@@ -1,0 +1,57 @@
+# Snyk (https://snyk.io) policy file — accepted-risk ignores for `snyk test`
+# and the advisory pre-commit hook (scripts/snyk_check.sh).
+#
+# These entries mirror the CI ignores in .github/workflows/security.yml
+# (pip-audit --ignore-vuln + dependency-review allow-ghsas). Keep the two in
+# sync — the CVE aliases are noted per entry.
+#
+# WHY THESE ARE IGNORED (all five):
+#   Every finding is a ChromaDB *HTTP-API-server* flaw — the two Critical ones
+#   (deserialization / code injection) additionally require `trust_remote_code`,
+#   and the three High ones are RBAC / multi-tenant authorization bugs. This app
+#   uses ONLY chromadb.PersistentClient (embedded, local disk; see src/memory.py),
+#   never starts the network server, and never sets trust_remote_code — verified
+#   by grep. None of these paths are reachable here.
+#
+#   No fixed chromadb release exists (1.5.9 is latest; all versions >= 0.4.17 are
+#   affected), so there is nothing to upgrade to. Intentionally NO `expires:` —
+#   an expiry would silently lapse and re-nag on every dependency-change commit
+#   with no available remediation. DROP these entries once ChromaDB ships a
+#   patched release and the lockfile is bumped past it.
+version: v1.25.0
+ignore:
+  # CVE-2026-45829 — Deserialization of Untrusted Data (Critical), HTTP API + trust_remote_code
+  SNYK-PYTHON-CHROMADB-16758047:
+    - '*':
+        reason: >-
+          ChromaDB HTTP-API-server RCE requiring trust_remote_code. App uses only
+          embedded PersistentClient, runs no server, never sets the flag. No fix
+          exists. Mirrors CI (CVE-2026-45829 / GHSA-f4j7-r4q5-qw2c).
+  # CVE-2026-45833 — Arbitrary Code Injection (Critical), HTTP API + auth + trust_remote_code
+  SNYK-PYTHON-CHROMADB-17337041:
+    - '*':
+        reason: >-
+          ChromaDB HTTP-API-server code injection requiring auth + trust_remote_code.
+          Unreachable via embedded PersistentClient; no server, flag never set. No
+          fix exists. Mirrors CI (CVE-2026-45833 / GHSA-36p7-vc44-83pf).
+  # CVE-2026-45832 — Authorization Bypass Through User-Controlled Key (High), V1 collection endpoints
+  SNYK-PYTHON-CHROMADB-17337044:
+    - '*':
+        reason: >-
+          ChromaDB HTTP-API-server authorization bypass (V1 collection endpoints).
+          Embedded PersistentClient has no auth layer/endpoints. Unreachable. No
+          fix exists. Mirrors CI (CVE-2026-45832).
+  # CVE-2026-45831 — Incorrect Authorization (High), SimpleRBACAuthorizationProvider
+  SNYK-PYTHON-CHROMADB-17337045:
+    - '*':
+        reason: >-
+          ChromaDB server RBAC (SimpleRBACAuthorizationProvider) authorization flaw.
+          Embedded PersistentClient has no RBAC/tenants. Unreachable. No fix exists.
+          Mirrors CI (CVE-2026-45831).
+  # CVE-2026-45830 — Authorization Bypass Through User-Controlled Key (High), cross-tenant
+  SNYK-PYTHON-CHROMADB-17337048:
+    - '*':
+        reason: >-
+          ChromaDB server cross-tenant authorization bypass. Embedded PersistentClient
+          has no tenants/auth. Unreachable. No fix exists. Mirrors CI (CVE-2026-45830).
+patch: {}

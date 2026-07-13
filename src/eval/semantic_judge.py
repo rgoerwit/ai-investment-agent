@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from src.async_utils import run_with_hard_timeout
+from src.config import config
 from src.eval.capture_contract import get_node_capture_spec, iter_stage3_judge_specs
 from src.eval.constants import CURRENT_CAPTURE_SCHEMA_VERSION
 from src.eval.prompt_checks import (
@@ -16,6 +18,7 @@ from src.eval.prompt_checks import (
     PromptCheckSuiteExecution,
 )
 from src.llms import create_consultant_llm, create_quick_thinking_llm
+from src.runtime_config import get_runtime_config
 
 JudgeVerdict = Literal["PASS", "SOFT_FAIL", "HARD_FAIL", "SKIPPED"]
 
@@ -131,6 +134,105 @@ Respond as JSON with keys: verdict, score, signals.""",
 }
 
 
+# Per-family binary checklist items. These target the irreducibly *semantic*
+# properties (engaging the bear, evidence/verdict consistency) that cannot be
+# turned into an L1/L2 assertion. The judge returns a per-item pass/fail; the
+# holistic verdict above is preserved and still drives the Stage-3 gate.
+_CHECKLIST_RUBRICS: dict[str, tuple[tuple[str, str], ...]] = {
+    "analysis_report": (
+        (
+            "engages_strongest_bear",
+            "The strongest bear point / counterpoint is explicitly addressed, not ignored.",
+        ),
+        (
+            "evidence_consistent",
+            "The overall conclusion does not contradict the cited evidence.",
+        ),
+        (
+            "company_specific",
+            "The thesis stays company-specific rather than generic or ticker-agnostic.",
+        ),
+    ),
+    "legal_structured": (
+        (
+            "narrative_matches_fields",
+            "The narrative does not contradict the structured pfic/vie fields.",
+        ),
+        (
+            "material_caveats_kept",
+            "Material tax/structure caveats present in BASELINE are retained.",
+        ),
+        (
+            "no_overstated_certainty",
+            "Certainty is not overstated beyond the evidence quoted.",
+        ),
+    ),
+    "risk_structured": (
+        ("score_verdict_align", "The verdict aligns with the numeric score."),
+        (
+            "concrete_risk_explained",
+            "A concrete, ticker-specific risk explanation is present.",
+        ),
+        (
+            "no_dropped_risk",
+            "No material risk present in BASELINE is silently dropped.",
+        ),
+    ),
+    "valuation_structured": (
+        (
+            "method_and_confidence",
+            "A valuation method and a confidence level are both stated.",
+        ),
+        ("framing_coherent", "Current-vs-target framing is internally coherent."),
+        (
+            "assumptions_specific",
+            "Key assumptions are specific rather than boilerplate.",
+        ),
+    ),
+    "trade_decision": (
+        (
+            "levels_coherent",
+            "The entry/stop/target relationship is internally coherent.",
+        ),
+        (
+            "action_change_justified",
+            "If the action changed vs BASELINE, the changed premise is explicit.",
+        ),
+        (
+            "sizing_consistent",
+            "Position sizing is consistent with the stated conviction/verdict.",
+        ),
+    ),
+    "portfolio_decision": (
+        (
+            "verdict_change_justified",
+            "If the verdict changed vs BASELINE, the changed risk/valuation premise is explicit.",
+        ),
+        (
+            "block_coherent",
+            "PM_BLOCK fields are internally coherent with the narrative.",
+        ),
+        (
+            "thesis_applied",
+            "Hard-requirement reasoning (health/growth/liquidity) is applied, not skipped.",
+        ),
+    ),
+}
+
+
+def _checklist_suffix(rubric_family: str) -> str:
+    """Append a binary-checklist instruction for families that define one."""
+    items = _CHECKLIST_RUBRICS.get(rubric_family)
+    if not items:
+        return ""
+    lines = "\n".join(f"- {item_id}: {text}" for item_id, text in items)
+    return (
+        "\n\nAlso include a JSON key `checklist`: an array with one object per "
+        'item below, each {"id": <id>, "passed": <true|false>, "rationale": '
+        "<one short sentence>}. Evaluate exactly these items:\n" + lines
+    )
+
+
 @dataclass(frozen=True)
 class JudgeResult:
     prompt_key: str
@@ -140,6 +242,7 @@ class JudgeResult:
     signals: tuple[str, ...] = ()
     baseline_run_id: str | None = None
     raw_response: str | None = None
+    checklist: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -238,8 +341,16 @@ class SemanticJudge:
             "CURRENT:\n"
             f"{_clip_text_for_judge(current_text)}"
         )
-        response = await self._llm.ainvoke(
-            [SystemMessage(content=rubric), HumanMessage(content=user_text)]
+        system_message = rubric + _checklist_suffix(rubric_family)
+        response = await run_with_hard_timeout(
+            self._llm.ainvoke(
+                [
+                    SystemMessage(content=system_message),
+                    HumanMessage(content=user_text),
+                ]
+            ),
+            timeout=get_runtime_config(config).llm_call_hard_timeout_seconds,
+            label="semantic_judge",
         )
         raw_response = _message_text(response)
         parsed = self._parse_response(raw_response)
@@ -251,6 +362,7 @@ class SemanticJudge:
             signals=parsed["signals"],
             baseline_run_id=baseline_run_id,
             raw_response=raw_response,
+            checklist=parsed["checklist"],
         )
 
     @staticmethod
@@ -270,6 +382,7 @@ class SemanticJudge:
                 "verdict": "HARD_FAIL",
                 "score": 0.0,
                 "signals": (f"judge response unparseable: {exc}",),
+                "checklist": (),
             }
 
         verdict = str(payload.get("verdict", "")).upper()
@@ -284,7 +397,24 @@ class SemanticJudge:
             signals = tuple(str(item) for item in raw_signals)
         else:
             signals = ("signals field missing or malformed",)
-        return {"verdict": verdict, "score": score, "signals": signals}
+        raw_checklist = payload.get("checklist", [])
+        checklist: tuple[dict[str, Any], ...] = ()
+        if isinstance(raw_checklist, list):
+            checklist = tuple(
+                {
+                    "id": str(item.get("id", "")),
+                    "passed": bool(item.get("passed", False)),
+                    "rationale": str(item.get("rationale", "")),
+                }
+                for item in raw_checklist
+                if isinstance(item, dict)
+            )
+        return {
+            "verdict": verdict,
+            "score": score,
+            "signals": signals,
+            "checklist": checklist,
+        }
 
 
 async def run_stage3_suite(

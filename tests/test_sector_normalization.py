@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from src.sector_normalization import aggregate_sector_weights, normalize_sector_label
-from src.validators.sector_classifier import Sector
+from src.thesis_constants import SECTOR_MEDIAN_PE
+from src.validators.sector_classifier import Sector, detect_sector
 
 
 def test_normalize_sector_label_passes_through_canonical_gics_names():
@@ -53,3 +54,34 @@ def test_canonical_sector_outputs_match_validator_sector_enum_values():
     assert {normalize_sector_label(sector.value) for sector in Sector} == {
         sector.value for sector in Sector
     }
+
+
+def test_sector_median_pe_keys_match_validator_sector_enum_values():
+    """SECTOR_MEDIAN_PE must cover exactly the canonical Sector enum values.
+
+    `data/metric_extraction.py` indexes SECTOR_MEDIAN_PE[sector] directly, so a
+    renamed/added Sector member or a stray SECTOR_MEDIAN_PE key would KeyError at
+    runtime with no other guard. Pin the two together.
+    """
+    assert set(SECTOR_MEDIAN_PE.keys()) == {sector.value for sector in Sector}
+
+
+def test_detect_sector_resolves_vendor_consumer_cyclical_not_materials():
+    """Yahoo's "Consumer Cyclical" must map to Consumer Discretionary.
+
+    Regression: the substring keyword fallback contains "cyclical" under
+    Materials, so "Consumer Cyclical" was misclassified as Materials (a
+    capital-intensive profile with looser leverage thresholds).
+    """
+    report = "DATA_BLOCK:\nSECTOR: Consumer Cyclical\nPE: 6.57\n"
+    assert detect_sector(report) is Sector.CONSUMER_DISCRETIONARY
+
+
+def test_detect_sector_resolves_vendor_consumer_defensive_to_staples():
+    report = "DATA_BLOCK:\nSECTOR: Consumer Defensive\n"
+    assert detect_sector(report) is Sector.CONSUMER_STAPLES
+
+
+def test_detect_sector_still_matches_genuine_materials():
+    report = "DATA_BLOCK:\nSECTOR: Basic Materials\n"
+    assert detect_sector(report) is Sector.MATERIALS

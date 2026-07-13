@@ -445,6 +445,20 @@ class TestSpecificPromptFiles:
             "valuation_context" in user_template.lower()
         ), "writer.json user_template should have valuation context section"
 
+    def test_writer_json_has_large_drawdown_completeness_rule(self):
+        """Writer should include the low and avoid false undiscovered framing."""
+        prompt_file = Path("prompts/writer.json")
+        if not prompt_file.exists():
+            pytest.skip("writer.json not found")
+
+        with open(prompt_file) as f:
+            data = json.load(f)
+
+        system_message = data.get("system_message", "")
+        assert "LARGE DRAWDOWN COMPLETENESS" in system_message
+        assert "FIFTY_TWO_WEEK_HIGH and FIFTY_TWO_WEEK_LOW" in system_message
+        assert "undiscovered" in system_message
+
     def test_value_trap_detector_has_insider_concentration_thresholds(self):
         """Verify value_trap_detector.json has explicit insider concentration thresholds."""
         prompt_file = Path("prompts/value_trap_detector.json")

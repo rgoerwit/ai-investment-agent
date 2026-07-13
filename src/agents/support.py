@@ -10,8 +10,14 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import RunnableConfig
 
 from src.data_block_utils import (
+    BLOCK_SHAPES,
+    BlockShape,
     extract_data_block_field,
+    extract_last_fenced_block,
+    fenced_block_pattern,
     has_parseable_data_block,
+    normalize_structured_block_boundaries,
+    unfenced_label,
 )
 from src.macro_regime import parse_macro_regime
 from src.runtime_diagnostics import get_model_name as _get_model_name
@@ -78,7 +84,7 @@ def _unpack_macro_context(context: Any | None) -> tuple[str, str, str]:
 def _extract_heading_block(report: str, heading: str) -> str:
     pattern = (
         rf"(?ims)^###\s+{re.escape(heading)}\s*\n"
-        r"(?P<body>.*?)(?=^###\s+|^MACRO_REGIME_BLOCK:|\Z)"
+        rf"(?P<body>.*?)(?=^###\s+|^{re.escape(unfenced_label('MACRO_REGIME_BLOCK'))}|\Z)"
     )
     match = re.search(pattern, report)
     if not match:
@@ -251,6 +257,32 @@ def extract_news_highlights(news_report: str, max_chars: int = 25000) -> str:
     return result if result.strip() else news_report[:max_chars]
 
 
+_HEDGED_OCF_MARKER_RE = re.compile(
+    r"~|\bapprox\.?\b|approximate|estimated?\b", re.IGNORECASE
+)
+_NA_WITH_NUMBER_RE = re.compile(r"\bN/?A\b[^\n]*\([^)]*\d", re.IGNORECASE)
+_OCF_CONTEXT_RE = re.compile(
+    r"(?:operating cash flow|filing cash flow)[^\n]{0,80}", re.IGNORECASE
+)
+
+
+def filing_ocf_is_approximate(foreign_data: str | None) -> bool:
+    """True if the FLA presents its filing OCF as approximate/hedged, not exact.
+
+    Catches ``~``-prefixed or "approx"/"estimated" OCF values and the
+    ``N/A (Operating Cash Flow ~1.148 bln)`` parenthetical-beside-N/A form. Such
+    a value must NOT be promoted to ``OPERATING_CASH_FLOW_SOURCE: FILING`` — only
+    an exact statement-line figure carries filing authority (KTY.WA 2026-06-27).
+    """
+    if not foreign_data:
+        return False
+    for match in _OCF_CONTEXT_RE.finditer(foreign_data):
+        ctx = match.group(0)
+        if _HEDGED_OCF_MARKER_RE.search(ctx) or _NA_WITH_NUMBER_RE.search(ctx):
+            return True
+    return False
+
+
 def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
     """Compare Junior vs FLA data and return a structured conflict block."""
     if not raw_data:
@@ -350,12 +382,34 @@ def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
             ratio = max(j_abs, f_abs) / min(j_abs, f_abs)
             if ratio > 1.3:
                 period_note = f" ({filing_ocf_period})" if filing_ocf_period else ""
+                sub_annual = bool(
+                    filing_ocf_period
+                    and re.match(r"\s*(H[12]|Q[1-4])", filing_ocf_period, re.IGNORECASE)
+                )
+                verdict = (
+                    "PERIOD MISMATCH — filing OCF is sub-annual; annualize or use a "
+                    "TTM basis before comparing"
+                    if sub_annual
+                    else "INVESTIGATE: same metric, material divergence"
+                )
                 conflicts.append(
                     f"- OCF: Junior={junior_ocf:,.0f} [yfinance] vs "
                     f"Filing={filing_ocf:,.0f}{period_note} [FLA] — "
-                    f"{ratio:.1f}x difference. "
-                    f"{'PERIOD MISMATCH — cannot directly compare' if filing_ocf_period and 'H' in filing_ocf_period.upper() else 'INVESTIGATE: same metric, material divergence'}"
+                    f"{ratio:.1f}x difference. {verdict}"
                 )
+
+    # A hedged/approximate FLA filing OCF must not be promoted to FILING
+    # authority. The exact-number regex above won't even parse a "~" value, so it
+    # silently passes through; surface it explicitly so the Senior keeps the
+    # aggregator OCF (KTY.WA 2026-06-27: hedged ~1.148B promoted over API 920M).
+    if filing_ocf_is_approximate(foreign_data):
+        conflicts.append(
+            "- OCF_FILING_NON_AUTHORITATIVE: the Foreign-Language filing OCF is "
+            "approximate/hedged (~, 'approx', or a number beside N/A) — do NOT set "
+            "OPERATING_CASH_FLOW_SOURCE: FILING from it. Keep the aggregator (Junior) "
+            "OCF and note the gap; only an exact statement-line figure has filing "
+            "authority."
+        )
 
     if junior_analysts is not None:
         analysts_int = int(junior_analysts)
@@ -475,7 +529,10 @@ def extract_value_trap_verdict(value_trap_report: str) -> str:
 # fires. These carry load-bearing structured data for downstream consumers
 # (PM rationale, memo, quality judge, chart overlay) and are emitted at the
 # tail of long agent outputs — exactly where a naive head-truncate drops them.
-_PRESERVED_FENCED_BLOCKS: tuple[str, ...] = (
+_PRESERVED_BLOCKS: tuple[str, ...] = (
+    "DATA_BLOCK",
+    "PM_BLOCK",
+    "VALUE_TRAP_BLOCK",
     "KILL_CRITERIA",
     "VALUATION_SCENARIOS",
     "VALUATION_PARAMS",
@@ -483,11 +540,30 @@ _PRESERVED_FENCED_BLOCKS: tuple[str, ...] = (
     "AUDITOR_RESOLUTION",
     "CONSULTANT_RESOLUTION",
 )
+_PRESERVED_FENCED_BLOCKS: tuple[str, ...] = tuple(
+    name for name in _PRESERVED_BLOCKS if BLOCK_SHAPES.get(name) is BlockShape.FENCED
+)
+_PRESERVED_UNFENCED_BLOCKS: tuple[str, ...] = tuple(
+    name for name in _PRESERVED_BLOCKS if BLOCK_SHAPES.get(name) is BlockShape.UNFENCED
+)
+_LEGACY_FENCED_UNFENCED_BLOCKS = _PRESERVED_UNFENCED_BLOCKS
 # Section-style (not fenced) block that Research Manager v5.3+ emits.
 _VARIANT_PERCEPTION_RE = re.compile(
     r"###\s*VARIANT PERCEPTION.*?(?=\n##\s|\n###\s[A-Z]|\Z)",
     re.DOTALL | re.IGNORECASE,
 )
+
+
+def _unfenced_preserve_pattern(block_name: str) -> re.Pattern[str]:
+    label = re.escape(unfenced_label(block_name))
+    return re.compile(rf"({label}.*?)(?=\n\n[A-Z]|\Z)", re.DOTALL | re.IGNORECASE)
+
+
+def _append_unique_preserved(blocks: list[str], seen: set[str], value: str) -> None:
+    normalized = value.strip()
+    if normalized and normalized not in seen:
+        seen.add(normalized)
+        blocks.append(normalized)
 
 
 def summarize_for_pm(report: str, report_type: str, max_chars: int = 3000) -> str:
@@ -504,31 +580,46 @@ def summarize_for_pm(report: str, report_type: str, max_chars: int = 3000) -> st
     if len(report) <= max_chars:
         return report
 
-    block_patterns = [
-        r"(DATA_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
-        r"(### --- START DATA_BLOCK[^\n]*---.*?### --- END DATA_BLOCK ---)",
-        r"(PM_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
-        r"(FORENSIC_DATA_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
-        r"(VALUE_TRAP_BLOCK:.*?)(?=\n\n[A-Z]|\Z)",
+    report = normalize_structured_block_boundaries(report) or report
+
+    legacy_label_patterns = [
+        rf"({re.escape(unfenced_label('DATA_BLOCK'))}.*?)(?=\n\n[A-Z]|\Z)",
+        rf"({re.escape(unfenced_label('PM_BLOCK'))}.*?)(?=\n\n[A-Z]|\Z)",
+        rf"({re.escape(unfenced_label('VALUE_TRAP_BLOCK'))}.*?)(?=\n\n[A-Z]|\Z)",
         r"(\*\*VERDICT\*\*:.*?)(?=\n\n|\Z)",
         r"(RECOMMENDATION:.*?)(?=\n\n|\Z)",
         r"(SCORE:\s*\d+.*?)(?=\n\n|\Z)",
     ]
-    # Append the Tranche-1–4 fenced blocks dynamically.
-    block_patterns.extend(
-        rf"(### --- START {name}[^\n]*---.*?### --- END {name} ---)"
-        for name in _PRESERVED_FENCED_BLOCKS
-    )
 
     blocks_to_preserve: list[str] = []
-    for pattern in block_patterns:
+    seen_blocks: set[str] = set()
+    for pattern in legacy_label_patterns:
         matches = re.findall(pattern, report, re.DOTALL | re.IGNORECASE)
-        blocks_to_preserve.extend(matches)
+        for match in matches:
+            _append_unique_preserved(blocks_to_preserve, seen_blocks, match)
+
+    for name in _PRESERVED_FENCED_BLOCKS:
+        for match in fenced_block_pattern(name).finditer(report):
+            _append_unique_preserved(blocks_to_preserve, seen_blocks, match.group(0))
+
+    for name in _PRESERVED_UNFENCED_BLOCKS:
+        for match in _unfenced_preserve_pattern(name).finditer(report):
+            _append_unique_preserved(blocks_to_preserve, seen_blocks, match.group(1))
+
+    # Old artifacts may contain resolution labels inside fenced markers even
+    # though the canonical PM resolution blocks are unfenced.
+    for name in _LEGACY_FENCED_UNFENCED_BLOCKS:
+        for match in fenced_block_pattern(name).finditer(report):
+            _append_unique_preserved(blocks_to_preserve, seen_blocks, match.group(0))
 
     # Variant Perception section (not fenced — anchored on the heading).
     variant_match = _VARIANT_PERCEPTION_RE.search(report)
     if variant_match:
-        blocks_to_preserve.append(variant_match.group(0).strip())
+        _append_unique_preserved(
+            blocks_to_preserve,
+            seen_blocks,
+            variant_match.group(0),
+        )
 
     preserved = "\n\n".join(blocks_to_preserve)
     remaining_chars = max_chars - len(preserved) - 100
@@ -646,19 +737,107 @@ def extract_source_conflicts_from_messages(messages: list) -> dict[str, Any]:
 
 
 def format_conflict_table(messages: list) -> str:
-    """Format source conflicts for Consultant or PM adjudication."""
+    """Format source conflicts for Consultant or PM adjudication.
+
+    Conflicts the merge already adjudicated by source quality (``resolved_by_quality``,
+    set in ``src/data/merge_policy.py``) are surfaced in a separate RESOLVED section so
+    the PM does not levy a Tier C2 investment-risk penalty on a value that was already
+    decided in favor of the higher-quality source (e.g. statement-derived growth winning
+    over a flaky provider scalar).
+    """
     conflicts = extract_source_conflicts_from_messages(messages)
     if not conflicts:
         return ""
 
-    lines = ["\n### DATA SOURCE CONFLICTS (>20% variance between providers)"]
-    for field, conflict in conflicts.items():
+    actionable = {
+        field: conflict
+        for field, conflict in conflicts.items()
+        if not conflict.get("resolved_by_quality")
+    }
+    resolved = {
+        field: conflict
+        for field, conflict in conflicts.items()
+        if conflict.get("resolved_by_quality")
+    }
+
+    lines: list[str] = []
+    if actionable:
+        lines.append("\n### DATA SOURCE CONFLICTS (>20% variance — UNRESOLVED)")
+        for field, conflict in actionable.items():
+            lines.append(
+                f"  - {field}: {conflict.get('old_source', '?')}={conflict.get('old', '?')}"
+                f", {conflict.get('new_source', '?')}={conflict.get('new', '?')}"
+                f" (delta {conflict.get('variance_pct', '?')}%)"
+            )
+    if resolved:
         lines.append(
-            f"  - {field}: {conflict.get('old_source', '?')}={conflict.get('old', '?')}"
-            f", {conflict.get('new_source', '?')}={conflict.get('new', '?')}"
-            f" (delta {conflict.get('variance_pct', '?')}%)"
+            "\n### RESOLVED BY DATA QUALITY "
+            "(do NOT apply a Tier C2 conflict penalty — already adjudicated)"
         )
-    return "\n".join(lines) + "\n"
+        for field, conflict in resolved.items():
+            # Prefer the merge's explicit winner/loser fields; the ``new`` side is NOT
+            # always the kept winner (it isn't when should_use was False). Fall back to
+            # new/old only for legacy payloads that predate those fields.
+            winner_source = conflict.get("winner_source") or conflict.get(
+                "new_source", "?"
+            )
+            winner_value = conflict.get("winner_value", conflict.get("new", "?"))
+            loser_source = conflict.get("loser_source") or conflict.get(
+                "old_source", "?"
+            )
+            loser_value = conflict.get("loser_value", conflict.get("old", "?"))
+            lines.append(
+                f"  - {field}: kept {winner_source}={winner_value}"
+                f" (quality {conflict.get('winner_quality', '?')}) over "
+                f"{loser_source}={loser_value}"
+                f" (quality {conflict.get('loser_quality', '?')})"
+            )
+    return ("\n".join(lines) + "\n") if lines else ""
+
+
+def format_red_flag_section(
+    pre_screening_result: str, red_flags: list[dict[str, Any]]
+) -> tuple[str, float]:
+    """Render pre-screen flags WITH their numeric penalties + a deterministic subtotal.
+
+    Code-computed flags (``src/validators/supplemental_flags.py``) already carry a
+    weighted ``risk_penalty``. Surfacing the number + a running subtotal removes the
+    synthesis model's burden of recalling each weight from the rubric and summing by
+    hand — the failure mode behind silently dropped penalties on weaker models.
+
+    Returns ``(section_text, code_subtotal)``. The subtotal is the deterministic floor
+    the PM must build on; ``decision_nodes`` logs a reconciliation warning when the PM's
+    narrated TOTAL RISK COUNT falls below it.
+    """
+    section = (
+        "\n\nRED-FLAG PRE-SCREENING:\n" f"Pre-Screening Result: {pre_screening_result}"
+    )
+    if not red_flags:
+        return section + "\nRed Flags Detected: None", 0.0
+
+    lines = []
+    code_subtotal = 0.0
+    for flag in red_flags:
+        penalty = flag.get("risk_penalty")
+        if isinstance(penalty, int | float) and not isinstance(penalty, bool):
+            code_subtotal += float(penalty)
+            tag = f" [risk_penalty {float(penalty):+.2f}]"
+        else:
+            tag = ""
+        lines.append(
+            f"  - {flag.get('type', 'Unknown')}{tag}: {flag.get('detail', 'No detail')}"
+        )
+
+    section += "\nRed Flags/Warnings Detected:\n" + "\n".join(lines)
+    section += (
+        f"\n\nCODE-COMPUTED RISK SUBTOTAL (deterministic, already weighted): "
+        f"{code_subtotal:+.2f}. These flags are ALREADY scored — do NOT re-score them "
+        f"from the rubric and do NOT omit them. Your TOTAL RISK COUNT = this subtotal "
+        f"+ any qualitative risks NOT listed above that the rubric requires (e.g. "
+        f"jurisdiction risk, family-control concentration, turnaround-exception "
+        f"penalty, ADR/data-integrity tiers)."
+    )
+    return section, code_subtotal
 
 
 def _is_output_insufficient(content: str, agent_key: str) -> bool:
@@ -718,10 +897,6 @@ def _extract_sector_country(raw_data: str) -> tuple:
     return sector, country
 
 
-_KILL_CRITERIA_BLOCK = re.compile(
-    r"### --- START KILL_CRITERIA ---\s*(.+?)\s*### --- END KILL_CRITERIA ---",
-    re.DOTALL,
-)
 _KILL_CRITERIA_TRIGGER = re.compile(r"TRIGGER_\d+\s*:\s*(.+)")
 
 
@@ -733,11 +908,11 @@ def extract_kill_criteria(bear_text: str | None) -> list[str]:
     """
     if not bear_text:
         return []
-    match = _KILL_CRITERIA_BLOCK.search(bear_text)
-    if not match:
+    block = extract_last_fenced_block(bear_text, "KILL_CRITERIA")
+    if block is None:
         return []
     triggers: list[str] = []
-    for line in match.group(1).splitlines():
+    for line in block.splitlines():
         m = _KILL_CRITERIA_TRIGGER.search(line)
         if m:
             value = m.group(1).strip()

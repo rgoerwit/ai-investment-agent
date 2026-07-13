@@ -57,10 +57,15 @@ async def get_news(
 
         results = []
 
+        # Disambiguate the company name from same-name commodities/topics
+        # ("Green Tea Group" vs green-tea market news): anchor the equity sense
+        # with the ticker symbol and the word "stock" once the name resolved.
+        ticker_qualifier = f" {normalized_symbol} stock" if company_resolved else ""
         general_query = (
-            f"{query_anchor} {search_query}"
+            f"{query_anchor}{ticker_qualifier} {search_query}"
             if search_query
-            else f"{query_anchor} (earnings OR merger OR acquisition OR regulatory)"
+            else f"{query_anchor}{ticker_qualifier} "
+            "(earnings OR merger OR acquisition OR regulatory)"
         )
         general_result = await shared._tavily_search_with_timeout(
             {"query": general_query}

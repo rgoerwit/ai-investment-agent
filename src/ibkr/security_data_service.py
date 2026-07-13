@@ -10,6 +10,7 @@ import structlog
 from src.ibkr.client import IbkrClient
 from src.ibkr.exceptions import IBKRAPIError, IBKRAuthError, IBKRSessionConflictError
 from src.ibkr.order_builder import parse_price
+from src.ibkr.session_manager import get_ibkr_session_manager
 from src.ibkr.ticker_mapper import (
     cache_conid_mapping,
     ibkr_symbol_to_yf,
@@ -27,6 +28,37 @@ _FIELD_VOLUME = "87"
 _FIELD_EXCHANGE = "6004"
 _FIELD_MARKET_DATA_AVAILABILITY = "6509"
 _FIELD_COMPANY_NAME = "7051"
+# Fundamental snapshot field codes — CANDIDATES pending live verification (see the
+# plan's "Field-code mapping"). IBKR may gate some behind market-data entitlements,
+# and units (esp. market cap) + period (trailing vs forward P/E) MUST be confirmed
+# against a live snapshot before the merge override is trusted.
+_FIELD_MARKET_CAP = "7289"
+_FIELD_PE = "7290"
+_FIELD_EPS = "7291"
+_FIELD_DIVIDEND_YIELD = "7287"
+_FIELD_FIFTY_TWO_WEEK_HIGH = "7293"
+_FIELD_FIFTY_TWO_WEEK_LOW = "7294"
+# 6008 ("conidEx") preserved for parity with the client's default snapshot field set.
+_FIELD_CONID_EX = "6008"
+_SNAPSHOT_REQUEST_FIELDS = ",".join(
+    (
+        _FIELD_LAST_PRICE,
+        _FIELD_SYMBOL,
+        _FIELD_BID,
+        _FIELD_ASK,
+        _FIELD_VOLUME,
+        _FIELD_EXCHANGE,
+        _FIELD_CONID_EX,
+        _FIELD_MARKET_DATA_AVAILABILITY,
+        _FIELD_COMPANY_NAME,
+        _FIELD_MARKET_CAP,
+        _FIELD_PE,
+        _FIELD_EPS,
+        _FIELD_DIVIDEND_YIELD,
+        _FIELD_FIFTY_TWO_WEEK_HIGH,
+        _FIELD_FIFTY_TWO_WEEK_LOW,
+    )
+)
 
 
 @dataclass
@@ -50,6 +82,15 @@ class IbkrSecurityProbe:
     used_brokerage_session: bool = False
     error_kind: str | None = None
     error_message: str | None = None
+    # Fundamental snapshot ratios — advisory; populated only on a VERIFIED, entitled
+    # snapshot. Additive: identity/quote consumers ignore these.
+    trailing_pe: float | None = None
+    eps: float | None = None
+    market_cap: float | None = None
+    dividend_yield: float | None = None
+    fifty_two_week_high: float | None = None
+    fifty_two_week_low: float | None = None
+    fundamentals_status: str | None = None  # OK | NO_FIELDS | None (not VERIFIED)
 
 
 class IbkrSecurityDataService:
@@ -114,9 +155,12 @@ class IbkrSecurityDataService:
                 error_kind="NOT_CONFIGURED",
             )
 
-        client = self._client_cls(config)
+        # Reuse the process-wide pooled connection instead of a fresh OAuth
+        # handshake per probe (which minted many never-logged-out sessions).
+        manager = get_ibkr_session_manager()
+        manager.configure(client_cls=self._client_cls, config=config)
         try:
-            client.connect(brokerage_session=False)
+            client = manager.acquire()
             symbol, expected_exchange = yf_to_ibkr_format(yf_ticker)
             raw_candidates = client.stock_conid_by_symbol(
                 symbol, default_filtering=False
@@ -202,7 +246,9 @@ class IbkrSecurityDataService:
                 listing_exchange or exchange or "",
             )
 
-            snapshot = client.get_marketdata_snapshot(conid, compete=False)
+            snapshot = client.get_marketdata_snapshot(
+                conid, fields=_SNAPSHOT_REQUEST_FIELDS, compete=False
+            )
             if snapshot:
                 probe.used_brokerage_session = True
                 probe.market_data_availability = self._first_non_empty(
@@ -227,6 +273,35 @@ class IbkrSecurityDataService:
                 probe.bid = self._snapshot_number(snapshot.get(_FIELD_BID))
                 probe.ask = self._snapshot_number(snapshot.get(_FIELD_ASK))
                 probe.volume = self._snapshot_number(snapshot.get(_FIELD_VOLUME))
+                probe.market_cap = self._snapshot_number(
+                    snapshot.get(_FIELD_MARKET_CAP)
+                )
+                probe.trailing_pe = self._snapshot_number(snapshot.get(_FIELD_PE))
+                probe.eps = self._snapshot_number(snapshot.get(_FIELD_EPS))
+                probe.dividend_yield = self._snapshot_number(
+                    snapshot.get(_FIELD_DIVIDEND_YIELD)
+                )
+                probe.fifty_two_week_high = self._snapshot_number(
+                    snapshot.get(_FIELD_FIFTY_TWO_WEEK_HIGH)
+                )
+                probe.fifty_two_week_low = self._snapshot_number(
+                    snapshot.get(_FIELD_FIFTY_TWO_WEEK_LOW)
+                )
+                probe.fundamentals_status = (
+                    "OK"
+                    if any(
+                        value is not None
+                        for value in (
+                            probe.trailing_pe,
+                            probe.eps,
+                            probe.market_cap,
+                            probe.dividend_yield,
+                            probe.fifty_two_week_high,
+                            probe.fifty_two_week_low,
+                        )
+                    )
+                    else "NO_FIELDS"
+                )
                 if probe.resolved_symbol:
                     probe.resolved_yf_ticker = ibkr_symbol_to_yf(
                         probe.resolved_symbol,
@@ -269,8 +344,6 @@ class IbkrSecurityDataService:
                 error_kind="API_ERROR",
                 error_message=str(exc),
             )
-        finally:
-            client.close()
 
     @staticmethod
     def _extract_candidates(raw_candidates: dict[str, Any], symbol: str) -> list[dict]:
@@ -341,3 +414,23 @@ class IbkrSecurityDataService:
             if isinstance(value, str) and value.strip():
                 return value.strip()
         return None
+
+
+# Shared, lazily-constructed singleton so every consumer (company-name resolution in
+# ticker_utils, the data-vacuum rescue probe in fetcher, and the optional IBKR market
+# source) shares ONE instance and ONE 60s probe cache — a ticker probed once is reused.
+_security_data_service: IbkrSecurityDataService | None = None
+
+
+def get_security_data_service() -> IbkrSecurityDataService:
+    """Return the process-wide shared IBKR security probe service."""
+    global _security_data_service
+    if _security_data_service is None:
+        _security_data_service = IbkrSecurityDataService()
+    return _security_data_service
+
+
+def set_security_data_service(service: IbkrSecurityDataService | None) -> None:
+    """Override (or reset with ``None``) the shared service — for tests."""
+    global _security_data_service
+    _security_data_service = service

@@ -20,9 +20,10 @@ import io
 import json
 import logging
 import math
-import multiprocessing as mp
+import queue
 import random
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -926,6 +927,52 @@ def _iter_enrichment_tasks(records, *, fx_rates, criteria: ScreenCriteria, debug
         yield (row, fx_rates, criteria.min_mcap, criteria.min_volume, debug)
 
 
+def _run_threaded_enrichment(tasks, *, workers, worker_fn):
+    """Yield enrichment results as they complete, using daemon worker threads.
+
+    Enrichment is pure network I/O (yfinance HTTP), so threads parallelize it
+    without ``fork()`` — avoiding the macOS Network.framework atfork crash that
+    ``multiprocessing`` "spawn" workers hit (a fork()+exec() child SIGSEGV before
+    exec; see CLAUDE.md → macOS-Specific Issues). Workers are **daemon** threads
+    with no cleanup obligations (idempotent, retried reads), so a
+    ``KeyboardInterrupt`` abandons any in-flight read and the process exits
+    promptly instead of hanging on a join (matching the old ``pool.terminate()``).
+    """
+    task_queue: queue.Queue = queue.Queue()
+    result_queue: queue.Queue = queue.Queue()
+    submitted = 0
+    for task in tasks:
+        task_queue.put(task)
+        submitted += 1
+    if submitted == 0:
+        return
+
+    def _worker() -> None:
+        while True:
+            try:
+                task = task_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                result_queue.put(worker_fn(task))
+            except Exception:
+                # Mirror the serial path: a failed row yields no data, not a crash.
+                result_queue.put(None)
+
+    for _ in range(max(1, workers)):
+        threading.Thread(target=_worker, daemon=True).start()
+
+    for _ in range(submitted):
+        # Poll with a timeout so a KeyboardInterrupt in the main thread is raised
+        # promptly rather than masked by an uninterruptible blocking get().
+        while True:
+            try:
+                yield result_queue.get(timeout=0.2)
+                break
+            except queue.Empty:
+                continue
+
+
 def _collect_enrichment_results(
     records,
     *,
@@ -971,18 +1018,16 @@ def _collect_enrichment_results(
             print("\nInterrupted! Returning partial results...", file=sys.stderr)
         return passing, all_enriched
 
-    pool = None
     try:
-        pool = mp.get_context("spawn").Pool(processes=workers)
-        for data in pool.imap_unordered(
-            worker_fn,
+        for data in _run_threaded_enrichment(
             _iter_enrichment_tasks(
                 records,
                 fx_rates=fx_rates,
                 criteria=criteria,
                 debug=debug,
             ),
-            chunksize=1,
+            workers=workers,
+            worker_fn=worker_fn,
         ):
             processed_count += 1
             _handle_enriched_row_result(
@@ -1000,14 +1045,6 @@ def _collect_enrichment_results(
             )
     except KeyboardInterrupt:
         print("\nInterrupted! Returning partial results...", file=sys.stderr)
-        if pool is not None:
-            pool.terminate()
-    else:
-        if pool is not None:
-            pool.close()
-    finally:
-        if pool is not None:
-            pool.join()
 
     return passing, all_enriched
 
@@ -1566,7 +1603,7 @@ when profitability, leverage, cash-flow quality, and coverage are stronger.
         "--workers",
         type=int,
         default=DEFAULT_WORKERS,
-        help="ThreadPoolExecutor concurrency (default: 4)",
+        help="Enrichment worker-thread concurrency (default: 4; 1 = serial)",
     )
     parser.add_argument(
         "--debug", action="store_true", help="Show skip reasons per ticker"

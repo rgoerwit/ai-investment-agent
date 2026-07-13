@@ -24,8 +24,31 @@ from src.runtime_diagnostics import (
     get_model_name,
     infer_provider,
 )
+from src.service_tiers import floor_llm_hard_timeout, provider_flex_active
 
 logger = structlog.get_logger(__name__)
+
+
+# Graph node labels (agent_name / context) of the two gate-critical APEX seats.
+# These run the biggest, most rule-dense prompts on the APEX model and need a
+# larger --quick per-call budget than the flat quick cap sized for cheap flash
+# data-gathering agents. Kept in lockstep with APEX_SEATS in src/llms.py via
+# tests/agents/test_runtime_hard_timeout.py (the seats' prompt agent_name).
+APEX_SEAT_CONTEXTS = frozenset({"Fundamentals Analyst", "Portfolio Manager"})
+
+
+def quick_mode_hard_timeout_seconds(context: str, cfg: Any = settings_config) -> float:
+    """Per-call hard wall-clock cap for a single ``--quick`` LLM ainvoke.
+
+    Gate-critical APEX seats (Senior Fundamentals, Portfolio Manager) get the
+    larger ``apex_quick_llm_call_hard_timeout_seconds`` budget so the tight quick
+    cap can't guillotine the DATA_BLOCK / PM_BLOCK the hard gates depend on;
+    every other (cheap, fast) agent keeps ``quick_llm_call_hard_timeout_seconds``
+    so quick mode still surfaces a hung provider quickly.
+    """
+    if context in APEX_SEAT_CONTEXTS:
+        return float(getattr(cfg, "apex_quick_llm_call_hard_timeout_seconds", 180.0))
+    return float(getattr(cfg, "quick_llm_call_hard_timeout_seconds", 60.0))
 
 
 @contextmanager
@@ -259,11 +282,18 @@ async def invoke_with_rate_limit_handling(
 
     runtime_config = get_runtime_config(settings_config)
     if runtime_config.quick_mode_active:
-        hard_timeout = float(
-            getattr(settings_config, "quick_llm_call_hard_timeout_seconds", 60.0)
-        )
+        hard_timeout = quick_mode_hard_timeout_seconds(context, settings_config)
     else:
         hard_timeout = float(runtime_config.llm_call_hard_timeout_seconds)
+    # Flex tier: queued calls may take minutes; floor the hard cap so a
+    # legitimately-slow flex call (plus its potential standard-tier fallback
+    # attempt) isn't killed and fed to the circuit breaker as a timeout.
+    hard_timeout = floor_llm_hard_timeout(
+        hard_timeout,
+        provider=resolved_provider,
+        cfg=settings_config,
+        label=f"invoke_hard_timeout:{resolved_provider}",
+    )
     deadline = (
         time.monotonic() + float(overall_timeout_seconds)
         if overall_timeout_seconds is not None
@@ -450,7 +480,19 @@ async def invoke_with_rate_limit_handling(
                 class_name=class_name,
             )
             elapsed_seconds = time.monotonic() - attempt_started
-            if breaker is not None:
+            # Quick-mode flex latency timeout: a queued flex call the transport
+            # could not fall back to standard (fallback disabled, or the flex
+            # client timeout raced the outer hard cap). It is a queue event, not
+            # a provider fault — so it must NOT re-queue at flex (non-retryable)
+            # and must be excluded from the circuit breakers, which would
+            # otherwise trip and fast-fail sibling agents on transient queueing.
+            # See the mitigation plan's flex-fallback x timeout matrix (rows 6-8).
+            flex_latency_timeout_quick = (
+                details.kind == "timeout"
+                and runtime_config.quick_mode_active
+                and provider_flex_active(resolved_provider, settings_config)
+            )
+            if breaker is not None and not flex_latency_timeout_quick:
                 breaker.record_outcome(
                     agent_name=context,
                     provider=resolved_provider,
@@ -458,7 +500,7 @@ async def invoke_with_rate_limit_handling(
                     ok=False,
                     failure_kind=details.kind,
                 )
-            if network_breaker is not None:
+            if network_breaker is not None and not flex_latency_timeout_quick:
                 network_breaker.record_outcome(ok=False, failure_kind=details.kind)
             with _accounting_hook("capture_manager_failure"):
                 capture_manager = _get_capture_manager()
@@ -559,7 +601,11 @@ async def invoke_with_rate_limit_handling(
                 continue
 
             transient_max_attempts = max(1, min(max_attempts, max_transient_attempts))
-            if is_transient and attempt < transient_max_attempts - 1:
+            if (
+                is_transient
+                and not flex_latency_timeout_quick
+                and attempt < transient_max_attempts - 1
+            ):
                 wait_time = 5 * (attempt + 1) + random.uniform(1, 3)
                 if deadline is not None:
                     remaining = deadline - time.monotonic()

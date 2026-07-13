@@ -70,9 +70,129 @@ class TestThesisMetricsExtraction:
         assert vis.metrics.growth_score == 100.0
 
     def test_extract_pe_ratio(self):
-        """Test P/E Ratio extraction."""
+        """Test P/E Ratio extraction (number + parsed gate verdict)."""
         vis = ThesisVisualizer(SAMPLE_PM_OUTPUT)
         assert vis.metrics.pe_ratio == 11.80
+        assert vis.metrics.pe_pass is True
+
+    def test_pe_ignores_forward_pe_concern_bullet(self):
+        """1926.T-shape: 'Forward P/E 19.2' before the gate line must not win."""
+        text = (
+            "- CONCERN: Weak implied upside vs forward valuation (Forward P/E 19.2)\n"
+            "- DATA_CHECK: DATA_BLOCK PE_RATIO_FORWARD is 19.20\n"
+            "### THESIS COMPLIANCE SUMMARY\n"
+            "- **P/E Ratio**: 14.03 (PEG: N/A, PE_VS_SECTOR: 0.83) - PASS\n"
+        )
+        vis = ThesisVisualizer(text)
+        assert vis.metrics.pe_ratio == 14.03
+        assert vis.metrics.pe_pass is True
+
+    def test_pe_ignores_sector_median_pe(self):
+        """2307.T-shape: 'SECTOR_MEDIAN_PE 25.00' before the gate must not win."""
+        text = (
+            "- DATA_CHECK: PE_RATIO_TTM is 9.41 vs SECTOR_MEDIAN_PE 25.00\n"
+            "- **P/E Ratio**: 9.41 (PEG: N/A, PE_VS_SECTOR: 0.38) - PASS\n"
+        )
+        vis = ThesisVisualizer(text)
+        assert vis.metrics.pe_ratio == 9.41
+        assert vis.metrics.pe_pass is True
+
+    def test_pe_minimal_output_number_only_fallback(self):
+        """Verdict-less gate line still yields the number (pe_pass None)."""
+        vis = ThesisVisualizer(MINIMAL_OUTPUT)
+        assert vis.metrics.pe_ratio == 15.2
+        assert vis.metrics.pe_pass is None
+
+    def test_pe_respects_pm_pass_over_threshold(self):
+        """A gate PASS above PE_MAX is honored (not re-derived as a fail)."""
+        text = "- **P/E Ratio**: 19.0 (PEG: 0.9) - PASS\n"
+        vis = ThesisVisualizer(text)
+        assert vis.metrics.pe_ratio == 19.0
+        assert vis.metrics.pe_pass is True
+        visual = generate_thesis_visual(text)
+        # The P/E row should render a check, not a cross, despite 19.0 > 18 —
+        # and the suffix must not contradict it with "(max 18)".
+        pe_line = next(ln for ln in visual.splitlines() if "P/E Ratio" in ln)
+        assert "✓" in pe_line and "✗" not in pe_line
+        assert "(PM gate)" in pe_line
+        assert "(max 18)" not in pe_line
+
+    def test_pe_suffix_unchanged_when_verdict_agrees_with_threshold(self):
+        for text, mark in (
+            ("- **P/E Ratio**: 14.03 (PEG: N/A) - PASS\n", "✓"),
+            ("- **P/E Ratio**: 28.5 (PEG: 2.1) - FAIL\n", "✗"),
+        ):
+            visual = generate_thesis_visual(text)
+            pe_line = next(ln for ln in visual.splitlines() if "P/E Ratio" in ln)
+            assert mark in pe_line
+            assert "(max 18)" in pe_line
+            assert "(PM gate)" not in pe_line
+
+    def test_health_growth_gate_verdicts_extracted(self):
+        """Score rows capture the PM's verdict token alongside the number."""
+        vis = ThesisVisualizer(SAMPLE_PM_OUTPUT)
+        assert vis.metrics.health_pass is True
+        assert vis.metrics.growth_pass is True
+        sell = ThesisVisualizer(SAMPLE_SELL_OUTPUT)
+        assert sell.metrics.health_pass is False
+        assert sell.metrics.growth_pass is False
+
+    def test_growth_data_vacuum_exception_pass(self):
+        """3088.T-shape: gate PASS at 33% via Data-Vacuum Exception → ✓ (PM gate)."""
+        text = (
+            "- **Growth Transition**: 33% (Adjusted) - PASS "
+            "(Data-Vacuum Exception: Missing REVENUE_GROWTH_TTM and "
+            "EARNINGS_GROWTH_TTM; Health >= 65% and P/E <= 18)\n"
+        )
+        vis = ThesisVisualizer(text)
+        assert vis.metrics.growth_score == 33.0
+        assert vis.metrics.growth_pass is True
+        visual = generate_thesis_visual(text)
+        growth_line = next(
+            ln for ln in visual.splitlines() if "Growth Transition" in ln
+        )
+        assert "✓" in growth_line and "✗" not in growth_line
+        assert "(PM gate)" in growth_line
+        assert "(min 50%)" not in growth_line
+
+    def test_growth_fail_with_exception_mention_stays_cross(self):
+        """2640.TWO-shape: FAIL token wins even when exception prose follows."""
+        text = (
+            "- **Growth Transition**: 33% (Adjusted) - FAIL "
+            "(Data-Vacuum Exception APPLIES: Health >= 65%, P/E <= 18, "
+            "missing TTM inputs)\n"
+        )
+        vis = ThesisVisualizer(text)
+        assert vis.metrics.growth_pass is False
+        visual = generate_thesis_visual(text)
+        growth_line = next(
+            ln for ln in visual.splitlines() if "Growth Transition" in ln
+        )
+        assert "✗" in growth_line
+        assert "(min 50%)" in growth_line
+        assert "(PM gate)" not in growth_line
+
+    def test_health_pm_gate_pass_below_threshold(self):
+        """A health gate PASS below 50% renders ✓ with the PM-gate suffix."""
+        text = "- **Financial Health**: 45% (Adjusted) - PASS (exception)\n"
+        vis = ThesisVisualizer(text)
+        assert vis.metrics.health_score == 45.0
+        assert vis.metrics.health_pass is True
+        visual = generate_thesis_visual(text)
+        health_line = next(ln for ln in visual.splitlines() if "Financial Health" in ln)
+        assert "✓" in health_line and "✗" not in health_line
+        assert "(PM gate)" in health_line
+
+    def test_health_growth_number_only_fallback(self):
+        """Verdict-less lines keep threshold-derived marks (legacy behavior)."""
+        vis = ThesisVisualizer(MINIMAL_OUTPUT)
+        assert vis.metrics.health_score == 55.0
+        assert vis.metrics.health_pass is None
+        assert vis.metrics.growth_pass is None
+        visual = generate_thesis_visual(MINIMAL_OUTPUT)
+        health_line = next(ln for ln in visual.splitlines() if "Financial Health" in ln)
+        assert "✓" in health_line
+        assert "(min 50%)" in health_line
 
     def test_extract_peg_ratio(self):
         """Test PEG Ratio extraction."""

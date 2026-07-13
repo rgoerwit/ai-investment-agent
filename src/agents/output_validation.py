@@ -6,7 +6,11 @@ from typing import Any
 
 import structlog
 
-from src.data_block_utils import has_parseable_data_block, has_parseable_fenced_block
+from src.data_block_utils import (
+    has_parseable_data_block,
+    has_parseable_fenced_block,
+    unfenced_label,
+)
 from src.llm_usage import extract_token_usage_breakdown
 
 logger = structlog.get_logger(__name__)
@@ -60,7 +64,7 @@ def _has_parseable_forensic_block(content: str) -> bool:
     if has_parseable_fenced_block(content, "FORENSIC_DATA_BLOCK"):
         return True
 
-    if "FORENSIC_DATA_BLOCK:" not in content:
+    if unfenced_label("FORENSIC_DATA_BLOCK") not in content:
         return False
 
     return "STATUS:" in content and _has_forensic_verdict(content)

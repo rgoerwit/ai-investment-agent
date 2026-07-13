@@ -162,7 +162,9 @@ def test_load_ibkr_context_emits_phase_status_and_returns_live_state(capsys):
             self.connected = False
             self.closed = False
 
-        def connect(self, *, brokerage_session: bool) -> None:
+        def connect(
+            self, brokerage_session: bool = False, *, maintain: bool = False
+        ) -> None:
             assert brokerage_session is False
             self.connected = True
 
@@ -171,6 +173,9 @@ def test_load_ibkr_context_emits_phase_status_and_returns_live_state(capsys):
             return [{"ticker": "7203", "side": "BUY"}]
 
         def close(self) -> None:
+            self.closed = True
+
+        def logout(self) -> None:
             self.closed = True
 
     def fake_read_portfolio(client, account_id, cash_buffer):
@@ -215,9 +220,7 @@ def test_load_ibkr_context_emits_phase_status_and_returns_live_state(capsys):
 
     captured = capsys.readouterr()
 
-    assert "Preparing IBKR client..." in captured.err
-    assert "Connecting to IBKR..." in captured.err
-    assert "Loading portfolio from IBKR..." in captured.err
+    assert "Loading holdings from IBKR..." in captured.err
     assert "Loading watchlist from IBKR..." in captured.err
     assert "Loading live orders from IBKR..." in captured.err
     assert "Loaded 2 watchlist tickers from 'watchlist-2026'" in captured.err
@@ -227,6 +230,64 @@ def test_load_ibkr_context_emits_phase_status_and_returns_live_state(capsys):
     assert loaded_watchlist_name == "watchlist-2026"
     assert loaded_watchlist_total == 2
     assert live_orders == [{"ticker": "7203", "side": "BUY"}]
+
+
+def test_load_ibkr_context_watchlist_unavailable_message_is_truthful(capsys):
+    """The degraded watchlist warning must match report behavior: BUY candidates
+    may still be shown, but watchlist filtering is unavailable."""
+    from src.ibkr.exceptions import IBKRAuthError
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+            self.connected = False
+
+        def connect(
+            self, brokerage_session: bool = False, *, maintain: bool = False
+        ) -> None:
+            assert brokerage_session is False
+            self.connected = True
+
+        def close(self) -> None:
+            pass
+
+        def logout(self) -> None:
+            pass
+
+    def fake_read_portfolio(client, account_id, cash_buffer):
+        assert client.connected is True
+        return ([], PortfolioSummary(portfolio_value_usd=1000, cash_balance_usd=50))
+
+    def fake_read_watchlist(client, watchlist_name):
+        assert client.connected is True
+        raise IBKRAuthError("brokerage session not authenticated for watchlist_fetch")
+
+    class FakeConfig:
+        ibkr_account_id = "U123456"
+
+        @staticmethod
+        def get_oauth_access_token_secret() -> str:
+            return "present"
+
+    args = Namespace(
+        account_id=None,
+        cash_buffer=0.05,
+        watchlist_name="watchlist-2026",
+        recommend=False,
+    )
+
+    _load_ibkr_context(
+        args,
+        client_cls=FakeClient,
+        read_portfolio_fn=fake_read_portfolio,
+        read_watchlist_fn=fake_read_watchlist,
+        config=FakeConfig(),
+    )
+
+    captured = capsys.readouterr()
+    assert "watchlist filtering is unavailable" in captured.err
+    assert "BUY CANDIDATES" in captured.err
+    assert "new-buy suggestions are omitted" not in captured.err
 
 
 def test_preflight_ibkr_requirements_fails_when_ibind_missing(capsys):

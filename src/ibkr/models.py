@@ -183,6 +183,15 @@ class AnalysisRecord(BaseModel):
     exchange: str = ""  # Exchange suffix (e.g. "HK", "T"), inferred from ticker
     is_quick_mode: bool = False  # True if analysis was run with --quick (less thorough)
     capital_flag_types: tuple[str, ...] = ()
+    # PM final risk tally — best-effort: read from prediction_snapshot first, else
+    # parsed from the PM decision text (None when neither is available). Consumed
+    # only by the opt-in off-watchlist BUY stability gate.
+    risk_tally: float | None = None
+    # Peak/transient quality flags re-derived from the saved fundamentals/value-trap
+    # reports (CYCLICAL_PEAK_WARNING, TRANSIENT_STRENGTH_DISTORTION, and the
+    # moat/capital-efficiency bonus-suppression markers). Consumed by the BUY
+    # stability gate; intentionally distinct from idle-cash `capital_flag_types`.
+    quality_flag_types: tuple[str, ...] = ()
     macro_regime: dict[str, Any] = Field(default_factory=dict)
     data_quality: dict[str, Any] = Field(default_factory=dict)
     # Special-situation routing (Senior promotes from Foreign Language M&A EVENT

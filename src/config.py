@@ -212,6 +212,61 @@ def _check_env_overrides() -> None:
                 )
 
 
+def _warn_retired_env_vars() -> None:
+    """Warn when a retired env var is still set (shell or .env).
+
+    SENIOR_FUNDAMENTALS_MODEL / SENIOR_FUNDAMENTALS_THINKING_LEVEL were
+    replaced by the APEX tier (APEX_MODEL / APEX_QUICK_MODEL /
+    APEX_THINKING_LEVEL), which covers the Portfolio Manager as well as the
+    Senior Fundamentals Analyst. The old names are ignored entirely.
+    """
+    retired = {
+        "SENIOR_FUNDAMENTALS_MODEL": "APEX_MODEL",
+        "SENIOR_FUNDAMENTALS_THINKING_LEVEL": "APEX_THINKING_LEVEL",
+    }
+    for name, replacement in retired.items():
+        if get_env_value(name):
+            logger.warning(
+                f"RETIRED ENV VAR IGNORED: {name} is no longer read - "
+                f"set {replacement} instead (APEX tier covers both the Senior "
+                f"Fundamentals Analyst and the Portfolio Manager)."
+            )
+
+
+def _apply_macos_fork_safety_env(*, enabled: bool, platform: str) -> None:
+    """Export env vars that prevent benign macOS fork-safety crashes.
+
+    The gRPC/Gemini stack loads Apple Network.framework and makes the process
+    multi-threaded; a later ``fork()+exec()`` (subprocess / multiprocessing-spawn
+    from a transitive dep) crashes in Network's atfork handler before ``exec`` —
+    a SIGSEGV in a short-lived forked child that is harmless but pops a macOS
+    crash dialog. Disabling proxy auto-discovery short-circuits the
+    SystemConfiguration/Network.framework lookup that trips the handler;
+    ``OBJC_DISABLE_INITIALIZE_FORK_SAFETY`` covers the ObjC +initialize variant.
+
+    No-op off macOS, when disabled, when a proxy is configured (proxy users must
+    keep proxying), or when the user already set the relevant vars.
+    """
+    if not enabled or platform != "darwin":
+        return
+    proxy_vars = (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    )
+    if (
+        not any(os.environ.get(v) for v in proxy_vars)
+        and "no_proxy" not in os.environ
+        and "NO_PROXY" not in os.environ
+    ):
+        os.environ["no_proxy"] = "*"
+        os.environ["NO_PROXY"] = "*"
+    os.environ.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
+
+
 def validate_environment_variables() -> None:
     """Validate required environment variables.
 
@@ -248,6 +303,7 @@ def validate_environment_variables() -> None:
 
     # Check for problematic shell environment overrides
     _check_env_overrides()
+    _warn_retired_env_vars()
 
     configure_langsmith_tracing(settings=config)
     logger.info("Environment variables validated")
@@ -306,19 +362,47 @@ class Settings(BaseSettings):
         validation_alias="QUICK_MODEL",
         description="Model for quick thinking/data gathering agents",
     )
+    # APEX tier: one pin for the two gate-critical seats — Senior Fundamentals
+    # (rubric arithmetic feeding the hard <50% health/growth gates) and the
+    # Portfolio Manager (gate checks, override logic, PM_BLOCK contract).
+    # Env-only (no CLI flag). Unset = legacy per-seat behavior (senior: quick
+    # tier; PM: deep tier). In --quick the seats fall back to APEX_QUICK_MODEL
+    # when set, else the plain quick floor — quick mode stays cheap and the
+    # degradation is an accepted trade-off (supersedes the old
+    # SENIOR_FUNDAMENTALS_MODEL applies-in-quick behavior).
+    apex_model: str = Field(
+        default="",
+        validation_alias="APEX_MODEL",
+        description=(
+            "Model pin for the gate-critical seats (Senior Fundamentals + "
+            "Portfolio Manager) in full mode. Empty = legacy per-seat tiers."
+        ),
+    )
+    apex_quick_model: str = Field(
+        default="",
+        validation_alias="APEX_QUICK_MODEL",
+        description=(
+            "Optional --quick override for the apex seats; empty = plain "
+            "QUICK_MODEL floor (accepted degradation). Only consulted when "
+            "APEX_MODEL is set."
+        ),
+    )
+    apex_thinking_level: Literal["low", "medium", "high"] = Field(
+        default="high",
+        validation_alias="APEX_THINKING_LEVEL",
+        description=(
+            "Thinking level for whichever apex model is in play; only "
+            "consulted when APEX_MODEL is set"
+        ),
+    )
 
     # --- Debate & Risk Configuration ---
     max_debate_rounds: int = Field(
         default=2,
-        ge=0,
+        ge=1,
+        le=2,
         validation_alias="MAX_DEBATE_ROUNDS",
-        description="Maximum rounds of bull/bear debate",
-    )
-    max_risk_discuss_rounds: int = Field(
-        default=1,
-        ge=0,
-        validation_alias="MAX_RISK_DISCUSS_ROUNDS",
-        description="Maximum rounds of risk discussion",
+        description="Maximum rounds of bull/bear debate (1 or 2; graph supports R1/R2 only)",
     )
 
     # --- Feature Flags ---
@@ -337,7 +421,29 @@ class Settings(BaseSettings):
         validation_alias="ENABLE_CONSULTANT",
         description="Enable OpenAI consultant for cross-validation",
     )
-
+    # --- BUY stability / hysteresis gate (off-watchlist new BUYs) ---
+    # Default ON since the gate was decoupled from src.agents (the enabled path is
+    # now agents-free — src/ibkr/buy_stability.py + the neutral pm_decision_parser).
+    # A fresh off-watchlist BUY contradicted by a recent same-ticker run (or
+    # marginal with an unresolved peak/transient flag) is withheld pending
+    # stability. Set BUY_STABILITY_ENABLED=false to opt out.
+    buy_stability_enabled: bool = Field(
+        default=True,
+        validation_alias="BUY_STABILITY_ENABLED",
+        description="Withhold unstable/marginal off-watchlist BUYs (reproducibility gate)",
+    )
+    buy_stability_lookback_days: int = Field(
+        default=7,
+        ge=1,
+        validation_alias="BUY_STABILITY_LOOKBACK_DAYS",
+        description="Lookback window (days) for same-ticker verdict stability checks",
+    )
+    buy_stability_margin_tally: float = Field(
+        default=0.5,
+        ge=0.0,
+        validation_alias="BUY_STABILITY_MARGIN_TALLY",
+        description="Risk-tally at/above which a BUY is 'marginal' for the stability gate",
+    )
     # --- Consultant Configuration ---
     consultant_model: str = Field(
         default="gpt-5.4",
@@ -420,32 +526,6 @@ class Settings(BaseSettings):
         description="Claude model for article writing",
     )
 
-    # --- Trading Parameters ---
-    max_position_size: float = Field(
-        default=0.1,
-        ge=0.0,
-        le=1.0,
-        validation_alias="MAX_POSITION_SIZE",
-        description="Maximum position size as fraction of portfolio",
-    )
-    max_daily_trades: int = Field(
-        default=5,
-        ge=0,
-        validation_alias="MAX_DAILY_TRADES",
-        description="Maximum number of trades per day",
-    )
-    risk_free_rate: float = Field(
-        default=0.03,
-        ge=0.0,
-        validation_alias="RISK_FREE_RATE",
-        description="Risk-free rate for calculations",
-    )
-    default_ticker: str = Field(
-        default="AAPL",
-        validation_alias="DEFAULT_TICKER",
-        description="Default ticker symbol for analysis",
-    )
-
     # --- Capital Efficiency Thresholds ---
     # Used by fetcher and red_flag_detector for ROIC/leverage quality checks
     roic_hurdle_rate: float = Field(
@@ -515,6 +595,41 @@ class Settings(BaseSettings):
         description="Capex / D&A ratio above which reinvestment is treated as growth investing. Default 1.25.",
     )
 
+    # --- Service tiers (flex inference) ---
+    # Flex halves per-token cost on both vendors in exchange for variable
+    # latency (1-15 min queue target) and best-effort capacity. Timeout floors
+    # are applied automatically wherever a wall-clock ceiling could kill a
+    # legitimately-queued flex call (see src/service_tiers.py). Applies in
+    # both normal and --quick runs. The LLM-judge content inspector is pinned
+    # to the standard tier regardless (inline security path).
+    gemini_service_tier: Literal["standard", "flex"] = Field(
+        default="standard",
+        validation_alias="GEMINI_SERVICE_TIER",
+        description="Gemini inference tier: standard, or flex (50% cost, higher latency)",
+    )
+    openai_service_tier: Literal["auto", "flex"] = Field(
+        default="auto",
+        validation_alias="OPENAI_SERVICE_TIER",
+        description="OpenAI service tier for consultant/auditor/editor: auto or flex",
+    )
+    flex_fallback_to_standard: bool = Field(
+        default=True,
+        validation_alias="FLEX_FALLBACK_TO_STANDARD",
+        description=(
+            "On flex capacity exhaustion (429/503 after SDK retries), re-issue "
+            "the call once at the standard tier instead of failing"
+        ),
+    )
+    flex_llm_timeout_seconds: int = Field(
+        default=900,
+        ge=60,
+        validation_alias="FLEX_LLM_TIMEOUT_SECONDS",
+        description=(
+            "Minimum per-call wall-clock allowance (seconds) for flex-tier LLM "
+            "calls; floors SDK timeouts and hard-timeout caps when flex is active"
+        ),
+    )
+
     # --- Logging ---
     log_level: str = Field(
         default="INFO",
@@ -573,6 +688,23 @@ class Settings(BaseSettings):
         validation_alias="QUICK_LLM_CALL_HARD_TIMEOUT_SECONDS",
         description=(
             "Hard wall-clock cap (seconds) for a single LLM ainvoke in --quick mode."
+        ),
+    )
+    # Larger per-call cap for the two gate-critical APEX seats (Senior
+    # Fundamentals + PM) in --quick mode. They run the biggest, most rule-dense
+    # prompts on the APEX model with high thinking, so the flat 60s quick cap
+    # (sized for flash data-gathering agents) guillotines them before they can
+    # emit the DATA_BLOCK / PM_BLOCK the hard gates depend on — turning a
+    # "cheap" screen into a zero-yield ANALYSIS FAILED. Quick mode must still
+    # *finish* the gate-critical work. Keep comfortably below the Stage-1
+    # pipeline watchdog (STAGE1_TICKER_TIMEOUT_SECONDS, default 600).
+    apex_quick_llm_call_hard_timeout_seconds: float = Field(
+        default=180.0,
+        gt=0.0,
+        validation_alias="APEX_QUICK_LLM_CALL_HARD_TIMEOUT_SECONDS",
+        description=(
+            "Hard wall-clock cap (seconds) for a single gate-critical APEX-seat "
+            "LLM ainvoke (Senior Fundamentals, Portfolio Manager) in --quick mode."
         ),
     )
 
@@ -646,12 +778,6 @@ class Settings(BaseSettings):
             "Hard wall-clock cap (seconds) for cleanup_async_resources at "
             "process shutdown; on timeout the process forces os._exit()."
         ),
-    )
-    # Base default; CLI runs use src.runtime_config for run-scoped overrides.
-    quick_mode_active: bool = Field(
-        default=False,
-        validation_alias="QUICK_MODE_ACTIVE",
-        description="True when the current run was started with --quick.",
     )
     llm_base_output_tokens: int = Field(
         default=32768,
@@ -781,6 +907,18 @@ class Settings(BaseSettings):
         description="Path to the SQLite database for MCP usage tracking",
     )
 
+    # --- Optional IBKR market-data source (analysis pipeline) ---
+    ibkr_data_source_enabled: bool = Field(
+        default=False,
+        validation_alias="IBKR_DATA_SOURCE_ENABLED",
+        description=(
+            "Opt in to using the IBKR market-data snapshot as an advisory source in the "
+            "analysis data merge (requires IBKR creds). Supplies point-in-time ratios + "
+            "price only; overrides Yahoo/FMP but defers to EODHD/filings. Default off so "
+            "non-IBKR users and latency-sensitive batches are unaffected."
+        ),
+    )
+
     # --- Telemetry & System Overrides ---
     # These settings are exported to os.environ for third-party libraries
     # that read directly from environment variables (ChromaDB, gRPC).
@@ -798,6 +936,14 @@ class Settings(BaseSettings):
         default="poll",
         validation_alias="GRPC_POLL_STRATEGY",
         description="gRPC poll strategy (poll is most compatible)",
+    )
+    macos_fork_safety_mitigation: bool = Field(
+        default=True,
+        validation_alias="MACOS_FORK_SAFETY_MITIGATION",
+        description=(
+            "On macOS, disable proxy auto-discovery + ObjC fork-init to prevent "
+            "benign Network.framework atfork SIGSEGV crash dialogs"
+        ),
     )
 
     # --- Prompts ---
@@ -1020,6 +1166,12 @@ class Settings(BaseSettings):
             os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "1"
         if self.grpc_poll_strategy:
             os.environ["GRPC_POLL_STRATEGY"] = self.grpc_poll_strategy
+
+        # macOS fork-safety: prevent benign Network.framework atfork SIGSEGV
+        # crash dialogs in forked children (see _apply_macos_fork_safety_env).
+        _apply_macos_fork_safety_env(
+            enabled=self.macos_fork_safety_mitigation, platform=sys.platform
+        )
 
         return self
 

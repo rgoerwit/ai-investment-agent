@@ -22,10 +22,19 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.validators.financial_rules import reconcile_ocf_period_mismatch_flags
+from src.validators.supplemental_extractors import parse_consultant_conditions
+
 
 def _safe(source: Any) -> dict:
     """Coerce non-dict inputs to an empty dict to keep callers branch-free."""
     return source if isinstance(source, dict) else {}
+
+
+def _artifact_ok(source: Any, field: str) -> bool:
+    """Return False only when artifact status explicitly marks a field invalid."""
+    status = (_safe(source).get("artifact_statuses") or {}).get(field)
+    return not (isinstance(status, dict) and status.get("ok") is False)
 
 
 def get_pm_output(source: Any) -> str:
@@ -72,6 +81,16 @@ def get_fundamentals_report(source: Any) -> str:
     )
 
 
+def get_raw_fundamentals_data(source: Any) -> str:
+    """Return Junior Fundamentals raw metrics text from either shape."""
+    s = _safe(source)
+    return (
+        s.get("raw_fundamentals_data")
+        or (s.get("source_artifacts") or {}).get("raw_fundamentals_data")
+        or ""
+    )
+
+
 def get_valuation_params(source: Any) -> str:
     """Return the Valuation Calculator's structured-block output from either shape."""
     s = _safe(source)
@@ -107,4 +126,32 @@ def get_apac_regional_report(source: Any) -> str:
         s.get("apac_regional_report")
         or (s.get("reports") or {}).get("apac_regional_report")
         or ""
+    )
+
+
+def get_red_flags(source: Any) -> list[dict[str, Any]]:
+    """Return persisted/runtime red flags, if available."""
+    s = _safe(source)
+    flags = s.get("red_flags")
+    return list(flags) if isinstance(flags, list) else []
+
+
+def get_effective_red_flags(source: Any) -> list[dict[str, Any]]:
+    """Return red flags after deterministic report-stage reconciliation."""
+    s = _safe(source)
+    ticker = (
+        s.get("company_of_interest")
+        or (s.get("metadata") or {}).get("ticker")
+        or "UNKNOWN"
+    )
+    consultant_review = (
+        get_consultant_review(s) if _artifact_ok(s, "consultant_review") else ""
+    )
+    return reconcile_ocf_period_mismatch_flags(
+        get_red_flags(s),
+        fundamentals_report=get_fundamentals_report(s),
+        consultant_review=consultant_review,
+        auditor_report=get_auditor_report(s),
+        ticker=str(ticker),
+        consultant_conditions=parse_consultant_conditions(consultant_review),
     )

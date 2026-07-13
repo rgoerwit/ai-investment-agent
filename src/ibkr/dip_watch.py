@@ -155,17 +155,29 @@ def is_dip_watch_eligible(
     max_age_days: int = _DEFAULT_DIP_WATCH_MAX_AGE_DAYS,
     excluded_zones: frozenset[str] = _DEFAULT_DIP_WATCH_EXCLUDED_ZONES,
     min_dip_pct: float = _DEFAULT_DIP_WATCH_MIN_DIP_PCT,
+    macro_event_active: bool = False,
 ) -> bool:
-    """Return True when a held item is safe to surface as a dip-watch candidate."""
+    """Return True when a held item is safe to surface as a dip-watch candidate.
+
+    During an active macro event, a fundamentally-intact ``macro_review`` position
+    that dipped is a dip-buy candidate even though the selloff pushed it to HIGH
+    zone and its standalone verdict is a (usually valuation-driven) REJECT. The
+    safeguards that DON'T relax: a **recent review** (``max_age_days``) and sound
+    **health/growth** — a stale rating is not trusted, so a position only qualifies
+    once its analysis has been refreshed.
+    """
     analysis = item.analysis
     if analysis is None:
         return False
-    if dip_watch_source(item) is None:
+    source = dip_watch_source(item)
+    if source is None:
         return False
-    if _normalize_verdict(analysis.verdict or "") != "BUY":
-        return False
-    if _normalize_zone(analysis.zone) in excluded_zones:
-        return False
+    macro_dip = macro_event_active and source == "macro_review"
+    if not macro_dip:
+        if _normalize_verdict(analysis.verdict or "") != "BUY":
+            return False
+        if _normalize_zone(analysis.zone) in excluded_zones:
+            return False
     if analysis.age_days > max_age_days:
         return False
     if (analysis.health_adj or 0.0) < min_health:
@@ -186,6 +198,7 @@ def select_dip_watch_candidates(
     max_age_days: int = _DEFAULT_DIP_WATCH_MAX_AGE_DAYS,
     excluded_zones: frozenset[str] = _DEFAULT_DIP_WATCH_EXCLUDED_ZONES,
     min_dip_pct: float = _DEFAULT_DIP_WATCH_MIN_DIP_PCT,
+    macro_event_active: bool = False,
     limit: int | None = None,
 ) -> list[ReconciliationItem]:
     """Return items eligible for DIP WATCH using the current CLI rules."""
@@ -200,6 +213,7 @@ def select_dip_watch_candidates(
             max_age_days=max_age_days,
             excluded_zones=excluded_zones,
             min_dip_pct=min_dip_pct,
+            macro_event_active=macro_event_active,
         )
     ]
     ranked.sort(key=score_dip_watch_item, reverse=True)

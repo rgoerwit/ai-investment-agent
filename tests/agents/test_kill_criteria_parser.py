@@ -28,13 +28,13 @@ def test_bear_prompt_includes_fenced_kill_criteria_block() -> None:
 # ---------- extract_kill_criteria: happy / edge / error ----------
 
 
-def test_extract_kill_criteria_happy_two_triggers() -> None:
+def test_extract_kill_criteria_accepts_marker_drift_and_suffix() -> None:
     bear = (
         "blah blah\n"
-        "### --- START KILL_CRITERIA ---\n"
+        "#### -- START KILL_CRITERIA (v2) --\n"
         "TRIGGER_1: D/E ratio exceeds 1.5\n"
         "TRIGGER_2: two consecutive years negative FCF\n"
-        "### --- END KILL_CRITERIA ---\n"
+        "#### -- END KILL_CRITERIA --\n"
         "trailing narrative\n"
     )
     triggers = extract_kill_criteria(bear)

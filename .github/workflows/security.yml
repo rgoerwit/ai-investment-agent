@@ -450,14 +450,18 @@ jobs:
           # yfinance with ticker symbols and Yahoo-managed endpoints, not
           # attacker-controlled URLs, so the internal-IP/redirect exposure in
           # curl_cffi is not currently a reachable path here.
-          # GHSA-f4j7-r4q5-qw2c (alias CVE-2026-45829) is a pre-authentication
-          # code injection in the ChromaDB *server*. This app only uses
-          # chromadb.PersistentClient (embedded, local-disk; see src/memory.py)
-          # and never starts the network server, so the pre-auth server path is
-          # not reachable. No fixed release exists yet (1.5.9 is latest). pip-audit
-          # keys on the GHSA primary ID, not the CVE alias — both are listed so the
-          # ignore matches regardless of which source (OSV/PyPI) reports it. Revisit
-          # and drop once chromadb ships a patched version.
+          # ChromaDB server vulns (CVE-2026-45829 through -45833, the Aug-2026
+          # disclosure batch). All are HTTP-API-*server* flaws: the two Critical
+          # ones (45829 deserialization/RCE, 45833 code injection) additionally
+          # require trust_remote_code; the three High ones (45830/45831/45832) are
+          # RBAC / multi-tenant authorization bypasses. This app uses only
+          # chromadb.PersistentClient (embedded, local-disk; see src/memory.py),
+          # never starts the network server, and never sets trust_remote_code — so
+          # none of these paths are reachable. No fixed release exists (1.5.9 is
+          # latest; all versions >= 0.4.17 affected). Both CVE and GHSA IDs are
+          # listed where known so the ignore matches whichever ID the source
+          # (OSV/PyPI) reports. Kept in sync with the repo .snyk policy file.
+          # Revisit and drop once chromadb ships a patched version.
           pip-audit -r /tmp/requirements.txt \
             --format json \
             --output pip-audit-results.json \
@@ -466,6 +470,11 @@ jobs:
             --ignore-vuln CVE-2026-4539 \
             --ignore-vuln GHSA-f4j7-r4q5-qw2c \
             --ignore-vuln CVE-2026-45829 \
+            --ignore-vuln CVE-2026-45830 \
+            --ignore-vuln CVE-2026-45831 \
+            --ignore-vuln CVE-2026-45832 \
+            --ignore-vuln CVE-2026-45833 \
+            --ignore-vuln GHSA-36p7-vc44-83pf \
             || (echo "⚠️  pip-audit found vulnerabilities — see pip-audit-results.json" && exit 1)
 
       - name: Display audit summary
@@ -497,12 +506,87 @@ jobs:
           retention-days: 30
 
   # ══════════════════════════════════════════════════════════════════════════
+  # Snyk container scan - base image + built image (restores Docker coverage that
+  # the disabled Trivy jobs used to provide). Uses the Snyk CLI in a plain `run:`
+  # step (pinned + version-printed) — NOT a third-party Action — so it carries no
+  # supply-chain exposure from the action itself (same rationale as pip-audit and
+  # the whole reason the Trivy Action jobs were pulled). Token-gated and NON-gating
+  # (base-image OS findings like acl/attr have no Debian fix yet; gating would red
+  # every build). Value: the daily cron surfaces newly-disclosed base CVEs, and the
+  # BUILT-image scan verifies that the Dockerfile's `apt-get upgrade -y` actually
+  # clears the fixable OS CVEs (which a base-TAG scan can't show).
+  # ══════════════════════════════════════════════════════════════════════════
+  snyk-container:
+    name: Snyk Container Scan (base tag + built image)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect SNYK_TOKEN
+        id: tok
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          if [ -n "$SNYK_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::SNYK_TOKEN secret absent — skipping Snyk container scan."
+          fi
+
+      - name: Install Snyk CLI (pinned)
+        if: steps.tok.outputs.present == 'true'
+        run: |
+          npm install -g snyk@1.1306.0
+          snyk --version   # printed for auditability of behavior changes
+
+      - name: Scan base image tag (advisory)
+        if: steps.tok.outputs.present == 'true'
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          mkdir -p snyk-sarif
+          # Remote ref: Snyk pulls it; --file gives base-image-upgrade advice.
+          # `|| true` — non-gating (unfixable base CVEs must not fail the build).
+          snyk container test python:3.12-slim --file=Dockerfile \
+            --severity-threshold=medium \
+            --sarif-file-output=snyk-sarif/base.sarif || true
+
+      - name: Build & scan the real shipped image (authoritative)
+        if: steps.tok.outputs.present == 'true'
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          docker build -t investment-agent:${{ github.sha }} .
+          # Scanning the BUILT image is what proves `apt-get upgrade -y` remediated
+          # the fixable OS CVEs (e.g. xz-utils) that a base-tag scan still reports.
+          snyk container test investment-agent:${{ github.sha }} --file=Dockerfile \
+            --severity-threshold=medium \
+            --sarif-file-output=snyk-sarif/image.sarif || true
+
+      - name: Upload Snyk SARIF to GitHub Security
+        if: steps.tok.outputs.present == 'true' && hashFiles('snyk-sarif/*.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-sarif
+          category: snyk-container
+
+      - name: Upload Snyk SARIF as artifact
+        if: steps.tok.outputs.present == 'true' && hashFiles('snyk-sarif/*.sarif') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-container-sarif
+          path: snyk-sarif/*.sarif
+          retention-days: 30
+
+  # ══════════════════════════════════════════════════════════════════════════
   # Summary job - Aggregate results and provide recommendations
   # ══════════════════════════════════════════════════════════════════════════
   security-summary:
     name: Security Scan Summary
     runs-on: ubuntu-latest
-    needs: [codeql-analysis, gitleaks, pip-audit]
+    needs: [codeql-analysis, gitleaks, pip-audit, snyk-container]
     if: always()  # Run even if some scans fail
     steps:
       - name: Check scan results
@@ -512,8 +596,11 @@ jobs:
           echo "✅ CodeQL SAST: ${{ needs.codeql-analysis.result }}"
           echo "✅ GitLeaks: ${{ needs.gitleaks.result }}"
           echo "✅ pip-audit (Python CVEs): ${{ needs.pip-audit.result }}"
+          echo "✅ Snyk container (base + built image, advisory): ${{ needs.snyk-container.result }}"
           echo ""
-          echo "ℹ️  Trivy jobs are disabled (supply-chain incident, March 2026 week 4)"
+          echo "ℹ️  Trivy Action jobs remain disabled (supply-chain incident, March 2026 week 4);"
+          echo "    container coverage is now provided by the token-gated snyk-container job"
+          echo "    (Snyk CLI in a run: step, non-gating)."
           echo ""
 
           # Check if any scans failed
@@ -554,13 +641,16 @@ jobs:
         with:
           # Fail if vulnerabilities are introduced with these severities
           fail-on-severity: critical
-          # Approved vulnerability exception (mirrors the pip-audit ignore):
-          # GHSA-f4j7-r4q5-qw2c (CVE-2026-45829) is a pre-auth code-injection in
-          # the ChromaDB *server*. This app only uses chromadb.PersistentClient
-          # (embedded, local-disk; see src/memory.py) and never starts the server,
-          # so the path is unreachable. No fixed release exists yet (1.5.9 latest).
-          # Drop once chromadb ships a patched version.
-          allow-ghsas: GHSA-f4j7-r4q5-qw2c
+          # Approved vulnerability exceptions (mirror the pip-audit ignore + .snyk):
+          # the two Critical ChromaDB *server* RCEs — GHSA-f4j7-r4q5-qw2c
+          # (CVE-2026-45829, deserialization) and GHSA-36p7-vc44-83pf
+          # (CVE-2026-45833, code injection). Both require the HTTP API server +
+          # trust_remote_code; this app only uses chromadb.PersistentClient
+          # (embedded, local-disk; see src/memory.py), so they are unreachable.
+          # (The three High authz bypasses 45830/45831/45832 sit below this job's
+          # critical-only gate, so they need no entry here.) No fixed release
+          # exists yet (1.5.9 latest). Drop once chromadb ships a patched version.
+          allow-ghsas: GHSA-f4j7-r4q5-qw2c, GHSA-36p7-vc44-83pf
           # Broadly allow common permissive licenses used by the Python ecosystem.
           # Keep this list tighter than "disable license checks", but wide enough
           # to avoid failing on normal dual-license metadata.
@@ -575,7 +665,11 @@ jobs:
           # - regex: Apache-2.0 licensed, but reports "CNRI-Python AND Apache-2.0"
           #   because it incorporates CPython regex code. CNRI-Python is an
           #   OSI-approved permissive license; treat as a reviewed exception.
-          allow-dependencies-licenses: pkg:pypi/aiohappyeyeballs, pkg:pypi/et-xmlfile, pkg:pypi/frozendict, pkg:pypi/lxml, pkg:pypi/matplotlib, pkg:pypi/parso, pkg:pypi/pycryptodome, pkg:pypi/python-dateutil, pkg:pypi/regex, pkg:pypi/structlog, pkg:pypi/typing-extensions, pkg:pypi/xlrd
+          # - protobuf: BSD-3-Clause package, but 7.x reports the combined expression
+          #   "BSD-3-Clause AND LicenseRef-scancode-protobuf" (scancode surfaced the
+          #   Google protobuf license ref on the 6->7 bump). Same permissive license as
+          #   6.x carried; scoped exception rather than globally allowing the scancode ref.
+          allow-dependencies-licenses: pkg:pypi/aiohappyeyeballs, pkg:pypi/et-xmlfile, pkg:pypi/frozendict, pkg:pypi/lxml, pkg:pypi/matplotlib, pkg:pypi/parso, pkg:pypi/protobuf, pkg:pypi/pycryptodome, pkg:pypi/python-dateutil, pkg:pypi/regex, pkg:pypi/structlog, pkg:pypi/typing-extensions, pkg:pypi/xlrd
           # Comment on PR with dependency changes
           comment-summary-in-pr: always
           # GitHub can lag when producing dependency graph snapshots for the PR

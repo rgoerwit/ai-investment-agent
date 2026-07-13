@@ -464,6 +464,50 @@ class TestStoreMacroEventIfDetected:
                 _store_macro_event_if_detected([self._CORR_FLAG], [])
         mock_store.store_event.assert_not_called()
 
+    def _characterize_patch(self, event_type="CONTAGION_SPREAD", impact="STRUCTURAL"):
+        return patch(
+            "scripts.portfolio_manager._characterize_macro_event",
+            return_value=("GLOBAL", "GLOBAL", "", impact, event_type, "h", ""),
+        )
+
+    def test_returns_characterized_event(self):
+        """Flag present → returns the characterized MacroEvent for the banner."""
+        mock_store = MagicMock()
+        mock_store.available = True
+        with patch("src.memory.create_macro_events_store", return_value=mock_store):
+            with self._characterize_patch():
+                event = _store_macro_event_if_detected([self._CORR_FLAG], [])
+        assert event is not None
+        assert event.event_type == "CONTAGION_SPREAD"
+
+    def test_returns_event_even_when_store_unavailable(self):
+        """Banner must work without Chroma: the event is returned though nothing stored."""
+        mock_store = MagicMock()
+        mock_store.available = False
+        with patch("src.memory.create_macro_events_store", return_value=mock_store):
+            with self._characterize_patch(
+                event_type="TARIFF_TRADE", impact="TRANSIENT"
+            ):
+                event = _store_macro_event_if_detected([self._CORR_FLAG], [])
+        mock_store.store_event.assert_not_called()
+        assert event is not None and event.event_type == "TARIFF_TRADE"
+
+    def test_returns_event_even_when_store_raises(self):
+        """store_event() raising must not lose the event for the banner."""
+        mock_store = MagicMock()
+        mock_store.available = True
+        mock_store.store_event.side_effect = RuntimeError("chroma down")
+        with patch("src.memory.create_macro_events_store", return_value=mock_store):
+            with self._characterize_patch(
+                event_type="TARIFF_TRADE", impact="TRANSIENT"
+            ):
+                event = _store_macro_event_if_detected([self._CORR_FLAG], [])
+        assert event is not None and event.event_type == "TARIFF_TRADE"
+
+    def test_returns_none_when_no_flag(self):
+        """No CORRELATED_SELL_EVENT → returns None (no event to show)."""
+        assert _store_macro_event_if_detected(["OTHER_FLAG"], []) is None
+
     def test_severity_high_when_correlation_above_40pct(self):
         """Correlation ≥ 0.40 → severity='HIGH' in stored MacroEvent."""
         mock_store = MagicMock()
@@ -587,19 +631,25 @@ class TestMacroFlagParsingContract:
             _make_sell_item_on_date,
         )
 
+        # Recent dates: the override (and the CORRELATED_SELL_EVENT flag it emits)
+        # only fires within macro_override_max_age_days of onset. First-detection
+        # onset = the fresh peak_anchor, so these must be recent to exercise the
+        # CORRELATED path (the lapsed/old-onset path is tested separately).
+        _recent = (date.today() - timedelta(days=5)).isoformat()
         if trigger == "window":
             items = [
-                _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+                _make_sell_item_on_date(f"S{i}.T", _recent, conid=100 + i)
                 for i in range(6)
             ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(4)]
         elif trigger == "cumulative":
-            from datetime import date as _d
             from datetime import timedelta as _td
 
+            # Spread ≥13d apart (no 14d window reaches 5 → forces the cumulative
+            # path) but anchored to today so the latest sell (peak_anchor) is recent.
             items = [
                 _make_sell_item_on_date(
                     f"S{i:02d}.T",
-                    (_d(2025, 6, 1) + _td(days=20 * i)).isoformat(),
+                    (date.today() - _td(days=13 * i)).isoformat(),
                     conid=100 + i,
                 )
                 for i in range(9)

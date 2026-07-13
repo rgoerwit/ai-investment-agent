@@ -80,6 +80,62 @@ class TestFootballFieldData:
         )
         assert data.has_external_targets() is False
 
+    def test_has_external_targets_false_thin_single_source_outlier(self):
+        """A degenerate single-point target wildly off price (the 1415-vs-447 case)
+        is suppressed as a chart anchor."""
+        data = FootballFieldData(
+            ticker="FRAGUAB.MX",
+            trade_date="2026-06-21",
+            current_price=447.40,
+            fifty_two_week_high=602.00,
+            fifty_two_week_low=447.40,
+            external_target_high=1415.00,
+            external_target_low=1415.00,
+            external_target_mean=1415.00,
+        )
+        assert data.has_external_targets() is False
+
+    def test_has_external_targets_true_when_point_target_near_price(self):
+        """A single-point target close to price (ratio within band) is still valid."""
+        data = FootballFieldData(
+            ticker="AAPL",
+            trade_date="2025-01-01",
+            current_price=150.00,
+            fifty_two_week_high=180.00,
+            fifty_two_week_low=120.00,
+            external_target_high=155.00,
+            external_target_low=155.00,
+            external_target_mean=155.00,
+        )
+        assert data.has_external_targets() is True
+
+
+class TestThinOutlierTarget:
+    """Unit coverage for the shared is_thin_outlier_target predicate."""
+
+    def test_point_target_far_above_price(self):
+        from src.charts.base import is_thin_outlier_target
+
+        assert is_thin_outlier_target(1415.0, 1415.0, 447.0) is True
+
+    def test_point_target_far_below_price(self):
+        from src.charts.base import is_thin_outlier_target
+
+        assert is_thin_outlier_target(100.0, 100.0, 400.0) is True  # 0.25x
+
+    def test_real_range_is_not_outlier(self):
+        from src.charts.base import is_thin_outlier_target
+
+        assert is_thin_outlier_target(480.0, 560.0, 447.0) is False
+
+    def test_missing_or_nonpositive_inputs_return_false(self):
+        from src.charts.base import is_thin_outlier_target
+
+        assert is_thin_outlier_target(1415.0, 1415.0, None) is False
+        assert is_thin_outlier_target(None, None, 447.0) is False
+        assert is_thin_outlier_target(0.0, 0.0, 447.0) is False
+        assert is_thin_outlier_target(1415.0, 1415.0, 0.0) is False
+
     def test_has_our_targets_true(self):
         """Test has_our_targets when targets available."""
         data = FootballFieldData(

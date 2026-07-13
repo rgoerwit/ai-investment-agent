@@ -13,6 +13,7 @@ from src.ibkr.portfolio_data_service import (
     PortfolioSnapshot,
     WatchlistSnapshot,
 )
+from src.ibkr.portfolio_defaults import DEFAULT_CASH_BUFFER_PCT
 from src.ibkr_config import ibkr_config
 
 
@@ -118,7 +119,7 @@ async def get_ibkr_portfolio_snapshot(
     account_id: str = "",
     watchlist_name: str = "",
     include_live_orders: bool = False,
-    cash_buffer_pct: float = 0.05,
+    cash_buffer_pct: float = DEFAULT_CASH_BUFFER_PCT,
 ) -> dict[str, Any]:
     """Return holdings, portfolio summary, watchlist, and optional live orders."""
     try:

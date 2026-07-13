@@ -29,7 +29,12 @@ def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
         },
         "artifact_statuses": {
             "consultant_review": {"complete": True, "ok": False},
-            "auditor_report": {"complete": True, "ok": True},
+            # ok=True AND a parseable non-caveated STATUS → a genuine successful audit.
+            "auditor_report": {
+                "complete": True,
+                "ok": True,
+                "content": "STATUS: CLEAN\nNo anomalies detected.",
+            },
             "apac_regional_report": {"complete": True, "ok": True},
         },
         "messages": [ToolMessage(content="done", tool_call_id="call_1", name="tool")],
@@ -53,6 +58,118 @@ def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
     assert summary["optional_failures"] == ["consultant_review"]
     assert summary["llm_attempts"] == 5
     assert summary["llm_failures"] == 2
+
+
+def _min_summary(monkeypatch, result: dict):
+    from src.persistence import build_run_summary
+
+    class _T:
+        def get_total_stats(self):
+            return {"failed_attempts": 0, "total_calls": 1}
+
+    monkeypatch.setattr("src.token_tracker.get_tracker", lambda: _T())
+    return build_run_summary(
+        result, quick_mode=True, article_requested=False, provider_preflight={}
+    )
+
+
+def test_debate_rounds_is_turns_over_two(monkeypatch):
+    # `count` tallies bull+bear turns: quick=2 → 1 round, full=4 → 2 rounds.
+    quick = _min_summary(monkeypatch, {"investment_debate_state": {"count": 2}})
+    assert quick["debate_rounds"] == 1
+    assert quick["debate_turns"] == 2
+    full = _min_summary(monkeypatch, {"investment_debate_state": {"count": 4}})
+    assert full["debate_rounds"] == 2
+    assert full["debate_turns"] == 4
+
+
+def test_verdict_qualified_flag_reflects_marker(monkeypatch):
+    qualified = _min_summary(
+        monkeypatch,
+        {
+            "final_trade_decision": "### VERDICT: BUY\n> **QUICK-MODE QUALIFICATION** ..."
+        },
+    )
+    assert qualified["verdict_qualified_by_quick_mode"] is True
+    plain = _min_summary(monkeypatch, {"final_trade_decision": "### VERDICT: BUY"})
+    assert plain["verdict_qualified_by_quick_mode"] is False
+
+
+def test_weak_asymmetry_flag_reflects_marker(monkeypatch):
+    qualified = _min_summary(
+        monkeypatch,
+        {
+            "final_trade_decision": (
+                "### VERDICT: BUY\n> **WEAK VALUATION ASYMMETRY — STARTER/VERIFY** ..."
+            )
+        },
+    )
+    assert qualified["verdict_weak_valuation_asymmetry"] is True
+    plain = _min_summary(monkeypatch, {"final_trade_decision": "### VERDICT: BUY"})
+    assert plain["verdict_weak_valuation_asymmetry"] is False
+
+
+@pytest.mark.parametrize(
+    "report, expected_successful, expected_status",
+    [
+        (
+            "## FORENSIC AUDITOR REPORT\n\nSTATUS: INSUFFICIENT_DATA\n\nReason: ...",
+            False,
+            "INSUFFICIENT_DATA",
+        ),
+        (
+            "## FORENSIC AUDITOR REPORT\n\nSTATUS: UNAVAILABLE\n",
+            False,
+            "UNAVAILABLE",
+        ),
+        (
+            # Filings retrieved but audit opinion unverified → caveated, not a clean pass.
+            "## FORENSIC AUDITOR REPORT\n\nSTATUS: PARTIAL_DATA\n\nFY2025 20-F located.",
+            False,
+            "PARTIAL_DATA",
+        ),
+        (
+            "## FORENSIC AUDITOR REPORT\n\nSTATUS: CLEAN\n\nNo anomalies detected.",
+            True,
+            "CLEAN",
+        ),
+        (
+            # No parseable STATUS line → unknown, must NOT read as a clean pass.
+            "## FORENSIC AUDITOR REPORT\n\nSome prose without a status field.",
+            False,
+            None,
+        ),
+    ],
+)
+def test_build_run_summary_auditor_success_requires_data(
+    monkeypatch, report, expected_successful, expected_status
+):
+    """A well-formed but data-less auditor report must not count as successful."""
+    from src.persistence import build_run_summary
+
+    class StubTracker:
+        def get_total_stats(self):
+            return {"failed_attempts": 0, "total_calls": 1}
+
+    monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
+
+    result = {
+        "pre_screening_result": "PASS",
+        "investment_debate_state": {"count": 1},
+        "artifact_statuses": {
+            # ok=True because the prose is structurally valid; content drives success.
+            "auditor_report": {"complete": True, "ok": True, "content": report},
+        },
+        "messages": [],
+    }
+
+    summary = build_run_summary(
+        result, quick_mode=False, article_requested=False, provider_preflight={}
+    )
+
+    assert summary["auditor_finished"] is True
+    assert summary["auditor_successful"] is expected_successful
+    assert summary["auditor_status"] == expected_status
 
 
 def test_save_results_to_file_preserves_macro_context_metadata(tmp_path, monkeypatch):
@@ -349,3 +466,65 @@ def test_persist_analysis_outputs_surfaces_formatted_warning():
 
     console.print.assert_called_once()
     assert "saving analysis results:RuntimeError" in console.print.call_args.args[0]
+
+
+def test_persist_analysis_outputs_records_saved_path(tmp_path):
+    from src.persistence import _persist_analysis_outputs
+
+    args = SimpleNamespace(ticker="7203.T", quick=True, quiet=True, brief=False)
+    result: dict = {}
+    saved = tmp_path / "7203.T_20260704_analysis.json"
+
+    with patch("src.persistence.save_results_to_file", return_value=saved):
+        _persist_analysis_outputs(
+            result,
+            args,
+            logger_obj=MagicMock(),
+            console_obj=None,
+        )
+
+    assert result["_saved_analysis_path"] == str(saved)
+
+
+def test_patch_saved_run_summary_merges_fields(tmp_path):
+    from src.persistence import patch_saved_run_summary
+
+    path = tmp_path / "a_analysis.json"
+    path.write_text(
+        json.dumps({"run_summary": {"existing": 1}, "metadata": {"ticker": "7203.T"}}),
+        encoding="utf-8",
+    )
+
+    patch_saved_run_summary(
+        path,
+        {"article_writer_model": "gemini-3.5-flash", "article_writer_fell_back": True},
+    )
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["run_summary"]["existing"] == 1
+    assert data["run_summary"]["article_writer_model"] == "gemini-3.5-flash"
+    assert data["run_summary"]["article_writer_fell_back"] is True
+    assert data["metadata"]["ticker"] == "7203.T"
+
+
+def test_patch_saved_run_summary_creates_missing_run_summary(tmp_path):
+    from src.persistence import patch_saved_run_summary
+
+    path = tmp_path / "a_analysis.json"
+    path.write_text(json.dumps({"metadata": {}}), encoding="utf-8")
+
+    patch_saved_run_summary(path, {"article_writer_fell_back": False})
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["run_summary"] == {"article_writer_fell_back": False}
+
+
+def test_patch_saved_run_summary_missing_file_fails_open(tmp_path):
+    from src.persistence import patch_saved_run_summary
+
+    logger = MagicMock()
+
+    patch_saved_run_summary(tmp_path / "missing.json", {"a": 1}, logger_obj=logger)
+
+    logger.warning.assert_called_once()
+    assert logger.warning.call_args.args[0] == "run_summary_patch_failed"

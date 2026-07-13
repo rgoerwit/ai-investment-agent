@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.error_safety import summarize_exception
 from src.ibkr.cli_options import (
     add_common_portfolio_request_args,
     portfolio_request_kwargs_from_args,
@@ -52,6 +53,7 @@ from src.ibkr.models import (
     PortfolioSummary,
     ReconciliationItem,
 )
+from src.ibkr.portfolio_defaults import DEFAULT_MAX_AGE_DAYS
 from src.ibkr.portfolio_presentation import (
     SELL_RECOMMENDATIONS_TITLE,
     SELL_RELATED_REVIEWS_TITLE,
@@ -84,6 +86,7 @@ from src.sector_normalization import (
 
 if TYPE_CHECKING:
     from src.ibkr.analysis_index import AnalysisLoadProgress
+    from src.memory import MacroEvent
 
 _IBKR_OAUTH_PORTAL = (
     "https://ndcdyn.interactivebrokers.com/sso/Login?action=OAUTH&RL=1&ip2loc=US"
@@ -374,7 +377,18 @@ def _preflight_ibkr_requirements() -> None:
     _check_config(ibkr_config)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(
+    argv: list[str] | None = None,
+    *,
+    analyzer_config: Any | None = None,
+    ibkr_settings: Any | None = None,
+) -> argparse.Namespace:
+    from src.config import config as default_analyzer_config
+    from src.ibkr_config import ibkr_config as default_ibkr_settings
+
+    analyzer_config = analyzer_config or default_analyzer_config
+    ibkr_settings = ibkr_settings or default_ibkr_settings
+
     parser = argparse.ArgumentParser(
         description="Reconcile IBKR portfolio against evaluator recommendations",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -403,21 +417,25 @@ def parse_args() -> argparse.Namespace:
         help="Verify IBKR credentials and connection, then exit",
     )
 
-    # Options
+    # Options. Sector/exchange/refresh defaults come from src.ibkr.portfolio_defaults
+    # via add_common_portfolio_request_args. The three knobs that ALSO have an env
+    # override (IbkrSettings) are sourced from ibkr_config here so that
+    # IBKR_CASH_BUFFER_PCT / IBKR_MAX_ANALYSIS_AGE_DAYS / IBKR_DRIFT_THRESHOLD_PCT
+    # actually take effect, with the matching CLI flag still overriding the env value.
     add_common_portfolio_request_args(
         parser,
         mode_flag_style="single",
-        results_dir_default="results/",
-        max_age_default=14,
-        cash_buffer_default=0.05,
-        drift_pct_default=15.0,
-        refresh_limit_default=10,
-        sector_limit_default=30.0,
-        exchange_limit_default=40.0,
+        max_age_default=ibkr_settings.ibkr_max_analysis_age_days,
+        cash_buffer_default=ibkr_settings.ibkr_cash_buffer_pct,
+        drift_pct_default=ibkr_settings.ibkr_drift_threshold_pct,
+        # Follow the analyzer's RESULTS_DIR so portfolio_manager reads from the same
+        # directory the analyzer writes analyses to (the dashboard keeps its own
+        # IBKR_DASHBOARD_RESULTS_DIR surface for process isolation).
+        results_dir_default=str(analyzer_config.results_dir),
         read_only_default=False,
         read_only_help="Never create IBKR connection (offline mode)",
         account_id_help="Override IBKR account ID",
-        results_dir_help="Override results directory (default: results/)",
+        results_dir_help="Override results directory (default: RESULTS_DIR or ./results)",
         watchlist_help=(
             "Name of the IBKR watchlist to evaluate "
             "(case-insensitive substring match). "
@@ -448,7 +466,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--json", action="store_true", help="Structured JSON output")
     parser.add_argument("--debug", action="store_true", help="Debug output")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # --recommend and --execute override --report-only
     if args.recommend or args.execute:
@@ -891,16 +909,23 @@ def _characterize_macro_event(
 def _store_macro_event_if_detected(
     health_flags: list[str],
     reconciliation_items: list,
-) -> None:
-    """Parse CORRELATED_SELL_EVENT, characterize it, store in ChromaDB. Fail-safe."""
+) -> MacroEvent | None:
+    """Parse CORRELATED_SELL_EVENT, characterize it, store in ChromaDB. Fail-safe.
+
+    Returns the characterized event (or None when no event was detected). The
+    event is returned even when ChromaDB storage is unavailable or fails, so the
+    caller's alert banner reflects the current detection regardless of Chroma.
+    """
     from datetime import date as _date
     from datetime import timedelta as _td
+
+    from src.memory import MacroEvent, create_macro_events_store
 
     correlated_flag = next(
         (f for f in health_flags if "CORRELATED_SELL_EVENT" in f), None
     )
     if not correlated_flag:
-        return
+        return None
 
     # Tolerant of the three trigger phrasings: "within Nd of DATE" (window)
     # and "as of DATE" (cumulative / drawdown_breadth).
@@ -912,7 +937,7 @@ def _store_macro_event_if_detected(
     )
     if not m:
         logger.warning("macro_event_flag_parse_failed", flag=correlated_flag)
-        return
+        return None
 
     peak_count = int(m.group(1))
     event_date = m.group(3)
@@ -945,33 +970,34 @@ def _store_macro_event_if_detected(
     anchor = max(_date.fromisoformat(event_date), _date.today())
     expiry = (anchor + _td(days=_EXPIRY_DAYS.get(event_type, 60))).isoformat()
 
-    try:
-        from src.memory import MacroEvent, create_macro_events_store
+    event = MacroEvent(
+        event_date=event_date,
+        detected_date=_date.today().isoformat(),
+        expiry=expiry,
+        impact=impact,
+        event_type=event_type,
+        scope=scope,
+        primary_region=primary_region,
+        primary_sector=primary_sector,
+        severity=severity,
+        correlation_pct=correlation_pct,
+        peak_count=peak_count,
+        total_held=total_held,
+        news_headline=headline,
+        news_detail=detail,
+        forced_reanalysis=(impact == "STRUCTURAL" and correlation_pct >= 0.40),
+    )
 
+    # Storage is best-effort: the returned event drives the caller's banner even
+    # when Chroma is unavailable or store_event raises.
+    try:
         store = create_macro_events_store()
-        if not store.available:
-            return
-        store.store_event(
-            MacroEvent(
-                event_date=event_date,
-                detected_date=_date.today().isoformat(),
-                expiry=expiry,
-                impact=impact,
-                event_type=event_type,
-                scope=scope,
-                primary_region=primary_region,
-                primary_sector=primary_sector,
-                severity=severity,
-                correlation_pct=correlation_pct,
-                peak_count=peak_count,
-                total_held=total_held,
-                news_headline=headline,
-                news_detail=detail,
-                forced_reanalysis=(impact == "STRUCTURAL" and correlation_pct >= 0.40),
-            )
-        )
+        if store.available:
+            store.store_event(event)
     except Exception as e:
         logger.warning("macro_event_storage_failed", error=str(e))
+
+    return event
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1054,8 +1080,9 @@ def format_report(
     portfolio: PortfolioSummary,
     show_recommendations: bool = False,
     portfolio_health_flags: list[str] | None = None,
-    max_age_days: int = 14,
+    max_age_days: int = DEFAULT_MAX_AGE_DAYS,
     live_orders: list[dict] | None = None,
+    errors: dict[str, str] | None = None,
     watchlist_name: str | None = None,
     watchlist_total: int | None = None,
     watchlist_tickers: set[str] | None = None,
@@ -1063,14 +1090,60 @@ def format_report(
     freshness_summary: AnalysisFreshnessSummary | None = None,
     refresh_activity: RefreshActivity | None = None,
     screening_freshness: ScreeningFreshnessSummary | None = None,
+    portfolio_data_loaded: bool = True,
+    current_macro_event: MacroEvent | None = None,
 ) -> str:
-    """Format reconciliation results as sectioned human-readable text."""
+    """Format reconciliation results as sectioned human-readable text.
+
+    ``portfolio_data_loaded`` is False in read-only/offline runs where no IBKR
+    connection was made — so holdings, watchlist, and cash are unknown rather
+    than zero. The report avoids asserting own/watchlist status in that case.
+    """
     lines: list[str] = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # Watchlist couldn't be read (Tier-2 brokerage session down) but holdings did
+    # load. Ownership is known from holdings; watchlist membership is not, so an
+    # "add to watchlist" advisory is meaningless — unheld BUY analyses are surfaced
+    # as direct BUY CANDIDATES and must be verified in IBKR before acting.
+    watchlist_unavailable = (
+        bool((errors or {}).get("watchlist")) and portfolio_data_loaded
+    )
+    # Active macro event (freshly detected correlated selloff or a stored event):
+    # enables dip-buy candidates on fundamentally-intact, recently-reviewed names
+    # that dipped — even HIGH-zone / REJECT-verdict ones the normal gates exclude.
+    _macro_event_active = any(
+        ("CORRELATED_SELL_EVENT" in f) or ("ACTIVE_MACRO_EVENT" in f)
+        for f in (portfolio_health_flags or [])
+    )
 
     # ── Header ──────────────────────────────────────────────────────────────
     lines.append(f"=== IBKR Portfolio Reconciliation  {now} ===")
     lines.append("")
+    if not portfolio_data_loaded:
+        lines.append(
+            "⚠ READ-ONLY — no IBKR connection; holdings, watchlist, and cash were "
+            "NOT loaded."
+        )
+        lines.append(
+            "  BUYs below come from saved analyses; whether you already own/watch "
+            "them is UNKNOWN."
+        )
+        lines.append("")
+    if (errors or {}).get("watchlist"):
+        lines.append(
+            "⚠ WATCHLIST UNAVAILABLE — could not read your IBKR watchlist (brokerage "
+            "session unavailable). Holdings/SELL/HOLD analysis below is unaffected. "
+            "Watchlist filtering is unavailable; unheld BUY analyses are shown as "
+            "BUY CANDIDATES and should be verified in IBKR before acting."
+        )
+        lines.append("")
+    if show_recommendations and (errors or {}).get("live_orders"):
+        lines.append(
+            "⚠ LIVE ORDERS UNAVAILABLE — open-order dedup is disabled; an order you "
+            "already have working may be re-suggested. Verify in IBKR before placing "
+            "orders."
+        )
+        lines.append("")
     nlv = portfolio.portfolio_value_usd
     cash = portfolio.cash_balance_usd
     settled = portfolio.settled_cash_usd
@@ -1079,41 +1152,50 @@ def format_report(
     buffer_amt = cash_summary.buffer_reserve_usd
     unsettled_amt = cash_summary.unsettled_cash_usd
 
-    lines.append(f"  Account:          {portfolio.account_id or 'N/A'}")
-    lines.append(f"  Net liquidation:  ${nlv:>10,.0f}")
-    if nlv > 0:
-        if unsettled_amt > 0:
-            cash_note = (
-                f"  includes ${unsettled_amt:,.0f} of unsettled sale proceeds "
-                "(not yet spendable)"
+    if not portfolio_data_loaded:
+        # Read-only run: no IBKR connection, so these are unknown, not zero.
+        lines.append("  Account:          not loaded (read-only)")
+        lines.append("  Net liquidation:  not loaded")
+        lines.append("  Cash (total):     not loaded")
+        lines.append("  Settled cash:     not loaded")
+        lines.append("  Available:        not loaded")
+    else:
+        lines.append(f"  Account:          {portfolio.account_id or 'N/A'}")
+        lines.append(f"  Net liquidation:  ${nlv:>10,.0f}")
+        if nlv > 0:
+            if unsettled_amt > 0:
+                cash_note = (
+                    f"  includes ${unsettled_amt:,.0f} of unsettled sale proceeds "
+                    "(not yet spendable)"
+                )
+            else:
+                cash_note = "  all shown cash is settled"
+            lines.append(
+                f"  Cash (total):     ${cash:>10,.0f}   ({cash / nlv * 100:.1f}%)"
+                f"{cash_note}"
+            )
+            lines.append(
+                f"  Settled cash:     ${settled:>10,.0f}   ({settled / nlv * 100:.1f}%)"
+                "  fully settled"
+            )
+            lines.append(
+                f"  Buffer reserve:   ${buffer_amt:>10,.0f}   ({buffer_amt / nlv * 100:.1f}%)"
+                "  cash buffer — not deployed into new buys"
+            )
+            lines.append(
+                f"  Available:        ${available:>10,.0f}"
+                "           deployable into new buys (settled − buffer)"
             )
         else:
-            cash_note = "  all shown cash is settled"
-        lines.append(
-            f"  Cash (total):     ${cash:>10,.0f}   ({cash / nlv * 100:.1f}%)"
-            f"{cash_note}"
-        )
-        lines.append(
-            f"  Settled cash:     ${settled:>10,.0f}   ({settled / nlv * 100:.1f}%)"
-            "  spend this today"
-        )
-        lines.append(
-            f"  Buffer reserve:   ${buffer_amt:>10,.0f}   ({buffer_amt / nlv * 100:.1f}%)"
-            "  held back"
-        )
-        lines.append(
-            f"  Available:        ${available:>10,.0f}"
-            "           see cash summary — buys consume this"
-        )
-    else:
-        lines.append(f"  Cash (total):     ${cash:,.0f}")
-        lines.append(f"  Settled cash:     ${settled:,.0f}")
-        lines.append(f"  Available:        ${available:,.0f}")
+            lines.append(f"  Cash (total):     ${cash:,.0f}")
+            lines.append(f"  Settled cash:     ${settled:,.0f}")
+            lines.append(f"  Available:        ${available:,.0f}")
     lines.append("")
 
     action_groups = group_portfolio_actions(
         items,
         watchlist_tickers=watchlist_tickers,
+        macro_event_active=_macro_event_active,
     )
     stop_sells = list(action_groups.stop_sells)
     hard_sells = list(action_groups.hard_sells)
@@ -1340,6 +1422,13 @@ def format_report(
             lines.append(
                 f"  {stars}  {_display_ticker(item):<12}  {hg_str}  |  {entry_str}  |  {rr_str}"
             )
+            if dip_watch_source(item) == "macro_review":
+                _as_of = a.analysis_date if a else "?"
+                lines.append(
+                    "             macro dip — fundamentals intact, review "
+                    f"{_as_of}; standalone verdict was REJECT (often valuation, which "
+                    "the dip improves) — review before adding"
+                )
         lines.append("")
         lines.append("  → Re-run before acting:")
         for _c in candidates:
@@ -1359,7 +1448,8 @@ def format_report(
     def _as_of_date(r: str) -> str:
         """Extract just the analysis date from a reason string, e.g. 'analyzed 2026-03-05'.
         Used in sections where the section header already explains the action — the date
-        tells the user when this recommendation was generated so they can judge staleness."""
+        tells the user when this recommendation was generated so they can judge staleness.
+        """
         normed = _norm_reason(r)
         paren = normed.rfind("(")
         if paren != -1 and normed.endswith(")"):
@@ -1596,26 +1686,33 @@ def format_report(
             "╚" + "═" * 54 + "╝",
         ]
         try:
-            from src.memory import create_macro_events_store as _cms
+            # Prefer the event detected in THIS run (passed in by the caller) over
+            # whatever the store returns — the stored copy can be a stale or
+            # unrelated active event, which made the banner's event_type diverge
+            # from the freshly-logged classification. Fall back to the store only
+            # when nothing was detected this run.
+            _ev = current_macro_event
+            if _ev is None:
+                from src.memory import create_macro_events_store as _cms
 
-            _mstore = _cms()
-            if _mstore.available:
-                _active_events = _mstore.get_active_events()
-                _ev = _active_events[0] if _active_events else None
-                if _ev and _ev.news_headline != "unknown":
-                    _banner_fields = [
-                        f"Macro driver: {_ev.event_type}",
-                        f"Impact: {_ev.impact}",
-                    ]
-                    for _field in _banner_fields:
-                        _banner_lines.insert(-1, f"║  {_field:<{_W}}║")
-                    for _wline in _wrap_banner_value(
-                        "Headline: ",
-                        _ev.news_headline,
-                        width=_W,
-                        max_lines=2,
-                    ):
-                        _banner_lines.insert(-1, f"║  {_wline:<{_W}}║")
+                _mstore = _cms()
+                if _mstore.available:
+                    _active_events = _mstore.get_active_events()
+                    _ev = _active_events[0] if _active_events else None
+            if _ev and _ev.news_headline != "unknown":
+                _banner_fields = [
+                    f"Macro driver: {_ev.event_type}",
+                    f"Impact: {_ev.impact}",
+                ]
+                for _field in _banner_fields:
+                    _banner_lines.insert(-1, f"║  {_field:<{_W}}║")
+                for _wline in _wrap_banner_value(
+                    "Headline: ",
+                    _ev.news_headline,
+                    width=_W,
+                    max_lines=2,
+                ):
+                    _banner_lines.insert(-1, f"║  {_wline:<{_W}}║")
         except Exception:
             pass
         for bl in _banner_lines:
@@ -1880,7 +1977,7 @@ def format_report(
         item
         for item in dip_candidates
         if dip_watch_source(item) == "held_buy_pullback"
-        or (_correlated_flag and dip_watch_source(item) == "macro_review")
+        or (_macro_event_active and dip_watch_source(item) == "macro_review")
     ]
     if display_dip_candidates:
         _render_dip_watch_section(display_dip_candidates)
@@ -1998,12 +2095,26 @@ def format_report(
             ),
         )[:10]
         _hidden = len(_cands_actionable) - len(_top_candidates)
-        _cand_subtitle = (
-            "analysis says BUY — inspect and add to watchlist before acting"
-        )
+        if not portfolio_data_loaded:
+            _cand_title = "WATCHLIST CANDIDATES"
+            _cand_subtitle = (
+                "analysis says BUY — holdings/watchlist not loaded, so own/watchlist "
+                "status is UNKNOWN"
+            )
+        elif watchlist_unavailable:
+            _cand_title = "BUY CANDIDATES"
+            _cand_subtitle = (
+                "analysis says BUY — watchlist could not be read, so surfaced as "
+                "direct buys; confirm watchlist status and re-check IBKR before acting"
+            )
+        else:
+            _cand_title = "WATCHLIST CANDIDATES"
+            _cand_subtitle = (
+                "analysis says BUY — inspect and add to watchlist before acting"
+            )
         if _hidden:
             _cand_subtitle += f"  (showing top 10 of {len(_cands_actionable)})"
-        _section("WATCHLIST CANDIDATES", _cand_subtitle)
+        _section(_cand_title, _cand_subtitle)
         for item in _top_candidates:
             ccy = _item_currency(item)
             # Append "(yf_ticker)" when the exchange suffix disambiguates the IBKR
@@ -2020,7 +2131,9 @@ def format_report(
                     _cand_parts.append(f"  {item.suggested_order_type}")
                 if not item.suggested_quantity:
                     _cand_parts.append(
-                        "  (quantity unavailable — inspect before placing order)"
+                        "  (portfolio/cash not loaded — inspect before placing order)"
+                        if not portfolio_data_loaded
+                        else "  (quantity unavailable — inspect before placing order)"
                     )
                 if not item.suggested_price:
                     _cand_parts.append("  (no entry price — re-run analysis)")
@@ -2035,7 +2148,11 @@ def format_report(
                     offwatch_parts.append(
                         f"target {size_pct:.1f}% (${target_usd:,.0f})"
                     )
-                offwatch_parts.append("[not on watchlist — new position]")
+                offwatch_parts.append(
+                    "[own/watchlist status unknown]"
+                    if not portfolio_data_loaded
+                    else "[not on watchlist — new position]"
+                )
                 if a.is_quick_mode:
                     offwatch_parts.append("⚠ quick mode — re-run full before adding")
                 lines.append(f"             {'  ·  '.join(offwatch_parts)}")
@@ -2044,10 +2161,24 @@ def format_report(
                 lines.append(cl)
             lines.append("")
         if not _top_candidates and not _cands_in_flight:
-            lines.append(
-                "  No off-watch BUY candidates shown — available cash is insufficient"
-                " for new watchlist additions this run."
-            )
+            if not portfolio_data_loaded:
+                lines.append(
+                    "  No candidates shown — holdings and cash were not loaded"
+                    " (read-only run), so deployable cash is unknown. Re-run without"
+                    " --read-only to size against live cash."
+                )
+            elif available <= 0:
+                lines.append(
+                    f"  No new positions this run — all settled cash (${settled:,.0f})"
+                    " is within the cash buffer, so $0 is deployable into buys."
+                    " Lower --cash-buffer or free cash via the SELL reviews above to"
+                    " deploy."
+                )
+            else:
+                lines.append(
+                    f"  No off-watch BUY candidates fit the ${available:,.0f}"
+                    " deployable after the cash buffer this run."
+                )
             lines.append("")
         if _cands_in_flight:
             _if_syms = ", ".join(_display_ticker(i) for i in _cands_in_flight)
@@ -2178,7 +2309,14 @@ def format_report(
             and (i.action != "BUY" or i.is_watchlist)  # exclude unvetted candidates
         ]
         lines.append(
-            f"  Already-settled cash (spend now):            ${settled:>7,.0f}"
+            f"  Settled cash:                                ${settled:>7,.0f}"
+        )
+        if buffer_amt > 0:
+            lines.append(
+                f"  Cash buffer (held back, not for new buys):  -${buffer_amt:>7,.0f}"
+            )
+        lines.append(
+            f"  Deployable into new buys:                    ${available:>7,.0f}"
         )
 
         total_cost = 0.0
@@ -2348,7 +2486,11 @@ def format_report(
                 qty_note = (
                     ""
                     if i.suggested_quantity
-                    else "  [quantity unavailable — inspect before placing order]"
+                    else (
+                        "  [portfolio/cash not loaded — inspect before placing order]"
+                        if not portfolio_data_loaded
+                        else "  [quantity unavailable — inspect before placing order]"
+                    )
                 )
                 lines.append(
                     f"    → {i.action}  {_display_ticker(i)}{qty_str}{price_str}{cost_str}"
@@ -2408,7 +2550,13 @@ def format_report(
             reverse=True,
         )[:5]
         if strong_candidates or removes:
-            lines.append(f"  WATCHLIST MOVES ({today_str}):")
+            _moves_header = (
+                "BUY CANDIDATES" if watchlist_unavailable else "WATCHLIST MOVES"
+            )
+            lines.append(f"  {_moves_header} ({today_str}):")
+            _move_label = (
+                "→ BUY             " if watchlist_unavailable else "→ ADD TO WATCHLIST"
+            )
             for i in strong_candidates:
                 _quick_note = (
                     "  ⚠ quick — run full first"
@@ -2416,15 +2564,21 @@ def format_report(
                     else ""
                 )
                 lines.append(
-                    f"    → ADD TO WATCHLIST  {_display_ticker(i)}"
+                    f"    {_move_label}  {_display_ticker(i)}"
                     f"  — analysis {i.analysis.analysis_date if i.analysis else '?'} says BUY{_quick_note}"
                     f"  →  {_analysis_command(run_ticker_for(i))}"
                 )
             skipped = len(_cands_actionable) - len(strong_candidates)
             if skipped > 0:
+                _skip_ref = (
+                    "BUY CANDIDATES"
+                    if watchlist_unavailable
+                    else "WATCHLIST CANDIDATES"
+                )
+                _skip_verb = "buying" if watchlist_unavailable else "adding"
                 lines.append(
                     f"    ({skipped} lower-conviction candidate{'s' if skipped > 1 else ''}"
-                    f" in WATCHLIST CANDIDATES above — review before adding)"
+                    f" in {_skip_ref} above — review before {_skip_verb})"
                 )
             for i in removes:
                 verdict = i.analysis.verdict if i.analysis else "DO_NOT_INITIATE"
@@ -2511,11 +2665,17 @@ def format_json(
     *,
     freshness_summary: AnalysisFreshnessSummary | None = None,
     refresh_activity: RefreshActivity | None = None,
-    max_age_days: int = 14,
+    max_age_days: int = DEFAULT_MAX_AGE_DAYS,
     show_recommendations: bool = False,
     screening_freshness: ScreeningFreshnessSummary | None = None,
+    portfolio_data_loaded: bool = True,
+    errors: dict[str, str] | None = None,
 ) -> str:
-    """Format reconciliation results as JSON."""
+    """Format reconciliation results as JSON.
+
+    ``portfolio_data_loaded`` is False in read-only/offline runs (no IBKR
+    connection): account/cash/positions reflect an empty default, not live data.
+    """
     freshness_summary = freshness_summary or _refresh_service.classify(
         items,
         max_age_days=max_age_days,
@@ -2526,6 +2686,10 @@ def format_json(
     )
     data = {
         "timestamp": datetime.now().isoformat(),
+        "portfolio_data_loaded": portfolio_data_loaded,
+        # Non-fatal data-source failures (e.g. {"live_orders": "..."}) so JSON
+        # consumers see degraded sections (order-dedup off) rather than assume "none".
+        "errors": dict(errors or {}),
         "portfolio": portfolio.model_dump(),
         "items": [item.model_dump() for item in items],
         "screening_freshness": {
@@ -2802,7 +2966,16 @@ def _load_ibkr_context(
     )
 
     watchlist = snapshot.watchlist
-    if not watchlist.found and wl_explicitly_requested:
+    if watchlist.unavailable:
+        # Tier-2 (brokerage) session down: holdings still loaded, so continue with
+        # a warning rather than abort. The report adds a WATCHLIST UNAVAILABLE banner.
+        print(
+            "Warning: could not read your IBKR watchlist (brokerage session "
+            "unavailable) — continuing with holdings only; watchlist filtering is "
+            "unavailable, so unheld BUY analyses may be shown as BUY CANDIDATES.",
+            file=sys.stderr,
+        )
+    elif not watchlist.found and wl_explicitly_requested:
         wl_name_hint = args.watchlist_name or ""
         print(
             f"Error: watchlist '{wl_name_hint}' not found in IBKR.\n"
@@ -2835,9 +3008,31 @@ def _load_ibkr_context(
     )
 
 
+def _install_ibkr_session_teardown(args: argparse.Namespace) -> None:
+    """Arm the pooled IBKR session for clean teardown.
+
+    Installs main-thread SIGINT/SIGTERM handlers and seeds the pool's config +
+    prompt callback so the single shared session is logged out exactly once on
+    exit or signal (atexit covers normal exit; the handlers cover ``kill``).
+    No-op in read-only mode, which never opens an IBKR connection.
+    """
+    if getattr(args, "read_only", False):
+        return
+    from src.ibkr.session_manager import get_ibkr_session_manager
+    from src.ibkr_config import ibkr_config
+
+    manager = get_ibkr_session_manager()
+    manager.configure(
+        config=ibkr_config,
+        prompt_for_missing_secret_fn=_prompt_for_missing_secret,
+    )
+    manager.install_signal_handlers()
+
+
 def main() -> None:
     args = parse_args()
     _configure_logging(args.debug)
+    _install_ibkr_session_teardown(args)
     refresh_policy = _resolve_refresh_policy(args)
 
     # --test-auth exits immediately after credential check — no analyses needed.
@@ -2882,7 +3077,21 @@ def main() -> None:
         )
 
     def _save_refresh_result(result, ticker: str, *, quick_mode: bool) -> Path:
-        from src.persistence import save_results_to_file
+        from src.persistence import attach_run_summary, save_results_to_file
+
+        # Parity with the main analyzer (src.main._attach_run_summary): enrich
+        # run_summary (macro provenance, providers, analysis_validity) BEFORE saving
+        # so refreshed artifacts match main-path artifacts and the macro self-check
+        # in save_results_to_file does not fire a spurious mismatch. Defensive: a
+        # failure here must not abort the refresh save.
+        try:
+            attach_run_summary(result, quick_mode=quick_mode)
+        except Exception as exc:
+            logger.warning(
+                "refresh_run_summary_attach_failed",
+                ticker=ticker,
+                **summarize_exception(exc, operation="attach_run_summary"),
+            )
 
         return save_results_to_file(
             result,
@@ -2930,7 +3139,11 @@ def main() -> None:
         raise
     except IBKRAuthError as e:
         print(f"IBKR auth error: {e}", file=sys.stderr)
-        print("Check IBKR credentials in .env or use --read-only", file=sys.stderr)
+        print(
+            "Quick fix: close other IBKR logins (especially the IBKR Mobile app), "
+            "or run with --read-only for offline mode.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     except IBKRError as e:
         print(f"IBKR error: {e}", file=sys.stderr)
@@ -2948,8 +3161,10 @@ def main() -> None:
     _watchlist_candidates_blocked_by_cash = bundle.watchlist_candidates_blocked_by_cash
     _live_orders_data = bundle.live_orders
 
-    # Detect and store macro events (fail-safe — errors caught internally).
-    _store_macro_event_if_detected(health_flags, items)
+    # Detect and store macro events (fail-safe — errors caught internally). The
+    # returned event drives the report banner so it reflects THIS run's
+    # classification rather than a stale/unrelated stored active event.
+    _current_macro_event = _store_macro_event_if_detected(health_flags, items)
 
     # Output
     show_recs = args.recommend
@@ -2963,6 +3178,8 @@ def main() -> None:
             max_age_days=args.max_age,
             show_recommendations=show_recs,
             screening_freshness=screening_freshness,
+            portfolio_data_loaded=not args.read_only,
+            errors=bundle.errors,
         )
     else:
         output = format_report(
@@ -2972,6 +3189,7 @@ def main() -> None:
             portfolio_health_flags=health_flags,
             max_age_days=args.max_age,
             live_orders=_live_orders_data,
+            errors=bundle.errors,
             watchlist_name=_loaded_watchlist_name,
             watchlist_total=_loaded_watchlist_total,
             watchlist_tickers=watchlist_tickers if watchlist_tickers else None,
@@ -2979,6 +3197,8 @@ def main() -> None:
             freshness_summary=freshness_summary,
             refresh_activity=refresh_activity,
             screening_freshness=screening_freshness,
+            portfolio_data_loaded=not args.read_only,
+            current_macro_event=_current_macro_event,
         )
 
     if args.output:

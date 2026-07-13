@@ -1,16 +1,20 @@
 from __future__ import annotations
 
-import re
-from typing import Literal, cast
+from typing import Literal
 
 from pydantic import BaseModel
 
-PMVerdict = Literal[
-    "BUY",
-    "HOLD",
-    "SELL",
-    "DO_NOT_INITIATE",
-    "UNPARSEABLE",
+# Canonicalization + the verdict label set live in the neutral, dependency-free
+# parser so lightweight callers (charts, reporting, IBKR) can reuse them without
+# importing src.agents. Re-exported here for backward compatibility.
+from src.pm_decision_parser import PMVerdict, canonicalize_pm_verdict
+
+__all__ = [
+    "PMVerdict",
+    "PMVerdictMetadata",
+    "PMVerdictRecovery",
+    "canonicalize_pm_verdict",
+    "pm_verdict_metadata_from_text",
 ]
 
 
@@ -18,15 +22,8 @@ class PMVerdictMetadata(BaseModel):
     verdict: PMVerdict
 
 
-def canonicalize_pm_verdict(raw: str | None) -> PMVerdict:
-    """Return the canonical PM verdict label for free-text or block values."""
-    cleaned = (raw or "").strip().upper().replace("-", "_").replace(" ", "_")
-    cleaned = re.sub(r"_+", "_", cleaned)
-    if cleaned in {"DO_NOT_INITIATE", "DONOTINITIATE", "DONOTINITATE", "REJECT"}:
-        return "DO_NOT_INITIATE"
-    if cleaned in {"BUY", "HOLD", "SELL"}:
-        return cast(PMVerdict, cleaned)
-    return "UNPARSEABLE"
+class PMVerdictRecovery(BaseModel):
+    verdict: Literal["BUY", "HOLD", "SELL", "DO_NOT_INITIATE"]
 
 
 def pm_verdict_metadata_from_text(pm_output: str) -> PMVerdictMetadata:

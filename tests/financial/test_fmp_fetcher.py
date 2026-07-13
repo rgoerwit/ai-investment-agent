@@ -65,6 +65,10 @@ class TestFMPFetcherInit:
 
         assert fetcher.is_available() is False
 
+    def test_peer_percentile_fetcher_is_not_exposed_without_consumers(self):
+        """Avoid hidden peer-network fanout until percentiles reach decision logic."""
+        assert not hasattr(FMPFetcher, "get_peer_percentiles")
+
 
 class TestFMPGet:
     """Test the internal _get method."""

@@ -5,9 +5,17 @@ from __future__ import annotations
 import structlog
 
 from src.ibkr.models import AnalysisRecord, NormalizedPosition, PortfolioSummary
+from src.ibkr.portfolio_defaults import DEFAULT_MAX_AGE_DAYS
 from src.ibkr.reconciliation_rules import _EXCHANGE_LONG_NAMES
 
 logger = structlog.get_logger(__name__)
+
+# The macro override (demote SELLs→REVIEW + enable buy-the-dip) is a TRANSIENT-shock
+# protection: it applies only this many days after the event onset, then lapses so
+# impaired positions (incl. structural events) can exit and dip-buys stop. Kept short
+# (≈3 weeks) regardless of the event record's longer expiry, which still drives the
+# ongoing-awareness banner and forced re-analysis.
+_DEFAULT_MACRO_OVERRIDE_MAX_AGE_DAYS = 21
 
 
 def _apply_macro_demotions(
@@ -46,13 +54,14 @@ def compute_portfolio_health(
     positions: list[NormalizedPosition],
     analyses: dict[str, AnalysisRecord],
     portfolio: PortfolioSummary,
-    max_age_days: int = 14,
+    max_age_days: int = DEFAULT_MAX_AGE_DAYS,
     reconciliation_items: list | None = None,
     correlated_window_days: int = 14,
     drawdown_pct: float = 10.0,
     drawdown_breadth_ratio: float = 0.35,
     cumulative_fallback_ratio: float = 0.35,
     active_macro_events: list | None = None,
+    macro_override_max_age_days: int = _DEFAULT_MACRO_OVERRIDE_MAX_AGE_DAYS,
 ) -> list[str]:
     """Compute portfolio-level health flags using data already in held analyses."""
     if not positions or portfolio.portfolio_value_usd <= 0:
@@ -261,7 +270,65 @@ def compute_portfolio_health(
                 peak_count = drawdown_count
                 peak_anchor = _date.today()
 
-        if correlated_event and peak_anchor is not None:
+        # The macro override (demote SELLs→REVIEW + enable buy-the-dip) protects
+        # against panic-selling a TRANSIENT shock — so it applies only briefly after
+        # onset, then LAPSES. Fresh verdict/cumulative evidence is evaluated apart
+        # from stored events: an old lapsed event must not suppress a genuinely new
+        # selloff. Drawdown-breadth evidence is different because it re-anchors to
+        # today every run; if an old active event already explains the drawdown, do
+        # not restart the override from drawdown alone.
+        today = _date.today()
+        fresh_onset = (
+            peak_anchor if correlated_event and peak_anchor is not None else None
+        )
+        fresh_within_window = (
+            fresh_onset is not None
+            and (today - fresh_onset).days <= macro_override_max_age_days
+        )
+
+        active_event_onsets: list[tuple[object, _date]] = []
+        undated_active_event = None
+        for ev in active_macro_events or []:
+            raw = getattr(ev, "event_date", "") or getattr(ev, "detected_date", "")
+            try:
+                active_event_onsets.append((ev, _date.fromisoformat(raw)))
+            except (ValueError, TypeError):
+                if undated_active_event is None:
+                    undated_active_event = ev
+
+        active_within_window_event = None
+        lapsed_onsets: list[tuple[object | None, _date]] = []
+        for ev, active_onset in active_event_onsets:
+            if (today - active_onset).days <= macro_override_max_age_days:
+                if active_within_window_event is None:
+                    active_within_window_event = ev
+            else:
+                lapsed_onsets.append((ev, active_onset))
+
+        has_lapsed_active_event = bool(lapsed_onsets)
+        fresh_override_allowed = bool(
+            fresh_within_window
+            and (trigger != "drawdown_breadth" or not has_lapsed_active_event)
+        )
+        if fresh_onset is not None and not fresh_override_allowed:
+            lapsed_onsets.append((None, fresh_onset))
+        lapsed_event, lapsed_onset = (
+            min(lapsed_onsets, key=lambda item: item[1])
+            if lapsed_onsets
+            else (None, None)
+        )
+        # A stored macro signal we can't date (degenerate/malformed event record)
+        # is not evidence the override has lapsed. Preserve the previous defensive
+        # behavior only when there is no dated active/fresh evidence to use.
+        fallback_active_event = (
+            undated_active_event
+            if undated_active_event is not None
+            and not active_event_onsets
+            and fresh_onset is None
+            else None
+        )
+
+        if fresh_override_allowed and correlated_event and peak_anchor is not None:
             # Truthful per-trigger phrasing. The "(within Nd of|as of) DATE"
             # shape is a parsing contract with _store_macro_event_if_detected
             # and the report banner — keep them in sync.
@@ -308,11 +375,13 @@ def compute_portfolio_health(
                 demoted=demoted,
                 pct=f"{peak_count / total_held:.0%}",
             )
-        elif active_macro_events:
-            # No fresh detection, but a previously detected event is still
-            # active (unexpired) — sustain the demotion across runs so the
-            # override doesn't vanish the day after detection.
-            event = active_macro_events[0]
+        elif (
+            active_within_window_event is not None or fallback_active_event is not None
+        ):
+            # No fresh detection, but a previously detected event is still within
+            # the brief override window — sustain the demotion so it doesn't vanish
+            # the day after detection.
+            event = active_within_window_event or fallback_active_event
             event_type = getattr(event, "event_type", "MACRO")
             expiry = getattr(event, "expiry", "?")
             demoted = _apply_macro_demotions(
@@ -339,5 +408,30 @@ def compute_portfolio_health(
                     expiry=expiry,
                     demoted=demoted,
                 )
+        elif lapsed_onset is not None:
+            # Event ongoing but PAST the brief override window: stop demoting so
+            # impaired positions can exit, and stop buy-the-dip (no transient
+            # mean-reversion to lean on). A distinct flag (not CORRELATED_/
+            # ACTIVE_MACRO_EVENT) keeps the dip-buy gate and panic banner off while
+            # still flagging that the event is live and verdicts are re-priced.
+            days = (today - lapsed_onset).days
+            event_type = (
+                getattr(lapsed_event, "event_type", "MACRO")
+                if lapsed_event is not None
+                else "MACRO"
+            )
+            flags.append(
+                f"MACRO_EVENT_ONGOING: {event_type} event onset ~{days}d ago — brief"
+                f" macro override (≤{macro_override_max_age_days}d) has lapsed; SELL"
+                " recommendations now flow normally on re-priced verdicts, and"
+                " buy-the-dip is suppressed (no transient mean-reversion assumed for"
+                " a sustained event)."
+            )
+            logger.info(
+                "macro_override_lapsed",
+                onset=lapsed_onset.isoformat(),
+                days=days,
+                event_type=event_type,
+            )
 
     return flags

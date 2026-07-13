@@ -35,6 +35,14 @@ SCRATCH="scratch"
 TICKER_LIST="${SCRATCH}/gems_${DATE}.txt"
 BUY_LIST="${SCRATCH}/buys_${DATE}.txt"
 COOLDOWN="${COOLDOWN_SECONDS:-10}"
+# Per-ticker outer watchdog (SIGTERM if a child exceeds it). Stage 1 default
+# raised 360 -> 600 so the gate-critical APEX seats' larger --quick per-call
+# budget (apex_quick_llm_call_hard_timeout_seconds, 180s x 2 seats + the rest of
+# the pipeline) fits comfortably under it: per-call cap < stage watchdog.
+STAGE1_TICKER_TIMEOUT_SECONDS="${STAGE1_TICKER_TIMEOUT_SECONDS:-600}"
+STAGE2_TICKER_TIMEOUT_SECONDS="${STAGE2_TICKER_TIMEOUT_SECONDS:-2400}"
+# Stable id for this pipeline invocation, stamped into the durable failures log.
+PIPELINE_RUN_ID="${DATE}-$$"
 FORCE=false
 SKIP_SCRAPE=""
 INCLUDE_US=""
@@ -131,11 +139,57 @@ extract_report_verdict() {
     fi
 }
 
-report_has_verdict_header() {
+# A report counts as a COMPLETED analysis (for resumability) only if it has a
+# verdict header AND that verdict is not the "ANALYSIS FAILED" sentinel.
+# src/main.py writes an "ANALYSIS FAILED" report (exit 0) when a gate-critical
+# agent could not produce a publishable result (e.g. an LLM timeout). That is a
+# soft failure, not a real verdict — treating it as "done" would skip the ticker
+# forever. Excluding it here makes the next run retry it. Persistent failures
+# stay visible via the [WARN] NO ANALYSIS line emitted per run.
+report_is_complete() {
     local file="$1"
     local verdict
     verdict=$(extract_report_verdict "$file")
-    [[ -n "$verdict" ]]
+    [[ -n "$verdict" && "$verdict" != "ANALYSIS FAILED" ]]
+}
+
+# Append a durable, dated record of a ticker failure. The per-ticker LOGFILE is
+# overwritten when a later run retries the same ticker, so the evidence trail
+# (which ticker failed, when, why) would otherwise be lost. One tab-delimited
+# line per failure survives reruns: UTC timestamp, run id, stage, kind, ticker.
+record_pipeline_failure() {
+    local ticker="$1" stage="$2" kind="$3" detail="${4:-}"
+    printf '%s\trun=%s\tstage=%s\tkind=%s\tticker=%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PIPELINE_RUN_ID" \
+        "$stage" "$kind" "$ticker" "$detail" \
+        >> "${SCRATCH}/pipeline_failures-${DATE}.log"
+}
+
+update_latest_log_alias() {
+    local detail_logfile="$1" latest_logfile="$2"
+    local latest_dir latest_name detail_base
+
+    [[ -z "$detail_logfile" || -z "$latest_logfile" ]] && return 0
+    [[ ! -f "$detail_logfile" ]] && return 0
+
+    latest_dir=$(dirname "$latest_logfile")
+    latest_name=$(basename "$latest_logfile")
+    detail_base=$(basename "$detail_logfile")
+
+    if (cd "$latest_dir" && ln -sfn "$detail_base" "$latest_name") 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$latest_logfile"
+    cp "$detail_logfile" "$latest_logfile"
+}
+
+run_pipeline_child() {
+    local detail_logfile="$1" latest_logfile="$2" status
+    shift 2
+    run_tracked_child "$detail_logfile" "$@"
+    status=$?
+    update_latest_log_alias "$detail_logfile" "$latest_logfile"
+    return "$status"
 }
 
 write_pipeline_marker() {
@@ -219,6 +273,22 @@ apply_run_date() {
     fi
 }
 
+# Print a read-only anomaly digest for the analyses a stage just wrote
+# (non-publishable / llm failures / consultant ERROR-UNPARSED / same-mode verdict
+# flips). Scoped by file mtime via a stage-start epoch ($1), NOT by $DATE: the
+# analysis filename carries the wall-clock date, which need not equal the logical
+# run-date on a cross-day resume, and mtime also survives a stage spanning midnight.
+# Fail-open: a digest error must never fail the pipeline.
+emit_batch_health() {
+    local since_epoch="${1:-}"
+    if [[ -n "$since_epoch" ]]; then
+        "${PYTHON_CMD[@]}" scripts/scan_batch_health.py \
+            --modified-since "$since_epoch" || true
+    else
+        "${PYTHON_CMD[@]}" scripts/scan_batch_health.py --run-date "$DATE" || true
+    fi
+}
+
 ticker_to_dash() {
     local ticker="$1"
     printf '%s\n' "$ticker" | tr '._' '-'
@@ -242,7 +312,7 @@ count_completed_quick_reports_for_date() {
         ticker=$(echo "$ticker" | xargs)
         [[ -z "$ticker" ]] && continue
         outfile=$(quick_outfile_for "$ticker" "$run_date")
-        if [[ -f "$outfile" ]] && report_has_verdict_header "$outfile"; then
+        if [[ -f "$outfile" ]] && report_is_complete "$outfile"; then
             count=$((count + 1))
         fi
     done < "$ticker_list"
@@ -498,13 +568,13 @@ if [[ $START_STAGE -le 0 ]]; then
         [[ -z "$ticker" ]] && continue
         DASH=$(echo "$ticker" | tr '._' '-')
         OUTFILE="${SCRATCH}/README-${DASH}-${DATE}_quick.md"
-        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! report_has_verdict_header "$OUTFILE"; then
+        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! report_is_complete "$OUTFILE"; then
             STAGE1_TODO=$((STAGE1_TODO + 1))
         fi
     done < "$TICKER_LIST"
 
     STAGE1_SKIP=$((TICKER_COUNT - STAGE1_TODO))
-    STAGE1_SECS=$((STAGE1_TODO * (COOLDOWN + 120)))
+    STAGE1_SECS=$((STAGE1_TODO * (COOLDOWN + 240)))
 
     # Foot-gun guard: if a different date in scratch/ has dramatically more
     # matching reports than the resume date we settled on, the operator
@@ -528,6 +598,7 @@ if [[ $START_STAGE -le 0 ]]; then
     fi
     info "Est. time:           ~$(format_duration $STAGE1_SECS) (${COOLDOWN}s cooldown)"
     info "Mode:                --quick --brief --no-memory"
+    info "Per-ticker watchdog: ${STAGE1_TICKER_TIMEOUT_SECONDS}s (SIGTERM if exceeded)"
     info "Output dir:          $SCRATCH/"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
@@ -565,13 +636,13 @@ if [[ $START_STAGE -le 1 ]]; then
             [[ -z "$ticker" ]] && continue
             DASH=$(echo "$ticker" | tr '._' '-')
             OUTFILE="${SCRATCH}/README-${DASH}-${DATE}_quick.md"
-            if $FORCE || ! [[ -f "$OUTFILE" ]] || ! report_has_verdict_header "$OUTFILE"; then
+            if $FORCE || ! [[ -f "$OUTFILE" ]] || ! report_is_complete "$OUTFILE"; then
                 STAGE1_TODO=$((STAGE1_TODO + 1))
             fi
         done < "$TICKER_LIST"
 
         STAGE1_SKIP=$((TICKER_COUNT - STAGE1_TODO))
-        STAGE1_SECS=$((STAGE1_TODO * (COOLDOWN + 120)))
+        STAGE1_SECS=$((STAGE1_TODO * (COOLDOWN + 240)))
 
         echo ""
         echo -e "${CYAN}━━━ Stage 1 Preview ━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -581,6 +652,7 @@ if [[ $START_STAGE -le 1 ]]; then
         fi
         info "Est. time:           ~$(format_duration $STAGE1_SECS) (${COOLDOWN}s cooldown)"
         info "Mode:                --quick --brief --no-memory"
+        info "Per-ticker watchdog: ${STAGE1_TICKER_TIMEOUT_SECONDS}s (SIGTERM if exceeded)"
         info "Output dir:          $SCRATCH/"
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
@@ -595,6 +667,10 @@ if [[ $START_STAGE -le 1 ]]; then
     STAGE1_PROCESSED=0
     STAGE1_SKIPPED=0
     STAGE1_FAILED=0
+    STAGE1_NOANALYSIS=0
+    # Captured before the first write so the stage-end digest sees only this
+    # stage's own output (files with mtime >= this epoch).
+    STAGE1_START_EPOCH=$(date +%s)
 
     while IFS= read -r ticker || [[ -n "$ticker" ]]; do
         # Skip empty lines and comments
@@ -606,9 +682,10 @@ if [[ $START_STAGE -le 1 ]]; then
         DASH=$(echo "$ticker" | tr '._' '-')
         OUTFILE="${SCRATCH}/README-${DASH}-${DATE}_quick.md"
         LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}_quick.txt"
+        DETAIL_LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}_quick-${PIPELINE_RUN_ID}.txt"
 
         # Resumability: skip if output already has a verdict line
-        if ! $FORCE && [[ -f "$OUTFILE" ]] && report_has_verdict_header "$OUTFILE"; then
+        if ! $FORCE && [[ -f "$OUTFILE" ]] && report_is_complete "$OUTFILE"; then
             STAGE1_SKIPPED=$((STAGE1_SKIPPED + 1))
             info "SKIP $ticker (already done)"
             continue
@@ -617,30 +694,35 @@ if [[ $START_STAGE -le 1 ]]; then
         STAGE1_PROCESSED=$((STAGE1_PROCESSED + 1))
         info "[$STAGE1_PROCESSED/$STAGE1_TODO, $TICKER_COUNT total] Quick: $ticker"
 
-        if PIPELINE_TICKER_TIMEOUT_SECONDS="${STAGE1_TICKER_TIMEOUT_SECONDS:-360}" \
-            run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
+        if PIPELINE_TICKER_TIMEOUT_SECONDS="${STAGE1_TICKER_TIMEOUT_SECONDS}" \
+            run_pipeline_child "$DETAIL_LOGFILE" "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
             --ticker "$ticker" \
             --quick --no-charts --quiet --brief --no-memory \
             --output "$OUTFILE"; then
             VERDICT=$(extract_report_verdict "$OUTFILE")
-            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
-            if [[ -n "$VERDICT" && -n "$BADGE" ]]; then
-                success "$ticker done [Verdict=${VERDICT}] [${BADGE}]"
-            elif [[ -n "$VERDICT" ]]; then
-                success "$ticker done [Verdict=${VERDICT}]"
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$DETAIL_LOGFILE" 2>/dev/null)
+            if [[ -z "$VERDICT" || "$VERDICT" == "ANALYSIS FAILED" ]]; then
+                # Exit 0 but no publishable analysis (a gate-critical agent
+                # failed, e.g. an LLM timeout). Not a success: report_is_complete
+                # rejects it, so the next run retries this ticker. Surface it
+                # loudly rather than as a green [OK].
+                STAGE1_NOANALYSIS=$((STAGE1_NOANALYSIS + 1))
+                record_pipeline_failure "$ticker" 1 no_analysis "logfile=${DETAIL_LOGFILE} ${VERDICT:-no_verdict_header}"
+                warn "NO ANALYSIS: $ticker (${VERDICT:-no verdict header}) — completed but unpublishable; will retry next run. See $DETAIL_LOGFILE"
             elif [[ -n "$BADGE" ]]; then
-                success "$ticker done [${BADGE}]"
+                success "$ticker done [Verdict=${VERDICT}] [${BADGE}]"
             else
-                success "$ticker done"
+                success "$ticker done [Verdict=${VERDICT}]"
             fi
         else
             status=$?
             exit_if_interrupted_status "$status"
-            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$DETAIL_LOGFILE" 2>/dev/null)
+            record_pipeline_failure "$ticker" 1 "child_exit_${status}" "logfile=${DETAIL_LOGFILE} ${BADGE:-}"
             if [[ -n "$BADGE" ]]; then
-                fail "FAILED: $ticker [${BADGE}] (see $LOGFILE)"
+                fail "FAILED: $ticker [${BADGE}] (see $DETAIL_LOGFILE)"
             else
-                fail "FAILED: $ticker (see $LOGFILE)"
+                fail "FAILED: $ticker (see $DETAIL_LOGFILE)"
             fi
             STAGE1_FAILED=$((STAGE1_FAILED + 1))
         fi
@@ -649,7 +731,8 @@ if [[ $START_STAGE -le 1 ]]; then
 
     done < "$TICKER_LIST"
 
-    info "Stage 1 complete: $STAGE1_PROCESSED analyzed, $STAGE1_SKIPPED skipped, $STAGE1_FAILED failed"
+    info "Stage 1 complete: $STAGE1_PROCESSED analyzed, $STAGE1_SKIPPED skipped, $STAGE1_FAILED failed, $STAGE1_NOANALYSIS no-analysis (will retry)"
+    emit_batch_health "$STAGE1_START_EPOCH"
 fi
 
 # ============================================================
@@ -753,7 +836,7 @@ if [[ $START_STAGE -le 2 ]]; then
         [[ -z "$ticker" ]] && continue
         DASH=$(echo "$ticker" | tr '._' '-')
         OUTFILE="${SCRATCH}/README-${DASH}-${DATE}.md"
-        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! report_has_verdict_header "$OUTFILE"; then
+        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! report_is_complete "$OUTFILE"; then
             STAGE2_TODO=$((STAGE2_TODO + 1))
         fi
     done < "$BUY_LIST"
@@ -769,6 +852,7 @@ if [[ $START_STAGE -le 2 ]]; then
     fi
     info "Est. time:             ~$(format_duration $STAGE2_SECS) (${COOLDOWN}s cooldown)"
     info "Mode:                  Full analysis with charts"
+    info "Per-ticker watchdog:   ${STAGE2_TICKER_TIMEOUT_SECONDS}s (SIGTERM if exceeded)"
     info "Output dir:            $SCRATCH/"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
@@ -782,6 +866,10 @@ if [[ $START_STAGE -le 2 ]]; then
     STAGE2_PROCESSED=0
     STAGE2_SKIPPED=0
     STAGE2_FAILED=0
+    STAGE2_NOANALYSIS=0
+    # Captured before the first write so the stage-end digest sees only this
+    # stage's own output (files with mtime >= this epoch).
+    STAGE2_START_EPOCH=$(date +%s)
 
     while IFS= read -r ticker || [[ -n "$ticker" ]]; do
         [[ -z "$ticker" || "$ticker" =~ ^[[:space:]]*# ]] && continue
@@ -791,9 +879,10 @@ if [[ $START_STAGE -le 2 ]]; then
         DASH=$(echo "$ticker" | tr '._' '-')
         OUTFILE="${SCRATCH}/README-${DASH}-${DATE}.md"
         LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}.txt"
+        DETAIL_LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}-${PIPELINE_RUN_ID}.txt"
 
         # Resumability: skip if full analysis output already has a verdict
-        if ! $FORCE && [[ -f "$OUTFILE" ]] && report_has_verdict_header "$OUTFILE"; then
+        if ! $FORCE && [[ -f "$OUTFILE" ]] && report_is_complete "$OUTFILE"; then
             STAGE2_SKIPPED=$((STAGE2_SKIPPED + 1))
             info "SKIP $ticker (full analysis exists)"
             continue
@@ -802,30 +891,36 @@ if [[ $START_STAGE -le 2 ]]; then
         STAGE2_PROCESSED=$((STAGE2_PROCESSED + 1))
         info "[$STAGE2_PROCESSED/$STAGE2_TODO, $BUY_TOTAL total] Full: $ticker"
 
-        if run_tracked_child "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
+        if PIPELINE_TICKER_TIMEOUT_SECONDS="${STAGE2_TICKER_TIMEOUT_SECONDS}" \
+            run_pipeline_child "$DETAIL_LOGFILE" "$LOGFILE" "${PYTHON_CMD[@]}" -m src.main \
             --ticker "$ticker" \
             --transparent --quiet \
             $STRICT_FLAG \
             --output "$OUTFILE"; then
             VERDICT=$(extract_report_verdict "$OUTFILE")
-            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
-            if [[ -n "$VERDICT" && -n "$BADGE" ]]; then
-                success "$ticker done [Verdict=${VERDICT}] [${BADGE}]"
-            elif [[ -n "$VERDICT" ]]; then
-                success "$ticker done [Verdict=${VERDICT}]"
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$DETAIL_LOGFILE" 2>/dev/null)
+            if [[ -z "$VERDICT" || "$VERDICT" == "ANALYSIS FAILED" ]]; then
+                # Exit 0 but no publishable analysis (a gate-critical agent
+                # failed, e.g. an LLM timeout). Not a success: report_is_complete
+                # rejects it, so the next run retries this ticker. Surface it
+                # loudly rather than as a green [OK].
+                STAGE2_NOANALYSIS=$((STAGE2_NOANALYSIS + 1))
+                record_pipeline_failure "$ticker" 2 no_analysis "logfile=${DETAIL_LOGFILE} ${VERDICT:-no_verdict_header}"
+                warn "NO ANALYSIS: $ticker (${VERDICT:-no verdict header}) — completed but unpublishable; will retry next run. See $DETAIL_LOGFILE"
             elif [[ -n "$BADGE" ]]; then
-                success "$ticker done [${BADGE}]"
+                success "$ticker done [Verdict=${VERDICT}] [${BADGE}]"
             else
-                success "$ticker done"
+                success "$ticker done [Verdict=${VERDICT}]"
             fi
         else
             status=$?
             exit_if_interrupted_status "$status"
-            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$LOGFILE" 2>/dev/null)
+            BADGE=$(python3 "${SCRIPT_DIR}/extract_run_health.py" "$DETAIL_LOGFILE" 2>/dev/null)
+            record_pipeline_failure "$ticker" 2 "child_exit_${status}" "logfile=${DETAIL_LOGFILE} ${BADGE:-}"
             if [[ -n "$BADGE" ]]; then
-                fail "FAILED: $ticker [${BADGE}] (see $LOGFILE)"
+                fail "FAILED: $ticker [${BADGE}] (see $DETAIL_LOGFILE)"
             else
-                fail "FAILED: $ticker (see $LOGFILE)"
+                fail "FAILED: $ticker (see $DETAIL_LOGFILE)"
             fi
             STAGE2_FAILED=$((STAGE2_FAILED + 1))
         fi
@@ -834,8 +929,9 @@ if [[ $START_STAGE -le 2 ]]; then
 
     done < "$BUY_LIST"
 
-    info "Stage 2 complete: $STAGE2_PROCESSED analyzed, $STAGE2_SKIPPED skipped, $STAGE2_FAILED failed"
+    info "Stage 2 complete: $STAGE2_PROCESSED analyzed, $STAGE2_SKIPPED skipped, $STAGE2_FAILED failed, $STAGE2_NOANALYSIS no-analysis (will retry)"
     write_pipeline_marker
+    emit_batch_health "$STAGE2_START_EPOCH"
 fi
 
 # ============================================================

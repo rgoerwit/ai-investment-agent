@@ -4,18 +4,27 @@ import argparse
 from pathlib import Path
 from typing import Any, Literal
 
+from src.ibkr.portfolio_defaults import (
+    DEFAULT_CASH_BUFFER_PCT,
+    DEFAULT_DRIFT_PCT,
+    DEFAULT_EXCHANGE_LIMIT_PCT,
+    DEFAULT_MAX_AGE_DAYS,
+    DEFAULT_REFRESH_LIMIT,
+    DEFAULT_SECTOR_LIMIT_PCT,
+)
+
 
 def add_common_portfolio_request_args(
     parser: argparse.ArgumentParser,
     *,
     mode_flag_style: Literal["single", "dual"] = "single",
     results_dir_default: str | None = "results/",
-    max_age_default: int | None = 14,
-    cash_buffer_default: float | None = 0.05,
-    drift_pct_default: float | None = 15.0,
-    refresh_limit_default: int | None = 10,
-    sector_limit_default: float | None = 30.0,
-    exchange_limit_default: float | None = 40.0,
+    max_age_default: int | None = DEFAULT_MAX_AGE_DAYS,
+    cash_buffer_default: float | None = DEFAULT_CASH_BUFFER_PCT,
+    drift_pct_default: float | None = DEFAULT_DRIFT_PCT,
+    refresh_limit_default: int | None = DEFAULT_REFRESH_LIMIT,
+    sector_limit_default: float | None = DEFAULT_SECTOR_LIMIT_PCT,
+    exchange_limit_default: float | None = DEFAULT_EXCHANGE_LIMIT_PCT,
     read_only_default: bool | None = False,
     read_only_help: str | None = None,
     live_help: str | None = None,

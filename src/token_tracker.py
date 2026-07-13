@@ -17,6 +17,79 @@ from src.llm_usage import extract_token_usage_breakdown
 
 logger = structlog.get_logger(__name__)
 
+# LLM pricing per 1M tokens, standard/interactive tier (July 2026).
+# Sources: ai.google.dev/gemini-api/docs/pricing, developers.openai.com/api/docs/pricing,
+# platform.claude.com/docs/en/pricing, api-docs.deepseek.com/quick_start/pricing.
+# IMPORTANT: Prefix-matched in insertion order — more specific keys (mini/lite/
+# preview variants) must come before their parents. Gemini >200k-context rate
+# differences are not modeled (single blended rate per model); cached-input
+# tokens are priced via CACHED_PROMPT_MULTIPLIER below.
+MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
+    # Current-generation models only — retired/deprecated models are
+    # deliberately absent; if one is somehow used it hits the default-pricing
+    # fallback and logs unknown_model_pricing.
+    # --- OpenAI gpt-5.x (consultant/auditor/editor; mini before parent) ---
+    "gpt-5.5": {"prompt": 5.00, "completion": 30.00},
+    "gpt-5.4-mini": {"prompt": 0.75, "completion": 4.50},
+    "gpt-5.4": {"prompt": 2.50, "completion": 15.00},
+    # gpt-4o family: still the in-code fallback default for auditor/editor
+    "gpt-4o-mini": {"prompt": 0.15, "completion": 0.60},
+    "gpt-4o": {"prompt": 2.50, "completion": 10.00},
+    # --- Gemini 3.x (paid tier) ---
+    "gemini-3.5-flash": {"prompt": 1.50, "completion": 9.00},
+    "gemini-3.1-flash-lite": {"prompt": 0.25, "completion": 1.50},
+    # "gemini-3.1-pro" prefix also covers "-preview"
+    "gemini-3.1-pro": {"prompt": 2.00, "completion": 12.00},
+    "gemini-3-flash-preview": {"prompt": 0.50, "completion": 3.00},
+    # "gemini-3-pro" prefix also covers "-preview"
+    "gemini-3-pro": {"prompt": 2.00, "completion": 12.00},
+    # --- Gemini 2.5 (paid tier; lite before parent) ---
+    "gemini-2.5-flash-lite": {"prompt": 0.10, "completion": 0.40},
+    "gemini-2.5-flash": {"prompt": 0.30, "completion": 2.50},
+    "gemini-2.5-pro": {"prompt": 1.25, "completion": 10.00},
+    # --- Anthropic (article writer) ---
+    "claude-opus-4": {"prompt": 5.00, "completion": 25.00},
+    "claude-sonnet-4": {"prompt": 3.00, "completion": 15.00},
+    "claude-haiku-4": {"prompt": 1.00, "completion": 5.00},
+    # --- DeepSeek (APAC regional specialist) ---
+    "deepseek-v4": {"prompt": 0.435, "completion": 0.87},
+}
+
+# Fallback for models missing from the table (Flash-class assumption).
+# Every fallback hit logs unknown_model_pricing once — a silent fallback is
+# how three months of 3-4x cost underreporting happened (July 2026).
+DEFAULT_PRICING_PER_1M: dict[str, float] = {"prompt": 0.30, "completion": 2.50}
+
+# Flex/batch service tiers are billed at 50% of standard rates on both
+# Gemini and OpenAI (July 2026 published pricing).
+FLEX_TIER_MULTIPLIER = 0.5
+
+# Cached prompt-prefix tokens bill at 10% of the standard input rate on both
+# vendors (verified 2026-07-03: ai.google.dev/gemini-api/docs/pricing context
+# caching = input/10 for every 2.5/3.x model; developers.openai.com/api/docs/
+# pricing cached input = input/10 for every gpt-5.x model). OpenAI documents
+# that flex does NOT further discount cached input, so the cached portion is
+# priced at this rate without the tier multiplier.
+CACHED_PROMPT_MULTIPLIER = 0.10
+
+_warned_unknown_pricing_models: set[str] = set()
+
+
+def _lookup_model_pricing(model_name: str) -> dict[str, float]:
+    for model_key, prices in MODEL_PRICING_PER_1M.items():
+        if model_name.startswith(model_key):
+            return prices
+    if model_name not in _warned_unknown_pricing_models:
+        _warned_unknown_pricing_models.add(model_name)
+        logger.warning(
+            "unknown_model_pricing",
+            model=model_name,
+            assumed_prompt_per_1m=DEFAULT_PRICING_PER_1M["prompt"],
+            assumed_completion_per_1m=DEFAULT_PRICING_PER_1M["completion"],
+            note="add this model to MODEL_PRICING_PER_1M in src/token_tracker.py",
+        )
+    return DEFAULT_PRICING_PER_1M
+
 
 @dataclass
 class TokenUsage:
@@ -29,86 +102,39 @@ class TokenUsage:
     completion_tokens: int
     total_tokens: int
     elapsed_seconds: float | None = None
+    # Effective service tier for this call ("flex"/"standard"/"auto"/None).
+    # Populated from provider response metadata (OpenAI echoes it natively;
+    # the Gemini flex subclass stamps it) so flex calls price at flex rates
+    # and fallback-to-standard calls price at full rates.
+    service_tier: str | None = None
+    # Prompt-prefix cache hits, a subset of prompt_tokens (both vendors count
+    # cached tokens inside the reported prompt total).
+    cached_prompt_tokens: int = 0
 
     @property
     def estimated_cost_usd(self) -> float:
         """
-        Estimate cost in USD assuming paid tier (GCP project with billing enabled).
+        Estimate cost in USD assuming paid tier (billing enabled on the account).
 
-        IMPORTANT: If your GCP project has billing enabled, ALL API calls cost money,
-        regardless of model name or "free tier" marketing. These are paid tier rates.
-
-        Updated for Dec 2025 pricing (sources: ai.google.dev/gemini-api/docs/pricing).
+        Uses ``MODEL_PRICING_PER_1M`` (standard-tier rates, prefix-matched)
+        with a 0.5x multiplier when this call ran on a flex tier. Cached prompt
+        tokens bill at ``CACHED_PROMPT_MULTIPLIER`` of the input rate and are
+        exempt from the flex multiplier (vendors don't stack the discounts).
         """
-        # LLM pricing (per 1M tokens)
-        # IMPORTANT: Order matters! More specific models must come before general ones
-        pricing = {
-            # OpenAI GPT-4 models (used by consultant node)
-            # Pricing as of Dec 2025: https://openai.com/api/pricing/
-            # Note: gpt-4o-mini must come BEFORE gpt-4o due to prefix matching
-            "gpt-4o-mini": {
-                "prompt": 0.15,  # $0.15 per 1M input tokens
-                "completion": 0.60,  # $0.60 per 1M output tokens
-            },
-            "gpt-4o": {
-                "prompt": 2.50,  # $2.50 per 1M input tokens
-                "completion": 10.00,  # $10.00 per 1M output tokens
-            },
-            "gpt-4-turbo": {
-                "prompt": 10.00,  # $10.00 per 1M input tokens
-                "completion": 30.00,  # $30.00 per 1M output tokens
-            },
-            "gpt-4": {
-                "prompt": 30.00,  # $30.00 per 1M input tokens
-                "completion": 60.00,  # $60.00 per 1M output tokens
-            },
-            # Gemini pricing - PAID TIER RATES
-            # NOTE: These apply when billing is enabled on your GCP project
-            # Gemini 2.0 Flash variants (experimental - but PAID if billing enabled)
-            "gemini-2.0-flash-thinking-exp": {
-                "prompt": 0.30,  # Paid tier: $0.30 per 1M input tokens
-                "completion": 2.50,  # Paid tier: $2.50 per 1M output tokens
-            },
-            "gemini-2.0-flash-exp": {
-                "prompt": 0.30,  # Paid tier: $0.30 per 1M input tokens
-                "completion": 2.50,  # Paid tier: $2.50 per 1M output tokens
-            },
-            # Gemini 2.5 Flash variants (more specific must come first!)
-            "gemini-2.5-flash-lite": {
-                "prompt": 0.10,  # $0.10 per 1M input tokens
-                "completion": 0.40,  # $0.40 per 1M output tokens
-            },
-            "gemini-2.5-flash": {
-                "prompt": 0.30,  # $0.30 per 1M input tokens
-                "completion": 2.50,  # $2.50 per 1M output tokens
-            },
-            # Gemini 3 Pro variants
-            "gemini-3-pro-preview": {
-                "prompt": 2.00,  # $2.00 per 1M input tokens
-                "completion": 12.00,  # $12.00 per 1M output tokens
-            },
-            "gemini-3-pro": {
-                "prompt": 2.00,  # $2.00 per 1M input tokens (< 200k context)
-                "completion": 12.00,  # $12.00 per 1M output tokens (< 200k context)
-            },
-        }
-
-        # Default pricing for unknown models (assume Flash-level pricing)
-        default_pricing = {"prompt": 0.30, "completion": 2.50}
-
-        # Find pricing for this model (match by prefix)
-        model_pricing = default_pricing
-        for model_key, prices in pricing.items():
-            if self.model_name.startswith(model_key):
-                model_pricing = prices
-                break
-
-        prompt_cost = (self.prompt_tokens / 1_000_000) * model_pricing["prompt"]
+        model_pricing = _lookup_model_pricing(self.model_name)
+        cached_tokens = min(max(self.cached_prompt_tokens, 0), self.prompt_tokens)
+        uncached_prompt_tokens = self.prompt_tokens - cached_tokens
+        prompt_cost = (uncached_prompt_tokens / 1_000_000) * model_pricing["prompt"]
+        cached_cost = (
+            (cached_tokens / 1_000_000)
+            * model_pricing["prompt"]
+            * CACHED_PROMPT_MULTIPLIER
+        )
         completion_cost = (self.completion_tokens / 1_000_000) * model_pricing[
             "completion"
         ]
-
-        return prompt_cost + completion_cost
+        multiplier = FLEX_TIER_MULTIPLIER if self.service_tier == "flex" else 1.0
+        return (prompt_cost + completion_cost) * multiplier + cached_cost
 
 
 @dataclass
@@ -120,6 +146,7 @@ class AgentTokenStats:
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
     total_tokens: int = 0
+    total_cached_prompt_tokens: int = 0
     total_cost_usd: float = 0.0
     wall_clock_seconds: float = 0.0
     wall_clock_max_seconds: float = 0.0
@@ -132,6 +159,7 @@ class AgentTokenStats:
         self.total_prompt_tokens += usage.prompt_tokens
         self.total_completion_tokens += usage.completion_tokens
         self.total_tokens += usage.total_tokens
+        self.total_cached_prompt_tokens += usage.cached_prompt_tokens
         self.total_cost_usd += usage.estimated_cost_usd
         if usage.elapsed_seconds is not None:
             self.wall_clock_seconds += usage.elapsed_seconds
@@ -203,6 +231,8 @@ class TokenTracker:
         prompt_tokens: int,
         completion_tokens: int,
         elapsed_seconds: float | None = None,
+        service_tier: str | None = None,
+        cached_prompt_tokens: int = 0,
     ):
         """Record token usage for a specific agent."""
         usage = TokenUsage(
@@ -213,6 +243,8 @@ class TokenTracker:
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens,
             elapsed_seconds=elapsed_seconds,
+            service_tier=service_tier,
+            cached_prompt_tokens=cached_prompt_tokens,
         )
 
         with self._lock:
@@ -230,6 +262,7 @@ class TokenTracker:
                 model=model_name,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                cached_prompt_tokens=cached_prompt_tokens or None,
                 total_tokens=usage.total_tokens,
                 estimated_cost_usd=f"${usage.estimated_cost_usd:.6f}",
                 elapsed_seconds=elapsed_seconds,
@@ -300,6 +333,9 @@ class TokenTracker:
             total_completion = sum(
                 stats.total_completion_tokens for stats in self.agent_stats.values()
             )
+            total_cached = sum(
+                stats.total_cached_prompt_tokens for stats in self.agent_stats.values()
+            )
             total_cost = sum(
                 stats.total_cost_usd for stats in self.agent_stats.values()
             )
@@ -311,6 +347,7 @@ class TokenTracker:
                 "total_prompt_tokens": total_prompt,
                 "total_completion_tokens": total_completion,
                 "total_tokens": total_prompt + total_completion,
+                "total_cached_prompt_tokens": total_cached,
                 "total_cost_usd": total_cost,
                 "session_start": self.session_start,
                 "agents": {
@@ -319,6 +356,7 @@ class TokenTracker:
                         "prompt_tokens": stats.total_prompt_tokens,
                         "completion_tokens": stats.total_completion_tokens,
                         "total_tokens": stats.total_tokens,
+                        "cached_prompt_tokens": stats.total_cached_prompt_tokens,
                         "cost_usd": stats.total_cost_usd,
                         "wall_clock_seconds": round(stats.wall_clock_seconds, 4),
                         "wall_clock_max_seconds": round(
@@ -567,6 +605,29 @@ class TokenTrackingCallback(BaseCallbackHandler):
         key = str(run_id) if run_id is not None else "__default__"
         self._run_starts.pop(key, None)
 
+    @staticmethod
+    def _extract_service_tier(response: LLMResult) -> str | None:
+        """Read the effective service tier off a provider response.
+
+        OpenAI echoes the billed tier in ``llm_output["service_tier"]``
+        (langchain-openai passes it through); the Gemini flex subclass stamps
+        both ``llm_output`` and each message's ``response_metadata``. A
+        fallback-to-standard call therefore reports "standard"/"auto" and is
+        priced at full rates.
+        """
+        if response.llm_output:
+            tier = response.llm_output.get("service_tier")
+            if isinstance(tier, str):
+                return tier
+        if response.generations and response.generations[0]:
+            message = getattr(response.generations[0][0], "message", None)
+            resp_meta = getattr(message, "response_metadata", None)
+            if isinstance(resp_meta, dict):
+                tier = resp_meta.get("service_tier")
+                if isinstance(tier, str):
+                    return tier
+        return None
+
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
         """Called when LLM completes a generation."""
         model_name = "unknown"
@@ -600,9 +661,12 @@ class TokenTrackingCallback(BaseCallbackHandler):
         if response.llm_output and model_name == "unknown":
             model_name = response.llm_output.get("model_name", "unknown")
 
+        service_tier = self._extract_service_tier(response)
+
         usage = extract_token_usage_breakdown(response)
         prompt_tokens = usage.input_tokens or 0
         completion_tokens = usage.total_output_tokens or 0
+        cached_prompt_tokens = usage.cached_input_tokens or 0
 
         if prompt_tokens > 0 or completion_tokens > 0:
             self.tracker.record_usage(
@@ -611,6 +675,8 @@ class TokenTrackingCallback(BaseCallbackHandler):
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 elapsed_seconds=elapsed_seconds,
+                service_tier=service_tier,
+                cached_prompt_tokens=cached_prompt_tokens,
             )
             if self.output_token_cap and completion_tokens > 0:
                 intent_utilization = (

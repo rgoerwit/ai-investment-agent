@@ -15,6 +15,11 @@ from src.data_block_utils import (
 
 logger = structlog.get_logger(__name__)
 
+# CMIC_STATUS tokens this chart extractor accepts. Kept identical to
+# src.validators.supplemental_extractors.CMIC_STATUS_TOKENS and the Legal Counsel
+# prompt; the L0 parity test asserts all three agree (single source via the test).
+CMIC_STATUS_TOKENS = ("FLAGGED", "UNCERTAIN", "CLEAR", "N/A")
+
 
 def _first_value(*values):
     """Return the first non-None value from the given candidates."""
@@ -105,15 +110,19 @@ def _extract_vie_from_block(data_block: str) -> bool | None:
 def _extract_cmic_from_block(data_block: str) -> bool | None:
     """Extract CMIC_STATUS from DATA_BLOCK.
 
-    Expected format: CMIC_STATUS: [FLAGGED / CLEAR / N/A]
+    Expected format: CMIC_STATUS: [FLAGGED / UNCERTAIN / CLEAR / N/A]
+    UNCERTAIN and N/A map to None (neither confirmed flagged nor clear).
     """
-    match = re.search(r"CMIC_STATUS:\s*(FLAGGED|CLEAR|N/A)", data_block, re.IGNORECASE)
+    match = re.search(
+        rf"CMIC_STATUS:\s*({'|'.join(CMIC_STATUS_TOKENS)})", data_block, re.IGNORECASE
+    )
     if match:
         value = match.group(1).upper()
         if value == "FLAGGED":
             return True
         elif value == "CLEAR":
             return False
+        # UNCERTAIN / N/A -> unknown
     return None
 
 

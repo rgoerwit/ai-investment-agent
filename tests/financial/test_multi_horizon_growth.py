@@ -68,6 +68,14 @@ def _make_mock_ticker(
     return mock
 
 
+def _diagnostic_reasons(result: dict, field: str) -> set[str]:
+    return {
+        item.get("reason")
+        for item in result.get("_quarterly_diagnostics", [])
+        if item.get("field") == field
+    }
+
+
 class TestQuarterlyHorizonExtraction:
     """Test _extract_quarterly_horizons directly."""
 
@@ -155,6 +163,9 @@ class TestEdgeCases:
         assert result.get("revenueGrowth_TTM") is None
         # Date metadata should still be present
         assert "latest_quarter_date" in result
+        assert "insufficient_quarterly_history" in _diagnostic_reasons(
+            result, "revenueGrowth_TTM"
+        )
 
     def test_five_quarters_mrq_only(self, fetcher):
         """5 quarters: MRQ available but TTM needs 8."""
@@ -167,6 +178,9 @@ class TestEdgeCases:
         assert result.get("revenueGrowth_MRQ") is not None
         assert result.get("revenueGrowth_TTM") is None  # Need 8 quarters
         assert result.get("growth_trajectory") is None  # Needs both MRQ and TTM
+        assert "insufficient_quarterly_history" in _diagnostic_reasons(
+            result, "revenueGrowth_TTM"
+        )
 
     def test_empty_quarterly_dataframe(self, fetcher):
         """Empty DataFrame: no crash, empty result."""
@@ -194,6 +208,9 @@ class TestEdgeCases:
         assert result.get("revenueGrowth_MRQ") is None
         assert result.get("revenueGrowth_TTM") is None
         assert result.get("netIncome_TTM") is not None
+        assert "missing_total_revenue_row" in _diagnostic_reasons(
+            result, "revenueGrowth_TTM"
+        )
 
     def test_zero_denominator(self, fetcher):
         """Prior-year quarter revenue = 0: avoid division by zero."""
@@ -231,6 +248,9 @@ class TestEdgeCases:
         # min_count=4 means NaN propagates
         assert result.get("revenueGrowth_TTM") is None
         assert result.get("revenue_TTM") is None
+        assert "malformed_quarterly_window" in _diagnostic_reasons(
+            result, "revenue_TTM"
+        )
 
     def test_extreme_growth_capped(self, fetcher):
         """Revenue from 1M to 100M (100x growth) exceeds sanity bound."""

@@ -12,7 +12,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.agents.decision_nodes import create_risk_debater_node, create_trader_node
+from src.agents.decision_nodes import (
+    create_portfolio_manager_node,
+    create_risk_debater_node,
+    create_trader_node,
+)
+from src.agents.pm_inputs import DIRECT_PM_INPUT_FIELDS
 from src.agents.research_nodes import _build_research_report_bundle
 
 STUB = "[SYSTEM]: market_analyst output missing required structure"
@@ -149,3 +154,68 @@ class TestResearchBundleInputs:
         bundle = _build_research_report_bundle({}, self.BUDGETS)
         assert "MARKET ANALYST REPORT:\nN/A" in bundle
         assert "FUNDAMENTALS ANALYST REPORT:\nN/A" in bundle
+
+
+class TestPortfolioManagerArtifactInputs:
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_pm_receives_valid_foreign_language_report(self, mock_get_prompt):
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="portfolio manager prompt", agent_name="Portfolio Manager"
+        )
+        fundamentals = """
+### --- START DATA_BLOCK ---
+SECTOR: Financials
+PE_RATIO_TTM: 16.55
+### --- END DATA_BLOCK ---
+"""
+        state = {
+            "company_of_interest": "B3SA3.SA",
+            "fundamentals_report": fundamentals,
+            "foreign_language_report": "NATIVE SOURCE BODY",
+            "investment_plan": "Research cites Foreign Language Analyst.",
+            "artifact_statuses": {
+                **_ok("fundamentals_report", fundamentals),
+                **_ok("foreign_language_report", "NATIVE SOURCE BODY"),
+            },
+        }
+
+        prompt = await _captured_prompt(
+            create_portfolio_manager_node(_mock_llm(), None), state
+        )
+
+        assert "FOREIGN LANGUAGE / NATIVE-SOURCE ANALYST REPORT" in prompt
+        assert "NATIVE SOURCE BODY" in prompt
+        assert "No Foreign Language Analyst report is present" not in prompt
+
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_pm_excludes_failed_foreign_language_report(self, mock_get_prompt):
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="portfolio manager prompt", agent_name="Portfolio Manager"
+        )
+        fundamentals = """
+### --- START DATA_BLOCK ---
+SECTOR: Financials
+PE_RATIO_TTM: 16.55
+### --- END DATA_BLOCK ---
+"""
+        state = {
+            "company_of_interest": "B3SA3.SA",
+            "fundamentals_report": fundamentals,
+            "foreign_language_report": STUB,
+            "artifact_statuses": {
+                **_ok("fundamentals_report", fundamentals),
+                **_failed("foreign_language_report"),
+            },
+        }
+
+        prompt = await _captured_prompt(
+            create_portfolio_manager_node(_mock_llm(), None), state
+        )
+
+        assert STUB not in prompt
+        assert "FOREIGN LANGUAGE / NATIVE-SOURCE ANALYST REPORT:\nN/A" in prompt
+
+    def test_foreign_language_report_is_direct_pm_input(self):
+        assert "foreign_language_report" in DIRECT_PM_INPUT_FIELDS

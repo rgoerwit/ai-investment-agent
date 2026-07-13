@@ -973,3 +973,45 @@ class TestToolErrorSanitization:
         assert result.startswith("Error: ")
         assert "ConnectionError" in result
         assert "HUSH123" not in result and "HUSH456" not in result
+
+
+@pytest.mark.asyncio
+class TestGetNewsEntityDisambiguation:
+    """General query must anchor the equity sense of ambiguous company names."""
+
+    async def test_resolved_name_query_carries_ticker_and_stock_qualifier(
+        self, mock_tavily
+    ):
+        captured: list[str] = []
+
+        async def side_effect(query_dict):
+            captured.append(query_dict["query"])
+            return "General News: something."
+
+        mock_tavily.side_effect = side_effect
+        with patch(
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
+            mock_name.return_value = "Green Tea Group"
+            await toolkit.get_news.ainvoke({"ticker": "6831.HK"})
+
+        general_query = captured[0]
+        assert '"Green Tea Group" 6831.HK stock' in general_query
+
+    async def test_unresolved_name_has_no_qualifier_or_double_ticker(self, mock_tavily):
+        captured: list[str] = []
+
+        async def side_effect(query_dict):
+            captured.append(query_dict["query"])
+            return "General News: something."
+
+        mock_tavily.side_effect = side_effect
+        with patch(
+            "src.tools.shared.extract_company_name_async", new_callable=AsyncMock
+        ) as mock_name:
+            mock_name.return_value = "6831.HK"  # unresolved: name == ticker
+            await toolkit.get_news.ainvoke({"ticker": "6831.HK"})
+
+        general_query = captured[0]
+        assert general_query.count("6831.HK") == 1
+        assert " stock" not in general_query

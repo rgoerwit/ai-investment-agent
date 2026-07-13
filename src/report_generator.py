@@ -18,10 +18,17 @@ from typing import Any
 
 import structlog
 
-from src.agents.pm_verdict_metadata import canonicalize_pm_verdict
 from src.charts.extractors.pm_block import extract_pm_block
-from src.data_block_utils import normalize_structured_block_boundaries
+from src.charts.extractors.valuation import format_iv
+from src.data_block_utils import (
+    extract_data_block_field,
+    fenced_marker_fragment,
+    normalize_structured_block_boundaries,
+    unfenced_label,
+)
 from src.error_safety import summarize_exception
+from src.pm_decision_parser import canonicalize_pm_verdict
+from src.reporting.state_access import get_effective_red_flags
 from src.runtime_diagnostics import is_publishable_analysis
 from src.thesis_constants import ANALYST_COVERAGE_MAX
 from src.ticker_policy import CHINA_SUFFIXES, KOREA_SUFFIXES, ticker_in_group
@@ -51,6 +58,59 @@ def normalize_governance_terms(text: str) -> str:
     for pattern, replacement in _GOVERNANCE_TERM_FIXES:
         text = pattern.sub(replacement, text)
     return text
+
+
+_FENCED_PM_BLOCK_PATTERN = re.compile(
+    r"(?:#{2,}\s+PM_BLOCK[^\n]*\n(?:[ \t]*\n)*)?```[^\n]*\n(?P<body>.*?)\n?```",
+    re.DOTALL,
+)
+
+
+def _strip_fenced_pm_machine_block(text: str) -> str:
+    """Remove a fenced PM_BLOCK code block (and any heading) only when the fence
+    actually encloses both START and END machine markers.
+
+    The PM sometimes emits CONSULTANT_RESOLUTION / APAC_RESOLUTION prose *inside*
+    the same fence, before the START marker. Gating removal on the enclosed markers
+    strips that prose with the block instead of orphaning it as a stray
+    "PM_BLOCK" section (the 6831.HK regression). Fences without both markers
+    (e.g. DECISION LOGIC) are left untouched.
+    """
+
+    def _repl(match: re.Match) -> str:
+        body = match.group("body")
+        if "START PM_BLOCK" in body and "END PM_BLOCK" in body:
+            return ""
+        return match.group(0)
+
+    return _FENCED_PM_BLOCK_PATTERN.sub(_repl, text)
+
+
+# Display-form PM verdicts whose execution levels are not actionable. The PM's
+# execution parameters are authoritative for these; subordinate agent entry/exit
+# levels and the trade plan are suppressed. Kept as one constant so the display
+# form here never drifts from the underscore form used elsewhere (e.g.
+# retrospective.py uses "DO_NOT_INITIATE").
+_NON_EXECUTABLE_VERDICTS = ("DO NOT INITIATE", "SELL")
+
+_ENTRY_EXIT_SUBSECTION_PATTERN = re.compile(
+    r"(#{2,6}\s*ENTRY/EXIT RECOMMENDATIONS[^\n]*\n).*?(?=\n#{2,6}\s|\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _suppress_executable_levels(market_md: str) -> str:
+    """Neutralize the Technical ENTRY/EXIT subsection for non-actionable verdicts.
+
+    For DO_NOT_INITIATE/SELL the PM's execution parameters are the only authoritative
+    levels; leaving the Market analyst's independent entry/stop numbers visible
+    yields a conflicting stop in the same report (the 6831.HK 5.20 vs 5.75
+    mismatch). Replace the subsection body with a non-actionable note.
+    """
+    return _ENTRY_EXIT_SUBSECTION_PATTERN.sub(
+        r"\1*Not actionable — Portfolio Manager verdict is non-executable.*\n",
+        market_md,
+    )
 
 
 def _markdown_asset_link(asset_path: Path, report_dir: Path | None) -> str:
@@ -99,12 +159,34 @@ class QuietModeReporter:
         target_high: float | None,
         methodology: str | None,
         confidence: str | None,
+        unanchored_caveat: str | None = None,
     ) -> None:
         """Store valuation context for article writer to use.
 
         This enables the article writer to address discrepancies between
         the football field chart visuals and the investment decision.
+
+        When ``unanchored_caveat`` is set the scenario valuation was suppressed
+        (peak/distorted earnings, no normalized EPS baseline), so no point fair
+        value is handed downstream — the writer is told the anchor is unavailable
+        rather than a confident midpoint it could launder into a price target.
         """
+        if unanchored_caveat:
+            price_line = (
+                f"- Current Price: {format_iv(current_price)}\n"
+                if current_price
+                else ""
+            )
+            self.valuation_context = (
+                "VALUATION DATA (scenario target suppressed):\n"
+                f"- Fair Value: UNANCHORED — {unanchored_caveat}\n"
+                f"{price_line}"
+                "NOTE: Do not present a precise point fair value as normalized. "
+                "Discuss valuation as a range or as explicitly unanchored, and do "
+                "not describe the chart as showing a target range (it was suppressed)."
+            )
+            return
+
         if not current_price or not target_low or not target_high:
             self.valuation_context = (
                 "VALUATION DATA: Insufficient data for target calculation."
@@ -175,8 +257,8 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             )
             from src.charts.extractors.valuation import (
                 calculate_valuation_targets,
-                extract_valuation_scenarios,
-                resolve_eps_ttm,
+                extract_valuation_scenarios_for_fundamentals,
+                scenario_valuation_caveat,
             )
             from src.charts.generators.football_field import generate_football_field
             from src.config import config
@@ -200,8 +282,9 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             scenarios = None
             if valuation_params and fundamentals_report:
                 try:
-                    eps_ttm = resolve_eps_ttm(fundamentals_report)
-                    scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
+                    scenarios = extract_valuation_scenarios_for_fundamentals(
+                        valuation_params, fundamentals_report
+                    )
                 except Exception as exc:  # pragma: no cover — defense-in-depth
                     from src.error_safety import summarize_exception
 
@@ -226,7 +309,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
 
             # Combine into FootballFieldData
             quality_warnings = []
-            red_flags = result.get("red_flags", [])
+            red_flags = get_effective_red_flags(result)
 
             for flag in red_flags:
                 # Only show CRITICAL or WARNING severity on the chart to reduce noise
@@ -240,6 +323,14 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
 
             # Limit to 2 warnings to prevent visual occlusion
             quality_warnings = quality_warnings[:2]
+            footnote_parts = []
+            if targets.methodology:
+                footnote_parts.append("Targets based on P/E normalization")
+            scenario_caveat = scenario_valuation_caveat(scenarios)
+            if scenarios and scenarios.normalization_required:
+                footnote_parts.append(f"Scenario EPS: {scenarios.earnings_basis}")
+            if scenario_caveat:
+                footnote_parts.append(scenario_caveat)
 
             football_data = FootballFieldData(
                 ticker=self.ticker,
@@ -252,24 +343,26 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
                 external_target_high=chart_data.external_target_high,
                 external_target_low=chart_data.external_target_low,
                 external_target_mean=chart_data.external_target_mean,
-                our_target_low=targets.low,
-                our_target_high=targets.high,
+                our_target_low=None if scenario_caveat else targets.low,
+                our_target_high=None if scenario_caveat else targets.high,
                 target_methodology=targets.methodology,
                 target_confidence=targets.confidence,
                 quality_warnings=quality_warnings if quality_warnings else None,
-                footnote="Targets based on P/E normalization"
-                if targets.methodology
-                else None,
-                scenarios=scenarios,
+                footnote=" | ".join(footnote_parts) if footnote_parts else None,
+                scenarios=None if scenario_caveat else scenarios,
             )
 
-            # Store valuation context for article writer (D1 implementation)
+            # Store valuation context for article writer (D1 implementation).
+            # When the scenario caveat fired the chart suppressed its target
+            # range above; mirror that here so the writer is not handed a
+            # confident midpoint the chart deliberately withheld.
             self._store_valuation_context(
                 current_price=chart_data.current_price,
                 target_low=targets.low,
                 target_high=targets.high,
                 methodology=targets.methodology,
                 confidence=targets.confidence,
+                unanchored_caveat=scenario_caveat,
             )
 
             # Configure chart generation
@@ -418,7 +511,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
 
             # Canonicalize PFIC status: Legal Counsel overrides DATA_BLOCK heuristic.
             legal_pfic_status = None
-            for flag in result.get("red_flags", []):
+            for flag in get_effective_red_flags(result):
                 flag_type = str(flag.get("type", "")).upper()
                 if flag_type == "PFIC_PROBABLE":
                     legal_pfic_status = "PROBABLE"
@@ -488,7 +581,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             # --- Data Quality Warnings ---
             axis_warnings = {}
             footnote_parts = []
-            red_flags = result.get("red_flags", [])
+            red_flags = get_effective_red_flags(result)
 
             # Check flags for specific warnings
             for flag in red_flags:
@@ -765,6 +858,10 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         final_decision = self._normalize_string(result.get("final_trade_decision", ""))
         return bool(final_decision and final_decision.strip())
 
+    def _artifact_ok(self, result: dict[str, Any], field: str) -> bool:
+        status = (result.get("artifact_statuses", {}) or {}).get(field) or {}
+        return not (isinstance(status, dict) and status.get("ok") is False)
+
     def _build_verification_caveat(self, result: dict[str, Any]) -> str | None:
         review = self._normalize_string(result.get("consultant_review", ""))
         if not review:
@@ -776,6 +873,21 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         consultant_status = (result.get("artifact_statuses", {}) or {}).get(
             "consultant_review"
         ) or {}
+        intro = (
+            "Independent consultant checks raised verification caveats. Treat any "
+            "unsupported or conflicting narrative claims below as suspect until re-verified."
+        )
+        if consultant_status.get("ok") is False:
+            message = self._normalize_string(
+                consultant_status.get("message")
+                or "Consultant review failed validation."
+            )
+            return (
+                intro
+                + "\n\n- External consultant review excluded from PM/report "
+                + f"cross-validation: {message}"
+            )
+
         flagged_patterns = (
             r"\b(unsubstantiated|unsupported|likely wrong|likely incorrect)\b",
             r"\b(cannot verify|unable to verify|not supported)\b",
@@ -813,10 +925,6 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         if not candidate_lines:
             return None
 
-        intro = (
-            "Independent consultant checks raised verification caveats. Treat any "
-            "unsupported or conflicting narrative claims below as suspect until re-verified."
-        )
         return intro + "\n\n" + "\n".join(candidate_lines)
 
     def _reconcile_consultant_wording(
@@ -934,7 +1042,7 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
             pass
 
         # Red Flag Pre-Screening (if applicable)
-        red_flags = result.get("red_flags", [])
+        red_flags = get_effective_red_flags(result)
         pre_screening_result = result.get("pre_screening_result", "PASS")
 
         if red_flags or pre_screening_result == "REJECT":
@@ -1051,6 +1159,11 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                 cleaned = self._strip_redundant_header(cleaned, title)
                 report_parts.append(f"{cleaned}\n\n")
 
+        market_report = result.get("market_report", "")
+        if market_report and extracted_decision in _NON_EXECUTABLE_VERDICTS:
+            result["market_report"] = _suppress_executable_levels(
+                self._normalize_string(market_report)
+            )
         add_section("market_report", "Technical Analysis")
 
         # Clean fundamentals: keep only final self-corrected DATA_BLOCK
@@ -1068,6 +1181,17 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                 pass  # Fallback if utils not available
 
         add_section("fundamentals_report", "Fundamental Analysis")
+
+        # Qualify "undiscovered" language when coverage is not independently
+        # confirmed low. Prompt-level guidance (sentiment v5.4) proved
+        # insufficient (KTY.WA 2026-06-27 still asserted "Strongly Undiscovered"
+        # at MODERATE total coverage), so this is a deterministic backstop keyed
+        # off the DATA_BLOCK coverage fields the Fundamentals Analyst owns.
+        sentiment_report = result.get("sentiment_report", "")
+        if sentiment_report:
+            result["sentiment_report"] = self._soften_undiscovered_language(
+                self._normalize_string(sentiment_report), fund_report
+            )
         add_section("sentiment_report", "Market Sentiment")
 
         # Reformat MACRO_DETECTION block before rendering news section
@@ -1082,7 +1206,11 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
 
         # CRITICAL: Include consultant review if present (external cross-validation)
         consultant_review = result.get("consultant_review", "")
-        if consultant_review and consultant_review.strip():
+        if (
+            consultant_review
+            and consultant_review.strip()
+            and self._artifact_ok(result, "consultant_review")
+        ):
             # Check if it's a real review (not an error message or "N/A")
             normalized = self._normalize_string(consultant_review)
             if (
@@ -1101,7 +1229,7 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                 )
 
         _verdict = extracted_decision
-        if _verdict in ("DO NOT INITIATE", "SELL"):
+        if _verdict in _NON_EXECUTABLE_VERDICTS:
             report_parts.append("## Trading Strategy\n\n")
             report_parts.append(
                 f"*Entry/exit parameters not applicable — "
@@ -1126,11 +1254,11 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                 if risky or safe or neutral:
                     risk_title = (
                         "Risk Assessment — Archival Debate (Non-Executable)"
-                        if _verdict in ("DO NOT INITIATE", "SELL")
+                        if _verdict in _NON_EXECUTABLE_VERDICTS
                         else "Risk Assessment"
                     )
                     report_parts.append(f"## {risk_title}\n\n")
-                    if _verdict in ("DO NOT INITIATE", "SELL"):
+                    if _verdict in _NON_EXECUTABLE_VERDICTS:
                         report_parts.append(
                             "*These subordinate views predate or challenge the PM "
                             "override. They are retained for audit context and are "
@@ -1197,33 +1325,56 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         )
 
         # Strip PM_BLOCK structured block (consumed by code; not reader-facing).
-        # Handles ##/###/#### headers, optional label line, optional code fence,
-        # and the bare START/END pair — LLMs drift between 3 and 4 hashes.
+        # Fenced case: remove the whole fence (and heading) only when it encloses
+        # the START/END markers, so resolution prose the PM may emit before the
+        # markers inside that fence is removed with them (the 6831.HK regression).
+        text = _strip_fenced_pm_machine_block(text)
+        # Bare (unfenced) START/END pair — LLMs drift between 3 and 4 hashes.
         # Line-count cap (30 lines) prevents runaway matching if END is absent/malformed.
         _pm_content = r"(?:[^\n]*\n){0,30}"
-        _pm_start = r"#{2,6}\s+---\s+START PM_BLOCK\s*:?\s*---"
-        _pm_end = r"#{2,6}\s+---\s+END PM_BLOCK\s*:?\s*---"
+        _pm_start = fenced_marker_fragment("PM_BLOCK", "START")
+        _pm_end = fenced_marker_fragment("PM_BLOCK", "END")
         text = re.sub(
-            r"(?:#{2,6}\s+PM_BLOCK[^\n]*\n)?```[^\n]*\n?"
-            + _pm_start
-            + r"\n"
-            + _pm_content
-            + _pm_end
-            + r"[^\n]*\n?```?"
-            r"|" + _pm_start + r"\n" + _pm_content + _pm_end + r"[^\n]*",
+            _pm_start + r"\n" + _pm_content + _pm_end + r"[^\n]*",
             "",
             text,
             flags=re.DOTALL,
         )
 
-        # Strip CONSULTANT_RESOLUTION machine-readable blocks.
-        # Handles: bare, #### prefix, **bold** wrapping, colon inside or outside bold.
+        # Preserve the PM's consultant reconciliation as reader-facing prose.
+        # The PM emits CONSULTANT_RESOLUTION (CONCERN/DATA_CHECK/VERDICT bullets)
+        # — often the *only* place the reconciliation appears — under the
+        # "CONSULTANT DISAGREEMENT RESOLUTION" heading. Previously the whole block
+        # was stripped; when the PM fenced it, the fence survived and left an empty
+        # ``` block under the heading (the KTY.WA 2026-06-27 regression). Now we
+        # drop only the machine label line and unwrap any fence, keeping the
+        # bullets so the reader sees the reconciliation.
+        # Fenced form: ```\nCONSULTANT_RESOLUTION:\n- ...\n```  -> keep bullets.
+        consultant_resolution = re.escape(
+            unfenced_label("CONSULTANT_RESOLUTION").rstrip(":")
+        )
         text = re.sub(
-            r"^[#*\s]*CONSULTANT_RESOLUTION[*:]*\s*\n(?:-[^\n]+\n)+",
+            rf"```[^\S\n]*\n[#*\s]*{consultant_resolution}[*:]*\s*\n"
+            r"(?P<bullets>(?:[#*\s]*-[^\n]+\n)+)\s*```",
+            lambda m: m.group("bullets"),
+            text,
+        )
+        # Unfenced form: drop only the label line, keep the bullets that follow.
+        text = re.sub(
+            rf"^[#*\s]*{consultant_resolution}[*:]*\s*\n(?=[#*\s]*-)",
             "",
             text,
             flags=re.MULTILINE,
         )
+        # Safety net: collapse any fenced block left entirely empty by prior strips
+        # (e.g. a machine block whose body was removed), without touching fences
+        # that still contain content such as APAC_RESOLUTION/AUDITOR_RESOLUTION.
+        text = re.sub(r"```[^\S\n]*\n[ \t]*```[ \t]*\n?", "", text)
+
+        # Turn the unresolved-auditor machine stub (NOT_PROVIDED/UNVERIFIABLE,
+        # auto-injected when the auditor named a concern the PM didn't reconcile)
+        # into a readable caveat. Real AUDITOR_RESOLUTION blocks are untouched.
+        text = self._reformat_unresolved_auditor_block(text)
 
         # Strip "Analyzing TICKER - Company" openers (redundant with report title).
         # Matches ticker by requiring a dot-delimited exchange suffix (e.g. .HK, .T, .DE).
@@ -1278,6 +1429,79 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         return text
 
     @staticmethod
+    def _soften_undiscovered_language(sentiment_text: str, fund_report: str) -> str:
+        """Qualify unconditional "undiscovered" claims when coverage isn't confirmed low.
+
+        Fires when the DATA_BLOCK reports MODERATE/HIGH/UNKNOWN total analyst
+        coverage, or an ANALYST_COVERAGE_DATA_QUALITY_NOTE is present. Prepends a
+        one-time "Coverage caveat" banner disclosing that the discovery/visibility
+        framing is relative, not absolute; the raw sentiment prose is left intact
+        (no fragile in-place rewriting). Idempotent via the banner-presence guard.
+        Genuinely-low, confidently-measured coverage is left untouched.
+        """
+        if not sentiment_text:
+            return sentiment_text
+        total_est = (
+            extract_data_block_field(fund_report, "ANALYST_COVERAGE_TOTAL_EST") or ""
+        ).upper()
+        has_note = "ANALYST_COVERAGE_DATA_QUALITY_NOTE" in (fund_report or "")
+        if not (has_note or total_est in {"MODERATE", "HIGH", "UNKNOWN"}):
+            return sentiment_text
+        # A caveat banner neutralizes the whole family of overclaim synonyms
+        # ("undiscovered", "effectively invisible", "entirely absent",
+        # "international ignorance") without fragile in-place phrase rewriting.
+        # In-place token substitution was removed: it spliced a noun phrase into
+        # adjective / header / label slots ("#### low English-language aggregator
+        # visibility STATUS ASSESSMENT", "the stock is … by retail crowds"),
+        # producing ungrammatical prose. The banner discloses the qualification
+        # cleanly; the raw prose is left grammatical.
+        caveat = (
+            "> **Coverage caveat:** discovery/visibility framing below reflects only "
+            "low *Western English-language retail* visibility — analyst coverage is not "
+            "confirmed low, so treat it as relative, not an absolute claim.\n\n"
+        )
+        if "Coverage caveat:" in sentiment_text:
+            return sentiment_text
+        return caveat + sentiment_text
+
+    # Shared between the fenced and unfenced rewrite forms below so the two
+    # regexes cannot drift (mirrors the CONSULTANT_RESOLUTION two-form handling).
+    _AUDITOR_STUB_BODY = (
+        r"[#*\s]*AUDITOR_RESOLUTION:?[ \t]*\n"
+        r"(?:[#*\s]*-\s*FINDING:[^\n]*\n)?"
+        r"[#*\s]*-\s*DATA_CHECK:\s*NOT_PROVIDED[ \t]*\n"
+        r"[#*\s]*-\s*VERDICT:\s*UNVERIFIABLE[ \t]*\n?"
+    )
+    _AUDITOR_NOTE = (
+        "> **Auditor note:** The forensic auditor flagged anomalies the PM did "
+        "not explicitly reconcile; treat earnings-quality / cash-flow "
+        "conclusions as unverified.\n"
+    )
+
+    @classmethod
+    def _reformat_unresolved_auditor_block(cls, text: str) -> str:
+        """Turn the NOT_PROVIDED/UNVERIFIABLE auditor stub into a prose caveat.
+
+        Only the machine stub injected by ``_ensure_auditor_resolution_block``
+        (DATA_CHECK: NOT_PROVIDED + VERDICT: UNVERIFIABLE) is rewritten; a
+        populated AUDITOR_RESOLUTION (real DATA_CHECK / verdict) and
+        ``AUDITOR_RESOLUTION: NONE`` are left untouched. Handles both the
+        code-injected unfenced form and a PM-authored fenced form — the fenced
+        sub runs first and consumes the whole fence, so no orphan ``` lines
+        can trap the blockquote inside a code block.
+        """
+        text = re.sub(
+            rf"(?ms)^```[^\S\n]*\n{cls._AUDITOR_STUB_BODY}\s*```[ \t]*\n?",
+            cls._AUDITOR_NOTE,
+            text,
+        )
+        return re.sub(
+            rf"(?ms)^{cls._AUDITOR_STUB_BODY}",
+            cls._AUDITOR_NOTE,
+            text,
+        )
+
+    @staticmethod
     def _reformat_macro_detection(text: str) -> str:
         """
         Replace raw MACRO_DETECTION key=value block with a prose callout (TRIGGERED=YES)
@@ -1311,10 +1535,13 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         annotation after START DATA_BLOCK (e.g. '(INTERNAL SCORING…)').
         Missing or malformed END markers cause no match — nothing is moved.
         """
+        data_start = fenced_marker_fragment("DATA_BLOCK", "START")
+        data_end = fenced_marker_fragment("DATA_BLOCK", "END")
         match = re.search(
-            r"(#{2,6}\s+---\s+START DATA_BLOCK[^\n]*---"
+            rf"({data_start}"
+            r"\n"
             r"(?:[^\n]*\n){0,120}"  # bounded: at most ~120 lines of content
-            r"#{2,6}\s+---\s+END DATA_BLOCK[^\n]*---\n?)",
+            rf"{data_end}\n?)",
             text,
             re.DOTALL,
         )

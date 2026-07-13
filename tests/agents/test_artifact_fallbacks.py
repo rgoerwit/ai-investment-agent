@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -77,6 +77,71 @@ class TestArtifactFallbacks:
         assert status["error_kind"] == "application_error"
         assert "CONTEXT_LIMIT_EXCEEDED" in result["auditor_report"]
         assert "FORENSIC_DATA_BLOCK" in result["auditor_report"]
+
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_auditor_binds_tools_and_runs_tool_loop(self, mock_get_prompt):
+        """Regression: the auditor LLM must receive its tools so it can call them.
+
+        Previously the loop invoked the unbound LLM, so the model never saw the
+        tool schemas, never emitted tool_calls, and returned INSUFFICIENT_DATA.
+        """
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="auditor prompt", agent_name="Forensic Auditor"
+        )
+
+        bound_stub = SimpleNamespace(model_name="gpt-5-mini")
+        mock_llm = SimpleNamespace(
+            model_name="gpt-5-mini",
+            bind_tools=MagicMock(return_value=bound_stub),
+        )
+        tools = [SimpleNamespace(name="get_news", ainvoke=AsyncMock())]
+
+        # First turn emits a tool call; second turn returns the final report.
+        resp_with_tool = SimpleNamespace(
+            content="",
+            tool_calls=[{"name": "get_news", "args": {"q": "TSMC"}, "id": "c1"}],
+        )
+        final_resp = SimpleNamespace(
+            content="STATUS: CLEAN\nNo anomalies detected.", tool_calls=None
+        )
+        invoke_mock = AsyncMock(side_effect=[resp_with_tool, final_resp])
+        tool_service = SimpleNamespace(
+            execute=AsyncMock(return_value=SimpleNamespace(value="FILING DATA"))
+        )
+
+        with (
+            patch(
+                "src.agents.runtime.invoke_with_rate_limit_handling", new=invoke_mock
+            ),
+            patch(
+                "src.agents.consultant_nodes.get_current_tool_service",
+                return_value=tool_service,
+            ),
+            patch(
+                "src.agents.consultant_nodes.validate_required_output",
+                return_value={"ok": True, "missing": []},
+            ),
+        ):
+            node = create_auditor_node(mock_llm, tools)
+            result = await node(
+                {
+                    "company_of_interest": "2330.TW",
+                    "company_name": "TSMC",
+                    "company_name_resolved": True,
+                },
+                {},
+            )
+
+        # Tools were bound to the LLM, and the loop drove the *bound* runnable.
+        mock_llm.bind_tools.assert_called_once_with(tools)
+        assert invoke_mock.await_args_list[0].args[0] is bound_stub
+        # The emitted tool call was executed through the tool service.
+        tool_service.execute.assert_awaited_once()
+        status = result["artifact_statuses"]["auditor_report"]
+        assert status["complete"] is True
+        assert status["ok"] is True
+        assert "CLEAN" in result["auditor_report"]
 
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")

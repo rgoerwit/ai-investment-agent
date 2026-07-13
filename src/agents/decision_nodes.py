@@ -8,6 +8,7 @@ import structlog
 from langchain_core.messages import HumanMessage
 from langgraph.types import RunnableConfig
 
+from src.agents.context_flags import drawdown_flag, format_pm_context_flags
 from src.agents.pm_inputs import (
     DIRECT_PM_INPUT_FIELDS,
     RISK_DEBATE_FIELD,
@@ -15,16 +16,29 @@ from src.agents.pm_inputs import (
     risk_debate_present,
 )
 from src.agents.pm_verdict_metadata import (
-    canonicalize_pm_verdict,
+    PMVerdictMetadata,
+    PMVerdictRecovery,
     pm_verdict_metadata_from_text,
 )
-
-# NOTE: do not import src.charts.extractors.pm_block at module level — it
-# imports src.agents.pm_verdict_metadata, which triggers this package's
-# __init__ and circles back here. Import it inside functions (same pattern
-# as pm_verdict_metadata.pm_verdict_metadata_from_text).
-from src.data_block_utils import has_parseable_data_block
+from src.agents.verdict_policy import (
+    maybe_demote_buy_on_blocking_flags,
+    maybe_floor_verdict_to_hold,
+    maybe_qualify_buy_in_quick_mode,
+    maybe_qualify_weak_asymmetry_buy,
+)
+from src.data_block_utils import (
+    extract_data_block_field,
+    fenced_block_pattern,
+    has_parseable_data_block,
+    unfenced_label,
+)
 from src.error_safety import summarize_exception
+from src.pm_claim_audit import audit_pm_claims
+
+# Verdict canonicalization lives in the neutral, dependency-free parser (it used
+# to live on src.agents.pm_verdict_metadata, which created a charts circular
+# import: pm_block -> pm_verdict_metadata -> agents/__init__ -> decision_nodes).
+from src.pm_decision_parser import canonicalize_pm_verdict, parse_final_decision_scores
 from src.runtime_diagnostics import (
     failure_artifact,
     get_artifact_status,
@@ -47,6 +61,47 @@ from .state import AgentState
 logger = structlog.get_logger(__name__)
 
 
+async def _recover_pm_verdict_metadata(
+    pm_output: str,
+    llm: Any,
+) -> PMVerdictMetadata | None:
+    """Recover final PM verdict from prose when PM_BLOCK/text regex parsing fails."""
+    if not hasattr(llm, "with_structured_output"):
+        return None
+    try:
+        structured_llm = llm.with_structured_output(PMVerdictRecovery, strict=True)
+        response = await agent_runtime.invoke_with_rate_limit_handling(
+            structured_llm,
+            [
+                HumanMessage(
+                    content=(
+                        "Extract only the final Portfolio Manager verdict from this "
+                        "analysis. Return the structured verdict. Valid values are "
+                        "BUY, HOLD, SELL, DO_NOT_INITIATE.\n\n"
+                        f"{pm_output[:8000]}"
+                    )
+                )
+            ],
+            context="pm_verdict_recovery",
+            provider=support.infer_provider_name(llm),
+            model_name=support.get_model_name(llm),
+            max_attempts=1,
+            max_transient_attempts=1,
+        )
+    except Exception as exc:
+        logger.warning(
+            "pm_verdict_recovery_failed",
+            **summarize_exception(exc, operation="pm_verdict_recovery"),
+        )
+        return None
+
+    verdict = getattr(response, "verdict", None)
+    canonical = canonicalize_pm_verdict(verdict)
+    if canonical == "UNPARSEABLE":
+        return None
+    return PMVerdictMetadata(verdict=canonical)
+
+
 def _present_pm_inputs(state: AgentState) -> tuple[list[str], list[str]]:
     """Return (present, missing) lists of direct PM inputs by validity.
 
@@ -64,6 +119,32 @@ def _present_pm_inputs(state: AgentState) -> tuple[list[str], list[str]]:
     else:
         missing.append(RISK_DEBATE_FIELD)
     return present, missing
+
+
+def _value_trap_capital_context(
+    fundamentals_report: str | None,
+) -> dict[str, str] | None:
+    """Build the capex/ROIC/plan context the Value-Trap reconciliation needs.
+
+    The Value-Trap Detector runs parallel to Fundamentals and is blind to these
+    DATA_BLOCK fields; the PM node sees both, so it supplies them here so a HIGH/TRAP
+    penalty driven by reinvestment can be downgraded when the DATA_BLOCK confirms
+    genuine growth investment (see ``detect_value_trap_flags``).
+    """
+    if not fundamentals_report:
+        return None
+    return {
+        "capex_to_da_status": extract_data_block_field(
+            fundamentals_report, "CAPEX_TO_DA_STATUS"
+        )
+        or "",
+        "roic_quality": extract_data_block_field(fundamentals_report, "ROIC_QUALITY")
+        or "",
+        "capital_plan_status": extract_data_block_field(
+            fundamentals_report, "CAPITAL_PLAN_STATUS"
+        )
+        or "",
+    }
 
 
 _STRICT_PM_ADDENDUM = """
@@ -143,7 +224,8 @@ def _ensure_consultant_resolution_block(
     pm_output: str, consultant_review: str | None
 ) -> str:
     """Ensure PM output always includes CONSULTANT_RESOLUTION when consultant ran."""
-    if not consultant_review or "CONSULTANT_RESOLUTION:" in pm_output:
+    label = unfenced_label("CONSULTANT_RESOLUTION")
+    if not consultant_review or label in pm_output:
         return pm_output
 
     from src.validators.red_flag_detector import RedFlagDetector
@@ -153,7 +235,7 @@ def _ensure_consultant_resolution_block(
 
     if conditions["verdict"] == "APPROVED" and not concerns:
         resolution_lines = [
-            "CONSULTANT_RESOLUTION:",
+            label,
             "- CONCERN: NONE",
             "- DATA_CHECK: N/A",
             "- VERDICT: N/A",
@@ -167,7 +249,7 @@ def _ensure_consultant_resolution_block(
         for concern in concerns:
             resolution_lines.extend(
                 [
-                    "CONSULTANT_RESOLUTION:",
+                    label,
                     f"- CONCERN: {concern}",
                     "- DATA_CHECK: NOT_PROVIDED",
                     "- VERDICT: UNVERIFIABLE",
@@ -175,12 +257,7 @@ def _ensure_consultant_resolution_block(
             )
 
     resolution_block = "\n".join(resolution_lines).rstrip()
-    pm_block_marker = "### --- START PM_BLOCK ---"
-    if pm_block_marker in pm_output:
-        return pm_output.replace(
-            pm_block_marker, f"{resolution_block}\n\n{pm_block_marker}", 1
-        )
-    return f"{pm_output.rstrip()}\n\n{resolution_block}\n"
+    return _insert_block_before_pm_block(pm_output, resolution_block)
 
 
 _APAC_SILENCE_SENTINELS = {
@@ -220,59 +297,76 @@ def _extract_apac_verdict_line(apac_report: str) -> str:
 
 def _insert_block_before_pm_block(pm_output: str, block_text: str) -> str:
     """Insert a resolution block immediately above PM_BLOCK (or at tail if absent)."""
-    pm_block_marker = "### --- START PM_BLOCK ---"
-    if pm_block_marker in pm_output:
-        return pm_output.replace(
-            pm_block_marker, f"{block_text.rstrip()}\n\n{pm_block_marker}", 1
+    match = fenced_block_pattern("PM_BLOCK").search(pm_output)
+    if match:
+        return (
+            f"{pm_output[: match.start()]}{block_text.rstrip()}\n\n"
+            f"{pm_output[match.start() :]}"
         )
     return f"{pm_output.rstrip()}\n\n{block_text.rstrip()}\n"
 
 
 def _normalize_pm_block_contract(pm_output: str) -> str:
-    """Rewrite final PM_BLOCK text when its sizing violates verdict semantics.
+    """Reconcile PM sizing surfaces with the (final) PM_BLOCK verdict.
 
-    PM_BLOCK extraction also clamps no-initiation position size for all readers,
-    including older artifacts. This boundary rewrite keeps newly persisted PM
-    output internally coherent with that same contract.
+    For a no-initiation verdict (HOLD / DO_NOT_INITIATE / SELL) this clamps BOTH the
+    machine ``POSITION_SIZE`` token AND the human-facing ``Recommended Position Size: X%``
+    prose line (PM prompt v9.19) to zero, so the persisted PM text is internally
+    coherent. Called at the PM-node tail *after* the deterministic verdict modifiers
+    (floor/demote), so a BUY→HOLD demotion cannot leave a stale nonzero size behind
+    (3773.T 2026-07-12: ``Recommended Position Size: 2.5%`` under VERDICT: HOLD; and the
+    demotion path, where ``_rewrite_pm_decision_surfaces`` rewrites only the decision
+    line, not the sizing fields).
     """
-    pm_block_pattern = re.compile(
-        r"### --- START PM_BLOCK[^\n]*---(?P<body>.+?)### --- END PM_BLOCK ---",
-        re.DOTALL,
-    )
-    blocks = list(pm_block_pattern.finditer(pm_output))
+    blocks = list(fenced_block_pattern("PM_BLOCK").finditer(pm_output))
     if not blocks:
         return pm_output
 
     last = blocks[-1]
-    body = last.group("body")
+    body = last.group(1)
     verdict_match = re.search(r"(?im)^VERDICT:\s*([^\n]+)", body)
-    size_match = re.search(r"(?im)^(POSITION_SIZE:\s*)([\d.]+)", body)
-    if not verdict_match or not size_match:
+    if not verdict_match:
         return pm_output
 
     verdict = canonicalize_pm_verdict(verdict_match.group(1))
-    try:
-        emitted_size = float(size_match.group(2))
-    except ValueError:
+    if verdict not in {"HOLD", "DO_NOT_INITIATE", "SELL"}:
         return pm_output
 
-    if verdict not in {"HOLD", "DO_NOT_INITIATE", "SELL"} or emitted_size == 0.0:
-        return pm_output
+    # 1) PM_BLOCK POSITION_SIZE token (skip if absent or already zero).
+    token_rewritten = False
+    size_match = re.search(r"(?im)^(POSITION_SIZE:\s*)([\d.]+)", body)
+    if size_match:
+        try:
+            emitted_size = float(size_match.group(2))
+        except ValueError:
+            emitted_size = 0.0
+        if emitted_size != 0.0:
+            rewritten_body = re.sub(
+                r"(?im)^(POSITION_SIZE:\s*)[\d.]+",
+                r"\g<1>0.0",
+                body,
+                count=1,
+            )
+            pm_output = (
+                pm_output[: last.start(1)] + rewritten_body + pm_output[last.end(1) :]
+            )
+            token_rewritten = True
 
-    logger.warning(
-        "pm_block_position_size_rewritten",
-        verdict=verdict,
-        emitted_position_size=emitted_size,
+    # 2) Human-facing prose line, outside the block (prompt v9.19).
+    pm_output, prose_lines_rewritten = re.subn(
+        r"(?im)^(\**Recommended Position Size\**:\s*)[\d.]+%?",
+        r"\g<1>0.0% (monitor only — no initiation)",
+        pm_output,
     )
-    rewritten_body = re.sub(
-        r"(?im)^(POSITION_SIZE:\s*)[\d.]+",
-        r"\g<1>0.0",
-        body,
-        count=1,
-    )
-    return (
-        pm_output[: last.start("body")] + rewritten_body + pm_output[last.end("body") :]
-    )
+
+    if token_rewritten or prose_lines_rewritten:
+        logger.warning(
+            "pm_block_position_size_rewritten",
+            verdict=verdict,
+            token_rewritten=token_rewritten,
+            prose_lines_rewritten=prose_lines_rewritten,
+        )
+    return pm_output
 
 
 def _ensure_apac_resolution_block(pm_output: str, apac_report: str | None) -> str:
@@ -285,13 +379,14 @@ def _ensure_apac_resolution_block(pm_output: str, apac_report: str | None) -> st
     """
     if not _requires_apac_resolution(apac_report):
         return pm_output
-    if "APAC_RESOLUTION:" in pm_output:
+    label = unfenced_label("APAC_RESOLUTION")
+    if label in pm_output:
         return pm_output
     summary = _extract_apac_verdict_line(apac_report or "") or (
         "APAC specialist output not reconciled in PM rationale."
     )
     fallback = (
-        "APAC_RESOLUTION:\n"
+        f"{label}\n"
         f"- FINDING: {summary}\n"
         "- DATA_CHECK: NOT_PROVIDED\n"
         "- VERDICT: UNVERIFIABLE"
@@ -370,10 +465,11 @@ def _ensure_auditor_resolution_block(pm_output: str, auditor_report: str | None)
     """
     if not _auditor_has_material_concern(auditor_report):
         return pm_output
-    if "AUDITOR_RESOLUTION:" in pm_output:
+    label = unfenced_label("AUDITOR_RESOLUTION")
+    if label in pm_output:
         return pm_output
     fallback = (
-        "AUDITOR_RESOLUTION:\n"
+        f"{label}\n"
         "- FINDING: Forensic Auditor flagged anomalies not explicitly addressed by PM rationale.\n"
         "- DATA_CHECK: NOT_PROVIDED\n"
         "- VERDICT: UNVERIFIABLE"
@@ -577,6 +673,84 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
     return risk_node
 
 
+def _log_risk_tally_reconciliation(
+    content_str: str, code_subtotal: float, ticker: str
+) -> float | None:
+    """Warn when the PM's narrated TOTAL RISK COUNT falls below the deterministic
+    code-computed floor — a dropped, weighted pre-screen penalty.
+
+    Best-effort, no verdict override (surface + log only). Returns the shortfall (the
+    amount dropped) when the floor is breached, else ``None``. A missing/unparseable
+    narrated tally yields ``None`` (cannot reconcile, do not warn).
+    """
+    narrated = parse_final_decision_scores(content_str).get("risk_tally")
+    if narrated is None or narrated >= code_subtotal - 0.01:
+        return None
+    dropped = round(code_subtotal - narrated, 2)
+    logger.warning(
+        "pm_risk_tally_below_code_floor",
+        ticker=ticker,
+        narrated=narrated,
+        code_subtotal=round(code_subtotal, 2),
+        dropped=dropped,
+    )
+    return dropped
+
+
+# Pre-screen flags whose unresolved presence forbids a Zone-2 BUY override (prompt rule).
+_OVERRIDE_BLOCKING_FLAGS = {"GROWTH_QUALITY_UNPROVEN", "TRANSIENT_STRENGTH_DISTORTION"}
+
+
+def _log_pm_discipline_checks(
+    content_str: str,
+    red_flags: list[dict[str, Any]],
+    valuation_reliability: str,
+    ticker: str,
+) -> None:
+    """Log-only reconciliation of the PM override path against the prompt's stated
+    thresholds (no verdict/zone mutation — surface + log only).
+
+    Fires only on unambiguous, deterministically-parseable misses. The blocking-flag check
+    is load-bearing: it catches the dropped-penalty + override combo where a weaker model
+    drops a +0.75 penalty (so ``risk_tally`` looks clean) yet the flag is still present.
+    Best-effort; missing scores/verdict/zone yield no warning. Non-raising by construction.
+    """
+    scores = parse_final_decision_scores(content_str)
+    verdict = canonicalize_pm_verdict(scores.get("verdict"))
+    zone = str(scores.get("zone") or "").upper()
+    health = scores.get("health_adj")
+    growth = scores.get("growth_adj")
+    risk = scores.get("risk_tally")
+    flag_types = {str(flag.get("type", "")).upper() for flag in red_flags}
+
+    if verdict == "BUY" and zone == "MODERATE":
+        reasons = []
+        if health is not None and health < 50:
+            reasons.append("health_below_50")
+        if risk is not None and risk > 1.5:
+            reasons.append("risk_above_1_5")
+        if flag_types & _OVERRIDE_BLOCKING_FLAGS:
+            reasons.append("blocking_growth_quality_flag")
+        if reasons:
+            logger.warning(
+                "pm_override_threshold_unmet", ticker=ticker, reasons=reasons
+            )
+
+    if verdict == "HOLD" and zone == "HIGH":
+        reasons = []
+        if health is not None and health < 80:
+            reasons.append("health_below_80")
+        if growth is not None and growth < 80:
+            reasons.append("growth_below_80")
+        if reasons:
+            logger.warning(
+                "pm_hold_override_threshold_unmet", ticker=ticker, reasons=reasons
+            )
+
+    if verdict == "BUY" and valuation_reliability == "QUARANTINED":
+        logger.warning("pm_buy_on_quarantined_valuation_inputs", ticker=ticker)
+
+
 def create_portfolio_manager_node(
     llm, memory: Any | None, strict_mode: bool = False
 ) -> Callable:
@@ -596,6 +770,7 @@ def create_portfolio_manager_node(
         sentiment = get_valid_artifact_content(state, "sentiment_report")
         news = get_valid_artifact_content(state, "news_report")
         fundamentals = get_valid_artifact_content(state, "fundamentals_report")
+        foreign_language = get_valid_artifact_content(state, "foreign_language_report")
         value_trap = get_valid_artifact_content(state, "value_trap_report")
         inv_plan = get_valid_artifact_content(state, "investment_plan")
         consultant = get_valid_artifact_content(state, "consultant_review")
@@ -616,15 +791,20 @@ NEUTRAL ANALYST (Balanced):
 
         pre_screening_result = state.get("pre_screening_result", "N/A")
         red_flags = list(state.get("red_flags", []))
+        pm_generated_red_flags: list[dict[str, Any]] = []
         ticker = state.get("company_of_interest", "UNKNOWN")
         macro_section = support.macro_section_for(config)
 
         if value_trap:
             value_trap_warnings = RedFlagDetector.detect_value_trap_flags(
-                value_trap, ticker
+                value_trap,
+                ticker,
+                m_and_a_status=extract_data_block_field(fundamentals, "M_AND_A_STATUS"),
+                capital_context=_value_trap_capital_context(fundamentals),
             )
             if value_trap_warnings:
                 red_flags.extend(value_trap_warnings)
+                pm_generated_red_flags.extend(value_trap_warnings)
                 logger.info(
                     "value_trap_warnings_detected",
                     ticker=ticker,
@@ -641,12 +821,30 @@ NEUTRAL ANALYST (Balanced):
             moat_bonuses = RedFlagDetector.detect_moat_flags(fundamentals, ticker)
             if moat_bonuses:
                 red_flags.extend(moat_bonuses)
+                pm_generated_red_flags.extend(moat_bonuses)
                 logger.info(
                     "moat_bonuses_detected",
                     ticker=ticker,
                     bonus_types=[bonus["type"] for bonus in moat_bonuses],
                     total_risk_bonus=sum(
                         bonus.get("risk_penalty", 0) for bonus in moat_bonuses
+                    ),
+                )
+
+            return_quality_flags = (
+                RedFlagDetector.detect_return_quality_fragility_flags(
+                    fundamentals, ticker
+                )
+            )
+            if return_quality_flags:
+                red_flags.extend(return_quality_flags)
+                pm_generated_red_flags.extend(return_quality_flags)
+                logger.info(
+                    "return_quality_fragility_flags_detected",
+                    ticker=ticker,
+                    flag_types=[flag["type"] for flag in return_quality_flags],
+                    total_risk_adjustment=sum(
+                        flag.get("risk_penalty", 0) for flag in return_quality_flags
                     ),
                 )
 
@@ -658,6 +856,7 @@ NEUTRAL ANALYST (Balanced):
             )
             if capital_flags:
                 red_flags.extend(capital_flags)
+                pm_generated_red_flags.extend(capital_flags)
                 logger.info(
                     "capital_efficiency_flags_detected",
                     ticker=ticker,
@@ -667,7 +866,49 @@ NEUTRAL ANALYST (Balanced):
                     ),
                 )
 
+            value_up_bonuses = (
+                RedFlagDetector.detect_shareholder_return_execution_flags(
+                    fundamentals,
+                    value_trap_report=value_trap,
+                    ticker=ticker,
+                )
+            )
+            if value_up_bonuses:
+                red_flags.extend(value_up_bonuses)
+                pm_generated_red_flags.extend(value_up_bonuses)
+                logger.info(
+                    "value_up_executed_bonus_detected",
+                    ticker=ticker,
+                    bonus_types=[bonus["type"] for bonus in value_up_bonuses],
+                    total_risk_bonus=sum(
+                        bonus.get("risk_penalty", 0) for bonus in value_up_bonuses
+                    ),
+                )
+
+        # Scan narrative artifacts (not the structured DATA_BLOCK) for a large,
+        # unverified operating decline that must block BUY pending verification.
+        narrative_text = "\n\n".join(
+            str(part)
+            for part in (news, value_trap, foreign_language)
+            if isinstance(part, str) and part
+        )
+        if narrative_text:
+            material_signal_flags = (
+                RedFlagDetector.detect_material_operating_signal_flags(
+                    narrative_text, ticker
+                )
+            )
+            if material_signal_flags:
+                red_flags.extend(material_signal_flags)
+                pm_generated_red_flags.extend(material_signal_flags)
+                logger.info(
+                    "material_operating_signal_flags_detected",
+                    ticker=ticker,
+                    flag_types=[flag["type"] for flag in material_signal_flags],
+                )
+
         consultant_review = get_valid_artifact_content(state, "consultant_review")
+        consultant_conditions = None
         if consultant_review:
             if not isinstance(consultant_review, str):
                 consultant_review = message_utils.extract_string_content(
@@ -682,6 +923,7 @@ NEUTRAL ANALYST (Balanced):
             )
             if consultant_flags:
                 red_flags.extend(consultant_flags)
+                pm_generated_red_flags.extend(consultant_flags)
                 logger.info(
                     "consultant_flags_detected",
                     ticker=ticker,
@@ -690,6 +932,32 @@ NEUTRAL ANALYST (Balanced):
                         flag.get("risk_penalty", 0) for flag in consultant_flags
                     ),
                 )
+
+        # OCF corroboration: the forensic auditor computes operating cash flow
+        # independently of the Foreign-Language "filing" value the Senior may have
+        # promoted under FILING AUTHORITY. The auditor only completes post-research,
+        # so this cross-check belongs here (not in the pre-screening validator). A
+        # material divergence blocks the "elite cash generation" overclaim without
+        # escalating the risk tally (OCF_SOURCE_DISCREPANCY already carries any
+        # penalty). See KTY.WA 2026-06-27: filing 1.148B vs auditor ~971M. The
+        # auditor content is read through the validity-gated accessor so a failed
+        # auditor artifact is never parsed as a corroborating figure.
+        auditor_report = get_valid_artifact_content(state, "auditor_report") or None
+        ocf_corroboration_flag = RedFlagDetector.detect_ocf_corroboration_flag(
+            RedFlagDetector.parse_ocf_amount(
+                extract_data_block_field(fundamentals, "OPERATING_CASH_FLOW")
+            ),
+            RedFlagDetector.extract_auditor_ocf(auditor_report),
+            ticker,
+        )
+        if ocf_corroboration_flag:
+            red_flags.append(ocf_corroboration_flag)
+            pm_generated_red_flags.append(ocf_corroboration_flag)
+            logger.info(
+                "ocf_corroboration_flag_detected",
+                ticker=ticker,
+                detail=ocf_corroboration_flag["detail"],
+            )
 
         logger.info(
             "pm_inputs",
@@ -758,16 +1026,23 @@ NEUTRAL ANALYST (Balanced):
         # WEIGHTED_IV; that hint is only useful if PM actually sees the
         # values, which is exactly what this section provides.
         from src.charts.extractors.valuation import (
-            extract_valuation_scenarios,
-            resolve_eps_ttm,
+            extract_valuation_scenarios_for_fundamentals,
+            format_iv,
+            parse_numeric_field,
+            scenario_upside_metrics,
         )
 
         valuation_params = get_valid_artifact_content(state, "valuation_params")
         scenarios = None
+        # Hoisted to function scope so the post-PM weak-asymmetry qualifier can
+        # reuse them (they are otherwise bound only inside the price branch).
+        weighted_upside: float | None = None
+        downside_probability: float | None = None
         if valuation_params and fundamentals:
-            eps_ttm = resolve_eps_ttm(fundamentals)
             try:
-                scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
+                scenarios = extract_valuation_scenarios_for_fundamentals(
+                    valuation_params, fundamentals
+                )
             except Exception as exc:  # pragma: no cover — defense-in-depth
                 logger.warning(
                     "pm_scenario_extraction_failed",
@@ -776,35 +1051,115 @@ NEUTRAL ANALYST (Balanced):
                 )
                 scenarios = None
         if scenarios is not None:
+            current_price = parse_numeric_field(
+                extract_data_block_field(fundamentals, "CURRENT_PRICE")
+            )
+            weighted_upside_text = ""
+            downside_probability_text = ""
+            upside_metrics = scenario_upside_metrics(scenarios, current_price)
+            if upside_metrics is not None:
+                weighted_upside, downside_probability = upside_metrics
+                weighted_upside_text = (
+                    f", implied upside {weighted_upside * 100:.1f}% vs current price "
+                    f"{format_iv(current_price)}"
+                )
+                downside_probability_text = (
+                    f", downside probability {downside_probability:.0f}%"
+                )
             valuation_section = (
                 "\n\nVALUATION SCENARIOS (Python-computed IVs from "
                 f"{scenarios.methodology}; sufficiency {scenarios.data_sufficiency}; "
+                f"earnings basis {scenarios.earnings_basis}; "
                 "anchor stop-loss to BEAR_IV, reference WEIGHTED_IV in rationale):\n"
-                f"- BEAR_IV: {scenarios.bear_iv} "
+                f"- BEAR_IV: {format_iv(scenarios.bear_iv)} "
                 f"({scenarios.bear.probability:.0f}%) — {scenarios.bear.drivers}\n"
-                f"- BASE_IV: {scenarios.base_iv} "
+                f"- BASE_IV: {format_iv(scenarios.base_iv)} "
                 f"({scenarios.base.probability:.0f}%) — {scenarios.base.drivers}\n"
-                f"- BULL_IV: {scenarios.bull_iv} "
+                f"- BULL_IV: {format_iv(scenarios.bull_iv)} "
                 f"({scenarios.bull.probability:.0f}%) — {scenarios.bull.drivers}\n"
-                f"- WEIGHTED_IV: {scenarios.weighted_iv}"
+                f"- WEIGHTED_IV: {format_iv(scenarios.weighted_iv)}{weighted_upside_text}"
+                f"{downside_probability_text}"
             )
+            if scenarios.normalization_required and not scenarios.normalized_earnings:
+                valuation_section += (
+                    "\n- NORMALIZATION WARNING: Earnings normalization was flagged, "
+                    "but no lower forward EPS baseline was available; treat "
+                    "WEIGHTED_IV as conditional, not normalized fair value."
+                )
         else:
             valuation_section = ""
 
-        red_flag_section = (
-            "\n\nRED-FLAG PRE-SCREENING:\n"
-            f"Pre-Screening Result: {pre_screening_result}"
+        supplemental_flags_section = format_pm_context_flags(
+            fundamentals,
+            market,
+            news,
+            foreign_language,
+            inv_plan,
+            apac,
+            consultant,
         )
-        if red_flags:
-            red_flag_list = "\n".join(
-                [
-                    f"  - {flag.get('type', 'Unknown')}: {flag.get('detail', 'No detail')}"
-                    for flag in red_flags
-                ]
+
+        # A large drawdown the news search could not attribute is risk, not noise.
+        # Same report set as format_pm_context_flags above so the classification
+        # the PM narrates and the one that carries the penalty never diverge.
+        drawdown_classification = drawdown_flag(
+            fundamentals,
+            market,
+            news,
+            foreign_language,
+            inv_plan,
+            apac,
+            consultant,
+        )
+        drawdown_gap_flags = RedFlagDetector.detect_unexplained_drawdown_flags(
+            drawdown_classification, news, ticker
+        )
+        if drawdown_gap_flags:
+            red_flags.extend(drawdown_gap_flags)
+            pm_generated_red_flags.extend(drawdown_gap_flags)
+            logger.info(
+                "drawdown_gap_flags_detected",
+                ticker=ticker,
+                classification=drawdown_classification,
+                total_risk_penalty=sum(
+                    flag.get("risk_penalty", 0) for flag in drawdown_gap_flags
+                ),
             )
-            red_flag_section += f"\nRed Flags/Warnings Detected:\n{red_flag_list}"
-        else:
-            red_flag_section += "\nRed Flags Detected: None"
+
+        # Surface distrusted valuation inputs to the PM as a zero-penalty (data-quality)
+        # warning. Assigned unconditionally so it is in scope for the discipline log below.
+        valuation_reliability = (
+            extract_data_block_field(fundamentals, "VALUATION_INPUT_RELIABILITY") or ""
+        ).upper()
+        if valuation_reliability == "QUARANTINED":
+            valuation_flag = {
+                "type": "VALUATION_INPUT_QUARANTINED",
+                "severity": "WARNING",
+                "detail": (
+                    "Forward/trailing valuation multiples were quarantined by "
+                    "structured data checks; they cannot independently support a BUY."
+                ),
+                "action": "REVIEW",
+                "risk_penalty": 0.0,
+                "rationale": (
+                    "Distrusted valuation inputs — verify before using as BUY support."
+                ),
+            }
+            red_flags.append(valuation_flag)
+            pm_generated_red_flags.append(valuation_flag)
+
+        red_flags = RedFlagDetector.reconcile_ocf_period_mismatch_flags(
+            red_flags,
+            fundamentals_report=fundamentals,
+            consultant_review=consultant_review,
+            auditor_report=auditor_report,
+            ticker=ticker,
+            consultant_conditions=consultant_conditions,
+        )
+
+        red_flag_section, code_risk_subtotal = support.format_red_flag_section(
+            pre_screening_result, red_flags
+        )
 
         all_context = f"""MARKET ANALYST REPORT:
 {support.summarize_for_pm(market, "market", 2500) if market else "N/A"}
@@ -818,11 +1173,14 @@ NEWS ANALYST REPORT:
 FUNDAMENTALS ANALYST REPORT:
 {support.summarize_for_pm(fundamentals, "fundamentals", 4000) if fundamentals else "N/A"}{attribution_table}{conflict_table}
 
+FOREIGN LANGUAGE / NATIVE-SOURCE ANALYST REPORT:
+{support.summarize_for_pm(foreign_language, "foreign_language", 2500) if foreign_language else "N/A"}
+
 VALUE TRAP ANALYSIS:
 {support.extract_value_trap_verdict(value_trap)}{support.summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}{macro_section}
 
 RESEARCH MANAGER RECOMMENDATION:
-{support.summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{apac_section}{consultant_section}{kill_criteria_section}{valuation_section}
+{support.summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{apac_section}{consultant_section}{kill_criteria_section}{valuation_section}{supplemental_flags_section}
 
 TRADER PROPOSAL:
 {support.summarize_for_pm(trader, "trader", 2000) if trader else "N/A"}
@@ -930,29 +1288,83 @@ RISK TEAM DEBATE:
                     fallback_content=content_str,
                 )
 
-            from src.charts.extractors.pm_block import extract_verdict_from_text
-
+            content_str, verdict_floored = maybe_floor_verdict_to_hold(
+                content_str,
+                fundamentals_report=fundamentals,
+                red_flags=red_flags,
+                code_subtotal=code_risk_subtotal,
+                pre_screening_result=pre_screening_result,
+                ticker=ticker,
+            )
+            content_str, buy_demoted = maybe_demote_buy_on_blocking_flags(
+                content_str,
+                red_flags=red_flags,
+                ticker=ticker,
+            )
+            pm_context = support.get_context_from_config(config)
+            quick_mode = bool(getattr(pm_context, "quick_mode", False))
+            content_str, quick_buy_qualified = maybe_qualify_buy_in_quick_mode(
+                content_str,
+                quick_mode=quick_mode,
+                ticker=ticker,
+            )
+            content_str, weak_asymmetry_qualified = maybe_qualify_weak_asymmetry_buy(
+                content_str,
+                weighted_upside=weighted_upside,
+                downside_probability=downside_probability,
+                ticker=ticker,
+            )
+            content_str, pm_claim_caveats = audit_pm_claims(
+                content_str,
+                fundamentals=fundamentals,
+                valuation_params=get_valid_artifact_content(state, "valuation_params"),
+                ticker=ticker,
+            )
+            # Reconcile sizing (token + prose) against the FINAL verdict, i.e. after
+            # any floor/demote rewrite above — so a BUY→HOLD demotion cannot leave a
+            # stale nonzero POSITION_SIZE or "Recommended Position Size" prose.
             content_str = _normalize_pm_block_contract(content_str)
+            _log_risk_tally_reconciliation(content_str, code_risk_subtotal, ticker)
+            _log_pm_discipline_checks(
+                content_str, red_flags, valuation_reliability, ticker
+            )
             present_inputs, missing_inputs = _present_pm_inputs(state)
             pm_metadata = pm_verdict_metadata_from_text(content_str)
+            pm_verdict_recovered = False
+            if pm_metadata.verdict == "UNPARSEABLE":
+                recovered_metadata = await _recover_pm_verdict_metadata(
+                    content_str, llm
+                )
+                if recovered_metadata is not None:
+                    pm_metadata = recovered_metadata
+                    pm_verdict_recovered = True
             logger.info(
                 "final_verdict_formed",
                 ticker=ticker,
-                verdict=extract_verdict_from_text(content_str) or "UNPARSEABLE",
+                verdict=pm_metadata.verdict,
+                pm_verdict_recovered=pm_verdict_recovered,
+                verdict_floored_to_hold=verdict_floored,
+                buy_demoted_on_blocking_flags=buy_demoted,
+                quick_buy_qualified=quick_buy_qualified,
+                weak_asymmetry_qualified=weak_asymmetry_qualified,
+                pm_claim_caveats=len(pm_claim_caveats),
                 pm_verdict_metadata=pm_metadata.model_dump(exclude_none=True),
                 pre_screening_result=state.get("pre_screening_result"),
                 direct_pm_inputs_present=present_inputs,
                 direct_pm_inputs_missing=missing_inputs,
                 debate_rounds=(state.get("investment_debate_state") or {}).get(
                     "count", 0
-                ),
+                )
+                // 2,
                 strict_mode=strict_mode,
             )
-            return success_artifact(
+            result = success_artifact(
                 "final_trade_decision",
                 cap_state_value(content_str, "final_trade_decision"),
                 provider=support.infer_provider_name(llm),
             )
+            result["red_flags"] = pm_generated_red_flags
+            return result
         except Exception as exc:
             logger.error(
                 "pm_error",
@@ -1131,7 +1543,14 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                             value_trap_report
                         )
                     vt_warnings = RedFlagDetector.detect_value_trap_flags(
-                        value_trap_report, ticker
+                        value_trap_report,
+                        ticker,
+                        m_and_a_status=extract_data_block_field(
+                            fundamentals_report, "M_AND_A_STATUS"
+                        ),
+                        capital_context=_value_trap_capital_context(
+                            fundamentals_report
+                        ),
                     )
                     if vt_warnings:
                         red_flags.extend(vt_warnings)

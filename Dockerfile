@@ -20,11 +20,17 @@ FROM python:${PYTHON_VERSION}-slim AS builder
 
 ARG POETRY_VERSION=2.1.1
 
-# Install system dependencies needed for building Python packages
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    build-essential \
-    libsqlite3-dev \
+# Install system dependencies needed for building Python packages.
+# `apt-get upgrade` patches known OS-package CVEs in the base image (the Snyk
+# base-image finding) — it pulls Debian's security-fixed versions on every
+# build, which is why the floating `-slim` tag is kept rather than pinned to a
+# (soon-stale) digest.
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        build-essential \
+        libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Poetry using official installer
@@ -50,10 +56,14 @@ RUN poetry install --only main --no-root --no-interaction --no-ansi
 # ────────────────────────────────────────────────────────────────────────────
 FROM python:${PYTHON_VERSION}-slim AS runtime
 
-# Install only runtime dependencies (SQLite for ChromaDB + bash for scripts)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash \
-    libsqlite3-0 \
+# Install only runtime dependencies (SQLite for ChromaDB + bash for scripts).
+# `apt-get upgrade` patches base-image OS-package CVEs in the shipped runtime
+# image (this is the layer Snyk scans) — see the builder-stage note above.
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security (don't run as root in production)

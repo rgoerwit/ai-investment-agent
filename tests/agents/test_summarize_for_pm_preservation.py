@@ -27,6 +27,22 @@ def test_kill_criteria_block_preserved_after_truncation() -> None:
     assert "[...summarized...]" in out
 
 
+def test_glued_data_block_start_preserved_after_truncation() -> None:
+    data_block = (
+        "Prior sentence ends here.### --- START DATA_BLOCK ---\n"
+        "SECTOR: Energy\n"
+        "ADJUSTED_HEALTH_SCORE: 75%\n"
+        "### --- END DATA_BLOCK ---"
+    )
+    report = _long_report(data_block)
+
+    out = summarize_for_pm(report, "fundamentals", max_chars=3000)
+
+    assert "### --- START DATA_BLOCK ---" in out
+    assert "SECTOR: Energy" in out
+    assert "[...summarized...]" in out
+
+
 def test_valuation_scenarios_block_preserved() -> None:
     scenarios = (
         "### --- START VALUATION_SCENARIOS ---\n"
@@ -55,9 +71,9 @@ def test_variant_perception_section_preserved() -> None:
 
 def test_multiple_resolution_blocks_preserved_together() -> None:
     blocks = [
-        "### --- START APAC_RESOLUTION ---\n- VERDICT: CONFIRMED_RISK\n### --- END APAC_RESOLUTION ---",
-        "### --- START AUDITOR_RESOLUTION ---\n- VERDICT: REJECTED\n### --- END AUDITOR_RESOLUTION ---",
-        "### --- START CONSULTANT_RESOLUTION ---\n- VERDICT: UNVERIFIABLE\n### --- END CONSULTANT_RESOLUTION ---",
+        "APAC_RESOLUTION:\n- VERDICT: CONFIRMED_RISK",
+        "AUDITOR_RESOLUTION:\n- VERDICT: REJECTED",
+        "CONSULTANT_RESOLUTION:\n- VERDICT: UNVERIFIABLE",
     ]
     report = _long_report(*blocks)
     out = summarize_for_pm(report, "pm", max_chars=3000)

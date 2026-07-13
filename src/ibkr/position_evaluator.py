@@ -258,6 +258,28 @@ def evaluate_positions(
                 )
                 continue
 
+            if (
+                verdict_upper == "DO_NOT_INITIATE"
+                and isinstance(analysis.health_adj, int | float)
+                and isinstance(analysis.growth_adj, int | float)
+                and analysis.health_adj == 0
+                and analysis.growth_adj == 0
+                and analysis.current_price is None
+            ):
+                siblings = _same_base_sibling_keys(analysis.ticker, analyses)
+                items.append(
+                    ReconciliationItem(
+                        ticker=item_ticker,
+                        action="REVIEW",
+                        reason=_data_vacuum_review_reason(analysis, siblings),
+                        urgency="HIGH",
+                        ibkr_position=pos,
+                        analysis=analysis,
+                        sell_type="DATA_QUALITY_REVIEW",
+                    )
+                )
+                continue
+
             items.append(
                 ReconciliationItem(
                     ticker=item_ticker,
@@ -285,13 +307,27 @@ def evaluate_positions(
         )
 
         target_hit = check_target_hit(analysis, current_price)
+        # A profit-take is the disciplined EXIT when a winner reaches its target or
+        # posts a large gain — both of which necessarily push price >drift_threshold
+        # above entry. check_staleness flags large drift in *either* direction, so the
+        # very upward move that earns the profit-take would otherwise null it (the
+        # capital-allocation SELL was dead in production for any target >threshold above
+        # entry). Gate the profit-take on age/macro staleness only — an exit reacts to
+        # favorable drift, it is not invalidated by it.
+        non_drift_stale, _ = check_staleness(
+            analysis,
+            current_price,
+            max_age_days,
+            float("inf"),
+            structural_macro_events=structural_macro_events,
+        )
         profit_take = (
             classify_profit_take(
                 analysis=analysis,
                 position=pos,
                 target_hit=target_hit,
             )
-            if not is_stale
+            if not non_drift_stale
             else None
         )
         if profit_take and profit_take.qualifies:
@@ -381,6 +417,9 @@ def evaluate_positions(
             if (
                 shortfall_pct > underweight_threshold_pct
                 and verdict_upper == "BUY"
+                # A quick-mode BUY is a screening candidate — it must not drive an ADD
+                # to an existing position; the position holds until a full re-run.
+                and not getattr(analysis, "is_quick_mode", False)
                 and remaining_cash > 0
             ):
                 target_value_usd = portfolio.portfolio_value_usd * (

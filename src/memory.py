@@ -13,6 +13,7 @@ allowing agents to learn from past analyses and decisions.
 """
 
 import re
+import threading
 from datetime import datetime
 from typing import Any
 
@@ -25,6 +26,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from src.async_utils import run_with_hard_timeout
 from src.config import config
 from src.error_safety import (
     redact_sensitive_text,
@@ -79,6 +81,12 @@ class FinancialSituationMemory:
 
     _EMBEDDING_MODEL = "gemini-embedding-001"
     _EMBEDDING_DIMENSION = 768
+    # google-genai passes timeout=None per-request when HttpOptions.timeout is
+    # unset, which in httpx DISABLES all timeouts (overriding even the client
+    # default) — an unreachable endpoint blocks the SSL read forever (hung the
+    # 2026-07-11 full-suite pytest run). Both embedding paths are bounded here.
+    _HEALTHCHECK_TIMEOUT_SECONDS = 15.0
+    _EMBEDDING_CALL_TIMEOUT_SECONDS = 30.0
     _shared_embeddings: GoogleGenerativeAIEmbeddings | None = None
     _shared_embeddings_available: bool = False
     _shared_embeddings_key: tuple[str | None, str, int] | None = None
@@ -209,7 +217,35 @@ class FinancialSituationMemory:
             }
             embeddings = GoogleGenerativeAIEmbeddings(**embedding_kwargs)
             try:
-                test_embedding = embeddings.embed_query("initialization test")
+                # Daemon thread + join(timeout): a hung probe is orphaned (it
+                # cannot block process exit) and lands in the existing
+                # healthcheck-failure branch below as a TimeoutError.
+                result_box: list[list[float]] = []
+                error_box: list[BaseException] = []
+
+                def _probe(
+                    emb: GoogleGenerativeAIEmbeddings = embeddings,
+                ) -> None:
+                    try:
+                        result_box.append(emb.embed_query("initialization test"))
+                    except BaseException as probe_exc:  # noqa: BLE001
+                        error_box.append(probe_exc)
+
+                probe_thread = threading.Thread(
+                    target=_probe,
+                    name="memory-embeddings-healthcheck",
+                    daemon=True,
+                )
+                probe_thread.start()
+                probe_thread.join(timeout=cls._HEALTHCHECK_TIMEOUT_SECONDS)
+                if probe_thread.is_alive():
+                    raise TimeoutError(
+                        "embeddings healthcheck exceeded "
+                        f"{cls._HEALTHCHECK_TIMEOUT_SECONDS:.0f}s"
+                    )
+                if error_box:
+                    raise error_box[0]
+                test_embedding = result_box[0] if result_box else None
                 if not test_embedding or len(test_embedding) == 0:
                     raise ValueError("Embedding test returned empty result")
                 cls._shared_embeddings = embeddings
@@ -313,7 +349,11 @@ class FinancialSituationMemory:
             from src.llms import GLOBAL_RATE_LIMITER
 
             async with GLOBAL_RATE_LIMITER:
-                embedding = await self.embeddings.aembed_query(truncated_text)
+                embedding = await run_with_hard_timeout(
+                    self.embeddings.aembed_query(truncated_text),
+                    timeout=self._EMBEDDING_CALL_TIMEOUT_SECONDS,
+                    label=f"memory_embedding:{self.name}",
+                )
         except Exception as exc:
             # Fallback if rate limiter not available or incompatible (e.g., in tests)
             # Catch all exceptions to handle import errors, attribute errors, type errors, etc.
@@ -341,7 +381,11 @@ class FinancialSituationMemory:
                 fallback="direct_embed_query",
                 exc_info=True,
             )
-            embedding = await self.embeddings.aembed_query(truncated_text)
+            embedding = await run_with_hard_timeout(
+                self.embeddings.aembed_query(truncated_text),
+                timeout=self._EMBEDDING_CALL_TIMEOUT_SECONDS,
+                label=f"memory_embedding_fallback:{self.name}",
+            )
 
         if not embedding or len(embedding) == 0:
             raise ValueError("Empty embedding returned")
@@ -1279,25 +1323,42 @@ class MacroEventsStore:
                 }
             )
             if existing and existing.get("ids"):
-                # Re-detection of an ongoing event: extend the stored expiry
-                # instead of dropping the signal, so the macro override keeps
-                # rolling forward while the situation persists.
+                # Re-detection of an ongoing event: refresh the stored
+                # characterization AND extend the expiry, instead of dropping the
+                # signal. Classification can change as the event develops (e.g.
+                # COMMODITY_SHOCK -> CONTAGION_SPREAD); without refreshing it the
+                # alert banner (which reads the stored event) would surface a
+                # stale event_type while the log shows the freshly-classified one.
                 new_expiry_ts = _date_to_int(event.expiry)
                 for event_id, meta in zip(
                     existing["ids"], existing.get("metadatas") or [], strict=False
                 ):
+                    meta = dict(meta)
+                    meta["impact"] = event.impact
+                    meta["event_type"] = event.event_type
+                    meta["scope"] = event.scope
+                    meta["primary_region"] = event.primary_region
+                    meta["primary_sector"] = event.primary_sector
+                    meta["severity"] = event.severity
+                    meta["correlation_pct"] = float(event.correlation_pct)
+                    meta["peak_count"] = int(event.peak_count)
+                    meta["total_held"] = int(event.total_held)
+                    meta["forced_reanalysis"] = event.forced_reanalysis
+                    meta["news_headline"] = event.news_headline[:120]
+                    meta["news_detail"] = event.news_detail[:300]
+                    meta["detected_date"] = event.detected_date
+                    # Extend the override window only when the new expiry is later
+                    # — never shorten a live window.
                     if new_expiry_ts > int(meta.get("expiry_ts", 0)):
-                        meta = dict(meta)
                         meta["expiry"] = event.expiry
                         meta["expiry_ts"] = new_expiry_ts
-                        meta["detected_date"] = event.detected_date
-                        self.collection.update(ids=[event_id], metadatas=[meta])
-                        logger.info(
-                            "macro_event_expiry_extended",
-                            event_date=meta.get("event_date"),
-                            new_expiry=event.expiry,
-                        )
-                logger.debug("macro_event_dedup_skipped", event_date=event.event_date)
+                    self.collection.update(ids=[event_id], metadatas=[meta])
+                logger.info(
+                    "macro_event_dedup_refreshed",
+                    event_date=event.event_date,
+                    event_type=event.event_type,
+                    new_expiry=event.expiry,
+                )
                 return False
 
             event_id = f"macro_{event.event_date}_{event.detected_date}"

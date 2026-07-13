@@ -7,6 +7,7 @@ while matching the author's distinctive voice from writing samples.
 
 import json
 import random
+import re
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,7 +25,7 @@ from src.article_audit import (
 )
 from src.config import config, get_env_value
 from src.error_safety import redact_sensitive_text, summarize_exception
-from src.llms import create_deep_thinking_llm, create_writer_llm
+from src.llms import create_writer_llm, writer_fallback_chain
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import classify_failure, get_model_name, infer_provider
 from src.runtime_services import get_current_tool_service
@@ -34,6 +35,12 @@ from src.tooling.runtime import ToolInvocation
 
 # Maximum characters for fact-check context (controls token usage)
 MAX_FACT_CHECK_CHARS = 1500
+
+# When a distilled style profile is present, it replaces the full
+# char-budgeted raw-sample set with itself + a small number of raw
+# samples for texture (see ArticleWriter._load_voice_samples).
+STYLE_PROFILE_FILENAME = "style_profile.md"
+RAW_SAMPLES_WHEN_PROFILE_PRESENT = 3
 
 logger = structlog.get_logger(__name__)
 
@@ -99,6 +106,55 @@ class EditorReviewResult(BaseModel):
     confidence: float = 0.5
 
 
+# Fenced meta block the writer appends during revisions (CORRECTED/CONTESTED
+# lines). The editor reads it for contest adjudication; it must never survive
+# into the published article.
+_EDITOR_NOTES_PATTERN = re.compile(r"\n*```EDITOR_NOTES\b.*?(?:```|\Z)\s*", re.DOTALL)
+
+# Failure sentinels returned by fetch_reference_content (src/editor_tools.py).
+# A URL whose fetch produced one of these must not survive in References.
+_REFERENCE_FAILURE_PREFIXES = ("FETCH_FAILED:", "INSUFFICIENT_CONTENT:", "INVALID_URL:")
+
+
+def _strip_editor_notes(article: str) -> str:
+    """Remove the fenced EDITOR_NOTES block from a (revised) article."""
+    if not article or "```EDITOR_NOTES" not in article:
+        return article
+    stripped = _EDITOR_NOTES_PATTERN.sub("", article)
+    logger.info(
+        "stripped_editor_notes_block",
+        removed_chars=len(article) - len(stripped),
+    )
+    return stripped.rstrip() + "\n"
+
+
+def _enforce_verdict_consistency(feedback: dict) -> dict:
+    """Coerce APPROVED to REVISE when the editor's own findings contradict it.
+
+    The LLM applies the decision rules in the prompt, but nothing stops it from
+    listing factual errors (or broken references) and still self-approving.
+    The verdict must follow the findings, so enforce that in code.
+    """
+    if not isinstance(feedback, dict) or feedback.get("verdict") != "APPROVED":
+        return feedback
+
+    reference_checks = feedback.get("reference_checks") or []
+    broken_reference = any(
+        isinstance(check, dict)
+        and str(check.get("status", "")).lower() in ("broken", "unsupported")
+        for check in reference_checks
+    )
+    if feedback.get("factual_errors") or broken_reference:
+        logger.warning(
+            "editor_verdict_overridden",
+            reason="findings_present",
+            num_factual_errors=len(feedback.get("factual_errors") or []),
+            broken_reference=broken_reference,
+        )
+        feedback["verdict"] = "REVISE"
+    return feedback
+
+
 def _review_response_for_citation_errors(errors: list[dict[str, str]]) -> dict:
     feedback = EditorReviewResult(
         verdict="REVISE",
@@ -143,9 +199,11 @@ def _extract_text_from_response(response) -> str:
         "plain string"
     Gemini with thinking:
         [{"text": "..."}, ...]  (no type field)
+    OpenAI responses/v1 (writer fallback tier):
+        [{"type": "reasoning", ...}, {"type": "text", "text": "..."}]
 
     Returns:
-        Concatenated text content, excluding thinking/redacted blocks.
+        Concatenated text content, excluding thinking/reasoning/redacted blocks.
     """
     content = response.content
 
@@ -161,7 +219,7 @@ def _extract_text_from_response(response) -> str:
             text_parts.append(block)
         elif isinstance(block, dict):
             block_type = block.get("type", "")
-            if block_type in ("thinking", "redacted_thinking"):
+            if block_type in ("thinking", "redacted_thinking", "reasoning"):
                 continue
             if block_type == "text":
                 text_parts.append(block["text"])
@@ -221,6 +279,17 @@ class ArticleWriter:
 
         self.prompt_config = self._load_prompt_config()
         self.llm = self._create_llm()
+        # "Fell back" = not backed by the configured Claude writer, whether
+        # that happened at construction (no CLAUDE_KEY → fallback chain) or
+        # later at runtime — this stamp feeds run_summary.article_writer_fell_back,
+        # the surface operators check before judging article voice.
+        self.writer_fell_back = (
+            infer_provider(
+                model_name=get_model_name(self.llm),
+                class_name=type(self.llm).__name__,
+            )
+            != "anthropic"
+        )
 
         logger.info(
             "articlewriter_initialized",
@@ -275,25 +344,19 @@ class ArticleWriter:
     def _create_llm(self):
         """Create the LLM for article generation.
 
-        Uses Claude (Anthropic) when CLAUDE_KEY is configured,
-        falls back to Gemini otherwise. Model selection and
-        thinking configuration are handled by create_writer_llm().
+        Uses Claude (Anthropic) when CLAUDE_KEY is configured; otherwise
+        create_writer_llm() resolves the first available tier of the writer
+        fallback chain (EDITOR_MODEL/OpenAI, then DEEP_MODEL/Gemini floor).
 
-        Note: use_quick_model in model_config is ignored — the writer
-        always uses WRITER_MODEL (Claude) or DEEP_MODEL (Gemini fallback).
-        To use a cheaper Claude model, set WRITER_MODEL=claude-haiku-4-5.
+        Note: use_quick_model in model_config is ignored — the writer model
+        is --quick-invariant. To use a cheaper Claude model, set
+        WRITER_MODEL=claude-haiku-4-5.
         """
         metadata = self.prompt_config.get("metadata", {})
         model_config = metadata.get("model_config", {})
         temperature = model_config.get("temperature", 0.7)
 
-        logger.info(
-            "creating_articlewriter_llm",
-            provider="claude" if config.get_claude_api_key() else "gemini-fallback",
-            model=config.writer_model,
-        )
-
-        return create_writer_llm(
+        llm = create_writer_llm(
             temperature=temperature,
             timeout=config.api_timeout,
             max_retries=get_runtime_config(config).api_retry_attempts,
@@ -302,6 +365,33 @@ class ArticleWriter:
                 *self._callbacks,
             ],
         )
+        # Log the instance actually constructed — the no-Claude-key path can
+        # resolve to any chain tier, so a pre-computed label would lie.
+        model_name = get_model_name(llm)
+        logger.info(
+            "creating_articlewriter_llm",
+            provider=infer_provider(
+                model_name=model_name, class_name=type(llm).__name__
+            ),
+            model=model_name,
+        )
+        return llm
+
+    @property
+    def current_model_name(self) -> str:
+        """Model actually backing the writer (reflects any fallback swap)."""
+        return get_model_name(self.llm) or ""
+
+    def _fallback_callbacks(self) -> list[BaseCallbackHandler]:
+        """Tracking callbacks for fallback tiers — same as the primary writer.
+
+        Fallback tokens must be attributed to the run, not silently free
+        (the pre-chain single-hop fallback was built with no callbacks).
+        """
+        return [
+            TokenTrackingCallback("Article Writer", get_tracker()),
+            *self._callbacks,
+        ]
 
     def _invoke_config(self, *, workflow: str) -> dict[str, object]:
         return {
@@ -315,6 +405,14 @@ class ArticleWriter:
     def _load_voice_samples(self, max_chars: int | None = None) -> str:
         """
         Load writing samples to establish author voice.
+
+        If ``writing_samples/style_profile.md`` exists (a distilled voice
+        reference), it is always included first and the raw-sample pool is
+        capped at RAW_SAMPLES_WHEN_PROFILE_PRESENT files instead of being
+        loaded up to the full char budget — the profile already carries the
+        distilled signal, so more raw text is diminishing texture, not more
+        voice fidelity. Falls back to the full char-budgeted set when no
+        profile is present.
 
         Args:
             max_chars: Maximum total characters to include (default from config)
@@ -333,20 +431,33 @@ class ArticleWriter:
             )
             return ""
 
-        samples = []
-        total_chars = 0
-
         # Load .txt and .md files, randomized for variety across runs
-        sample_files = list(self.samples_dir.glob("*.txt")) + list(
+        all_files = list(self.samples_dir.glob("*.txt")) + list(
             self.samples_dir.glob("*.md")
         )
-        random.shuffle(sample_files)
 
-        if not sample_files:
+        if not all_files:
             logger.warning("no_writing_samples_found", path=str(self.samples_dir))
             return ""
 
-        for sample_file in sample_files:
+        profile_path = self.samples_dir / STYLE_PROFILE_FILENAME
+        style_profile_used = profile_path in all_files
+        raw_files = [f for f in all_files if f != profile_path]
+        random.shuffle(raw_files)
+
+        if style_profile_used:
+            ordered_files = [
+                profile_path,
+                *raw_files[:RAW_SAMPLES_WHEN_PROFILE_PRESENT],
+            ]
+        else:
+            ordered_files = raw_files
+
+        samples = []
+        total_chars = 0
+        loaded_files: list[str] = []
+
+        for sample_file in ordered_files:
             try:
                 content = sample_file.read_text(encoding="utf-8")
 
@@ -354,7 +465,15 @@ class ArticleWriter:
                 if len(content) > max_per_file:
                     content = content[:max_per_file] + "\n[...truncated]"
 
-                samples.append(f"--- Sample: {sample_file.name} ---\n{content}")
+                if sample_file == profile_path:
+                    header = (
+                        "=== DISTILLED STYLE PROFILE ===\n"
+                        "(guidance about the voice — not prose to imitate verbatim)"
+                    )
+                else:
+                    header = f"--- Writing Sample: {sample_file.name} (imitate this prose) ---"
+                samples.append(f"{header}\n{content}")
+                loaded_files.append(sample_file.name)
                 total_chars += len(content)
 
                 # Check limit AFTER adding - ensures last file is included
@@ -372,18 +491,34 @@ class ArticleWriter:
             "loaded_writing_samples",
             count=len(samples),
             total_chars=total_chars,
-            files=[f.name for f in sample_files[: len(samples)]],
+            files=loaded_files,
+            style_profile_used=style_profile_used,
         )
 
         return "\n\n".join(samples)
 
-    def _format_image_manifest(self, ticker: str, trade_date: str) -> str:
+    def load_voice_samples(self, max_chars: int | None = None) -> str:
+        """Public accessor so the editor can receive the same writing samples."""
+        return self._load_voice_samples(max_chars=max_chars)
+
+    def _format_image_manifest(
+        self,
+        ticker: str,
+        trade_date: str,
+        chart_paths: dict[str, str] | None = None,
+    ) -> str:
         """
         Create image manifest with URLs for available charts.
 
         Args:
             ticker: Stock ticker (e.g., "0005.HK")
             trade_date: Analysis date (e.g., "2026-01-01")
+            chart_paths: Charts the current run actually generated (graph state
+                ``chart_paths``). A non-empty dict restricts the manifest to
+                those files, so a chart the run suppressed (e.g. football field
+                on DO_NOT_INITIATE/SELL) cannot resurface via a stale image
+                from a previous run of the same ticker. None/empty follows the
+                legacy disk glob (mirrors report_generator's convention).
 
         Returns:
             Formatted manifest with image descriptions and URLs
@@ -391,6 +526,10 @@ class ArticleWriter:
         if not self.images_dir.exists():
             logger.warning("images_directory_not_found", path=str(self.images_dir))
             return "No charts available."
+
+        allowed_names = (
+            {Path(path).name for path in chart_paths.values()} if chart_paths else None
+        )
 
         # Normalize ticker for filename matching (dots become underscores or dashes)
         safe_ticker_underscore = ticker.replace(".", "_").replace("/", "_")
@@ -417,6 +556,8 @@ class ArticleWriter:
         for pattern in patterns:
             matches = list(self.images_dir.glob(pattern))
             for match in matches:
+                if allowed_names is not None and match.name not in allowed_names:
+                    continue
                 if match not in [img for img, _, _ in found_images]:
                     # Determine chart type
                     if "football_field" in match.name:
@@ -539,7 +680,14 @@ class ArticleWriter:
             return ""
 
     def _invoke_with_fallback(self, messages: list):
-        """Invoke LLM with automatic Claude → Gemini fallback on API errors."""
+        """Invoke the writer LLM, walking the fallback chain on Claude API errors.
+
+        Chain order (from writer_fallback_chain): EDITOR_MODEL (OpenAI, when
+        lib+key+ENABLE_CONSULTANT allow) → DEEP_MODEL (Gemini floor). First
+        tier to succeed is cached on self.llm; non-Anthropic primary errors
+        propagate without falling back; if every tier fails, the last
+        exception is raised.
+        """
         primary_model = get_model_name(self.llm)
         primary_provider = infer_provider(
             model_name=primary_model, class_name=type(self.llm).__name__
@@ -609,78 +757,86 @@ class ArticleWriter:
                 raise  # Not a Claude error — propagate
 
             logger.warning(
-                "claude_writer_failed_falling_back_to_gemini",
+                "claude_writer_primary_failed",
                 failure_kind=primary_failure.kind,
                 host=primary_failure.host,
                 error_type=primary_failure.error_type,
                 root_cause_type=primary_failure.root_cause_type,
                 reason=primary_failure.message,
             )
-            fallback_llm = create_deep_thinking_llm()
-            self.llm = fallback_llm  # Cache for subsequent calls (e.g., retry)
-            fallback_model = get_model_name(fallback_llm)
-            fallback_provider = infer_provider(
-                model_name=fallback_model, class_name=type(fallback_llm).__name__
-            )
-            try:
-                logger.info(
-                    "llm_call_start",
-                    context="article_writer_fallback",
-                    provider=fallback_provider,
-                    model=fallback_model,
-                    runnable_class=type(fallback_llm).__name__,
-                    max_attempts=1,
-                )
-                response = fallback_llm.invoke(
-                    messages,
-                    config=cast(Any, self._invoke_config(workflow="article_fallback")),
-                )
-                logger.info(
-                    "llm_call_success",
-                    context="article_writer_fallback",
-                    provider=fallback_provider,
-                    model=fallback_model,
-                    runnable_class=type(fallback_llm).__name__,
-                    attempt=1,
-                )
-                return response
-            except Exception as fallback_exc:
-                fallback_failure = classify_failure(
-                    fallback_exc,
-                    provider=fallback_provider,
-                    model_name=fallback_model,
-                    class_name=type(fallback_llm).__name__,
-                )
-                get_tracker().record_failure(
-                    agent_name="Article Writer Fallback",
-                    provider=fallback_failure.provider,
-                    failure_kind=fallback_failure.kind,
-                    model_name=fallback_model or "",
-                )
-                logger.error(
-                    "llm_call_failed",
-                    context="article_writer_fallback",
-                    provider=fallback_failure.provider,
-                    model=fallback_model,
-                    runnable_class=type(fallback_llm).__name__,
-                    attempt=1,
-                    max_attempts=1,
-                    failure_kind=fallback_failure.kind,
-                    host=fallback_failure.host,
-                    retryable=fallback_failure.retryable,
-                    error_type=fallback_failure.error_type,
-                    root_cause_type=fallback_failure.root_cause_type,
-                    error_message=fallback_failure.message,
-                    same_failure_kind=fallback_failure.kind == primary_failure.kind,
-                )
-                raise
+            last_exc: Exception = e
+            for tier in writer_fallback_chain(callbacks=self._fallback_callbacks()):
+                fallback_model = ""
+                fallback_provider = "unknown"
+                fallback_class = ""
+                try:
+                    tier_llm = tier.build()  # lazy: construct only when attempted
+                    fallback_model = get_model_name(tier_llm)
+                    fallback_provider = infer_provider(
+                        model_name=fallback_model,
+                        class_name=type(tier_llm).__name__,
+                    )
+                    fallback_class = type(tier_llm).__name__
+                    logger.info(
+                        "writer_fallback_attempt",
+                        tier=tier.label,
+                        fallback_model=fallback_model,
+                        fallback_provider=fallback_provider,
+                        runnable_class=fallback_class,
+                    )
+                    response = tier_llm.invoke(
+                        messages,
+                        config=cast(
+                            Any, self._invoke_config(workflow="article_fallback")
+                        ),
+                    )
+                    self.llm = tier_llm  # Cache for subsequent calls (e.g., retry)
+                    self.writer_fell_back = True
+                    logger.info(
+                        "writer_fallback_succeeded",
+                        tier=tier.label,
+                        fallback_model=fallback_model,
+                        fallback_provider=fallback_provider,
+                        runnable_class=fallback_class,
+                    )
+                    return response
+                except Exception as fallback_exc:
+                    last_exc = fallback_exc
+                    fallback_failure = classify_failure(
+                        fallback_exc,
+                        provider=fallback_provider,
+                        model_name=fallback_model,
+                        class_name=fallback_class,
+                    )
+                    get_tracker().record_failure(
+                        agent_name="Article Writer Fallback",
+                        provider=fallback_failure.provider,
+                        failure_kind=fallback_failure.kind,
+                        model_name=fallback_model or "",
+                    )
+                    logger.error(
+                        "writer_fallback_attempt_failed",
+                        tier=tier.label,
+                        fallback_model=fallback_model,
+                        fallback_provider=fallback_provider,
+                        runnable_class=fallback_class,
+                        failure_kind=fallback_failure.kind,
+                        host=fallback_failure.host,
+                        retryable=fallback_failure.retryable,
+                        error_type=fallback_failure.error_type,
+                        root_cause_type=fallback_failure.root_cause_type,
+                        error_message=fallback_failure.message,
+                        same_failure_kind=fallback_failure.kind == primary_failure.kind,
+                    )
+            raise last_exc from e
 
     def _invoke_writer(self, messages: list) -> str:
         """
         Invoke the writer LLM with provider-aware post-processing.
 
         Handles:
-        1. Claude → Gemini fallback on API errors (billing, auth, rate limits)
+        1. Fallback chain on Claude API errors (billing, auth, rate limits):
+           EDITOR_MODEL (OpenAI) when usable, then Gemini floor
         2. Thinking block extraction (Claude adaptive thinking / Gemini thinking)
         3. Preamble stripping (Claude's politeness tendency)
         4. Refusal detection (financial advice guardrails)
@@ -695,6 +851,25 @@ class ArticleWriter:
             RuntimeError: If the model refuses to generate the article
         """
         response = self._invoke_with_fallback(messages)
+
+        # 0. Truncation guard: a MAX_TOKENS/LENGTH finish means the model ran out
+        # of output budget mid-generation (e.g. Gemini hidden reasoning eating the
+        # shared completion pool). Raise instead of silently saving a mid-sentence
+        # article. (June 2026 1928.T fallback failure.)
+        finish_reason = str(
+            (getattr(response, "response_metadata", {}) or {}).get("finish_reason", "")
+        ).upper()
+        if finish_reason in ("MAX_TOKENS", "LENGTH"):
+            logger.error(
+                "writer_output_truncated",
+                finish_reason=finish_reason,
+                model=get_model_name(self.llm),
+            )
+            raise RuntimeError(
+                f"Writer LLM hit the output token limit before finishing the "
+                f"article (finish_reason={finish_reason}). Refusing to return a "
+                f"truncated draft."
+            )
 
         # 1. Extract text, filtering out thinking blocks
         article = _extract_text_from_response(response)
@@ -737,6 +912,7 @@ class ArticleWriter:
         output_path: Path | None = None,
         valuation_context: str | None = None,
         governance_card: dict[str, Any] | None = None,
+        chart_paths: dict[str, str] | None = None,
     ) -> str:
         """
         Generate an article from the analysis report.
@@ -748,6 +924,8 @@ class ArticleWriter:
             trade_date: Date of the analysis
             output_path: Optional path to save the article
             valuation_context: Optional context about chart valuation vs decision
+            chart_paths: Charts generated by the current run (restricts the
+                image manifest — see ``_format_image_manifest``)
 
         Returns:
             Generated article as Markdown string
@@ -762,7 +940,9 @@ class ArticleWriter:
             )
 
         # Format image manifest
-        image_manifest = self._format_image_manifest(ticker, trade_date)
+        image_manifest = self._format_image_manifest(
+            ticker, trade_date, chart_paths=chart_paths
+        )
 
         # Fetch fact-check context (single Tavily search, controlled size)
         fact_check_context = self._fetch_fact_check_context(ticker, company_name)
@@ -1174,6 +1354,7 @@ class ArticleEditor:
         self.tools = get_editor_tools()
         self.prompt_config = self._load_prompt_config()
         self._url_cache: dict[str, str] = {}
+        self._failed_urls: set[str] = set()
         self.review_llm = self._build_structured_review_llm()
 
         # Build tool lookup and bind tools to LLM for agentic reference checking
@@ -1243,6 +1424,7 @@ class ArticleEditor:
         voice_samples: str | None = None,
         governance_context: str | None = None,
         consultant_review: str | None = None,
+        valuation_context: str | None = None,
     ) -> str:
         """
         Assemble fact-check context for the editor.
@@ -1252,6 +1434,8 @@ class ArticleEditor:
             pm_block: PM_BLOCK from Portfolio Manager (verdict, adjusted scores)
             valuation_params: Valuation parameters (target ranges)
             voice_samples: Writing samples for style reference
+            valuation_context: The valuation summary given to the writer
+                (carries the conditional/suppressed caveat when it fired)
 
         Returns:
             Formatted context string
@@ -1266,6 +1450,12 @@ class ArticleEditor:
 
         if valuation_params:
             context_parts.append(f"=== VALUATION PARAMETERS ===\n{valuation_params}")
+
+        if valuation_context:
+            context_parts.append(
+                "=== VALUATION CONTEXT (as given to writer) ===\n"
+                f"{valuation_context}"
+            )
 
         if governance_context:
             context_parts.append(governance_context)
@@ -1283,7 +1473,7 @@ class ArticleEditor:
             if len(voice_samples) > 5000:
                 truncated_samples += "\n...[truncated]"
             context_parts.append(
-                f"=== VOICE SAMPLES (Match This Style) ===\n{truncated_samples}"
+                f"=== WRITING SAMPLES (Match This Voice) ===\n{truncated_samples}"
             )
 
         return "\n\n".join(context_parts) if context_parts else "No context provided."
@@ -1361,7 +1551,10 @@ class ArticleEditor:
 
                 # Cache URL fetch results for this editorial session
                 if tool_name == "fetch_reference_content":
-                    url_cache[tool_args.get("url", "")] = content
+                    url = tool_args.get("url", "")
+                    url_cache[url] = content
+                    if content.startswith(_REFERENCE_FAILURE_PREFIXES):
+                        self._failed_urls.add(url)
 
                 results.append(ToolMessage(content=content, tool_call_id=tool_id))
             except Exception as e:
@@ -1374,7 +1567,9 @@ class ArticleEditor:
 
                 # Cache errors too — no point retrying a broken URL
                 if tool_name == "fetch_reference_content":
-                    url_cache[tool_args.get("url", "")] = error_content
+                    url = tool_args.get("url", "")
+                    url_cache[url] = error_content
+                    self._failed_urls.add(url)
 
                 results.append(ToolMessage(content=error_content, tool_call_id=tool_id))
 
@@ -1390,6 +1585,50 @@ class ArticleEditor:
             )
 
         return results
+
+    def _flag_failed_references(self, draft: str, feedback: dict) -> dict:
+        """Deterministically flag reference URLs the editor watched fail.
+
+        The editor prompt asks for this too, but nothing stops the LLM from
+        fetching a 404 and approving the draft with the dead link intact
+        (3393.T 2026-07-03 shipped a 404'd JPX quote URL). Only URLs still
+        present in the current draft are flagged.
+        """
+        if not isinstance(feedback, dict) or not self._failed_urls:
+            return feedback
+
+        leaked = sorted(url for url in self._failed_urls if url and url in draft)
+        if not leaked:
+            return feedback
+
+        factual_errors = feedback.setdefault("factual_errors", [])
+        known_claims = {
+            error.get("claim") for error in factual_errors if isinstance(error, dict)
+        }
+        for url in leaked:
+            claim = f"References include a URL whose verification fetch failed: {url}"
+            if claim in known_claims:
+                continue
+            factual_errors.append(
+                {
+                    "location": "References",
+                    "claim": claim,
+                    "ground_truth": (
+                        "The editor's fetch of this URL failed "
+                        "(HTTP error, invalid URL, or empty content)."
+                    ),
+                    "action": "correct",
+                }
+            )
+
+        if feedback.get("verdict") == "APPROVED":
+            logger.warning(
+                "editor_verdict_overridden",
+                reason="failed_reference_in_draft",
+                num_failed_references=len(leaked),
+            )
+            feedback["verdict"] = "REVISE"
+        return feedback
 
     async def review(
         self,
@@ -1646,6 +1885,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         voice_samples: str | None = None,
         governance_card: dict[str, Any] | None = None,
         consultant_review: str | None = None,
+        valuation_context: str | None = None,
     ) -> tuple[str, dict]:
         """
         Run the full editorial loop: review -> revise -> review.
@@ -1659,6 +1899,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
             pm_block: Portfolio Manager verdict/scores
             valuation_params: Valuation parameters
             voice_samples: Writing samples for style
+            valuation_context: Valuation summary given to the writer
 
         Returns:
             Tuple of (final_article, final_feedback)
@@ -1683,6 +1924,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
             voice_samples=voice_samples,
             governance_context=governance_context,
             consultant_review=consultant_review,
+            valuation_context=valuation_context,
         )
 
         current_draft = article_draft
@@ -1691,9 +1933,14 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         # Session-scoped URL cache: avoids re-fetching the same URLs across
         # review iterations (e.g. paywalled sites that 401 every time).
         self._url_cache = {}
+        self._failed_urls = set()
         try:
             while revision_count < self.MAX_REVISIONS:
-                citation_errors = audit_article_citations(current_draft, data_block)
+                # Audit the article body only — the EDITOR_NOTES meta block may
+                # quote the editor's (wrong) claimed values verbatim.
+                citation_errors = audit_article_citations(
+                    _strip_editor_notes(current_draft), data_block
+                )
                 if citation_errors:
                     feedback = _review_response_for_citation_errors(citation_errors)
                     logger.warning(
@@ -1702,8 +1949,14 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                         mismatch_count=len(citation_errors),
                     )
                 else:
-                    # Review the current draft
-                    feedback = await self.review(current_draft, fact_check_context)
+                    # Review the current draft (with EDITOR_NOTES intact so the
+                    # editor can adjudicate CONTESTED items)
+                    feedback = self._flag_failed_references(
+                        current_draft,
+                        _enforce_verdict_consistency(
+                            await self.review(current_draft, fact_check_context)
+                        ),
+                    )
 
                 logger.info(
                     "editor_review_complete",
@@ -1716,7 +1969,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                 # Check if approved
                 if feedback.get("verdict") == "APPROVED":
                     feedback["revisions"] = revision_count
-                    return current_draft, feedback
+                    return _strip_editor_notes(current_draft), feedback
 
                 # Revise based on feedback
                 revision_count += 1
@@ -1727,16 +1980,35 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                     max_revisions=self.MAX_REVISIONS,
                 )
 
-                current_draft = writer.revise(
-                    original_draft=current_draft,
-                    editor_feedback=feedback,
-                    ticker=ticker,
-                    company_name=company_name,
-                    governance_context=governance_context,
-                )
+                try:
+                    current_draft = writer.revise(
+                        original_draft=current_draft,
+                        editor_feedback=feedback,
+                        ticker=ticker,
+                        company_name=company_name,
+                        governance_context=governance_context,
+                    )
+                except Exception as e:
+                    # A failed revision (e.g. truncated output, all fallback
+                    # tiers down) must not destroy the complete draft we
+                    # already hold — keep it and let the final review below
+                    # apply its caveats.
+                    logger.error(
+                        "article_revision_failed_keeping_previous_draft",
+                        ticker=ticker,
+                        revision=revision_count,
+                        **summarize_exception(e, operation="editor:revise_loop"),
+                    )
+                    break
 
             # Max revisions reached, do final review
-            final_feedback = await self.review(current_draft, fact_check_context)
+            final_feedback = self._flag_failed_references(
+                current_draft,
+                _enforce_verdict_consistency(
+                    await self.review(current_draft, fact_check_context)
+                ),
+            )
+            current_draft = _strip_editor_notes(current_draft)
             final_citation_errors = audit_article_citations(current_draft, data_block)
             if final_citation_errors:
                 current_draft = prepend_verification_caveats(
@@ -1760,6 +2032,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
             return current_draft, final_feedback
         finally:
             self._url_cache = {}
+            self._failed_urls = set()
 
 
 def generate_article(

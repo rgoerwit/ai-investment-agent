@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from src.data_block_utils import unfenced_label
+
 _FIELD_ENUMS: dict[str, frozenset[str]] = {
     "risk_appetite": frozenset({"RISK_ON", "RISK_OFF", "MIXED", "UNCERTAIN"}),
     "shock_type": frozenset(
@@ -40,7 +42,10 @@ _FIELD_ENUMS: dict[str, frozenset[str]] = {
     "confidence": frozenset({"HIGH", "MEDIUM", "LOW"}),
 }
 
-_BLOCK_RE = re.compile(r"(?ims)^MACRO_REGIME_BLOCK:\s*\n?(?P<body>.*?)(?=^###\s+|\Z)")
+_MACRO_REGIME_LABEL = unfenced_label("MACRO_REGIME_BLOCK")
+_BLOCK_RE = re.compile(
+    rf"(?ims)^{re.escape(_MACRO_REGIME_LABEL)}\s*\n?(?P<body>.*?)(?=^###\s+|\Z)"
+)
 _LINE_RE = re.compile(r"^\s*([A-Z_]+)\s*:\s*([A-Z_]+)\s*$")
 
 
@@ -90,5 +95,5 @@ def parse_macro_regime(report: str | None) -> MacroRegime:
         if value in _FIELD_ENUMS.get(key, frozenset()):
             fields[key] = value
 
-    raw = f"MACRO_REGIME_BLOCK:\n{body}" if body else "MACRO_REGIME_BLOCK:"
+    raw = f"{_MACRO_REGIME_LABEL}\n{body}" if body else _MACRO_REGIME_LABEL
     return MacroRegime(present=True, raw_block=raw, **fields)

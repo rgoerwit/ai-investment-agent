@@ -170,6 +170,65 @@ def test_data_vacuum_dni_stop_breach_still_routes_to_sell():
     assert item.sell_type == "STOP_BREACH"
 
 
+def test_zero_score_no_price_dni_routes_to_review_not_sell():
+    """AGS-shaped all-N/A analysis must not become an executable hard-reject SELL."""
+    pos = _make_position(
+        ticker="AGS",
+        quantity=5,
+        avg_cost=66.7,
+        current_price=66.7,
+        market_value_usd=364.0,
+        currency="USD",
+    )
+    analysis = _make_analysis(
+        ticker="AGS",
+        verdict="DO_NOT_INITIATE",
+        stop_price=None,
+        current_price=None,
+    )
+    analysis.zone = "HIGH"
+    analysis.health_adj = 0.0
+    analysis.growth_adj = 0.0
+    analysis.data_quality = {"data_vacuum": False}
+
+    items = reconcile([pos], {"AGS": analysis}, _make_portfolio())
+    item = _first_item_for_ticker(items, "AGS")
+
+    assert item.action == "REVIEW"
+    assert item.urgency == "HIGH"
+    assert item.sell_type == "DATA_QUALITY_REVIEW"
+    assert item.suggested_quantity is None
+    assert item.cash_impact_usd == 0.0
+
+
+def test_zero_score_no_price_dni_stop_breach_still_routes_to_sell():
+    """The zero-score guard must not suppress a genuine stop breach."""
+    pos = _make_position(
+        ticker="AGS",
+        quantity=5,
+        avg_cost=66.7,
+        current_price=60.0,
+        market_value_usd=327.0,
+        currency="USD",
+    )
+    analysis = _make_analysis(
+        ticker="AGS",
+        verdict="DO_NOT_INITIATE",
+        stop_price=65.0,
+        current_price=None,
+    )
+    analysis.zone = "HIGH"
+    analysis.health_adj = 0.0
+    analysis.growth_adj = 0.0
+    analysis.data_quality = {"data_vacuum": False}
+
+    items = reconcile([pos], {"AGS": analysis}, _make_portfolio())
+    item = _first_item_for_ticker(items, "AGS")
+
+    assert item.action == "SELL"
+    assert item.sell_type == "STOP_BREACH"
+
+
 def test_explicit_sell_verdict_remains_sell_even_if_low_zone():
     """A PM SELL verdict remains executable regardless of zone."""
     pos = _make_position(ticker="4396.T", current_price=1009.30)

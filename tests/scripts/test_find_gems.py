@@ -932,81 +932,58 @@ class TestFetchAndFilter:
         assert "P/E<=18 or <=24 with stronger quality" in stderr
         assert "Contextual band requires ROE>=16%/ROA>=7%" in stderr
 
-    def test_process_pool_collector_closes_and_joins_on_normal_completion(self):
+    def test_threaded_collector_processes_all_rows(self):
+        # Threaded (no-fork) enrichment must return every row's result. Results
+        # complete unordered, so compare as sets.
         records = [{"YF_Ticker": "7203.T"}, {"YF_Ticker": "6758.T"}]
-        lifecycle: list[str] = []
 
-        class FakePool:
-            def imap_unordered(self, worker_fn, tasks, chunksize=1):
-                for task in tasks:
-                    yield {"YF_Ticker": task[0]["YF_Ticker"]}
+        def fake_worker(task):
+            return {"YF_Ticker": task[0]["YF_Ticker"]}
 
-            def close(self):
-                lifecycle.append("close")
+        with patch("find_gems._passes_filters", return_value=True):
+            passing, enriched = find_gems._collect_enrichment_results(
+                records,
+                fx_rates={"USD": 1.0},
+                criteria=find_gems.ScreenCriteria(),
+                workers=2,
+                worker_fn=fake_worker,
+            )
 
-            def terminate(self):
-                lifecycle.append("terminate")
+        assert {row["YF_Ticker"] for row in passing} == {"7203.T", "6758.T"}
+        assert {row["YF_Ticker"] for row in enriched} == {"7203.T", "6758.T"}
 
-            def join(self):
-                lifecycle.append("join")
+    def test_threaded_collector_returns_partial_on_interrupt(self):
+        # A KeyboardInterrupt mid-collection (here: while handling the 2nd result)
+        # must return the partial results gathered so far, not raise.
+        records = [{"YF_Ticker": f"T{i}.T"} for i in range(6)]
 
-        class FakeContext:
-            def Pool(self, processes):
-                assert processes == 2
-                lifecycle.append("pool")
-                return FakePool()
+        def fake_worker(task):
+            return {"YF_Ticker": task[0]["YF_Ticker"]}
 
-        with patch("find_gems.mp.get_context", return_value=FakeContext()):
-            with patch("find_gems._passes_filters", return_value=True):
-                passing, enriched = find_gems._collect_enrichment_results(
-                    records,
-                    fx_rates={"USD": 1.0},
-                    criteria=find_gems.ScreenCriteria(),
-                    workers=2,
-                )
+        real_handle = find_gems._handle_enriched_row_result
+        calls = {"n": 0}
 
-        assert [row["YF_Ticker"] for row in passing] == ["7203.T", "6758.T"]
-        assert [row["YF_Ticker"] for row in enriched] == ["7203.T", "6758.T"]
-        assert lifecycle == ["pool", "close", "join"]
-
-    def test_process_pool_collector_terminates_and_joins_on_interrupt(self):
-        records = [{"YF_Ticker": "7203.T"}, {"YF_Ticker": "6758.T"}]
-        lifecycle: list[str] = []
-
-        class FakePool:
-            def imap_unordered(self, worker_fn, tasks, chunksize=1):
-                task_iter = iter(tasks)
-                first = next(task_iter)
-                yield {"YF_Ticker": first[0]["YF_Ticker"]}
+        def handle(data, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
                 raise KeyboardInterrupt()
+            return real_handle(data, **kwargs)
 
-            def close(self):
-                lifecycle.append("close")
+        with (
+            patch("find_gems._passes_filters", return_value=True),
+            patch("find_gems._handle_enriched_row_result", side_effect=handle),
+        ):
+            passing, enriched = find_gems._collect_enrichment_results(
+                records,
+                fx_rates={"USD": 1.0},
+                criteria=find_gems.ScreenCriteria(),
+                workers=3,
+                worker_fn=fake_worker,
+            )
 
-            def terminate(self):
-                lifecycle.append("terminate")
-
-            def join(self):
-                lifecycle.append("join")
-
-        class FakeContext:
-            def Pool(self, processes):
-                assert processes == 2
-                lifecycle.append("pool")
-                return FakePool()
-
-        with patch("find_gems.mp.get_context", return_value=FakeContext()):
-            with patch("find_gems._passes_filters", return_value=True):
-                passing, enriched = find_gems._collect_enrichment_results(
-                    records,
-                    fx_rates={"USD": 1.0},
-                    criteria=find_gems.ScreenCriteria(),
-                    workers=2,
-                )
-
-        assert [row["YF_Ticker"] for row in passing] == ["7203.T"]
-        assert [row["YF_Ticker"] for row in enriched] == ["7203.T"]
-        assert lifecycle == ["pool", "terminate", "join"]
+        # Exactly one row handled before the interrupt; the rest are abandoned.
+        assert len(enriched) == 1
+        assert len(passing) == 1
 
 
 # ============================================================

@@ -708,6 +708,55 @@ class TestEditorialLoopIntegration:
         assert feedback["verdict"] == "APPROVED"
 
     @pytest.mark.asyncio
+    async def test_edit_keeps_previous_draft_when_revision_fails(self):
+        """A failed revision (e.g. truncated output) must not lose the draft.
+
+        The revise call raises; edit() keeps the last complete draft, runs
+        the final review, and returns instead of propagating.
+        """
+        from src.article_writer import ArticleWriter
+
+        writer = ArticleWriter()
+        editor = _create_article_editor()
+
+        review_count = 0
+
+        async def mock_review(*args, **kwargs):
+            nonlocal review_count
+            review_count += 1
+            return {
+                "verdict": "REVISE",
+                "factual_errors": [
+                    {"location": "X", "claim": "Y", "ground_truth": "Z"}
+                ],
+                "cuts": [],
+                "style_issues": [],
+                "confidence": 0.5,
+            }
+
+        editor.review = mock_review
+        editor.llm = MagicMock()
+
+        writer.revise = MagicMock(
+            side_effect=RuntimeError(
+                "Writer LLM hit the output token limit before finishing"
+            )
+        )
+
+        draft = "# Complete Draft\n\nViable content."
+        result, feedback = await editor.edit(
+            writer=writer,
+            article_draft=draft,
+            ticker="TEST",
+            company_name="Test Corp",
+        )
+
+        assert result == draft, "previous complete draft must be preserved"
+        assert writer.revise.call_count == 1
+        # Loop review + post-loop final review both ran
+        assert review_count == 2
+
+    @pytest.mark.asyncio
     async def test_edit_respects_max_revisions(self):
         """edit() should stop after MAX_REVISIONS iterations."""
         from src.article_writer import ArticleWriter
@@ -808,7 +857,8 @@ class TestEditorialLoopIntegration:
             data_block=data_block,
         )
 
-        assert result.startswith("## Verification Caveats")
+        # Caveats are QA scaffolding: they land below the article's H1 title.
+        assert result.startswith("# Still Wrong\n\n## Verification Caveats")
         assert "NET_DEBT_EBITDA: 1.95" in result
         assert feedback["verdict"] == "REVISE"
         assert feedback["deterministic_citation_audit"] is True
@@ -988,6 +1038,162 @@ class TestMainPyIntegration:
             )
 
             # The function should complete without raising
+
+    @pytest.mark.asyncio
+    async def test_handle_article_generation_surfaces_writer_fallback(self):
+        """A silent Claude → Gemini fallback must land in the run summary."""
+        from unittest.mock import MagicMock, mock_open, patch
+
+        args = MagicMock()
+        args.article = "test_article.md"
+        args.output = "/tmp/test_output.md"
+        args.quiet = True
+        args.brief = False
+
+        mock_writer_instance = MagicMock()
+        mock_writer_instance.write.return_value = "# Draft"
+        mock_writer_instance.current_model_name = "gemini-3.5-flash"
+        mock_writer_instance.writer_fell_back = True
+
+        mock_editor_instance = MagicMock()
+        mock_editor_instance.is_available.return_value = False
+
+        analysis_result = {
+            "fundamentals_report": "DATA",
+            "final_trade_decision": "PM",
+        }
+
+        with (
+            patch(
+                "src.article_writer.ArticleWriter", return_value=mock_writer_instance
+            ),
+            patch(
+                "src.article_writer.ArticleEditor", return_value=mock_editor_instance
+            ),
+            patch("builtins.open", mock_open()),
+        ):
+            from src.output import handle_article_generation
+
+            await handle_article_generation(
+                args=args,
+                ticker="TEST",
+                company_name="Test Corp",
+                report_text="Full report...",
+                trade_date="2026-01-01",
+                analysis_result=analysis_result,
+                resolve_article_path_fn=lambda *_a, **_k: "/tmp/test_article.md",
+            )
+
+        run_summary = analysis_result["run_summary"]
+        assert run_summary["article_writer_model"] == "gemini-3.5-flash"
+        assert run_summary["article_writer_fell_back"] is True
+
+    @pytest.mark.asyncio
+    async def test_handle_article_generation_patches_saved_json(self, tmp_path):
+        """The writer-model stamp must reach the already-persisted analysis JSON.
+
+        The JSON artifact is saved before article generation, so the in-memory
+        run_summary stamp alone never reaches disk (the 3393.T review gap).
+        """
+        import json
+        from unittest.mock import MagicMock, mock_open, patch
+
+        args = MagicMock()
+        args.article = "test_article.md"
+        args.output = "/tmp/test_output.md"
+        args.quiet = True
+        args.brief = False
+
+        mock_writer_instance = MagicMock()
+        mock_writer_instance.write.return_value = "# Draft"
+        mock_writer_instance.current_model_name = "gemini-3.5-flash"
+        mock_writer_instance.writer_fell_back = True
+
+        mock_editor_instance = MagicMock()
+        mock_editor_instance.is_available.return_value = False
+
+        saved_json = tmp_path / "TEST_20260704_analysis.json"
+        saved_json.write_text(
+            json.dumps({"run_summary": {"verdict": "HOLD"}}), encoding="utf-8"
+        )
+        analysis_result = {
+            "fundamentals_report": "DATA",
+            "final_trade_decision": "PM",
+            "_saved_analysis_path": str(saved_json),
+        }
+
+        with (
+            patch(
+                "src.article_writer.ArticleWriter", return_value=mock_writer_instance
+            ),
+            patch(
+                "src.article_writer.ArticleEditor", return_value=mock_editor_instance
+            ),
+            patch("builtins.open", mock_open()),
+        ):
+            from src.output import handle_article_generation
+
+            await handle_article_generation(
+                args=args,
+                ticker="TEST",
+                company_name="Test Corp",
+                report_text="Full report...",
+                trade_date="2026-01-01",
+                analysis_result=analysis_result,
+                resolve_article_path_fn=lambda *_a, **_k: str(
+                    tmp_path / "test_article.md"
+                ),
+            )
+
+        data = json.loads(saved_json.read_text(encoding="utf-8"))
+        assert data["run_summary"]["verdict"] == "HOLD"
+        assert data["run_summary"]["article_writer_model"] == "gemini-3.5-flash"
+        assert data["run_summary"]["article_writer_fell_back"] is True
+
+    @pytest.mark.asyncio
+    async def test_handle_article_generation_records_primary_writer_model(self):
+        from unittest.mock import MagicMock, mock_open, patch
+
+        args = MagicMock()
+        args.article = "test_article.md"
+        args.output = "/tmp/test_output.md"
+        args.quiet = True
+        args.brief = False
+
+        mock_writer_instance = MagicMock()
+        mock_writer_instance.write.return_value = "# Draft"
+        mock_writer_instance.current_model_name = "claude-opus-4-8"
+        mock_writer_instance.writer_fell_back = False
+
+        mock_editor_instance = MagicMock()
+        mock_editor_instance.is_available.return_value = False
+
+        analysis_result = {}
+
+        with (
+            patch(
+                "src.article_writer.ArticleWriter", return_value=mock_writer_instance
+            ),
+            patch(
+                "src.article_writer.ArticleEditor", return_value=mock_editor_instance
+            ),
+            patch("builtins.open", mock_open()),
+        ):
+            from src.output import handle_article_generation
+
+            await handle_article_generation(
+                args=args,
+                ticker="TEST",
+                company_name="Test Corp",
+                report_text="Full report...",
+                trade_date="2026-01-01",
+                analysis_result=analysis_result,
+                resolve_article_path_fn=lambda *_a, **_k: "/tmp/test_article.md",
+            )
+
+        run_summary = analysis_result["run_summary"]
+        assert run_summary["article_writer_model"] == "claude-opus-4-8"
+        assert run_summary["article_writer_fell_back"] is False
 
 
 class TestStripLLMPreamble:
@@ -1219,6 +1425,25 @@ class TestExtractTextFromResponse:
         result = _extract_text_from_response(mock_response)
         assert result == "# Gemini Article"
 
+    def test_openai_responses_v1_reasoning_blocks_skipped(self):
+        """OpenAI responses/v1 (writer EDITOR_MODEL fallback tier): reasoning
+        blocks are excluded by type, even if they carry a text field."""
+        from src.article_writer import _extract_text_from_response
+
+        mock_response = MagicMock()
+        mock_response.content = [
+            {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "planning..."}],
+                "text": "internal chain of thought",
+            },
+            {"type": "text", "text": "# GPT Fallback Article\n\nContent."},
+        ]
+
+        result = _extract_text_from_response(mock_response)
+        assert result == "# GPT Fallback Article\n\nContent."
+        assert "chain of thought" not in result
+
     def test_multiple_text_blocks_concatenated(self):
         """Should concatenate multiple text blocks."""
         from src.article_writer import _extract_text_from_response
@@ -1323,7 +1548,7 @@ class TestCreateWriterLLM:
         assert callable(create_writer_llm)
 
     def test_falls_back_to_gemini_without_claude_key(self):
-        """Should fall back to Gemini when CLAUDE_KEY is not set."""
+        """No CLAUDE_KEY and no usable OpenAI tier → Gemini floor of the chain."""
         from src.llms import create_writer_llm
 
         mock_llm = MagicMock()
@@ -1333,6 +1558,9 @@ class TestCreateWriterLLM:
             patch("src.llms.ChatGoogleGenerativeAI", return_value=mock_llm),
         ):
             mock_config.get_claude_api_key.return_value = None
+            # No usable OpenAI tier — the chain must resolve to the Gemini floor.
+            mock_config.enable_consultant = False
+            mock_config.get_openai_api_key.return_value = ""
             mock_config.deep_think_llm = "gemini-3-pro-preview"
             mock_config.api_timeout = 300
             mock_config.api_retry_attempts = 10
@@ -1367,6 +1595,44 @@ class TestCreateWriterLLM:
                 "effort must not appear in model_kwargs — the library handles "
                 "wrapping it in output_config for the API call"
             )
+
+    @pytest.mark.parametrize(
+        "model_name",
+        [
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-opus-4-8-20260601",
+        ],
+    )
+    def test_opus_4_6_plus_uses_adaptive_thinking(self, model_name):
+        from src.llms import create_writer_llm
+
+        with patch("src.llms.config") as mock_config:
+            mock_config.get_claude_api_key.return_value = "fake-key"
+            mock_config.writer_model = model_name
+            mock_config.api_timeout = 300
+            mock_config.api_retry_attempts = 3
+
+            llm = create_writer_llm()
+
+        assert llm.thinking == {"type": "adaptive"}
+        assert llm.effort == "high"
+        assert llm.thinking.get("type") != "enabled"
+
+    def test_opus_4_5_keeps_manual_thinking(self):
+        from src.llms import create_writer_llm
+
+        with patch("src.llms.config") as mock_config:
+            mock_config.get_claude_api_key.return_value = "fake-key"
+            mock_config.writer_model = "claude-opus-4-5"
+            mock_config.api_timeout = 300
+            mock_config.api_retry_attempts = 3
+
+            llm = create_writer_llm()
+
+        assert llm.thinking == {"type": "enabled", "budget_tokens": 8192}
+        assert getattr(llm, "effort", None) is None
 
     def test_opus_effort_serialized_into_output_config_payload(self):
         """Wire-format regression: effort must appear in output_config in the API payload.
@@ -2080,3 +2346,303 @@ class TestSearchClaimTool:
         tool_names = [t.name for t in tools]
         assert "fetch_reference_content" in tool_names
         assert "search_claim" in tool_names
+
+
+# =============================================================================
+# Verdict Consistency & EDITOR_NOTES Tests (July 2026 editorial-loop hardening)
+# =============================================================================
+
+
+class TestEnforceVerdictConsistency:
+    """The verdict must follow the editor's own findings."""
+
+    def test_clean_approval_passes_through(self):
+        from src.article_writer import _enforce_verdict_consistency
+
+        feedback = {"verdict": "APPROVED", "factual_errors": [], "confidence": 0.6}
+        assert _enforce_verdict_consistency(feedback)["verdict"] == "APPROVED"
+
+    def test_approved_with_factual_errors_coerced_to_revise(self):
+        from src.article_writer import _enforce_verdict_consistency
+
+        feedback = {
+            "verdict": "APPROVED",
+            "factual_errors": [{"location": "X", "claim": "Y", "ground_truth": "Z"}],
+        }
+        assert _enforce_verdict_consistency(feedback)["verdict"] == "REVISE"
+
+    def test_approved_with_broken_reference_coerced_to_revise(self):
+        from src.article_writer import _enforce_verdict_consistency
+
+        feedback = {
+            "verdict": "APPROVED",
+            "factual_errors": [],
+            "reference_checks": [{"url": "https://x", "status": "broken"}],
+        }
+        assert _enforce_verdict_consistency(feedback)["verdict"] == "REVISE"
+
+    def test_verified_reference_does_not_coerce(self):
+        from src.article_writer import _enforce_verdict_consistency
+
+        feedback = {
+            "verdict": "APPROVED",
+            "factual_errors": [],
+            "reference_checks": [{"url": "https://x", "status": "verified"}],
+        }
+        assert _enforce_verdict_consistency(feedback)["verdict"] == "APPROVED"
+
+    def test_revise_verdict_untouched(self):
+        from src.article_writer import _enforce_verdict_consistency
+
+        feedback = {"verdict": "REVISE", "factual_errors": []}
+        assert _enforce_verdict_consistency(feedback)["verdict"] == "REVISE"
+
+    def test_malformed_reference_entries_do_not_raise(self):
+        from src.article_writer import _enforce_verdict_consistency
+
+        feedback = {
+            "verdict": "APPROVED",
+            "factual_errors": [],
+            "reference_checks": ["not-a-dict", None, 42],
+        }
+        assert _enforce_verdict_consistency(feedback)["verdict"] == "APPROVED"
+
+
+class TestFlagFailedReferences:
+    """URLs the editor watched fail must not survive in the published draft."""
+
+    def test_failed_url_in_draft_appends_error_and_forces_revise(self):
+        editor = _create_article_editor()
+        editor._failed_urls = {"https://dead.example/quote"}
+        draft = "Body text.\n\n### References\n1. [X](https://dead.example/quote)\n"
+        feedback = {"verdict": "APPROVED", "factual_errors": []}
+
+        result = editor._flag_failed_references(draft, feedback)
+
+        assert result["verdict"] == "REVISE"
+        assert len(result["factual_errors"]) == 1
+        error = result["factual_errors"][0]
+        assert error["location"] == "References"
+        assert "https://dead.example/quote" in error["claim"]
+        assert error["action"] == "correct"
+
+    def test_failed_url_absent_from_draft_leaves_feedback_untouched(self):
+        editor = _create_article_editor()
+        editor._failed_urls = {"https://dead.example/quote"}
+        feedback = {"verdict": "APPROVED", "factual_errors": []}
+
+        result = editor._flag_failed_references("No links here.", feedback)
+
+        assert result["verdict"] == "APPROVED"
+        assert result["factual_errors"] == []
+
+    def test_no_failed_urls_is_a_noop(self):
+        editor = _create_article_editor()
+        editor._failed_urls = set()
+        feedback = {"verdict": "APPROVED", "factual_errors": []}
+
+        assert editor._flag_failed_references("any", feedback) is feedback
+
+    def test_non_dict_feedback_returned_as_is(self):
+        editor = _create_article_editor()
+        editor._failed_urls = {"https://dead.example/quote"}
+
+        assert (
+            editor._flag_failed_references("https://dead.example/quote", None) is None
+        )
+
+    def test_existing_claim_not_duplicated(self):
+        editor = _create_article_editor()
+        editor._failed_urls = {"https://dead.example/quote"}
+        claim = (
+            "References include a URL whose verification fetch failed: "
+            "https://dead.example/quote"
+        )
+        feedback = {
+            "verdict": "REVISE",
+            "factual_errors": [{"location": "References", "claim": claim}],
+        }
+
+        result = editor._flag_failed_references(
+            "see https://dead.example/quote", feedback
+        )
+
+        assert len(result["factual_errors"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_calls_records_failure_sentinels(self):
+        editor = _create_article_editor()
+        editor._failed_urls = set()
+        editor._url_cache = {}
+
+        mock_tool = AsyncMock()
+        mock_tool.ainvoke = AsyncMock(return_value="FETCH_FAILED: HTTP 404")
+        mock_tool.name = "fetch_reference_content"
+        editor._tools_by_name = {"fetch_reference_content": mock_tool}
+
+        await editor._execute_tool_calls(
+            [
+                {
+                    "name": "fetch_reference_content",
+                    "args": {"url": "https://dead.example/quote"},
+                    "id": "call_1",
+                }
+            ]
+        )
+
+        assert editor._failed_urls == {"https://dead.example/quote"}
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_calls_ignores_successful_fetch(self):
+        editor = _create_article_editor()
+        editor._failed_urls = set()
+        editor._url_cache = {}
+
+        mock_tool = AsyncMock()
+        mock_tool.ainvoke = AsyncMock(return_value="Plenty of real page content")
+        mock_tool.name = "fetch_reference_content"
+        editor._tools_by_name = {"fetch_reference_content": mock_tool}
+
+        await editor._execute_tool_calls(
+            [
+                {
+                    "name": "fetch_reference_content",
+                    "args": {"url": "https://alive.example/page"},
+                    "id": "call_1",
+                }
+            ]
+        )
+
+        assert editor._failed_urls == set()
+
+
+class TestStripEditorNotes:
+    """The revision meta block must never survive into the published article."""
+
+    def test_strips_closed_block(self):
+        from src.article_writer import _strip_editor_notes
+
+        article = (
+            "# Title\n\nBody text.\n\n## References\n- https://x\n\n"
+            "```EDITOR_NOTES\nCORRECTED: fixed P/E\nCONTESTED: kept phrasing — "
+            "matches writing samples\n```\n"
+        )
+        stripped = _strip_editor_notes(article)
+        assert "EDITOR_NOTES" not in stripped
+        assert "CORRECTED" not in stripped
+        assert stripped.startswith("# Title")
+        assert "## References" in stripped
+
+    def test_strips_unclosed_block_at_eof(self):
+        from src.article_writer import _strip_editor_notes
+
+        article = "# Title\n\nBody.\n\n```EDITOR_NOTES\nCORRECTED: item"
+        stripped = _strip_editor_notes(article)
+        assert "EDITOR_NOTES" not in stripped
+        assert "Body." in stripped
+
+    def test_noop_without_block(self):
+        from src.article_writer import _strip_editor_notes
+
+        article = "# Title\n\nBody with ```python\ncode\n``` fence.\n"
+        assert _strip_editor_notes(article) == article
+
+    def test_noop_on_empty_string(self):
+        from src.article_writer import _strip_editor_notes
+
+        assert _strip_editor_notes("") == ""
+
+    @pytest.mark.asyncio
+    async def test_edit_strips_notes_from_approved_return(self):
+        """A draft carrying EDITOR_NOTES must come back clean from edit()."""
+        from src.article_writer import ArticleWriter
+
+        writer = ArticleWriter()
+        editor = _create_article_editor()
+        editor.llm = MagicMock()
+        editor.review = AsyncMock(
+            return_value={"verdict": "APPROVED", "confidence": 0.9}
+        )
+
+        draft = (
+            "# Title\n\nBody.\n\n## References\n- https://x\n\n"
+            "```EDITOR_NOTES\nCORRECTED: item\n```\n"
+        )
+        result, feedback = await editor.edit(
+            writer=writer,
+            article_draft=draft,
+            ticker="TEST",
+            company_name="Test Corp",
+        )
+        assert feedback["verdict"] == "APPROVED"
+        assert "EDITOR_NOTES" not in result
+        assert "Body." in result
+
+    @pytest.mark.asyncio
+    async def test_edit_coerces_approved_with_errors_and_revises(self):
+        """APPROVED + listed factual errors must trigger a revision pass."""
+        editor = _create_article_editor()
+        editor.llm = MagicMock()
+
+        call_count = 0
+
+        async def mock_review(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Self-approves despite listing an error — must be coerced
+                return {
+                    "verdict": "APPROVED",
+                    "factual_errors": [
+                        {"location": "X", "claim": "Y", "ground_truth": "Z"}
+                    ],
+                    "confidence": 0.95,
+                }
+            return {"verdict": "APPROVED", "factual_errors": [], "confidence": 0.9}
+
+        editor.review = mock_review
+        writer = MagicMock()
+        writer.revise.return_value = "# Revised\n\nClean."
+
+        result, feedback = await editor.edit(
+            writer=writer,
+            article_draft="# Original\n\nWith an error.",
+            ticker="TEST",
+            company_name="Test Corp",
+        )
+
+        assert writer.revise.called
+        assert feedback["verdict"] == "APPROVED"
+        assert result == "# Revised\n\nClean."
+
+
+class TestEditorContextWiring:
+    """New context inputs reach the editor's fact-check context."""
+
+    def test_valuation_context_included(self):
+        editor = _create_article_editor()
+        context = editor.build_fact_check_context(
+            data_block="DATA",
+            valuation_context="VALUATION DATA (scenario target suppressed): ...",
+        )
+        assert "=== VALUATION CONTEXT (as given to writer) ===" in context
+        assert "scenario target suppressed" in context
+
+    def test_valuation_context_omitted_when_none(self):
+        editor = _create_article_editor()
+        context = editor.build_fact_check_context(data_block="DATA")
+        assert "VALUATION CONTEXT" not in context
+
+    def test_writing_samples_header_used(self):
+        editor = _create_article_editor()
+        context = editor.build_fact_check_context(voice_samples="Sample prose.")
+        assert "=== WRITING SAMPLES (Match This Voice) ===" in context
+        assert "VOICE SAMPLES" not in context
+
+    def test_writer_public_sample_loader(self, tmp_path):
+        from src.article_writer import ArticleWriter
+
+        (tmp_path / "sample.txt").write_text("Voiceful prose.", encoding="utf-8")
+        writer = ArticleWriter(samples_dir=tmp_path)
+        samples = writer.load_voice_samples(max_chars=1000)
+        assert "Voiceful prose." in samples

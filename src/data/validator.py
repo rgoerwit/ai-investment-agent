@@ -274,6 +274,30 @@ class FineGrainedValidator:
                     f"Unusual: ROE ({roe:.2%}) < ROA ({roa:.2%}) (typically ROE > ROA)"
                 )
 
+        # Pairing invariant: calculate_return_trends emits roa_5y_avg/roe_5y_avg
+        # atomically with their _*_5y_years counts, and every known transform
+        # preserves the pairing — yet a rare run drops only the averages (the
+        # 6831.HK 2026-06-24 artifact). The missing 5Y average silently flips
+        # cyclical-peak / normalization logic downstream, so surface the violation
+        # as both a structured warning (searchable; the drop is non-deterministic)
+        # and a profitability validation warning.
+        for years_key, avg_key in (
+            ("_roa_5y_years", "roa_5y_avg"),
+            ("_roe_5y_years", "roe_5y_avg"),
+        ):
+            if data.get(years_key) and data.get(avg_key) is None:
+                result.warnings.append(
+                    f"{avg_key} missing despite {years_key}={data.get(years_key)} "
+                    "(return-trend pairing invariant violated)"
+                )
+                logger.warning(
+                    "return_trend_average_missing",
+                    symbol=symbol,
+                    years_field=years_key,
+                    avg_field=avg_key,
+                    years=data.get(years_key),
+                )
+
         result.passed = len(result.issues) == 0
         return result
 

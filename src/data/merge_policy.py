@@ -70,7 +70,17 @@ QUOTE_PRICE_FIELDS = (
 SOURCE_QUALITY = {
     "yfinance_statements": 10,
     "calculated_from_statements": 10,
+    # FY EPS growth derived from the filed EPS rows is filing-authoritative (tier 10).
+    # The net-income proxy is filing-derived but less precise than real EPS, so it sits
+    # below EODHD's actual EPS-TTM YoY (9.5) yet still beats raw Yahoo/info scalars (9).
+    "calculated_from_statement_diluted_eps": 10,
+    "calculated_from_statement_basic_eps": 10,
+    "calculated_from_statement_net_income_proxy": 9.3,
     "eodhd": 9.5,
+    # Exchange-direct IBKR snapshot: more reliable than the Yahoo/FMP point-in-time
+    # values, so it overrides them — but stays below the paid EODHD feed and the
+    # filing-derived statements (10), which it never supplies. Gated on opt-in + creds.
+    "ibkr": 9.4,
     "yfinance": 9,
     "yfinance_info": 9,
     "alpha_vantage": 9,
@@ -184,7 +194,9 @@ def smart_merge_with_quality(
     sources_used: set[str] = set()
     gaps_filled = 0
 
-    source_order = ["yahooquery", "fmp", "alpha_vantage", "eodhd", "yfinance"]
+    # IBKR is processed last (its quality, not its position, governs overrides) so any
+    # >20% IBKR-vs-best-other-source disagreement is captured in source_conflicts.
+    source_order = ["yahooquery", "fmp", "alpha_vantage", "eodhd", "yfinance", "ibkr"]
     for source_name in source_order:
         source_data = source_results.get(source_name)
         if not source_data:
@@ -272,11 +284,20 @@ def smart_merge_with_quality(
                         old_quality = field_quality.get(key, quality)
                         winner_quality = quality if should_use else old_quality
                         loser_quality = old_quality if should_use else quality
+                        # ``should_use`` decides which side becomes the merged winner;
+                        # surface it explicitly so downstream formatters never have to
+                        # assume ``new`` won (it does not when should_use is False).
                         source_conflicts[key] = {
                             "old": round(old_val, 4),
                             "old_source": old_source,
                             "new": round(new_val, 4),
                             "new_source": source_name,
+                            "winner_source": source_name if should_use else old_source,
+                            "winner_value": round(
+                                new_val if should_use else old_val, 4
+                            ),
+                            "loser_source": old_source if should_use else source_name,
+                            "loser_value": round(old_val if should_use else new_val, 4),
                             "variance_pct": round(
                                 abs(new_val - old_val) / abs(old_val) * 100, 1
                             ),
@@ -342,6 +363,28 @@ def smart_merge_with_quality(
         gaps_filled=gaps_filled,
     )
     return merged, metadata
+
+
+def collect_ibkr_advisory_conflicts(merged: dict[str, Any]) -> None:
+    """Surface IBKR-party source conflicts as a flat advisory list (mutates ``merged``).
+
+    Reuses the merge's already-normalized ``_source_conflicts`` (scaling/percent handled)
+    rather than re-comparing — any conflict where IBKR is a party is copied into
+    ``merged['_ibkr_advisory_conflicts']`` with ``advisory=True``, so the analyst sees a
+    cross-check whenever the exchange-direct IBKR value differs substantially (>20%) from
+    the best other source. Never mutates a merged winner.
+    """
+    conflicts = merged.get("_source_conflicts")
+    if not isinstance(conflicts, dict):
+        return
+    advisory = [
+        {"field": field, "advisory": True, **value}
+        for field, value in conflicts.items()
+        if isinstance(value, dict)
+        and "ibkr" in (value.get("new_source"), value.get("old_source"))
+    ]
+    if advisory:
+        merged["_ibkr_advisory_conflicts"] = advisory
 
 
 def quarantine_forward_pe_outlier(

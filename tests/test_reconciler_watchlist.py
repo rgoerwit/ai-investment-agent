@@ -14,6 +14,16 @@ from src.ibkr.models import AnalysisRecord, NormalizedPosition, PortfolioSummary
 from src.ibkr.reconciler import reconcile
 from src.ibkr.ticker import Ticker
 
+
+@pytest.fixture(autouse=True)
+def _isolate_results_dir(tmp_path, monkeypatch):
+    """Isolate config.results_dir so the default-on BUY stability gate scans an
+    empty dir (off-watchlist reconcile path) instead of the real results/ history."""
+    from src.config import config
+
+    monkeypatch.setattr(config, "results_dir", str(tmp_path), raising=False)
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 

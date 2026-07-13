@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -9,11 +10,15 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.types import RunnableConfig
 
+from src.charts.extractors.valuation_signals import VALUATION_CONTEXT_TOKENS
 from src.config import config as settings_config
 from src.data_block_utils import (
+    build_fenced_block,
     detect_legacy_data_block_shape,
     extract_block_text_value,
     extract_last_data_block,
+    fenced_end,
+    fenced_start,
     has_parseable_data_block,
     has_parseable_fenced_block,
     normalize_legacy_data_block_report,
@@ -23,6 +28,8 @@ from src.data_block_utils import (
 from src.error_safety import summarize_exception
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import failure_artifact, success_artifact
+from src.service_tiers import floor_llm_hard_timeout
+from src.thesis_constants import DRAWDOWN_52WK_RATIO, DRAWDOWN_SMA200_RATIO
 from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
@@ -32,6 +39,7 @@ from .fundamentals_reconciler import (
     append_analyst_coverage_data_quality_note,
     extract_raw_metrics_payload,
     reconcile_high_risk_fields,
+    reconcile_score_consistency,
 )
 from .output_limits import cap_state_value
 from .output_validation import (
@@ -48,14 +56,18 @@ _FUNDAMENTALS_RETRY_FORMAT_SUFFIX = """
 CRITICAL FORMAT CORRECTION:
 Emit the DATA_BLOCK first.
 Use exactly these fenced markers:
-### --- START DATA_BLOCK ---
+{start_marker}
 ...
-### --- END DATA_BLOCK ---
+{end_marker}
 Inside DATA_BLOCK, use plain KEY: VALUE lines only.
 Do NOT use markdown tables inside DATA_BLOCK.
-"""
+""".format(
+    start_marker=fenced_start("DATA_BLOCK"),
+    end_marker=fenced_end("DATA_BLOCK"),
+)
 
 _QUARANTINED_FORWARD_KEYS = ("PE_RATIO_FORWARD", "PEG_RATIO")
+_VALUATION_RELIABILITY_FIELD = "VALUATION_INPUT_RELIABILITY"
 _VALID_ADR_EXCHANGES = {
     "NYSE",
     "NASDAQ",
@@ -84,6 +96,25 @@ _UNSPONSORED_ADR_MARKERS = (
     "unsponsored adr program",
     "multi unsponsored",
 )
+
+
+def _extract_valuation_context(report: str | None) -> str:
+    """Return compact valuation-relevant flags that sit outside DATA_BLOCK."""
+    if not report:
+        return "None"
+    lines: list[str] = []
+    for raw_line in report.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line:
+            continue
+        upper = line.upper()
+        if any(keyword in upper for keyword in VALUATION_CONTEXT_TOKENS):
+            lines.append(line[:300])
+        if len(lines) >= 8:
+            break
+    return "\n".join(lines) if lines else "None"
+
+
 _SPONSORED_ADR_MARKERS = (
     "sponsorship level: sponsored",
     "sponsored level i adr",
@@ -136,13 +167,39 @@ def _classify_otc_adr_evidence(raw_text: str) -> str | None:
     return None
 
 
+def _valuation_input_reliability(payload: dict[str, Any]) -> str:
+    """Classify whether DATA_BLOCK valuation multiples can be trusted, from markers the
+    fetcher/merge layer already set on the raw metrics payload.
+
+    QUARANTINED = a forward OR trailing valuation input was actively distrusted (split
+    sensitivity, low-P/E anomaly, unit/decimal/currency error, or forward-P/E quarantine);
+    UNAVAILABLE = no forward valuation input present; USABLE otherwise. Conservative on an
+    empty/malformed payload (UNAVAILABLE) — never raises.
+    """
+    if not payload:
+        return "UNAVAILABLE"
+    if (
+        payload.get("_split_sensitive_metrics_quarantined") is True
+        or payload.get("_pe_low_anomaly_quarantined") is True
+        or payload.get("_pe_unit_error_quarantined") in {"forward", "trailing"}
+        or bool(payload.get("_forwardPE_quarantine_reason"))
+    ):
+        return "QUARANTINED"
+    if all(payload.get(key) is None for key in ("forwardPE", "forwardEps", "pegRatio")):
+        return "UNAVAILABLE"
+    return "USABLE"
+
+
 def _sanitize_fundamentals_output(
     content: str,
     raw_data: str,
     ticker: str,
     foreign_data: str = "",
 ) -> str:
-    if not raw_data or not has_parseable_data_block(content):
+    # Score consistency is checked even without raw data (it is DATA_BLOCK-internal),
+    # so only an unparseable block short-circuits; payload-dependent steps stay
+    # gated on has_structured_payload below.
+    if not has_parseable_data_block(content):
         return content
 
     payload = extract_raw_metrics_payload(raw_data)
@@ -154,8 +211,26 @@ def _sanitize_fundamentals_output(
         return content
 
     updated_body = block_body
+    # `corrective` marks a sanitization that *fixed something suspect* (quarantine,
+    # invalid ADR routing, ADR sponsorship correction) vs. routine additive
+    # annotation (coverage data-quality note, valuation-reliability field, N/A
+    # backfills) that happens on essentially every run. The final log fires at
+    # WARNING only when corrective, else INFO — so the WARNING keeps signal value.
+    corrective = False
     if has_structured_payload:
         updated_body = reconcile_high_risk_fields(updated_body, payload)
+
+    updated_body, score_corrected, score_suspect = reconcile_score_consistency(
+        updated_body
+    )
+    if score_corrected or score_suspect:
+        corrective = True
+        logger.warning(
+            "score_consistency_reconciled",
+            ticker=ticker,
+            corrected=score_corrected,
+            suspect=score_suspect,
+        )
 
     updated_body = append_analyst_coverage_data_quality_note(
         updated_body,
@@ -166,10 +241,12 @@ def _sanitize_fundamentals_output(
         has_structured_payload
         and payload.get("_split_sensitive_metrics_quarantined") is True
     ):
+        corrective = True
         for key in _QUARANTINED_FORWARD_KEYS:
             updated_body = replace_or_append_block_line(updated_body, key, "N/A")
 
     if has_structured_payload and payload.get("_pe_low_anomaly_quarantined") is True:
+        corrective = True
         updated_body = replace_or_append_block_line(updated_body, "PE_RATIO_TTM", "N/A")
         updated_body = replace_or_append_block_line(updated_body, "PEG_RATIO", "N/A")
 
@@ -181,6 +258,13 @@ def _sanitize_fundamentals_output(
                     datablock_key,
                     "N/A",
                 )
+
+    if has_structured_payload:
+        updated_body = replace_or_append_block_line(
+            updated_body,
+            _VALUATION_RELIABILITY_FIELD,
+            _valuation_input_reliability(payload),
+        )
 
     latest_quarter_date = payload.get("latest_quarter_date")
     latest_quarter_date_reconciled = (
@@ -200,6 +284,7 @@ def _sanitize_fundamentals_output(
         )
 
     if _invalid_adr_routing(updated_body, ticker):
+        corrective = True
         for key, value in {
             "ADR_TICKER": "None",
             "ADR_EXCHANGE": "None",
@@ -242,6 +327,7 @@ def _sanitize_fundamentals_output(
             logger.warning("adr_sponsorship_downgraded_to_uncertain", ticker=ticker)
 
         if replacements:
+            corrective = True
             for key, value in replacements.items():
                 updated_body = replace_or_append_block_line(
                     updated_body,
@@ -252,12 +338,11 @@ def _sanitize_fundamentals_output(
     if updated_body == block_body:
         return content
 
-    logger.warning("fundamentals_datablock_sanitized", ticker=ticker)
-    updated_block = (
-        "### --- START DATA_BLOCK ---\n"
-        f"{updated_body.rstrip()}\n"
-        "### --- END DATA_BLOCK ---"
-    )
+    # WARNING only when a corrective fix was applied; routine additive annotation
+    # (which changes the block on nearly every run) logs at INFO.
+    log = logger.warning if corrective else logger.info
+    log("fundamentals_datablock_sanitized", ticker=ticker, corrective=corrective)
+    updated_block = build_fenced_block("DATA_BLOCK", updated_body.rstrip())
     block_index = content.rfind(block_with_markers)
     if block_index < 0:
         return content
@@ -412,6 +497,39 @@ def _build_news_macro_extra_context(ticker: str, context: Any | None) -> str:
     if not blocks:
         return ""
     return "\n\n" + "\n\n".join(blocks) + "\n"
+
+
+def _build_news_price_drawdown_context(ticker: str, context: Any | None) -> str:
+    """Return the drawdown-investigation trigger block for the News Analyst.
+
+    News runs parallel to fundamentals, so the trigger uses the pre-graph
+    ``price_snapshot`` (advisory; empty string when absent or not triggered).
+    """
+    snapshot = getattr(context, "price_snapshot", None) or {}
+    current = snapshot.get("current")
+    high = snapshot.get("high_52w")
+    sma200 = snapshot.get("sma200")
+    if not current or not high or current <= 0 or high <= 0:
+        return ""
+    triggered = (current / high <= DRAWDOWN_52WK_RATIO) or (
+        sma200 and sma200 > 0 and current < DRAWDOWN_SMA200_RATIO * sma200
+    )
+    if not triggered:
+        return ""
+    logger.info(
+        "news_drawdown_context_injected",
+        ticker=ticker,
+        pct_of_52wk_high=round(current / high * 100, 1),
+    )
+    sma_line = f" 200-day SMA: {sma200:.2f}." if sma200 else ""
+    return (
+        "### PRICE DRAWDOWN CONTEXT\n"
+        f"- Current price {current:.2f} is {(1 - current / high) * 100:.0f}% below "
+        f"the 52-week high ({high:.2f}).{sma_line}\n"
+        "Instruction: follow the PRICE DRAWDOWN PROTOCOL — run the mandatory "
+        "targeted 'share price decline reason' searches (English + native "
+        "language) and report DRAWDOWN_EXPLANATION in the SUMMARY."
+    )
 
 
 def create_analyst_node(
@@ -592,6 +710,9 @@ def create_analyst_node(
                 macro_context_injected_into_news = (
                     "### REGIONAL MACRO CONTEXT" in news_macro_context
                 )
+                drawdown_context = _build_news_price_drawdown_context(ticker, context)
+                if drawdown_context:
+                    extra_context += "\n\n" + drawdown_context + "\n"
 
             core_system_instruction = (
                 f"{agent_prompt.system_message}\n\n"
@@ -682,6 +803,18 @@ def create_analyst_node(
                     else prompt_template | retry_llm
                 )
 
+                # In --quick, base the retry's overall budget on the same
+                # per-seat cap the main path uses (larger for gate-critical APEX
+                # seats), so a retry can't clip an APEX seat below its 180s
+                # allowance. Full mode keeps the standard hard cap.
+                _retry_rc = get_runtime_config(settings_config)
+                _retry_base_seconds = (
+                    agent_runtime.quick_mode_hard_timeout_seconds(
+                        agent_prompt.agent_name, settings_config
+                    )
+                    if _retry_rc.quick_mode_active
+                    else float(_retry_rc.llm_call_hard_timeout_seconds)
+                )
                 try:
                     retry_response = (
                         await agent_runtime.invoke_with_rate_limit_handling(
@@ -690,10 +823,12 @@ def create_analyst_node(
                             context=f"{agent_prompt.agent_name} (RETRY-HIGH)",
                             provider=support.infer_provider_name(retry_llm),
                             model_name=support.get_model_name(retry_llm),
-                            overall_timeout_seconds=float(
-                                get_runtime_config(
-                                    settings_config
-                                ).llm_call_hard_timeout_seconds
+                            # Floor for flex: an un-floored overall budget
+                            # would clamp the flex-aware hard cap back down.
+                            overall_timeout_seconds=floor_llm_hard_timeout(
+                                _retry_base_seconds,
+                                provider=support.infer_provider_name(retry_llm),
+                                label="analyst_retry_overall_timeout",
                             ),
                         )
                     )
@@ -865,10 +1000,15 @@ def create_valuation_calculator_node(llm) -> Callable:
                 provider=support.infer_provider_name(llm),
             )
 
+        valuation_context = _extract_valuation_context(fundamentals_report)
+
         prompt = f"""{agent_prompt.system_message}
 
 TICKER: {ticker}
 COMPANY: {company_name}
+
+VALUATION_CONTEXT:
+{valuation_context}
 
 DATA_BLOCK:
 {data_block}

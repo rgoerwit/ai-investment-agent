@@ -24,16 +24,24 @@ from dataclasses import dataclass, field
 
 import structlog
 
-from src.agents.pm_verdict_metadata import canonicalize_pm_verdict
 from src.agents.support import extract_kill_criteria, get_bear_history
-from src.charts.extractors.valuation import extract_valuation_scenarios, resolve_eps_ttm
-from src.data_block_utils import extract_data_block_field
+from src.charts.extractors.valuation import (
+    extract_valuation_scenarios_for_fundamentals,
+    format_iv,
+    is_weak_buy_asymmetry,
+    parse_numeric_field,
+    scenario_upside_metrics,
+    scenario_valuation_caveat,
+)
+from src.data_block_utils import extract_data_block_field, extract_last_fenced_block
+from src.pm_decision_parser import canonicalize_pm_verdict
 from src.reporting.source_confidence import (
     SourceRow,
     build_source_confidence_rows,
     render_source_confidence_markdown,
 )
 from src.reporting.state_access import (
+    get_effective_red_flags,
     get_fundamentals_report,
     get_investment_plan,
     get_pm_output,
@@ -43,10 +51,6 @@ from src.reporting.state_access import (
 logger = structlog.get_logger(__name__)
 
 
-_VERDICT_PM_BLOCK = re.compile(
-    r"### --- START PM_BLOCK[^\n]*---(.+?)### --- END PM_BLOCK ---",
-    re.DOTALL,
-)
 _VERDICT_LINE = re.compile(r"VERDICT:\s*([A-Z_ ]+)")
 _VERDICT_NARRATIVE = re.compile(
     r"PORTFOLIO MANAGER VERDICT:\s*(BUY|HOLD|DO NOT INITIATE|SELL)",
@@ -56,8 +60,6 @@ _RATIONALE_HEADER = re.compile(
     r"#+\s*DECISION RATIONALE\s*\n+(.+?)(?:\n#+\s|\n---|\Z)",
     re.DOTALL | re.IGNORECASE,
 )
-
-
 _VARIANT_PLACEHOLDER = "Not explicitly stated."
 
 
@@ -80,9 +82,9 @@ def extract_pm_verdict(pm_text: str) -> str:
     """Return the canonical verdict label from PM output, or 'UNAVAILABLE'."""
     if not pm_text:
         return "UNAVAILABLE"
-    blocks = list(_VERDICT_PM_BLOCK.finditer(pm_text))
-    if blocks:
-        match = _VERDICT_LINE.search(blocks[-1].group(1))
+    pm_block = extract_last_fenced_block(pm_text, "PM_BLOCK")
+    if pm_block is not None:
+        match = _VERDICT_LINE.search(pm_block)
         if match:
             verdict = canonicalize_pm_verdict(match.group(1))
             return "UNAVAILABLE" if verdict == "UNPARSEABLE" else verdict
@@ -93,6 +95,14 @@ def extract_pm_verdict(pm_text: str) -> str:
     return "UNAVAILABLE"
 
 
+# A period ending one of these is an abbreviation, not a sentence boundary —
+# "**Operational Quality vs." rendered as the whole thesis (3393.T 2026-07-04).
+_ABBREVIATION_SENTENCE_END = re.compile(
+    r"\b(?:vs|etc|cf|ca|approx|incl|resp|e\.g|i\.e|inc|ltd|co|corp|u\.s|u\.k)\.$",
+    re.IGNORECASE,
+)
+
+
 def extract_pm_thesis(pm_text: str, max_words: int = 30) -> str:
     """Pull the first sentence of the DECISION RATIONALE section, capped at max_words."""
     if not pm_text:
@@ -101,14 +111,39 @@ def extract_pm_thesis(pm_text: str, max_words: int = 30) -> str:
     if not match:
         return "Thesis unavailable."
     body = match.group(1).strip()
-    # First sentence-ish (cope with markdown bullets and bold prefixes).
-    body = re.sub(r"^[*\-•\s]+", "", body)
-    sentence_break = re.search(r"(.+?[.!?])\s", body + " ")
-    sentence = sentence_break.group(1) if sentence_break else body.split("\n", 1)[0]
+    # Strip leading markdown noise that precedes the rationale prose: header
+    # hashes ("#### 1."), list enumerators ("1.", "2)"), and bullets. The PM
+    # almost always renders DECISION RATIONALE as a numbered list, so without
+    # this the first-sentence regex latched onto a bare "1." marker and rendered
+    # the thesis as "1." (systemic memo bug). Bold "**" prefixes are left intact
+    # so the captured sentence keeps balanced markdown.
+    body = re.sub(r"^(?:#+\s*|\d+[.)]\s+|[-•]\s+)+", "", body)
+    # First sentence-ish, but never a degenerate marker-only capture (e.g. a
+    # stray "1." an enumerator strip missed): require at least one letter. A
+    # fragment ending in an abbreviation ("vs.", "e.g.") is not a sentence
+    # boundary — keep appending the following segments.
+    sentence = ""
+    fragment = ""
+    for candidate in re.finditer(r"(.+?[.!?])(?:\s|$)", body + " "):
+        text = candidate.group(1).strip()
+        if not fragment and not (re.search(r"[A-Za-z]", text) and len(text) > 3):
+            continue
+        fragment = f"{fragment} {text}".strip()
+        if _ABBREVIATION_SENTENCE_END.search(fragment):
+            continue
+        sentence = fragment
+        break
+    if not sentence:
+        sentence = fragment or body.split("\n", 1)[0]
     words = sentence.split()
     if len(words) > max_words:
         sentence = " ".join(words[:max_words]).rstrip(",;:") + "…"
-    return sentence.strip()
+    sentence = sentence.strip()
+    # Balance a dangling bold marker left by abbreviation-fallback or word-cap
+    # truncation so the memo line renders as markdown.
+    if sentence.count("**") % 2:
+        sentence += "**"
+    return sentence
 
 
 def extract_variant_view(state: dict) -> str:
@@ -208,9 +243,10 @@ def format_scenario_summary(state: dict) -> str | None:
         return None
 
     fundamentals = get_fundamentals_report(state)
-    eps_ttm = resolve_eps_ttm(fundamentals)
 
-    scenarios = extract_valuation_scenarios(valuation_params, eps_ttm)
+    scenarios = extract_valuation_scenarios_for_fundamentals(
+        valuation_params, fundamentals
+    )
     if scenarios is None:
         return None
 
@@ -218,14 +254,35 @@ def format_scenario_summary(state: dict) -> str | None:
     prefix = f"{ccy} " if ccy else ""
 
     def _fmt(value: float) -> str:
-        return f"{prefix}{value:,.2f}"
+        return f"{prefix}{format_iv(value)}"
+
+    caveat = scenario_valuation_caveat(scenarios)
+    warning = (
+        " Warning: peak/distorted earnings flagged; weighted IV is conditional, "
+        "not normalized fair value."
+        if caveat
+        else ""
+    )
+    current_price = parse_numeric_field(
+        extract_data_block_field(fundamentals, "CURRENT_PRICE")
+    )
+    upside_metrics = scenario_upside_metrics(scenarios, current_price)
+    if extract_pm_verdict(get_pm_output(state)) == "BUY" and upside_metrics:
+        weighted_upside, downside_probability = upside_metrics
+        if is_weak_buy_asymmetry(weighted_upside, downside_probability):
+            warning += (
+                " Warning: BUY verdict has weak valuation asymmetry; review "
+                f"weighted IV upside ({weighted_upside * 100:.1f}%) and "
+                f"downside probability ({downside_probability:.0f}%)."
+            )
 
     return (
         f"Bear {_fmt(scenarios.bear_iv)} ({scenarios.bear.probability:.0f}%) / "
         f"Base {_fmt(scenarios.base_iv)} ({scenarios.base.probability:.0f}%) / "
         f"Bull {_fmt(scenarios.bull_iv)} ({scenarios.bull.probability:.0f}%); "
         f"weighted {_fmt(scenarios.weighted_iv)} "
-        f"({scenarios.methodology}, sufficiency {scenarios.data_sufficiency})."
+        f"({scenarios.methodology}, sufficiency {scenarios.data_sufficiency}; "
+        f"earnings basis {scenarios.earnings_basis}).{warning}"
     )
 
 
@@ -255,6 +312,8 @@ def extract_pm_risks(
     """Combine red-flag detail lines and PM-narrative risk bullets into a short list."""
     risks: list[str] = []
     for flag in red_flags or []:
+        if not _is_material_risk_flag(flag):
+            continue
         flag_type = flag.get("type") if isinstance(flag, dict) else None
         detail = flag.get("detail") if isinstance(flag, dict) else None
         if flag_type and detail:
@@ -280,12 +339,43 @@ def extract_pm_risks(
     return risks[:limit]
 
 
+def _is_material_risk_flag(flag: dict) -> bool:
+    """True for flags that belong in the memo's Top risks list."""
+    if not isinstance(flag, dict):
+        return False
+    if flag.get("action") == "AUTO_REJECT" or flag.get("severity") == "CRITICAL":
+        return True
+    penalty = flag.get("risk_penalty")
+    if isinstance(penalty, bool):
+        return False
+    if isinstance(penalty, int | float):
+        return penalty > 0
+    return False
+
+
 def summarize_confidence(state: dict) -> str:
     """One-sentence summary of which optional cross-checks ran."""
     run_summary = state.get("run_summary") or {}
     bits: list[str] = []
-    if run_summary.get("consultant_successful"):
+    verdict = run_summary.get("consultant_verdict")
+    if verdict == "CLEAN" or (
+        verdict is None and run_summary.get("consultant_successful")
+    ):
+        # `verdict is None` = pre-change saved JSON; fall back to the legacy
+        # "ran ok" signal so old analyses still render.
         bits.append("consultant cross-check passed")
+    elif verdict == "CONDITIONAL":
+        bits.append("consultant approved with conditions — verify open items")
+    elif verdict == "MAJOR_CONCERNS":
+        bits.append("consultant raised major concerns")
+    elif verdict == "REJECTED":
+        bits.append("consultant did NOT approve")
+    elif verdict == "ERROR":
+        bits.append("consultant review failed validation")
+    elif verdict == "SKIPPED":
+        bits.append("consultant cross-check skipped (quick screen)")
+    elif verdict == "UNPARSED":
+        bits.append("consultant review unparsed")
     elif run_summary.get("consultant_completed"):
         bits.append("consultant ran but did not approve")
     if run_summary.get("auditor_successful"):
@@ -309,7 +399,7 @@ def build_memo(state: dict) -> InvestmentMemo:
     pm = get_pm_output(state)
     fundamentals = get_fundamentals_report(state)
     bear_text = get_bear_history(state)
-    red_flags = state.get("red_flags") or []
+    red_flags = get_effective_red_flags(state)
 
     return InvestmentMemo(
         decision=extract_pm_verdict(pm),
@@ -334,6 +424,15 @@ def render_memo_markdown(memo: InvestmentMemo) -> str:
         )
 
     parts: list[str] = [f"## Investment Memo — {memo.decision}\n\n"]
+    # The analyzer PM is portfolio-blind (no holdings access), so an analyzer
+    # HOLD is always monitor-only — clarify up front, because the body can
+    # retain the trader's pre-override sizing (e.g. 3626.T: "Initial Position
+    # Size: 2.0%" below a HOLD with 0.0% recommended).
+    if memo.decision == "HOLD":
+        parts.append(
+            "*New-candidate HOLD: monitor only — this analysis does not "
+            "initiate a position.*\n\n"
+        )
     parts.append(f"**Thesis.** {memo.one_line_thesis}\n\n")
     # Tranche 5, Step 8: omit the line entirely when the placeholder fires.
     # Rendering "Not explicitly stated." as a bolded section adds visual noise

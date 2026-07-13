@@ -122,6 +122,20 @@ POSITION_SIZE: 4.5
         assert result.verdict == "BUY"
         assert result.position_size == 4.5
 
+    def test_extract_accepts_hash_and_dash_drift(self):
+        pm_output = """
+## -- START PM_BLOCK --
+VERDICT: BUY
+ZONE: LOW
+POSITION_SIZE: 4.5
+## -- END PM_BLOCK --
+"""
+        result = extract_pm_block(pm_output)
+
+        assert result.verdict == "BUY"
+        assert result.zone == "LOW"
+        assert result.position_size == 4.5
+
     def test_missing_pm_block_returns_defaults(self):
         """Test that missing PM_BLOCK returns default values."""
         pm_output = """

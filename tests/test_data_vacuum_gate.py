@@ -19,6 +19,14 @@ def _fetcher_returning(metrics):
     return SimpleNamespace(get_financial_metrics=AsyncMock(return_value=metrics))
 
 
+class _HistoryCandidate:
+    def __init__(self, label: str):
+        self._label = label
+
+    def display_label(self) -> str:
+        return self._label
+
+
 class TestVacuumProbe:
     @pytest.mark.asyncio
     async def test_total_vacuum_detected(self):
@@ -70,6 +78,10 @@ class TestGateInRunAnalysis:
             patch(
                 "src.main._is_total_data_vacuum", new=AsyncMock(return_value=True)
             ) as probe,
+            patch(
+                "src.ticker_history_resolver.historical_resolution_candidates",
+                return_value=[],
+            ),
             patch("src.graph.create_trading_graph") as graph_factory,
         ):
             result = await run_analysis("1264.TW", quick_mode=True)
@@ -103,6 +115,30 @@ class TestGateInRunAnalysis:
 
         probe.assert_not_awaited()
         graph_factory.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_vacuum_abort_prints_history_suggestions_without_redirect(
+        self, capsys
+    ):
+        with (
+            patch(
+                "src.ticker_utils.resolve_company_name",
+                new=AsyncMock(return_value=self._unresolved_name()),
+            ),
+            patch("src.main._is_total_data_vacuum", new=AsyncMock(return_value=True)),
+            patch(
+                "src.ticker_history_resolver.historical_resolution_candidates",
+                return_value=[_HistoryCandidate("KRN.DE (EUR, DE, 2026-06-11)")],
+            ),
+            patch("src.graph.create_trading_graph") as graph_factory,
+        ):
+            result = await run_analysis("KRN", quick_mode=True)
+
+        assert result is None
+        graph_factory.assert_not_called()
+        out = capsys.readouterr().out
+        assert "Prior reliable same-base analysis(es): KRN.DE" in out
+        assert "--force-data-vacuum" in out
 
     @pytest.mark.asyncio
     async def test_resolved_name_skips_probe_entirely(self):

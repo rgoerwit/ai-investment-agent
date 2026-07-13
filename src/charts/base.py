@@ -125,6 +125,29 @@ class ChartConfig:
             self.output_dir = Path(self.output_dir)
 
 
+# A degenerate single-point analyst target (HIGH == LOW == MEAN) that sits wildly
+# off the current price is a single stale source, not a consensus — exclude it as a
+# chart anchor (e.g. a lone 1415 target against a 447 price).
+_THIN_TARGET_RATIO_HIGH = 3.0
+_THIN_TARGET_RATIO_LOW = 0.33
+
+
+def is_thin_outlier_target(
+    target_low: float | None,
+    target_high: float | None,
+    current_price: float | None,
+) -> bool:
+    """True when the external analyst target is a single-source point wildly off price."""
+    if not (current_price and current_price > 0):
+        return False
+    if not (target_low and target_high and target_low > 0 and target_high > 0):
+        return False
+    if target_low != target_high:
+        return False
+    ratio = target_high / current_price
+    return ratio > _THIN_TARGET_RATIO_HIGH or ratio < _THIN_TARGET_RATIO_LOW
+
+
 @dataclass
 class FootballFieldData:
     """Data required for football field valuation chart.
@@ -190,12 +213,16 @@ class FootballFieldData:
         )
 
     def has_external_targets(self) -> bool:
-        """Check if external analyst targets are available."""
-        return (
+        """Check if external analyst targets are available (and not a thin outlier)."""
+        if not (
             self.external_target_low is not None
             and self.external_target_high is not None
             and self.external_target_low > 0
             and self.external_target_high > 0
+        ):
+            return False
+        return not is_thin_outlier_target(
+            self.external_target_low, self.external_target_high, self.current_price
         )
 
     def has_our_targets(self) -> bool:

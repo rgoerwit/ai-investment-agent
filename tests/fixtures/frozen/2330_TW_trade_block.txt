@@ -1,0 +1,56 @@
+**TRADE PROPOSAL**
+
+**Security**: 2330.TW - Taiwan Semiconductor Manufacturing Co.
+**Exchange**: Taiwan Stock Exchange (TWSE)
+**Currency**: TWD
+
+**Action**: **HOLD / DO NOT INITIATE**
+
+**Initial Position Size**: 0.0%
+- Rationale: The Research Manager has issued a formal **REJECT** recommendation based on a failure to meet the "undiscovered" mandate (excessive analyst coverage of 32+). As a trader, I must adhere to the investment mandate.
+- Conviction: N/A
+- Risk Basis: The position violates the core thesis criteria regarding institutional saturation and analyst coverage.
+
+**Entry Strategy**:
+- Approach: N/A
+- Entry Price: N/A
+- Timing: N/A
+
+**Stop Loss**:
+- Price: N/A
+- Percentage: N/A
+- Rationale: N/A
+
+**Profit Targets**:
+1. First: N/A
+2. Second: N/A
+3. Stretch: N/A
+
+**Risk/Reward**:
+- Max loss: 0%
+- Expected gain: N/A
+- R:R ratio: N/A
+
+**Special Considerations**:
+- **Mandate Violation**: The primary driver for rejection is the "undiscovered" thesis failure. TSMC is a global benchmark asset, not an alpha-generating opportunity under the current mandate.
+- **Geopolitical Risk**: The concentration of manufacturing in the Taiwan Strait remains a structural risk that cannot be hedged within this position.
+- **Valuation**: Current P/E (27.47) and high institutional ownership suggest limited upside from "undiscovered" alpha, as the market has already fully priced in the AI/HPC growth narrative.
+
+**Order Details**:
+- Order type: N/A
+- Time in force: N/A
+- Execution approach: No execution authorized.
+
+```
+TRADE_BLOCK:
+ACTION: HOLD
+SIZE: 0.0%
+CONVICTION: N/A
+ENTRY: N/A
+STOP: N/A
+TARGET_1: N/A
+TARGET_2: N/A
+HORIZON: N/A
+R:R: N/A
+SPECIAL: Mandate violation (Institutional saturation)
+```

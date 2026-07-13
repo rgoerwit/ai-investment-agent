@@ -233,12 +233,20 @@ class TestAgentToolNodeFiltering:
 
     @pytest.mark.asyncio
     async def test_executes_tool_calls_concurrently_and_preserves_order(self):
-        """Multiple tool calls should run concurrently without reordering results."""
+        """Multiple tool calls should run concurrently without reordering results.
+
+        Concurrency is proven structurally rather than by wall-clock timing (which is
+        flaky under load): both tools wait on a shared 2-party barrier, so they must be
+        in flight simultaneously for either to return. A regression to sequential
+        execution leaves the barrier permanently short a party, so ``wait_for`` trips.
+        """
+        both_in_flight = asyncio.Barrier(2)
+
         first_tool = MagicMock()
         first_tool.name = "get_news"
 
         async def _first(_args):
-            await asyncio.sleep(0.07)
+            await both_in_flight.wait()
             return "news-result"
 
         first_tool.ainvoke = AsyncMock(side_effect=_first)
@@ -247,7 +255,7 @@ class TestAgentToolNodeFiltering:
         second_tool.name = "get_macroeconomic_news"
 
         async def _second(_args):
-            await asyncio.sleep(0.07)
+            await both_in_flight.wait()
             return "macro-result"
 
         second_tool.ainvoke = AsyncMock(side_effect=_second)
@@ -279,11 +287,12 @@ class TestAgentToolNodeFiltering:
             ]
         }
 
-        start = time.perf_counter()
-        result = await agent_tool_node(state, {"configurable": {}})
-        elapsed = time.perf_counter() - start
+        # Sequential execution would leave the barrier a party short and hang; the
+        # timeout converts that regression into a fast, unambiguous failure.
+        result = await asyncio.wait_for(
+            agent_tool_node(state, {"configurable": {}}), timeout=5
+        )
 
-        assert elapsed < 0.11
         assert [msg.tool_call_id for msg in result["messages"]] == ["first", "second"]
         assert [msg.content for msg in result["messages"]] == [
             "news-result",

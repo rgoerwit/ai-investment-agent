@@ -19,10 +19,15 @@ class _FakeClient:
     def __init__(self, _config):
         self.connected = False
 
-    def connect(self, brokerage_session: bool = False) -> None:
+    def connect(
+        self, brokerage_session: bool = False, *, maintain: bool = False
+    ) -> None:
         self.connected = True
 
     def close(self) -> None:
+        self.connected = False
+
+    def logout(self) -> None:
         self.connected = False
 
     def stock_conid_by_symbol(self, symbol: str, default_filtering: bool = False):

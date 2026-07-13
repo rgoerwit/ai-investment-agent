@@ -578,3 +578,79 @@ class TestEdgeCases:
 
         # 100x ratio should be filtered, only 2 valid years
         assert signals.get("moat_cfoToNiYears", 0) == 2
+
+
+class TestMoatBonusSuppression:
+    """Moat bonuses must be suppressed (not netted) under peak/transient earnings.
+
+    Guards the fix for the moat-bonus-vs-peak defect: a -1.0 durable-advantage
+    bonus computed from stable margins + strong cash conversion must NOT cancel
+    a concurrent cyclical-peak / transient-strength warning.
+    """
+
+    _STRONG_MOAT = (
+        "MOAT_MARGIN_STABILITY: HIGH\nMOAT_MARGIN_CV: 0.05\n"
+        "MOAT_CASH_CONVERSION: STRONG\nMOAT_CFO_NI_AVG: 0.95"
+    )
+
+    def _block(self, *extra: str) -> str:
+        lines = "\n".join((self._STRONG_MOAT, *extra))
+        return f"### --- START DATA_BLOCK ---\n{lines}\n### --- END DATA_BLOCK ---"
+
+    def test_durable_advantage_still_fires_without_peak(self):
+        """Happy path: stable moat with benign cycle position still earns -1.0."""
+        flags = RedFlagDetector.detect_moat_flags(
+            self._block("CYCLE_POSITION: MID"), "OK.T"
+        )
+        assert [f["type"] for f in flags] == ["MOAT_DURABLE_ADVANTAGE"]
+        assert sum(f["risk_penalty"] for f in flags) == -1.0
+
+    def test_cycle_position_peak_suppresses_moat_bonus(self):
+        """Edge: CYCLE_POSITION: PEAK suppresses the bonus to 0.0."""
+        flags = RedFlagDetector.detect_moat_flags(
+            self._block("CYCLE_POSITION: PEAK"), "PEAK.T"
+        )
+        assert [f["type"] for f in flags] == ["MOAT_BONUS_SUPPRESSED_PEAK_TRANSIENT"]
+        assert sum(f["risk_penalty"] for f in flags) == 0.0
+
+    def test_roa_above_avg_and_unstable_suppresses(self):
+        """Edge: ROA >1.5x 5Y avg + unstable trend suppresses (mirrors CYCLICAL_PEAK_WARNING)."""
+        block = self._block(
+            "ROA_PERCENT: 18.0%", "ROA_5Y_AVG: 8.0%", "PROFITABILITY_TREND: UNSTABLE"
+        )
+        flags = RedFlagDetector.detect_moat_flags(block, "ROA.T")
+        assert flags[0]["type"] == "MOAT_BONUS_SUPPRESSED_PEAK_TRANSIENT"
+        assert sum(f["risk_penalty"] for f in flags) == 0.0
+
+    def test_high_roa_but_stable_trend_does_not_suppress(self):
+        """Guardrail: high ROA ratio alone (STABLE trend) must NOT over-suppress a genuine compounder."""
+        block = self._block(
+            "ROA_PERCENT: 18.0%", "ROA_5Y_AVG: 8.0%", "PROFITABILITY_TREND: STABLE"
+        )
+        flags = RedFlagDetector.detect_moat_flags(block, "STABLE.T")
+        assert [f["type"] for f in flags] == ["MOAT_DURABLE_ADVANTAGE"]
+
+    def test_transient_marker_in_body_suppresses(self):
+        """Edge: a one-time gain-on-sale marker in body text suppresses the bonus."""
+        report = (
+            self._block()
+            + "\nReported EPS was boosted by a one-time gain on sale of a division."
+        )
+        flags = RedFlagDetector.detect_moat_flags(report, "GAIN.T")
+        assert flags[0]["type"] == "MOAT_BONUS_SUPPRESSED_PEAK_TRANSIENT"
+
+    def test_empty_or_garbled_report_does_not_crash_or_suppress(self):
+        """Error handling: empty/garbled input yields no flags and no crash."""
+        assert RedFlagDetector.detect_moat_flags("", "EMPTY.T") == []
+        assert RedFlagDetector.detect_moat_flags("no data block here", "X.T") == []
+
+    def test_no_spurious_suppression_when_no_moat_bonus(self):
+        """A one-time marker without moat metrics must NOT emit a suppression flag."""
+        report = (
+            "### --- START DATA_BLOCK ---\n"
+            "MOAT_MARGIN_STABILITY: LOW\nMOAT_CASH_CONVERSION: WEAK\n"
+            "### --- END DATA_BLOCK ---\n"
+            "Reported EPS was boosted by a one-time gain on sale of a division."
+        )
+        # No moat bonus would fire (LOW/WEAK), so no suppression flag should appear.
+        assert RedFlagDetector.detect_moat_flags(report, "NOMOAT.T") == []

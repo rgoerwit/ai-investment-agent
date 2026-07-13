@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.12.0] - 2026-07-12
+
+### Added
+
+- **APEX Model Tier** — Gate-critical seats (Senior Fundamentals Analyst, Portfolio Manager) are pinnable to a dedicated `APEX_MODEL` with deep-tier thinking, separate from the flash data-gathering tier; in `--quick` they pin to the standard service tier with a larger per-call budget so the block-emitting work finishes before the pipeline watchdog.
+- **Flex Service Tiers** — Gemini/OpenAI flex inference at ~50% token price with error-discovered capability caching, standard-tier fallback on capacity/latency, load-bearing timeout floors (quick-mode exempt), and flex/cache-adjusted cost tracking (corrects months of 3–4× cost under-reporting on gemini-3.x/gpt-5.x).
+- **Writer Fallback Chain** — The article writer degrades through an ordered Claude → `EDITOR_MODEL` (OpenAI) → Gemini floor chain with truthful `article_writer_fell_back` stamping and family-neutral log events.
+- **IBKR Advisory Data Source** — Opt-in (`IBKR_DATA_SOURCE_ENABLED`) sixth merge source supplying point-in-time ratios/price (quality 9.4, overrides Yahoo/FMP, gap-fills the ex-US `trailingPE` vacuum); a no-op that auto-recovers when unentitled.
+- **Batch Health Digest** — `scripts/scan_batch_health.py`, auto-run at each stage end of `run_pipeline.sh`, summarizes anomalies (non-publishable, `llm_failures`, consultant `ERROR`/`UNPARSED`, same-mode verdict flips), scoped by file mtime for cross-day-resume robustness.
+- **Prompt-Drift Harness** — Tiered L0–L3 prompt↔parser contract tests (`make test-prompts` / `replay` / `eval-semantic`) catching silent prompt/parser format drift at commit time.
+- **Score-Consistency & Drawdown Flags** — Deterministic health/growth score validation (`SUSPECT` + arithmetic repair, `*_SCORE_UNRELIABLE` gate guard, per-criterion rubric breakdown audit) and an `UNEXPLAINED_DRAWDOWN_NEWS_GAP` flag with a News-Analyst price-drawdown protocol.
+
+### Changed
+
+- **Portfolio-Manager BUY Discipline** — `VALUATION_INPUT_RELIABILITY` quarantine (distrusted multiples can't back a BUY), suppression of peak/transient moat bonuses, distortion-before-catalyst and material-op-signal BUY blocks, a now-default BUY-stability gate (decoupled from `src.agents` via neutral `pm_decision_parser`), and weak-asymmetry BUY qualification.
+- **Consultant/Auditor Wiring** — Verdict scoped to the FINAL CONSULTANT VERDICT section; explicit `MANDATE_BREACH:`/`HARD_STOP:` tokens (prompt v2.12) with negation-aware fallback; a ≤50% partial-tool-failure passes a tagged review rather than discarding it; auditor decoupled from the consultant on the shared OpenAI plane; gate-bypass labeled `SKIPPED` not `UNPARSED`.
+- **PM Sizing Reconciliation** — No-initiation verdicts (HOLD/DO_NOT_INITIATE/SELL) clamp both the machine `POSITION_SIZE` token and the human-facing prose to zero, applied after all deterministic verdict modifiers.
+- **ex-US Data Quality** — Statement-derived FY revenue/EPS growth overrides stale yfinance scalars (`GROWTH_DATA_STALE`); OCF FILING-authority gated on exact extraction with an independent auditor cross-check; exchange-code canonicalization (TSEJ/TSE/TSXV) with a ground-truth canary.
+- **Report Rendering** — Compliance visuals for P/E, health, and growth follow the PM gate verdict; "undiscovered" is softened via a banner caveat; unresolved-auditor stubs render as prose; HOLD memos carry a monitor-only clarifier.
+
+### Fixed
+
+- **Full-Suite pytest Hang** — Memory embedding calls are hard-bounded (google-genai's per-request `timeout=None` disabled all httpx timeouts, hanging an SSL read forever).
+- **`--quick` child_timeout Kills** — Flex timeout floors are exempted in quick mode with a standard-tier fallback on queued-flex latency, and APEX seats are pinned standard with a larger budget so gate-critical seats aren't guillotined before emitting their block.
+- **DuckDuckGo Fallback Death** — The single-worker search executor is replaced with a constructor-locked multi-worker pool so one hung socket read no longer kills fallback for the rest of the process.
+- **Cloudflare 52x** — Consultant transient 520–524 responses are classified retryable instead of dying non-retryable.
+- **IBKR Session Lifecycle** — One pooled connection per process with retry on brokerage-session init, watchlist fail-closed, and multi-exchange held-position `conid` resolution.
+- **Currency/Valuation** — GAMA.L GBp→GBP double-scale, `format_iv` false cents on KRW/JPY, and scenario intrinsic-value normalization on peak/one-off EPS.
+
 ## [3.11.0] - 2026-06-11
 
 ### Added

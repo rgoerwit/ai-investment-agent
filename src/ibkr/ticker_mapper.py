@@ -344,7 +344,7 @@ def resolve_conid(yf_ticker: str, client: Any | None = None) -> int | None:
         }
         _flush_cache()
 
-        logger.info("conid_resolved", ticker=yf_ticker, conid=conid, exchange=exchange)
+        logger.debug("conid_resolved", ticker=yf_ticker, conid=conid, exchange=exchange)
         return conid if isinstance(conid, int) else None
 
     except IBKRTickerResolutionError:

@@ -12,6 +12,7 @@ from src.charts.extractors.valuation import (
     ValuationScenarios,
     _scenario_iv,
     extract_valuation_scenarios,
+    format_iv,
 )
 
 # Convention: EPS_TTM 10.0 keeps math easy to eyeball.
@@ -57,13 +58,15 @@ def test_valuation_calculator_prompt_extended() -> None:
     data = json.loads(
         pathlib.Path("prompts/valuation_calculator.json").read_text(encoding="utf-8")
     )
-    assert data["version"] == "1.3"
+    assert data["version"] == "1.4"
     msg = data["system_message"]
     assert "VALUATION_SCENARIOS" in msg
+    assert "VALUATION_CONTEXT" in msg
     assert "BEAR_MULTIPLE" in msg
     assert "BULL_PROBABILITY" in msg
     assert "DATA_SUFFICIENCY" in msg
     assert "DO NOT COMPUTE IVs" in msg
+    assert "Respect earnings-quality flags" in msg
     # Original VALUATION_PARAMS contract preserved.
     assert "VALUATION_PARAMS" in msg
     assert "DO NOT CALCULATE" in msg
@@ -229,3 +232,17 @@ def test_unparseable_block_returns_none() -> None:
         "### --- END VALUATION_SCENARIOS ---"
     )
     assert extract_valuation_scenarios(block, eps_ttm=EPS_TTM) is None
+
+
+def test_format_iv_drops_cents_on_large_nominal_values() -> None:
+    # KRW/JPY-scale IVs run to thousands — a hundredth of a unit is noise.
+    assert format_iv(30811.21) == "30,811"
+    assert format_iv(21294.06) == "21,294"
+    assert format_iv(1000.0) == "1,000"
+
+
+def test_format_iv_keeps_cents_on_small_nominal_values() -> None:
+    # USD/EUR-scale IVs keep two decimals — cents are meaningful.
+    assert format_iv(129.60) == "129.60"
+    assert format_iv(74.5) == "74.50"
+    assert format_iv(999.99) == "999.99"

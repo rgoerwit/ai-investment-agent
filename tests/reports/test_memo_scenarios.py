@@ -113,6 +113,75 @@ def test_scenario_summary_derives_eps_when_field_absent() -> None:
     assert "Bear" in out and "Base" in out and "Bull" in out
 
 
+def test_scenario_summary_warns_when_valuation_is_conditional() -> None:
+    fundamentals = (
+        "#### CROSS-CHECK FLAGS\n"
+        "- [CYCLICAL PEAK — LOW P/E MAY BE PEAK-DISTORTED]: returns above history.\n"
+        "### --- START DATA_BLOCK ---\n"
+        "SECTOR: Industrials\n"
+        "PE_RATIO_TTM: 10.0\n"
+        "PE_RATIO_FORWARD: 8.0\n"
+        "CURRENT_PRICE: 100.00\n"
+        "### --- END DATA_BLOCK ---\n"
+    )
+    out = format_scenario_summary(
+        {"fundamentals_report": fundamentals, "valuation_params": _VALUATION_PARAMS}
+    )
+    assert out is not None
+    assert "Warning: peak/distorted earnings flagged" in out
+    assert "conditional, not normalized fair value" in out
+
+
+def test_scenario_summary_warns_weak_buy_asymmetry_only_for_buy() -> None:
+    fundamentals = _FUNDAMENTALS.replace("CURRENT_PRICE: 100.00", "CURRENT_PRICE: 120")
+    buy_state = {
+        "final_trade_decision": "### --- START PM_BLOCK ---\nVERDICT: BUY\n### --- END PM_BLOCK ---",
+        "fundamentals_report": fundamentals,
+        "valuation_params": _VALUATION_PARAMS,
+    }
+    buy_out = format_scenario_summary(buy_state)
+    assert buy_out is not None
+    assert "BUY verdict has weak valuation asymmetry" in buy_out
+    assert "weighted IV upside" in buy_out
+
+    hold_state = {
+        **buy_state,
+        "final_trade_decision": "### --- START PM_BLOCK ---\nVERDICT: HOLD\n### --- END PM_BLOCK ---",
+    }
+    hold_out = format_scenario_summary(hold_state)
+    assert hold_out is not None
+    assert "BUY verdict has weak valuation asymmetry" not in hold_out
+
+
+def test_scenario_summary_drops_cents_on_large_nominal_values() -> None:
+    """KRW/JPY-scale IVs run to thousands; two decimals there is false precision."""
+    fundamentals = (
+        "### --- START DATA_BLOCK ---\n"
+        "SECTOR: Industrials\n"
+        "REPORTING_CURRENCY: KRW\n"
+        "PE_RATIO_TTM: 12.0\n"
+        "EPS_TTM: 3000.0\n"
+        "CURRENT_PRICE: 36000.00\n"
+        "### --- END DATA_BLOCK ---\n"
+    )
+    out = format_scenario_summary(
+        {"fundamentals_report": fundamentals, "valuation_params": _VALUATION_PARAMS}
+    )
+    assert out is not None
+    assert "KRW" in out
+    # No thousands-grouped value carries cents (e.g. "38,880.00").
+    assert not re.search(r"\d,\d{3}\.\d", out)
+
+
+def test_scenario_summary_keeps_cents_on_small_nominal_values() -> None:
+    """USD-scale IVs (< 1000) keep two decimals — cents are meaningful there."""
+    out = format_scenario_summary(
+        {"fundamentals_report": _FUNDAMENTALS, "valuation_params": _VALUATION_PARAMS}
+    )
+    assert out is not None
+    assert re.search(r"\d\.\d{2}", out)
+
+
 def test_scenario_summary_none_when_eps_unresolvable() -> None:
     """Without EPS_TTM AND without (CURRENT_PRICE + PE_RATIO_TTM) → fallback."""
     fundamentals_no_inputs = (
