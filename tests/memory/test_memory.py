@@ -345,6 +345,13 @@ class TestSituationStorage:
         async def _stall(*_a, **_k):
             await asyncio.sleep(5)
 
+        # Instant limiter: the real GLOBAL_RATE_LIMITER can block on aacquire when
+        # tokens are drained (full-suite CI ordering), and that wait would leak into
+        # the timed section and mask the hard-timeout bound this test verifies.
+        class _InstantLimiter:
+            async def aacquire(self, *, blocking=True):
+                return True
+
         memory = FinancialSituationMemory("test_memory")
         memory.available = True
         memory.embeddings = MagicMock()
@@ -353,6 +360,10 @@ class TestSituationStorage:
         with (
             patch.object(
                 FinancialSituationMemory, "_EMBEDDING_CALL_TIMEOUT_SECONDS", 0.05
+            ),
+            patch(
+                "src.llms.GLOBAL_RATE_LIMITER",
+                _LazyRateLimiterProxy(lambda: _InstantLimiter()),
             ),
             patch("src.memory.logger"),
         ):
