@@ -273,11 +273,20 @@ apply_run_date() {
     fi
 }
 
-# Print a read-only anomaly digest for the run-date's analyses at stage end
+# Print a read-only anomaly digest for the analyses a stage just wrote
 # (non-publishable / llm failures / consultant ERROR-UNPARSED / same-mode verdict
-# flips). Fail-open: a digest error must never fail the pipeline.
+# flips). Scoped by file mtime via a stage-start epoch ($1), NOT by $DATE: the
+# analysis filename carries the wall-clock date, which need not equal the logical
+# run-date on a cross-day resume, and mtime also survives a stage spanning midnight.
+# Fail-open: a digest error must never fail the pipeline.
 emit_batch_health() {
-    "${PYTHON_CMD[@]}" scripts/scan_batch_health.py --run-date "$DATE" || true
+    local since_epoch="${1:-}"
+    if [[ -n "$since_epoch" ]]; then
+        "${PYTHON_CMD[@]}" scripts/scan_batch_health.py \
+            --modified-since "$since_epoch" || true
+    else
+        "${PYTHON_CMD[@]}" scripts/scan_batch_health.py --run-date "$DATE" || true
+    fi
 }
 
 ticker_to_dash() {
@@ -659,6 +668,9 @@ if [[ $START_STAGE -le 1 ]]; then
     STAGE1_SKIPPED=0
     STAGE1_FAILED=0
     STAGE1_NOANALYSIS=0
+    # Captured before the first write so the stage-end digest sees only this
+    # stage's own output (files with mtime >= this epoch).
+    STAGE1_START_EPOCH=$(date +%s)
 
     while IFS= read -r ticker || [[ -n "$ticker" ]]; do
         # Skip empty lines and comments
@@ -720,7 +732,7 @@ if [[ $START_STAGE -le 1 ]]; then
     done < "$TICKER_LIST"
 
     info "Stage 1 complete: $STAGE1_PROCESSED analyzed, $STAGE1_SKIPPED skipped, $STAGE1_FAILED failed, $STAGE1_NOANALYSIS no-analysis (will retry)"
-    emit_batch_health
+    emit_batch_health "$STAGE1_START_EPOCH"
 fi
 
 # ============================================================
@@ -855,6 +867,9 @@ if [[ $START_STAGE -le 2 ]]; then
     STAGE2_SKIPPED=0
     STAGE2_FAILED=0
     STAGE2_NOANALYSIS=0
+    # Captured before the first write so the stage-end digest sees only this
+    # stage's own output (files with mtime >= this epoch).
+    STAGE2_START_EPOCH=$(date +%s)
 
     while IFS= read -r ticker || [[ -n "$ticker" ]]; do
         [[ -z "$ticker" || "$ticker" =~ ^[[:space:]]*# ]] && continue
@@ -916,7 +931,7 @@ if [[ $START_STAGE -le 2 ]]; then
 
     info "Stage 2 complete: $STAGE2_PROCESSED analyzed, $STAGE2_SKIPPED skipped, $STAGE2_FAILED failed, $STAGE2_NOANALYSIS no-analysis (will retry)"
     write_pipeline_marker
-    emit_batch_health
+    emit_batch_health "$STAGE2_START_EPOCH"
 fi
 
 # ============================================================

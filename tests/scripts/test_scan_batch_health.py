@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
+
+import pytest
 
 # Add scripts/ to path so we can import scan_batch_health as a module.
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
@@ -185,3 +188,96 @@ class TestScanEndToEnd:
         _write(tmp_path, "OK.T", "20260712", "120000", verdict="HOLD")
         result = sbh.scan(tmp_path, "20260712")
         assert result.total == 1
+
+    def test_non_dict_json_skipped(self, tmp_path: Path):
+        # A JSON array (valid JSON, wrong shape) must be skipped, not crash.
+        (tmp_path / "ARR.T_20260712_120000_analysis.json").write_text("[1, 2, 3]")
+        _write(tmp_path, "OK.T", "20260712", "120000", verdict="HOLD")
+        result = sbh.scan(tmp_path, "20260712")
+        assert result.total == 1
+
+
+class TestModifiedSinceSelection:
+    """--modified-since scopes the batch by file mtime, not filename date.
+
+    This is the cross-day-resume fix: the analysis filename carries the wall-clock
+    date, which need not equal the pipeline's logical run-date, so a stage's own
+    output is identified by *when it was written*, not by a date string.
+    """
+
+    def test_selects_by_mtime_not_filename_date(self, tmp_path: Path):
+        # OLD filename-date but recent... vs. an actually-old file. Both carry an
+        # anomaly so they'd surface if selected.
+        old = _write(
+            tmp_path, "OLD.T", "20260707", "120000", verdict="HOLD", llm_failures=1
+        )
+        new = _write(
+            tmp_path, "NEW.T", "20260707", "130000", verdict="HOLD", llm_failures=1
+        )
+        os.utime(old, (1000, 1000))
+        os.utime(new, (5000, 5000))
+        result = sbh.scan(tmp_path, modified_since=3000)
+        flagged = {rec.ticker for rec, _ in result.flagged}
+        assert result.total == 1
+        assert "NEW.T" in flagged
+        assert "OLD.T" not in flagged
+
+    def test_boundary_is_inclusive(self, tmp_path: Path):
+        f = _write(
+            tmp_path, "X.T", "20260712", "120000", verdict="HOLD", llm_failures=1
+        )
+        os.utime(f, (3000, 3000))
+        result = sbh.scan(tmp_path, modified_since=3000.0)
+        assert result.total == 1
+
+    def test_date_mode_ignores_mtime(self, tmp_path: Path):
+        f = _write(tmp_path, "X.T", "20260712", "120000", verdict="HOLD")
+        os.utime(f, (1000, 1000))  # ancient mtime must not matter in date mode
+        result = sbh.scan(tmp_path, "20260712")
+        assert result.total == 1
+
+    def test_flip_comparison_spans_history_in_mtime_mode(self, tmp_path: Path):
+        # Prior full analysis is OLD (excluded from the batch) but must still be
+        # available as the flip baseline for the recent record.
+        prior = _write(
+            tmp_path, "AAA.T", "20260302", "120000", verdict="DO_NOT_INITIATE"
+        )
+        recent = _write(tmp_path, "AAA.T", "20260712", "120000", verdict="BUY")
+        os.utime(prior, (1000, 1000))
+        os.utime(recent, (5000, 5000))
+        result = sbh.scan(tmp_path, modified_since=3000)
+        flagged = {rec.ticker: anoms for rec, anoms in result.flagged}
+        assert result.total == 1  # only the recent record is in the batch
+        assert any("verdict flip" in a for a in flagged.get("AAA.T", []))
+
+
+class TestMainArgHandling:
+    def test_run_date_and_modified_since_mutually_exclusive(self):
+        with pytest.raises(SystemExit):
+            sbh.main(["--run-date", "2026-07-07", "--modified-since", "123"])
+
+    def test_modified_since_requires_number(self):
+        with pytest.raises(SystemExit):
+            sbh.main(["--modified-since", "not-a-number"])
+
+    def test_modified_since_json_output(self, tmp_path: Path, capsys):
+        f = _write(
+            tmp_path, "X.T", "20260712", "120000", verdict="HOLD", llm_failures=1
+        )
+        os.utime(f, (5000, 5000))
+        rc = sbh.main(
+            ["--modified-since", "3000", "--results-dir", str(tmp_path), "--json"]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["modified_since"] == 3000.0
+        assert payload["run_date"] is None
+        assert payload["total"] == 1
+
+    def test_strict_exits_nonzero_on_anomaly(self, tmp_path: Path, capsys):
+        _write(tmp_path, "X.T", "20260712", "120000", verdict="HOLD", llm_failures=1)
+        rc = sbh.main(
+            ["--run-date", "2026-07-12", "--results-dir", str(tmp_path), "--strict"]
+        )
+        capsys.readouterr()
+        assert rc == 1

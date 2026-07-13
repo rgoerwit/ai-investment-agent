@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Batch health digest — scan a run-date's analyses for anomalies.
+"""Batch health digest — scan a batch of analyses for anomalies.
 
 Read-only. Consumes only already-persisted fields (``run_summary``,
 ``analysis_validity``, ``prediction_snapshot``) from ``results/*_analysis.json`` and
@@ -9,18 +9,28 @@ prints a compact digest of anomalies worth a human glance:
 - ``llm_failures > 0``
 - consultant ``ERROR`` / ``UNPARSED`` (a ran-but-broken cross-check)
 - optional-artifact failures (consultant/auditor provider errors)
-- **verdict flip vs the prior run of the same ticker** (the highest-value signal)
+- **verdict flip vs the prior same-mode run of the same ticker** (highest-value signal)
 
 By-design low-signal states are deliberately NOT flagged: auditor ``PARTIAL_DATA`` /
 ``INSUFFICIENT_DATA`` (honest completeness caveats) and consultant ``SKIPPED`` (the
 quick-mode gate bypass).
 
-Invoked automatically at each stage end by ``scripts/run_pipeline.sh`` so it is a
-digest, not a manual step. Always exits 0 (informational) unless ``--strict`` is given.
+Batch selection (mutually exclusive):
+
+- ``--modified-since EPOCH`` — analyses whose file mtime is at/after a Unix epoch. This
+  is what the pipeline uses at each stage end: it scopes the digest to the files *that
+  stage actually wrote*, which is robust to a cross-day resume (the analysis filename
+  carries the wall-clock date, which need not equal the pipeline's logical run-date) and
+  to a stage that spans midnight.
+- ``--run-date YYYY-MM-DD`` — analyses whose *filename* date matches (manual, retrospective).
+- neither — defaults to ``--run-date`` = today.
+
+The verdict-flip comparison always loads full history regardless of which selector picks
+the batch. Always exits 0 (informational) unless ``--strict`` is given.
 
 Usage:
-    poetry run python scripts/scan_batch_health.py [--run-date YYYY-MM-DD]
-        [--results-dir DIR] [--json] [--strict]
+    poetry run python scripts/scan_batch_health.py [--run-date YYYY-MM-DD |
+        --modified-since EPOCH] [--results-dir DIR] [--json] [--strict]
 """
 
 from __future__ import annotations
@@ -30,6 +40,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 _FILENAME_RE = re.compile(
@@ -46,16 +57,24 @@ def _normalize_verdict(verdict: str | None) -> str:
     return (verdict or "").strip().upper().replace("_", " ")
 
 
+def _compact_to_display_date(compact: str | None) -> str:
+    """YYYYMMDD → YYYY-MM-DD; pass through anything unexpected."""
+    if compact and len(compact) == 8 and compact.isdigit():
+        return f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}"
+    return compact or "unspecified"
+
+
 @dataclass
 class Record:
     ticker: str
-    date: str  # YYYYMMDD
-    time: str  # HHMMSS
+    date: str  # YYYYMMDD (from filename)
+    time: str  # HHMMSS (from filename)
     path: Path
     verdict: str
     is_quick: bool | None  # None = mode not recorded (pre-tracking artifact)
     run_summary: dict
     validity: dict
+    mtime: float = 0.0  # file modification time (epoch); used by --modified-since
 
     @property
     def sort_key(self) -> str:
@@ -63,15 +82,18 @@ class Record:
 
 
 def load_records(results_dir: Path) -> list[Record]:
-    """Load every parseable ``*_analysis.json`` into a Record (skips malformed)."""
+    """Load every parseable ``*_analysis.json`` into a Record (skips malformed/unreadable)."""
     records: list[Record] = []
     for path in results_dir.glob("*_analysis.json"):
         m = _FILENAME_RE.match(path.name)
         if not m:
             continue
         try:
+            mtime = path.stat().st_mtime
             data = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
             continue
         snapshot = data.get("prediction_snapshot") or {}
         run_summary = data.get("run_summary") or {}
@@ -84,8 +106,14 @@ def load_records(results_dir: Path) -> list[Record]:
                 path=path,
                 verdict=_normalize_verdict(snapshot.get("verdict")),
                 is_quick=bool(raw_quick) if raw_quick is not None else None,
-                run_summary=run_summary,
-                validity=data.get("analysis_validity") or {},
+                run_summary=run_summary if isinstance(run_summary, dict) else {},
+                validity=(
+                    data.get("analysis_validity")
+                    if isinstance(data.get("analysis_validity"), dict)
+                    else {}
+                )
+                or {},
+                mtime=mtime,
             )
         )
     return records
@@ -98,7 +126,8 @@ def prior_verdict(record: Record, all_records: list[Record]) -> str | None:
     screen casts a wide BUY net that Stage-2 full analysis routinely refines to
     HOLD/DNI, so a quick→full "flip" is the expected pipeline behavior, not an
     anomaly. Comparing within a mode surfaces only a genuine change of view under
-    equal rigor.
+    equal rigor. "Before" is by filename timestamp (sort_key), so a re-run never
+    compares against itself.
     """
     if record.is_quick is None:
         return None  # current mode unknown → cannot make a same-mode comparison
@@ -138,11 +167,9 @@ def detect_anomalies(record: Record, prior: str | None) -> list[str]:
         anomalies.append(f"consultant {rs.get('consultant_verdict')}")
 
     optional = rs.get("optional_failures") or []
-    if optional:
-        names = sorted({str(o) for o in optional}) if isinstance(optional, list) else []
-        anomalies.append(
-            f"optional failures: {', '.join(names)}" if names else "optional failures"
-        )
+    if isinstance(optional, list) and optional:
+        names = sorted({str(o) for o in optional})
+        anomalies.append(f"optional failures: {', '.join(names)}")
 
     if prior and record.verdict and prior != record.verdict:
         anomalies.append(f"verdict flip: {prior} → {record.verdict}")
@@ -152,16 +179,40 @@ def detect_anomalies(record: Record, prior: str | None) -> list[str]:
 
 @dataclass
 class ScanResult:
-    run_date: str
+    label: str
     flagged: list[tuple[Record, list[str]]] = field(default_factory=list)
     total: int = 0
+    run_date: str | None = None  # YYYY-MM-DD (date mode)
+    modified_since: float | None = None  # epoch (mtime mode)
 
 
-def scan(results_dir: Path, run_date_compact: str) -> ScanResult:
-    """Scan the batch for ``run_date_compact`` (YYYYMMDD); compare against all history."""
+def scan(
+    results_dir: Path,
+    run_date_compact: str | None = None,
+    *,
+    modified_since: float | None = None,
+) -> ScanResult:
+    """Scan a batch and flag anomalies; the verdict-flip check spans all history.
+
+    Selection precedence: ``modified_since`` (file mtime) wins when set; otherwise the
+    filename-date match. Exactly one is normally supplied.
+    """
     all_records = load_records(results_dir)
-    batch = [r for r in all_records if r.date == run_date_compact]
-    result = ScanResult(run_date=run_date_compact, total=len(batch))
+    if modified_since is not None:
+        batch = [r for r in all_records if r.mtime >= modified_since]
+        label = f"since {datetime.fromtimestamp(modified_since):%Y-%m-%d %H:%M}"
+        run_date_display = None
+    else:
+        batch = [r for r in all_records if r.date == run_date_compact]
+        run_date_display = _compact_to_display_date(run_date_compact)
+        label = run_date_display
+
+    result = ScanResult(
+        label=label,
+        total=len(batch),
+        run_date=run_date_display,
+        modified_since=modified_since,
+    )
     for rec in sorted(batch, key=lambda r: r.sort_key):
         anomalies = detect_anomalies(rec, prior_verdict(rec, all_records))
         if anomalies:
@@ -171,7 +222,7 @@ def scan(results_dir: Path, run_date_compact: str) -> ScanResult:
 
 def _render(result: ScanResult) -> str:
     lines = [
-        f"━━━ Batch health digest — {result.run_date} "
+        f"━━━ Batch health digest — {result.label} "
         f"({result.total} analyses, {len(result.flagged)} flagged) ━━━"
     ]
     if not result.flagged:
@@ -186,15 +237,24 @@ def _render(result: ScanResult) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from datetime import datetime
-
     from src.config import config
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    selector = parser.add_mutually_exclusive_group()
+    selector.add_argument(
         "--run-date",
-        default=datetime.now().strftime("%Y-%m-%d"),
-        help="Run date to scan (YYYY-MM-DD; default: today)",
+        default=None,
+        help="Scan analyses whose filename date matches (YYYY-MM-DD; default: today)",
+    )
+    selector.add_argument(
+        "--modified-since",
+        type=float,
+        default=None,
+        metavar="EPOCH",
+        help=(
+            "Scan analyses whose file mtime is at/after this Unix epoch "
+            "(pipeline uses this to scope a stage's own output; robust to cross-day resume)"
+        ),
     )
     parser.add_argument(
         "--results-dir",
@@ -209,14 +269,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    run_date_compact = args.run_date.replace("-", "")
-    result = scan(Path(args.results_dir), run_date_compact)
+    results_dir = Path(args.results_dir)
+    if args.modified_since is not None:
+        result = scan(results_dir, modified_since=args.modified_since)
+    else:
+        run_date = args.run_date or datetime.now().strftime("%Y-%m-%d")
+        result = scan(results_dir, run_date.replace("-", ""))
 
     if args.json:
         print(
             json.dumps(
                 {
-                    "run_date": args.run_date,
+                    "label": result.label,
+                    "run_date": result.run_date,
+                    "modified_since": result.modified_since,
                     "total": result.total,
                     "flagged": [
                         {
