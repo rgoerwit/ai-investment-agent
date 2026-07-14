@@ -95,6 +95,25 @@ def test_verdict_qualified_flag_reflects_marker(monkeypatch):
     assert plain["verdict_qualified_by_quick_mode"] is False
 
 
+def test_dni_review_candidate_flag_reflects_marker(monkeypatch):
+    from src.agents.verdict_policy import DNI_REVIEW_CANDIDATE_MARKER
+
+    tagged = _min_summary(
+        monkeypatch,
+        {
+            "final_trade_decision": (
+                "### VERDICT: DO_NOT_INITIATE\n"
+                f"> **{DNI_REVIEW_CANDIDATE_MARKER}** ..."
+            )
+        },
+    )
+    assert tagged["verdict_dni_review_candidate"] is True
+    plain = _min_summary(
+        monkeypatch, {"final_trade_decision": "### VERDICT: DO_NOT_INITIATE"}
+    )
+    assert plain["verdict_dni_review_candidate"] is False
+
+
 def test_weak_asymmetry_flag_reflects_marker(monkeypatch):
     qualified = _min_summary(
         monkeypatch,

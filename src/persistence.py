@@ -17,6 +17,7 @@ from src.agents.pm_inputs import (
     governance_card_present,
     risk_debate_content,
 )
+from src.agents.verdict_policy import DNI_REVIEW_CANDIDATE_MARKER
 from src.config import config
 from src.runtime_config import get_runtime_config
 from src.sector_normalization import normalize_sector_label
@@ -323,6 +324,10 @@ def build_run_summary(
         # Honest flag: marker presence of the weak-asymmetry BUY caveat, same
         # rationale as verdict_qualified_by_quick_mode above.
         "verdict_weak_valuation_asymmetry": "WEAK VALUATION ASYMMETRY"
+        in (result.get("final_trade_decision") or ""),
+        # Honest flag: marker presence of the gate-passing-DNI review-candidate
+        # note (shared constant, so the key cannot drift from the note wording).
+        "verdict_dni_review_candidate": DNI_REVIEW_CANDIDATE_MARKER
         in (result.get("final_trade_decision") or ""),
         "consultant_completed": consultant_finished,
         "auditor_completed": auditor_finished,

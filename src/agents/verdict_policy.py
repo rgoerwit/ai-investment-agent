@@ -27,6 +27,8 @@ import structlog
 
 from src.agents.pm_verdict_metadata import pm_verdict_metadata_from_text
 from src.charts.extractors.valuation import is_weak_buy_asymmetry
+from src.pm_decision_parser import parse_final_decision_scores
+from src.thesis_constants import GROWTH_MIN_PCT, HEALTH_MIN_PCT
 from src.validators.metric_extractor import extract_metrics
 
 logger = structlog.get_logger(__name__)
@@ -197,6 +199,96 @@ def maybe_qualify_weak_asymmetry_buy(
         "starter and confirm the entry before adding.\n"
     )
     logger.info("buy_qualified_weak_asymmetry", ticker=ticker)
+    return content_str.rstrip() + note, True
+
+
+DNI_REVIEW_CANDIDATE_MARKER = "QUALITY-GATE-PASSING DNI - REVIEW CANDIDATE"
+
+# Category prefixes whose flags disqualify at ANY penalty: legal/tax/sanctions/
+# mandate categories where even an "uncertain" signal makes a DNI a genuine avoid.
+# REGULATORY_* is dynamically suffixed (supplemental_flags.py) — prefix match is
+# required, a finite name set cannot cover it.
+_REVIEW_DISQUALIFYING_PREFIXES = (
+    "PFIC_",
+    "VIE_",
+    "CMIC_",
+    "REGULATORY_",
+    "CONSULTANT_",
+)
+# Named disqualifiers outside those categories. VALUE_TRAP_MODERATE_RISK (0.5) is a
+# deliberate carve-out — a moderate governance signal is compatible with "review".
+_REVIEW_DISQUALIFYING_FLAGS = frozenset({"VALUE_TRAP_HIGH_RISK", "VALUE_TRAP_VERDICT"})
+# Any single flag carrying this much penalty is material regardless of name —
+# future flags with novel names auto-disqualify with no denylist maintenance.
+_REVIEW_DISQUALIFYING_PENALTY = 1.0
+
+
+def _disqualifies_review_candidate(flag: dict) -> bool:
+    ftype = str(flag.get("type", ""))
+    if ftype in _REVIEW_DISQUALIFYING_FLAGS or ftype.startswith(
+        _REVIEW_DISQUALIFYING_PREFIXES
+    ):
+        return True
+    penalty = flag.get("risk_penalty")
+    if isinstance(penalty, bool):
+        return False
+    return isinstance(penalty, int | float) and penalty >= _REVIEW_DISQUALIFYING_PENALTY
+
+
+def maybe_tag_dni_review_candidate(
+    content_str: str, *, red_flags: list[dict], ticker: str = "UNKNOWN"
+) -> tuple[str, bool]:
+    """Tag a DO_NOT_INITIATE that clears the health/growth gates as a review candidate.
+
+    Splits gate-passing DNIs from genuine avoids without asserting *why* the PM
+    declined — liquidity, coverage, valuation, US-revenue, or data gaps may bind,
+    and the predicate cannot distinguish them (strict mode also converts normal
+    HOLDs and data-vacuum cases to DNI). Mirrors the BUY qualifiers: appends a
+    caveat note but leaves the ``VERDICT:`` token intact so no downstream parser
+    (charts, article, IBKR, run-summary) changes; the run-summary flag is derived
+    from marker presence, never this return value.
+
+    Disqualification is layered, most-structural first: any hard flag
+    (AUTO_REJECT/CRITICAL), any ``blocks_buy`` flag (the gate arithmetic itself is
+    indeterminate), any single flag with ``risk_penalty`` ≥ 1.0 (material by
+    construction, covers future flags with novel names), and the legal/mandate
+    category prefixes which disqualify even at 0.5 penalty.
+
+    Conservative and idempotent. Returns ``(content_str, tagged)``.
+    """
+    if pm_verdict_metadata_from_text(content_str).verdict != "DO_NOT_INITIATE":
+        return content_str, False
+    if _has_hard_flag(red_flags):
+        return content_str, False
+    if any(flag.get("blocks_buy") is True for flag in red_flags):
+        return content_str, False
+    if any(_disqualifies_review_candidate(flag) for flag in red_flags):
+        return content_str, False
+    scores = parse_final_decision_scores(content_str)
+    health = scores.get("health_adj")
+    growth = scores.get("growth_adj")
+    if health is None or growth is None:
+        return content_str, False
+    if health < HEALTH_MIN_PCT or growth < GROWTH_MIN_PCT:
+        return content_str, False
+    if DNI_REVIEW_CANDIDATE_MARKER in content_str:
+        return content_str, True
+    # Note wording constraints (ripple-audited): no parentheses — the PM-claim and
+    # article citation audits scan un-backticked (...) groups; no `KEY:` uppercase
+    # tokens or PASS/FAIL words — thesis_visualizer / parse_final_decision_scores /
+    # discipline-check regexes key on those. The numbers restate values parsed from
+    # this same document, so any parser that reads them stays self-consistent.
+    note = (
+        f"\n\n> **{DNI_REVIEW_CANDIDATE_MARKER}**\n"
+        f"> This DO_NOT_INITIATE clears both hard quality gates — health "
+        f"{health:.0f}%, growth {growth:.0f}% — and carries no critical, "
+        "legal/governance, or material-penalty flag. This note does not assert why "
+        "the PM declined; the binding constraint may be liquidity, coverage, "
+        "valuation, US-revenue exposure, or data gaps — see the PM rationale above. "
+        "Treat as a candidate for periodic re-review rather than a discard. Not an "
+        "entry-timing signal.\n"
+    )
+    logger.info("dni_review_candidate", ticker=ticker, health=health, growth=growth)
     return content_str.rstrip() + note, True
 
 

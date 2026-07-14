@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import re
+
+import pytest
+
 from src.agents.verdict_policy import (
+    DNI_REVIEW_CANDIDATE_MARKER,
     maybe_demote_buy_on_blocking_flags,
     maybe_floor_verdict_to_hold,
     maybe_qualify_buy_in_quick_mode,
     maybe_qualify_weak_asymmetry_buy,
+    maybe_tag_dni_review_candidate,
 )
 from src.charts.extractors.pm_block import extract_pm_block
 
@@ -426,3 +432,189 @@ class TestWeakAsymmetryBuyQualification:
         assert qualified2 is True
         assert out2 == out1
         assert out2.count("WEAK VALUATION ASYMMETRY") == 1
+
+
+def _dni_output(health: str = "60", growth: str = "70") -> str:
+    """A gate-passing DO_NOT_INITIATE PM output with configurable adjusted scores."""
+    return (
+        "### PORTFOLIO MANAGER VERDICT: DO NOT INITIATE\n\n"
+        "Rationale: risk tally crossed the Zone-1 threshold.\n\n"
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: DO_NOT_INITIATE\n"
+        f"HEALTH_ADJ: {health}\n"
+        f"GROWTH_ADJ: {growth}\n"
+        "RISK_TALLY: 2.5\n"
+        "ZONE: HIGH\n"
+        "POSITION_SIZE: 0.0%\n"
+        "### --- END PM_BLOCK ---\n"
+    )
+
+
+class TestDniReviewCandidate:
+    """A gate-passing DNI is tagged as a review candidate; token stays DNI.
+
+    The tag deliberately does NOT assert why the PM declined (liquidity,
+    coverage, valuation, US-revenue, or data gaps may bind) — it is a
+    re-review signal, never an entry-timing claim.
+    """
+
+    def test_gate_passing_dni_tagged_token_unchanged(self):
+        pm = _dni_output()
+        out, tagged = maybe_tag_dni_review_candidate(pm, red_flags=[], ticker="X")
+        assert tagged is True
+        assert DNI_REVIEW_CANDIDATE_MARKER in out
+        # Verdict token deliberately unchanged so no downstream parser breaks.
+        assert "VERDICT: DO_NOT_INITIATE" in out
+        assert "does not assert why" in out
+        assert "Not an entry-timing signal" in out
+
+    def test_note_is_regex_inert(self):
+        # Ripple-audit contract: the appended note must contain no parentheses
+        # (PM-claim/article citation audits scan bare parentheticals), no
+        # uppercase KEY: tokens, and no standalone PASS/FAIL tokens
+        # (thesis_visualizer / score-parser / discipline-check regexes key on
+        # word-boundary tokens — "GATE-PASSING" is a different word).
+        pm = _dni_output()
+        out, _ = maybe_tag_dni_review_candidate(pm, red_flags=[])
+        note = out[len(pm.rstrip()) :]
+        assert "(" not in note and ")" not in note
+        assert not re.search(r"\bPASS\b|\bFAIL\b", note)
+        assert not re.search(r"\b[A-Z][A-Z0-9_]{2,}:", note)
+
+    def test_liquidity_or_data_vacuum_dni_gets_non_assertive_note(self):
+        # A high-score DNI with no red flags (e.g. liquidity fail, coverage
+        # fail, or strict-mode data-vacuum conversion) IS tagged — but the note
+        # must not claim to know the binding constraint.
+        out, tagged = maybe_tag_dni_review_candidate(_dni_output(), red_flags=[])
+        assert tagged is True
+        assert "liquidity, coverage, valuation, US-revenue" in out
+        assert "entry-timing hold" not in out
+        assert "Monitor for a better entry" not in out
+
+    def test_failing_health_gate_not_tagged(self):
+        pm = _dni_output(health="45")
+        out, tagged = maybe_tag_dni_review_candidate(pm, red_flags=[])
+        assert tagged is False
+        assert out == pm
+
+    def test_failing_growth_gate_not_tagged(self):
+        pm = _dni_output(growth="33")
+        out, tagged = maybe_tag_dni_review_candidate(pm, red_flags=[])
+        assert tagged is False
+        assert out == pm
+
+    def test_missing_scores_no_tag_no_raise(self):
+        pm = (
+            "### PORTFOLIO MANAGER VERDICT: DO NOT INITIATE\n\n"
+            "### --- START PM_BLOCK ---\n"
+            "VERDICT: DO_NOT_INITIATE\n"
+            "POSITION_SIZE: 0.0%\n"
+            "### --- END PM_BLOCK ---\n"
+        )
+        out, tagged = maybe_tag_dni_review_candidate(pm, red_flags=[])
+        assert tagged is False
+        assert out == pm
+
+    def test_non_dni_verdicts_untouched(self):
+        for display, block in (("BUY", "BUY"), ("HOLD", "HOLD"), ("SELL", "SELL")):
+            pm = _pm_output(display, block)
+            out, tagged = maybe_tag_dni_review_candidate(pm, red_flags=[])
+            assert tagged is False
+            assert out == pm
+
+    def test_auto_reject_flag_disqualifies(self):
+        out, tagged = maybe_tag_dni_review_candidate(
+            _dni_output(),
+            red_flags=[{"type": "EXTREME_LEVERAGE", "action": "AUTO_REJECT"}],
+        )
+        assert tagged is False
+        assert DNI_REVIEW_CANDIDATE_MARKER not in out
+
+    def test_blocks_buy_flag_disqualifies(self):
+        # An unreliable score makes the gate-pass claim itself indeterminate.
+        out, tagged = maybe_tag_dni_review_candidate(
+            _dni_output(),
+            red_flags=[
+                {
+                    "type": "HEALTH_SCORE_UNRELIABLE",
+                    "action": "REVIEW",
+                    "risk_penalty": 0.0,
+                    "blocks_buy": True,
+                }
+            ],
+        )
+        assert tagged is False
+
+    def test_material_penalty_with_novel_name_disqualifies(self):
+        # Structural threshold: any single flag >= 1.0 penalty disqualifies
+        # regardless of name — future flags need no denylist maintenance.
+        out, tagged = maybe_tag_dni_review_candidate(
+            _dni_output(),
+            red_flags=[{"type": "SOME_FUTURE_FLAG", "risk_penalty": 1.5}],
+        )
+        assert tagged is False
+
+    @pytest.mark.parametrize(
+        "flag_type, penalty",
+        [
+            ("PFIC_PROBABLE", 1.0),
+            ("PFIC_UNCERTAIN", 0.5),
+            ("VIE_STRUCTURE", 0.5),
+            ("CMIC_FLAGGED", 2.0),
+            ("CMIC_UNCERTAIN", 1.0),
+            # Dynamically suffixed by Legal Counsel — prefix match required.
+            ("REGULATORY_DELISTING", 0.5),
+            ("CONSULTANT_MANDATE_BREACH", 2.0),
+            ("CONSULTANT_MAJOR_CONCERNS", 1.5),
+            # Category prefix disqualifies even below the 1.0 threshold.
+            ("CONSULTANT_TRANSIENT_STRENGTH", 0.5),
+            ("VALUE_TRAP_HIGH_RISK", 1.0),
+            ("VALUE_TRAP_VERDICT", 1.0),
+        ],
+    )
+    def test_category_disqualifiers(self, flag_type, penalty):
+        out, tagged = maybe_tag_dni_review_candidate(
+            _dni_output(),
+            red_flags=[
+                {"type": flag_type, "action": "RISK_PENALTY", "risk_penalty": penalty}
+            ],
+        )
+        assert tagged is False
+
+    def test_value_trap_moderate_is_deliberate_carve_out(self):
+        # A moderate governance signal (0.5, no category prefix) is compatible
+        # with "review" — documented carve-out, not an oversight.
+        out, tagged = maybe_tag_dni_review_candidate(
+            _dni_output(),
+            red_flags=[
+                {
+                    "type": "VALUE_TRAP_MODERATE_RISK",
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.5,
+                }
+            ],
+        )
+        assert tagged is True
+
+    def test_idempotent(self):
+        out1, _ = maybe_tag_dni_review_candidate(_dni_output(), red_flags=[])
+        out2, tagged2 = maybe_tag_dni_review_candidate(out1, red_flags=[])
+        assert tagged2 is True
+        assert out2 == out1
+        assert out2.count(DNI_REVIEW_CANDIDATE_MARKER) == 1
+
+    def test_floored_dni_not_also_tagged(self):
+        # Sequencing contract (mirrors the pm_node tail): a DNI the floor hook
+        # converts to HOLD must not then be tagged as a review candidate.
+        pm = _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE")
+        floored, did_floor = maybe_floor_verdict_to_hold(
+            pm,
+            fundamentals_report=APR_BLOCK,
+            red_flags=[],
+            code_subtotal=1.0,
+            pre_screening_result="PASS",
+        )
+        assert did_floor is True
+        out, tagged = maybe_tag_dni_review_candidate(floored, red_flags=[])
+        assert tagged is False
+        assert out == floored

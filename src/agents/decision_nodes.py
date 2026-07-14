@@ -25,6 +25,7 @@ from src.agents.verdict_policy import (
     maybe_floor_verdict_to_hold,
     maybe_qualify_buy_in_quick_mode,
     maybe_qualify_weak_asymmetry_buy,
+    maybe_tag_dni_review_candidate,
 )
 from src.data_block_utils import (
     extract_data_block_field,
@@ -1314,6 +1315,11 @@ RISK TEAM DEBATE:
                 downside_probability=downside_probability,
                 ticker=ticker,
             )
+            content_str, dni_review_candidate = maybe_tag_dni_review_candidate(
+                content_str,
+                red_flags=red_flags,
+                ticker=ticker,
+            )
             content_str, pm_claim_caveats = audit_pm_claims(
                 content_str,
                 fundamentals=fundamentals,
@@ -1347,6 +1353,7 @@ RISK TEAM DEBATE:
                 buy_demoted_on_blocking_flags=buy_demoted,
                 quick_buy_qualified=quick_buy_qualified,
                 weak_asymmetry_qualified=weak_asymmetry_qualified,
+                dni_review_candidate=dni_review_candidate,
                 pm_claim_caveats=len(pm_claim_caveats),
                 pm_verdict_metadata=pm_metadata.model_dump(exclude_none=True),
                 pre_screening_result=state.get("pre_screening_result"),
