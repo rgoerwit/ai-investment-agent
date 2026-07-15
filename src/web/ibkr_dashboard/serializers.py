@@ -114,6 +114,7 @@ def serialize_item(
         "action": item.action,
         "sell_type": item.sell_type,
         "sell_type_label": get_sell_type_label(item.sell_type),
+        "action_basis": item.action_basis,
         "reason": item.reason,
         "urgency": item.urgency,
         "is_watchlist": item.is_watchlist,

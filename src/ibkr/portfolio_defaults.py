@@ -32,3 +32,16 @@ DEFAULT_EXCHANGE_LIMIT_PCT = 40.0
 # Position-weight bands (% of portfolio) for ADD/TRIM rebalancing.
 DEFAULT_OVERWEIGHT_PCT = 20.0
 DEFAULT_UNDERWEIGHT_PCT = 20.0
+
+# Positions below this USD value are de-minimis: never surfaced as executable
+# actions or attention-level reviews (hard triggers — stop breach, mandatory
+# exit — and compliance-class flags like PFIC are exempt from suppression).
+DEFAULT_MIN_ACTIONABLE_POSITION_USD = 300.0
+
+# A held-position thesis-failure SELL requires CONFIRMATION: the most recent
+# prior full-mode analysis must also reject, at least this many days before the
+# current one (one bad data day re-analyzed twice must not self-confirm).
+DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS = 7
+
+# How far back to scan same-ticker history for the confirming prior verdict.
+DEFAULT_SELL_CONFIRMATION_LOOKBACK_DAYS = 60

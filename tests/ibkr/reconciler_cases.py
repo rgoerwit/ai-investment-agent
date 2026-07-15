@@ -387,7 +387,11 @@ class TestReconcile:
         assert items[0].action == "HOLD"
 
     def test_held_but_verdict_dni(self):
-        """Held + evaluator says DO_NOT_INITIATE → SELL."""
+        """Held + unconfirmed DO_NOT_INITIATE → REVIEW, never unattended SELL.
+
+        A stock-level rejection may trigger refresh, review, replacement
+        analysis, or an exit — it must not decide among those alone.
+        """
         pos = _make_position(current_price=2100)
         analysis = _make_analysis(verdict="DO_NOT_INITIATE")
         items = reconcile(
@@ -396,16 +400,18 @@ class TestReconcile:
             _make_portfolio(),
         )
         assert len(items) == 1
-        assert items[0].action == "SELL"
-        assert items[0].urgency == "HIGH"
+        assert items[0].action == "REVIEW"
+        assert items[0].urgency == "MEDIUM"
         assert "do_not_initiate" in items[0].reason.lower()
 
     def test_held_but_verdict_sell(self):
-        """Held + evaluator says SELL → SELL."""
+        """Held + unconfirmed SELL verdict → REVIEW with a typed basis
+        (intact fundamentals at entry price → entry constraint)."""
         pos = _make_position()
         analysis = _make_analysis(verdict="SELL")
         items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
-        assert items[0].action == "SELL"
+        assert items[0].action == "REVIEW"
+        assert items[0].action_basis == "ENTRY_CONSTRAINT"
 
     def test_held_stop_breached(self):
         """Held + price below stop → urgent SELL via LMT at current price."""
@@ -974,8 +980,12 @@ CAPITAL_PLAN_STATUS: NONE
         result = load_latest_analyses(tmp_path)
         assert result["7203.T"].is_quick_mode is True
 
-    def test_is_quick_mode_defaults_false_when_absent(self, tmp_path):
-        """is_quick_mode defaults to False for analyses predating the field."""
+    def test_is_quick_mode_unknown_when_absent(self, tmp_path):
+        """Snapshots predating is_quick_mode load as mode-unknown (None).
+
+        The legacy False default gave pre-field artifacts full-mode authority
+        in the SELL confirmation gate; None is falsy, so quick-BUY gates
+        behave exactly as before."""
         data = {
             "prediction_snapshot": {
                 "ticker": "7203.T",
@@ -987,7 +997,7 @@ CAPITAL_PLAN_STATUS: NONE
         }
         (tmp_path / "7203_T_2026-03-01_analysis.json").write_text(json.dumps(data))
         result = load_latest_analyses(tmp_path)
-        assert result["7203.T"].is_quick_mode is False
+        assert result["7203.T"].is_quick_mode is None
 
     def test_progress_callback_receives_discovered_and_complete_events(self, tmp_path):
         """Progress callback gets start/end events plus parsing updates."""
@@ -2359,24 +2369,28 @@ class TestSellTypeTagging:
         assert items[0].sell_type == "STOP_BREACH"
 
     def test_fundamental_failure_tagged_hard_reject(self):
-        """Verdict DO_NOT_INITIATE + health_adj=40 → HARD_REJECT (fails hard check)."""
+        """Verdict DO_NOT_INITIATE + health_adj=40 → sell_type HARD_REJECT;
+        unconfirmed, so the disposition is REVIEW (thesis reassessment)."""
         pos = _make_position(current_price=2100)
         analysis = _make_analysis(verdict="DO_NOT_INITIATE")
         analysis.health_adj = 40.0  # below 50 → hard fail
         analysis.growth_adj = 60.0
         items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
-        sell = next(i for i in items if i.action == "SELL")
-        assert sell.sell_type == "HARD_REJECT"
+        item = next(i for i in items if i.sell_type == "HARD_REJECT")
+        assert item.action == "REVIEW"
+        assert item.action_basis == "THESIS_REASSESSMENT"
 
     def test_soft_failure_tagged_soft_reject(self):
-        """Verdict DO_NOT_INITIATE + health_adj=65 + growth_adj=60 → SOFT_REJECT."""
+        """Intact fundamentals at/above entry → sell_type SOFT_REJECT with an
+        ENTRY_CONSTRAINT review — the screen rejected the price, not the thesis."""
         pos = _make_position(current_price=2100)
         analysis = _make_analysis(verdict="DO_NOT_INITIATE")
         analysis.health_adj = 65.0  # passes hard check
         analysis.growth_adj = 60.0  # passes hard check
         items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
-        sell = next(i for i in items if i.action == "SELL")
-        assert sell.sell_type == "SOFT_REJECT"
+        item = next(i for i in items if i.sell_type == "SOFT_REJECT")
+        assert item.action == "REVIEW"
+        assert item.action_basis == "ENTRY_CONSTRAINT"
 
     def test_no_analysis_tagged_hard_reject(self):
         """Held position with no analysis → REVIEW (not SELL), so no sell_type."""
@@ -2578,11 +2592,14 @@ def _make_multi_sell_scenario(
     analyses = {}
     conid = 1
 
-    # SOFT_REJECT SELLs — passed both hard checks, rejected on soft tally
+    # SOFT_REJECT rejections — passed both hard checks, rejected on soft tally.
+    # Priced BELOW entry (2100 → 1950, above the 1900 stop): genuine macro
+    # evidence is price-down; at/above-entry rejections classify as
+    # ENTRY_CONSTRAINT and are deliberately excluded from event breadth.
     for i in range(n_soft_sells):
         ticker = f"SOFT{i:02d}.T"
         pos = _make_position(
-            ticker=ticker, current_price=2100, market_value_usd=1000, conid=conid
+            ticker=ticker, current_price=1950, market_value_usd=1000, conid=conid
         )
         a = _make_analysis(ticker=ticker, verdict="DO_NOT_INITIATE", age_days=0)
         a.analysis_date = sell_date
@@ -2606,11 +2623,11 @@ def _make_multi_sell_scenario(
         analyses[ticker] = a
         conid += 1
 
-    # HARD_REJECT SELLs — failed fundamental checks
+    # HARD_REJECT rejections — failed fundamental checks (price-down, as above)
     for i in range(n_hard_rejects):
         ticker = f"HARD{i:02d}.T"
         pos = _make_position(
-            ticker=ticker, current_price=2100, market_value_usd=1000, conid=conid
+            ticker=ticker, current_price=1950, market_value_usd=1000, conid=conid
         )
         a = _make_analysis(ticker=ticker, verdict="DO_NOT_INITIATE", age_days=0)
         a.analysis_date = sell_date
@@ -2646,9 +2663,20 @@ def _make_sell_item_on_date(
     date_str: str,
     conid: int = 99999,
     sell_type: str = "SOFT_REJECT",
+    current_price: float = 1800.0,
 ) -> ReconciliationItem:
-    """Build a SELL ReconciliationItem with a specific analysis_date."""
-    pos = _make_position(ticker=ticker, market_value_usd=1000, conid=conid)
+    """Build a SELL ReconciliationItem with a specific analysis_date.
+
+    Defaults to price BELOW the analysis entry (2100 → 1800): genuine macro
+    event evidence is price-down. Pass current_price >= 2100 to model the
+    analyzer-side re-rating case (MODEL_REGIME_SHIFT discriminator).
+    """
+    pos = _make_position(
+        ticker=ticker,
+        market_value_usd=1000,
+        conid=conid,
+        current_price=current_price,
+    )
     a = _make_analysis(ticker=ticker, verdict="DO_NOT_INITIATE", age_days=0)
     a.analysis_date = date_str
     if sell_type == "SOFT_REJECT":
@@ -2758,43 +2786,71 @@ class TestCorrelatedSellDetection:
         )
         assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
 
-    def test_soft_reject_demoted_to_review_on_correlated_day(self):
-        """On a correlated day, SOFT_REJECT SELLs are demoted to REVIEW."""
+    def test_soft_reject_is_review_at_source_and_counts_as_evidence(self):
+        """Fundamentals-intact rejections are REVIEW at the disposition layer —
+        permanently, not only during a macro window — and still count toward
+        correlated-event breadth via action_basis when priced below entry."""
         positions, analyses, portfolio = _make_multi_sell_scenario(
             n_soft_sells=6, n_stop_breaches=0, n_hard_rejects=0, n_holds=2
         )
         items = reconcile(positions, analyses, portfolio)
-        # Before health check: SOFT_REJECT items are still SELL
-        soft_sells_before = [
-            i for i in items if i.sell_type == "SOFT_REJECT" and i.action == "SELL"
-        ]
-        assert len(soft_sells_before) == 6
+        soft = [i for i in items if i.sell_type == "SOFT_REJECT"]
+        assert len(soft) == 6
+        assert all(i.action == "REVIEW" for i in soft)
+        assert all(i.action_basis == "THESIS_REASSESSMENT" for i in soft)
 
-        compute_portfolio_health(
+        flags = compute_portfolio_health(
             positions, analyses, portfolio, reconciliation_items=items
         )
+        # Permanent reviews did not erase event breadth evidence
+        assert any("CORRELATED_SELL_EVENT" in f for f in flags)
+        assert all(i.action == "REVIEW" for i in soft)
 
-        # After: demoted to REVIEW
-        soft_sells_after = [
-            i for i in items if i.sell_type == "SOFT_REJECT" and i.action == "SELL"
-        ]
-        soft_reviews_after = [
-            i for i in items if i.sell_type == "SOFT_REJECT" and i.action == "REVIEW"
-        ]
-        assert len(soft_sells_after) == 0
-        assert len(soft_reviews_after) == 6
-        # Reason string annotated
-        assert all("MACRO_WATCH" in i.reason for i in soft_reviews_after)
+    def test_unconfirmed_hard_reject_is_review_not_sell(self):
+        """A single unconfirmed reject — even with weak scores — is a REVIEW
+        with a refresh requirement, never an unattended executable SELL."""
+        positions, analyses, portfolio = _make_multi_sell_scenario(
+            n_soft_sells=0, n_stop_breaches=0, n_hard_rejects=3, n_holds=3
+        )
+        with patch("src.ibkr.position_evaluator._load_prior_history", return_value=[]):
+            items = reconcile(positions, analyses, portfolio)
+        hard = [i for i in items if i.sell_type == "HARD_REJECT"]
+        assert len(hard) == 3
+        assert all(i.action == "REVIEW" for i in hard)
+        assert all(i.action_basis == "THESIS_REASSESSMENT" for i in hard)
 
-    def test_hard_reject_stays_sell_on_correlated_day(self):
-        """HARD_REJECT SELLs remain SELL even when correlated event fires."""
+    def test_confirmed_hard_reject_stays_sell_on_correlated_day(self):
+        """A reject CONFIRMED by a prior full-mode reject is an executable SELL
+        and survives the macro demotion pass (two independent analyses agreed —
+        the forcing function must outlive macro windows)."""
+        from datetime import datetime, timedelta
+
+        from src.ibkr.buy_stability import PriorVerdict
+
         positions, analyses, portfolio = _make_multi_sell_scenario(
             n_soft_sells=5,  # enough to trigger event
             n_stop_breaches=0,
             n_hard_rejects=3,
             n_holds=3,
         )
-        items = reconcile(positions, analyses, portfolio)
+
+        def fake_history(analysis):
+            if analysis.ticker.startswith("HARD"):
+                return [
+                    PriorVerdict(
+                        verdict="DO_NOT_INITIATE",
+                        analysis_dt=datetime.now() - timedelta(days=20),
+                        is_quick_mode=False,
+                        file_path="prior.json",
+                    )
+                ]
+            return []
+
+        with patch(
+            "src.ibkr.position_evaluator._load_prior_history",
+            side_effect=fake_history,
+        ):
+            items = reconcile(positions, analyses, portfolio)
         compute_portfolio_health(
             positions, analyses, portfolio, reconciliation_items=items
         )
@@ -2802,7 +2858,60 @@ class TestCorrelatedSellDetection:
         hard_sells = [
             i for i in items if i.sell_type == "HARD_REJECT" and i.action == "SELL"
         ]
-        assert len(hard_sells) == 3  # unchanged
+        assert len(hard_sells) == 3  # confirmed — survives the macro pass
+        assert all(i.action_basis == "CONFIRMED_THESIS_FAILURE" for i in hard_sells)
+
+    def test_quick_mode_reject_never_confirms(self):
+        """A quick-mode screening reject cannot confirm a thesis failure."""
+        from datetime import datetime, timedelta
+
+        from src.ibkr.buy_stability import PriorVerdict
+
+        positions, analyses, portfolio = _make_multi_sell_scenario(
+            n_soft_sells=0, n_stop_breaches=0, n_hard_rejects=1, n_holds=3
+        )
+        quick_prior = [
+            PriorVerdict(
+                verdict="DO_NOT_INITIATE",
+                analysis_dt=datetime.now() - timedelta(days=20),
+                is_quick_mode=True,
+                file_path="prior.json",
+            )
+        ]
+        with patch(
+            "src.ibkr.position_evaluator._load_prior_history",
+            return_value=quick_prior,
+        ):
+            items = reconcile(positions, analyses, portfolio)
+        hard = [i for i in items if i.sell_type == "HARD_REJECT"]
+        assert all(i.action == "REVIEW" for i in hard)
+
+    def test_same_week_reject_does_not_self_confirm(self):
+        """Two rejects inside the min-spacing window (one bad data day,
+        re-analyzed) must not self-confirm into an executable SELL."""
+        from datetime import datetime, timedelta
+
+        from src.ibkr.buy_stability import PriorVerdict
+
+        positions, analyses, portfolio = _make_multi_sell_scenario(
+            n_soft_sells=0, n_stop_breaches=0, n_hard_rejects=1, n_holds=3
+        )
+        close_prior = [
+            PriorVerdict(
+                verdict="DO_NOT_INITIATE",
+                # scenario analysis_date is now-5d; 2 days before it → spacing 2d
+                analysis_dt=datetime.now() - timedelta(days=7),
+                is_quick_mode=False,
+                file_path="prior.json",
+            )
+        ]
+        with patch(
+            "src.ibkr.position_evaluator._load_prior_history",
+            return_value=close_prior,
+        ):
+            items = reconcile(positions, analyses, portfolio)
+        hard = [i for i in items if i.sell_type == "HARD_REJECT"]
+        assert all(i.action == "REVIEW" for i in hard)
 
     def test_stop_breach_stays_sell_when_fundamentals_weak_on_correlated_day(self):
         """STOP_BREACH SELLs on fundamentally weak positions stay SELL even when correlated event fires."""

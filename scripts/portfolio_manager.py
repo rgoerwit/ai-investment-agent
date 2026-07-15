@@ -59,7 +59,7 @@ from src.ibkr.portfolio_presentation import (
     SELL_RELATED_REVIEWS_TITLE,
     build_action_summary_counts,
     build_cash_summary,
-    get_sell_type_label,
+    get_action_label,
     group_portfolio_actions,
 )
 from src.ibkr.portfolio_presentation import (
@@ -68,7 +68,7 @@ from src.ibkr.portfolio_presentation import (
 from src.ibkr.portfolio_presentation import (
     find_live_order as shared_find_live_order,
 )
-from src.ibkr.reconciliation_rules import _EXCHANGE_LONG_NAMES
+from src.ibkr.reconciliation_rules import _EXCHANGE_LONG_NAMES, stop_staleness_note
 from src.ibkr.refresh_service import (
     AnalysisFreshnessSummary,
     AnalysisRefreshService,
@@ -919,6 +919,7 @@ def _store_macro_event_if_detected(
     from datetime import date as _date
     from datetime import timedelta as _td
 
+    from src.ibkr.portfolio_health import is_macro_event_evidence
     from src.memory import MacroEvent, create_macro_events_store
 
     correlated_flag = next(
@@ -947,16 +948,16 @@ def _store_macro_event_if_detected(
     total_held = sum(
         1 for item in reconciliation_items if item.ibkr_position is not None
     )
-    # Event evidence for region/sector characterization. Demotion has ALREADY
-    # run by the time this executes, so the dominant soft-rejects are action
-    # REVIEW — restricting to action SELL would characterize the event from
-    # leftovers (or nothing). Include the demoted items.
+    # Event evidence for region/sector characterization — the canonical
+    # basis-aware predicate from portfolio_health (do not re-declare the
+    # action/sell_type tuple here), plus macro-demoted items (demotion has
+    # ALREADY run by the time this executes, and a demoted item's basis no
+    # longer matches the evidence predicate).
     sell_items = [
         item
         for item in reconciliation_items
         if item.ibkr_position is not None
-        and item.action in ("SELL", "REVIEW")
-        and item.sell_type in ("HARD_REJECT", "SOFT_REJECT", "STOP_BREACH")
+        and (is_macro_event_evidence(item) or "[MACRO_" in (item.reason or ""))
     ]
 
     scope, primary_region, primary_sector, impact, event_type, headline, detail = (
@@ -1295,7 +1296,9 @@ def format_report(
         pfx = _urgency_prefix(item)
         sym = ACTION_SYMBOLS.get(item.action, item.action)
         parts = [f"{pfx}{sym:<6}  {_display_ticker(item):<12}"]
-        if show_recommendations:
+        # Reviews are not orders — render no qty/price/order-type segment
+        # (an order-ticket-looking review invites premature execution).
+        if show_recommendations and item.action != "REVIEW":
             if item.suggested_quantity:
                 parts.append(f"  {abs(item.suggested_quantity)} shares")
             if item.suggested_price:
@@ -1307,6 +1310,19 @@ def format_report(
             if not item.suggested_price:
                 parts.append("  (no entry price — re-run analysis)")
         return "".join(parts)
+
+    def _holding_line(item: ReconciliationItem, ccy: str) -> str | None:
+        """Position context for a held REVIEW row: size, last price, and the
+        *potential* exit value (never treated as available funds)."""
+        pos = item.ibkr_position
+        if pos is None or not pos.quantity:
+            return None
+        parts = [f"holding: {abs(pos.quantity):,.0f} shares"]
+        if pos.current_price_local:
+            parts.append(f"last {_ccy(ccy)}{pos.current_price_local:,.2f}")
+        if pos.market_value_usd:
+            parts.append(f"potential exit ~${pos.market_value_usd:,.0f} USD")
+        return "             " + "  ·  ".join(parts)
 
     def _proceeds_line(item: ReconciliationItem) -> str | None:
         """Build proceeds/settlement line for SELL and TRIM."""
@@ -1586,7 +1602,7 @@ def format_report(
         return segments
 
     def _sell_type_label(item: ReconciliationItem) -> str:
-        return get_sell_type_label(item.sell_type)
+        return get_action_label(item)
 
     def _profit_take_segments(item: ReconciliationItem) -> list[str]:
         segments: list[str] = []
@@ -1673,6 +1689,28 @@ def format_report(
             _cnt, _dt, _pct = _bm.group(1), _bm.group(2), f"{_bm.group(3)}%"
         else:
             _cnt, _dt, _pct = "?", "?", "?%"
+        # Guidance composed from the ACTUAL action mix — the old fixed
+        # "Execute stops" line rendered beside sell queues containing no
+        # stop-breaches at all. Say what is executable, not a template.
+        _stop_sell_n = sum(
+            1 for i in items if i.action == "SELL" and i.sell_type == "STOP_BREACH"
+        )
+        _confirmed_sell_n = sum(
+            1
+            for i in items
+            if i.action == "SELL" and i.action_basis == "CONFIRMED_THESIS_FAILURE"
+        )
+        _guidance = ["Pause thesis changes; re-evaluate intrinsic value."]
+        if _stop_sell_n:
+            _guidance.append(
+                f"{_stop_sell_n} weak-fundamentals stop SELL(s) remain live."
+            )
+        if _confirmed_sell_n:
+            _guidance.append(
+                f"{_confirmed_sell_n} confirmed thesis failure(s) remain live."
+            )
+        if not (_stop_sell_n or _confirmed_sell_n):
+            _guidance.append("No executable SELLs — all demoted to review.")
         # Truthful summary line: the trigger may be verdict-flip evidence OR a
         # current price-drawdown breadth — "impacted" covers both.
         _W = 52  # inner text width (54 inner box chars minus 2-space left indent)
@@ -1682,7 +1720,7 @@ def format_report(
             f"║  {f'{_cnt} positions impacted (as of {_dt})':<{_W}}║",
             f"║  {f'({_pct} of held positions) — probable macro event':<{_W}}║",
             f"║  {'Likely macro event, not individual thesis failure.':<{_W}}║",
-            f"║  {'Execute stops (weak only); review strong stops first.':<{_W}}║",
+            *(f"║  {line:<{_W}}║" for line in _guidance),
             "╚" + "═" * 54 + "╝",
         ]
         try:
@@ -1734,6 +1772,22 @@ def format_report(
             f"║  {'!! MACRO OVERRIDE ACTIVE':<{_W}}║",
             f"║  {f'{_type} event active until {_until}':<{_W}}║",
             f"║  {f'{_n} SELL(s) held in REVIEW (sustained override)':<{_W}}║",
+            "╚" + "═" * 54 + "╝",
+        ):
+            lines.append(bl)
+        lines.append("")
+    elif any("MODEL_REGIME_SHIFT" in f for f in (portfolio_health_flags or [])):
+        # Verdict flips with prices at/above entry — the analyzer re-rated,
+        # the market did not move. Not a macro event: no demotions to explain,
+        # no dip-buying, no stored event. The correct response is an audit.
+        _W = 52
+        for bl in (
+            "╔" + "═" * 54 + "╗",
+            f"║  {'!! MODEL RE-RATING DETECTED':<{_W}}║",
+            f"║  {'Broad verdict flips with prices at/above entry':<{_W}}║",
+            f"║  {'— analyzer-side re-rating, not market distress.':<{_W}}║",
+            f"║  {'Audit recent prompt/model/threshold changes':<{_W}}║",
+            f"║  {'before acting on the flipped verdicts.':<{_W}}║",
             "╚" + "═" * 54 + "╝",
         ):
             lines.append(bl)
@@ -1966,6 +2020,17 @@ def format_report(
                 if sl:
                     lines.append(sl)
                 _append_pnl_proceeds(item, ccy)
+            if item.action == "REVIEW":
+                hl = _holding_line(item, ccy)
+                if hl:
+                    lines.append(hl)
+                if item.action_basis == "ENTRY_CONSTRAINT":
+                    pos = item.ibkr_position
+                    ratchet = stop_staleness_note(
+                        item.analysis, pos.current_price_local if pos else None
+                    )
+                    if ratchet:
+                        lines.append("             " + ratchet)
             note = _order_note(item)
             if note:
                 lines.append(note)
@@ -2222,8 +2287,18 @@ def format_report(
             t1_str = (
                 f"target {sym}{a.target_1_price:,.2f}" if a and a.target_1_price else ""
             )
+            # The HOLDS row is rebuilt from raw fields, so decision-layer
+            # annotations must be re-derived here: de-minimis marker (basis)
+            # and stop-staleness advisory (shared helper with the evaluator).
+            note_str = ""
+            if item.action_basis == "DE_MINIMIS":
+                note_str = "de-minimis — monitor only"
+            elif a and pos:
+                note_str = stop_staleness_note(a, pos.current_price_local) or ""
 
-            row_parts = [p for p in [weight_str, price_str, stop_str, t1_str] if p]
+            row_parts = [
+                p for p in [weight_str, price_str, stop_str, t1_str, note_str] if p
+            ]
             lines.append(
                 f"  {'HOLD':<6}  {_display_ticker(item):<12}  {'  '.join(row_parts)}"
             )
@@ -2269,7 +2344,8 @@ def format_report(
     # ── CONCENTRATION ──────────────────────────────────────────────────────────
     sector_weights = _aggregate_sector_weights(portfolio.sector_weights)
     exchange_weights = portfolio.exchange_weights
-    if sector_weights or exchange_weights:
+    currency_weights = portfolio.currency_weights
+    if sector_weights or exchange_weights or currency_weights:
         _section("CONCENTRATION")
 
         if sector_weights:
@@ -2285,6 +2361,13 @@ def format_report(
                 long_name = _EXCHANGE_LONG_NAMES.get(exch, exch)
                 bar = _bar_chart(pct, 40.0)
                 lines.append(f"    {exch:<5} ({long_name:<13}) {pct:>5.1f}%  {bar}")
+            lines.append("")
+
+        if currency_weights:
+            lines.append("  Currency:")
+            for ccy, pct in sorted(currency_weights.items(), key=lambda x: -x[1]):
+                bar = _bar_chart(pct, 50.0)
+                lines.append(f"    {ccy:<22} {pct:>5.1f}%  {bar}")
             lines.append("")
 
     # ── PORTFOLIO HEALTH ───────────────────────────────────────────────────────
@@ -2654,6 +2737,27 @@ def format_report(
         "MACRO_WATCH",
     ]
     summary_parts = [f"{action_counts[a]} {a}" for a in order if a in action_counts]
+    # Executable turnover only — SELL/TRIM proceeds + BUY/ADD costs. Review
+    # notional is deliberately excluded (it has its own conditional line);
+    # this makes a high-churn day visible before any order is placed.
+    sell_notional = sum(
+        i.cash_impact_usd
+        for i in items
+        if i.action in ("SELL", "TRIM") and i.cash_impact_usd > 0
+    )
+    buy_notional = sum(
+        abs(i.cash_impact_usd)
+        for i in items
+        if i.action in ("BUY", "ADD") and i.cash_impact_usd
+    )
+    if sell_notional or buy_notional:
+        nav = portfolio.portfolio_value_usd
+        sell_pct = f" ({sell_notional / nav * 100:.1f}% of NAV)" if nav > 0 else ""
+        buy_pct = f" ({buy_notional / nav * 100:.1f}% of NAV)" if nav > 0 else ""
+        lines.append(
+            f"  Plan turnover:  executable sells ~${sell_notional:,.0f}{sell_pct}"
+            f"  ·  buys ~${buy_notional:,.0f}{buy_pct}"
+        )
     lines.append(f"  Summary:  {'  ·  '.join(summary_parts) or 'empty'}")
 
     return "\n".join(lines)

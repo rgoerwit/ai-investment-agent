@@ -2681,3 +2681,59 @@ class TestReadOnlyDataNotLoaded:
         )
         assert "holdings and cash were not loaded" in report
         assert "within the cash buffer" not in report
+
+
+class TestOrderMatcherAuthority:
+    """Conid is authoritative; terminal statuses are not live orders."""
+
+    def test_differing_conids_never_fall_back_to_symbol(self):
+        """The AGS collision: SGX 'AGS' item must not match a Brussels Ageas
+        'AGS' order — comparable conids that differ end the comparison."""
+        item = _make_sell_item(ticker="9201.T", sell_type="HARD_REJECT")
+        order = _make_order(conid=11111, ticker="9201", side="B", price=70.80)
+        report = format_report([item], _make_portfolio(), live_orders=[order])
+        assert "CONFLICT" not in report
+        assert "ORDER" not in report.split("SELL RECOMMENDATIONS")[-1].split("═")[0]
+
+    def test_cancelled_order_never_annotates(self):
+        item = _make_sell_item(ticker="9201.T")
+        order = _make_order(conid=99999, side="B", status="Cancelled")
+        report = format_report([item], _make_portfolio(), live_orders=[order])
+        assert "CONFLICT" not in report
+        assert "ORDER ALREADY SUBMITTED" not in report
+
+    def test_inactive_order_never_annotates(self):
+        item = _make_sell_item(ticker="9201.T")
+        order = _make_order(conid=99999, side="S", status="Inactive")
+        report = format_report([item], _make_portfolio(), live_orders=[order])
+        assert "ORDER ALREADY SUBMITTED" not in report
+        assert "CONFLICT" not in report
+
+    def test_filled_order_is_historical_note_not_conflict(self):
+        """A filled cross-side order is information, not a live conflict —
+        and carries no 'do not re-enter' imperative."""
+        item = _make_sell_item(ticker="9201.T")
+        order = _make_order(conid=99999, side="B", status="Filled", price=279.48)
+        report = format_report([item], _make_portfolio(), live_orders=[order])
+        assert "ORDER FILLED" in report
+        assert "CONFLICT" not in report
+        assert "do not re-enter" not in report
+
+    def test_open_order_wins_over_earlier_filled_order(self):
+        """A filled order encountered first must not hide a later open
+        cross-side conflict."""
+        item = _make_sell_item(ticker="9201.T")
+        filled = _make_order(conid=99999, side="S", status="Filled")
+        open_buy = _make_order(conid=99999, side="B", status="Submitted")
+        report = format_report(
+            [item], _make_portfolio(), live_orders=[filled, open_buy]
+        )
+        assert "CONFLICT" in report
+        assert "ORDER FILLED" not in report
+
+    def test_non_numeric_conid_falls_back_to_symbol(self):
+        item = _make_sell_item(ticker="9201.T")
+        order = _make_order(ticker="9201", side="S", remaining_size=100)
+        order["conid"] = "not-a-number"
+        report = format_report([item], _make_portfolio(), live_orders=[order])
+        assert "ORDER ALREADY SUBMITTED" in report

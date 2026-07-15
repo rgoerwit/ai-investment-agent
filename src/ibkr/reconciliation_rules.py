@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal
+from datetime import date
+from typing import TYPE_CHECKING, Literal
 
 import structlog
 
 from src.exchange_metadata import IBKR_TO_YFINANCE
 from src.fx_normalization import get_fx_rate_fallback
-from src.ibkr.models import AnalysisRecord, NormalizedPosition
-from src.ibkr.portfolio_defaults import DEFAULT_DRIFT_PCT, DEFAULT_MAX_AGE_DAYS
+from src.ibkr.models import ActionBasis, AnalysisRecord, NormalizedPosition
+from src.ibkr.portfolio_defaults import (
+    DEFAULT_DRIFT_PCT,
+    DEFAULT_MAX_AGE_DAYS,
+    DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS,
+)
+
+if TYPE_CHECKING:
+    from src.ibkr.buy_stability import PriorVerdict
 
 logger = structlog.get_logger(__name__)
 
@@ -349,3 +358,193 @@ def _classify_sell_type(analysis: AnalysisRecord | None, stop_breached: bool) ->
     health_ok = (analysis.health_adj or 0.0) >= 50.0
     growth_ok = (analysis.growth_adj or 0.0) >= 50.0
     return "SOFT_REJECT" if (health_ok and growth_ok) else "HARD_REJECT"
+
+
+# Stop sitting closer than this to the current price is inside daily-noise
+# range — the analysis-time stop is stale and inflates target/stop R/R.
+STOP_NOISE_BAND_PCT = 5.0
+# A position that ran this far above analysis entry without a stop restatement
+# is a ratchet candidate (let winners run, with discipline).
+STOP_RATCHET_GAIN_PCT = 15.0
+
+
+def stop_staleness_note(
+    analysis: AnalysisRecord | None, current_price_local: float | None
+) -> str | None:
+    """Advisory on a stop that has decayed since analysis time, or None.
+
+    Analysis-time stops are never restated automatically; the two decay modes
+    are a stop inside daily-noise range (fires on nothing, inflates R/R) and a
+    winner far above entry still carrying its original stop. Shared by the
+    position evaluator (reason text) and the CLI HOLDS renderer.
+    """
+    if analysis is None or not analysis.stop_price or not current_price_local:
+        return None
+    if not 0 < analysis.stop_price < current_price_local:
+        return None
+    stop_gap_pct = (
+        (current_price_local - analysis.stop_price) / current_price_local * 100
+    )
+    if stop_gap_pct < STOP_NOISE_BAND_PCT:
+        return (
+            f"⚠ stop within {stop_gap_pct:.1f}% of price — inside noise range, "
+            "restate on refresh"
+        )
+    if analysis.entry_price and analysis.entry_price > 0:
+        gain_pct = (
+            (current_price_local - analysis.entry_price) / analysis.entry_price * 100
+        )
+        if gain_pct >= STOP_RATCHET_GAIN_PCT:
+            return f"⚠ stop unrevised after {gain_pct:+.1f}% run — ratchet candidate"
+    return None
+
+
+@dataclass(frozen=True)
+class HeldDisposition:
+    """The portfolio-level disposition of a held position with a reject verdict."""
+
+    action: Literal["SELL", "REVIEW"]
+    basis: ActionBasis
+    executable: bool = False
+    detail: str = ""
+
+
+def _gate_scores_intact(analysis: AnalysisRecord) -> bool:
+    """Both thesis gate scores at/above the 50% hard gates.
+
+    Deliberately narrow: this tests only health_adj/growth_adj, not general
+    quality — an intact-score reject loses *automatic* SELL authority, nothing
+    more. Mandatory-exit flags, stop breaches, tender mechanics, and
+    data-quality quarantine retain theirs.
+    """
+    return (analysis.health_adj or 0.0) >= 50.0 and (analysis.growth_adj or 0.0) >= 50.0
+
+
+def reject_confirmed(
+    analysis: AnalysisRecord,
+    prior_history: Sequence[PriorVerdict],
+    *,
+    min_spacing_days: int = DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS,
+) -> bool:
+    """Whether a held-position reject verdict is confirmed by prior history.
+
+    Confirmation requires provably full-mode analyses on BOTH sides: the
+    current analysis must be full-mode (a screening-tier verdict never
+    executes a sell), and the most recent *provably full-mode* prior must also
+    reject, at least ``min_spacing_days`` before the current analysis — one
+    bad data day re-analyzed twice must not self-confirm. Mode-unknown
+    records (``is_quick_mode is None``, legacy artifacts) carry no sell
+    authority on either side. An intervening full-mode non-reject breaks
+    confirmation (the thesis recovered in between).
+    """
+    if analysis.is_quick_mode is not False:
+        return False
+    fulls = [
+        record
+        for record in prior_history
+        if record.is_quick_mode is False and record.verdict
+    ]
+    if not fulls:
+        return False
+    latest = max(fulls, key=lambda record: record.analysis_dt)
+    if _normalize_verdict(latest.verdict) not in _REJECT_VERDICTS:
+        return False
+    try:
+        current_date = date.fromisoformat(analysis.analysis_date)
+    except (ValueError, TypeError):
+        return False
+    return (current_date - latest.analysis_dt.date()).days >= min_spacing_days
+
+
+def classify_disposition(
+    analysis: AnalysisRecord,
+    *,
+    current_price_local: float,
+    prior_history: Sequence[PriorVerdict],
+    min_spacing_days: int = DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS,
+) -> HeldDisposition:
+    """Classify the portfolio disposition of a held position whose verdict rejects.
+
+    A portfolio action requires portfolio evidence: a stock-level rejection may
+    trigger refresh, review, replacement analysis, or an exit, but it must not
+    decide among those alone. The caller handles stop breaches and data-vacuum
+    quarantines before this point; this function decides SELL vs REVIEW for the
+    remaining reject verdicts, most-structural evidence first.
+    """
+    evidence = analysis.evidence
+
+    if evidence.mandatory_exit_flag_types:
+        return HeldDisposition(
+            "SELL",
+            "MANDATORY_EXIT",
+            executable=True,
+            detail=f"Restriction: {', '.join(evidence.mandatory_exit_flag_types)}",
+        )
+
+    # An active tender is a deal-mechanics decision (tender vs market sale vs
+    # hold for a bump), not a verdict consequence. Deliberate widening vs the
+    # legacy path, which auto-sold these inside the reject branch.
+    if analysis.m_and_a_status == "ACTIVE_TENDER":
+        return HeldDisposition(
+            "REVIEW",
+            "SPECIAL_SITUATION_REVIEW",
+            detail="Active tender — decide on deal premium/mechanics, not verdict",
+        )
+
+    # Buy-blocking flags mean the gate arithmetic is indeterminate — the reject
+    # cannot be trusted in either direction. Review, never exit, on model doubt.
+    if evidence.buy_blocking_flag_types:
+        return HeldDisposition(
+            "REVIEW",
+            "DATA_QUALITY",
+            detail=(
+                "Gate scores unreliable "
+                f"({', '.join(evidence.buy_blocking_flag_types)}) — "
+                "re-run before acting"
+            ),
+        )
+
+    # Intact gate scores strip the verdict of automatic SELL authority — the
+    # check deliberately precedes confirmation, otherwise every persistent
+    # entry-screen rejection of a winner would escalate to SELL on its next
+    # refresh ≥ min_spacing_days later (the 2026-07-14 nine-sell day). Exits
+    # for this class come from stop breaches, targets, tenders, or mandatory
+    # flags — never from repeated rejects alone.
+    if _gate_scores_intact(analysis):
+        entry = analysis.entry_price or analysis.current_price
+        appreciated = bool(
+            entry and current_price_local > 0 and current_price_local >= entry
+        )
+        if appreciated or evidence.dni_review_candidate:
+            # "Wouldn't initiate at this price" at/above entry is the GARP
+            # screen rejecting its own winner, not exit evidence.
+            return HeldDisposition(
+                "REVIEW",
+                "ENTRY_CONSTRAINT",
+                detail=(
+                    "Fundamentals intact; verdict reflects entry screen, "
+                    "not thesis failure"
+                ),
+            )
+        return HeldDisposition(
+            "REVIEW",
+            "THESIS_REASSESSMENT",
+            detail=(
+                "Gate scores intact — price weakness alone; "
+                "stop-loss governs downside"
+            ),
+        )
+
+    if reject_confirmed(analysis, prior_history, min_spacing_days=min_spacing_days):
+        return HeldDisposition(
+            "SELL",
+            "CONFIRMED_THESIS_FAILURE",
+            executable=True,
+            detail="Reject confirmed by prior full-mode analysis",
+        )
+
+    return HeldDisposition(
+        "REVIEW",
+        "THESIS_REASSESSMENT",
+        detail="Unconfirmed reject — refresh analysis before exiting",
+    )

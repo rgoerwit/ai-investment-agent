@@ -23,6 +23,20 @@ SELL_TYPE_LABELS: dict[str | None, str] = {
     None: "SELL",
 }
 
+# Decision-basis labels — preferred over sell_type when a basis is stamped,
+# so a confirmation-gated exit reads as what it is, not a generic "failure".
+ACTION_BASIS_LABELS: dict[str, str] = {
+    "MANDATORY_EXIT": "MANDATORY EXIT",
+    "STOP_LOSS": "STOP BREACH",
+    "CONFIRMED_THESIS_FAILURE": "CONFIRMED THESIS FAILURE",
+    "THESIS_REASSESSMENT": "THESIS REASSESSMENT",
+    "ENTRY_CONSTRAINT": "ENTRY CONSTRAINT",
+    "SPECIAL_SITUATION_REVIEW": "M&A TENDER REVIEW",
+    "DATA_QUALITY": "DATA REVIEW",
+    "CAPITAL_ALLOCATION": "PROFIT TAKE",
+    "DE_MINIMIS": "DE MINIMIS",
+}
+
 
 @dataclass(frozen=True)
 class PortfolioActionGroups:
@@ -118,6 +132,14 @@ class ActionDisplaySection:
 def get_sell_type_label(sell_type: str | None) -> str:
     """Return the canonical human label for a sell_type token."""
     return SELL_TYPE_LABELS.get(sell_type, "SELL")
+
+
+def get_action_label(item: ReconciliationItem) -> str:
+    """Return the display label for an item, preferring its decision basis."""
+    basis = getattr(item, "action_basis", None)
+    if basis and basis in ACTION_BASIS_LABELS:
+        return ACTION_BASIS_LABELS[basis]
+    return get_sell_type_label(item.sell_type)
 
 
 def group_portfolio_actions(
@@ -389,19 +411,27 @@ def build_cash_timeline(
 
 
 def _soft_sell_proceeds_usd(items: list[ReconciliationItem]) -> float:
-    """Total USD proceeds from SOFT_REJECT sells (conditional, not confirmed).
+    """Total USD *potential exit value* of SOFT_REJECT items — never funds.
 
-    Includes macro-demoted items (action REVIEW, sell_type SOFT_REJECT): the
-    operator still sees their potential proceeds in the conditional bucket —
-    that is what "soft-sell reviews" means in the report.
+    SELL items contribute their estimated proceeds (`cash_impact_usd`).
+    REVIEW items carry no order fields by contract (a review is not an
+    order), so their potential exit value derives from the held position's
+    market value. This is the conditional bucket ("soft-sell reviews") —
+    strictly informational, excluded from pending/executable cash by
+    `build_cash_timeline`'s SELL/TRIM filter.
     """
-    return sum(
-        item.cash_impact_usd
-        for item in items
-        if item.action in ("SELL", "REVIEW")
-        and item.sell_type == "SOFT_REJECT"
-        and item.cash_impact_usd > 0
-    )
+    total = 0.0
+    for item in items:
+        if item.sell_type != "SOFT_REJECT":
+            continue
+        if item.action == "SELL" and item.cash_impact_usd > 0:
+            total += item.cash_impact_usd
+        elif item.action == "REVIEW":
+            if item.cash_impact_usd > 0:
+                total += item.cash_impact_usd
+            elif item.ibkr_position and item.ibkr_position.market_value_usd > 0:
+                total += item.ibkr_position.market_value_usd
+    return total
 
 
 def build_cash_summary(
@@ -485,10 +515,36 @@ def build_portfolio_overview(
     )
 
 
+# Orders in a terminal state are not live: Cancelled/Inactive never annotate,
+# Filled is surfaced only as historical context when no open order matches.
+_TERMINAL_ORDER_STATUSES = frozenset({"cancelled", "inactive", "filled"})
+
+
+def _build_live_order_match(order: dict) -> LiveOrderMatch:
+    raw_quantity = order.get("remainingSize") or order.get("totalSize")
+    quantity: int | None
+    try:
+        quantity = int(raw_quantity) if raw_quantity is not None else None
+    except (TypeError, ValueError):
+        quantity = None
+    side = "SELL" if str(order.get("side", "")).upper() in {"S", "SELL"} else "BUY"
+    return LiveOrderMatch(
+        order=order,
+        side=side,
+        quantity=quantity,
+        price=order.get("price") or order.get("auxPrice"),
+        order_type=str(order.get("orderType") or "LMT"),
+        status=str(order.get("status") or ""),
+    )
+
+
 def find_live_order(
     item: ReconciliationItem,
     live_orders: list[dict] | None,
 ) -> LiveOrderMatch | None:
+    """Match the first genuinely open order for the item; a Filled order is
+    returned only when no open order matches (open-before-filled — a filled
+    order encountered first must not hide a later open cross-side conflict)."""
     if not live_orders:
         return None
 
@@ -500,13 +556,19 @@ def find_live_order(
     if pos and pos.symbol:
         symbol_candidates.add(pos.symbol.upper())
 
+    filled_fallback: LiveOrderMatch | None = None
     for order in live_orders:
         matched = False
         order_conid = order.get("conid")
         order_symbol = (order.get("ticker") or order.get("symbol") or "").upper()
         if conid and order_conid is not None:
             try:
-                matched = int(order_conid) == int(conid)
+                if int(order_conid) != int(conid):
+                    # Comparable conids that differ are authoritative — never
+                    # fall back to symbol (bare-symbol collisions across
+                    # exchanges, e.g. SGX AGS vs Brussels Ageas AGS).
+                    continue
+                matched = True
             except (TypeError, ValueError):
                 matched = False
         if not matched and order_symbol in symbol_candidates:
@@ -514,22 +576,16 @@ def find_live_order(
         if not matched:
             continue
 
-        raw_quantity = order.get("remainingSize") or order.get("totalSize")
-        quantity: int | None
-        try:
-            quantity = int(raw_quantity) if raw_quantity is not None else None
-        except (TypeError, ValueError):
-            quantity = None
-        side = "SELL" if str(order.get("side", "")).upper() in {"S", "SELL"} else "BUY"
-        return LiveOrderMatch(
-            order=order,
-            side=side,
-            quantity=quantity,
-            price=order.get("price") or order.get("auxPrice"),
-            order_type=str(order.get("orderType") or "LMT"),
-            status=str(order.get("status") or ""),
-        )
-    return None
+        status = str(order.get("status") or "").strip().lower()
+        if status in _TERMINAL_ORDER_STATUSES:
+            # Filled is historical context, kept only if no open order
+            # matches; Cancelled/Inactive are dead and never annotate.
+            if status == "filled" and filled_fallback is None:
+                filled_fallback = _build_live_order_match(order)
+            continue
+
+        return _build_live_order_match(order)
+    return filled_fallback
 
 
 def build_live_order_note(
@@ -549,6 +605,12 @@ def build_live_order_note(
 
     rec_side = "SELL" if item.action in {"SELL", "TRIM"} else "BUY"
     display_qty = match.quantity if match.quantity is not None else "?"
+    if match.status.strip().lower() == "filled":
+        # Historical information, not a live order — no conflict language and
+        # no "do not re-enter" imperative.
+        return (
+            f"[ORDER FILLED: {match.side} {display_qty}{price_str} {match.order_type}]"
+        )
     if match.side == rec_side:
         rec_qty = item.suggested_quantity
         if (

@@ -720,7 +720,11 @@ class TestMacroFlagParsingContract:
         demoted = []
         for i in range(6):
             item = _make_sell_item_on_date(f"JP{i}.T", "2026-06-01", conid=100 + i)
-            item.action = "REVIEW"  # as _apply_macro_demotions leaves it
+            # As _apply_macro_demotions leaves it: action flipped AND the
+            # MACRO tag appended (characterization keys on the tag for
+            # demoted items, since their basis no longer matches evidence).
+            item.action = "REVIEW"
+            item.reason += "  [MACRO_WATCH: demoted from SELL]"
             demoted.append(item)
         flag = (
             "CORRELATED_SELL_EVENT: 6 positions changed verdict within 14d of"

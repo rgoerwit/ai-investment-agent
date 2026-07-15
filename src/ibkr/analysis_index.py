@@ -22,7 +22,7 @@ import structlog
 from src.currency_resolver import resolve_local_trading_currency
 from src.error_safety import summarize_exception
 from src.fx_normalization import FALLBACK_RATES_TO_USD, normalize_minor_unit_currency
-from src.ibkr.models import AnalysisRecord, TradeBlockData
+from src.ibkr.models import AnalysisRecord, PortfolioEvidence, TradeBlockData
 from src.ibkr.order_builder import parse_trade_block
 from src.ibkr.reconciliation_rules import _exchange_from_ticker, _normalize_verdict
 from src.pm_decision_parser import parse_final_decision_scores
@@ -38,7 +38,12 @@ from src.validators.supplemental_flags import (
 logger = structlog.get_logger(__name__)
 # Bump when the parsed AnalysisRecord schema changes so cached indexes rebuild.
 # v5: added risk_tally + quality_flag_types (BUY stability gate inputs).
-_ANALYSIS_INDEX_VERSION = 5
+# v6: added PortfolioEvidence (dni_review_candidate marker, blocks_buy /
+#     compliance flag types) — disposition classifier inputs.
+# v7: is_quick_mode tri-state (None = snapshot predates the field — cached
+#     v6 records stored the false-full default, which granted legacy
+#     artifacts sell-confirmation authority).
+_ANALYSIS_INDEX_VERSION = 7
 _DATA_VACUUM_COVERAGE_THRESHOLD_PCT = 40.0
 
 
@@ -322,6 +327,44 @@ def _extract_flag_types(
     return capital_types, quality_types
 
 
+_COMPLIANCE_FLAG_PREFIXES = ("PFIC_", "VIE_", "CMIC_", "REGULATORY_")
+
+
+def _extract_portfolio_evidence(data: dict[str, Any]) -> PortfolioEvidence:
+    """Assemble decision-layer evidence from already-persisted artifact fields.
+
+    Reads run_summary markers and the root red_flags list — never prose. A
+    malformed red_flags payload degrades to empty evidence (complete=False),
+    which the disposition classifier treats conservatively.
+    """
+    run_summary = data.get("run_summary")
+    run_summary = run_summary if isinstance(run_summary, dict) else {}
+    red_flags = data.get("red_flags")
+    flags_valid = isinstance(red_flags, list)
+    flags = red_flags if flags_valid else []
+
+    def _types(predicate: Callable[[dict[str, Any]], bool]) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                str(flag["type"])
+                for flag in flags
+                if isinstance(flag, dict) and flag.get("type") and predicate(flag)
+            )
+        )
+
+    return PortfolioEvidence(
+        # The marker key exists in run_summary from July 2026 onward; its mere
+        # presence (True or False) is what distinguishes a marker-aware artifact
+        # from a legacy one.
+        complete=flags_valid and "verdict_dni_review_candidate" in run_summary,
+        dni_review_candidate=bool(run_summary.get("verdict_dni_review_candidate")),
+        buy_blocking_flag_types=_types(lambda f: bool(f.get("blocks_buy"))),
+        compliance_flag_types=_types(
+            lambda f: str(f.get("type", "")).startswith(_COMPLIANCE_FLAG_PREFIXES)
+        ),
+    )
+
+
 def _extract_tool1_financial_metrics(data: dict[str, Any]) -> dict[str, Any]:
     """Parse the saved Junior Tool 1 financial-metrics JSON payload."""
     raw = (
@@ -505,13 +548,18 @@ def _build_analysis_record_from_data(
         conviction=snapshot.get("conviction") or trade_block.conviction,
         sector=normalize_sector_label(snapshot.get("sector")),
         exchange=snapshot.get("exchange") or _exchange_from_ticker(ticker),
-        is_quick_mode=bool(snapshot.get("is_quick_mode", False)),
+        is_quick_mode=(
+            None
+            if snapshot.get("is_quick_mode") is None
+            else bool(snapshot["is_quick_mode"])
+        ),
         capital_flag_types=capital_flag_types,
         risk_tally=snapshot.get("risk_tally"),
         quality_flag_types=quality_flag_types,
         macro_regime=macro_regime,
         data_quality=data_quality,
         m_and_a_status=(snapshot.get("m_and_a_status") or "").strip().upper(),
+        evidence=_extract_portfolio_evidence(data),
     )
 
 

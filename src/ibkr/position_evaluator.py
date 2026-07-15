@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import structlog
 
+from src.ibkr.buy_stability import PriorVerdict, load_recent_same_ticker_history
 from src.ibkr.models import (
     AnalysisRecord,
     NormalizedPosition,
@@ -11,6 +12,10 @@ from src.ibkr.models import (
     ReconciliationItem,
 )
 from src.ibkr.order_builder import round_to_lot_size
+from src.ibkr.portfolio_defaults import (
+    DEFAULT_MIN_ACTIONABLE_POSITION_USD,
+    DEFAULT_SELL_CONFIRMATION_LOOKBACK_DAYS,
+)
 from src.ibkr.reconciliation_rules import (
     _MIN_ORDER_USD,
     _REJECT_VERDICTS,
@@ -23,12 +28,62 @@ from src.ibkr.reconciliation_rules import (
     check_staleness,
     check_stop_breach,
     check_target_hit,
+    classify_disposition,
     classify_profit_take,
+    stop_staleness_note,
 )
 from src.ibkr.ticker import Ticker
 from src.ticker_policy import sibling_ticker_candidates
 
 logger = structlog.get_logger(__name__)
+
+
+def _load_prior_history(analysis: AnalysisRecord) -> list[PriorVerdict]:
+    """Load dated same-ticker verdict history for the SELL confirmation gate."""
+    from src.config import config
+
+    return load_recent_same_ticker_history(
+        analysis.ticker,
+        lookback_days=DEFAULT_SELL_CONFIRMATION_LOOKBACK_DAYS,
+        results_dir=str(config.results_dir),
+        exclude_path=analysis.file_path or None,
+    )
+
+
+def _is_de_minimis(
+    pos: NormalizedPosition,
+    analysis: AnalysisRecord,
+    min_actionable_position_usd: float,
+) -> bool:
+    """Position too small to be worth attention — unless compliance-flagged.
+
+    Compliance-class flags (PFIC/VIE/CMIC) carry per-position burdens
+    independent of dollar size (a $193 PFIC still costs a Form 8621), so they
+    exempt a position from de-minimis suppression entirely.
+    """
+    if pos.market_value_usd >= min_actionable_position_usd:
+        return False
+    return not analysis.evidence.compliance_flag_types
+
+
+def _de_minimis_hold(
+    item_ticker: Ticker,
+    pos: NormalizedPosition,
+    analysis: AnalysisRecord,
+    suppressed_reason: str,
+) -> ReconciliationItem:
+    return ReconciliationItem(
+        ticker=item_ticker,
+        action="HOLD",
+        reason=(
+            f"De-minimis (${pos.market_value_usd:,.0f}) — monitor only. "
+            f"Suppressed: {suppressed_reason}"
+        ),
+        urgency="LOW",
+        ibkr_position=pos,
+        analysis=analysis,
+        action_basis="DE_MINIMIS",
+    )
 
 
 _PROFIT_TAKE_REASON_LABELS = {
@@ -118,6 +173,7 @@ def evaluate_positions(
     sector_weights: dict[str, float],
     exchange_weights: dict[str, float],
     remaining_cash: float,
+    min_actionable_position_usd: float = DEFAULT_MIN_ACTIONABLE_POSITION_USD,
 ) -> tuple[list[ReconciliationItem], set[str], float]:
     """Evaluate currently held positions and return actions plus updated cash/held set."""
     items: list[ReconciliationItem] = []
@@ -213,6 +269,7 @@ def evaluate_positions(
                     cash_impact_usd=pos.market_value_usd,
                     settlement_date=_settlement_date(2),
                     sell_type="STOP_BREACH",
+                    action_basis="STOP_LOSS",
                 )
             )
             continue
@@ -221,6 +278,13 @@ def evaluate_positions(
         if verdict_upper in _REJECT_VERDICTS:
             zone = _normalize_zone(analysis.zone)
             if verdict_upper == "DO_NOT_INITIATE" and zone in SCREEN_REVIEW_DNI_ZONES:
+                if _is_de_minimis(pos, analysis, min_actionable_position_usd):
+                    items.append(
+                        _de_minimis_hold(
+                            item_ticker, pos, analysis, f"screen-threshold DNI ({zone})"
+                        )
+                    )
+                    continue
                 items.append(
                     ReconciliationItem(
                         ticker=item_ticker,
@@ -233,6 +297,7 @@ def evaluate_positions(
                         ibkr_position=pos,
                         analysis=analysis,
                         sell_type="SCREEN_REJECT",
+                        action_basis="ENTRY_CONSTRAINT",
                     )
                 )
                 continue
@@ -254,6 +319,7 @@ def evaluate_positions(
                         ibkr_position=pos,
                         analysis=analysis,
                         sell_type="DATA_QUALITY_REVIEW",
+                        action_basis="DATA_QUALITY",
                     )
                 )
                 continue
@@ -276,6 +342,53 @@ def evaluate_positions(
                         ibkr_position=pos,
                         analysis=analysis,
                         sell_type="DATA_QUALITY_REVIEW",
+                        action_basis="DATA_QUALITY",
+                    )
+                )
+                continue
+
+            disposition = classify_disposition(
+                analysis,
+                current_price_local=current_price,
+                prior_history=_load_prior_history(analysis),
+            )
+            sell_type = _classify_sell_type(analysis, stop_breached=False)
+            if disposition.basis == "DATA_QUALITY":
+                # Score-derived sell_type is meaningless when the scores
+                # themselves are unreliable; the DATA_QUALITY_REVIEW token
+                # also routes the item into the refresh blocking_now bucket
+                # (a SOFT_REJECT stamp would leave it on staleness cadence).
+                sell_type = "DATA_QUALITY_REVIEW"
+            if disposition.action == "SELL":
+                items.append(
+                    ReconciliationItem(
+                        ticker=item_ticker,
+                        action="SELL",
+                        reason=(
+                            f"Verdict → {analysis.verdict}  "
+                            f"({analysis.analysis_date}) — {disposition.detail}"
+                        ),
+                        urgency="HIGH",
+                        ibkr_position=pos,
+                        analysis=analysis,
+                        suggested_quantity=abs(int(pos.quantity)),
+                        suggested_order_type="LMT",
+                        suggested_price=current_price,
+                        cash_impact_usd=pos.market_value_usd,
+                        settlement_date=_settlement_date(2),
+                        sell_type=sell_type,
+                        action_basis=disposition.basis,
+                    )
+                )
+                continue
+
+            if _is_de_minimis(pos, analysis, min_actionable_position_usd):
+                items.append(
+                    _de_minimis_hold(
+                        item_ticker,
+                        pos,
+                        analysis,
+                        f"verdict {analysis.verdict} ({disposition.basis})",
                     )
                 )
                 continue
@@ -283,17 +396,16 @@ def evaluate_positions(
             items.append(
                 ReconciliationItem(
                     ticker=item_ticker,
-                    action="SELL",
-                    reason=f"Verdict → {analysis.verdict}  ({analysis.analysis_date})",
-                    urgency="HIGH",
+                    action="REVIEW",
+                    reason=(
+                        f"Verdict → {analysis.verdict}  "
+                        f"({analysis.analysis_date}) — {disposition.detail}"
+                    ),
+                    urgency="MEDIUM",
                     ibkr_position=pos,
                     analysis=analysis,
-                    suggested_quantity=abs(int(pos.quantity)),
-                    suggested_order_type="LMT",
-                    suggested_price=current_price,
-                    cash_impact_usd=pos.market_value_usd,
-                    settlement_date=_settlement_date(2),
-                    sell_type=_classify_sell_type(analysis, stop_breached=False),
+                    sell_type=sell_type,
+                    action_basis=disposition.basis,
                 )
             )
             continue
@@ -346,6 +458,7 @@ def evaluate_positions(
                     cash_impact_usd=pos.market_value_usd if executable else 0.0,
                     settlement_date=_settlement_date(2) if executable else None,
                     sell_type="PROFIT_TAKE",
+                    action_basis="CAPITAL_ALLOCATION",
                     cost_basis_return_pct=profit_take.cost_basis_return_pct,
                     profit_take_reasons=profit_take.reasons,
                 )
@@ -353,6 +466,9 @@ def evaluate_positions(
             continue
 
         if target_hit:
+            if _is_de_minimis(pos, analysis, min_actionable_position_usd):
+                items.append(_de_minimis_hold(item_ticker, pos, analysis, "target hit"))
+                continue
             items.append(
                 ReconciliationItem(
                     ticker=item_ticker,
@@ -361,11 +477,19 @@ def evaluate_positions(
                     urgency="LOW",
                     ibkr_position=pos,
                     analysis=analysis,
+                    action_basis="CAPITAL_ALLOCATION",
                 )
             )
             continue
 
         if is_stale:
+            if _is_de_minimis(pos, analysis, min_actionable_position_usd):
+                items.append(
+                    _de_minimis_hold(
+                        item_ticker, pos, analysis, f"stale analysis ({stale_reason})"
+                    )
+                )
+                continue
             items.append(
                 ReconciliationItem(
                     ticker=item_ticker,
@@ -487,6 +611,9 @@ def evaluate_positions(
             )
         if analysis.stop_price:
             status_parts.append(f"stop {analysis.stop_price:.2f}")
+            stop_note = stop_staleness_note(analysis, current_price)
+            if stop_note:
+                status_parts.append(stop_note)
         if analysis.target_1_price:
             status_parts.append(f"target {analysis.target_1_price:.2f}")
 

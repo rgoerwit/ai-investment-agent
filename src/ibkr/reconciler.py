@@ -23,6 +23,7 @@ from src.ibkr.portfolio_defaults import (
     DEFAULT_DRIFT_PCT,
     DEFAULT_EXCHANGE_LIMIT_PCT,
     DEFAULT_MAX_AGE_DAYS,
+    DEFAULT_MIN_ACTIONABLE_POSITION_USD,
     DEFAULT_OVERWEIGHT_PCT,
     DEFAULT_SECTOR_LIMIT_PCT,
     DEFAULT_UNDERWEIGHT_PCT,
@@ -119,6 +120,7 @@ def _populate_portfolio_weights(
 
     sector_weights: dict[str, float] = {}
     exchange_weights: dict[str, float] = {}
+    currency_weights: dict[str, float] = {}
     total_position_value = sum(position.market_value_usd for position in positions)
     if total_position_value > 0:
         for pos in positions:
@@ -135,12 +137,15 @@ def _populate_portfolio_weights(
                     analysis = best
             sector = normalize_sector_label(analysis.sector if analysis else None)
             exchange = _exchange_from_position(pos)
+            currency = (pos.currency or "USD").upper()
             weight = pos.market_value_usd / total_position_value * 100
             sector_weights[sector] = sector_weights.get(sector, 0.0) + weight
             exchange_weights[exchange] = exchange_weights.get(exchange, 0.0) + weight
+            currency_weights[currency] = currency_weights.get(currency, 0.0) + weight
 
     portfolio.sector_weights = sector_weights
     portfolio.exchange_weights = exchange_weights
+    portfolio.currency_weights = currency_weights
     return sector_weights, exchange_weights
 
 
@@ -156,6 +161,7 @@ def reconcile(
     exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT,
     watchlist_tickers: set[str] | None = None,
     diagnostics: ReconciliationDiagnostics | None = None,
+    min_actionable_position_usd: float = DEFAULT_MIN_ACTIONABLE_POSITION_USD,
 ) -> list[ReconciliationItem]:
     """
     Compare IBKR positions against evaluator recommendations.
@@ -188,6 +194,7 @@ def reconcile(
         sector_weights=sector_weights,
         exchange_weights=exchange_weights,
         remaining_cash=remaining_cash,
+        min_actionable_position_usd=min_actionable_position_usd,
     )
 
     watchlist_items, held_tickers, remaining_cash = evaluate_watchlist(

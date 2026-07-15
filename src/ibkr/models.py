@@ -124,6 +124,60 @@ class NormalizedPosition(BaseModel):
         return self.ticker.exchange
 
 
+# Why a held position is being acted on. A portfolio action requires portfolio
+# evidence: a stock-level rejection may trigger refresh, review, replacement
+# analysis, or an exit — but it must not decide among those alone.
+#
+#   MANDATORY_EXIT             – compliance/operator-declared restriction (empty
+#                                by default today; reserved for explicit policy)
+#   STOP_LOSS                  – validated stop-price breach
+#   CONFIRMED_THESIS_FAILURE   – reject verdict confirmed by a prior full-mode
+#                                reject with minimum spacing (the forcing function
+#                                that prevents deadwood accumulating forever)
+#   THESIS_REASSESSMENT        – single unconfirmed reject — review + refresh
+#   ENTRY_CONSTRAINT           – analyzer would not initiate at this price, but
+#                                fundamentals are intact ("not cheap enough to
+#                                buy" is not evidence to exit)
+#   SPECIAL_SITUATION_REVIEW   – active M&A tender; sell/tender/hold depends on
+#                                deal mechanics and premium, not the verdict
+#   DATA_QUALITY               – evidence indeterminate (data vacuum, unreliable
+#                                gate arithmetic) — never punish the stock for
+#                                the model's uncertainty
+#   CAPITAL_ALLOCATION         – profit-take / rebalancing discipline
+#   DE_MINIMIS                 – position too small to be worth an action
+ActionBasis = Literal[
+    "MANDATORY_EXIT",
+    "STOP_LOSS",
+    "CONFIRMED_THESIS_FAILURE",
+    "THESIS_REASSESSMENT",
+    "ENTRY_CONSTRAINT",
+    "SPECIAL_SITUATION_REVIEW",
+    "DATA_QUALITY",
+    "CAPITAL_ALLOCATION",
+    "DE_MINIMIS",
+]
+
+
+class PortfolioEvidence(BaseModel):
+    """Decision-layer evidence loaded from the persisted analysis artifact.
+
+    Assembled by the analysis index from already-saved fields (run_summary
+    markers, root red_flags) — never reparsed from prose at reconcile time.
+    The three flag families are deliberately separate: buy-blocking evidence
+    means the gate arithmetic is indeterminate (a REVIEW signal), compliance
+    flags carry per-position burdens independent of dollar size (PFIC Form
+    8621), and mandatory-exit restrictions are the only flags that force a
+    sale. ``complete=False`` marks legacy artifacts that predate the
+    persisted markers — classify conservatively, never more favorably.
+    """
+
+    complete: bool = False
+    dni_review_candidate: bool = False  # quality-gate-passing DNI marker
+    buy_blocking_flag_types: tuple[str, ...] = ()  # blocks_buy red flags
+    compliance_flag_types: tuple[str, ...] = ()  # PFIC_/VIE_/CMIC_ class
+    mandatory_exit_flag_types: tuple[str, ...] = ()  # reserved; empty today
+
+
 class TradeBlockData(BaseModel):
     """Parsed TRADE_BLOCK fields from an analysis.
 
@@ -181,7 +235,11 @@ class AnalysisRecord(BaseModel):
     conviction: str = ""
     sector: str = ""  # GICS sector (e.g. "Industrials"), if available in snapshot
     exchange: str = ""  # Exchange suffix (e.g. "HK", "T"), inferred from ticker
-    is_quick_mode: bool = False  # True if analysis was run with --quick (less thorough)
+    # True if run with --quick (screening tier); None = mode unknown (legacy
+    # artifact predating the snapshot field). Unknown carries no sell
+    # authority in the confirmation gate; quick-BUY gates use truthiness, so
+    # None behaves like full mode there (unknown must not block a BUY review).
+    is_quick_mode: bool | None = False
     capital_flag_types: tuple[str, ...] = ()
     # PM final risk tally — best-effort: read from prediction_snapshot first, else
     # parsed from the PM decision text (None when neither is available). Consumed
@@ -198,6 +256,8 @@ class AnalysisRecord(BaseModel):
     # section). Empty string when no analysis ever set it or the analysis predates
     # the field; otherwise one of ACTIVE_TENDER / RUMORED / NONE.
     m_and_a_status: str = ""
+    # Decision-layer evidence from persisted markers/flags (see PortfolioEvidence).
+    evidence: PortfolioEvidence = Field(default_factory=PortfolioEvidence)
 
     @property
     def age_days(self) -> int:
@@ -244,6 +304,9 @@ class ReconciliationItem(BaseModel):
     sell_type: str | None = (
         None  # STOP_BREACH | HARD_REJECT | SOFT_REJECT | PROFIT_TAKE | None
     )
+    # Typed decision basis (additive — sell_type stays the presentation/grouping
+    # token; action_basis is the decision-layer field macro detection keys on).
+    action_basis: ActionBasis | None = None
     cost_basis_return_pct: float | None = None
     profit_take_reasons: tuple[str, ...] = ()
 
@@ -278,3 +341,4 @@ class PortfolioSummary(BaseModel):
     # Concentration weights (% of portfolio value) — populated by reconcile()
     sector_weights: dict[str, float] = Field(default_factory=dict)
     exchange_weights: dict[str, float] = Field(default_factory=dict)
+    currency_weights: dict[str, float] = Field(default_factory=dict)
