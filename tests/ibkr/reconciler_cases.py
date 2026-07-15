@@ -499,15 +499,18 @@ class TestReconcile:
         items = reconcile([], {"7203.T": analysis}, _make_portfolio())
         assert len(items) == 0
 
-    def test_no_cash_skips_new_buys(self):
-        """No available cash → no new BUY recommendations."""
+    def test_no_cash_retains_non_executable_new_buy_for_watchlist_ranking(self):
+        """No available cash retains a non-executable candidate for watchlist merit."""
         analysis = _make_analysis(verdict="BUY", age_days=3)
         items = reconcile(
             [],
             {"7203.T": analysis},
             _make_portfolio(cash=0, value=100000),
         )
-        assert len(items) == 0
+        assert len(items) == 1
+        assert items[0].is_cash_blocked is True
+        assert items[0].suggested_quantity is None
+        assert items[0].cash_impact_usd == 0.0
 
     def test_overweight_position(self):
         """Overweight position → TRIM."""
@@ -773,7 +776,7 @@ class TestHeldPositionBlocksCandidate:
 
 
 class TestPhase2CashBlockedCandidates:
-    def test_offwatch_buy_is_counted_when_cash_policy_blocks_it(self):
+    def test_offwatch_buy_is_retained_when_cash_policy_blocks_it(self):
         portfolio = _make_portfolio(value=100_000, cash=0)
         portfolio.exchange_weights = {}
         portfolio.sector_weights = {}
@@ -788,7 +791,10 @@ class TestPhase2CashBlockedCandidates:
         )
 
         phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
-        assert not phase2_buys
+        assert len(phase2_buys) == 1
+        assert phase2_buys[0].is_cash_blocked is True
+        assert phase2_buys[0].suggested_quantity is None
+        assert phase2_buys[0].cash_impact_usd == 0.0
         assert diagnostics.cash_blocked_offwatch_buy_count == 1
 
 

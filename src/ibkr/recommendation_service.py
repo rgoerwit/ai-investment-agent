@@ -288,9 +288,19 @@ class PortfolioRecommendationService:
             items,
             max_age_days=request.max_age_days,
         )
+        # The report count is derived from retained items, not a parallel
+        # diagnostic side channel, so it cannot disagree with the merit pool.
+        cash_blocked_candidates = sum(
+            1
+            for item in items
+            if item.action == "BUY"
+            and not item.is_watchlist
+            and item.ibkr_position is None
+            and item.is_cash_blocked
+        )
         return (
             items,
             health_flags,
             freshness_summary,
-            diagnostics.cash_blocked_offwatch_buy_count,
+            cash_blocked_candidates,
         )

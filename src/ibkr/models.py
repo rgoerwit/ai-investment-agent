@@ -299,6 +299,9 @@ class ReconciliationItem(BaseModel):
     suggested_price: float | None = None  # LOCAL currency (see class docstring)
     suggested_order_type: str = "LMT"  # LMT or MKT
     cash_impact_usd: float = 0.0  # USD (negative = cost, positive = proceeds)
+    # A BUY retained for watchlist ranking even though live cash was exhausted.
+    # It is advisory only: it must never create an order or affect cash/turnover.
+    is_cash_blocked: bool = False
     settlement_date: str | None = None  # for sells/trims: "YYYY-MM-DD"
     is_watchlist: bool = False  # True when sourced from IBKR watchlist (zero holdings)
     sell_type: str | None = (

@@ -59,8 +59,12 @@ from src.ibkr.portfolio_presentation import (
     SELL_RELATED_REVIEWS_TITLE,
     build_action_summary_counts,
     build_cash_summary,
+    build_watchlist_optimization_summary,
     get_action_label,
     group_portfolio_actions,
+    resolve_watchlist_optimization,
+    watchlist_candidate_conviction,
+    watchlist_candidate_score,
 )
 from src.ibkr.portfolio_presentation import (
     build_live_order_note as shared_build_live_order_note,
@@ -77,6 +81,7 @@ from src.ibkr.refresh_service import (
     run_ticker_for,
 )
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
+from src.ibkr.ticker import Ticker
 from src.sector_normalization import (
     aggregate_sector_weights as shared_aggregate_sector_weights,
 )
@@ -1198,6 +1203,36 @@ def format_report(
         watchlist_tickers=watchlist_tickers,
         macro_event_active=_macro_event_active,
     )
+    _optimization_in_flight = tuple(
+        item
+        for item in items
+        if item.action == "BUY"
+        and item.ibkr_position is None
+        and not item.is_watchlist
+        and (match := shared_find_live_order(item, live_orders)) is not None
+        and match.side == "BUY"
+    )
+    _optimization_in_flight_ids = {
+        item.ticker.yf.upper() for item in _optimization_in_flight
+    }
+    _live_buy_order_items = tuple(
+        item
+        for item in items
+        if item.action == "BUY"
+        and item.ibkr_position is None
+        and shared_find_live_order(item, live_orders) is not None
+    )
+    watchlist_optimization = resolve_watchlist_optimization(
+        [
+            item
+            for item in items
+            if item.ticker.yf.upper() not in _optimization_in_flight_ids
+        ],
+        action_groups,
+        watchlist_tickers=watchlist_tickers,
+        watchlist_supplied=(watchlist_total is not None and not watchlist_unavailable),
+        watchlist_unavailable=watchlist_unavailable,
+    )
     stop_sells = list(action_groups.stop_sells)
     hard_sells = list(action_groups.hard_sells)
     profit_take_sells = list(action_groups.profit_take_sells)
@@ -1206,10 +1241,7 @@ def format_report(
     macro_reviews = list(action_groups.macro_reviews)
     macro_stop_reviews = list(action_groups.macro_stop_reviews)
     trims = list(action_groups.trims)
-    removes = list(action_groups.removes)
     adds = list(action_groups.adds)
-    buys = list(action_groups.new_buys)
-    buys_offwatch = list(action_groups.watchlist_candidates)
     holds_real = list(action_groups.holds_real)
     holds_watch = list(action_groups.holds_watch)
     reviews = list(action_groups.reviews)
@@ -1634,19 +1666,12 @@ def format_report(
     _live_orders: list[dict] = live_orders or []
 
     def _candidate_conviction(item: ReconciliationItem) -> str:
-        """Return normalised conviction string ('high', 'medium', 'low', '')."""
-        a = item.analysis
-        if not a:
-            return ""
-        raw = a.conviction or (a.trade_block.conviction if a.trade_block else "") or ""
-        return raw.strip().lower()
+        """Compatibility wrapper for the shared watchlist selection rule."""
+        return watchlist_candidate_conviction(item)
 
     def _candidate_score(item: ReconciliationItem) -> float:
-        """Composite score for ranking watchlist candidates: health + growth (0–200)."""
-        a = item.analysis
-        if not a:
-            return 0.0
-        return (a.health_adj or 0.0) + (a.growth_adj or 0.0)
+        """Compatibility wrapper for the shared watchlist selection rule."""
+        return watchlist_candidate_score(item)
 
     def _buy_pos_tag(item: ReconciliationItem) -> str:
         """Short inline tag for BUY/ADD lines in the action plan."""
@@ -2059,13 +2084,6 @@ def format_report(
                 lines.append(note)
             lines.append("")
 
-    # ── WATCHLIST REMOVE ─────────────────────────────────────────────────────
-    if removes:
-        _section("WATCHLIST — REMOVE", "verdict changed — remove from IBKR watchlist")
-        for item in removes:
-            lines.append(f"  {'REMOVE':<6}  {_display_ticker(item):<12}  {item.reason}")
-        lines.append("")
-
     # ── ADDS ─────────────────────────────────────────────────────────────────
     if adds:
         _section("ADDS", "increase underweight positions")
@@ -2084,174 +2102,206 @@ def format_report(
                     f"             [upping position — currently hold {pos.quantity:,.0f} shares{avg_str}]"
                 )
             cl = _cost_line(item)
+            if cl:
+                lines.append(cl)
             note = _order_note(item)
             if note:
                 lines.append(note)
             lines.append("")
 
-    # ── NEW BUYS ──────────────────────────────────────────────────────────────
-    # Only shown when items originate from the IBKR watchlist (is_watchlist=True).
-    # Section is intentionally absent when no watchlist was loaded.
-    if buys:
-        _count_str = (
-            f"{len(buys)}/{watchlist_total} " if watchlist_total is not None else ""
+    # ── WATCHLIST OPTIMIZATION ───────────────────────────────────────────────
+    _case_subtitles = {
+        "no_watchlist": "no watchlist loaded — additions only",
+        "watchlist_unavailable": (
+            "watchlist status UNKNOWN — additions only; confirm watchlist status "
+            "and re-check IBKR before acting"
+        ),
+        "nothing_actionable": "no medium-or-better candidates",
+        "empty_pool": "no medium-or-better candidates; existing entries retained for review",
+        "partial_fill": (
+            f"optimal BUY-ready set under-filled ({len(watchlist_optimization.optimal)}"
+            f" of {watchlist_optimization.target_size})"
+        ),
+        "aligned": "current watchlist already matches the BUY-ready target",
+        "full_optimize": (
+            f"top {watchlist_optimization.target_size} medium-or-higher BUY-ready slots"
+        ),
+    }
+    _section(
+        "WATCHLIST OPTIMIZATION",
+        _case_subtitles[watchlist_optimization.case.value],
+    )
+
+    def _watchlist_symbol(item: ReconciliationItem) -> str:
+        yf_hint = f" ({item.ticker.yf})" if "." in item.ticker.yf else ""
+        return f"{_display_ticker(item)}{yf_hint}"
+
+    def _render_watchlist_candidate(item: ReconciliationItem, label: str) -> None:
+        analysis = item.analysis
+        conviction = watchlist_candidate_conviction(item) or "unspecified"
+        score = watchlist_candidate_score(item)
+        lines.append(
+            f"  {label:<6}  {_watchlist_symbol(item):<20}  {conviction} conviction  score {score:.0f}"
         )
-        _name_str = f"watchlist '{watchlist_name}'" if watchlist_name else "watchlist"
-        _wl_subtitle = f"{_count_str}from {_name_str} selected for BUY"
-        _section("NEW BUYS", _wl_subtitle)
-        for item in buys:
-            ccy = _item_currency(item)
-            lines.append(_order_line(item, ccy))
-            a = item.analysis
-            if a:
-                conviction = a.conviction or a.trade_block.conviction or "Unspecified"
-                size_pct = a.trade_block.size_pct or a.position_size or 0
-                detail_parts: list[str] = []
-                detail_parts.append(f"{conviction} conviction")
-                if size_pct and nlv > 0:
-                    target_usd = nlv * size_pct / 100
-                    detail_parts.append(f"target {size_pct:.1f}% (${target_usd:,.0f})")
-                detail_parts.append("[watchlist — new position]")
-                if a.is_quick_mode:
-                    detail_parts.append(
-                        "⚠ quick mode — re-run full analysis before buying"
-                    )
-                lines.append(f"             {'  ·  '.join(detail_parts)}")
-            cl = _cost_line(item)
-            if cl:
-                lines.append(cl)
-            note = _order_note(item)
-            if note:
-                lines.append(note)
-            lines.append("")
-
-    # ── WATCHLIST CANDIDATES ──────────────────────────────────────────────────
-    # Phase 2 BUYs from past analysis runs not yet on the watchlist.
-    # Must be reviewed and added to watchlist before executing — not actionable orders.
-    #
-    # Exclude candidates whose base symbol already appears in an actionable
-    # context — SELL/REMOVE (contradictory) or any held position (already owned).
-    # Held-position check is belt-and-suspenders: the reconciler's Phase 1 should
-    # block these in Phase 2, but ticker-format mismatches (bare "5434" position
-    # vs "5434.TW" analysis) can still slip through.
-    _cands_deduped = list(buys_offwatch)
-    # Split candidates: exclude any that already have a live BUY order so the
-    # ":10" slice is filled with real candidates, not orders already placed.
-    _cands_in_flight: list[ReconciliationItem] = []
-    _cands_actionable: list[ReconciliationItem] = []
-    for _c in _cands_deduped:
-        _clo = _find_live_order(_c)
-        if _clo and _clo[1] == "BUY":
-            _cands_in_flight.append(_c)
-        else:
-            _cands_actionable.append(_c)
-
-    if (
-        _cands_actionable
-        or _cands_in_flight
-        or watchlist_candidates_blocked_by_cash > 0
-    ):
-        _CONVICTION_RANK = {"high": 0, "medium": 1, "low": 2}
-        _top_candidates = sorted(
-            _cands_actionable,
-            key=lambda i: (
-                _CONVICTION_RANK.get(_candidate_conviction(i), 3),
-                -_candidate_score(i),
-            ),
-        )[:10]
-        _hidden = len(_cands_actionable) - len(_top_candidates)
+        detail: list[str] = []
+        if analysis:
+            size_pct = analysis.trade_block.size_pct or analysis.position_size or 0
+            if size_pct and nlv > 0:
+                detail.append(f"target {size_pct:.1f}% (${nlv * size_pct / 100:,.0f})")
         if not portfolio_data_loaded:
-            _cand_title = "WATCHLIST CANDIDATES"
-            _cand_subtitle = (
-                "analysis says BUY — holdings/watchlist not loaded, so own/watchlist "
-                "status is UNKNOWN"
-            )
-        elif watchlist_unavailable:
-            _cand_title = "BUY CANDIDATES"
-            _cand_subtitle = (
-                "analysis says BUY — watchlist could not be read, so surfaced as "
-                "direct buys; confirm watchlist status and re-check IBKR before acting"
-            )
-        else:
-            _cand_title = "WATCHLIST CANDIDATES"
-            _cand_subtitle = (
-                "analysis says BUY — inspect and add to watchlist before acting"
-            )
-        if _hidden:
-            _cand_subtitle += f"  (showing top 10 of {len(_cands_actionable)})"
-        _section(_cand_title, _cand_subtitle)
-        for item in _top_candidates:
+            detail.append("[own/watchlist status unknown]")
+        if item.is_cash_blocked:
+            detail.append("no cash — inspect before ordering; no order ticket")
+        elif show_recommendations and item.suggested_quantity:
             ccy = _item_currency(item)
-            # Append "(yf_ticker)" when the exchange suffix disambiguates the IBKR
-            # base symbol — e.g. "DLG (DLG.MI)" vs a bare US ticker "AAPL".
-            _yf_hint = f" ({item.ticker.yf})" if "." in item.ticker.yf else ""
-            _pfx = _urgency_prefix(item)
-            _act = ACTION_SYMBOLS.get(item.action, item.action)
-            _sym = f"{_display_ticker(item)}{_yf_hint}"
-            _cand_parts = [f"{_pfx}{_act:<6}  {_sym}"]
-            if show_recommendations:
-                if item.suggested_price:
-                    _cand_parts.append(f"  @ {_ccy(ccy)}{item.suggested_price:,.2f}")
-                if item.suggested_order_type:
-                    _cand_parts.append(f"  {item.suggested_order_type}")
-                if not item.suggested_quantity:
-                    _cand_parts.append(
-                        "  (portfolio/cash not loaded — inspect before placing order)"
-                        if not portfolio_data_loaded
-                        else "  (quantity unavailable — inspect before placing order)"
-                    )
-                if not item.suggested_price:
-                    _cand_parts.append("  (no entry price — re-run analysis)")
-            lines.append("".join(_cand_parts))
-            a = item.analysis
-            if a:
-                conviction = a.conviction or a.trade_block.conviction or "Unspecified"
-                size_pct = a.trade_block.size_pct or a.position_size or 0
-                offwatch_parts = [f"{conviction} conviction"]
-                if size_pct and nlv > 0:
-                    target_usd = nlv * size_pct / 100
-                    offwatch_parts.append(
-                        f"target {size_pct:.1f}% (${target_usd:,.0f})"
-                    )
-                offwatch_parts.append(
-                    "[own/watchlist status unknown]"
-                    if not portfolio_data_loaded
-                    else "[not on watchlist — new position]"
+            detail.append(
+                f"future BUY: {item.suggested_quantity} shares"
+                + (
+                    f" @ {_ccy(ccy)}{item.suggested_price:,.2f}"
+                    if item.suggested_price
+                    else ""
                 )
-                if a.is_quick_mode:
-                    offwatch_parts.append("⚠ quick mode — re-run full before adding")
-                lines.append(f"             {'  ·  '.join(offwatch_parts)}")
-            cl = _cost_line(item)
-            if cl:
-                lines.append(cl)
-            lines.append("")
-        if not _top_candidates and not _cands_in_flight:
-            if not portfolio_data_loaded:
-                lines.append(
-                    "  No candidates shown — holdings and cash were not loaded"
-                    " (read-only run), so deployable cash is unknown. Re-run without"
-                    " --read-only to size against live cash."
-                )
-            elif available <= 0:
-                lines.append(
-                    f"  No new positions this run — all settled cash (${settled:,.0f})"
-                    " is within the cash buffer, so $0 is deployable into buys."
-                    " Lower --cash-buffer or free cash via the SELL reviews above to"
-                    " deploy."
-                )
-            else:
-                lines.append(
-                    f"  No off-watch BUY candidates fit the ${available:,.0f}"
-                    " deployable after the cash buffer this run."
-                )
-            lines.append("")
-        if _cands_in_flight:
-            _if_syms = ", ".join(_display_ticker(i) for i in _cands_in_flight)
-            lines.append(
-                f"  ✓ {len(_cands_in_flight)} order{'s' if len(_cands_in_flight) > 1 else ''}"
-                f" already in flight ({_if_syms}) — verify in IBKR"
             )
-            lines.append("")
+        elif not portfolio_data_loaded:
+            detail.append("portfolio/cash not loaded — inspect before ordering")
+        elif show_recommendations and not item.suggested_quantity:
+            detail.append("quantity unavailable — inspect before placing order")
+        if not item.suggested_price:
+            detail.append("no entry price — re-run analysis")
+        if detail:
+            lines.append(f"             {'  ·  '.join(detail)}")
+        if item.is_watchlist and not item.is_cash_blocked:
+            cost_line = _cost_line(item)
+            if cost_line:
+                lines.append(cost_line)
+
+    if watchlist_optimization.add:
+        for item in watchlist_optimization.add:
+            _render_watchlist_candidate(item, "+ ADD")
+        lines.append("")
+
+    _must_remove = [
+        move
+        for move in watchlist_optimization.remove
+        if move.reason == "verdict_reject"
+    ]
+    _optional_remove = [
+        move
+        for move in watchlist_optimization.remove
+        if move.reason != "verdict_reject"
+    ]
+    if _must_remove:
+        lines.append("  MUST REMOVE (verdict reject):")
+        for move in _must_remove:
+            verdict = move.item.analysis.verdict if move.item.analysis else "REJECT"
+            lines.append(
+                f"    − REMOVE FROM WATCHLIST  {_watchlist_symbol(move.item)}  — verdict {verdict}"
+            )
+        lines.append("")
+    if _optional_remove:
+        lines.append(
+            "  OPTIONAL OPTIMIZATION (retain if you disagree with the ranking):"
+        )
+        for move in _optional_remove:
+            reason = move.reason.replace("_", " ")
+            lines.append(
+                f"    − REMOVE FROM WATCHLIST  {_watchlist_symbol(move.item)}  — {reason}"
+            )
+        lines.append("")
+    if watchlist_optimization.keep:
+        lines.append(
+            "  KEEPING ACTIVE "
+            f"({len(watchlist_optimization.keep)}): "
+            + ", ".join(_watchlist_symbol(item) for item in watchlist_optimization.keep)
+        )
+    if watchlist_optimization.monitors:
+        lines.append(
+            "  KEEPING MONITORS "
+            f"({len(watchlist_optimization.monitors)}): "
+            + ", ".join(
+                _watchlist_symbol(item) for item in watchlist_optimization.monitors
+            )
+        )
+    if watchlist_optimization.reviews:
+        lines.append(
+            "  KEEPING REVIEWS "
+            f"({len(watchlist_optimization.reviews)}): "
+            + ", ".join(
+                _watchlist_symbol(item) for item in watchlist_optimization.reviews
+            )
+        )
+    if watchlist_optimization.protected_tickers:
+        lines.append(
+            "  KEEPING PROTECTED "
+            f"({len(watchlist_optimization.protected_tickers)}): "
+            + ", ".join(watchlist_optimization.protected_tickers)
+            + "  (held or unresolved; not changed automatically)"
+        )
+    if (
+        watchlist_optimization.keep
+        or watchlist_optimization.monitors
+        or watchlist_optimization.reviews
+        or watchlist_optimization.protected_tickers
+    ):
+        lines.append("")
+
+    if watchlist_optimization.excluded_low_conviction:
+        lines.append(
+            "  Excluded below medium conviction: "
+            f"{len(watchlist_optimization.excluded_low_conviction)}"
+        )
+    if watchlist_candidates_blocked_by_cash:
+        lines.append(
+            "  Cash-blocked candidates retained for ranking: "
+            f"{watchlist_candidates_blocked_by_cash}"
+        )
+        if not watchlist_optimization.optimal and not portfolio_data_loaded:
+            lines.append(
+                "  No candidates shown — holdings and cash were not loaded "
+                "(read-only run), so deployable cash is unknown."
+            )
+    if _optimization_in_flight:
+        lines.append(
+            "  ✓ "
+            f"{len(_optimization_in_flight)} BUY order"
+            f"{'s' if len(_optimization_in_flight) != 1 else ''} already in flight "
+            f"({', '.join(_watchlist_symbol(item) for item in _optimization_in_flight)})"
+            " — excluded from changes"
+        )
+    if _live_buy_order_items:
+        lines.append("  LIVE ORDER STATUS:")
+        for item in _live_buy_order_items:
+            order_note = _order_note(item)
+            if order_note:
+                lines.append(f"    {_watchlist_symbol(item)}  {order_note.strip()}")
+
+    _has_optional_removal = bool(_optional_remove)
+    _replacement_entries = [
+        *watchlist_optimization.optimal,
+        *watchlist_optimization.monitors,
+        *watchlist_optimization.reviews,
+    ]
+    _replacement_symbols = [item.ticker.ibkr for item in _replacement_entries]
+    _replacement_symbols.extend(
+        Ticker.from_yf(ticker).ibkr
+        for ticker in watchlist_optimization.protected_tickers
+    )
+    if (
+        watchlist_optimization.watchlist_supplied
+        and _replacement_symbols
+        and not _has_optional_removal
+        and len(_replacement_symbols) == len(set(_replacement_symbols))
+    ):
+        lines.append("  [Update IBKR watchlist to]: " + ", ".join(_replacement_symbols))
+    elif _has_optional_removal:
+        lines.append(
+            "  Exact replacement list withheld — decide optional removals first."
+        )
+    elif len(_replacement_symbols) != len(set(_replacement_symbols)):
+        lines.append(
+            "  Exact replacement list withheld — raw IBKR symbols are exchange-ambiguous."
+        )
+    lines.append("")
 
     # ── HOLDS ────────────────────────────────────────────────────────────────
     if holds_real:
@@ -2462,15 +2512,24 @@ def format_report(
     from datetime import date
 
     today_str = date.today().isoformat()
+    _selected_watchlist_buy_ids = {
+        candidate.ticker.yf.upper()
+        for candidate in watchlist_optimization.optimal
+        if candidate.is_watchlist
+    }
     action_today = [i for i in items if i.action in ("SELL", "TRIM")]
     funded_today = [
         i
         for i in items
-        if i.action in ("ADD", "BUY")
+        if (
+            i.action == "ADD"
+            or (
+                i.action == "BUY"
+                and i.is_watchlist
+                and i.ticker.yf.upper() in _selected_watchlist_buy_ids
+            )
+        )
         and i.cash_impact_usd < 0
-        and (
-            i.action != "BUY" or i.is_watchlist
-        )  # unvetted BUYs go to WATCHLIST CANDIDATES, not here
     ]
     # Sell proceeds grouped by settlement date (confirmed only; soft sells separate)
     settle_groups: dict[str, float] = {}
@@ -2491,15 +2550,13 @@ def format_report(
         or display_dip_candidates
         or settle_groups
         or settle_conditional
-        or _cands_deduped
-        or removes
         or refresh_activity.refreshed
         or refresh_activity.failed
         or refresh_activity.skipped_due_to_limit
     ):
         _section(
             "ACTION PLAN",
-            "execution orders · watchlist moves · when proceeds clear · refresh follow-through",
+            "execution orders · settlement · refresh follow-through",
         )
 
         if action_today or funded_today:
@@ -2627,50 +2684,6 @@ def format_report(
                 )
             lines.append("")
 
-        strong_candidates = sorted(
-            [i for i in _cands_actionable if _candidate_conviction(i) == "high"],
-            key=_candidate_score,
-            reverse=True,
-        )[:5]
-        if strong_candidates or removes:
-            _moves_header = (
-                "BUY CANDIDATES" if watchlist_unavailable else "WATCHLIST MOVES"
-            )
-            lines.append(f"  {_moves_header} ({today_str}):")
-            _move_label = (
-                "→ BUY             " if watchlist_unavailable else "→ ADD TO WATCHLIST"
-            )
-            for i in strong_candidates:
-                _quick_note = (
-                    "  ⚠ quick — run full first"
-                    if (i.analysis and i.analysis.is_quick_mode)
-                    else ""
-                )
-                lines.append(
-                    f"    {_move_label}  {_display_ticker(i)}"
-                    f"  — analysis {i.analysis.analysis_date if i.analysis else '?'} says BUY{_quick_note}"
-                    f"  →  {_analysis_command(run_ticker_for(i))}"
-                )
-            skipped = len(_cands_actionable) - len(strong_candidates)
-            if skipped > 0:
-                _skip_ref = (
-                    "BUY CANDIDATES"
-                    if watchlist_unavailable
-                    else "WATCHLIST CANDIDATES"
-                )
-                _skip_verb = "buying" if watchlist_unavailable else "adding"
-                lines.append(
-                    f"    ({skipped} lower-conviction candidate{'s' if skipped > 1 else ''}"
-                    f" in {_skip_ref} above — review before {_skip_verb})"
-                )
-            for i in removes:
-                verdict = i.analysis.verdict if i.analysis else "DO_NOT_INITIATE"
-                lines.append(
-                    f"    → REMOVE FROM WATCHLIST  {_display_ticker(i)}"
-                    f"  — verdict: {verdict}"
-                )
-            lines.append("")
-
         all_settle_dates = sorted(set(settle_groups) | set(settle_conditional))
         for settle_date in all_settle_dates:
             confirmed = settle_groups.get(settle_date, 0.0)
@@ -2725,16 +2738,25 @@ def format_report(
 
     # ── Summary line ──────────────────────────────────────────────────────────
     action_counts = build_action_summary_counts(action_groups)
+    # The unified section owns watchlist BUY/candidate/remove presentation. Keep
+    # the shared grouping counts intact for the dashboard, but summarize the CLI
+    # from the optimizer's authoritative diff.
+    action_counts.pop("BUY", None)
+    action_counts.pop("CANDIDATES", None)
+    action_counts.pop("REMOVE", None)
+    action_counts.update(build_watchlist_optimization_summary(watchlist_optimization))
     order = [
         "SELL",
-        "REMOVE",
         "TRIM",
         "ADD",
-        "BUY",
-        "CANDIDATES",
         "HOLD",
         "REVIEW",
         "MACRO_WATCH",
+        "WATCHLIST_KEEP",
+        "WATCHLIST_ADD",
+        "WATCHLIST_REMOVE",
+        "WATCHLIST_MONITOR",
+        "WATCHLIST_REVIEW",
     ]
     summary_parts = [f"{action_counts[a]} {a}" for a in order if a in action_counts]
     # Executable turnover only — SELL/TRIM proceeds + BUY/ADD costs. Review

@@ -120,6 +120,25 @@ def find_opportunities(
 
         has_portfolio = portfolio.portfolio_value_usd > 0
         if has_portfolio and remaining_cash <= 0:
+            entry_price = analysis.entry_price or analysis.current_price
+            conviction = analysis.conviction or analysis.trade_block.conviction or ""
+            size_pct = analysis.trade_block.size_pct or (analysis.position_size or 0)
+            items.append(
+                ReconciliationItem(
+                    ticker=Ticker.from_yf(ticker),
+                    action="BUY",
+                    reason=(
+                        f"New BUY ({analysis.analysis_date}) — {conviction} conviction, "
+                        f"target {size_pct:.1f}% — no cash available"
+                    ),
+                    urgency="MEDIUM",
+                    analysis=analysis,
+                    suggested_price=entry_price,
+                    suggested_order_type="LMT",
+                    cash_impact_usd=0.0,
+                    is_cash_blocked=True,
+                )
+            )
             if diagnostics is not None:
                 diagnostics.cash_blocked_offwatch_buy_count += 1
             continue

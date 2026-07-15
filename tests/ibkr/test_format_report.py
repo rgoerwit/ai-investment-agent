@@ -1522,13 +1522,13 @@ class TestWatchlistUnavailableDegradation:
         )
         assert "WATCHLIST UNAVAILABLE" in report
         assert "Watchlist filtering is unavailable" in report
-        assert "BUY CANDIDATES" in report
+        assert "WATCHLIST OPTIMIZATION" in report
         assert "confirm watchlist status and re-check IBKR before acting" in report
         assert "WATCHLIST CANDIDATES" not in report
         assert "ADD TO WATCHLIST" not in report
         assert "NEW BUYS and watchlist filtering are omitted" not in report
         assert "new-buy suggestions are omitted" not in report
-        assert "→ BUY" in report
+        assert "+ ADD" in report
 
     def test_available_keeps_watchlist_add_framing(self):
         report = format_report(
@@ -1539,12 +1539,12 @@ class TestWatchlistUnavailableDegradation:
             portfolio_data_loaded=True,
         )
         assert "WATCHLIST UNAVAILABLE" not in report
-        assert "WATCHLIST CANDIDATES" in report
-        assert "ADD TO WATCHLIST" in report
+        assert "WATCHLIST OPTIMIZATION" in report
+        assert "+ ADD" in report
 
 
-class TestNewBuysSection:
-    """format_report() NEW BUYS section rendering and live-order annotation."""
+class TestWatchlistOptimizationSection:
+    """format_report() unified watchlist optimization rendering."""
 
     def _report(
         self,
@@ -1573,8 +1573,8 @@ class TestNewBuysSection:
             cash_impact_usd=-1752.0,
         )
         report = self._report([item])
-        assert "NEW BUYS" in report
-        assert "High conviction" in report
+        assert "WATCHLIST OPTIMIZATION" in report
+        assert "high conviction" in report
         assert "target 4.0%" in report
         assert "Cost:" in report
         assert "use already-settled cash" in report
@@ -1588,7 +1588,7 @@ class TestNewBuysSection:
             cash_impact_usd=0.0,  # no cost when no quantity
         )
         report = self._report([item])
-        assert "Medium conviction" in report
+        assert "medium conviction" in report
         assert "target 4.0%" in report
         assert "Cost:" not in report
 
@@ -1602,8 +1602,8 @@ class TestNewBuysSection:
         report = self._report([item])
         assert "no entry price" in report
 
-    def test_missing_conviction_shows_target_only(self):
-        """Analysis with empty conviction → target still shown, no 'conviction' label."""
+    def test_missing_conviction_is_excluded_from_the_buy_ready_pool(self):
+        """An analysis without conviction is never made a BUY-ready slot."""
         tb = TradeBlockData(conviction="", size_pct=2.5)
         analysis = AnalysisRecord(
             ticker="6752.T",
@@ -1622,11 +1622,11 @@ class TestNewBuysSection:
             cash_impact_usd=0.0,
         )
         report = self._report([item])
-        assert "conviction" not in report.split("NEW BUYS")[1].split("═")[0]
-        assert "target" in report
+        assert "Excluded below medium conviction: 1" in report
+        assert "+ ADD" not in report
 
-    def test_no_analysis_shows_order_line_only(self):
-        """BUY item with no analysis → order line only, no detail line."""
+    def test_no_analysis_is_excluded_from_the_buy_ready_pool(self):
+        """A BUY with no analysis cannot safely occupy a BUY-ready slot."""
         item = ReconciliationItem(
             ticker="9201.T",
             action="BUY",
@@ -1640,48 +1640,44 @@ class TestNewBuysSection:
             is_watchlist=True,
         )
         report = self._report([item])
-        assert "NEW BUYS" in report
-        assert "9201" in report  # IBKR format (no exchange suffix)
-        assert "conviction" not in report
+        assert "Excluded below medium conviction: 1" in report
+        assert "+ ADD" not in report
 
-    def test_header_section_shown(self):
-        """NEW BUYS section header appears when BUY items exist."""
+    def test_header_section_is_always_shown(self):
+        """The unified section makes an empty optimization explicit."""
         item = _make_buy_item()
         report = self._report([item])
-        assert "NEW BUYS" in report
+        assert "WATCHLIST OPTIMIZATION" in report
 
-    def test_title_shows_named_watchlist(self):
-        """When watchlist_name is provided, section subtitle names the watchlist."""
+    def test_title_states_no_watchlist_when_snapshot_metadata_is_absent(self):
+        """A name alone is not evidence that a watchlist was actually loaded."""
         item = _make_buy_item()
         report = self._report([item], watchlist_name="MyWatchlist")
-        assert "from watchlist 'MyWatchlist'" in report
+        assert "no watchlist loaded — additions only" in report
 
-    def test_title_shows_generic_watchlist_when_name_unknown(self):
-        """When watchlist_name is None (auto-discovered), subtitle says 'from watchlist'."""
+    def test_auto_discovered_watchlist_uses_total_not_name(self):
+        """An auto-discovered watchlist is loaded when its total is present."""
         item = _make_buy_item()
-        report = self._report([item], watchlist_name=None)
-        assert "from watchlist" in report
-        # The section still appears because the item has is_watchlist=True
-        assert "NEW BUYS" in report
+        report = self._report([item], watchlist_name=None, watchlist_total=1)
+        assert "optimal BUY-ready set under-filled (1 of 6)" in report
+        assert "no watchlist loaded" not in report
 
-    def test_title_shows_count_when_watchlist_total_known(self):
-        """watchlist_total provided → subtitle includes 'M/N from watchlist' ratio."""
+    def test_title_reports_the_buy_ready_target_when_watchlist_is_loaded(self):
+        """The report uses the optimization target, not a raw watchlist BUY count."""
         items = [_make_buy_item("7203.T"), _make_buy_item("6752.T")]
         report = self._report(items, watchlist_name="MyWatchlist", watchlist_total=15)
-        assert "2/15" in report
-        assert "from watchlist 'MyWatchlist'" in report
+        assert "optimal BUY-ready set under-filled (2 of 6)" in report
 
-    def test_title_omits_count_when_watchlist_total_not_provided(self):
-        """watchlist_total not provided → no M/N ratio in subtitle."""
+    def test_title_does_not_treat_a_name_as_loaded_state(self):
+        """A missing total remains an additions-only result."""
         item = _make_buy_item()
         report = self._report(
             [item], watchlist_name="MyWatchlist", watchlist_total=None
         )
-        assert "1/" not in report
-        assert "from watchlist 'MyWatchlist'" in report
+        assert "no watchlist loaded — additions only" in report
 
-    def test_section_absent_when_no_watchlist_items(self):
-        """BUY item without is_watchlist=True (e.g. Phase 2) → NEW BUYS section not shown."""
+    def test_offwatch_buy_is_an_addition_in_the_unified_section(self):
+        """An off-watchlist BUY appears as an addition rather than a parallel list."""
         item = ReconciliationItem(
             ticker="9201.T",
             action="BUY",
@@ -1691,7 +1687,7 @@ class TestNewBuysSection:
             is_watchlist=False,
         )
         report = self._report([item], watchlist_name="MyWatchlist")
-        assert "NEW BUYS" not in report
+        assert "WATCHLIST OPTIMIZATION" in report
 
     # ── Order annotation for BUY items ────────────────────────────────────────
 
@@ -1817,8 +1813,8 @@ class TestIbkrDisplaySymbol:
         # (the run cmd has "--ticker 7203.T", the label has "7203 ")
         assert "7203  " in reviews_block or "7203 " in reviews_block
 
-    def test_new_buy_watchlist_shows_ibkr_ticker(self):
-        """Phase 2 BUY (not held) displays IBKR format (no exchange suffix)."""
+    def test_new_buy_without_analysis_is_excluded(self):
+        """A missing analysis cannot be rendered as a BUY-ready watchlist row."""
         item = ReconciliationItem(
             ticker="CAG.ST",
             action="BUY",
@@ -1827,7 +1823,7 @@ class TestIbkrDisplaySymbol:
             is_watchlist=True,
         )
         report = format_report([item], _make_portfolio())
-        assert "CAG" in report  # IBKR format: "CAG" not "CAG.ST"
+        assert "Excluded below medium conviction: 1" in report
 
     def test_reviews_run_cmd_uses_analysis_ticker_when_item_ticker_bare(self):
         """When item.ticker has no suffix but analysis.ticker has one, REVIEWS run cmd uses analysis.ticker.
@@ -1948,7 +1944,7 @@ def _make_offwatch_buy(
 
 
 class TestWatchlistCandidatesInFlight:
-    """WATCHLIST CANDIDATES section hides items that already have a live BUY order."""
+    """The unified optimizer excludes off-watchlist items with live BUY orders."""
 
     def _report(self, items, live_orders=None) -> str:
         return format_report(
@@ -1959,29 +1955,24 @@ class TestWatchlistCandidatesInFlight:
         )
 
     def test_candidate_with_live_buy_order_hidden_from_section(self):
-        """Off-watchlist BUY with an open order is excluded from WATCHLIST CANDIDATES."""
+        """An off-watchlist BUY with an open order is not a new addition."""
         item = _make_offwatch_buy("WDO.TO")
         live_order = {"ticker": "WDO", "side": "B", "remainingSize": "100"}
         report = self._report([item], live_orders=[live_order])
-        # WDO removed from candidates display (no entry in WATCHLIST CANDIDATES body)
-        cands_block = (
-            report.split("WATCHLIST CANDIDATES")[1]
-            if "WATCHLIST CANDIDATES" in report
-            else ""
+        assert "WATCHLIST OPTIMIZATION" in report
+        assert "already in flight" in report
+        assert "WDO" in report
+        assert not any(
+            line.startswith("  + ADD") and "WDO" in line for line in report.splitlines()
         )
-        # Should show the in-flight note, not a regular candidate entry
-        assert "already in flight" in cands_block
-        assert "WDO" in cands_block
-        # The normal "[not on watchlist" detail line should not appear for in-flight items
-        assert "[not on watchlist" not in cands_block
 
     def test_candidate_without_live_order_shown_normally(self):
-        """Off-watchlist BUY with no live order appears in WATCHLIST CANDIDATES as usual."""
+        """Off-watchlist BUY with no live order appears as an addition."""
         item = _make_offwatch_buy("WDO.TO")
         report = self._report([item], live_orders=[])
-        assert "WATCHLIST CANDIDATES" in report
+        assert "WATCHLIST OPTIMIZATION" in report
         assert "WDO" in report
-        assert "not on watchlist" in report
+        assert "+ ADD" in report
 
     def test_empty_section_shown_when_cash_policy_blocked_candidates(self):
         report = format_report(
@@ -1991,19 +1982,18 @@ class TestWatchlistCandidatesInFlight:
             watchlist_candidates_blocked_by_cash=2,
         )
 
-        assert "WATCHLIST CANDIDATES" in report
-        # Default portfolio has deployable cash > 0, so the message explains that no
-        # candidate fit the deployable-after-buffer amount (not a bare "insufficient").
-        assert "deployable after the cash buffer" in report
-        assert "[not on watchlist" not in report
+        assert "WATCHLIST OPTIMIZATION" in report
+        assert "Cash-blocked candidates retained for ranking: 2" in report
 
     def test_in_flight_candidate_excluded_from_watchlist_moves(self):
-        """In-flight candidates must not appear in WATCHLIST MOVES (ADDED TO WATCHLIST)."""
+        """The retired WATCHLIST MOVES block cannot duplicate an in-flight candidate."""
         item = _make_offwatch_buy("WDO.TO", conviction="High")
         live_order = {"ticker": "WDO", "side": "B", "remainingSize": "50"}
         report = self._report([item], live_orders=[live_order])
-        # WATCHLIST MOVES should be absent entirely (no strong candidates remain)
-        assert "ADDED TO WATCHLIST" not in report
+        assert "WATCHLIST MOVES" not in report
+        assert not any(
+            line.startswith("  + ADD") and "WDO" in line for line in report.splitlines()
+        )
 
     def test_two_candidates_one_in_flight_other_shown(self):
         """When one candidate is in-flight and another is not, only the latter appears."""
@@ -2011,18 +2001,20 @@ class TestWatchlistCandidatesInFlight:
         pending = _make_offwatch_buy("TOTL.TO", conviction="Medium")
         live_order = {"ticker": "WDO", "side": "B", "remainingSize": "100"}
         report = self._report([inflight, pending], live_orders=[live_order])
-        assert "WATCHLIST CANDIDATES" in report
-        # TOTL shown as normal candidate
+        assert "WATCHLIST OPTIMIZATION" in report
         assert "TOTL" in report
-        assert "not on watchlist" in report
-        # WDO shown only in the in-flight note, not as a candidate entry
-        cands_block = report.split("WATCHLIST CANDIDATES")[1].split("HOLDS")[0]
-        assert "already in flight" in cands_block
-        assert "WDO" in cands_block
+        assert any(
+            line.startswith("  + ADD") and "TOTL" in line
+            for line in report.splitlines()
+        )
+        assert not any(
+            line.startswith("  + ADD") and "WDO" in line for line in report.splitlines()
+        )
+        assert "already in flight" in report
 
 
-class TestSellBaseExcludesCandidate:
-    """WATCHLIST CANDIDATES suppresses same-base BUY when a SELL exists for that symbol."""
+class TestExchangeQualifiedCandidateSafety:
+    """Exchange-qualified candidates are never suppressed by a base-symbol match."""
 
     def _make_sell_item(
         self, ticker: str, sell_type: str | None = "HARD_REJECT"
@@ -2039,26 +2031,27 @@ class TestSellBaseExcludesCandidate:
             suggested_price=35.50,
         )
 
-    def test_sell_base_blocks_same_base_candidate(self):
-        """SELL DLG → DLG.MI BUY candidate suppressed from WATCHLIST CANDIDATES."""
+    def test_sell_does_not_block_different_exchange_same_base_candidate(self):
+        """A bare DLG sell must not suppress an exchange-qualified DLG.MI listing."""
         sell = self._make_sell_item("DLG")
         buy_cand = _make_offwatch_buy("DLG.MI")
         report = format_report(
             [sell, buy_cand], _make_portfolio(), show_recommendations=True
         )
-        # DLG appears in SELLs section
         assert "SELL" in report
-        # DLG.MI must NOT appear as a watchlist candidate
-        assert "WATCHLIST CANDIDATES" not in report
+        assert "WATCHLIST OPTIMIZATION" in report
+        assert "DLG" in report
+        assert "+ ADD" in report
 
-    def test_stop_breach_sell_also_blocks_candidate(self):
-        """STOP_BREACH sell also suppresses same-base candidate."""
+    def test_stop_breach_does_not_block_different_exchange_same_base_candidate(self):
+        """Stop handling remains scoped to the exact exchange-qualified security."""
         sell = self._make_sell_item("DLG", sell_type="STOP_BREACH")
         buy_cand = _make_offwatch_buy("DLG.MI")
         report = format_report(
             [sell, buy_cand], _make_portfolio(), show_recommendations=True
         )
-        assert "WATCHLIST CANDIDATES" not in report
+        assert "WATCHLIST OPTIMIZATION" in report
+        assert "+ ADD" in report
 
     def test_different_base_candidate_not_blocked(self):
         """SELL DLG does not suppress a candidate with a different base symbol."""
@@ -2067,39 +2060,38 @@ class TestSellBaseExcludesCandidate:
         report = format_report(
             [sell, buy_cand], _make_portfolio(), show_recommendations=True
         )
-        assert "WATCHLIST CANDIDATES" in report
+        assert "WATCHLIST OPTIMIZATION" in report
         assert "WDO" in report
 
 
-class TestWatchlistTickersExcludesCandidate:
-    """WATCHLIST CANDIDATES suppresses BUY candidates already on the IBKR watchlist.
+class TestWatchlistTickerIdentity:
+    """The optimizer only deduplicates exact exchange-qualified identities."""
 
-    Belt-and-suspenders against conid resolution failures: if Phase 1.5 silently
-    drops a watchlist ticker (API error on first encounter), the format_report
-    _watchlist_bases filter catches it here.
-    """
-
-    def test_suffixed_watchlist_ticker_blocks_same_candidate(self):
-        """watchlist_tickers={'5434.TW'} → '5434.TW' BUY suppressed from WATCHLIST CANDIDATES."""
+    def test_suffixed_watchlist_ticker_keeps_same_candidate(self):
+        """An exact watchlist ticker becomes KEEP, not a duplicate addition."""
         buy_cand = _make_offwatch_buy("5434.TW")
         report = format_report(
             [buy_cand],
             _make_portfolio(),
             show_recommendations=True,
             watchlist_tickers={"5434.TW"},
+            watchlist_total=1,
         )
-        assert "WATCHLIST CANDIDATES" not in report
+        assert "KEEPING ACTIVE" in report
+        assert "+ ADD" not in report
 
-    def test_bare_watchlist_ticker_blocks_suffixed_candidate(self):
-        """watchlist_tickers={'5434'} (bare, failed resolution) → '5434.TW' BUY suppressed."""
+    def test_bare_watchlist_ticker_protects_itself_but_not_a_suffixed_listing(self):
+        """A failed bare resolution cannot be assumed to equal 5434.TW."""
         buy_cand = _make_offwatch_buy("5434.TW")
         report = format_report(
             [buy_cand],
             _make_portfolio(),
             show_recommendations=True,
             watchlist_tickers={"5434"},
+            watchlist_total=1,
         )
-        assert "WATCHLIST CANDIDATES" not in report
+        assert "KEEPING PROTECTED" in report
+        assert "+ ADD" in report
 
     def test_none_watchlist_does_not_suppress(self):
         """watchlist_tickers=None → no watchlist filter applied."""
@@ -2110,7 +2102,7 @@ class TestWatchlistTickersExcludesCandidate:
             show_recommendations=True,
             watchlist_tickers=None,
         )
-        assert "WATCHLIST CANDIDATES" in report
+        assert "WATCHLIST OPTIMIZATION" in report
         assert "5434" in report
 
     def test_different_base_not_blocked(self):
@@ -2122,7 +2114,7 @@ class TestWatchlistTickersExcludesCandidate:
             show_recommendations=True,
             watchlist_tickers={"5434"},
         )
-        assert "WATCHLIST CANDIDATES" in report
+        assert "WATCHLIST OPTIMIZATION" in report
         assert "WDO" in report
 
 
@@ -2227,7 +2219,11 @@ class TestPortfolioManagerOutputTightening:
     def test_watchlist_moves_are_advisory_not_past_tense(self):
         high = _make_offwatch_buy("TOTL.JK", conviction="High")
         report = format_report([high], _make_portfolio(), show_recommendations=True)
-        assert "ADD TO WATCHLIST  TOTL" in report
+        assert "WATCHLIST OPTIMIZATION" in report
+        assert any(
+            line.startswith("  + ADD") and "TOTL" in line
+            for line in report.splitlines()
+        )
         assert "ADDED TO WATCHLIST" not in report
 
 
@@ -2638,22 +2634,21 @@ class TestReadOnlyDataNotLoaded:
         # Header/cash relabeled to "not loaded" rather than a misleading $0/N/A.
         assert "Account:          not loaded (read-only)" in report
         assert "Net liquidation:  not loaded" in report
-        # Subtitle no longer implies the watchlist is known.
-        assert "own/watchlist status is UNKNOWN" in report
+        assert "no watchlist loaded — additions only" in report
         assert "inspect and add to watchlist before acting" not in report
 
-    def test_loaded_default_keeps_new_position_wording(self):
-        """Default (data loaded) → accurate live wording preserved, no banner."""
+    def test_loaded_default_marks_the_candidate_as_a_watchlist_addition(self):
+        """Default (data loaded) presents an explicit addition, not an ownership claim."""
         report = format_report(
             [self._offwatch_buy()],
             _make_portfolio(),
             show_recommendations=True,
         )
-        assert "[not on watchlist — new position]" in report
+        assert "+ ADD" in report
         assert "[own/watchlist status unknown]" not in report
         assert "READ-ONLY — no IBKR connection" not in report
         assert "not loaded (read-only)" not in report
-        assert "inspect and add to watchlist before acting" in report
+        assert "no watchlist loaded — additions only" in report
 
     def test_format_json_surfaces_portfolio_data_loaded(self):
         """format_json exposes the flag both ways for machine consumers."""
@@ -2737,3 +2732,180 @@ class TestOrderMatcherAuthority:
         order["conid"] = "not-a-number"
         report = format_report([item], _make_portfolio(), live_orders=[order])
         assert "ORDER ALREADY SUBMITTED" in report
+
+
+class TestWatchlistOptimizationReporting:
+    """The operator-facing text must make each optimization state actionable."""
+
+    @staticmethod
+    def _set_score(item: ReconciliationItem, score: float) -> ReconciliationItem:
+        assert item.analysis is not None
+        item.analysis.health_adj = score / 2
+        item.analysis.growth_adj = score / 2
+        return item
+
+    def test_case_1_additions_only_explains_that_no_merge_is_possible(self):
+        report = format_report(
+            [_make_offwatch_buy("7203.T")],
+            _make_portfolio(),
+            show_recommendations=True,
+        )
+
+        assert "WATCHLIST OPTIMIZATION" in report
+        assert "no watchlist loaded — additions only" in report
+        assert "+ ADD" in report
+        assert "REMOVE FROM WATCHLIST" not in report
+        assert "[Update IBKR watchlist to]" not in report
+
+    def test_case_2_empty_supplied_watchlist_with_no_worthy_candidates_is_honest(self):
+        low = _make_buy_item("7203.T", conviction="Low", is_watchlist=False)
+        report = format_report(
+            [low],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_tickers=set(),
+            watchlist_total=0,
+        )
+
+        assert "no medium-or-better candidates" in report
+        assert "Excluded below medium conviction: 1" in report
+        assert "+ ADD" not in report
+        assert "REMOVE FROM WATCHLIST" not in report
+
+    def test_supplied_empty_watchlist_with_no_items_reports_no_recommendation(self):
+        report = format_report(
+            [],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_tickers=set(),
+            watchlist_total=0,
+        )
+
+        assert "no medium-or-better candidates" in report
+        assert "+ ADD" not in report
+        assert "REMOVE FROM WATCHLIST" not in report
+
+    def test_case_3_partial_fill_reports_capacity_and_each_addition(self):
+        first = _make_offwatch_buy("7203.T", conviction="High")
+        second = _make_offwatch_buy("6758.T", conviction="Medium")
+        report = format_report(
+            [first, second],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_tickers=set(),
+            watchlist_total=0,
+        )
+
+        assert "optimal BUY-ready set under-filled (2 of 6)" in report
+        assert sum(line.startswith("  + ADD") for line in report.splitlines()) == 2
+        assert "7203" in report
+        assert "6758" in report
+
+    def test_case_4_full_optimization_separates_keeps_additions_and_optional_swaps(
+        self,
+    ):
+        keep_one = self._set_score(_make_buy_item("7203.T"), 200)
+        keep_two = self._set_score(_make_buy_item("6758.T"), 180)
+        replace_one = self._set_score(_make_buy_item("9432.T", conviction="Medium"), 50)
+        replace_two = self._set_score(_make_buy_item("9984.T", conviction="Medium"), 30)
+        additions = [
+            self._set_score(_make_offwatch_buy("8306.T"), 190),
+            self._set_score(_make_offwatch_buy("8058.T"), 170),
+            self._set_score(_make_offwatch_buy("7201.T", conviction="Medium"), 200),
+            self._set_score(_make_offwatch_buy("4063.T", conviction="Medium"), 190),
+        ]
+        report = format_report(
+            [keep_one, keep_two, replace_one, replace_two, *additions],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_tickers={"7203.T", "6758.T", "9432.T", "9984.T"},
+            watchlist_total=4,
+        )
+
+        assert "top 6 medium-or-higher BUY-ready slots" in report
+        assert "KEEPING ACTIVE (2):" in report
+        assert sum(line.startswith("  + ADD") for line in report.splitlines()) == 4
+        assert "OPTIONAL OPTIMIZATION" in report
+        assert report.count("REMOVE FROM WATCHLIST") == 2
+        assert (
+            "Exact replacement list withheld — decide optional removals first."
+            in report
+        )
+
+    def test_must_remove_is_visually_distinct_from_optional_optimization(self):
+        rejected = ReconciliationItem(
+            ticker="7203.T",
+            action="REMOVE",
+            reason="Rejected",
+            urgency="MEDIUM",
+            analysis=_make_analysis(ticker="7203.T", verdict="DO_NOT_INITIATE"),
+            is_watchlist=True,
+        )
+        low = _make_buy_item("6758.T", conviction="Low")
+        report = format_report(
+            [rejected, low],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_tickers={"7203.T", "6758.T"},
+            watchlist_total=2,
+        )
+
+        assert "MUST REMOVE (verdict reject):" in report
+        assert "OPTIONAL OPTIMIZATION" in report
+        assert "verdict DO_NOT_INITIATE" in report
+        assert "below medium conviction" in report
+
+    def test_safe_replacement_list_preserves_active_monitor_review_and_held_entries(
+        self,
+    ):
+        active = _make_buy_item("7203.T")
+        monitor = ReconciliationItem(
+            ticker="6758.T",
+            action="HOLD",
+            reason="Monitor",
+            urgency="LOW",
+            analysis=_make_analysis(ticker="6758.T", verdict="HOLD"),
+            is_watchlist=True,
+        )
+        review = ReconciliationItem(
+            ticker="9432.T",
+            action="REVIEW",
+            reason="Stale",
+            urgency="MEDIUM",
+            is_watchlist=True,
+        )
+        held = ReconciliationItem(
+            ticker="AAPL",
+            action="HOLD",
+            reason="Held",
+            urgency="LOW",
+            ibkr_position=_make_position(ticker="AAPL"),
+        )
+        report = format_report(
+            [active, monitor, review, held],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_tickers={"7203.T", "6758.T", "9432.T", "AAPL"},
+            watchlist_total=4,
+        )
+
+        assert "KEEPING ACTIVE (1):" in report
+        assert "KEEPING MONITORS (1):" in report
+        assert "KEEPING REVIEWS (1):" in report
+        assert "KEEPING PROTECTED (1): AAPL" in report
+        assert "[Update IBKR watchlist to]: 7203, 6758, 9432, AAPL" in report
+
+    def test_exchange_ambiguous_raw_symbols_withhold_replacement_list(self):
+        current = _make_buy_item("BHP.AX")
+        candidate = _make_offwatch_buy("BHP.L")
+        report = format_report(
+            [current, candidate],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_tickers={"BHP.AX"},
+            watchlist_total=1,
+        )
+
+        assert "KEEPING ACTIVE (1):" in report
+        assert "+ ADD" in report
+        assert "raw IBKR symbols are exchange-ambiguous" in report

@@ -98,8 +98,16 @@ async def test_build_bundle_preserves_cash_blocked_watchlist_candidate_count():
     portfolio_service = FakePortfolioDataService(snapshot)
 
     def fake_reconcile(**kwargs):
-        kwargs["diagnostics"].cash_blocked_offwatch_buy_count = 3
-        return []
+        return [
+            ReconciliationItem(
+                ticker=f"CASH{i}.T",
+                action="BUY",
+                reason="Cash blocked",
+                urgency="MEDIUM",
+                is_cash_blocked=True,
+            )
+            for i in range(3)
+        ]
 
     service = PortfolioRecommendationService(
         portfolio_data_service=portfolio_service,

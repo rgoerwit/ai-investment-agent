@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 from src.ibkr.dip_watch import (
     collect_dip_watch_source_items,
@@ -8,8 +9,12 @@ from src.ibkr.dip_watch import (
 )
 from src.ibkr.models import PortfolioSummary, ReconciliationItem
 from src.ibkr.refresh_service import AnalysisFreshnessSummary, RefreshActivity
+from src.ibkr.ticker import Ticker
 
 _DEFAULT_DIP_WATCH_LIMIT = 7
+TARGET_WATCHLIST_SIZE = 6
+WATCHLIST_MIN_CONVICTION = "medium"
+_WATCHLIST_CONVICTION_RANK = {"high": 0, "medium": 1, "low": 2}
 SELL_RECOMMENDATIONS_TITLE = "SELL RECOMMENDATIONS"
 SELL_RELATED_REVIEWS_TITLE = "SELL-RELATED REVIEWS"
 SELL_TYPE_LABELS: dict[str | None, str] = {
@@ -56,6 +61,259 @@ class PortfolioActionGroups:
     holds_watch: tuple[ReconciliationItem, ...]
     reviews: tuple[ReconciliationItem, ...]
     dip_candidates: tuple[ReconciliationItem, ...]
+
+
+class WatchlistOptCase(str, Enum):
+    """Operator-facing states for the watchlist optimizer."""
+
+    NO_WATCHLIST = "no_watchlist"
+    WATCHLIST_UNAVAILABLE = "watchlist_unavailable"
+    NOTHING_ACTIONABLE = "nothing_actionable"
+    EMPTY_POOL = "empty_pool"
+    PARTIAL_FILL = "partial_fill"
+    ALIGNED = "aligned"
+    FULL_OPTIMIZE = "full_optimize"
+
+
+@dataclass(frozen=True)
+class WatchlistMove:
+    item: ReconciliationItem
+    reason: str
+
+
+@dataclass(frozen=True)
+class WatchlistOptimization:
+    """Pure watchlist recommendation separated from report rendering.
+
+    ``protected_tickers`` are live holdings or unresolved watchlist entries. They
+    are deliberately retained outside the six BUY-ready slots because their
+    membership cannot be safely changed from this reconciliation alone.
+    """
+
+    case: WatchlistOptCase
+    watchlist_supplied: bool
+    target_size: int
+    optimal: tuple[ReconciliationItem, ...]
+    keep: tuple[ReconciliationItem, ...]
+    add: tuple[ReconciliationItem, ...]
+    remove: tuple[WatchlistMove, ...]
+    monitors: tuple[ReconciliationItem, ...]
+    reviews: tuple[ReconciliationItem, ...]
+    protected_tickers: tuple[str, ...]
+    excluded_low_conviction: tuple[ReconciliationItem, ...]
+    pool_size: int
+
+
+def _watchlist_ticker_identity(ticker: str) -> str:
+    """Return the exchange-qualified identity already managed by ``Ticker``.
+
+    Never strip a suffix here: same-base symbols can be distinct listings. A
+    bare symbol remains bare and is protected if it cannot be matched exactly.
+    """
+    return Ticker.from_yf(ticker).yf.upper()
+
+
+def _item_ticker_identity(item: ReconciliationItem) -> str:
+    return item.ticker.yf.upper()
+
+
+def watchlist_candidate_conviction(item: ReconciliationItem) -> str:
+    """Return the normalized conviction token used by selection and rendering."""
+    analysis = item.analysis
+    if analysis is None:
+        return ""
+    raw = analysis.conviction or analysis.trade_block.conviction or ""
+    return raw.strip().lower()
+
+
+def watchlist_candidate_score(item: ReconciliationItem) -> float:
+    """Return the deterministic health-plus-growth rank score."""
+    analysis = item.analysis
+    if analysis is None:
+        return 0.0
+    return (analysis.health_adj or 0.0) + (analysis.growth_adj or 0.0)
+
+
+def resolve_watchlist_optimization(
+    items: list[ReconciliationItem],
+    groups: PortfolioActionGroups,
+    *,
+    watchlist_tickers: set[str] | None,
+    watchlist_supplied: bool,
+    watchlist_unavailable: bool,
+    target_size: int = TARGET_WATCHLIST_SIZE,
+    min_conviction: str = WATCHLIST_MIN_CONVICTION,
+) -> WatchlistOptimization:
+    """Select up to ``target_size`` medium-or-higher unheld BUYs safely.
+
+    Membership and deduplication use full yfinance identities, rather than base
+    symbols, to avoid collapsing listings that happen to share a ticker.
+    """
+    if target_size < 0:
+        raise ValueError("target_size must be non-negative")
+
+    min_rank = _WATCHLIST_CONVICTION_RANK.get(min_conviction.lower())
+    if min_rank is None:
+        raise ValueError(f"unsupported watchlist conviction: {min_conviction}")
+
+    raw_watchlist = {
+        _watchlist_ticker_identity(ticker) for ticker in (watchlist_tickers or set())
+    }
+    watchlist_items = tuple(item for item in items if item.is_watchlist)
+    watched_item_ids = {_item_ticker_identity(item) for item in watchlist_items}
+    held_ids = {
+        _item_ticker_identity(item) for item in items if item.ibkr_position is not None
+    }
+    protected_tickers = tuple(
+        sorted((raw_watchlist - watched_item_ids) | (raw_watchlist & held_ids))
+    )
+
+    # Retain the first exact identity, preferring a current watchlist member to
+    # minimize churn. Full identities intentionally keep BHP.AX and BHP.L apart.
+    pooled_by_identity: dict[str, ReconciliationItem] = {}
+    pool_candidates = sorted(
+        (item for item in items if item.action == "BUY" and item.ibkr_position is None),
+        key=lambda item: (not item.is_watchlist, _item_ticker_identity(item)),
+    )
+    for item in pool_candidates:
+        pooled_by_identity.setdefault(_item_ticker_identity(item), item)
+
+    pool = tuple(pooled_by_identity.values())
+    eligible: list[ReconciliationItem] = []
+    excluded_low_conviction: list[ReconciliationItem] = []
+    for item in pool:
+        conviction_rank = _WATCHLIST_CONVICTION_RANK.get(
+            watchlist_candidate_conviction(item), len(_WATCHLIST_CONVICTION_RANK)
+        )
+        if conviction_rank > min_rank:
+            excluded_low_conviction.append(item)
+        else:
+            eligible.append(item)
+
+    optimal = tuple(
+        sorted(
+            eligible,
+            key=lambda item: (
+                _WATCHLIST_CONVICTION_RANK[watchlist_candidate_conviction(item)],
+                -watchlist_candidate_score(item),
+                not item.is_watchlist,
+                _item_ticker_identity(item),
+            ),
+        )[:target_size]
+    )
+    optimal_ids = {_item_ticker_identity(item) for item in optimal}
+
+    if watchlist_unavailable:
+        return WatchlistOptimization(
+            case=WatchlistOptCase.WATCHLIST_UNAVAILABLE,
+            watchlist_supplied=False,
+            target_size=target_size,
+            optimal=optimal,
+            keep=(),
+            add=optimal,
+            remove=(),
+            monitors=(),
+            reviews=(),
+            protected_tickers=(),
+            excluded_low_conviction=tuple(excluded_low_conviction),
+            pool_size=len(pool),
+        )
+
+    if not watchlist_supplied:
+        return WatchlistOptimization(
+            case=WatchlistOptCase.NO_WATCHLIST,
+            watchlist_supplied=False,
+            target_size=target_size,
+            optimal=optimal,
+            keep=(),
+            add=optimal,
+            remove=(),
+            monitors=(),
+            reviews=(),
+            protected_tickers=(),
+            excluded_low_conviction=tuple(excluded_low_conviction),
+            pool_size=len(pool),
+        )
+
+    reject_ids = {_item_ticker_identity(item) for item in groups.removes}
+    monitor_ids = {_item_ticker_identity(item) for item in groups.holds_watch}
+    review_ids = {
+        _item_ticker_identity(item) for item in groups.reviews if item.is_watchlist
+    }
+    keep = tuple(
+        item
+        for item in optimal
+        if item.is_watchlist or _item_ticker_identity(item) in raw_watchlist
+    )
+    add = tuple(item for item in optimal if item not in keep)
+    monitors = tuple(
+        item
+        for item in groups.holds_watch
+        if _item_ticker_identity(item) not in optimal_ids
+    )
+    reviews = tuple(
+        item
+        for item in groups.reviews
+        if item.is_watchlist and _item_ticker_identity(item) not in optimal_ids
+    )
+    removals: list[WatchlistMove] = []
+    for item in watchlist_items:
+        identity = _item_ticker_identity(item)
+        if identity in optimal_ids or identity in monitor_ids or identity in review_ids:
+            continue
+        if identity in reject_ids or item.action == "REMOVE":
+            removals.append(WatchlistMove(item, "verdict_reject"))
+        elif item.action == "BUY":
+            reason = (
+                "below_medium_conviction"
+                if item in excluded_low_conviction
+                else "displaced_by_higher_conviction"
+            )
+            removals.append(WatchlistMove(item, reason))
+
+    if not optimal and not raw_watchlist and not watchlist_items:
+        case = WatchlistOptCase.NOTHING_ACTIONABLE
+    elif not optimal:
+        case = WatchlistOptCase.EMPTY_POOL
+    elif len(optimal) < target_size:
+        case = WatchlistOptCase.PARTIAL_FILL
+    elif not add and not removals:
+        case = WatchlistOptCase.ALIGNED
+    else:
+        case = WatchlistOptCase.FULL_OPTIMIZE
+
+    return WatchlistOptimization(
+        case=case,
+        watchlist_supplied=True,
+        target_size=target_size,
+        optimal=optimal,
+        keep=keep,
+        add=add,
+        remove=tuple(removals),
+        monitors=monitors,
+        reviews=reviews,
+        protected_tickers=protected_tickers,
+        excluded_low_conviction=tuple(excluded_low_conviction),
+        pool_size=len(pool),
+    )
+
+
+def build_watchlist_optimization_summary(
+    optimization: WatchlistOptimization,
+) -> dict[str, int]:
+    """Return CLI-specific watchlist counts without changing dashboard buckets."""
+    counts: dict[str, int] = {}
+    if optimization.keep:
+        counts["WATCHLIST_KEEP"] = len(optimization.keep)
+    if optimization.add:
+        counts["WATCHLIST_ADD"] = len(optimization.add)
+    if optimization.remove:
+        counts["WATCHLIST_REMOVE"] = len(optimization.remove)
+    if optimization.monitors:
+        counts["WATCHLIST_MONITOR"] = len(optimization.monitors)
+    if optimization.reviews:
+        counts["WATCHLIST_REVIEW"] = len(optimization.reviews)
+    return counts
 
 
 @dataclass(frozen=True)
