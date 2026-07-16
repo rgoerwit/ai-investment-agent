@@ -1871,14 +1871,14 @@ def format_report(
             "ANALYSIS FRESHNESS", "what is stale, what is queued, what happens next"
         )
 
-        lines.append("  Blocking now:")
+        lines.append("  Needs review before action:")
         if _blocking_rows:
             for row in _blocking_rows:
                 detail_bits = [row.reason_family]
                 if row.age_days is not None:
                     detail_bits.append(f"{row.age_days}d old")
                 if row.expires_date:
-                    detail_bits.append(f"expired {row.expires_date}")
+                    detail_bits.append(f"expires {row.expires_date}")
                 lines.append(
                     f"    {row.display_ticker:<12} {'  ·  '.join(detail_bits)}"
                     f"  →  {_analysis_command(row.run_ticker)}"
@@ -1888,7 +1888,7 @@ def format_report(
         lines.append("")
 
         if _candidate_rows:
-            lines.append("  Candidates blocked:")
+            lines.append("  Candidates needing full refresh:")
             for row in _candidate_rows:
                 detail_bits = [row.reason_family]
                 if row.age_days is not None:
@@ -1899,7 +1899,7 @@ def format_report(
                 )
             lines.append("")
 
-        lines.append("  Already in queue:")
+        lines.append("  Already in refresh queue:")
         if _queue_rows:
             for row in _queue_rows:
                 detail_bits = [f"already in {row.action} queue"]
@@ -1956,7 +1956,8 @@ def format_report(
             )
         if refresh_activity.skipped_due_to_limit:
             lines.append(
-                "    Deferred by limit: "
+                "    Deferred by refresh limit: "
+                "will be retried on the next refresh-enabled run: "
                 + ", ".join(refresh_activity.skipped_due_to_limit)
             )
         if not (

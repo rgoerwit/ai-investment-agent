@@ -50,6 +50,17 @@
       </aside>
     </main>
 
+    <section id="report-viewer" class="report-viewer hidden" aria-hidden="true">
+      <div class="report-viewer-backdrop" data-report-close="true"></div>
+      <article class="report-viewer-panel" role="dialog" aria-modal="true" aria-labelledby="report-viewer-title">
+        <header class="report-viewer-header">
+          <h2 id="report-viewer-title">Report</h2>
+          <button id="report-viewer-close" type="button">Close</button>
+        </header>
+        <div id="report-viewer-body" class="markdown-body report-viewer-body"></div>
+      </article>
+    </section>
+
     <script src="{{ url_for('static', filename='dashboard.js', v=dashboard_js_version) }}"></script>
   </body>
 </html>

@@ -34,6 +34,7 @@ function makeElement() {{
   return {{
     classList: {{ add() {{}}, remove() {{}}, toggle() {{}} }},
     addEventListener() {{}},
+    setAttribute() {{}},
     textContent: "",
     innerHTML: "",
     value: "",
@@ -57,11 +58,11 @@ const context = {{
   }},
 }};
 
-vm.createContext(context);
-vm.runInContext(
-  source + "\\nglobalThis.__dashboardTest = {{ escapeHtmlText, escapeHtmlAttr, renderTickerLink, renderSettings, renderConcentrationHeader, updateMacroAlert, updateModeAlert, state, elements }};",
-  context,
-);
+    vm.createContext(context);
+    vm.runInContext(
+      source + "\\nglobalThis.__dashboardTest = {{ escapeHtmlText, escapeHtmlAttr, renderTickerLink, renderSettings, renderConcentrationHeader, renderActiveTab, renderRefresh, renderWatchlist, renderDrilldown, openReportViewer, closeReportViewer, updateMacroAlert, updateModeAlert, updateStatus, state, elements }};",
+      context,
+    );
 const __dashboardTest = context.__dashboardTest;
 
 const result = (() => {{
@@ -157,6 +158,294 @@ return renderSettings();
 
     assert '<input name="max_age_days" type="number" value="14">' in html
     assert '<input name="refresh_limit" type="number" value="10">' in html
+
+
+def test_render_refresh_uses_portfolio_manager_freshness_wording():
+    html = _run_dashboard_js("""
+const { renderRefresh, state } = __dashboardTest;
+state.snapshot = {
+  freshness: {
+    blocking_now: [{ ticker: "7203.T" }],
+    stale_in_queue: [{ ticker: "0005.HK" }],
+    candidate_blocked: [{ ticker: "3515.TW" }],
+    due_soon: [{ ticker: "6831.HK" }],
+    fresh_count: 2,
+  },
+  screening_freshness: {
+    status: "fresh",
+    screening_date: "2026-07-15",
+    age_days: 0,
+    candidate_count: 10,
+    buy_count: 2,
+  },
+};
+return renderRefresh();
+""")
+
+    assert "Needs review" in html
+    assert "Refresh queue" in html
+    assert "Needs full refresh" in html
+    assert "Queue action-required reruns (2)" in html
+    assert "Blocking now" not in html
+    assert "Stale in queue" not in html
+
+
+def test_loading_copy_explains_live_ibkr_fetch():
+    result = _run_dashboard_js("""
+const { renderActiveTab, updateStatus, state, elements } = __dashboardTest;
+const tab = { innerHTML: "" };
+const status = { textContent: "" };
+const context = { textContent: "" };
+elements.tabContent = () => tab;
+elements.status = () => status;
+elements.context = () => context;
+state.settings = { read_only: false };
+state.snapshot = null;
+state.snapshotMeta = {
+  status: "loading",
+  fetched_at: null,
+  cache_hit: false,
+  refreshing: true,
+  last_error: null,
+};
+renderActiveTab();
+updateStatus();
+return {
+  tab: tab.innerHTML,
+  status: status.textContent,
+  context: context.textContent,
+};
+""")
+
+    expected = "Fetching IBKR positions, watchlist, and orders; may take a few minutes."
+    assert expected in result["tab"]
+    assert result["status"] == "Loading live data…"
+    assert result["context"] == expected
+
+
+def test_loading_copy_stays_generic_in_read_only_mode():
+    result = _run_dashboard_js("""
+const { renderActiveTab, updateStatus, state, elements } = __dashboardTest;
+const tab = { innerHTML: "" };
+const status = { textContent: "" };
+const context = { textContent: "" };
+elements.tabContent = () => tab;
+elements.status = () => status;
+elements.context = () => context;
+state.settings = { read_only: true };
+state.snapshot = null;
+state.snapshotMeta = {
+  status: "loading",
+  fetched_at: null,
+  cache_hit: false,
+  refreshing: true,
+  last_error: null,
+};
+renderActiveTab();
+updateStatus();
+return {
+  tab: tab.innerHTML,
+  status: status.textContent,
+  context: context.textContent,
+};
+""")
+
+    assert "Loading current data…" in result["tab"]
+    assert result["status"] == "Loading data…"
+    assert result["context"] == "Loading current data…"
+
+
+def test_render_watchlist_zero_cost_buy_uses_short_na_label():
+    html = _run_dashboard_js("""
+const { renderWatchlist, state } = __dashboardTest;
+state.snapshot = {
+  watchlist: {
+    name: "watchlist-2026",
+    total: 2,
+    tickers: ["3393.T", "3762.T"],
+  },
+  actions: {
+    watchlist_buy: [
+      {
+        ticker_yf: "3393.T",
+        ticker_ibkr: "3393",
+        action: "BUY",
+        reason: "Watchlist BUY (2026-07-05) — Medium conviction, target 4.0%",
+        suggested_price: 2980,
+        suggested_quantity: null,
+        cash_impact_usd: 0,
+      },
+      {
+        ticker_yf: "3762.T",
+        ticker_ibkr: "3762",
+        action: "BUY",
+        reason: "Watchlist BUY (2026-07-11) — Medium conviction, target 4.0%",
+        suggested_price: 1800,
+        suggested_quantity: 100,
+        cash_impact_usd: -1206,
+      },
+    ],
+    watchlist_candidate: [],
+    watchlist_monitor: [],
+    watchlist_remove: [],
+  },
+};
+return renderWatchlist();
+""")
+
+    assert ">N/A</td>" in html
+    assert "$1,206" in html
+    assert "$0" not in html
+
+
+def test_render_drilldown_keeps_long_structured_content_out_of_side_panel():
+    html = _run_dashboard_js("""
+const { renderDrilldown } = __dashboardTest;
+return renderDrilldown({
+  ticker_ibkr: "3393",
+  action: "BUY",
+  reason: "Watchlist BUY",
+  urgency: "MEDIUM",
+  position: {},
+  analysis: {
+    verdict: "BUY",
+    analysis_date: "2026-07-05",
+    health_adj: 92,
+    growth_adj: 67,
+    zone: "LOW",
+    conviction: "Medium",
+    trade_block: { action: "BUY", size_pct: 4.0, risk_reward: "3:1" },
+  },
+  structured: {
+    final_decision: { block: "PM_BLOCK SHOULD NOT APPEAR" },
+    investment_analysis: { thesis: "Long investment analysis should not appear" },
+    risk_analysis: { risk: "Long risk analysis should not appear" },
+    artifact_statuses: { report: "valid" },
+    analysis_validity: { auditor_report: { content: "Raw diagnostic payload" } },
+  },
+  report_markdown_html: "<h1>Full Report Body</h1><p>Readable report</p>",
+  article_markdown_html: null,
+});
+""")
+
+    assert "Open Report" in html
+    assert "Decision Detail" in html
+    assert "Agent Outputs" in html
+    assert "Artifact Statuses" not in html
+    assert "Analysis Validity" not in html
+    assert "Raw diagnostic payload" not in html
+    assert "PM_BLOCK SHOULD NOT APPEAR" not in html
+    assert "Long investment analysis should not appear" not in html
+    assert "Long risk analysis should not appear" not in html
+    assert "Full Report Body" not in html
+
+
+def test_open_report_viewer_renders_selected_report_html():
+    result = _run_dashboard_js("""
+const { openReportViewer, state, elements } = __dashboardTest;
+const viewer = {
+  classList: { add() {}, remove() {} },
+  attributes: {},
+  setAttribute(name, value) { this.attributes[name] = value; },
+};
+const title = { textContent: "" };
+const body = { innerHTML: "" };
+elements.reportViewer = () => viewer;
+elements.reportViewerTitle = () => title;
+elements.reportViewerBody = () => body;
+state.currentDrilldown = {
+  ticker_ibkr: "3393",
+  report_markdown_html: "<h1>Full Report</h1><p>Decision text</p>",
+  article_markdown_html: "<h1>Article</h1>",
+};
+openReportViewer("report");
+return {
+  title: title.textContent,
+  body: body.innerHTML,
+  hidden: viewer.attributes["aria-hidden"],
+};
+""")
+
+    assert result["title"] == "3393 Report"
+    assert "<h1>Full Report</h1>" in result["body"]
+    assert "Decision text" in result["body"]
+    assert result["hidden"] == "false"
+
+
+def test_open_decision_detail_viewer_renders_structured_content_on_demand():
+    result = _run_dashboard_js("""
+const { openReportViewer, state, elements } = __dashboardTest;
+const viewer = {
+  classList: { add() {}, remove() {} },
+  attributes: {},
+  setAttribute(name, value) { this.attributes[name] = value; },
+};
+const title = { textContent: "" };
+const body = { innerHTML: "" };
+elements.reportViewer = () => viewer;
+elements.reportViewerTitle = () => title;
+elements.reportViewerBody = () => body;
+state.currentDrilldown = {
+  ticker_ibkr: "3393",
+  structured: {
+    final_decision: {
+      verdict: "BUY",
+      rationale: "Readable decision detail",
+    },
+  },
+};
+openReportViewer("decision");
+return {
+  title: title.textContent,
+  body: body.innerHTML,
+  hidden: viewer.attributes["aria-hidden"],
+};
+""")
+
+    assert result["title"] == "3393 Decision Detail"
+    assert "Final Decision" in result["body"]
+    assert "Readable decision detail" in result["body"]
+    assert result["hidden"] == "false"
+
+
+def test_open_agent_outputs_viewer_escapes_structured_content():
+    result = _run_dashboard_js("""
+const { openReportViewer, state, elements } = __dashboardTest;
+const viewer = {
+  classList: { add() {}, remove() {} },
+  attributes: {},
+  setAttribute(name, value) { this.attributes[name] = value; },
+};
+const title = { textContent: "" };
+const body = { innerHTML: "" };
+elements.reportViewer = () => viewer;
+elements.reportViewerTitle = () => title;
+elements.reportViewerBody = () => body;
+state.currentDrilldown = {
+  ticker_ibkr: "3393",
+  structured: {
+    artifact_statuses: {
+      auditor_report: {
+        complete: true,
+        ok: true,
+        content: "Auditor text <img src=x onerror=alert(1)>",
+      },
+    },
+  },
+};
+openReportViewer("diagnostics");
+return {
+  title: title.textContent,
+  body: body.innerHTML,
+  hidden: viewer.attributes["aria-hidden"],
+};
+""")
+
+    assert result["title"] == "3393 Agent Outputs"
+    assert "Auditor Report" in result["body"]
+    assert "&lt;img src=x onerror=alert(1)&gt;" in result["body"]
+    assert "<img" not in result["body"]
+    assert result["hidden"] == "false"
 
 
 def test_render_concentration_header_escapes_attribute_contexts():

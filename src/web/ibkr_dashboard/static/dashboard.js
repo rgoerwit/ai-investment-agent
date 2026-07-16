@@ -10,6 +10,7 @@ const state = {
   },
   jobs: [],
   settings: null,
+  currentDrilldown: null,
   jobsPollHandle: null,
   snapshotPollHandle: null,
   concentrationSorts: {
@@ -28,6 +29,10 @@ const elements = {
   status: () => document.getElementById("snapshot-status"),
   context: () => document.getElementById("snapshot-context"),
   drilldown: () => document.getElementById("drilldown-panel"),
+  reportViewer: () => document.getElementById("report-viewer"),
+  reportViewerTitle: () => document.getElementById("report-viewer-title"),
+  reportViewerBody: () => document.getElementById("report-viewer-body"),
+  reportViewerClose: () => document.getElementById("report-viewer-close"),
   refreshButton: () => document.getElementById("refresh-portfolio-btn"),
 };
 
@@ -44,6 +49,13 @@ function setError(message) {
   }
   banner.classList.remove("hidden");
   banner.textContent = message;
+}
+
+function loadingSnapshotMessage() {
+  if (state.settings?.read_only === false) {
+    return "Fetching IBKR positions, watchlist, and orders; may take a few minutes.";
+  }
+  return "Loading current data…";
 }
 
 function fmtCurrency(value) {
@@ -71,6 +83,17 @@ function fmtPct(value) {
   if (value === null || value === undefined) return "—";
   const sign = value > 0 ? "+" : "";
   return `${sign}${Number(value).toFixed(1)}%`;
+}
+
+function fmtBuyCost(item) {
+  if (item.cash_impact_usd === null || item.cash_impact_usd === undefined) {
+    return "N/A";
+  }
+  const cost = Math.abs(Number(item.cash_impact_usd));
+  if (!Number.isFinite(cost) || cost <= 0) {
+    return "N/A";
+  }
+  return fmtCurrency(cost);
 }
 
 function escapeHtmlText(value) {
@@ -387,10 +410,11 @@ function renderOverview() {
     ${candidateNote}
     <section class="summary-grid">
       ${renderInlineMetrics("Freshness At A Glance", [
-        { label: "Blocking now", value: freshness.blocking_now ?? 0 },
-        { label: "Stale in queue", value: freshness.stale_in_queue ?? 0 },
+        { label: "Needs review", value: freshness.blocking_now ?? 0 },
+        { label: "Refresh queue", value: freshness.stale_in_queue ?? 0 },
+        { label: "Needs full refresh", value: freshness.candidate_blocked ?? 0 },
         { label: "Due soon", value: freshness.due_soon ?? 0 },
-        { label: "Fresh count", value: freshness.fresh_count ?? 0 },
+        { label: "Fresh", value: freshness.fresh_count ?? 0 },
       ])}
       ${renderInlineMetrics("Cash Overview", [
         { label: "Total cash", value: fmtCurrency(cashSummary.total_cash_usd) },
@@ -601,7 +625,7 @@ function renderWatchlist() {
     ${renderLoadedWatchlist(watchlist)}
     ${renderActionTable("New Buys", actions.watchlist_buy, [
       { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
-      { label: "Cost", render: (item) => fmtCurrency(Math.abs(item.cash_impact_usd ?? 0)) },
+      { label: "Cost", render: fmtBuyCost },
     ])}
     ${renderActionTable("Watchlist Candidates", actions.watchlist_candidate, [
       { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
@@ -752,16 +776,17 @@ function renderRefresh() {
       }</p>
     </section>
     ${renderCards([
-      { label: "Blocking now", value: freshness.blocking_now.length },
-      { label: "Stale in queue", value: freshness.stale_in_queue.length },
+      { label: "Needs review", value: freshness.blocking_now.length },
+      { label: "Refresh queue", value: freshness.stale_in_queue.length },
+      { label: "Needs full refresh", value: freshness.candidate_blocked.length },
       { label: "Due soon", value: freshness.due_soon.length },
-      { label: "Fresh count", value: freshness.fresh_count },
+      { label: "Fresh", value: freshness.fresh_count },
     ])}
     <section>
       <h3 class="section-title">Queue Analysis Refresh Job</h3>
       <p class="muted">${escapeHtml(explainer)}</p>
       <div class="jobs-controls">
-        <button id="job-stale" type="button" ${staleEligible === 0 ? "disabled" : ""}>Queue stale analysis reruns (${staleEligible})</button>
+        <button id="job-stale" type="button" ${staleEligible === 0 ? "disabled" : ""}>Queue action-required reruns (${staleEligible})</button>
         <button id="job-due-soon" type="button" ${dueSoonEligible === 0 ? "disabled" : ""}>Queue due-soon reruns (${dueSoonEligible})</button>
         <input id="job-ticker-input" type="text" placeholder="7203.T, MEGP.L">
         <button id="job-custom" type="button">Queue ticker rerun list</button>
@@ -849,28 +874,176 @@ function renderDetailSection(title, rows) {
   `;
 }
 
-function renderStructuredSections(structured) {
-  if (!structured || !Object.keys(structured).length) {
-    return "";
+function renderReportActions(payload) {
+  const actions = [];
+  const structured = payload.structured || {};
+  const hasDecisionDetail = hasStructuredContent(structured, [
+    "prediction_snapshot",
+    "final_decision",
+    "investment_analysis",
+    "risk_analysis",
+  ]);
+  const hasAgentOutputs = hasStructuredContent(structured, [
+    "reports",
+    "artifact_statuses",
+    "analysis_validity",
+  ]);
+  if (hasDecisionDetail) {
+    actions.push(
+      '<button type="button" class="report-open" data-report-kind="decision">Decision Detail</button>',
+    );
   }
-  const sections = [
-    ["Prediction Summary", structured.prediction_snapshot],
-    ["Final Decision", structured.final_decision],
-    ["Investment Analysis", structured.investment_analysis],
-    ["Risk Analysis", structured.risk_analysis],
-    ["Artifact Statuses", structured.artifact_statuses],
-    ["Analysis Validity", structured.analysis_validity],
-  ]
-    .filter(([, value]) => value !== null && value !== undefined)
-    .map(([title, value]) => {
-      const rows =
-        typeof value === "object" && !Array.isArray(value)
-          ? Object.entries(value).map(([label, entry]) => ({ label, value: entry }))
-          : [{ label: title, value }];
-      return renderDetailSection(title, rows);
-    })
+  if (hasAgentOutputs) {
+    actions.push(
+      '<button type="button" class="report-open" data-report-kind="diagnostics">Agent Outputs</button>',
+    );
+  }
+  if (payload.report_markdown_html) {
+    actions.push(
+      '<button type="button" class="report-open" data-report-kind="report">Open Report</button>',
+    );
+  }
+  if (payload.article_markdown_html) {
+    actions.push(
+      '<button type="button" class="report-open" data-report-kind="article">Open Article</button>',
+    );
+  }
+  if (!actions.length) {
+    return payload.note ? `<p class="muted">${escapeHtml(payload.note)}</p>` : "";
+  }
+  return `
+    <section class="detail-section report-actions">
+      <h4>Full Report</h4>
+      <div class="topbar-actions report-action-buttons">${actions.join("")}</div>
+    </section>
+  `;
+}
+
+function hasStructuredContent(structured, keys) {
+  return keys.some((key) => {
+    const value = structured?.[key];
+    if (value === null || value === undefined) return false;
+    if (typeof value === "string") return value.trim().length > 0;
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === "object") return Object.keys(value).length > 0;
+    return true;
+  });
+}
+
+function titleFromKey(key) {
+  return String(key || "")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function renderStructuredDocument(title, structured, sections) {
+  const body = sections
+    .filter(({ key }) => structured?.[key] !== null && structured?.[key] !== undefined)
+    .map(
+      ({ key, label }) => `
+        <section class="reader-section">
+          <h2>${escapeHtml(label)}</h2>
+          ${renderStructuredValue(structured[key])}
+        </section>
+      `,
+    )
     .join("");
-  return sections ? `<div class="detail-grid">${sections}</div>` : "";
+  if (!body) return "";
+  return `<div class="structured-reader"><h1>${escapeHtml(title)}</h1>${body}</div>`;
+}
+
+function renderStructuredValue(value) {
+  if (value === null || value === undefined || value === "") {
+    return "<p class='muted'>No data.</p>";
+  }
+  if (typeof value === "string") {
+    return `<pre class="structured-text">${escapeHtml(value)}</pre>`;
+  }
+  if (typeof value !== "object") {
+    return `<p>${escapeHtml(value)}</p>`;
+  }
+  if (Array.isArray(value)) {
+    if (!value.length) return "<p class='muted'>No data.</p>";
+    return `<div class="structured-list">${value.map(renderStructuredValue).join("")}</div>`;
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(value, "content") ||
+    Object.prototype.hasOwnProperty.call(value, "message")
+  ) {
+    const metadata = Object.entries(value).filter(
+      ([key]) => key !== "content" && key !== "message",
+    );
+    const metadataHtml = metadata.length
+      ? `<dl class="reader-metadata">${metadata
+          .map(
+            ([key, entry]) => `
+              <dt>${escapeHtml(titleFromKey(key))}</dt>
+              <dd>${formatDetailValue(entry)}</dd>
+            `,
+          )
+          .join("")}</dl>`
+      : "";
+    const content = value.content ?? value.message;
+    return `
+      ${metadataHtml}
+      ${content ? `<pre class="structured-text">${escapeHtml(content)}</pre>` : ""}
+    `;
+  }
+  return Object.entries(value)
+    .map(
+      ([key, entry]) => `
+        <section class="reader-subsection">
+          <h3>${escapeHtml(titleFromKey(key))}</h3>
+          ${renderStructuredValue(entry)}
+        </section>
+      `,
+    )
+    .join("");
+}
+
+function openReportViewer(kind) {
+  const payload = state.currentDrilldown;
+  if (!payload) return;
+  const structured = payload.structured || {};
+  const isArticle = kind === "article";
+  const isDecision = kind === "decision";
+  const isDiagnostics = kind === "diagnostics";
+  let html = isArticle ? payload.article_markdown_html : payload.report_markdown_html;
+  if (isDecision) {
+    html = renderStructuredDocument("Decision Detail", structured, [
+      { key: "prediction_snapshot", label: "Prediction Summary" },
+      { key: "final_decision", label: "Final Decision" },
+      { key: "investment_analysis", label: "Investment Analysis" },
+      { key: "risk_analysis", label: "Risk Analysis" },
+    ]);
+  } else if (isDiagnostics) {
+    html = renderStructuredDocument("Agent Outputs", structured, [
+      { key: "reports", label: "Reports" },
+      { key: "artifact_statuses", label: "Artifact Statuses" },
+      { key: "analysis_validity", label: "Analysis Validity" },
+    ]);
+  }
+  if (!html) return;
+  const titleKind = isArticle
+    ? "Article"
+    : isDecision
+      ? "Decision Detail"
+      : isDiagnostics
+        ? "Agent Outputs"
+        : "Report";
+  const title = `${payload.ticker_ibkr || payload.ticker_yf || "Equity"} ${titleKind}`;
+  elements.reportViewerTitle().textContent = title;
+  elements.reportViewerBody().innerHTML = html;
+  elements.reportViewer().classList.remove("hidden");
+  elements.reportViewer().setAttribute("aria-hidden", "false");
+}
+
+function closeReportViewer() {
+  const viewer = elements.reportViewer();
+  viewer.classList.add("hidden");
+  viewer.setAttribute("aria-hidden", "true");
+  elements.reportViewerTitle().textContent = "Report";
+  elements.reportViewerBody().innerHTML = "";
 }
 
 function renderDrilldown(payload) {
@@ -948,18 +1121,7 @@ function renderDrilldown(payload) {
         { label: "Risk/Reward", value: tradeBlock.risk_reward },
       ])}
     </div>
-    ${renderStructuredSections(payload.structured)}
-    ${
-      payload.report_markdown_html
-        ? `<section class="detail-section"><h4>Report</h4><div class="markdown-body">${payload.report_markdown_html}</div></section>`
-        : ""
-    }
-    ${
-      payload.article_markdown_html
-        ? `<section class="detail-section"><h4>Article</h4><div class="markdown-body">${payload.article_markdown_html}</div></section>`
-        : ""
-    }
-    ${payload.note ? `<p class="muted">${escapeHtml(payload.note)}</p>` : ""}
+    ${renderReportActions(payload)}
   `;
 }
 
@@ -967,7 +1129,7 @@ function renderActiveTab() {
   if (!state.snapshot && state.activeTab !== "settings") {
     const message =
       state.snapshotMeta.status === "loading"
-        ? "Loading current data…"
+        ? loadingSnapshotMessage()
         : state.snapshotMeta.status === "error"
           ? "Current data unavailable. Use Reload Data to retry."
           : "No current data loaded yet. It should load automatically in a moment.";
@@ -1114,7 +1276,9 @@ async function loadDrilldown(ticker) {
         "<p class='muted'>Current data is still loading. Try again in a moment.</p>";
       return;
     }
+    state.currentDrilldown = payload;
     elements.drilldown().innerHTML = renderDrilldown(payload);
+    bindReportHandlers();
   } catch (error) {
     setError(error.message);
   }
@@ -1159,8 +1323,9 @@ function updateStatus() {
   const status = elements.status();
   const context = elements.context();
   if (state.snapshotMeta.status === "loading") {
-    status.textContent = "Loading data…";
-    context.textContent = "";
+    status.textContent =
+      state.settings?.read_only === false ? "Loading live data…" : "Loading data…";
+    context.textContent = loadingSnapshotMessage();
     return;
   }
   if (state.snapshotMeta.status === "error") {
@@ -1218,10 +1383,18 @@ async function createJob(scope, tickers = []) {
   }
 }
 
+function bindReportHandlers() {
+  document.querySelectorAll(".report-open[data-report-kind]").forEach((button) => {
+    button.addEventListener("click", () => openReportViewer(button.dataset.reportKind));
+  });
+}
+
 function bindDynamicHandlers() {
   document.querySelectorAll(".ticker-link[data-ticker]").forEach((button) => {
     button.addEventListener("click", () => loadDrilldown(button.dataset.ticker));
   });
+
+  bindReportHandlers();
 
   document.querySelectorAll(".sort-button[data-sort-section][data-sort-key]").forEach(
     (button) => {
@@ -1312,6 +1485,12 @@ function bindStaticHandlers() {
     button.addEventListener("click", () => setActiveTab(button.dataset.tab));
   });
   elements.refreshButton().addEventListener("click", () => loadPortfolio(true));
+  elements.reportViewerClose().addEventListener("click", closeReportViewer);
+  elements.reportViewer().addEventListener("click", (event) => {
+    if (event.target?.dataset?.reportClose === "true") {
+      closeReportViewer();
+    }
+  });
 }
 
 async function initializeDashboard() {

@@ -2259,8 +2259,8 @@ class TestAnalysisFreshnessReporting:
     def test_analysis_freshness_section_replaces_split_brain_deadlines(self):
         report = format_report(self._items(), _make_portfolio(), max_age_days=14)
         assert "ANALYSIS FRESHNESS" in report
-        assert "Blocking now:" in report
-        assert "Already in queue:" in report
+        assert "Needs review before action:" in report
+        assert "Already in refresh queue:" in report
         assert "Due soon:" in report
         assert "Upcoming review deadlines" not in report
 

@@ -35,7 +35,9 @@ class DashboardSettings(BaseSettings):
     port: int = 5050
     debug: bool = False
 
-    snapshot_timeout_seconds: int = 60
+    # Live IBKR snapshots can take about a minute on first load when positions,
+    # watchlists, and live orders all need brokerage-session calls and retries.
+    snapshot_timeout_seconds: int = 180
     default_refresh_limit: int = DEFAULT_REFRESH_LIMIT
     runtime_dir: Path = Path("runtime") / "ibkr_dashboard"
 
