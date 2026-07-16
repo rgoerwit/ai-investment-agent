@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -12,10 +13,13 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.types import RunnableConfig
 
 from src.config import config as settings_config
+from src.data_block_utils import unfenced_label
 from src.error_safety import redact_sensitive_text, summarize_exception
 from src.runtime_diagnostics import ArtifactStatus, failure_artifact, success_artifact
 from src.runtime_services import get_current_tool_service
+from src.service_tiers import floor_llm_hard_timeout, floor_llm_total_timeout
 from src.tooling.runtime import ToolInvocation
+from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
@@ -41,6 +45,15 @@ logger = structlog.get_logger(__name__)
 
 CONSULTANT_CALL_TIMEOUT_SECONDS = 90.0
 CONSULTANT_TOTAL_TIMEOUT_SECONDS = 240.0
+# A completed review with a minority of failed verification calls is degraded,
+# not worthless: above this failed/executed ratio the review is excluded from
+# PM inputs (previous all-or-nothing behavior); at or below it the review
+# reaches the PM tagged PARTIAL. The 3393.T 2026-07-03 run lost the entire
+# +2.0 confirmed-risk counterweight to a single 1-of-4 tool failure.
+CONSULTANT_PARTIAL_TOOL_FAILURE_RATIO = 0.5
+# Cap for the aggregator-metrics snapshot injected into the auditor's first
+# message (the loop's ToolMessage truncation cap is far larger at 63.5k).
+_AUDITOR_SNAPSHOT_MAX_CHARS = 20_000
 _CONSULTANT_QUICK_SCREENING_ADDENDUM = """
 ## QUICK SCREENING MODE
 
@@ -58,6 +71,8 @@ _CONSULTANT_CONTEXT_BUDGETS = {
         "fundamentals": 5000,
         "debate": 4000,
         "research": 4000,
+        "foreign_language": 2500,
+        "value_trap": 2500,
         "auditor": 3000,
         "apac": 2500,
     },
@@ -68,6 +83,8 @@ _CONSULTANT_CONTEXT_BUDGETS = {
         "fundamentals": 2500,
         "debate": 1400,
         "research": 1400,
+        "foreign_language": 900,
+        "value_trap": 900,
         "auditor": 1200,
         "apac": 1200,
     },
@@ -78,6 +95,8 @@ _CONSULTANT_CONTEXT_BUDGETS = {
         "fundamentals": 3600,
         "debate": 2000,
         "research": 2200,
+        "foreign_language": 1400,
+        "value_trap": 1400,
         "auditor": 1800,
         "apac": 1600,
     },
@@ -101,7 +120,14 @@ async def _invoke_consultant_with_deadline(
             f"Consultant node exceeded total wall-clock timeout of {total_timeout:.0f}s for {ticker}"
         )
 
-    timeout_s = min(CONSULTANT_CALL_TIMEOUT_SECONDS, remaining)
+    # Flex tier: a queued call may legitimately take minutes; floor the
+    # per-call cap (the shrinking `remaining` budget still bounds the loop).
+    per_call_cap = floor_llm_hard_timeout(
+        CONSULTANT_CALL_TIMEOUT_SECONDS,
+        provider="openai",
+        label="consultant_call_timeout",
+    )
+    timeout_s = min(per_call_cap, remaining)
     try:
         return await agent_runtime.invoke_with_rate_limit_handling(
             runnable,
@@ -281,6 +307,8 @@ def create_consultant_node(
         news = state.get("news_report", "N/A")
         fundamentals = state.get("fundamentals_report", "N/A")
         investment_plan = state.get("investment_plan", "N/A")
+        foreign_language = state.get("foreign_language_report", "N/A")
+        value_trap = state.get("value_trap_report", "N/A")
         auditor = state.get("auditor_report", "N/A")
         apac = state.get("apac_regional_report", "N/A")
         consultant_profile = (
@@ -313,6 +341,14 @@ FUNDAMENTALS ANALYST REPORT:
 === RESEARCH MANAGER SYNTHESIS ===
 
 {support.summarize_for_pm(investment_plan, "research", _consultant_context_budget("research", profile=consultant_profile)) if investment_plan != "N/A" else "N/A"}
+
+=== FOREIGN-LANGUAGE / NATIVE-SOURCE ANALYST ===
+
+{support.summarize_for_pm(foreign_language, "foreign_language", _consultant_context_budget("foreign_language", profile=consultant_profile)) if foreign_language != "N/A" else "N/A"}
+
+=== VALUE TRAP DETECTOR ===
+
+{support.summarize_for_pm(value_trap, "value_trap", _consultant_context_budget("value_trap", profile=consultant_profile)) if value_trap != "N/A" else "N/A"}
 
 === RED FLAGS (Pre-Screening Results) ===
 
@@ -359,10 +395,12 @@ Provide your independent consultant review."""
         try:
             messages = [HumanMessage(content=prompt)]
             active_llm = llm_with_tools or llm
-            total_timeout = (
+            total_timeout = floor_llm_total_timeout(
                 settings_config.consultant_quick_total_timeout_seconds
                 if quick_mode
-                else CONSULTANT_TOTAL_TIMEOUT_SECONDS
+                else CONSULTANT_TOTAL_TIMEOUT_SECONDS,
+                provider="openai",
+                label="consultant_total_timeout",
             )
             consultant_deadline = time.monotonic() + total_timeout
 
@@ -452,6 +490,55 @@ Provide your independent consultant review."""
                 truncated=trunc_info["truncated"],
             )
             if had_tool_errors:
+                executed = loop_result.tool_call_count
+                failure_ratio = tool_failure_count / executed if executed else 1.0
+                is_partial = (
+                    bool(content_str.strip())
+                    and tool_failure_count > 0
+                    and failure_ratio <= CONSULTANT_PARTIAL_TOOL_FAILURE_RATIO
+                )
+                if is_partial:
+                    logger.warning(
+                        "consultant_review_partial",
+                        ticker=ticker,
+                        tool_failure_count=tool_failure_count,
+                        tool_call_count=executed,
+                        failed_tools=list(loop_result.failed_tools),
+                    )
+                    failed_tools_note = (
+                        f" ({', '.join(loop_result.failed_tools)})"
+                        if loop_result.failed_tools
+                        else ""
+                    )
+                    partial_content = (
+                        f"[PARTIAL REVIEW: {tool_failure_count} of {executed} "
+                        f"verification tool calls failed{failed_tools_note}. "
+                        "Claims depending on the failed verification remain "
+                        "unverified — weight accordingly.]\n\n" + content_str
+                    )
+                    partial_status = ArtifactStatus(
+                        complete=True,
+                        ok=True,
+                        content=partial_content,
+                        provider=support.infer_provider_name(llm),
+                        message=(
+                            f"Consultant review PARTIAL: {tool_failure_count}/"
+                            f"{executed} verification tool calls failed"
+                        ),
+                    )
+                    partial_result: dict[str, Any] = {
+                        "consultant_review": partial_content,
+                        "consultant_tool_failures": tool_failure_count,
+                        **(
+                            {"consultant_quick_profile": consultant_profile}
+                            if quick_mode
+                            else {}
+                        ),
+                        "artifact_statuses": {
+                            "consultant_review": partial_status.as_dict(),
+                        },
+                    }
+                    return partial_result
                 status = ArtifactStatus(
                     complete=True,
                     ok=False,
@@ -705,6 +792,57 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
     return legal_counsel_node
 
 
+async def _preload_metrics_snapshot(ticker: str, tools_by_name: dict) -> str:
+    """One deterministic get_financial_metrics call through the hook chain.
+
+    Replaces the auditor's own aggregator-metrics tool rounds (the fetcher's
+    metrics cache is already warm from the pre-graph data-vacuum probe, so
+    this is near-free). Returns a formatted snapshot block for the auditor's
+    first message, or "" (fail-open) when the tool is absent, blocked,
+    errored, or non-JSON — the prompt's fallback tool budget covers that case.
+    """
+    metrics_tool = tools_by_name.get("get_financial_metrics")
+    if metrics_tool is None:
+        return ""
+    try:
+
+        async def _run_preload_tool(args: dict[str, Any]) -> Any:
+            return await metrics_tool.ainvoke(args)
+
+        result = await get_current_tool_service().execute(
+            ToolInvocation(
+                name="get_financial_metrics",
+                args={"ticker": ticker},
+                source="auditor",
+                agent_key="global_forensic_auditor",
+            ),
+            runner=_run_preload_tool,
+        )
+        if result.blocked:
+            return ""
+        payload = str(result.value)
+        parsed = json.loads(payload)
+        if not isinstance(parsed, dict) or "error" in parsed:
+            return ""
+    except Exception as exc:
+        logger.debug(
+            "auditor_metrics_preload_skipped",
+            ticker=ticker,
+            reason=type(exc).__name__,
+        )
+        return ""
+    return (
+        "\n\nPRE-LOADED AGGREGATOR SNAPSHOT "
+        "(merged yfinance/FMP/EODHD metrics — aggregator tier, "
+        "not filing ground truth):\n"
+        + format_untrusted_block(
+            payload[:_AUDITOR_SNAPSHOT_MAX_CHARS],
+            "financial_api",
+            provenance=f"merged aggregator metrics for {ticker}",
+        )
+    )
+
+
 def create_auditor_node(llm, tools: list) -> Callable:
     """
     Create the Global Forensic Auditor node.
@@ -735,18 +873,23 @@ def create_auditor_node(llm, tools: list) -> Callable:
         company_warning = (
             "" if company_resolved else f"\n{support._UNRESOLVED_NAME_WARNING}"
         )
+        tools_by_name = {t.name: t for t in tools}
+        snapshot_block = await _preload_metrics_snapshot(ticker, tools_by_name)
+
         human_msg = f"""Analyze financial statements for:
 Ticker: {ticker}
 Company: {company_name}{company_warning}
 Date: {support._format_date_with_fy_hint(current_date)}
 
-Perform a forensic audit using your tools."""
-
-        tools_by_name = {t.name: t for t in tools}
-        # recursion_limit=12 in the old create_react_agent maps to 6 tool-call rounds
-        # (each round = 1 LLM call + 1 tool execution step in LangGraph).
-        # We use 6 manual iterations here to preserve the same budget.
-        max_tool_iterations = 6
+Perform a forensic audit using your tools.{snapshot_block}"""
+        # Prompt v2.11 mandates plan-then-batch: all searches in one parallel
+        # round, follow-up rounds only on gate failures. The per-tool budgets
+        # (3 foreign + 1 metrics fallback + 1 news) fit in 2 batched rounds,
+        # so 3 rounds (4 LLM calls incl. synthesis) is the hard ceiling — a
+        # model that regresses to one-search-per-turn is cut off economically
+        # rather than allowed the old 6-round (create_react_agent-era) budget.
+        # At the cap the loop forces a final answer from the data collected.
+        max_tool_iterations = 3
 
         def _truncate_messages_for_llm(msgs: list) -> list:
             """Apply the auditor truncation hook to ToolMessages before LLM invocation."""
@@ -813,7 +956,9 @@ Perform a forensic audit using your tools."""
                     )
 
                 messages.append(response)
-                for tool_call in tool_calls:
+
+                async def _exec_one(tool_call: dict[str, Any]) -> ToolMessage:
+                    """Run one tool call; failures are contained per task."""
                     tool_fn = tools_by_name.get(tool_call["name"])
                     tool_call_id = tool_call.get("id", tool_call["name"])
                     if tool_fn:
@@ -846,9 +991,14 @@ Perform a forensic audit using your tools."""
                             tool_output = f"TOOL_ERROR: {tool_err}"
                     else:
                         tool_output = f"Unknown tool: {tool_call['name']}"
-                    messages.append(
-                        ToolMessage(content=tool_output, tool_call_id=tool_call_id)
-                    )
+                    return ToolMessage(content=tool_output, tool_call_id=tool_call_id)
+
+                # Plan-then-batch (prompt v2.11) puts several searches in one
+                # round; run them concurrently like the graph tool node does.
+                # gather preserves tool_calls order for the ToolMessages.
+                messages.extend(
+                    await asyncio.gather(*[_exec_one(tc) for tc in tool_calls])
+                )
 
                 logger.debug(
                     "auditor_tool_iteration",
@@ -861,7 +1011,17 @@ Perform a forensic audit using your tools."""
         logger.debug("auditor_start", ticker=ticker)
 
         try:
-            response_str = await _run_auditor_loop(llm, agent_prompt.system_message)
+            # Bind the tool schemas onto the LLM so it can actually emit tool_calls.
+            # Without this the model never sees the tools, the loop below is dead code,
+            # and the auditor returns INSUFFICIENT_DATA claiming it has no tools. Kept
+            # inside the try so a bind_tools failure is contained as a failure-artifact
+            # (the auditor is optional) rather than escaping the node. The unbound
+            # ``llm`` is retained below for provider/diagnostic introspection and the
+            # repair path, which must operate on the base model, not the binding.
+            llm_with_tools = llm.bind_tools(tools) if tools else llm
+            response_str = await _run_auditor_loop(
+                llm_with_tools, agent_prompt.system_message
+            )
             response_str = canonicalize_forensic_auditor_output(response_str)
             validation = validate_required_output(
                 "global_forensic_auditor", response_str
@@ -952,6 +1112,7 @@ Perform a forensic audit using your tools."""
             )
 
             if is_context_error:
+                forensic_label = unfenced_label("FORENSIC_DATA_BLOCK")
                 graceful_msg = f"""## FORENSIC AUDITOR REPORT
 
 **STATUS**: CONTEXT_LIMIT_EXCEEDED
@@ -962,7 +1123,7 @@ Perform a forensic audit using your tools."""
 Downstream agents should rely on Fundamentals Analyst DATA_BLOCK (structured APIs: yfinance, FMP, EODHD) as primary source. Independent forensic audit unavailable for {ticker}.
 
 ---
-FORENSIC_DATA_BLOCK:
+{forensic_label}
 STATUS: UNAVAILABLE
 META: CONTEXT_LIMIT_EXCEEDED
 REASON: Data volume exceeded 128k token limit

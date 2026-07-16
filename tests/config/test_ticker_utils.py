@@ -346,7 +346,7 @@ def test_to_yfinance(input_ticker, expected):
         ("NOVN:SWX", "NOVN:SWX"),
         ("NOVN.N-CH", "NOVN:SWX"),
         ("AAPL", "AAPL:SMART"),
-        ("7203.T", "7203:TSE"),
+        ("7203.T", "7203:TSEJ"),
         ("0005.HK", "5:SEHK"),
         ("5.HK", "5:SEHK"),
         ("5930.KS", "005930:KRX"),

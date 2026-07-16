@@ -1,6 +1,67 @@
 from __future__ import annotations
 
 import re
+from enum import Enum
+
+
+class BlockShape(Enum):
+    """Structured block delimiter family."""
+
+    FENCED = "fenced"
+    UNFENCED = "unfenced"
+
+
+_FENCED_START = "### --- START {name} ---"
+_FENCED_END = "### --- END {name} ---"
+
+
+def fenced_start(name: str) -> str:
+    """Return the canonical emitted fenced-block start marker."""
+    return _FENCED_START.format(name=name)
+
+
+def fenced_end(name: str) -> str:
+    """Return the canonical emitted fenced-block end marker."""
+    return _FENCED_END.format(name=name)
+
+
+def build_fenced_block(name: str, body: str) -> str:
+    """Return a canonical fenced structured block."""
+    return f"{fenced_start(name)}\n{body}\n{fenced_end(name)}"
+
+
+def unfenced_label(name: str) -> str:
+    """Return the canonical label for an unfenced structured block."""
+    return f"{name}:"
+
+
+BLOCK_SHAPES: dict[str, BlockShape] = {
+    "DATA_BLOCK": BlockShape.FENCED,
+    "PM_BLOCK": BlockShape.FENCED,
+    "VALUE_TRAP_BLOCK": BlockShape.FENCED,
+    "VALUATION_PARAMS": BlockShape.FENCED,
+    "VALUATION_SCENARIOS": BlockShape.FENCED,
+    "KILL_CRITERIA": BlockShape.FENCED,
+    "TRADE_BLOCK": BlockShape.UNFENCED,
+    "FORENSIC_DATA_BLOCK": BlockShape.UNFENCED,
+    "MACRO_REGIME_BLOCK": BlockShape.UNFENCED,
+    "CONSULTANT_RESOLUTION": BlockShape.UNFENCED,
+    "APAC_RESOLUTION": BlockShape.UNFENCED,
+    "AUDITOR_RESOLUTION": BlockShape.UNFENCED,
+}
+
+FENCED_BLOCK_NAMES = tuple(
+    name for name, shape in BLOCK_SHAPES.items() if shape is BlockShape.FENCED
+)
+UNFENCED_BLOCK_NAMES = tuple(
+    name for name, shape in BLOCK_SHAPES.items() if shape is BlockShape.UNFENCED
+)
+_FENCED_NAMES_ALT = "|".join(re.escape(name) for name in FENCED_BLOCK_NAMES)
+_GLUED_FENCED_MARKER_RE = re.compile(
+    r"(?m)^(?P<pre>.*[^\s#-])[ \t]*"
+    rf"(?P<marker>#{{2,}}[ \t]*-{{2,}}[ \t]*(?:START|END)[ \t]+"
+    rf"(?:{_FENCED_NAMES_ALT})\b[^\n]*)$"
+)
 
 _NULL_TOKENS = frozenset({"N/A", "NA", "NONE", "-", ""})
 _FIELD_VALUE_PATTERN = r"(?m)^{field_name}:\s*(.+?)\s*$"
@@ -8,26 +69,47 @@ _NUMBER_TOKEN_PATTERN = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
 
 
 def _compile_named_block_pattern(block_name: str) -> re.Pattern[str]:
-    escaped_name = re.escape(block_name)
+    start_fragment = fenced_marker_fragment(block_name, "START")
+    end_fragment = fenced_marker_fragment(block_name, "END")
     return re.compile(
-        rf"(?m)^[ \t]*#{{3,}}\s*---\s*START\s+{escaped_name}\b[^\n]*\s*$"
-        rf"(.+?)^[ \t]*#{{3,}}\s*---\s*END\s+{escaped_name}\b[^\n]*\s*$",
+        rf"(?m)^{start_fragment}\s*$" rf"(.+?)^{end_fragment}\s*$",
         re.DOTALL | re.MULTILINE,
     )
 
 
+def fenced_marker_fragment(block_name: str, edge: str) -> str:
+    """Return the shared tolerant regex fragment for a fenced block marker.
+
+    Emitters use exactly three hashes. Matchers deliberately accept two or more
+    hashes and two or more dashes so repair/strip paths catch common LLM
+    heading drift.
+    """
+    normalized_edge = edge.upper()
+    if normalized_edge not in {"START", "END"}:
+        raise ValueError("edge must be START or END")
+    escaped_name = re.escape(block_name)
+    return rf"[ \t]*#{{2,}}\s*-{{2,}}\s*{normalized_edge}\s+{escaped_name}\b[^\n]*"
+
+
+def fenced_block_pattern(block_name: str) -> re.Pattern[str]:
+    """Return the shared tolerant regex for a named fenced block."""
+    return _compile_named_block_pattern(block_name)
+
+
 DATA_BLOCK_PATTERN = _compile_named_block_pattern("DATA_BLOCK")
 _LEGACY_DATA_BLOCK_HEADER_PATTERN = re.compile(
-    r"(?m)^### DATA_BLOCK(?:\s*\([^\n]*\))?\s*$"
+    r"(?m)^#{2,} DATA_BLOCK(?:\s*\([^\n]*\))?\s*$"
 )
-_DASHED_DATA_BLOCK_HEADER_PATTERN = re.compile(r"(?m)^###\s*---\s*DATA_BLOCK\s*---\s*$")
+_DASHED_DATA_BLOCK_HEADER_PATTERN = re.compile(
+    r"(?m)^#{2,}\s*-{2,}\s*DATA_BLOCK\s*-{2,}\s*$"
+)
 # Intentionally narrow: this pairs only with the legacy ### --- DATA_BLOCK --- opener.
 _EXPLICIT_DATA_BLOCK_END_PATTERN = re.compile(
-    r"(?m)^###\s*---\s*END DATA_BLOCK\s*---\s*$"
+    r"(?m)^#{2,}\s*-{2,}\s*END DATA_BLOCK\s*-{2,}\s*$"
 )
-_SECTION_HEADER_PATTERN = re.compile(r"(?m)^#{3,} ")
+_SECTION_HEADER_PATTERN = re.compile(r"(?m)^#{2,} ")
 _TABLE_ROW_PATTERN = re.compile(r"^\|(.+)\|$")
-_STRUCTURED_BLOCK_BOUNDARY_NAMES = ("DATA_BLOCK", "PM_BLOCK")
+_STRUCTURED_BLOCK_BOUNDARY_NAMES = FENCED_BLOCK_NAMES
 _LIKELY_DATA_BLOCK_KEYS = (
     "SECTOR",
     "RAW_HEALTH_SCORE",
@@ -313,19 +395,21 @@ def extract_data_block_number(report: str | None, field_name: str) -> float | No
 
 
 def normalize_structured_block_boundaries(report: str | None) -> str | None:
-    """Insert missing line breaks after known structured block end markers.
+    """Insert missing line breaks around known structured fenced markers.
 
-    This only repairs the narrow glued-heading defect where a recognized end
-    marker is immediately followed by the next markdown heading, e.g.
-    ``### --- END DATA_BLOCK ---### FINANCIAL HEALTH DETAIL``.
+    Repairs two common LLM boundary defects:
+    - a recognized fenced marker glued onto the previous prose line, e.g.
+      ``...assets come online.### --- START DATA_BLOCK ---``;
+    - a recognized end marker immediately followed by the next markdown heading,
+      e.g. ``### --- END DATA_BLOCK ---### FINANCIAL HEALTH DETAIL``.
     """
     if not report or not isinstance(report, str):
         return report
 
-    normalized = report
+    normalized = _GLUED_FENCED_MARKER_RE.sub(r"\g<pre>\n\g<marker>", report)
     for block_name in _STRUCTURED_BLOCK_BOUNDARY_NAMES:
         normalized = re.sub(
-            rf"(#{{3,}}[ \t]*---[ \t]*END[ \t]+{re.escape(block_name)}[ \t]*---[ \t]*)(?=#{{3,}}[ \t])",
+            rf"(#{{2,}}[ \t]*-{{2,}}[ \t]*END[ \t]+{re.escape(block_name)}[ \t]*-{{2,}}[ \t]*)(?=#{{2,}}[ \t])",
             r"\1\n\n",
             normalized,
         )
@@ -358,8 +442,6 @@ def normalize_legacy_data_block_report(report: str | None) -> str | None:
     if not normalized_body:
         return report
 
-    repaired_block = (
-        f"### --- START DATA_BLOCK ---\n{normalized_body}\n### --- END DATA_BLOCK ---"
-    )
+    repaired_block = build_fenced_block("DATA_BLOCK", normalized_body)
     repaired_report = report[:region_start] + repaired_block + report[region_end:]
     return repaired_report

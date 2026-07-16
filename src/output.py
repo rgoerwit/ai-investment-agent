@@ -281,6 +281,11 @@ async def handle_article_generation(
         governance_card = (
             analysis_result.get("entity_governance_card") if analysis_result else None
         )
+        chart_paths = (
+            analysis_result.get("chart_paths")
+            if isinstance(analysis_result, dict)
+            else None
+        )
         draft_article = writer.write(
             ticker=ticker,
             company_name=company_name,
@@ -289,6 +294,7 @@ async def handle_article_generation(
             output_path=article_path,
             valuation_context=valuation_context,
             governance_card=governance_card,
+            chart_paths=chart_paths if isinstance(chart_paths, dict) else None,
         )
 
         editor = ArticleEditor(
@@ -322,6 +328,8 @@ async def handle_article_generation(
                     pm_block=pm_block,
                     valuation_params=valuation_params,
                     consultant_review=consultant_review,
+                    voice_samples=writer.load_voice_samples(max_chars=5000),
+                    valuation_context=valuation_context,
                     governance_card=governance_card
                     if isinstance(governance_card, dict)
                     else None,
@@ -351,6 +359,37 @@ async def handle_article_generation(
                     console_obj.print(
                         "[yellow]Editor revision failed, using original draft.[/yellow]"
                     )
+
+        # Surface which model actually wrote the article — a silent Claude →
+        # Gemini fallback (e.g. exhausted Anthropic credits) otherwise only
+        # shows up as a warning buried in the logs, and article-quality
+        # conclusions get drawn against the wrong model.
+        writer_model = getattr(writer, "current_model_name", "")
+        writer_fell_back = bool(getattr(writer, "writer_fell_back", False))
+        if isinstance(analysis_result, dict):
+            run_summary = analysis_result.setdefault("run_summary", {})
+            run_summary["article_writer_model"] = writer_model
+            run_summary["article_writer_fell_back"] = writer_fell_back
+            # The analysis JSON was persisted before article generation, so
+            # the in-memory stamp above never reaches disk on its own — patch
+            # the saved artifact in place (fail-open).
+            saved_path = analysis_result.get("_saved_analysis_path")
+            if saved_path:
+                from src.persistence import patch_saved_run_summary
+
+                patch_saved_run_summary(
+                    saved_path,
+                    {
+                        "article_writer_model": writer_model,
+                        "article_writer_fell_back": writer_fell_back,
+                    },
+                    logger_obj=logger_obj,
+                )
+        if writer_fell_back and not args.quiet and not args.brief:
+            console_obj.print(
+                f"[yellow]Claude writer unavailable — article written by "
+                f"fallback model {writer_model}.[/yellow]"
+            )
 
         if not args.quiet and not args.brief:
             console_obj.print(

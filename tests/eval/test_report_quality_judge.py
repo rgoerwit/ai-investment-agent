@@ -147,6 +147,18 @@ def test_score_report_partial_features() -> None:
     assert score.overall == "C"
 
 
+def test_specialist_resolution_accepts_rendered_auditor_note() -> None:
+    """The render layer rewrites the unresolved-auditor stub into a prose
+    caveat (no raw AUDITOR_RESOLUTION token); the judge must still count it."""
+    bolded = "> **Auditor note:** The forensic auditor flagged anomalies …\n"
+    assert score_report(bolded).has_specialist_resolution is True
+    # Unbolded variant also counts — decoupled from Markdown styling.
+    unbolded = "> Auditor note: anomalies were not reconciled.\n"
+    assert score_report(unbolded).has_specialist_resolution is True
+    # Raw tokens still count (regression).
+    assert score_report("APAC_RESOLUTION: NONE\n").has_specialist_resolution is True
+
+
 def test_score_report_bloat_flag_fires_above_threshold() -> None:
     md = "## Investment Memo — BUY\n\n**Variant view.** v\n" + (
         "x" * (BLOAT_CHAR_THRESHOLD + 1)

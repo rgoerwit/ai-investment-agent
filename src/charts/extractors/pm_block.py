@@ -11,7 +11,8 @@ from dataclasses import dataclass
 
 import structlog
 
-from src.agents.pm_verdict_metadata import canonicalize_pm_verdict
+from src.data_block_utils import extract_last_fenced_block
+from src.pm_decision_parser import canonicalize_pm_verdict
 
 logger = structlog.get_logger(__name__)
 
@@ -104,20 +105,13 @@ def extract_pm_block(pm_output: str) -> PMBlockData:
         logger.debug("no_pm_output_provided")
         return PMBlockData()
 
-    # Find the PM_BLOCK section (take last one for self-correction pattern)
-    # Tolerates optional descriptive text after "PM_BLOCK" (future-proofing)
-    pm_block_pattern = r"### --- START PM_BLOCK[^\n]*---(.+?)### --- END PM_BLOCK ---"
-    blocks = list(re.finditer(pm_block_pattern, pm_output, re.DOTALL))
-
-    if not blocks:
+    pm_block = extract_last_fenced_block(pm_output, "PM_BLOCK")
+    if pm_block is None:
         logger.warning(
             "no_pm_block_found",
             message="No PM_BLOCK found in Portfolio Manager output — charts will use fallback defaults",
         )
         return PMBlockData()
-
-    # Use the last (most corrected) block
-    pm_block = blocks[-1].group(1)
 
     verdict_raw = _extract_str(r"VERDICT:\s*([^\n]+)", pm_block)
     canonical_verdict = canonicalize_pm_verdict(verdict_raw)

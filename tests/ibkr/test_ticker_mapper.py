@@ -33,7 +33,12 @@ class TestIbkrSymbolToYf:
         assert ibkr_symbol_to_yf("3600", "SEHK") == "3600.HK"
 
     def test_tokyo(self):
-        assert ibkr_symbol_to_yf("7203", "TSE") == "7203.T"
+        # IBKR Client Portal reports Tokyo as "TSEJ" (not "TSE").
+        assert ibkr_symbol_to_yf("7203", "TSEJ") == "7203.T"
+
+    def test_toronto(self):
+        # IBKR Client Portal reports Toronto as "TSE"; must map to .TO (not .T).
+        assert ibkr_symbol_to_yf("PEY", "TSE") == "PEY.TO"
 
     def test_amsterdam(self):
         assert ibkr_symbol_to_yf("ASML", "AEB") == "ASML.AS"
@@ -231,8 +236,13 @@ class TestYfToIbkrFormat:
 
     def test_tokyo(self):
         symbol, exchange = yf_to_ibkr_format("7203.T")
-        assert exchange == "TSE"
+        assert exchange == "TSEJ"
         assert symbol == "7203"
+
+    def test_toronto(self):
+        symbol, exchange = yf_to_ibkr_format("PEY.TO")
+        assert exchange == "TSE"
+        assert symbol == "PEY"
 
     def test_amsterdam(self):
         symbol, exchange = yf_to_ibkr_format("ASML.AS")
@@ -292,7 +302,7 @@ class TestResolveConid:
             "7203.T": {
                 "conid": 123456,
                 "symbol": "7203",
-                "exchange": "TSE",
+                "exchange": "TSEJ",
                 "ts": time.time(),
             }
         }
@@ -304,7 +314,7 @@ class TestResolveConid:
     def test_api_resolution(self, mock_load, mock_save):
         mock_client = MagicMock()
         mock_client.stock_conid_by_symbol.return_value = {
-            "7203": [{"conid": 123456, "exchange": "TSE"}]
+            "7203": [{"conid": 123456, "exchange": "TSEJ"}]
         }
         result = resolve_conid("7203.T", client=mock_client)
         assert result == 123456
@@ -374,15 +384,20 @@ class TestResolveYfTickerFromPosition:
     """Test converting IBKR position dicts to yfinance tickers."""
 
     def test_standard_position(self):
-        pos = {"contractDesc": "7203", "listingExchange": "TSE"}
+        pos = {"contractDesc": "7203", "listingExchange": "TSEJ"}
         assert resolve_yf_ticker_from_position(pos) == "7203.T"
+
+    def test_toronto_position(self):
+        # IBKR Client Portal lists Toronto as "TSE" → must resolve to .TO, not .T.
+        pos = {"contractDesc": "PEY", "listingExchange": "TSE", "currency": "CAD"}
+        assert resolve_yf_ticker_from_position(pos) == "PEY.TO"
 
     def test_hk_position(self):
         pos = {"contractDesc": "5", "listingExchange": "SEHK"}
         assert resolve_yf_ticker_from_position(pos) == "0005.HK"
 
     def test_hyphenated_symbol(self):
-        pos = {"contractDesc": "7203-TSE", "listingExchange": ""}
+        pos = {"contractDesc": "7203-TSEJ", "listingExchange": ""}
         assert resolve_yf_ticker_from_position(pos) == "7203.T"
 
     def test_ticker_field_fallback(self):

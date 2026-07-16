@@ -161,6 +161,10 @@ class LLMJudgeInspector:
                 model=self._model_name,
                 max_output_tokens=256,
                 callbacks=self._merge_judge_callbacks(),
+                # Inline security path: must not queue on the flex tier
+                # (GEMINI_SERVICE_TIER=flex would add minutes per inspected
+                # tool output).
+                service_tier="standard",
             )
         return self._llm
 

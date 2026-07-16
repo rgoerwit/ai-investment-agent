@@ -5,8 +5,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.ibkr.exceptions import IBKRAPIError
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
 from src.ibkr.portfolio import (
+    _resolve_watchlist_conid,
     build_portfolio_summary,
     normalize_positions,
     read_watchlist,
@@ -22,7 +24,7 @@ class TestNormalizePositions:
             {
                 "conid": 123456,
                 "contractDesc": "7203",
-                "listingExchange": "TSE",
+                "listingExchange": "TSEJ",
                 "position": 100,
                 "avgCost": 2000.0,
                 "mktValue": 1400.0,
@@ -83,7 +85,7 @@ class TestNormalizePositions:
             {
                 "conid": 1,
                 "contractDesc": "7203",
-                "listingExchange": "TSE",
+                "listingExchange": "TSEJ",
                 "position": 100,
                 "mktPrice": 2100,
             },
@@ -125,7 +127,7 @@ class TestNormalizePositions:
             {
                 "conid": 1,
                 "contractDesc": "7203",
-                "listingExchange": "TSE",
+                "listingExchange": "TSEJ",
                 "position": 100,
                 "mktValue": 210_000.0,  # ¥210,000
                 "currency": "JPY",
@@ -232,6 +234,258 @@ class TestNormalizePositions:
         # market_value_usd computed from GBP mktValue before ×100 — must NOT be affected
         assert p.market_value_usd == pytest.approx(894.0 * 1.27, rel=0.05)
 
+    def test_position_conid_primary_exchange_overrides_stale_raw_twse(self):
+        """Held Taiwan conid beats stale raw TWSE metadata after TPEx migration."""
+        client = _contract_info_client(
+            {
+                "symbol": "1264",
+                "primaryExch": "TPEX",
+                "exchange": "SMART",
+                "currency": "TWD",
+            }
+        )
+        raw = [
+            {
+                "conid": 1264,
+                "contractDesc": "1264",
+                "listingExchange": "TWSE",
+                "position": 1000,
+                "mktValue": 5000,
+                "currency": "TWD",
+                "mktPrice": 50.0,
+            }
+        ]
+
+        with patch("src.ibkr.portfolio.cache_conid_mapping"):
+            positions = normalize_positions(raw, client=client)
+
+        assert positions[0].yf_ticker == "1264.TWO"
+        client.get_contract_info.assert_called_once_with(1264, compete=False)
+
+    def test_position_conid_resolves_blank_taiwan_exchange_to_tpex(self):
+        client = _contract_info_client(
+            {"symbol": "1264", "primaryExch": "TPEX", "currency": "TWD"}
+        )
+        raw = [
+            {
+                "conid": 1264,
+                "contractDesc": "1264",
+                "listingExchange": "",
+                "position": 1000,
+                "mktValue": 5000,
+                "currency": "TWD",
+            }
+        ]
+
+        with patch("src.ibkr.portfolio.cache_conid_mapping"):
+            positions = normalize_positions(raw, client=client)
+
+        assert positions[0].yf_ticker == "1264.TWO"
+
+    def test_position_raw_twse_without_client_preserves_current_fallback(self):
+        raw = [
+            {
+                "conid": 1264,
+                "contractDesc": "1264",
+                "listingExchange": "TWSE",
+                "position": 1000,
+                "mktValue": 5000,
+                "currency": "TWD",
+            }
+        ]
+
+        positions = normalize_positions(raw)
+
+        assert positions[0].yf_ticker == "1264.TW"
+
+    def test_us_smart_usd_position_skips_contract_info(self):
+        client = _contract_info_client(
+            {"symbol": "AAPL", "primaryExch": "NASDAQ", "currency": "USD"}
+        )
+        raw = [
+            {
+                "conid": 1,
+                "contractDesc": "AAPL",
+                "listingExchange": "SMART",
+                "position": 5,
+                "mktValue": 1000,
+                "currency": "USD",
+            }
+        ]
+
+        positions = normalize_positions(raw, client=client)
+
+        assert positions[0].yf_ticker == "AAPL"
+        client.get_contract_info.assert_not_called()
+
+    def test_korean_multi_exchange_currency_forces_live_resolution(self):
+        client = _contract_info_client(
+            {"symbol": "35420", "primaryExch": "KOSDAQ", "currency": "KRW"}
+        )
+        raw = [
+            {
+                "conid": 35420,
+                "contractDesc": "35420",
+                "listingExchange": "KRX",
+                "position": 3,
+                "mktValue": 3_000_000,
+                "currency": "KRW",
+            }
+        ]
+
+        with patch("src.ibkr.portfolio.cache_conid_mapping"):
+            positions = normalize_positions(raw, client=client)
+
+        assert positions[0].yf_ticker == "035420.KQ"
+
+    def test_position_contract_info_empty_keeps_position(self):
+        client = _contract_info_client({})
+        raw = [
+            {
+                "conid": 1264,
+                "contractDesc": "1264",
+                "listingExchange": "TWSE",
+                "position": 1000,
+                "mktValue": 5000,
+                "currency": "TWD",
+            }
+        ]
+
+        positions = normalize_positions(raw, client=client)
+
+        assert len(positions) == 1
+        assert positions[0].yf_ticker == "1264.TW"
+
+    def test_position_security_definition_resolves_when_contract_info_unavailable(self):
+        client = _contract_info_client({})
+        client.get_security_definition.return_value = {
+            "ticker": "1264",
+            "listingExchange": "TPEX",
+            "allExchanges": "TPEX",
+            "currency": "TWD",
+        }
+        raw = [
+            {
+                "conid": 1264,
+                "contractDesc": "1264",
+                "position": 1000,
+                "mktValue": 5000,
+                "currency": "TWD",
+            }
+        ]
+
+        with patch("src.ibkr.portfolio.cache_conid_mapping"):
+            positions = normalize_positions(raw, client=client)
+
+        assert positions[0].yf_ticker == "1264.TWO"
+        client.get_contract_info.assert_called_once_with(1264, compete=False)
+        client.get_security_definition.assert_called_once_with(1264)
+
+    def test_position_security_definition_exception_keeps_position(self, caplog):
+        client = _contract_info_client({})
+        client.get_security_definition.side_effect = Exception(
+            "secret path /tmp/private-token"
+        )
+        raw = [
+            {
+                "conid": 1264,
+                "contractDesc": "1264",
+                "position": 1000,
+                "mktValue": 5000,
+                "currency": "TWD",
+            }
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="src.ibkr.portfolio"):
+            positions = normalize_positions(raw, client=client)
+
+        assert positions[0].yf_ticker == "1264.TW"
+        assert any(
+            "conid_security_definition_failed" in r.message for r in caplog.records
+        )
+        assert not any("/tmp/private-token" in r.message for r in caplog.records)
+
+    def test_position_contract_info_exception_keeps_position(self, caplog):
+        client = _contract_info_client(Exception("secret path /tmp/private-token"))
+        raw = [
+            {
+                "conid": 1264,
+                "contractDesc": "1264",
+                "listingExchange": "TWSE",
+                "position": 1000,
+                "mktValue": 5000,
+                "currency": "TWD",
+            }
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="src.ibkr.portfolio"):
+            positions = normalize_positions(raw, client=client)
+
+        assert positions[0].yf_ticker == "1264.TW"
+        assert any("conid_contract_info_failed" in r.message for r in caplog.records)
+        assert not any("/tmp/private-token" in r.message for r in caplog.records)
+
+    def test_position_contract_info_missing_symbol_keeps_raw_mapping(self):
+        client = _contract_info_client({"primaryExch": "TPEX", "currency": "TWD"})
+        raw = [
+            {
+                "conid": 1264,
+                "contractDesc": "1264",
+                "listingExchange": "TWSE",
+                "position": 1000,
+                "mktValue": 5000,
+                "currency": "TWD",
+            }
+        ]
+
+        positions = normalize_positions(raw, client=client)
+
+        assert positions[0].yf_ticker == "1264.TW"
+
+    def test_position_bad_conid_skips_live_resolution(self):
+        client = _contract_info_client(
+            {"symbol": "1264", "primaryExch": "TPEX", "currency": "TWD"}
+        )
+        raw = [
+            {
+                "conid": "not-a-number",
+                "contractDesc": "1264",
+                "listingExchange": "TWSE",
+                "position": 1000,
+                "mktValue": 5000,
+                "currency": "TWD",
+            }
+        ]
+
+        positions = normalize_positions(raw, client=client)
+
+        assert positions[0].conid == 0
+        assert positions[0].yf_ticker == "1264.TW"
+        client.get_contract_info.assert_not_called()
+
+    def test_force_live_bypasses_stale_conid_cache(self):
+        client = _contract_info_client(
+            {"symbol": "1264", "primaryExch": "TPEX", "currency": "TWD"}
+        )
+        raw = [
+            {
+                "conid": 1264,
+                "contractDesc": "1264",
+                "listingExchange": "TWSE",
+                "position": 1000,
+                "mktValue": 5000,
+                "currency": "TWD",
+            }
+        ]
+
+        with (
+            patch("src.ibkr.portfolio.yf_ticker_from_conid", return_value="1264.TW"),
+            patch("src.ibkr.portfolio.cache_conid_mapping"),
+        ):
+            positions = normalize_positions(raw, client=client)
+
+        assert positions[0].yf_ticker == "1264.TWO"
+
 
 class TestBuildPortfolioSummary:
     """Test portfolio summary construction."""
@@ -257,8 +511,8 @@ class TestBuildPortfolioSummary:
         assert summary.portfolio_value_usd == 125430.0
         assert summary.cash_balance_usd == 18200.0
         assert summary.position_count == 1
-        # Available cash = 18200 - (125430 * 0.05) = 18200 - 6271.5 = 11928.5
-        assert summary.available_cash_usd == pytest.approx(11928.5, rel=0.01)
+        # Available cash = 18200 - (125430 * 0.03) = 18200 - 3762.9 = 14437.1
+        assert summary.available_cash_usd == pytest.approx(14437.1, rel=0.01)
 
     def test_fallback_to_positions_sum(self):
         ledger = {}  # No ledger data
@@ -297,7 +551,52 @@ def _mock_client(rows: list[dict]) -> MagicMock:
     return client
 
 
+def _contract_info_client(payload: dict | Exception) -> MagicMock:
+    """Return a client mock that serves one contract-info response."""
+    client = MagicMock()
+    if isinstance(payload, Exception):
+        client.get_contract_info.side_effect = payload
+    else:
+        client.get_contract_info.return_value = payload
+    client.get_security_definition.return_value = {}
+    return client
+
+
 _RESOLVE = "src.ibkr.portfolio._resolve_watchlist_conid"
+
+
+class TestReadWatchlistFailClosed:
+    """read_watchlist fails closed for an explicit watchlist, soft-fails for default."""
+
+    def test_explicit_name_fetch_error_propagates(self):
+        """Explicit --watchlist-name + API error → propagate (no phantom-empty list)."""
+        client = MagicMock()
+        client.get_watchlist.side_effect = IBKRAPIError("IBKR watchlist fetch failed")
+        with pytest.raises(IBKRAPIError):
+            read_watchlist(client, "watchlist-2026")
+
+    def test_default_fetch_error_soft_fails_to_empty(self, caplog):
+        """Default (unnamed) discovery + API error → best-effort empty set, logged."""
+        client = MagicMock()
+        client.get_watchlist.side_effect = IBKRAPIError("IBKR watchlist fetch failed")
+        with caplog.at_level(logging.WARNING, logger="src.ibkr.portfolio"):
+            result = read_watchlist(client, "")
+        assert result == set()
+        assert any(
+            "watchlist_default_fetch_failed" in r.message for r in caplog.records
+        )
+
+    def test_not_found_returns_none(self):
+        """A genuinely-missing watchlist (get_watchlist → None) stays None, not error."""
+        client = MagicMock()
+        client.get_watchlist.return_value = None
+        assert read_watchlist(client, "watchlist-2026") is None
+
+    def test_empty_watchlist_returns_empty_set(self):
+        """An existing-but-empty watchlist (get_watchlist → []) is empty, not failure."""
+        client = MagicMock()
+        client.get_watchlist.return_value = []
+        assert read_watchlist(client, "watchlist-2026") == set()
 
 
 class TestReadWatchlistRowParsing:
@@ -394,3 +693,41 @@ class TestReadWatchlistRowParsing:
     def test_watchlist_empty_returns_empty_set(self):
         """Client returning [] (empty watchlist) returns an empty set."""
         assert read_watchlist(_mock_client([])) == set()
+
+    def test_watchlist_conid_prefers_primary_exchange(self):
+        client = _contract_info_client(
+            {
+                "symbol": "1264",
+                "primaryExch": "TPEX",
+                "listingExchange": "TWSE",
+                "exchange": "SMART",
+                "currency": "TWD",
+            }
+        )
+
+        with (
+            patch("src.ibkr.portfolio.yf_ticker_from_conid", return_value=None),
+            patch("src.ibkr.portfolio.cache_conid_mapping"),
+        ):
+            result = _resolve_watchlist_conid(1264, client)
+
+        assert result == "1264.TWO"
+
+    def test_watchlist_without_client_can_still_use_suffixed_cache(self):
+        with patch("src.ibkr.portfolio.yf_ticker_from_conid", return_value="1264.TWO"):
+            result = _resolve_watchlist_conid(1264, None)
+
+        assert result == "1264.TWO"
+
+    def test_conid_resolver_uses_compete_false(self):
+        client = _contract_info_client(
+            {"symbol": "1264", "primaryExch": "TPEX", "currency": "TWD"}
+        )
+
+        with (
+            patch("src.ibkr.portfolio.yf_ticker_from_conid", return_value=None),
+            patch("src.ibkr.portfolio.cache_conid_mapping"),
+        ):
+            _resolve_watchlist_conid(1264, client)
+
+        client.get_contract_info.assert_called_once_with(1264, compete=False)

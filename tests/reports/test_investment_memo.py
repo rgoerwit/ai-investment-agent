@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.agents.support import format_red_flag_section
 from src.reporting.memo import (
     InvestmentMemo,
     build_memo,
@@ -44,13 +45,13 @@ POSITION_SIZE: 3.5
 
 _PM_OUTPUT_DNI = """#### PORTFOLIO MANAGER VERDICT: DO NOT INITIATE
 
-### --- START PM_BLOCK ---
+## -- START PM_BLOCK --
 VERDICT: DO_NOT_INITIATE
 HEALTH_ADJ: 35
 GROWTH_ADJ: 20
 RISK_TALLY: 2.5
 ZONE: HIGH
-### --- END PM_BLOCK ---
+## -- END PM_BLOCK --
 """
 
 
@@ -106,6 +107,26 @@ def test_extract_pm_thesis_pulls_first_sentence() -> None:
     assert len(thesis.split()) <= 31
 
 
+def test_extract_pm_thesis_skips_numbered_list_marker() -> None:
+    """Real PMs render DECISION RATIONALE as a numbered list ("1. **Lead-in**: ...").
+
+    Regression: the extractor must skip the bare "1." enumerator and return the real
+    sentence, not render the thesis as "1." (systemic memo bug).
+    """
+    numbered = (
+        "#### PORTFOLIO MANAGER VERDICT: DO NOT INITIATE\n\n"
+        "### DECISION RATIONALE\n\n"
+        "1. **Elite but Uninvestable Quality**: Hugel is a control trap under private "
+        "equity ownership despite a 15.15% ROIC. More text follows.\n"
+    )
+    thesis = extract_pm_thesis(numbered)
+    assert thesis != "1."
+    assert "Hugel" in thesis and "control trap" in thesis
+    # Hashed-enumerator variant ("#### 1.") must behave the same.
+    hashed = "### DECISION RATIONALE\n\n#### 1. **Macro Headwind**: Margins compress here. Next.\n"
+    assert extract_pm_thesis(hashed).startswith("**Macro Headwind**")
+
+
 def test_extract_pm_thesis_caps_long_rationale() -> None:
     long_rationale = (
         "### DECISION RATIONALE\n\n" + " ".join(["word"] * 80) + ". Trailing sentence."
@@ -118,6 +139,52 @@ def test_extract_pm_thesis_caps_long_rationale() -> None:
 def test_extract_pm_thesis_returns_placeholder_when_missing() -> None:
     assert extract_pm_thesis("") == "Thesis unavailable."
     assert extract_pm_thesis("VERDICT: BUY") == "Thesis unavailable."
+
+
+def test_extract_pm_thesis_does_not_split_on_abbreviations() -> None:
+    """Regression: 3393.T 2026-07-04 run 5 rendered the memo lead as the
+    dangling fragment "**Operational Quality vs." — "vs." is an abbreviation,
+    not a sentence boundary."""
+    rationale = (
+        "### DECISION RATIONALE\n\n"
+        "1. **Operational Quality vs. Market Pricing**: Startia Holdings is a "
+        "high-quality business masquerading as a legacy IT distributor. "
+        "More text follows.\n"
+    )
+    thesis = extract_pm_thesis(rationale)
+    assert not thesis.endswith("vs.")
+    assert "Market Pricing" in thesis and "Startia" in thesis
+    assert thesis.count("**") % 2 == 0  # balanced bold
+
+
+def test_extract_pm_thesis_handles_eg_abbreviation() -> None:
+    rationale = (
+        "### DECISION RATIONALE\n\n"
+        "Margins compress under known headwinds, e.g. FX and freight, "
+        "yet cash conversion holds. Next sentence.\n"
+    )
+    thesis = extract_pm_thesis(rationale)
+    assert not thesis.endswith("e.g.")
+    assert "cash conversion holds." in thesis
+
+
+def test_extract_pm_thesis_word_cap_balances_bold() -> None:
+    rationale = (
+        "### DECISION RATIONALE\n\n**"
+        + " ".join(["word"] * 40)
+        + "** trailing prose ends here.\n"
+    )
+    thesis = extract_pm_thesis(rationale, max_words=10)
+    assert thesis.endswith("…**")
+    assert thesis.count("**") % 2 == 0
+
+
+def test_extract_pm_thesis_trailing_abbreviation_degrades_gracefully() -> None:
+    # Body ends on the abbreviation with nothing after it: fall back to the
+    # accumulated fragment rather than crashing or returning empty.
+    rationale = "### DECISION RATIONALE\n\nQuality holds up vs.\n"
+    thesis = extract_pm_thesis(rationale)
+    assert "Quality holds up" in thesis
 
 
 # ---------- extract_variant_view ----------
@@ -211,12 +278,73 @@ def test_extract_legacy_target_range_unavailable() -> None:
 
 def test_extract_pm_risks_prefers_red_flags() -> None:
     red_flags = [
-        {"type": "PFIC_UNCERTAIN", "detail": "PFIC status unclear"},
-        {"type": "HIGH_JURISDICTION_RISK", "detail": "China consumer exposure"},
+        {
+            "type": "PFIC_UNCERTAIN",
+            "detail": "PFIC status unclear",
+            "risk_penalty": 1.0,
+        },
+        {
+            "type": "HIGH_JURISDICTION_RISK",
+            "detail": "China consumer exposure",
+            "risk_penalty": 0.5,
+        },
     ]
     risks = extract_pm_risks(_PM_OUTPUT_BUY, red_flags, limit=4)
     assert len(risks) >= 2
     assert risks[0].startswith("PFIC_UNCERTAIN:")
+
+
+def test_extract_pm_risks_skips_notes_and_bonus_flags() -> None:
+    red_flags = [
+        {
+            "type": "OCF_PERIOD_MISMATCH_RESOLVED",
+            "detail": "period mismatch",
+            "action": "NOTE",
+            "risk_penalty": 0.0,
+        },
+        {
+            "type": "MOAT_PRICING_POWER",
+            "detail": "durable pricing power",
+            "risk_penalty": -0.5,
+        },
+        {
+            "type": "LOCAL_COVERAGE_HIGH",
+            "detail": "moderate local coverage",
+            "risk_penalty": 0.25,
+        },
+    ]
+    risks = extract_pm_risks("", red_flags, limit=4)
+    assert risks == ["LOCAL_COVERAGE_HIGH: moderate local coverage"]
+
+
+def test_extract_pm_risks_keeps_critical_zero_penalty_flags() -> None:
+    red_flags = [
+        {
+            "type": "STRUCTURAL_STOP",
+            "detail": "hard governance stop",
+            "severity": "CRITICAL",
+            "risk_penalty": 0.0,
+        },
+    ]
+    assert extract_pm_risks("", red_flags) == ["STRUCTURAL_STOP: hard governance stop"]
+
+
+def test_valuation_quarantine_is_visible_but_not_a_top_risk() -> None:
+    red_flags = [
+        {
+            "type": "VALUATION_INPUT_QUARANTINED",
+            "detail": "Distrusted valuation inputs — verify before using as BUY support.",
+            "severity": "WARNING",
+            "action": "REVIEW",
+            "risk_penalty": 0.0,
+        }
+    ]
+
+    assert extract_pm_risks("", red_flags, limit=4) == []
+    rendered, subtotal = format_red_flag_section("PASS", red_flags)
+    assert subtotal == 0.0
+    assert "VALUATION_INPUT_QUARANTINED [risk_penalty +0.00]" in rendered
+    assert "verify before using as BUY support" in rendered
 
 
 def test_extract_pm_risks_falls_back_to_pm_narrative() -> None:
@@ -248,6 +376,20 @@ def test_summarize_confidence_when_nothing_ran() -> None:
     assert "did not run" in out
 
 
+def test_summarize_confidence_consultant_error_is_validation_failure() -> None:
+    out = summarize_confidence(
+        {
+            "run_summary": {
+                "consultant_completed": True,
+                "consultant_successful": False,
+                "consultant_verdict": "ERROR",
+            }
+        }
+    )
+    assert "consultant review failed validation" in out
+    assert "consultant ran but did not approve" not in out
+
+
 # ---------- build_memo + render_memo_markdown (happy/edge/error) ----------
 
 
@@ -264,7 +406,11 @@ def test_build_memo_happy_path_buy() -> None:
             ),
         },
         "red_flags": [
-            {"type": "PFIC_UNCERTAIN", "detail": "PFIC status unclear"},
+            {
+                "type": "PFIC_UNCERTAIN",
+                "detail": "PFIC status unclear",
+                "risk_penalty": 1.0,
+            },
         ],
         "run_summary": {
             "consultant_successful": True,
@@ -281,6 +427,39 @@ def test_build_memo_happy_path_buy() -> None:
     ]
     assert memo.top_risks[0].startswith("PFIC_UNCERTAIN")
     assert "consultant" in memo.confidence
+
+
+def test_build_memo_uses_effective_resolved_ocf_flags() -> None:
+    state = {
+        "final_trade_decision": (
+            "### PORTFOLIO MANAGER VERDICT: HOLD\n\n"
+            "### DECISION RATIONALE\n"
+            "Hold while cash-flow period mismatch is reconciled.\n\n"
+            "### --- START PM_BLOCK ---\nVERDICT: HOLD\n### --- END PM_BLOCK ---\n"
+        ),
+        "fundamentals_report": (
+            "### --- START DATA_BLOCK ---\n"
+            "OPERATING_CASH_FLOW: 151.97M PLN\n"
+            "OPERATING_CASH_FLOW_SOURCE: FILING\n"
+            "OCF_FILING_REASON: DISCREPANCY\n"
+            "### --- END DATA_BLOCK ---\n"
+        ),
+        "consultant_review": (
+            "SPOT_CHECK operatingCashflow: DATA_BLOCK 151.97m PLN FY2025; "
+            "FMP 178.06m PLN TTM/Q1 — PERIOD MISMATCH, not a data conflict."
+        ),
+        "auditor_report": "Operating cash flow: PLN 151.967m",
+        "red_flags": [
+            {
+                "type": "OCF_SOURCE_DISCREPANCY",
+                "detail": "OCF value sourced from filing differs from API data",
+                "risk_penalty": 0.5,
+            }
+        ],
+    }
+    memo = build_memo(state)
+    assert memo.top_risks == []
+    assert "period mismatch" in memo.source_confidence[0][1]
 
 
 def test_render_memo_markdown_happy_path_renders_all_sections() -> None:
@@ -324,10 +503,45 @@ def test_render_memo_markdown_dni_omits_optional_sections() -> None:
     assert "**Top risks.**" not in md
 
 
+def test_render_memo_markdown_hold_carries_monitor_only_clarifier() -> None:
+    memo = InvestmentMemo(
+        decision="HOLD",
+        one_line_thesis="Passes screens; catalysts absent.",
+        variant_view="Not explicitly stated.",
+        key_numbers=["P/E: 9.65"],
+        valuation="Weighted 479.58.",
+        top_risks=["No catalyst detected"],
+        kill_criteria=[],
+        confidence="Anchored on consultant.",
+    )
+    md = render_memo_markdown(memo)
+    assert "## Investment Memo — HOLD" in md
+    assert "monitor only" in md
+    assert "does not initiate a position" in md
+    # Clarifier sits directly under the title, before the thesis.
+    assert md.index("monitor only") < md.index("**Thesis.**")
+
+
+def test_render_memo_markdown_non_hold_has_no_monitor_clarifier() -> None:
+    for decision in ("BUY", "DO_NOT_INITIATE", "SELL"):
+        memo = InvestmentMemo(
+            decision=decision,
+            one_line_thesis="A thesis.",
+            variant_view="Not explicitly stated.",
+            key_numbers=[],
+            valuation="Valuation summary unavailable.",
+            top_risks=[],
+            kill_criteria=[],
+            confidence="Optional cross-checks did not run.",
+        )
+        assert "monitor only" not in render_memo_markdown(memo)
+
+
 def test_render_memo_for_state_empty_input_returns_unavailable_stub() -> None:
     md = render_memo_for_state({})
     assert "Investment Memo — UNAVAILABLE" in md
     assert md.endswith("\n")
+    assert "monitor only" not in md
 
 
 def test_render_memo_for_state_saved_json_shape_finds_bear_history() -> None:

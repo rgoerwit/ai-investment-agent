@@ -99,6 +99,7 @@ EXCHANGE_BENCHMARK: dict[str, str] = {
     ".SI": "^STI",
     ".MI": "^FTSEMIB",
     ".ST": "^OMX",
+    ".SA": "^BVSP",  # B3 / Bovespa
 }
 FALLBACK_BENCHMARK = "^GSPC"
 
@@ -942,9 +943,13 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
             }
         )
         from src.config import config as settings_config
+        from src.service_tiers import floor_llm_hard_timeout
 
-        hard_timeout = float(
-            get_runtime_config(settings_config).llm_call_hard_timeout_seconds
+        # Lesson LLM is the quick Gemini model; floor for GEMINI_SERVICE_TIER=flex.
+        hard_timeout = floor_llm_hard_timeout(
+            float(get_runtime_config(settings_config).llm_call_hard_timeout_seconds),
+            provider="google",
+            label="retrospective_lesson_timeout",
         )
         if invoke_config:
             response = await run_with_hard_timeout(
@@ -997,7 +1002,7 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
         details = classify_failure(
             e,
             provider="google",
-            model_name=getattr(config, "quick_thinking_llm", None),
+            model_name=getattr(config, "quick_think_llm", None),
             class_name="RetrospectiveLessonLLM",
         )
         logger.error(
@@ -1494,6 +1499,8 @@ async def format_lessons_for_injection(
                 "sector": meta.get("sector", "Unknown"),
                 "exchange": meta.get("exchange", "??"),
                 "confidence": round(effective_score, 2),
+                "lesson_type": meta.get("lesson_type"),
+                "ticker": meta.get("ticker"),
             }
         )
 
@@ -1528,8 +1535,14 @@ async def format_lessons_for_injection(
 
     lines = ["LESSONS FROM PAST ANALYSES (cross-market):"]
     for lesson in top_lessons:
+        # A `prior_rejection` record is a screening artifact, not a learned market
+        # lesson — label it distinctly so it is not read as a generalizable lesson.
+        if lesson.get("lesson_type") == "prior_rejection":
+            prefix = f"PRIOR REJECTION ({lesson.get('ticker') or '?'})"
+        else:
+            prefix = "LESSON"
         lines.append(
-            f"- {lesson['lesson']} "
+            f"- {prefix}: {lesson['lesson']} "
             f"({lesson['failure_mode']} | {lesson['sector']}/{lesson['exchange']} "
             f"| conf: {lesson['confidence']})"
         )

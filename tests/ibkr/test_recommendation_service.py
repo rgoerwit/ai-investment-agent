@@ -245,3 +245,28 @@ def test_active_macro_events_loader_fails_open():
         side_effect=RuntimeError("chroma exploded"),
     ):
         assert _load_active_macro_events() == []
+
+
+def test_validate_watchlist_does_not_abort_when_unavailable():
+    """Tier-2 watchlist failure (unavailable) degrades, not aborts — even when a
+    named watchlist was explicitly requested."""
+    snap = PortfolioSnapshot(
+        watchlist=WatchlistSnapshot(
+            found=False, unavailable=True, explicitly_requested=True
+        )
+    )
+    # Must not raise.
+    PortfolioRecommendationService._validate_watchlist_snapshot(snap, "watchlist-2026")
+
+
+def test_validate_watchlist_still_aborts_on_genuine_not_found():
+    """A genuinely missing named watchlist (not an availability failure) still aborts."""
+    snap = PortfolioSnapshot(
+        watchlist=WatchlistSnapshot(
+            found=False, unavailable=False, explicitly_requested=True
+        )
+    )
+    with pytest.raises(ValueError):
+        PortfolioRecommendationService._validate_watchlist_snapshot(
+            snap, "watchlist-2026"
+        )

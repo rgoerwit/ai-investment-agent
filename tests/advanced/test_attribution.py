@@ -207,9 +207,10 @@ class TestAuditorPrompt:
         with open(prompt_file) as f:
             config = json.load(f)
 
-        # Version should be at least 2.3 (current stable version)
-        version = float(config["version"])
-        assert version >= 2.3
+        # Version should be at least 2.3 (current stable version). Compare as
+        # version components so 2.10 correctly sorts after 2.3.
+        version = tuple(int(part) for part in config["version"].split("."))
+        assert version >= (2, 3)
 
     def test_auditor_metadata_has_forensic_tags(self):
         """Verify auditor has forensic accounting capability tags."""

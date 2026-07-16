@@ -8,6 +8,7 @@ from src.reporting.state_access import (
     get_apac_regional_report,
     get_auditor_report,
     get_consultant_review,
+    get_effective_red_flags,
     get_fundamentals_report,
     get_investment_plan,
     get_pm_output,
@@ -103,6 +104,44 @@ def test_get_consultant_review_both_shapes() -> None:
 def test_get_apac_regional_report_both_shapes() -> None:
     assert get_apac_regional_report({"apac_regional_report": "RT"}) == "RT"
     assert get_apac_regional_report({"reports": {"apac_regional_report": "SV"}}) == "SV"
+
+
+def test_get_effective_red_flags_ignores_invalid_consultant_resolution() -> None:
+    state = {
+        "red_flags": [
+            {
+                "type": "OCF_SOURCE_DISCREPANCY",
+                "severity": "WARNING",
+                "detail": "OCF differs",
+                "risk_penalty": 0.5,
+            }
+        ],
+        "reports": {
+            "fundamentals_report": (
+                "### --- START DATA_BLOCK ---\n"
+                "OPERATING_CASH_FLOW: 151.97M PLN\n"
+                "OPERATING_CASH_FLOW_SOURCE: FILING\n"
+                "OCF_FILING_REASON: DISCREPANCY\n"
+                "### --- END DATA_BLOCK ---\n"
+            ),
+            "consultant_review": (
+                "SPOT_CHECK operatingCashflow: DATA_BLOCK 151.97m PLN FY2025; "
+                "FMP 178.06m PLN TTM/Q1 — PERIOD MISMATCH, not a data conflict."
+            ),
+            "auditor_report": "Operating cash flow: PLN 151.967m",
+        },
+        "artifact_statuses": {
+            "consultant_review": {
+                "complete": True,
+                "ok": False,
+                "message": "Consultant review completed with tool failures",
+            }
+        },
+    }
+
+    flags = get_effective_red_flags(state)
+
+    assert [flag["type"] for flag in flags] == ["OCF_SOURCE_DISCREPANCY"]
 
 
 # ---------- defensive: non-dict input does not raise ----------

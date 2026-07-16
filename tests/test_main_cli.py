@@ -291,6 +291,82 @@ class TestOutputCompanyNameLookup:
         assert result["macro_regime_block"]["risk_appetite"] == "RISK_OFF"
         assert result["macro_regime_raw"].startswith("MACRO_REGIME_BLOCK:")
 
+    @pytest.mark.parametrize(
+        ("quick_mode", "configured_rounds", "expected_rounds"),
+        [
+            (False, 1, 1),
+            (False, 2, 2),
+            (True, 2, 1),
+        ],
+    )
+    def test_run_analysis_wires_debate_rounds_behaviorally(
+        self,
+        monkeypatch,
+        quick_mode,
+        configured_rounds,
+        expected_rounds,
+    ):
+        """MAX_DEBATE_ROUNDS must reach both graph builder and TradingContext."""
+        from src.main import config, run_analysis
+        from src.ticker_utils import CompanyNameResult
+
+        fake_tracker = MagicMock()
+        captured_context = {}
+
+        async def _capture_ainvoke(_state, *, config):
+            captured_context["context"] = config["configurable"]["context"]
+            return {}
+
+        fake_graph = MagicMock()
+        fake_graph.ainvoke = AsyncMock(side_effect=_capture_ainvoke)
+        macro_result = {
+            "report": "",
+            "region": "GLOBAL",
+            "status": "disabled",
+            "generated_at": None,
+            "llm_invoked": False,
+            "prompt_used": None,
+            "regime_block_dict": {},
+            "regime_raw": "",
+        }
+
+        monkeypatch.setattr(config, "max_debate_rounds", configured_rounds)
+
+        with (
+            patch(
+                "src.ticker_utils.resolve_company_name",
+                new=AsyncMock(
+                    return_value=CompanyNameResult(
+                        name="HSBC Holdings",
+                        source="lookup",
+                        is_resolved=True,
+                    )
+                ),
+            ),
+            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
+            patch(
+                "src.main._prefetch_macro_context",
+                new=AsyncMock(return_value=macro_result),
+            ),
+            patch(
+                "src.graph.create_trading_graph", return_value=fake_graph
+            ) as create_graph,
+            patch("src.token_tracker.get_tracker", return_value=fake_tracker),
+            patch("src.main.build_analysis_validity", return_value={"ok": True}),
+        ):
+            result = asyncio.run(
+                run_analysis(
+                    ticker="0005.HK",
+                    quick_mode=quick_mode,
+                    strict_mode=False,
+                    skip_charts=True,
+                )
+            )
+
+        assert result["analysis_validity"] == {"ok": True}
+        assert create_graph.call_args.kwargs["max_debate_rounds"] == expected_rounds
+        assert captured_context["context"].max_debate_rounds == expected_rounds
+
     def test_strict_and_quick_composable(self):
         """--strict --quick can be combined without conflict."""
         from src.cli import build_arg_parser
@@ -1602,7 +1678,12 @@ class TestSavedDiagnostics:
             },
             "artifact_statuses": {
                 "consultant_review": {"complete": True, "ok": False},
-                "auditor_report": {"complete": True, "ok": True},
+                # ok=True + a parseable non-caveated STATUS → genuine successful audit.
+                "auditor_report": {
+                    "complete": True,
+                    "ok": True,
+                    "content": "STATUS: CLEAN\nNo anomalies detected.",
+                },
             },
         }
 
@@ -1918,6 +1999,14 @@ class TestSavedDiagnostics:
             "fundamentals_report": "DATA_BLOCK",
             "final_trade_decision": "BUY",
             "pre_screening_result": "PASS",
+            "red_flags": [
+                {
+                    "type": "PFIC_UNCERTAIN",
+                    "severity": "WARNING",
+                    "detail": "PFIC status unclear.",
+                    "risk_penalty": 0.5,
+                }
+            ],
             "investment_debate_state": {"count": 1},
             "analysis_validity": {"publishable": True},
             "artifact_statuses": {},
@@ -1936,6 +2025,7 @@ class TestSavedDiagnostics:
         payload = json.loads(output_path.read_text())
 
         assert payload["pre_screening_result"] == "PASS"
+        assert payload["red_flags"] == result["red_flags"]
         assert payload["metadata"]["llm_provider"] == "google"
 
     def test_save_results_includes_macro_context_metadata(self, tmp_path, monkeypatch):

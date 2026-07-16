@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import json
 
-from src.agents.analyst_nodes import _sanitize_fundamentals_output
+from src.agents.analyst_nodes import (
+    _sanitize_fundamentals_output,
+    _valuation_input_reliability,
+)
+from src.agents.fundamentals_reconciler import (
+    parse_score_breakdown,
+    reconcile_score_consistency,
+)
 
 
 def test_sanitize_fundamentals_output_forces_missing_horizons_to_na() -> None:
@@ -194,6 +201,45 @@ NET_DEBT_EBITDA: -0.01
     assert "NET_DEBT_EBITDA: 1.95" in sanitized
 
 
+def test_sanitize_fundamentals_output_flags_stale_annual_statements() -> None:
+    content = """### --- START DATA_BLOCK ---
+REVENUE_GROWTH_FY: 9.9%
+EARNINGS_GROWTH_FY: 8.9%
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "revenueGrowth": 0.099,
+            "earningsGrowth": 0.089,
+            "statements_stale": True,
+            "_income_statement_date": "2024-12-31",
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "FRAGUAB.MX")
+
+    assert "GROWTH_DATA_STALE:" in sanitized
+    assert "2024-12-31" in sanitized
+
+
+def test_sanitize_fundamentals_output_no_stale_flag_when_current() -> None:
+    content = """### --- START DATA_BLOCK ---
+REVENUE_GROWTH_FY: 22.3%
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "revenueGrowth": 0.223,
+            "earningsGrowth": 0.198,
+            "_income_statement_date": "2025-06-30",
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "4396.T")
+
+    assert "GROWTH_DATA_STALE:" not in sanitized
+
+
 def test_sanitize_fundamentals_output_reconciles_b3_balance_sheet_fields() -> None:
     content = """### --- START DATA_BLOCK ---
 NET_CASH_TO_MARKET_CAP: 1.8%
@@ -222,6 +268,91 @@ PFIC_CASH_TRAP: YES
     assert "PFIC_ASSET_RATIO: 3.3%" in sanitized
     assert "PFIC_CASH_TRAP: NO" in sanitized
     assert "PFIC_CASH_TRAP: YES" not in sanitized
+
+
+def test_sanitize_fundamentals_output_promotes_pfic_proximity_to_medium() -> None:
+    content = """### --- START DATA_BLOCK ---
+PFIC_RISK: LOW
+CASH_TO_ASSETS: 49.3%
+PFIC_ASSET_RATIO: 49.3%
+PFIC_CASH_TRAP: NO
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"capital_cashToAssets": 0.4934})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "3393.T")
+
+    assert "PFIC_RISK: MEDIUM" in sanitized
+    assert "PFIC_ASSET_RATIO: 49.3%" in sanitized
+    assert "PFIC_CASH_TRAP: NO" in sanitized
+
+
+def test_sanitize_fundamentals_output_appends_missing_pfic_risk_on_proximity() -> None:
+    content = """### --- START DATA_BLOCK ---
+CASH_TO_ASSETS: 49.3%
+PFIC_ASSET_RATIO: 49.3%
+PFIC_CASH_TRAP: NO
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "cashAndShortTermInvestments": 4_934,
+            "totalAssets": 10_000,
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "3393.T")
+
+    assert "PFIC_RISK: MEDIUM" in sanitized
+
+
+def test_sanitize_fundamentals_output_keeps_pfic_low_below_proximity() -> None:
+    content = """### --- START DATA_BLOCK ---
+PFIC_RISK: LOW
+CASH_TO_ASSETS: 44.9%
+PFIC_ASSET_RATIO: 44.9%
+PFIC_CASH_TRAP: NO
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"capital_cashToAssets": 0.449})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "3393.T")
+
+    assert "PFIC_RISK: LOW" in sanitized
+    assert "PFIC_RISK: MEDIUM" not in sanitized
+
+
+def test_sanitize_fundamentals_output_preserves_pfic_high_on_proximity() -> None:
+    content = """### --- START DATA_BLOCK ---
+PFIC_RISK: HIGH
+CASH_TO_ASSETS: 49.3%
+PFIC_ASSET_RATIO: 49.3%
+PFIC_CASH_TRAP: NO
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"capital_cashToAssets": 0.4934})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "3393.T")
+
+    assert "PFIC_RISK: HIGH" in sanitized
+    assert "PFIC_RISK: MEDIUM" not in sanitized
+
+
+def test_sanitize_fundamentals_output_leaves_pfic_risk_when_basis_unreliable() -> None:
+    content = """### --- START DATA_BLOCK ---
+PFIC_RISK: LOW
+CASH_TO_ASSETS: 49.3%
+PFIC_ASSET_RATIO: 49.3%
+PFIC_CASH_TRAP: NO
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"totalDebt": 1_000, "ebitda": 500})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "3393.T")
+
+    assert "PFIC_RISK: LOW" in sanitized
+    assert "PFIC_RISK: MEDIUM" not in sanitized
+    assert "PFIC_ASSET_NOTE:" in sanitized
 
 
 def test_sanitize_fundamentals_output_downgrades_unreliable_pfic_basis() -> None:
@@ -358,7 +489,17 @@ ADR_THESIS_IMPACT: MODERATE_CONCERN
 
     sanitized = _sanitize_fundamentals_output(content, raw_data, "ABEV3.SA")
 
-    assert sanitized == content
+    # Valid ADR routing is preserved untouched.
+    for line in (
+        "ADR_EXISTS: YES",
+        "ADR_TYPE: SPONSORED",
+        "ADR_TICKER: ABEV",
+        "ADR_EXCHANGE: NYSE",
+        "ADR_THESIS_IMPACT: MODERATE_CONCERN",
+    ):
+        assert line in sanitized
+    # The only added line is the reliability contract (no forward fields -> UNAVAILABLE).
+    assert "VALUATION_INPUT_RELIABILITY: UNAVAILABLE" in sanitized
 
 
 def test_sanitize_downgrades_loose_otc_sponsored_claim() -> None:
@@ -488,4 +629,766 @@ PEG_RATIO: 0.70
 
     sanitized = _sanitize_fundamentals_output(content, raw_data, "TEST.SA")
 
-    assert sanitized == content
+    # The low-PE *flag* (not a quarantine marker) must not blank the valuation lines.
+    assert "PE_RATIO_TTM: 4.20" in sanitized
+    assert "PEG_RATIO: 0.70" in sanitized
+    # Reliability contract appended; no forward fields present -> UNAVAILABLE.
+    assert "VALUATION_INPUT_RELIABILITY: UNAVAILABLE" in sanitized
+
+
+# --------------------------------------------------------------------------- #
+# VALUATION_INPUT_RELIABILITY classifier + DATA_BLOCK contract
+# --------------------------------------------------------------------------- #
+def test_valuation_input_reliability_usable_when_forward_present_and_clean() -> None:
+    assert _valuation_input_reliability({"forwardPE": 12.0}) == "USABLE"
+
+
+def test_valuation_input_reliability_quarantined_markers() -> None:
+    # Every distrust marker the fetcher/merge layer can set → QUARANTINED.
+    assert (
+        _valuation_input_reliability({"_split_sensitive_metrics_quarantined": True})
+        == "QUARANTINED"
+    )
+    assert (
+        _valuation_input_reliability({"_pe_low_anomaly_quarantined": True})
+        == "QUARANTINED"
+    )
+    assert (
+        _valuation_input_reliability({"_pe_unit_error_quarantined": "forward"})
+        == "QUARANTINED"
+    )
+    # Trailing P/E is also a valuation input — contract is valuation-input, not forecast.
+    assert (
+        _valuation_input_reliability({"_pe_unit_error_quarantined": "trailing"})
+        == "QUARANTINED"
+    )
+    assert (
+        _valuation_input_reliability({"_forwardPE_quarantine_reason": "recent split"})
+        == "QUARANTINED"
+    )
+
+
+def test_valuation_input_reliability_unavailable_cases() -> None:
+    assert _valuation_input_reliability({}) == "UNAVAILABLE"
+    assert (
+        _valuation_input_reliability(
+            {
+                "trailingPE": 10.0,
+                "forwardPE": None,
+                "forwardEps": None,
+                "pegRatio": None,
+            }
+        )
+        == "UNAVAILABLE"
+    )
+
+
+def test_valuation_input_reliability_unit_error_only_matches_known_values() -> None:
+    # A stray truthy (non-"forward"/"trailing") marker must NOT trip the quarantine
+    # branch; with a present forward field the result is USABLE.
+    assert (
+        _valuation_input_reliability(
+            {"_pe_unit_error_quarantined": True, "forwardPE": 9.0}
+        )
+        == "USABLE"
+    )
+
+
+def test_sanitize_appends_valuation_input_reliability_usable() -> None:
+    content = """### --- START DATA_BLOCK ---
+PE_RATIO_FORWARD: 10.0
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"forwardPE": 10.0, "forwardEps": 1.0})
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "TEST.T")
+    assert "VALUATION_INPUT_RELIABILITY: USABLE" in sanitized
+
+
+def test_sanitize_appends_valuation_input_reliability_quarantined() -> None:
+    content = """### --- START DATA_BLOCK ---
+PE_RATIO_FORWARD: 10.0
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {"_split_sensitive_metrics_quarantined": True, "forwardPE": 10.0}
+    )
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "TEST.T")
+    assert "VALUATION_INPUT_RELIABILITY: QUARANTINED" in sanitized
+    # Appears exactly once (replace-or-append, never duplicated).
+    assert sanitized.count("VALUATION_INPUT_RELIABILITY:") == 1
+
+
+def test_sanitize_corrects_fabricated_pe_ratio_ttm() -> None:
+    """A PE_RATIO_TTM that contradicts fetched trailingPE is reconciled to the raw value."""
+    content = """### --- START DATA_BLOCK ---
+PE_RATIO_TTM: 8.20
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"trailingPE": 11.473684})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "BEC.SI")
+
+    assert "PE_RATIO_TTM: 11.47" in sanitized
+    assert "PE_RATIO_TTM: 8.20" not in sanitized
+    # The correction is carried by the distinct valuation note (own changed_valuation
+    # flag), not the growth-data note.
+    assert (
+        "VALUATION_DATA_QUALITY_NOTE: Valuation/margin scalars reconciled "
+        "to fetched raw metrics." in sanitized
+    )
+
+
+def test_sanitize_corrects_payout_and_margin_scalars() -> None:
+    content = """### --- START DATA_BLOCK ---
+PAYOUT_RATIO: 50.0%
+NET_MARGIN: 25.0%
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"payoutRatio": 0.3685, "profitMargins": 0.05894})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "BEC.SI")
+
+    # 50% vs 36.9% (35.7% rel) and 25% vs 5.9% (>3x) both exceed tolerance.
+    assert "PAYOUT_RATIO: 36.9%" in sanitized
+    assert "NET_MARGIN: 5.9%" in sanitized
+    assert "VALUATION_DATA_QUALITY_NOTE:" in sanitized
+
+
+def test_sanitize_leaves_small_margin_divergence_within_tolerance() -> None:
+    """A sub-threshold margin gap (5.57 vs 5.89) is left to the agent, not over-corrected."""
+    content = """### --- START DATA_BLOCK ---
+NET_MARGIN: 5.57%
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"profitMargins": 0.05894})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "BEC.SI")
+
+    assert "NET_MARGIN: 5.57%" in sanitized
+    assert "VALUATION_DATA_QUALITY_NOTE:" not in sanitized
+
+
+def test_sanitize_leaves_valuation_within_tolerance_untouched() -> None:
+    content = """### --- START DATA_BLOCK ---
+PE_RATIO_TTM: 11.60
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"trailingPE": 11.473684})
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "BEC.SI")
+
+    assert "PE_RATIO_TTM: 11.60" in sanitized
+    assert "VALUATION_DATA_QUALITY_NOTE:" not in sanitized
+
+
+def test_sanitize_does_not_erase_valuation_when_raw_absent() -> None:
+    """A filing-derived value must survive when the raw payload lacks the field."""
+    content = """### --- START DATA_BLOCK ---
+PE_RATIO_TTM: 8.20
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps({"totalDebt": 100, "ebitda": 50})  # no trailingPE
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "BEC.SI")
+
+    assert "PE_RATIO_TTM: 8.20" in sanitized
+    assert "PE_RATIO_TTM: N/A" not in sanitized
+    assert "VALUATION_DATA_QUALITY_NOTE:" not in sanitized
+
+
+def test_sanitize_skips_pe_reconciliation_when_quarantined() -> None:
+    """The low-PE quarantine path wins: PE goes to N/A, not the raw value."""
+    content = """### --- START DATA_BLOCK ---
+PE_RATIO_TTM: 8.20
+PEG_RATIO: 0.46
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {"trailingPE": 11.473684, "_pe_low_anomaly_quarantined": True}
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "BEC.SI")
+
+    assert "PE_RATIO_TTM: N/A" in sanitized
+    assert "PE_RATIO_TTM: 11.47" not in sanitized
+
+
+class TestScoreConsistency:
+    """reconcile_score_consistency: hybrid correct-vs-flag policy."""
+
+    @staticmethod
+    def _body(*lines: str) -> str:
+        return "\n".join(lines)
+
+    def test_consistent_scores_untouched(self) -> None:
+        body = self._body(
+            "RAW_HEALTH_SCORE: 9.5/12",
+            "ADJUSTED_HEALTH_SCORE: 79.2% (based on 12 available points)",
+            "RAW_GROWTH_SCORE: 4/6",
+            "ADJUSTED_GROWTH_SCORE: 67% (based on 6 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected
+        assert not suspect
+
+    def test_available_denominator_convention_accepted(self) -> None:
+        """RAW x/available (the dominant real-world convention) is not suspect."""
+        body = self._body(
+            "SECTOR: Financials",
+            "RAW_HEALTH_SCORE: 9/11",
+            "ADJUSTED_HEALTH_SCORE: 82% (based on 11 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_arithmetic_error_corrected(self) -> None:
+        body = self._body(
+            "RAW_HEALTH_SCORE: 8/12",
+            "ADJUSTED_HEALTH_SCORE: 50% (based on 10 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert corrected and not suspect
+        assert "ADJUSTED_HEALTH_SCORE: 80.0% (based on 10 available points)" in updated
+        assert "HEALTH_SCORE_DATA_QUALITY_NOTE:" in updated
+
+    def test_rounding_within_tolerance_no_churn(self) -> None:
+        body = self._body(
+            "RAW_HEALTH_SCORE: 10/12",
+            "ADJUSTED_HEALTH_SCORE: 83% (based on 12 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_denominator_incoherent_flagged_not_fixed(self) -> None:
+        """Fraction disagrees with both rubric total and available points."""
+        body = self._body(
+            "RAW_HEALTH_SCORE: 4/10",
+            "ADJUSTED_HEALTH_SCORE: 40% (based on 8 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert suspect and not corrected
+        assert "HEALTH_SCORE_CONSISTENCY: SUSPECT" in updated
+        assert "ADJUSTED_HEALTH_SCORE: 40%" in updated  # never rewritten
+
+    def test_earned_exceeds_available_flagged(self) -> None:
+        body = self._body(
+            "RAW_HEALTH_SCORE: 11/9",
+            "ADJUSTED_HEALTH_SCORE: 100% (based on 9 available points)",
+        )
+        _, corrected, suspect = reconcile_score_consistency(body)
+        assert suspect and not corrected
+
+    def test_available_above_rubric_total_flagged(self) -> None:
+        body = self._body(
+            "RAW_GROWTH_SCORE: 5/8",
+            "ADJUSTED_GROWTH_SCORE: 63% (based on 8 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert suspect and not corrected
+        assert "GROWTH_SCORE_CONSISTENCY: SUSPECT" in updated
+
+    def test_financials_de_removed_without_denominator_reduction(self) -> None:
+        body = self._body(
+            "SECTOR: Financial Services",
+            "SECTOR_ADJUSTMENTS: Financials (Insurance) - D/E removed; ROE >12%.",
+            "RAW_HEALTH_SCORE: 10/12",
+            "ADJUSTED_HEALTH_SCORE: 83% (based on 12 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert suspect and not corrected
+        assert "HEALTH_SCORE_CONSISTENCY: SUSPECT" in updated
+        assert "D/E removed" in updated
+
+    def test_financials_de_removed_with_reduced_denominator_ok(self) -> None:
+        """AGS.BR June-29 shape: internally consistent, must not flag."""
+        body = self._body(
+            "SECTOR: Financials",
+            "SECTOR_ADJUSTMENTS: Financials: D/E Ratio and EV/EBITDA removed.",
+            "RAW_HEALTH_SCORE: 7.5/9",
+            "ADJUSTED_HEALTH_SCORE: 83% (based on 9 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_malformed_lines_are_skipped(self) -> None:
+        body = self._body(
+            "RAW_HEALTH_SCORE: strong",
+            "ADJUSTED_HEALTH_SCORE: solid pass",
+            "RAW_GROWTH_SCORE: 4/0",
+            "ADJUSTED_GROWTH_SCORE: 80% (based on 0 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        # Health lines unparseable -> skipped; growth zero denominator -> suspect.
+        assert not corrected
+        assert suspect
+        assert "GROWTH_SCORE_CONSISTENCY: SUSPECT" in updated
+        assert "HEALTH_SCORE_CONSISTENCY" not in updated
+
+    def test_missing_adjusted_line_skipped(self) -> None:
+        body = self._body("RAW_HEALTH_SCORE: 8/12")
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_sanitize_runs_score_check_without_raw_data(self) -> None:
+        """Empty raw payload no longer short-circuits the DATA_BLOCK-internal check."""
+        content = """### --- START DATA_BLOCK ---
+RAW_HEALTH_SCORE: 8/12
+ADJUSTED_HEALTH_SCORE: 50% (based on 10 available points)
+### --- END DATA_BLOCK ---
+"""
+        sanitized = _sanitize_fundamentals_output(content, "", "AGS.BR")
+        assert (
+            "ADJUSTED_HEALTH_SCORE: 80.0% (based on 10 available points)" in sanitized
+        )
+
+    def test_earned_over_available_parenthetical_accepted(self) -> None:
+        """Prompt-example form: '70% (7/10 available)' = earned 7 of 10."""
+        body = self._body(
+            "RAW_HEALTH_SCORE: 7/12",
+            "ADJUSTED_HEALTH_SCORE: 70% (7/10 available)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_available_statement_parenthetical_accepted(self) -> None:
+        """Real-world form: '79% (12/12 available)' with RAW 9.5/12 is a
+        denominator statement, not an earned claim — must not flag."""
+        body = self._body(
+            "RAW_HEALTH_SCORE: 9.5/12",
+            "ADJUSTED_HEALTH_SCORE: 79% (12/12 available)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_conflicting_earned_readings_flagged(self) -> None:
+        """Self-consistent earned/available reading that contradicts RAW."""
+        body = self._body(
+            "RAW_HEALTH_SCORE: 5/12",
+            "ADJUSTED_HEALTH_SCORE: 70% (7/10 available)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert suspect and not corrected
+        assert "HEALTH_SCORE_CONSISTENCY: SUSPECT" in updated
+
+
+class TestScoreBreakdown:
+    """Per-criterion *_SCORE_BREAKDOWN audit (A5b): numerator becomes checkable."""
+
+    _HEALTH_OK = (
+        "HEALTH_SCORE_BREAKDOWN: ROE=1; ROA=0.5; OPERATING_MARGIN=0; DE_RATIO=1; "
+        "NET_DEBT_EBITDA=N/A; CURRENT_RATIO=1; OCF_POSITIVE=1; FCF_POSITIVE=1; "
+        "FCF_YIELD=N/A; PE_OR_PEG=1; EV_EBITDA=N/A; PB_OR_PS=0"
+    )  # numeric sum 6.5, available 9
+
+    @staticmethod
+    def _body(*lines: str) -> str:
+        return "\n".join(lines)
+
+    def test_consistent_breakdown_passes(self) -> None:
+        body = self._body(
+            self._HEALTH_OK,
+            "RAW_HEALTH_SCORE: 6.5/9",
+            "ADJUSTED_HEALTH_SCORE: 72% (based on 9 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_breakdown_sum_mismatch_flagged(self) -> None:
+        body = self._body(
+            self._HEALTH_OK,
+            "RAW_HEALTH_SCORE: 5/9",
+            "ADJUSTED_HEALTH_SCORE: 56% (based on 9 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert suspect and not corrected
+        assert "HEALTH_SCORE_CONSISTENCY: SUSPECT" in updated
+        assert "breakdown awards sum 6.5 != RAW earned 5" in updated
+
+    def test_breakdown_available_mismatch_flagged(self) -> None:
+        body = self._body(
+            self._HEALTH_OK,
+            "RAW_HEALTH_SCORE: 6.5/10",
+            "ADJUSTED_HEALTH_SCORE: 65% (based on 10 available points)",
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "breakdown available points 9 != stated available 10" in updated
+
+    def test_financials_removed_and_na_reconcile_denominator(self) -> None:
+        body = self._body(
+            "SECTOR: Financials",
+            "SECTOR_ADJUSTMENTS: Financials: D/E removed; ROE threshold 12%.",
+            "HEALTH_SCORE_BREAKDOWN: ROE=1; ROA=1; OPERATING_MARGIN=0.5; "
+            "DE_RATIO=REMOVED; NET_DEBT_EBITDA=N/A; CURRENT_RATIO=1; "
+            "OCF_POSITIVE=1; FCF_POSITIVE=1; FCF_YIELD=N/A; PE_OR_PEG=1; "
+            "EV_EBITDA=REMOVED; PB_OR_PS=1",
+            "RAW_HEALTH_SCORE: 7.5/8",
+            "ADJUSTED_HEALTH_SCORE: 94% (based on 8 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_unknown_and_missing_keys_flagged(self) -> None:
+        body = self._body(
+            "HEALTH_SCORE_BREAKDOWN: ROE=1; MYSTERY_METRIC=1",
+            "RAW_HEALTH_SCORE: 2/12",
+            "ADJUSTED_HEALTH_SCORE: 17% (based on 12 available points)",
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "breakdown keys do not match rubric" in updated
+        assert "MYSTERY_METRIC" in updated
+
+    def test_duplicate_keys_flagged(self) -> None:
+        body = self._body(
+            "HEALTH_SCORE_BREAKDOWN: ROE=1; ROE=0; ROA=1",
+            "RAW_HEALTH_SCORE: 2/12",
+            "ADJUSTED_HEALTH_SCORE: 17% (based on 12 available points)",
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "unparseable or has duplicate criteria" in updated
+
+    def test_malformed_award_values_flagged_not_raised(self) -> None:
+        body = self._body(
+            "HEALTH_SCORE_BREAKDOWN: ROE=maybe; ROA=strong",
+            "RAW_HEALTH_SCORE: 2/12",
+            "ADJUSTED_HEALTH_SCORE: 17% (based on 12 available points)",
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect  # nothing parseable -> unparseable reason
+
+    def test_absent_breakdown_line_degrades_to_totals_only(self) -> None:
+        """Pre-v9.31 reports: identical behavior to the A2 validator."""
+        body = self._body(
+            "RAW_HEALTH_SCORE: 9/11",
+            "ADJUSTED_HEALTH_SCORE: 82% (based on 11 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_growth_breakdown_validated_independently(self) -> None:
+        body = self._body(
+            "GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=0; "
+            "ROA_ROE_IMPROVING=0.5; GROSS_MARGIN=1; GLOBAL_EXPANSION=0; "
+            "R_AND_D_CAPEX_BACKLOG=1",
+            "RAW_GROWTH_SCORE: 4/6",
+            "ADJUSTED_GROWTH_SCORE: 67% (based on 6 available points)",
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect  # 3.5 != 4
+        assert "GROWTH_SCORE_CONSISTENCY: SUSPECT" in updated
+
+
+class TestScoreBreakdownObjectiveChecks:
+    _BASE = (
+        "HEALTH_SCORE_BREAKDOWN: ROE=1; ROA=1; OPERATING_MARGIN=1; DE_RATIO=1; "
+        "NET_DEBT_EBITDA=1; CURRENT_RATIO=1; OCF_POSITIVE=1; FCF_POSITIVE=1; "
+        "FCF_YIELD=1; PE_OR_PEG=1; EV_EBITDA=1; PB_OR_PS=1"
+    )  # sum 12/12
+
+    def _body(self, *extra: str) -> str:
+        return "\n".join(
+            (
+                *extra,
+                self._BASE,
+                "RAW_HEALTH_SCORE: 12/12",
+                "ADJUSTED_HEALTH_SCORE: 100% (based on 12 available points)",
+            )
+        )
+
+    def test_ocf_award_with_negative_ocf_flagged(self) -> None:
+        body = self._body("OPERATING_CASH_FLOW: -¥1.2B")
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "OCF_POSITIVE=1 but OPERATING_CASH_FLOW is negative" in updated
+
+    def test_fcf_award_with_negative_fcf_flagged(self) -> None:
+        body = self._body("FCF: -$120M")
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "FCF_POSITIVE=1 but FCF is negative" in updated
+
+    def test_pe_award_with_clearly_failing_multiples_flagged(self) -> None:
+        body = self._body("SECTOR: Industrials", "PE_RATIO_TTM: 25.0", "PEG_RATIO: 1.8")
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "PE_OR_PEG" in updated
+
+    def test_pe_check_skipped_for_information_technology(self) -> None:
+        """IT has a documented P/S alternative to the P/E gate."""
+        body = self._body(
+            "SECTOR: Information Technology", "PE_RATIO_TTM: 25.0", "PEG_RATIO: 1.8"
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert not suspect and not corrected
+
+    def test_pe_near_threshold_not_flagged(self) -> None:
+        body = self._body(
+            "SECTOR: Industrials", "PE_RATIO_TTM: 19.0", "PEG_RATIO: 1.25"
+        )
+        _, corrected, suspect = reconcile_score_consistency(body)
+        assert not suspect and not corrected
+
+    def test_pe_check_needs_both_multiples_present(self) -> None:
+        body = self._body("SECTOR: Industrials", "PE_RATIO_TTM: 25.0")
+        _, corrected, suspect = reconcile_score_consistency(body)
+        assert not suspect and not corrected
+
+    def test_forward_ttm_swap_flagged(self) -> None:
+        """145020.KQ quick-mode: award earned on PE_RATIO_FORWARD 14.58 while
+        trailing 18.22 and PEG fail — swap signature, plain thresholds."""
+        body = self._body(
+            "SECTOR: Industrials",
+            "PE_RATIO_TTM: 18.22",
+            "PE_RATIO_FORWARD: 14.58",
+            "PEG_RATIO: 1.5",
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "forward P/E basis" in updated
+
+    def test_borderline_ttm_without_forward_tolerated(self) -> None:
+        """No rescuing forward value: 18.22 stays inside the 10% margin."""
+        body = self._body(
+            "SECTOR: Industrials", "PE_RATIO_TTM: 18.22", "PEG_RATIO: 1.5"
+        )
+        _, corrected, suspect = reconcile_score_consistency(body)
+        assert not suspect and not corrected
+
+    def test_failing_forward_is_not_a_swap(self) -> None:
+        """Forward also above PE_MAX cannot have rescued the point."""
+        body = self._body(
+            "SECTOR: Industrials",
+            "PE_RATIO_TTM: 18.22",
+            "PE_RATIO_FORWARD: 19.0",
+            "PEG_RATIO: 1.5",
+        )
+        _, corrected, suspect = reconcile_score_consistency(body)
+        assert not suspect and not corrected
+
+    def test_swap_check_skipped_for_information_technology(self) -> None:
+        body = self._body(
+            "SECTOR: Information Technology",
+            "PE_RATIO_TTM: 18.22",
+            "PE_RATIO_FORWARD: 14.58",
+            "PEG_RATIO: 1.5",
+        )
+        _, corrected, suspect = reconcile_score_consistency(body)
+        assert not suspect and not corrected
+
+    def test_passing_ttm_with_forward_present_untouched(self) -> None:
+        body = self._body(
+            "SECTOR: Industrials",
+            "PE_RATIO_TTM: 12.0",
+            "PE_RATIO_FORWARD: 10.0",
+            "PEG_RATIO: 1.5",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not suspect and not corrected
+
+    def test_passing_peg_with_forward_present_untouched(self) -> None:
+        """PEG legitimately earns the point even when both P/E bases differ."""
+        body = self._body(
+            "SECTOR: Industrials",
+            "PE_RATIO_TTM: 18.22",
+            "PE_RATIO_FORWARD: 14.58",
+            "PEG_RATIO: 0.9",
+        )
+        _, corrected, suspect = reconcile_score_consistency(body)
+        assert not suspect and not corrected
+
+    def test_positive_values_not_flagged(self) -> None:
+        body = self._body(
+            "SECTOR: Industrials",
+            "OPERATING_CASH_FLOW: ¥2.9B",
+            "FCF: $120M",
+            "PE_RATIO_TTM: 12.0",
+            "PEG_RATIO: 0.9",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not suspect and not corrected
+
+
+class TestAgsBrNumeratorTriplet:
+    """The three AGS.BR runs (4/10, 7.5/9, 5/9 on identical data) that motivated
+    A5b: internally consistent totals pass only when the breakdown supports the
+    numerator; a contradicting breakdown lands HEALTH_SCORE_UNRELIABLE-class
+    SUSPECT instead of silently flipping the <50% gate."""
+
+    _FIN = (
+        "SECTOR: Financials",
+        "SECTOR_ADJUSTMENTS: Financials: D/E Ratio and EV/EBITDA removed.",
+    )
+
+    def _breakdown(self, awards: dict[str, str]) -> str:
+        base = {
+            "ROE": "0",
+            "ROA": "0",
+            "OPERATING_MARGIN": "0",
+            "DE_RATIO": "REMOVED",
+            "NET_DEBT_EBITDA": "N/A",
+            "CURRENT_RATIO": "0",
+            "OCF_POSITIVE": "0",
+            "FCF_POSITIVE": "0",
+            "FCF_YIELD": "0",
+            "PE_OR_PEG": "0",
+            "EV_EBITDA": "REMOVED",
+            "PB_OR_PS": "0",
+        }
+        base.update(awards)
+        return "HEALTH_SCORE_BREAKDOWN: " + "; ".join(
+            f"{k}={v}" for k, v in base.items()
+        )  # available = 9
+
+    def test_5_of_9_with_supporting_breakdown_passes(self) -> None:
+        body = "\n".join(
+            (
+                *self._FIN,
+                self._breakdown(
+                    {
+                        "ROE": "1",
+                        "ROA": "1",
+                        "CURRENT_RATIO": "1",
+                        "OCF_POSITIVE": "1",
+                        "PE_OR_PEG": "1",
+                    }
+                ),
+                "RAW_HEALTH_SCORE: 5/9",
+                "ADJUSTED_HEALTH_SCORE: 56% (based on 9 available points)",
+            )
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_5_of_9_total_with_7_5_breakdown_is_suspect(self) -> None:
+        """June-29-style numerator (7.5) contradicting a July-2-style total."""
+        body = "\n".join(
+            (
+                *self._FIN,
+                self._breakdown(
+                    {
+                        "ROE": "1",
+                        "ROA": "1",
+                        "OPERATING_MARGIN": "0.5",
+                        "CURRENT_RATIO": "1",
+                        "OCF_POSITIVE": "1",
+                        "FCF_POSITIVE": "1",
+                        "PE_OR_PEG": "1",
+                        "PB_OR_PS": "1",
+                    }
+                ),
+                "RAW_HEALTH_SCORE: 5/9",
+                "ADJUSTED_HEALTH_SCORE: 56% (based on 9 available points)",
+            )
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "breakdown awards sum 7.5 != RAW earned 5" in updated
+
+    def test_4_of_10_shape_denominator_still_audited(self) -> None:
+        """June-28 shape: breakdown says 9 available but totals claim 10."""
+        body = "\n".join(
+            (
+                *self._FIN,
+                self._breakdown(
+                    {"ROE": "1", "ROA": "1", "CURRENT_RATIO": "1", "OCF_POSITIVE": "1"}
+                ),
+                "RAW_HEALTH_SCORE: 4/10",
+                "ADJUSTED_HEALTH_SCORE: 40% (based on 10 available points)",
+            )
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "breakdown available points 9 != stated available 10" in updated
+
+
+class TestScoreBreakdownHardening:
+    """Fix-round regressions: strict item parsing + REMOVED semantics."""
+
+    @staticmethod
+    def _body(breakdown_items: str, raw: str, adjusted: str) -> str:
+        return "\n".join(
+            (
+                f"HEALTH_SCORE_BREAKDOWN: {breakdown_items}",
+                f"RAW_HEALTH_SCORE: {raw}",
+                f"ADJUSTED_HEALTH_SCORE: {adjusted}",
+            )
+        )
+
+    def test_out_of_vocabulary_numeric_award_is_suspect_not_misparsed(self) -> None:
+        """ROE=1.5 must not silently parse as ROE=1 (verified regression)."""
+        assert parse_score_breakdown("ROE=1.5; ROA=0.75") is None
+        body = self._body(
+            "ROE=1.5; ROA=0.75", "2/12", "17% (based on 12 available points)"
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "unparseable or has duplicate criteria" in updated
+
+    def test_trailing_period_after_award_tolerated(self) -> None:
+        awards = parse_score_breakdown("ROE=1; PB_OR_PS=0.")
+        assert awards == {"ROE": "1", "PB_OR_PS": "0"}
+
+    def test_labeled_full_line_parses(self) -> None:
+        awards = parse_score_breakdown("HEALTH_SCORE_BREAKDOWN: ROE=1; ROA=0")
+        assert awards == {"ROE": "1", "ROA": "0"}
+
+    def test_removed_on_never_removable_criterion_is_suspect(self) -> None:
+        """AGS.BR 2026-07-02 run 2 shape: OCF_POSITIVE=REMOVED claims a sector
+        mandate that does not exist."""
+        body = self._body(
+            "ROE=1; ROA=0; OPERATING_MARGIN=0.5; DE_RATIO=REMOVED; "
+            "NET_DEBT_EBITDA=REMOVED; CURRENT_RATIO=1; OCF_POSITIVE=REMOVED; "
+            "FCF_POSITIVE=REMOVED; FCF_YIELD=REMOVED; PE_OR_PEG=1; "
+            "EV_EBITDA=REMOVED; PB_OR_PS=0",
+            "3.5/6",
+            "58% (based on 6 available points)",
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert (
+            "REMOVED claimed for non-sector-removable criteria: OCF_POSITIVE" in updated
+        )
+
+    def test_removed_on_sector_removable_criteria_accepted(self) -> None:
+        """FCF-class / D/E / EV-EBITDA REMOVED stays legal (Financials usage)."""
+        body = self._body(
+            "ROE=1; ROA=1; OPERATING_MARGIN=0.5; DE_RATIO=REMOVED; "
+            "NET_DEBT_EBITDA=REMOVED; CURRENT_RATIO=1; OCF_POSITIVE=1; "
+            "FCF_POSITIVE=REMOVED; FCF_YIELD=REMOVED; PE_OR_PEG=1; "
+            "EV_EBITDA=REMOVED; PB_OR_PS=0.5",
+            "6/7",
+            "86% (based on 7 available points)",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
+    def test_fcf_sign_check_reads_canonical_free_cash_flow_field(self) -> None:
+        body = "\n".join(
+            (
+                "FREE_CASH_FLOW: -€0.3B",
+                "HEALTH_SCORE_BREAKDOWN: ROE=1; ROA=1; OPERATING_MARGIN=1; "
+                "DE_RATIO=1; NET_DEBT_EBITDA=1; CURRENT_RATIO=1; OCF_POSITIVE=1; "
+                "FCF_POSITIVE=1; FCF_YIELD=1; PE_OR_PEG=1; EV_EBITDA=1; PB_OR_PS=1",
+                "RAW_HEALTH_SCORE: 12/12",
+                "ADJUSTED_HEALTH_SCORE: 100% (based on 12 available points)",
+            )
+        )
+        updated, _, suspect = reconcile_score_consistency(body)
+        assert suspect
+        assert "FCF_POSITIVE=1 but FREE_CASH_FLOW is negative" in updated

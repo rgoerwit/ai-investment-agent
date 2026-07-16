@@ -15,6 +15,15 @@ set -euo pipefail
 # Prevents gRPC "fork_posix.cc:71" errors and hanging on Apple Silicon
 export GRPC_POLL_STRATEGY=poll
 export GRPC_VERBOSITY=ERROR
+# macOS fork-safety: disable proxy auto-discovery so the Network.framework
+# atfork handler doesn't SIGSEGV in forked children (benign crash dialogs).
+# Mirrors src/config.py; guarded so proxy users keep proxying. (config.py sets
+# these too for direct `src.main` runs — shell export is just earliest.)
+if [ "$(uname)" = "Darwin" ] && \
+   [ -z "${HTTP_PROXY:-}${HTTPS_PROXY:-}${http_proxy:-}${https_proxy:-}" ]; then
+  export no_proxy='*' NO_PROXY='*'
+fi
+export OBJC_DISABLE_INITIALIZE_FORK_SAFETY="${OBJC_DISABLE_INITIALIZE_FORK_SAFETY:-YES}"
 # ==============================
 
 # Configuration defaults

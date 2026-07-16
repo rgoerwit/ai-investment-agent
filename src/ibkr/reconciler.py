@@ -19,6 +19,14 @@ from src.ibkr.models import (
     ReconciliationItem,
 )
 from src.ibkr.opportunity_finder import find_opportunities
+from src.ibkr.portfolio_defaults import (
+    DEFAULT_DRIFT_PCT,
+    DEFAULT_EXCHANGE_LIMIT_PCT,
+    DEFAULT_MAX_AGE_DAYS,
+    DEFAULT_OVERWEIGHT_PCT,
+    DEFAULT_SECTOR_LIMIT_PCT,
+    DEFAULT_UNDERWEIGHT_PCT,
+)
 from src.ibkr.position_evaluator import evaluate_positions
 from src.ibkr.watchlist_evaluator import evaluate_watchlist
 from src.sector_normalization import normalize_sector_label
@@ -140,12 +148,12 @@ def reconcile(
     positions: list[NormalizedPosition],
     analyses: dict[str, AnalysisRecord],
     portfolio: PortfolioSummary,
-    max_age_days: int = 14,
-    drift_threshold_pct: float = 15.0,
-    overweight_threshold_pct: float = 20.0,
-    underweight_threshold_pct: float = 20.0,
-    sector_limit_pct: float = 30.0,
-    exchange_limit_pct: float = 40.0,
+    max_age_days: int = DEFAULT_MAX_AGE_DAYS,
+    drift_threshold_pct: float = DEFAULT_DRIFT_PCT,
+    overweight_threshold_pct: float = DEFAULT_OVERWEIGHT_PCT,
+    underweight_threshold_pct: float = DEFAULT_UNDERWEIGHT_PCT,
+    sector_limit_pct: float = DEFAULT_SECTOR_LIMIT_PCT,
+    exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT,
     watchlist_tickers: set[str] | None = None,
     diagnostics: ReconciliationDiagnostics | None = None,
 ) -> list[ReconciliationItem]:

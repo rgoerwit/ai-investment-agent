@@ -227,7 +227,7 @@ def test_deep_llm_passes_through_max_output_tokens(
 
 
 def test_create_gemini_model_logs_thinking_level_at_debug(caplog):
-    with patch("src.llms.ChatGoogleGenerativeAI", return_value=MagicMock()):
+    with patch("src.llms._TieredChatGoogleGenerativeAI", return_value=MagicMock()):
         caplog.set_level(logging.DEBUG, logger="src.llms")
 
         _create_gemini_model(
@@ -256,7 +256,9 @@ def test_create_gemini_model_logs_thinking_level_at_debug(caplog):
 
 
 def test_create_gemini_model_uses_thinking_budget_for_gemini_2_5():
-    with patch("src.llms.ChatGoogleGenerativeAI", return_value=MagicMock()) as mock_llm:
+    with patch(
+        "src.llms._TieredChatGoogleGenerativeAI", return_value=MagicMock()
+    ) as mock_llm:
         with patch("src.llms.config") as mock_config:
             mock_config.llm_base_output_tokens = 4096
             mock_config.llm_default_reasoning_reserve_tokens = 2048
@@ -280,7 +282,7 @@ def test_create_gemini_model_uses_thinking_budget_for_gemini_2_5():
 def test_create_gemini_model_adds_default_reserve_for_gemini_3():
     llm = MagicMock()
 
-    with patch("src.llms.ChatGoogleGenerativeAI", return_value=llm) as mock_llm:
+    with patch("src.llms._TieredChatGoogleGenerativeAI", return_value=llm) as mock_llm:
         with patch("src.llms.config") as mock_config:
             mock_config.llm_base_output_tokens = 4096
             mock_config.llm_default_reasoning_reserve_tokens = 2048

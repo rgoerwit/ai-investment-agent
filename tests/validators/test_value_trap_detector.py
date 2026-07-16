@@ -470,6 +470,54 @@ KEY_RISKS:
         flag_types = [f["type"] for f in flags]
         assert "NO_CATALYST_DETECTED" not in flag_types
 
+    def test_no_catalyst_suppressed_by_active_ma(self):
+        """ACTIVE_TENDER M&A status suppresses NO_CATALYST_DETECTED.
+
+        Regression for GAMA.L: the DATA_BLOCK reported
+        ``M_AND_A_STATUS: ACTIVE_TENDER`` (an active takeover IS a re-rating
+        catalyst) while the value-trap gate still flagged "no catalyst".
+        """
+        from src.validators.red_flag_detector import RedFlagDetector
+
+        report = """
+SCORE: 70
+VERDICT: WATCHABLE
+ACTIVIST_PRESENT: NO
+CATALYSTS:
+  INDEX_CANDIDATE: NONE
+  RESTRUCTURING: NONE
+KEY_RISKS:
+- test
+"""
+        # Sanity: without M&A context the flag still fires.
+        baseline = RedFlagDetector.detect_value_trap_flags(report, "GAMA.L")
+        assert "NO_CATALYST_DETECTED" in [f["type"] for f in baseline]
+
+        for status in ("ACTIVE_TENDER", "ACTIVE_OFFER", "active_tender"):
+            flags = RedFlagDetector.detect_value_trap_flags(
+                report, "GAMA.L", m_and_a_status=status
+            )
+            assert "NO_CATALYST_DETECTED" not in [f["type"] for f in flags], status
+
+    def test_no_catalyst_not_suppressed_by_inactive_ma(self):
+        """A non-active / rumored M&A status does NOT suppress the flag."""
+        from src.validators.red_flag_detector import RedFlagDetector
+
+        report = """
+SCORE: 70
+VERDICT: WATCHABLE
+ACTIVIST_PRESENT: NO
+CATALYSTS:
+  INDEX_CANDIDATE: NONE
+KEY_RISKS:
+- test
+"""
+        for status in (None, "", "NONE", "RUMORED", "COMPLETED"):
+            flags = RedFlagDetector.detect_value_trap_flags(
+                report, "TEST.T", m_and_a_status=status
+            )
+            assert "NO_CATALYST_DETECTED" in [f["type"] for f in flags], status
+
     def test_empty_report_no_flags(self):
         """Test empty report produces no flags."""
         from src.validators.red_flag_detector import RedFlagDetector

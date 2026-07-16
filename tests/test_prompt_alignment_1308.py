@@ -32,11 +32,15 @@ class TestFundamentalsPromptAlignment:
 
 
 class TestResearchPromptAlignment:
-    def test_bull_prompt_allows_unsponsored_adr_and_uses_consultant(self):
+    def test_bull_prompt_allows_unsponsored_adr_and_excludes_unreachable_consultant(
+        self,
+    ):
         prompt = get_prompt("bull_researcher")
         assert prompt is not None
         assert "Unsponsored ADRs are acceptable" in prompt.system_message
-        assert "CONSULTANT INTEGRATION" in prompt.system_message
+        # Consultant runs after the Bull/Bear debate (post-Research Manager), so it
+        # is never in the researcher context — the integration bullet was removed.
+        assert "CONSULTANT INTEGRATION" not in prompt.system_message
 
     def test_bear_prompt_treats_unsponsored_adr_as_nonfatal(self):
         prompt = get_prompt("bear_researcher")
@@ -45,7 +49,8 @@ class TestResearchPromptAlignment:
             "Unsponsored ADRs are not an automatic violation" in prompt.system_message
         )
         assert "Sponsored ADR exists on NYSE/NASDAQ/OTC" in prompt.system_message
-        assert "CONSULTANT INTEGRATION" in prompt.system_message
+        # See above: Bear cannot see the Consultant either.
+        assert "CONSULTANT INTEGRATION" not in prompt.system_message
 
 
 class TestRiskPromptAlignment:

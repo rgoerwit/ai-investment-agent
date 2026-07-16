@@ -6,10 +6,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.agents import message_utils, support
 from src.agents import runtime as agent_runtime
+from src.data_block_utils import unfenced_label
 
 _RECOVERABLE_AUDITOR_STATUSES = frozenset(
     {"INSUFFICIENT_DATA", "UNAVAILABLE", "CONTEXT_LIMIT_EXCEEDED"}
 )
+_FORENSIC_LABEL = unfenced_label("FORENSIC_DATA_BLOCK")
 
 FORENSIC_REPAIR_INSTRUCTION = (
     "Rewrite the following forensic auditor output into a final compliant report. "
@@ -18,12 +20,12 @@ FORENSIC_REPAIR_INSTRUCTION = (
     "unverified filings, emit the canonical INSUFFICIENT_DATA fallback form. "
     "Output only the repaired final report. "
     "Do not call tools. "
-    "End with raw labels exactly as FORENSIC_DATA_BLOCK:, STATUS:, and VERDICT:."
+    f"End with raw labels exactly as {_FORENSIC_LABEL}, STATUS:, and VERDICT:."
 )
 
 
 def _inject_forensic_verdict_if_missing(content: str) -> str:
-    if "FORENSIC_DATA_BLOCK:" not in content:
+    if _FORENSIC_LABEL not in content:
         return content
 
     status_match = re.search(r"(?im)^\s*STATUS:\s*([A-Z_]+)\s*$", content)
@@ -60,7 +62,7 @@ def _expand_inline_forensic_stub(content: str) -> str:
     status = match.group("status")
     rest = match.group("rest").strip()
     if not rest:
-        return f"FORENSIC_DATA_BLOCK:\nSTATUS: {status}\n"
+        return f"{_FORENSIC_LABEL}\nSTATUS: {status}\n"
 
     meta_parts: list[str] = []
     detail_lines: list[str] = []
@@ -75,7 +77,7 @@ def _expand_inline_forensic_stub(content: str) -> str:
         else:
             meta_parts.append(f"{key_upper}={value}")
 
-    rebuilt = ["FORENSIC_DATA_BLOCK:", f"STATUS: {status}"]
+    rebuilt = [_FORENSIC_LABEL, f"STATUS: {status}"]
     if meta_parts:
         rebuilt.append(f"META: {' | '.join(meta_parts)}")
     rebuilt.extend(detail_lines)
@@ -87,11 +89,11 @@ def canonicalize_forensic_auditor_output(content: str) -> str:
     replacements = (
         (
             r"(?im)^(?P<indent>\s*)(?:\*\*)?\s*FORENSIC(?:[ _]DATA)?[ _]?BLOCK\s*(?:\*\*)?\s*:?\s*$",
-            r"\g<indent>FORENSIC_DATA_BLOCK:",
+            r"\g<indent>" + _FORENSIC_LABEL,
         ),
         (
             r"(?im)^(?P<indent>\s*)##+\s*FORENSIC_DATA_BLOCK\s*:?\s*$",
-            r"\g<indent>FORENSIC_DATA_BLOCK:",
+            r"\g<indent>" + _FORENSIC_LABEL,
         ),
         (
             r"(?im)^(?P<indent>\s*)(?:\*\*)?\s*STATUS\s*(?:\*\*)?\s*:\s*(?P<value>\S.*)$",

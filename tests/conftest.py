@@ -13,6 +13,32 @@ import structlog
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# macOS fork-safety: apply the same mitigation the app uses, but at test-session
+# import time (before any test forks). Several tests + scripts/find_gems.py use
+# multiprocessing "spawn"; spawning a worker does fork()+exec(), and on macOS the
+# child can SIGSEGV in Apple's Network.framework atfork handler before exec once
+# the gRPC/proxy stack is active — a benign but dialog-popping forked-child crash.
+# Guarded: no-op off macOS and when a proxy is configured (so proxied CI keeps
+# working); only sets no_proxy='*' on clean machines. See src/config.py.
+from src.config import _apply_macos_fork_safety_env  # noqa: E402
+
+_apply_macos_fork_safety_env(enabled=True, platform=sys.platform)
+
+
+@pytest.fixture(autouse=True)
+def _reset_ibkr_session_manager():
+    """Reset the process-wide pooled IBKR session between tests.
+
+    The pool is a singleton; without this, a fake client_cls injected by one test
+    would stay connected and be reused by the next, bleeding state across tests.
+    """
+    from src.ibkr.session_manager import reset_ibkr_session_manager
+
+    reset_ibkr_session_manager()
+    yield
+    reset_ibkr_session_manager()
+
+
 # Capture real API key if present (for integration tests)
 _REAL_GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 
@@ -33,6 +59,26 @@ def setup_test_env():
         "GOOGLE_API_KEY": "test-key",  # Default to dummy key
         "TAVILY_API_KEY": "test-key",
         "FINNHUB_API_KEY": "test-key",
+        # Service tiers must be pinned to defaults: an operator .env with
+        # GEMINI/OPENAI_SERVICE_TIER=flex flips llms.py construction paths
+        # (flex subclasses bypass ChatOpenAI/ChatGoogleGenerativeAI mocks) and
+        # floors timeout assertions (35 s quick budgets become 1350 s). Flex
+        # behavior is tested explicitly via config patching in
+        # tests/test_llms_flex.py / tests/test_service_tiers.py.
+        "GEMINI_SERVICE_TIER": "standard",
+        "OPENAI_SERVICE_TIER": "auto",
+        "FLEX_FALLBACK_TO_STANDARD": "true",
+        "FLEX_LLM_TIMEOUT_SECONDS": "900",
+        # Pin the APEX-tier knobs to unset: an operator .env with APEX_MODEL
+        # flips the llms.py construction path for the Senior Fundamentals and
+        # PM seats (dedicated deep-tier instance instead of the quick/deep
+        # tiers) under mock-based unit tests. Apex-path behavior is tested
+        # explicitly via config patching in tests/test_llms_apex.py.
+        "APEX_MODEL": "",
+        "APEX_QUICK_MODEL": "",
+        # Same rationale: an operator .env overriding the thinking level
+        # breaks default-value assertions.
+        "APEX_THINKING_LEVEL": "high",
     }
 
     # 1. Patch os.environ

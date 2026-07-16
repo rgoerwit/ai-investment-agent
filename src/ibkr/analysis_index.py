@@ -25,11 +25,20 @@ from src.fx_normalization import FALLBACK_RATES_TO_USD, normalize_minor_unit_cur
 from src.ibkr.models import AnalysisRecord, TradeBlockData
 from src.ibkr.order_builder import parse_trade_block
 from src.ibkr.reconciliation_rules import _exchange_from_ticker, _normalize_verdict
+from src.pm_decision_parser import parse_final_decision_scores
 from src.sector_normalization import normalize_sector_label
-from src.validators.supplemental_flags import detect_capital_efficiency_flags
+from src.validators.financial_rules import detect_red_flags
+from src.validators.metric_extractor import extract_metrics
+from src.validators.quality_flags import PEAK_OR_TRANSIENT_FLAGS
+from src.validators.supplemental_flags import (
+    detect_capital_efficiency_flags,
+    detect_moat_flags,
+)
 
 logger = structlog.get_logger(__name__)
-_ANALYSIS_INDEX_VERSION = 4
+# Bump when the parsed AnalysisRecord schema changes so cached indexes rebuild.
+# v5: added risk_tally + quality_flag_types (BUY stability gate inputs).
+_ANALYSIS_INDEX_VERSION = 5
 _DATA_VACUUM_COVERAGE_THRESHOLD_PCT = 40.0
 
 
@@ -52,6 +61,16 @@ def _analysis_index_path(results_dir: Path) -> Path:
 def _analysis_index_lock_path(results_dir: Path) -> Path:
     """Return the sibling lock file used to serialize index updates."""
     return results_dir.parent / f".{results_dir.name}.latest_analyses_index.lock"
+
+
+# Note: directory mtime is an unreliable freshness signal — it is second-granular
+# on some filesystems (APFS reports `st_mtime_ns` ending in `000000000` for
+# directories) while the index persists full-precision ns, and two files written
+# in the same wall-clock second leave it unchanged. So the mtime check is kept only
+# as a cheap *hint*; the authoritative staleness guard is the analysis-file COUNT
+# comparison below. Do NOT gate the count check behind an mtime match (a same-second
+# addition would evade detection). The `*_mtime_mismatch_accepted` logs are emitted
+# at debug to avoid per-load/per-save noise.
 
 
 @contextmanager
@@ -169,43 +188,15 @@ _FILENAME_TIMESTAMP_RE = re.compile(r"^(?P<ticker>.+?)_(\d{8})_(\d{6})_analysis\
 
 
 def _parse_scores_from_final_decision(text: str) -> dict:
-    """Extract health_adj, growth_adj, verdict, zone from a PM final_decision narrative."""
-    result: dict = {}
+    """Extract health_adj, growth_adj, verdict, zone, risk_tally from a PM decision.
 
-    m = re.search(r"\bHEALTH_ADJ[:\s]+([0-9.]+)", text, re.IGNORECASE)
-    if not m:
-        m = re.search(r"Financial Health[^0-9\n]+([\d.]+)%", text, re.IGNORECASE)
-    if m:
-        try:
-            result["health_adj"] = float(m.group(1))
-        except ValueError:
-            pass
-
-    m = re.search(r"\bGROWTH_ADJ[:\s]+([0-9.]+)", text, re.IGNORECASE)
-    if not m:
-        m = re.search(r"Growth Transition[^0-9\n]+([\d.]+)%", text, re.IGNORECASE)
-    if m:
-        try:
-            result["growth_adj"] = float(m.group(1))
-        except ValueError:
-            pass
-
-    verdict_token = r"[A-Z_]+(?:[ \t][A-Z_]+)*"
-    for pattern in (
-        rf"\bVERDICT[:\s]+({verdict_token})",
-        rf"PORTFOLIO MANAGER VERDICT:\s*({verdict_token})",
-        r"\*\*Action\*\*:\s*\*\*(\w[\w_ ]*)\*\*",
-    ):
-        m = re.search(pattern, text)
-        if m:
-            result["verdict"] = m.group(1).strip().replace(" ", "_").upper()
-            break
-
-    m = re.search(r"\bZONE[:\s]+(HIGH|MODERATE|LOW)\b", text, re.IGNORECASE)
-    if m:
-        result["zone"] = m.group(1).upper()
-
-    return result
+    Thin delegate to the neutral src.pm_decision_parser so the parser stays
+    agents-free and is shared with the BUY stability gate. The verdict is returned
+    RAW; the AnalysisRecord call site canonicalizes via _normalize_verdict (so a
+    verdict like "REJECT" is preserved verbatim, not collapsed to DO_NOT_INITIATE).
+    Private name retained as the existing test surface.
+    """
+    return parse_final_decision_scores(text)
 
 
 def _should_emit_analysis_progress(processed_files: int, total_files: int) -> bool:
@@ -259,30 +250,76 @@ _PROFIT_TAKE_CAPITAL_FLAGS = frozenset(
 )
 
 
-def _extract_capital_flag_types(data: dict[str, Any], ticker: str) -> tuple[str, ...]:
-    """Derive capital-allocation flags from the saved fundamentals report."""
+def _extract_flag_types(
+    data: dict[str, Any],
+    ticker: str,
+    *,
+    source_file: str | None = None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Single validator pass → (capital_flag_types, quality_flag_types).
+
+    Runs the validators once over the saved fundamentals/value-trap reports and
+    partitions the result into:
+      - capital_flag_types: idle-cash capital flags (_PROFIT_TAKE_CAPITAL_FLAGS)
+      - quality_flag_types: peak/transient markers (PEAK_OR_TRANSIENT_FLAGS) —
+        CYCLICAL_PEAK_WARNING, TRANSIENT_STRENGTH_DISTORTION, and the
+        moat/capital-efficiency bonus-suppression flags — for the BUY stability gate.
+
+    Re-derivation is deterministic; any failure degrades both to ().
+    """
+    reports = data.get("reports") or {}
     fundamentals_report = (
-        (data.get("reports") or {}).get("fundamentals_report")
-        or data.get("fundamentals_report")
-        or ""
+        reports.get("fundamentals_report") or data.get("fundamentals_report") or ""
     )
     if not fundamentals_report:
-        return ()
-    try:
-        flags = detect_capital_efficiency_flags(fundamentals_report, ticker=ticker)
-    except Exception as exc:
-        logger.warning(
-            "capital_flag_extraction_failed",
-            ticker=ticker,
-            **_safe_exception_fields(exc, operation="extracting capital flags"),
-        )
-        return ()
-    filtered = (
-        flag_type
-        for flag in flags
-        if (flag_type := flag.get("type")) in _PROFIT_TAKE_CAPITAL_FLAGS
+        return (), ()
+    value_trap_report = (
+        reports.get("value_trap_report") or data.get("value_trap_report") or ""
     )
-    return tuple(dict.fromkeys(filtered))
+    try:
+        metrics = extract_metrics(
+            fundamentals_report,
+            ticker=ticker,
+            source_file=source_file,
+        )
+        red_flags, _ = detect_red_flags(metrics, ticker=ticker)
+        moat = detect_moat_flags(
+            fundamentals_report,
+            ticker=ticker,
+            base_metrics=metrics,
+        )
+        capital = detect_capital_efficiency_flags(
+            fundamentals_report,
+            ticker=ticker,
+            value_trap_report=value_trap_report or None,
+            base_metrics=metrics,
+        )
+    except Exception as exc:
+        log_fields = _safe_exception_fields(exc, operation="extracting analysis flags")
+        if source_file:
+            log_fields["file"] = source_file
+        logger.warning(
+            "flag_extraction_failed",
+            ticker=ticker,
+            **log_fields,
+        )
+        return (), ()
+
+    capital_types = tuple(
+        dict.fromkeys(
+            flag_type
+            for flag in capital
+            if (flag_type := flag.get("type")) in _PROFIT_TAKE_CAPITAL_FLAGS
+        )
+    )
+    quality_types = tuple(
+        dict.fromkeys(
+            flag_type
+            for flag in (*red_flags, *moat, *capital)
+            if (flag_type := flag.get("type")) in PEAK_OR_TRANSIENT_FLAGS
+        )
+    )
+    return capital_types, quality_types
 
 
 def _extract_tool1_financial_metrics(data: dict[str, Any]) -> dict[str, Any]:
@@ -408,6 +445,8 @@ def _build_analysis_record_from_data(
                 }
             if not snapshot.get("zone"):
                 snapshot = {**snapshot, "zone": fallback.get("zone") or ""}
+            if snapshot.get("risk_tally") is None:
+                snapshot = {**snapshot, "risk_tally": fallback.get("risk_tally")}
 
     ticker = snapshot.get("ticker") or data.get("ticker", "")
     if not ticker:
@@ -436,6 +475,11 @@ def _build_analysis_record_from_data(
     )
     macro_regime = macro_regime_raw if isinstance(macro_regime_raw, dict) else {}
     data_quality = _extract_analysis_data_quality(data, snapshot)
+    capital_flag_types, quality_flag_types = _extract_flag_types(
+        data,
+        ticker,
+        source_file=filepath.name,
+    )
 
     return AnalysisRecord(
         ticker=ticker,
@@ -462,7 +506,9 @@ def _build_analysis_record_from_data(
         sector=normalize_sector_label(snapshot.get("sector")),
         exchange=snapshot.get("exchange") or _exchange_from_ticker(ticker),
         is_quick_mode=bool(snapshot.get("is_quick_mode", False)),
-        capital_flag_types=_extract_capital_flag_types(data, ticker),
+        capital_flag_types=capital_flag_types,
+        risk_tally=snapshot.get("risk_tally"),
+        quality_flag_types=quality_flag_types,
         macro_regime=macro_regime,
         data_quality=data_quality,
         m_and_a_status=(snapshot.get("m_and_a_status") or "").strip().upper(),
@@ -492,7 +538,7 @@ def _repair_legacy_snapshot_currency(
         normalized_currency, scale = normalize_minor_unit_currency(resolution.code)
         major_rate = FALLBACK_RATES_TO_USD.get(normalized_currency or "")
         repaired_fx_rate = major_rate * scale if major_rate is not None else None
-        logger.info(
+        logger.debug(
             "legacy_snapshot_currency_repaired",
             ticker=ticker,
             from_currency=actual_currency,
@@ -573,7 +619,7 @@ def _load_latest_analyses_from_index(
         if indexed_total_files != current_analysis_file_count:
             emit_rebuild_notice(f"{index_path.name}:stale_directory_state")
             return None
-        logger.info(
+        logger.debug(
             "analysis_index_mtime_mismatch_accepted",
             path=str(index_path),
             indexed_total_files=indexed_total_files,
@@ -708,7 +754,7 @@ def update_latest_analyses_index(
                     analysis_file_count_before_save is not None
                     and indexed_total_files == analysis_file_count_before_save
                 ):
-                    logger.info(
+                    logger.debug(
                         "analysis_index_incremental_update_mtime_mismatch_accepted",
                         ticker=record.ticker,
                         path=str(index_path),

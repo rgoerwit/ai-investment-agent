@@ -18,7 +18,9 @@ Focus:
 - Statistics (per-instance)
 """
 
+import asyncio
 import socket
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -184,6 +186,42 @@ class TestFinancialSituationMemoryInitialization:
                     assert memory.embeddings_available is False
                     assert memory.available is False
 
+    def test_init_healthcheck_timeout_degrades_without_hanging(self):
+        """A hung embed_query (timeout=None SSL read, 2026-07-11 pytest hang)
+        must degrade to embeddings-unavailable within the deadline, not block
+        the constructor forever."""
+        with patch("src.memory.config") as mock_config:
+            mock_config.get_google_api_key.return_value = "test-key"
+
+            with patch(
+                "src.memory.GoogleGenerativeAIEmbeddings"
+            ) as mock_embeddings_class:
+                mock_embeddings = MagicMock()
+                mock_embeddings.embed_query.side_effect = lambda *_a, **_k: time.sleep(
+                    2
+                )
+                mock_embeddings_class.return_value = mock_embeddings
+
+                with (
+                    patch.object(
+                        FinancialSituationMemory,
+                        "_HEALTHCHECK_TIMEOUT_SECONDS",
+                        0.1,
+                    ),
+                    patch.object(
+                        FinancialSituationMemory,
+                        "_get_shared_chroma_client",
+                        return_value=None,
+                    ),
+                ):
+                    start = time.monotonic()
+                    memory = FinancialSituationMemory("test_memory")
+                    elapsed = time.monotonic() - start
+
+        assert memory.embeddings_available is False
+        assert memory.available is False
+        assert elapsed < 1.5
+
     def test_get_ticker_memory_stats_reads_existing_collections_without_recreating(
         self,
     ):
@@ -294,6 +332,47 @@ class TestSituationStorage:
         }
         assert kwargs["error_type"] == "RuntimeError"
         assert kwargs["exc_info"] is True
+
+    @pytest.mark.asyncio
+    async def test_get_embedding_hard_timeout_bounds_stalled_call(self):
+        """A stalled aembed_query must raise TimeoutError, not hang the run
+        (both the rate-limited attempt and the fallback are bounded).
+
+        Calls the undecorated function (``__wrapped__``) to test the hard
+        bound itself without tenacity's 3-attempt exponential backoff.
+        """
+
+        async def _stall(*_a, **_k):
+            await asyncio.sleep(5)
+
+        # Instant limiter: the real GLOBAL_RATE_LIMITER can block on aacquire when
+        # tokens are drained (full-suite CI ordering), and that wait would leak into
+        # the timed section and mask the hard-timeout bound this test verifies.
+        class _InstantLimiter:
+            async def aacquire(self, *, blocking=True):
+                return True
+
+        memory = FinancialSituationMemory("test_memory")
+        memory.available = True
+        memory.embeddings = MagicMock()
+        memory.embeddings.aembed_query = _stall
+
+        with (
+            patch.object(
+                FinancialSituationMemory, "_EMBEDDING_CALL_TIMEOUT_SECONDS", 0.05
+            ),
+            patch(
+                "src.llms.GLOBAL_RATE_LIMITER",
+                _LazyRateLimiterProxy(lambda: _InstantLimiter()),
+            ),
+            patch("src.memory.logger"),
+        ):
+            start = time.monotonic()
+            with pytest.raises(TimeoutError):
+                await memory._get_embedding.__wrapped__(memory, "some situation text")
+            elapsed = time.monotonic() - start
+
+        assert elapsed < 2
 
     @pytest.mark.asyncio
     async def test_get_embedding_accepts_lazy_rate_limiter_proxy(self):

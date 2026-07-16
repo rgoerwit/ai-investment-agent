@@ -225,7 +225,22 @@ def classify_failure(
         retryable = True
     elif any(
         marker in combined
-        for marker in ("500", "502", "503", "504", "internal server error")
+        # "internalservererror" catches the OpenAI SDK class name (raised for
+        # any >=500, including Cloudflare 52x bodies that name no 50x code the
+        # spaced marker would match); 520-524 are Cloudflare origin errors.
+        for marker in (
+            "500",
+            "502",
+            "503",
+            "504",
+            "520",
+            "521",
+            "522",
+            "523",
+            "524",
+            "internal server error",
+            "internalservererror",
+        )
     ):
         kind = "server_error"
         retryable = True
@@ -239,6 +254,17 @@ def classify_failure(
     ):
         kind = "model_not_found"
         retryable = False
+    elif any(
+        marker in combined
+        for marker in (
+            "clientpayloaderror",
+            "transferencodingerror",
+            "not enough data to satisfy transfer length header",
+            "response payload is not completed",
+        )
+    ):
+        kind = "connect_error"
+        retryable = True
     elif any(
         marker in combined for marker in ("400", "bad request", "invalid_request_error")
     ):

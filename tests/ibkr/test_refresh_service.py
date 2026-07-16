@@ -244,6 +244,34 @@ class TestPlan:
         )
         assert activity.queued == ["7203.T"]
 
+    def test_stale_soft_reject_review_is_refreshed(self):
+        """A CORRELATED_SELL_EVENT demotes a stale SOFT_REJECT sell to REVIEW; the
+        analysis is still stale, so it must be refreshed (the macro demotion must
+        not silently suppress refresh)."""
+        service = AnalysisRefreshService()
+        summary = service.classify(
+            [
+                _make_review_item(
+                    "7203.T",
+                    reason="Verdict → DO_NOT_INITIATE  (2026-03-05)",
+                    sell_type="SOFT_REJECT",
+                )
+            ],
+            max_age_days=14,
+        )
+        assert [row.run_ticker for row in summary.stale_in_queue] == ["7203.T"]
+        activity = service.plan(
+            summary,
+            options=RefreshPlanOptions(
+                policy="blocking",
+                limit=10,
+                show_recommendations=False,
+                read_only=False,
+                max_age_days=14,
+            ),
+        )
+        assert activity.queued == ["7203.T"]
+
     def test_read_only_moves_queue_to_skipped(self):
         service = AnalysisRefreshService()
         summary = service.classify([_make_review_item("7203.T")], max_age_days=14)

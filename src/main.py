@@ -323,6 +323,51 @@ async def _fetch_market_context(ticker: str, trade_date: str) -> str:
     return ""
 
 
+async def _fetch_price_snapshot(ticker: str) -> dict[str, float] | None:
+    """Fetch a 52-week/SMA price snapshot for the drawdown-investigation trigger.
+
+    Strictly advisory: failure returns None (debug log only) and must never
+    affect analysis validity. Mirrors ``_fetch_market_context``'s bounded pattern.
+    """
+    try:
+        import yfinance as yf
+
+        # auto_adjust=False: the trigger must share the DATA_BLOCK's basis
+        # (vendor fiftyTwoWeekHigh is unadjusted; adjusted highs sit lower and
+        # silently under-trigger — 6831.HK 2026-07-02: 8.73 adjusted vs 9.81).
+        hist = await run_with_hard_timeout(
+            asyncio.to_thread(
+                lambda: yf.Ticker(ticker).history(period="1y", auto_adjust=False)
+            ),
+            timeout=10,
+            label=f"price_snapshot:{ticker}",
+        )
+        closes = hist["Close"].dropna()
+        if len(closes) < 20:
+            return None
+        return {
+            "current": float(closes.iloc[-1]),
+            "high_52w": float(hist["High"].dropna().max()),
+            "low_52w": float(hist["Low"].dropna().min()),
+            "sma50": float(closes.tail(50).mean()),
+            "sma200": (
+                float(closes.tail(200).mean())
+                if len(closes) >= 200
+                else float(closes.mean())
+            ),
+        }
+    except Exception as e:
+        logger.debug(
+            "price_snapshot_fetch_failed",
+            **summarize_exception(
+                e,
+                operation="fetching price snapshot",
+                provider="unknown",
+            ),
+        )
+    return None
+
+
 async def _prefetch_macro_context(
     ticker: str,
     trade_date: str,
@@ -498,10 +543,35 @@ async def run_analysis(
                     from src.ticker_policy import sibling_ticker_candidates
 
                     siblings = sibling_ticker_candidates(ticker)
+                    history_candidates: list[str] = []
+                    try:
+                        from src.config import config as settings_config
+                        from src.ticker_history_resolver import (
+                            historical_resolution_candidates,
+                        )
+
+                        history_candidates = [
+                            candidate.display_label()
+                            for candidate in historical_resolution_candidates(
+                                ticker,
+                                results_dir=Path(settings_config.results_dir),
+                            )
+                        ]
+                    except Exception as exc:
+                        logger.debug(
+                            "history_resolution_candidates_failed",
+                            ticker=ticker,
+                            **summarize_exception(
+                                exc,
+                                operation="history resolution candidate lookup",
+                                provider="local",
+                            ),
+                        )
                     logger.warning(
                         "analysis_aborted_data_vacuum",
                         ticker=ticker,
                         sibling_candidates=list(siblings),
+                        history_candidates=history_candidates,
                         action=(
                             "verify the listing (possible delisting/migration); "
                             "if migrated, add to config/ticker_overrides.json; "
@@ -516,15 +586,51 @@ async def run_analysis(
                             if siblings
                             else ""
                         )
+                        + (
+                            "  Prior reliable same-base analysis(es): "
+                            f"{'; '.join(history_candidates)}\n"
+                            if history_candidates
+                            else ""
+                        )
                         + "  If the listing migrated, record it in "
                         "config/ticker_overrides.json.\n"
                         "  Use --force-data-vacuum to run the analysis anyway."
                     )
                     return None
 
+                # Proceeding despite an unresolved name (data is present, or
+                # --force-data-vacuum). On a dual-market suffix this is the
+                # wrong/secondary-listing signature — e.g. 145020.KS pulling a
+                # divergent feed while the canonical Hugel listing is KOSDAQ
+                # 145020.KQ. Flag it so the operator can verify the canonical
+                # exchange (and add a config/ticker_overrides.json remap).
+                from src.ticker_policy import (
+                    CHINA_SUFFIXES,
+                    KOREA_SUFFIXES,
+                    TAIWAN_SUFFIXES,
+                    get_ticker_suffix,
+                )
+
+                _suffix = get_ticker_suffix(ticker)
+                if _suffix in (KOREA_SUFFIXES | CHINA_SUFFIXES | TAIWAN_SUFFIXES):
+                    logger.warning(
+                        "secondary_listing_name_unresolved",
+                        ticker=ticker,
+                        suffix=_suffix,
+                        message=(
+                            "Name unresolved on a dual-market listing but data is "
+                            "present — possible wrong/secondary listing; verify the "
+                            "canonical exchange (consider config/ticker_overrides.json)"
+                        ),
+                    )
+
             # Fetch benchmark context once (non-blocking) before graph starts.
             # Prepended to the HumanMessage so every agent receives it as session context.
             market_context = await _fetch_market_context(ticker, real_date)
+            # Advisory 52wk/SMA snapshot: powers the news-analyst drawdown
+            # investigation trigger (news runs parallel to fundamentals, so it
+            # cannot read DATA_BLOCK price fields). None on failure by design.
+            price_snapshot = await _fetch_price_snapshot(ticker)
             # The macro brief remains advisory News Analyst context, but its LLM call
             # should still flow through the same callback-based cost/tracing surface.
             macro_context = await _prefetch_macro_context(
@@ -563,8 +669,7 @@ async def run_analysis(
             graph = create_trading_graph(
                 ticker=ticker,  # BUG FIX #1: Pass ticker for isolation
                 cleanup_previous=True,  # BUG FIX #1: Cleanup to prevent contamination
-                max_debate_rounds=1 if quick_mode else 2,
-                max_risk_discuss_rounds=1,
+                max_debate_rounds=1 if quick_mode else config.max_debate_rounds,
                 enable_memory=runtime_config.enable_memory,
                 recursion_limit=100,
                 quick_mode=quick_mode,  # Pass quick_mode for consultant LLM selection
@@ -639,12 +744,12 @@ async def run_analysis(
                 trade_date=real_date,
                 quick_mode=quick_mode,
                 enable_memory=runtime_config.enable_memory,
-                max_debate_rounds=1 if quick_mode else 2,
-                max_risk_rounds=1,
+                max_debate_rounds=1 if quick_mode else config.max_debate_rounds,
                 macro_context_report=macro_context_report,
                 macro_context_region=macro_context_region,
                 macro_context_status=macro_context_status,
                 macro_regime=macro_regime_block,
+                price_snapshot=price_snapshot,
             )
 
             logger.info(
@@ -1179,10 +1284,8 @@ def _attach_run_summary(
     provider_preflight: dict[str, dict[str, str]],
 ) -> None:
     """Attach the compact run summary before any persistence/output steps."""
-    result.setdefault("run_summary", {})
-    result["run_summary"]["quick_mode"] = bool(args.quick)
-    result["analysis_validity"] = build_analysis_validity(result)
-    result["run_summary"] = persistence.build_run_summary(
+    result.setdefault("run_summary", {})["quick_mode"] = bool(args.quick)
+    persistence.attach_run_summary(
         result,
         quick_mode=args.quick,
         article_requested=bool(args.article),

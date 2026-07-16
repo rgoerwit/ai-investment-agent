@@ -286,7 +286,37 @@ _GATE_BLOCKING_RED_FLAGS = frozenset(
     }
 )
 
+# Unresolved-data-conflict flags: a negative RM verdict normally skips the
+# Consultant (low value-add on a clear reject), but when the reject rests on a
+# data discrepancy the Consultant's reconciliation is the only step that can
+# resolve it (145020.KQ OCF period-mismatch, July 2026). Deliberately narrower
+# than _GATE_BLOCKING_RED_FLAGS: well-founded value-trap/PFIC rejects still skip.
+_GATE_DATA_DISCREPANCY_FLAGS = frozenset(
+    {
+        "OCF_SOURCE_DISCREPANCY",
+        "OCF_FILING_VALUE_UNCORROBORATED",
+        "CONSULTANT_DATA_DISCREPANCY",
+    }
+)
+
 _AUDITOR_CLEAN_STATUSES = frozenset({"CLEAN", "INSUFFICIENT_DATA", "UNAVAILABLE"})
+
+
+def parse_auditor_status(auditor_report: object) -> str | None:
+    """Return the auditor report's declared STATUS token (upper-case), or None.
+
+    Shared by the Consultant-gate cleanliness check and the run-summary success
+    flag so both read the auditor's `STATUS:` line through one regex.
+    """
+    if not isinstance(auditor_report, str):
+        return None
+    text = auditor_report.strip()
+    if not text or text.upper() == "N/A":
+        return "N/A"
+    import re
+
+    match = re.search(r"(?im)^\s*STATUS\s*[:=]\s*([A-Z_]+)", text)
+    return match.group(1).upper() if match else None
 
 
 def _auditor_status_clean(auditor_report: object) -> bool:
@@ -295,20 +325,22 @@ def _auditor_status_clean(auditor_report: object) -> bool:
         return True
     if not isinstance(auditor_report, str):
         return False
-    text = auditor_report.strip()
-    if not text or text.upper() == "N/A":
+    status = parse_auditor_status(auditor_report)
+    if status == "N/A":
         return True
-    import re
-
-    match = re.search(r"(?im)^\s*STATUS\s*[:=]\s*([A-Z_]+)", text)
-    if match:
-        return match.group(1).upper() in _AUDITOR_CLEAN_STATUSES
+    if status is not None:
+        return status in _AUDITOR_CLEAN_STATUSES
     # No explicit status field — fall back to a conservative "keep Consultant"
     # decision so a misformatted auditor output never silently disables it.
     return False
 
 
-def _has_blocking_red_flag(red_flags: object) -> bool:
+def _has_marker_red_flag(red_flags: object, markers: frozenset[str]) -> bool:
+    """True when any flag's stringified form contains one of ``markers``.
+
+    Flags may be plain strings or dicts/objects (production emits dicts with a
+    ``type`` key) — the str() form tolerates both.
+    """
     if not red_flags:
         return False
     if isinstance(red_flags, list | tuple | set):
@@ -317,9 +349,13 @@ def _has_blocking_red_flag(red_flags: object) -> bool:
         items = [red_flags]
     for raw in items:
         text = str(raw).upper()
-        if any(marker in text for marker in _GATE_BLOCKING_RED_FLAGS):
+        if any(marker in text for marker in markers):
             return True
     return False
+
+
+def _has_blocking_red_flag(red_flags: object) -> bool:
+    return _has_marker_red_flag(red_flags, _GATE_BLOCKING_RED_FLAGS)
 
 
 def _investment_plan_has_conflict(investment_plan: object) -> bool:
@@ -342,12 +378,14 @@ def _classify_rm_verdict(investment_plan: object) -> str:
 
     global _POSITIVE_VERDICT_RE, _NEGATIVE_VERDICT_RE
     if _POSITIVE_VERDICT_RE is None:
+        # Tolerate markdown header prefixes and the INVESTMENT/FINAL qualifier,
+        # e.g. "### FINAL RECOMMENDATION: BUY" / "### INVESTMENT RECOMMENDATION: REJECT".
         _POSITIVE_VERDICT_RE = re.compile(
-            r"(?im)^\s*(?:FINAL\s+)?(?:RECOMMENDATION|VERDICT|DECISION)\s*[:=]\s*"
+            r"(?im)^\s*#*\s*(?:FINAL\s+|INVESTMENT\s+)?(?:RECOMMENDATION|VERDICT|DECISION)\s*[:=]\s*"
             r"(STRONG[\s_-]*BUY|BUY|ACCUMULATE|WATCH|INITIATE)"
         )
         _NEGATIVE_VERDICT_RE = re.compile(
-            r"(?im)^\s*(?:FINAL\s+)?(?:RECOMMENDATION|VERDICT|DECISION)\s*[:=]\s*"
+            r"(?im)^\s*#*\s*(?:FINAL\s+|INVESTMENT\s+)?(?:RECOMMENDATION|VERDICT|DECISION)\s*[:=]\s*"
             r"(SELL|STRONG[\s_-]*SELL|DO[\s_-]*NOT[\s_-]*INITIATE|REJECT|AVOID|"
             r"STRONG[\s_-]*HOLD)"
         )
@@ -373,20 +411,27 @@ def should_invoke_consultant(
     Returns ``(True, reason)`` to invoke and ``(False, reason)`` to skip.
     Skips fire only in ``--quick`` mode; full runs always invoke Consultant
     so the deeper review remains the source of truth for production reports.
+    A negative RM verdict skips only when it is *clear* — a reject resting on
+    an unresolved data discrepancy keeps the Consultant so its reconciliation
+    isn't lost from the final report.
     """
     if not _quick_mode_active(config):
         return True, "full_mode"
 
     investment_plan = state.get("investment_plan")
     verdict = _classify_rm_verdict(investment_plan)
+    red_flags = state.get("red_flags") or []
+    has_conflict = _investment_plan_has_conflict(investment_plan)
 
-    if verdict == "negative":
+    if (
+        verdict == "negative"
+        and not has_conflict
+        and not _has_marker_red_flag(red_flags, _GATE_DATA_DISCREPANCY_FLAGS)
+    ):
         return False, "rm_clear_negative"
 
     if verdict == "positive":
         auditor_clean = _auditor_status_clean(state.get("auditor_report"))
-        red_flags = state.get("red_flags") or []
-        has_conflict = _investment_plan_has_conflict(investment_plan)
         if auditor_clean and not _has_blocking_red_flag(red_flags) and not has_conflict:
             return False, "clean_consensus"
 

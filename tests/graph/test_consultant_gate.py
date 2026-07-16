@@ -7,11 +7,30 @@ from typing import Any
 
 import pytest
 
+from src.graph import routing
 from src.graph.routing import (
     CONSULTANT_SKIP_SENTINEL,
+    _classify_rm_verdict,
     consultant_gate_router,
     should_invoke_consultant,
 )
+
+
+@pytest.mark.parametrize(
+    "plan, expected",
+    [
+        # The Research Manager emits markdown-prefixed headers; the classifier
+        # must see through "### " and the FINAL/INVESTMENT qualifiers.
+        ("### FINAL RECOMMENDATION: REJECT", "negative"),
+        ("### FINAL RECOMMENDATION: DO NOT INITIATE", "negative"),
+        ("### INVESTMENT RECOMMENDATION: BUY", "positive"),
+        ("### FINAL RECOMMENDATION: STRONG BUY", "positive"),
+        ("FINAL RECOMMENDATION: BUY", "positive"),
+        ("Notes: mixed signals only", "ambiguous"),
+    ],
+)
+def test_classify_rm_verdict_tolerates_markdown_headers(plan, expected):
+    assert _classify_rm_verdict(plan) == expected
 
 
 def _config(quick_mode: bool) -> dict[str, Any]:
@@ -110,6 +129,58 @@ def test_quick_negative_verdict_variants_skip(verdict_line):
     assert reason == "rm_clear_negative"
 
 
+def test_quick_negative_with_data_discrepancy_keeps_consultant():
+    """A reject resting on an unresolved data conflict still gets the
+    Consultant's reconciliation (145020.KQ OCF period-mismatch, July 2026)."""
+    state = _state(
+        plan=_NEGATIVE_PLAN,
+        auditor=_CLEAN_AUDITOR,
+        red_flags=["OCF_SOURCE_DISCREPANCY"],
+    )
+    invoke, reason = should_invoke_consultant(state, _config(quick_mode=True))
+    assert invoke is True
+    assert reason == "default_invoke"
+
+
+def test_quick_negative_with_dict_shaped_discrepancy_flag():
+    """Production red flags are dicts with a 'type' key — must not raise and
+    must still be recognized."""
+    state = _state(plan=_NEGATIVE_PLAN, auditor=_CLEAN_AUDITOR)
+    state["red_flags"] = [
+        {"type": "OCF_FILING_VALUE_UNCORROBORATED", "severity": "WARNING"}
+    ]
+    invoke, reason = should_invoke_consultant(state, _config(quick_mode=True))
+    assert invoke is True
+    assert reason == "default_invoke"
+
+
+def test_quick_negative_with_non_discrepancy_flag_still_skips():
+    """Well-founded value-trap rejects don't need a second opinion."""
+    state = _state(
+        plan=_NEGATIVE_PLAN,
+        auditor=_CLEAN_AUDITOR,
+        red_flags=["VALUE_TRAP_HIGH_RISK"],
+    )
+    invoke, reason = should_invoke_consultant(state, _config(quick_mode=True))
+    assert invoke is False
+    assert reason == "rm_clear_negative"
+
+
+def test_quick_negative_with_conflict_marker_keeps_consultant():
+    plan = _NEGATIVE_PLAN + "\nNote: CONFLICT between analyst and filing data."
+    state = _state(plan=plan, auditor=_CLEAN_AUDITOR)
+    invoke, reason = should_invoke_consultant(state, _config(quick_mode=True))
+    assert invoke is True
+    assert reason == "default_invoke"
+
+
+def test_full_mode_negative_with_discrepancy_unchanged():
+    state = _state(plan=_NEGATIVE_PLAN, red_flags=["OCF_SOURCE_DISCREPANCY"])
+    invoke, reason = should_invoke_consultant(state, _config(quick_mode=False))
+    assert invoke is True
+    assert reason == "full_mode"
+
+
 def test_quick_missing_auditor_treated_as_clean():
     """Auditor unset (e.g., ENABLE_CONSULTANT off elsewhere) should not block
     the Fast-Pass — the absence of an auditor report is not evidence of
@@ -178,3 +249,38 @@ def test_sentinel_records_reason():
     text = CONSULTANT_SKIP_SENTINEL.format(reason="clean_consensus")
     assert "clean_consensus" in text
     assert "SKIPPED_BY_GATE" in text
+
+
+class TestSharedOpenAIPlaneInvariant:
+    """Consultant and Auditor both gate on the shared OpenAI cross-check plane
+    (``enable_consultant`` + OpenAI key) via ``_is_auditor_enabled`` /
+    ``is_openai_consultant_available`` — neither is subordinate to the other's
+    LLM object. The auditor has independent PM (OCF corroboration) and report
+    consumers, so it must NOT be disabled merely because the consultant object
+    failed to build while the plane is up.
+    """
+
+    def test_auditor_off_when_consultant_disabled(self, monkeypatch):
+        monkeypatch.setattr(routing.config, "enable_consultant", False)
+        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: True)
+        assert routing._is_auditor_enabled() is False
+
+    def test_auditor_off_when_no_openai_key(self, monkeypatch):
+        monkeypatch.setattr(routing.config, "enable_consultant", True)
+        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: False)
+        assert routing._is_auditor_enabled() is False
+
+    def test_auditor_on_when_plane_up(self, monkeypatch):
+        monkeypatch.setattr(routing.config, "enable_consultant", True)
+        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: True)
+        assert routing._is_auditor_enabled() is True
+
+    def test_auditor_enable_matches_openai_availability_gate(self, monkeypatch):
+        # The auditor gate and the consultant availability gate read the SAME two
+        # conditions; enabling the plane flips both together.
+        monkeypatch.setattr(routing.config, "enable_consultant", True)
+        for available in (True, False):
+            monkeypatch.setattr(
+                routing, "is_openai_consultant_available", lambda a=available: a
+            )
+            assert routing._is_auditor_enabled() is available

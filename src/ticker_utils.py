@@ -25,7 +25,6 @@ from src.exchange_metadata import (
 )
 
 logger = structlog.get_logger(__name__)
-_ibkr_name_service = None
 
 _COMPANY_NAME_BASE_FALLBACK_SUFFIXES = frozenset({".ST"})
 _NORMALIZED_SHARE_CLASS_TICKER_PATTERN = re.compile(
@@ -356,9 +355,11 @@ class TickerFormatter:
             "symbol": symbol,
             "exchange_suffix": "",
             "exchange_name": f"Exchange {exchange}",
-            "country": "United States"
-            if exchange in ["NASDAQ", "NYSE", "SMART"]
-            else "Unknown",
+            "country": (
+                "United States"
+                if exchange in ["NASDAQ", "NYSE", "SMART"]
+                else "Unknown"
+            ),
             "ibkr_exchange": exchange,
             "format": "ibkr",
         }
@@ -586,12 +587,11 @@ async def _try_ibkr(ticker: str) -> str | None:
 
 
 def _get_ibkr_name_service():
-    global _ibkr_name_service
-    if _ibkr_name_service is None:
-        from src.ibkr.security_data_service import IbkrSecurityDataService
+    # Delegate to the process-wide shared service so name-resolution shares one probe
+    # cache with the rescue path and the optional IBKR market source.
+    from src.ibkr.security_data_service import get_security_data_service
 
-        _ibkr_name_service = IbkrSecurityDataService()
-    return _ibkr_name_service
+    return get_security_data_service()
 
 
 async def resolve_company_name(

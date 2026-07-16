@@ -16,11 +16,16 @@ class FakeClient:
         self.connected = False
         self.closed = False
 
-    def connect(self, *, brokerage_session: bool) -> None:
+    def connect(
+        self, brokerage_session: bool = False, *, maintain: bool = False
+    ) -> None:
         assert brokerage_session is False
         self.connected = True
 
     def close(self) -> None:
+        self.closed = True
+
+    def logout(self) -> None:
         self.closed = True
 
     def get_live_orders(self, account_id: str | None = None) -> list[dict]:
@@ -119,9 +124,7 @@ async def test_fetch_snapshot_preserves_name_total_and_progress():
     )
 
     assert progress == [
-        "Preparing IBKR client...",
-        "Connecting to IBKR...",
-        "Loading portfolio from IBKR...",
+        "Loading holdings from IBKR...",
         "Loading watchlist from IBKR...",
         "Loading live orders from IBKR...",
     ]
@@ -133,3 +136,99 @@ async def test_fetch_snapshot_preserves_name_total_and_progress():
     assert snapshot.live_orders == [
         {"ticker": "7203", "side": "BUY", "account_id": "U123456"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_snapshot_degrades_when_watchlist_unavailable():
+    """Tier-2 (brokerage) failure on the watchlist must not abort: holdings still
+    load, the watchlist is flagged unavailable, and the error is recorded."""
+    from src.ibkr.exceptions import IBKRAuthError
+
+    def _raising_watchlist(client, watchlist_name):
+        raise IBKRAuthError("brokerage session not authenticated for watchlist_fetch")
+
+    service = IbkrPortfolioDataService(
+        config=FakeConfig(),
+        client_cls=FakeClient,
+        read_portfolio_fn=_fake_read_portfolio,
+        read_watchlist_fn=_raising_watchlist,
+    )
+    snapshot = await service.fetch_snapshot(
+        account_id="U123456",
+        watchlist_name="watchlist-2026",
+        explicitly_requested=True,
+        cash_buffer_pct=0.05,
+        include_live_orders=False,
+    )
+
+    # Holdings (Tier 1) still loaded — run continues.
+    assert snapshot.positions == [{"ticker": "7203.T", "quantity": 100}]
+    # Watchlist (Tier 2) degraded, not aborted.
+    assert snapshot.watchlist.unavailable is True
+    assert snapshot.watchlist.found is False
+    assert "watchlist" in snapshot.errors
+
+
+@pytest.mark.asyncio
+async def test_fetch_snapshot_sanitizes_watchlist_error():
+    """Degraded watchlist errors are report/JSON-visible, so they must not expose
+    raw paths or secret-looking values."""
+
+    def _raising_watchlist(client, watchlist_name):
+        raise RuntimeError(
+            "failed reading /Users/richard3/.env with api_key=sk-1234567890abcdef"
+        )
+
+    service = IbkrPortfolioDataService(
+        config=FakeConfig(),
+        client_cls=FakeClient,
+        read_portfolio_fn=_fake_read_portfolio,
+        read_watchlist_fn=_raising_watchlist,
+    )
+    snapshot = await service.fetch_snapshot(
+        account_id="U123456",
+        watchlist_name="watchlist-2026",
+        explicitly_requested=True,
+        cash_buffer_pct=0.05,
+        include_live_orders=False,
+    )
+
+    error = snapshot.errors["watchlist"]
+    assert "watchlist_fetch" in error
+    assert "RuntimeError" in error
+    assert "/Users/richard3/.env" not in error
+    assert "sk-1234567890abcdef" not in error
+    assert "api_key" not in error
+
+
+@pytest.mark.asyncio
+async def test_fetch_snapshot_sanitizes_live_orders_error():
+    """Live-order degradation should not leak raw exception text through errors."""
+
+    class RaisingLiveOrdersClient(FakeClient):
+        def get_live_orders(self, account_id: str | None = None) -> list[dict]:
+            raise RuntimeError(
+                "live orders failed at /tmp/ibkr.json token=sk-fedcba0987654321"
+            )
+
+    service = IbkrPortfolioDataService(
+        config=FakeConfig(),
+        client_cls=RaisingLiveOrdersClient,
+        read_portfolio_fn=_fake_read_portfolio,
+        read_watchlist_fn=_fake_read_watchlist,
+    )
+    snapshot = await service.fetch_snapshot(
+        account_id="U123456",
+        watchlist_name="watchlist-2026",
+        explicitly_requested=True,
+        cash_buffer_pct=0.05,
+        include_live_orders=True,
+    )
+
+    error = snapshot.errors["live_orders"]
+    assert "live_orders" in error
+    assert "RuntimeError" in error
+    assert "/tmp/ibkr.json" not in error
+    assert "sk-fedcba0987654321" not in error
+    assert "token" not in error
+    assert snapshot.live_orders == []

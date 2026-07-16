@@ -7,6 +7,8 @@ No LLM is called; only the prompt JSON on disk is inspected.
 
 from __future__ import annotations
 
+import re
+
 from src.prompts import get_prompt
 
 
@@ -109,6 +111,35 @@ class TestPortfolioManagerPromptContent:
     def test_portfolio_manager_prompt_forbids_unverifiable_override_support(self):
         prompt = get_prompt("portfolio_manager")
         assert "UNVERIFIABLE consultant-resolution claims" in prompt.system_message
+
+    def test_portfolio_manager_prompt_separates_data_quality_from_thesis_risk(self):
+        """Internal-pipeline disagreements must be DATA_QUALITY_REVIEW (0.0 tally), not thesis risk.
+
+        Guards the fix for the over-rejection failure mode where moving-average /
+        price-feed / extractor mismatches were scored as Tier C1/C2 investment risk.
+        """
+        msg = get_prompt("portfolio_manager").system_message
+        assert "DATA-QUALITY REVIEW vs THESIS RISK" in msg
+        assert "DATA_QUALITY_REVIEW" in msg
+        assert "never Tier C2" in msg
+
+    def test_portfolio_manager_prompt_suppresses_moat_bonus_under_peak(self):
+        """Moat/capital-efficiency bonuses must be scored 0.0 under a peak/transient flag."""
+        msg = get_prompt("portfolio_manager").system_message
+        assert "MOAT_BONUS_SUPPRESSED_PEAK_TRANSIENT" in msg
+        assert "do NOT re-introduce the negative bonus" in msg
+
+    def test_portfolio_manager_prompt_enforces_distortion_before_catalyst(self):
+        """One-time items must be classified as distortions before being credited as catalysts."""
+        msg = get_prompt("portfolio_manager").system_message
+        assert "Distortion-before-catalyst" in msg
+        assert "NORMALIZED_EARNINGS_REQUIRED" in msg
+
+    def test_portfolio_manager_prompt_blocks_buy_on_material_unverified_signal(self):
+        """A large unverified operating decline must block BUY pending verification (not auto-SELL)."""
+        msg = get_prompt("portfolio_manager").system_message
+        assert "MATERIAL_UNVERIFIED_OPERATING_SIGNAL" in msg
+        assert "BLOCK BUY" in msg
 
 
 class TestFundamentalsEbitdaAnnualization:
@@ -260,3 +291,69 @@ class TestKoreanPromptAnchors:
         assert "밸류업" in apac.system_message
         assert "자사주 소각" in apac.system_message
         assert "기업지배구조보고서" in value_trap.system_message
+
+
+def _version_ok(version: str) -> bool:
+    return bool(re.match(r"^\d+\.\d+$", version))
+
+
+class TestOcfSamePeriodRule:
+    """Fundamentals prompt must forbid comparing a sub-annual filing OCF to TTM."""
+
+    def test_version_valid(self):
+        assert _version_ok(get_prompt("fundamentals_analyst").version)
+
+    def test_ocf_same_period_rule_present(self):
+        sm = get_prompt("fundamentals_analyst").system_message
+        assert "OCF same-period rule" in sm
+        assert "ESTIMATED" in sm
+
+
+class TestForeignLanguageSearchCFreshness:
+    """Search C must prefer the latest quarter, not the annual report."""
+
+    def test_version_valid(self):
+        assert _version_ok(get_prompt("foreign_language_analyst").version)
+
+    def test_prefers_latest_quarter(self):
+        sm = get_prompt("foreign_language_analyst").system_message
+        assert "most recent quarterly" in sm
+        assert "trailing-4-quarter" in sm
+
+    def test_en_fallback_not_annual_only(self):
+        sm = get_prompt("foreign_language_analyst").system_message
+        assert "cash flow from operations annual report" not in sm
+        assert "latest quarterly results operating cash flow" in sm
+
+
+class TestUndiscoveredCoverageGuard:
+    """Coverage caveat must bind against unqualified 'undiscovered' framing."""
+
+    def test_research_manager_binding_rule(self):
+        rm = get_prompt("research_manager")
+        assert _version_ok(rm.version)
+        assert "Undiscovered framing is binding" in rm.system_message
+        assert "ANALYST_COVERAGE_DATA_QUALITY_NOTE" in rm.system_message
+
+    def test_sentiment_qualifier(self):
+        s = get_prompt("sentiment_analyst")
+        assert _version_ok(s.version)
+        assert "low Western / English-language" in s.system_message
+
+    def test_no_hardcoded_analyst_count(self):
+        # The disputed "5 analysts" claim must not be encoded anywhere.
+        for key in ("research_manager", "sentiment_analyst"):
+            sm = get_prompt(key).system_message
+            assert "5 analysts" not in sm
+
+
+class TestPmExecutionPrecedence:
+    """PM final execution parameters must be declared binding over upstream stops."""
+
+    def test_version_valid(self):
+        assert _version_ok(get_prompt("portfolio_manager").version)
+
+    def test_precedence_rule_present(self):
+        sm = get_prompt("portfolio_manager").system_message
+        assert "these FINAL EXECUTION PARAMETERS are binding" in sm
+        assert "supersede" in sm

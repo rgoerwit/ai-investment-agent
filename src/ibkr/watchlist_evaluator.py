@@ -107,6 +107,22 @@ def evaluate_watchlist(
                     is_watchlist=True,
                 )
             )
+        elif verdict_upper == "BUY" and getattr(analysis, "is_quick_mode", False):
+            # Quick-mode BUY is a screening candidate, not investable — surface as
+            # REVIEW rather than proposing a watchlist buy off a fast-tier verdict.
+            items.append(
+                ReconciliationItem(
+                    ticker=Ticker.from_yf(ticker),
+                    action="REVIEW",
+                    reason=(
+                        f"Watchlist quick-mode screening BUY ({analysis.analysis_date}) — "
+                        "re-run full analysis before acting"
+                    ),
+                    urgency="LOW",
+                    analysis=analysis,
+                    is_watchlist=True,
+                )
+            )
         elif verdict_upper == "BUY":
             has_portfolio = portfolio.portfolio_value_usd > 0
             if has_portfolio and remaining_cash <= 0:

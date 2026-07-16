@@ -8,6 +8,7 @@ from typing import Any
 from src.ibkr.client import IbkrClient
 from src.ibkr.models import PortfolioSummary
 from src.ibkr.portfolio import build_portfolio_summary
+from src.ibkr.session_manager import get_ibkr_session_manager
 
 
 def _account_id(value: object) -> str:
@@ -70,28 +71,30 @@ class IbkrAccountService:
 
         return ibkr_config
 
-    def _fetch_account_ids_sync(self) -> list[str]:
+    def _build_client(self):
+        """Return ``(pooled_client, config)`` from the shared session pool.
+
+        The client is reused process-wide and logged out once at teardown — never
+        connect or close it here. The prompt-for-missing-secret callback runs once,
+        inside the pool's lazy connect.
+        """
         config = self._resolve_config()
-        if self._prompt_for_missing_secret_fn is not None:
-            self._prompt_for_missing_secret_fn(config)
-        client = self._client_cls(config)
-        client.connect(brokerage_session=False)
-        try:
-            return client.get_accounts()
-        finally:
-            client.close()
+        manager = get_ibkr_session_manager()
+        manager.configure(
+            client_cls=self._client_cls,
+            config=config,
+            prompt_for_missing_secret_fn=self._prompt_for_missing_secret_fn,
+        )
+        return manager.acquire(), config
+
+    def _fetch_account_ids_sync(self) -> list[str]:
+        client, _config = self._build_client()
+        return client.get_accounts()
 
     def _fetch_ledger_sync(self, account_id: str | None = None) -> dict[str, Any]:
-        config = self._resolve_config()
-        if self._prompt_for_missing_secret_fn is not None:
-            self._prompt_for_missing_secret_fn(config)
-        client = self._client_cls(config)
-        client.connect(brokerage_session=False)
+        client, config = self._build_client()
         acct = account_id or _account_id(getattr(config, "ibkr_account_id", ""))
-        try:
-            return client.get_ledger(acct)
-        finally:
-            client.close()
+        return client.get_ledger(acct)
 
     def _verify_connection_sync(
         self,
@@ -107,18 +110,12 @@ class IbkrAccountService:
         if include_key_validation and self._validate_key_files_fn is not None:
             key_info = self._validate_key_files_fn(config)
 
-        if self._prompt_for_missing_secret_fn is not None:
-            self._prompt_for_missing_secret_fn(config)
-
         acct = account_id or _account_id(getattr(config, "ibkr_account_id", ""))
-        client = self._client_cls(config)
-        client.connect(brokerage_session=False)
-        try:
-            accounts = client.get_accounts()
-            ledger = client.get_ledger(acct)
-            raw_positions = client.get_positions(acct)
-        finally:
-            client.close()
+        # Pool handles the prompt-for-missing-secret callback at connect time.
+        client, _config = self._build_client()
+        accounts = client.get_accounts()
+        ledger = client.get_ledger(acct)
+        raw_positions = client.get_positions(acct)
 
         summary = self._build_portfolio_summary_fn(ledger, [], acct)
         return AccountStatus(

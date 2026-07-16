@@ -228,6 +228,44 @@ class TestNonRateLimitErrors:
             10 <= second_wait <= 15
         ), f"Second wait {second_wait} not in expected range"
 
+    @pytest.mark.asyncio
+    async def test_transfer_encoding_400_reset_is_retried_as_transport_error(self):
+        """A framing/reset failure containing 400 is transport, not a bad request."""
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(
+            side_effect=[
+                Exception(
+                    "Response payload is not completed: "
+                    "<TransferEncodingError: 400, message='Not enough data to "
+                    "satisfy transfer length header.'>. "
+                    "ConnectionResetError(54, 'Connection reset by peer')"
+                ),
+                AIMessage(content="Success after retry"),
+            ]
+        )
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            with patch("src.agents.runtime.random.uniform", return_value=1.25):
+                with patch("src.agents.runtime.logger") as mock_logger:
+                    result = await invoke_with_rate_limit_handling(
+                        runnable,
+                        {"input": "test"},
+                        max_attempts=2,
+                        max_transient_attempts=2,
+                        context="Fundamentals Analyst",
+                        provider="google",
+                        model_name="gemini-3.5-flash",
+                    )
+
+        assert result.content == "Success after retry"
+        assert runnable.ainvoke.call_count == 2
+        mock_sleep.assert_called_once_with(6.25)
+
+        retry_log = mock_logger.warning.call_args
+        assert retry_log[0][0] == "llm_call_retry"
+        assert retry_log[1]["failure_kind"] == "connect_error"
+        assert retry_log[1]["retryable"] is True
+
 
 class TestQuietMode:
     """Test quiet mode behaviour: warnings/errors always surface, info is suppressed."""

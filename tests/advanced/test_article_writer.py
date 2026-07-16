@@ -80,9 +80,14 @@ class TestVoiceSamplesLoading:
 
         samples = writer._load_voice_samples()
 
-        # Should contain content from at least one sample
+        # Should contain content from at least one sample. The real
+        # writing_samples/ dir carries a distilled style_profile.md, which
+        # gets a distinct header from raw prose samples (see
+        # _load_voice_samples) — accept either.
         assert len(samples) > 0
-        assert "--- Sample:" in samples
+        assert (
+            "--- Writing Sample:" in samples or "=== DISTILLED STYLE PROFILE" in samples
+        )
 
     def test_respects_max_chars_limit(self):
         """Test that samples are truncated to max_chars."""
@@ -102,9 +107,12 @@ class TestVoiceSamplesLoading:
         samples = writer._load_voice_samples()
 
         # Should be truncated - per-file cap of 50 chars each
-        # Note: last file is included even if it puts us over max_sample_chars
-        # So with 50 char/file + ~50 header each, 2 files = ~200 chars
-        assert len(samples) <= 250  # Allow for 2 files with headers
+        # Note: last file is included even if it puts us over max_sample_chars.
+        # When a style_profile.md is present it's always the first file loaded
+        # (see _load_voice_samples), so with 50 char/file + the longer
+        # descriptive headers used to distinguish profile vs. raw samples,
+        # 2 files land around 300 chars.
+        assert len(samples) <= 350  # Allow for 2 files with headers
 
     def test_returns_empty_when_no_samples(self):
         """Test returns empty string when no samples found."""
@@ -139,6 +147,128 @@ class TestVoiceSamplesLoading:
             # At least one filename should appear
             found_filename = any(f.name in samples for f in sample_files)
             assert found_filename, "Sample filenames should be included"
+
+
+class TestVoiceSampleProfilePriority:
+    """Hermetic tests locking profile priority, marker fix, and distinct headers."""
+
+    def test_marker_matches_prompt_literal(self, tmp_path):
+        """The marker the prompt quotes appears verbatim as its own line.
+
+        Drift guard: the marker is EXTRACTED from prompts/writer.json, not
+        hardcoded — if the prompt renames/drops the quoted marker or the
+        loader stops emitting it, this fails.
+        """
+        import json
+
+        from src.article_writer import ArticleWriter
+
+        prompt = json.loads(Path("prompts/writer.json").read_text(encoding="utf-8"))
+        match = re.search(
+            r'block marked "(=== DISTILLED STYLE PROFILE ===)"',
+            prompt["system_message"],
+        )
+        assert match, "writer.json no longer quotes the profile marker"
+        marker = match.group(1)
+
+        # Create profile and one raw sample
+        profile_file = tmp_path / "style_profile.md"
+        profile_file.write_text("Profile content here", encoding="utf-8")
+        raw_file = tmp_path / "sample1.txt"
+        raw_file.write_text("Raw sample", encoding="utf-8")
+
+        writer = ArticleWriter.__new__(ArticleWriter)
+        writer.samples_dir = tmp_path
+        writer.prompt_config = {"metadata": {"max_sample_chars": 50000}}
+
+        samples = writer._load_voice_samples()
+
+        # The prompt's exact marker must appear as a standalone line
+        marker_lines = [line for line in samples.split("\n") if line.strip() == marker]
+        assert (
+            len(marker_lines) == 1
+        ), "Marker should appear exactly once on its own line"
+
+    def test_profile_appears_first(self, tmp_path):
+        """Profile block appears before raw writing samples."""
+        from src.article_writer import ArticleWriter
+
+        profile_file = tmp_path / "style_profile.md"
+        profile_file.write_text("Profile", encoding="utf-8")
+        raw_file = tmp_path / "sample1.txt"
+        raw_file.write_text("Raw", encoding="utf-8")
+
+        writer = ArticleWriter.__new__(ArticleWriter)
+        writer.samples_dir = tmp_path
+        writer.prompt_config = {"metadata": {"max_sample_chars": 50000}}
+
+        samples = writer._load_voice_samples()
+
+        profile_pos = samples.find("=== DISTILLED STYLE PROFILE")
+        raw_pos = samples.find("--- Writing Sample:")
+        assert profile_pos != -1, "Profile should be present"
+        assert raw_pos != -1, "Raw sample should be present"
+        assert profile_pos < raw_pos, "Profile must appear before raw samples"
+
+    def test_raw_pool_capped_at_constant(self, tmp_path):
+        """Raw writing samples limited to RAW_SAMPLES_WHEN_PROFILE_PRESENT."""
+        from src.article_writer import RAW_SAMPLES_WHEN_PROFILE_PRESENT, ArticleWriter
+
+        profile_file = tmp_path / "style_profile.md"
+        profile_file.write_text("Profile", encoding="utf-8")
+
+        # Create 6 raw files (more than the constant)
+        for i in range(6):
+            (tmp_path / f"sample{i}.txt").write_text(f"Sample {i}", encoding="utf-8")
+
+        writer = ArticleWriter.__new__(ArticleWriter)
+        writer.samples_dir = tmp_path
+        writer.prompt_config = {"metadata": {"max_sample_chars": 50000}}
+
+        samples = writer._load_voice_samples()
+
+        # Count raw sample blocks (should be capped)
+        raw_count = samples.count("--- Writing Sample:")
+        assert raw_count == RAW_SAMPLES_WHEN_PROFILE_PRESENT
+
+    def test_profile_not_in_raw_pool(self, tmp_path):
+        """Profile appears exactly once, never in the raw sample count."""
+        from src.article_writer import ArticleWriter
+
+        profile_file = tmp_path / "style_profile.md"
+        profile_file.write_text("Profile", encoding="utf-8")
+        (tmp_path / "sample1.txt").write_text("Sample", encoding="utf-8")
+
+        writer = ArticleWriter.__new__(ArticleWriter)
+        writer.samples_dir = tmp_path
+        writer.prompt_config = {"metadata": {"max_sample_chars": 50000}}
+
+        samples = writer._load_voice_samples()
+
+        # Profile marker should appear exactly once
+        profile_count = samples.count("=== DISTILLED STYLE PROFILE ===")
+        assert profile_count == 1
+
+    def test_distinct_headers_profile_vs_raw(self, tmp_path):
+        """Profile and raw samples use distinct headers."""
+        from src.article_writer import ArticleWriter
+
+        profile_file = tmp_path / "style_profile.md"
+        profile_file.write_text("Profile", encoding="utf-8")
+        raw_file = tmp_path / "sample1.txt"
+        raw_file.write_text("Raw", encoding="utf-8")
+
+        writer = ArticleWriter.__new__(ArticleWriter)
+        writer.samples_dir = tmp_path
+        writer.prompt_config = {"metadata": {"max_sample_chars": 50000}}
+
+        samples = writer._load_voice_samples()
+
+        # Profile uses "=== ... ===" style, raw uses "--- ... ---" style
+        assert "=== DISTILLED STYLE PROFILE ===" in samples
+        assert "--- Writing Sample:" in samples
+        # They should not use each other's format
+        assert "--- DISTILLED" not in samples
 
 
 class TestImageManifest:
@@ -228,6 +358,73 @@ class TestImageManifest:
             manifest = writer._format_image_manifest("XXXX", "2026-01-01")
 
             assert "No charts available" in manifest
+
+    def test_chart_paths_excludes_stale_suppressed_chart(self):
+        """A stale football-field file (run suppressed it, e.g. DNI/SELL) must
+        not resurface in the manifest when chart_paths from this run omit it."""
+        from src.article_writer import ArticleWriter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            images_dir = Path(tmpdir)
+            (images_dir / "2767.T_football_field.png").touch()  # stale, prior run
+            (images_dir / "2767.T_radar.png").touch()
+
+            writer = ArticleWriter.__new__(ArticleWriter)
+            writer.images_dir = images_dir
+            writer.use_github_urls = False
+
+            manifest = writer._format_image_manifest(
+                "2767.T",
+                "2026-02-07",
+                chart_paths={"radar": str(images_dir / "2767.T_radar.png")},
+            )
+
+            assert "Radar" in manifest
+            assert "Football Field" not in manifest
+
+    def test_chart_paths_includes_fresh_charts(self):
+        """Charts listed in chart_paths appear in the manifest normally."""
+        from src.article_writer import ArticleWriter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            images_dir = Path(tmpdir)
+            (images_dir / "2767.T_football_field.png").touch()
+            (images_dir / "2767.T_radar.png").touch()
+
+            writer = ArticleWriter.__new__(ArticleWriter)
+            writer.images_dir = images_dir
+            writer.use_github_urls = False
+
+            manifest = writer._format_image_manifest(
+                "2767.T",
+                "2026-02-07",
+                chart_paths={
+                    "football_field": str(images_dir / "2767.T_football_field.png"),
+                    "radar": str(images_dir / "2767.T_radar.png"),
+                },
+            )
+
+            assert "Football Field" in manifest
+            assert "Radar" in manifest
+
+    def test_chart_paths_none_or_empty_keeps_legacy_glob(self):
+        """None/{} chart_paths follow the legacy disk glob (mirrors
+        report_generator's empty-dict fallback convention)."""
+        from src.article_writer import ArticleWriter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            images_dir = Path(tmpdir)
+            (images_dir / "2767.T_football_field.png").touch()
+
+            writer = ArticleWriter.__new__(ArticleWriter)
+            writer.images_dir = images_dir
+            writer.use_github_urls = False
+
+            for chart_paths in (None, {}):
+                manifest = writer._format_image_manifest(
+                    "2767.T", "2026-02-07", chart_paths=chart_paths
+                )
+                assert "Football Field" in manifest
 
 
 class TestArticlePathResolution:
@@ -694,93 +891,373 @@ class TestWritingSamplesDirectory:
         assert has_content, "At least one sample should have substantial content"
 
 
-class TestClaudeToGeminiFallback:
-    """Tests for automatic Claude → Gemini fallback on API errors."""
+def _samples_dir():
+    return Path("writing_samples") if Path("writing_samples").exists() else None
 
-    @patch("src.article_writer.create_deep_thinking_llm")
-    @patch("src.article_writer.create_writer_llm")
-    def test_fallback_on_anthropic_billing_error(
-        self, mock_create_writer, mock_create_gemini
-    ):
-        """Regression: billing errors should fall back to Gemini, not crash."""
+
+def _billing_error() -> Exception:
+    return Exception(
+        "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', "
+        "'message': 'Your credit balance is too low to access the Anthropic API.'}}"
+    )
+
+
+def _mock_llm(model: str, response_text: str | None = None, error=None):
+    """LLM mock with a real model-name string so provider inference works."""
+    llm = MagicMock()
+    llm.model = model
+    if error is not None:
+        llm.invoke.side_effect = error
+    else:
+        llm.invoke.return_value = MagicMock(content=response_text)
+    return llm
+
+
+def _tier(label: str, llm):
+    from src.llms import WriterTier
+
+    return WriterTier(label, lambda: llm)
+
+
+class _RecordingLogger:
+    def __init__(self):
+        self.events: list[tuple[str, dict]] = []
+
+    def _record(self, event, **kwargs):
+        self.events.append((event, kwargs))
+
+    debug = info = warning = error = _record
+
+    def named(self, event: str) -> list[dict]:
+        return [kwargs for name, kwargs in self.events if name == event]
+
+
+class TestWriterFallbackChainRuntime:
+    """Runtime Claude-error path: iterate the writer fallback chain.
+
+    Chain order (EDITOR_MODEL → Gemini floor) is covered at construction level
+    in tests/test_llms_writer_fallback.py; here the chain is injected so the
+    loop's behavior — recovery, caching, logging, output — is tested directly.
+    """
+
+    def _writer(self, mock_create_writer, primary):
         from src.article_writer import ArticleWriter
 
-        # Claude LLM that raises billing error
-        mock_claude = MagicMock()
-        mock_claude.invoke.side_effect = Exception(
-            "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', "
-            "'message': 'Your credit balance is too low to access the Anthropic API.'}}"
-        )
-        mock_create_writer.return_value = mock_claude
+        mock_create_writer.return_value = primary
+        return ArticleWriter(samples_dir=_samples_dir())
 
-        # Gemini fallback
-        mock_gemini = MagicMock()
-        mock_gemini.invoke.return_value = MagicMock(
-            content="# Fallback Article\n\nWritten by Gemini."
-        )
-        mock_create_gemini.return_value = mock_gemini
+    @patch("src.article_writer.create_writer_llm")
+    def test_billing_error_recovers_on_first_tier(self, mock_create_writer):
+        """Claude billing error → EDITOR_MODEL tier writes the article."""
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", "# Fallback Article\n\nWritten by GPT.")
+        gemini = _mock_llm("gemini-3.5-flash", "# Should not be used.")
+        writer = self._writer(mock_create_writer, primary)
 
-        writer = ArticleWriter(
-            samples_dir=Path("writing_samples")
-            if Path("writing_samples").exists()
-            else None,
-        )
-        article = writer._invoke_writer([MagicMock()])
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[
+                _tier("editor_model", gpt),
+                _tier("gemini_last_resort", gemini),
+            ],
+        ):
+            article = writer._invoke_writer([MagicMock()])
 
-        # Should have fallen back to Gemini and produced an article
         assert "Fallback Article" in article
-        mock_create_gemini.assert_called_once()
-
-    @patch("src.article_writer.create_deep_thinking_llm")
-    @patch("src.article_writer.create_writer_llm")
-    def test_fallback_caches_gemini_for_subsequent_calls(
-        self, mock_create_writer, mock_create_gemini
-    ):
-        """After fallback, Gemini should be cached so subsequent calls don't retry Claude."""
-        from src.article_writer import ArticleWriter
-
-        mock_claude = MagicMock()
-        mock_claude.invoke.side_effect = Exception(
-            "Your credit balance is too low to access the Anthropic API."
-        )
-        mock_create_writer.return_value = mock_claude
-
-        mock_gemini = MagicMock()
-        mock_gemini.invoke.return_value = MagicMock(content="# Article\n\nContent.")
-        mock_create_gemini.return_value = mock_gemini
-
-        writer = ArticleWriter(
-            samples_dir=Path("writing_samples")
-            if Path("writing_samples").exists()
-            else None,
-        )
-
-        # First call triggers fallback
-        writer._invoke_writer([MagicMock()])
-        # Second call should use cached Gemini, not retry Claude
-        writer._invoke_writer([MagicMock()])
-
-        # Claude called once (first attempt), Gemini created once (cached), invoked twice
-        assert mock_claude.invoke.call_count == 1
-        assert mock_gemini.invoke.call_count == 2
+        assert writer.writer_fell_back is True
+        assert writer.current_model_name == "gpt-5.4"
+        gemini.invoke.assert_not_called()
 
     @patch("src.article_writer.create_writer_llm")
-    def test_non_anthropic_errors_propagate(self, mock_create_writer):
-        """Non-Anthropic errors should NOT trigger fallback."""
-        from src.article_writer import ArticleWriter
+    def test_first_tier_failure_recovers_on_gemini_floor(self, mock_create_writer):
+        """EDITOR_MODEL tier also fails → Gemini floor still produces the article."""
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", error=Exception("openai 503"))
+        gemini = _mock_llm("gemini-3.5-flash", "# Floor Article\n\nWritten by Gemini.")
+        writer = self._writer(mock_create_writer, primary)
 
-        mock_claude = MagicMock()
-        mock_claude.invoke.side_effect = ValueError("Some unrelated error")
-        mock_create_writer.return_value = mock_claude
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[
+                _tier("editor_model", gpt),
+                _tier("gemini_last_resort", gemini),
+            ],
+        ):
+            article = writer._invoke_writer([MagicMock()])
 
-        writer = ArticleWriter(
-            samples_dir=Path("writing_samples")
-            if Path("writing_samples").exists()
-            else None,
-        )
+        assert "Floor Article" in article
+        assert writer.writer_fell_back is True
+        assert writer.current_model_name == "gemini-3.5-flash"
+        assert gpt.invoke.call_count == 1
 
-        with pytest.raises(ValueError, match="Some unrelated error"):
+    @patch("src.article_writer.create_writer_llm")
+    def test_all_tiers_fail_raises_last_exception(self, mock_create_writer):
+        """No silent empty article: every tier failing re-raises the last error."""
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", error=Exception("openai 503"))
+        gemini = _mock_llm("gemini-3.5-flash", error=Exception("gemini floor down"))
+        writer = self._writer(mock_create_writer, primary)
+
+        with (
+            patch(
+                "src.article_writer.writer_fallback_chain",
+                return_value=[
+                    _tier("editor_model", gpt),
+                    _tier("gemini_last_resort", gemini),
+                ],
+            ),
+            pytest.raises(Exception, match="gemini floor down"),
+        ):
             writer._invoke_writer([MagicMock()])
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_non_anthropic_errors_propagate_without_chain(self, mock_create_writer):
+        """Non-Anthropic primary errors must NOT trigger the fallback chain."""
+        primary = _mock_llm("claude-opus-4-8", error=ValueError("Some unrelated error"))
+        writer = self._writer(mock_create_writer, primary)
+
+        with patch("src.article_writer.writer_fallback_chain") as mock_chain:
+            with pytest.raises(ValueError, match="Some unrelated error"):
+                writer._invoke_writer([MagicMock()])
+        mock_chain.assert_not_called()
+        assert writer.writer_fell_back is False
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_winning_tier_cached_for_subsequent_calls(self, mock_create_writer):
+        """After recovery the winning tier is cached — Claude is not retried."""
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", "# Article\n\nContent.")
+        writer = self._writer(mock_create_writer, primary)
+
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[_tier("editor_model", gpt)],
+        ) as mock_chain:
+            writer._invoke_writer([MagicMock()])
+            writer._invoke_writer([MagicMock()])
+
+        assert primary.invoke.call_count == 1
+        assert gpt.invoke.call_count == 2
+        mock_chain.assert_called_once()
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_fallback_invoke_preserves_writer_persona_messages(
+        self, mock_create_writer
+    ):
+        """The fallback swaps only the LLM — the writer's messages (persona
+        SystemMessage included) reach the fallback tier unchanged."""
+        from langchain_core.messages import SystemMessage
+
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", "# Article\n\nContent.")
+        writer = self._writer(mock_create_writer, primary)
+        messages = [SystemMessage(content="writer persona"), MagicMock()]
+
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[_tier("editor_model", gpt)],
+        ):
+            writer._invoke_writer(messages)
+
+        assert gpt.invoke.call_args.args[0] is messages
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_fallback_tiers_receive_tracking_callbacks(self, mock_create_writer):
+        """Fallback tokens must be attributed — the chain is built with the
+        writer's TokenTrackingCallback (the old single-hop passed none)."""
+        from src.token_tracker import TokenTrackingCallback
+
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", "# Article\n\nContent.")
+        writer = self._writer(mock_create_writer, primary)
+
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[_tier("editor_model", gpt)],
+        ) as mock_chain:
+            writer._invoke_writer([MagicMock()])
+
+        callbacks = mock_chain.call_args.kwargs["callbacks"]
+        assert isinstance(callbacks[0], TokenTrackingCallback)
+        assert callbacks[0].agent_name == "Article Writer"
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_recovery_logging_is_family_neutral_and_complete(
+        self, mock_create_writer, monkeypatch
+    ):
+        """Success path emits primary-failed + attempt + succeeded with the tier
+        label and real model/provider in structured fields — never a model
+        family baked into a fallback event name."""
+        import src.article_writer as aw
+
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", "# Article\n\nContent.")
+        writer = self._writer(mock_create_writer, primary)
+
+        recorder = _RecordingLogger()
+        monkeypatch.setattr(aw, "logger", recorder)
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[_tier("editor_model", gpt)],
+        ):
+            writer._invoke_writer([MagicMock()])
+
+        assert len(recorder.named("claude_writer_primary_failed")) == 1
+        attempts = recorder.named("writer_fallback_attempt")
+        assert [a["tier"] for a in attempts] == ["editor_model"]
+        assert attempts[0]["fallback_model"] == "gpt-5.4"
+        assert attempts[0]["fallback_provider"] == "openai"
+        succeeded = recorder.named("writer_fallback_succeeded")
+        assert [s["tier"] for s in succeeded] == ["editor_model"]
+        fallback_events = [name for name, _ in recorder.events if "fallback" in name]
+        for name in fallback_events:
+            assert not any(
+                family in name for family in ("gemini", "gpt", "claude", "openai")
+            ), f"family token in fallback event name: {name}"
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_tier_failure_logging_then_recovery(self, mock_create_writer, monkeypatch):
+        """A failing tier logs writer_fallback_attempt_failed and the loop
+        advances — events tell the full story in order."""
+        import src.article_writer as aw
+
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gpt = _mock_llm("gpt-5.4", error=Exception("openai 503"))
+        gemini = _mock_llm("gemini-3.5-flash", "# Article\n\nContent.")
+        writer = self._writer(mock_create_writer, primary)
+
+        recorder = _RecordingLogger()
+        monkeypatch.setattr(aw, "logger", recorder)
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[
+                _tier("editor_model", gpt),
+                _tier("gemini_last_resort", gemini),
+            ],
+        ):
+            writer._invoke_writer([MagicMock()])
+
+        failed = recorder.named("writer_fallback_attempt_failed")
+        assert [f["tier"] for f in failed] == ["editor_model"]
+        assert failed[0]["fallback_model"] == "gpt-5.4"
+        succeeded = recorder.named("writer_fallback_succeeded")
+        assert [s["tier"] for s in succeeded] == ["gemini_last_resort"]
+        assert succeeded[0]["fallback_provider"] == "google"
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_tier_build_failure_is_contained_and_loop_advances(
+        self, mock_create_writer, monkeypatch
+    ):
+        """A tier whose build() raises (availability race) is logged with empty
+        model fields — no NameError — and the next tier still recovers."""
+        import src.article_writer as aw
+        from src.llms import WriterTier
+
+        primary = _mock_llm("claude-opus-4-8", error=_billing_error())
+        gemini = _mock_llm("gemini-3.5-flash", "# Article\n\nContent.")
+
+        def _broken_build():
+            raise RuntimeError("OpenAI writer fallback tier unavailable")
+
+        writer = self._writer(mock_create_writer, primary)
+        recorder = _RecordingLogger()
+        monkeypatch.setattr(aw, "logger", recorder)
+        with patch(
+            "src.article_writer.writer_fallback_chain",
+            return_value=[
+                WriterTier("editor_model", _broken_build),
+                _tier("gemini_last_resort", gemini),
+            ],
+        ):
+            article = writer._invoke_writer([MagicMock()])
+
+        assert "Content." in article
+        failed = recorder.named("writer_fallback_attempt_failed")
+        assert [f["tier"] for f in failed] == ["editor_model"]
+        assert failed[0]["fallback_model"] == ""
+        assert failed[0]["fallback_provider"] == "unknown"
+        assert writer.writer_fell_back is True
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_primary_success_keeps_fell_back_flag_false(self, mock_create_writer):
+        primary = _mock_llm("claude-opus-4-8", "# Article\n\nContent.")
+        writer = self._writer(mock_create_writer, primary)
+
+        with patch("src.article_writer.writer_fallback_chain") as mock_chain:
+            writer._invoke_writer([MagicMock()])
+
+        assert writer.writer_fell_back is False
+        mock_chain.assert_not_called()
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_truncated_output_raises_error(self, mock_create_writer):
+        """MAX_TOKENS/LENGTH finish_reason raises RuntimeError, not silent skip."""
+        primary = _mock_llm("claude-opus-4-8", "# Article\n\n[truncated]")
+        primary.invoke.return_value.response_metadata = {"finish_reason": "MAX_TOKENS"}
+        writer = self._writer(mock_create_writer, primary)
+
+        with pytest.raises(RuntimeError, match="output token limit"):
+            writer._invoke_writer([MagicMock()])
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_normal_finish_reason_does_not_raise(self, mock_create_writer):
+        """STOP/END_TURN finish_reason succeeds normally."""
+        primary = _mock_llm("claude-opus-4-8", "# Article\n\nComplete.")
+        primary.invoke.return_value.response_metadata = {"finish_reason": "STOP"}
+        writer = self._writer(mock_create_writer, primary)
+
+        article = writer._invoke_writer([MagicMock()])
+        assert "Article" in article
+
+
+class TestWriterFellBackInitStamp:
+    """writer_fell_back is derived from the provider actually constructed —
+    a no-CLAUDE_KEY run resolving to GPT/Gemini must stamp True in the saved
+    run_summary, not the pre-chain default False."""
+
+    def _writer_with_model(self, mock_create_writer, model: str):
+        from src.article_writer import ArticleWriter
+
+        mock_create_writer.return_value = _mock_llm(model, "# A\n\nB.")
+        return ArticleWriter(samples_dir=_samples_dir())
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_claude_backed_writer_stamps_false(self, mock_create_writer):
+        writer = self._writer_with_model(mock_create_writer, "claude-opus-4-8")
+        assert writer.writer_fell_back is False
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_openai_backed_writer_stamps_true(self, mock_create_writer):
+        writer = self._writer_with_model(mock_create_writer, "gpt-5.4")
+        assert writer.writer_fell_back is True
+        assert writer.current_model_name == "gpt-5.4"
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_gemini_backed_writer_stamps_true(self, mock_create_writer):
+        writer = self._writer_with_model(mock_create_writer, "gemini-3.5-flash")
+        assert writer.writer_fell_back is True
+
+    @patch("src.article_writer.create_writer_llm")
+    def test_creation_log_reports_constructed_instance(
+        self, mock_create_writer, monkeypatch
+    ):
+        """creating_articlewriter_llm logs the real provider/model — never the
+        pre-chain 'gemini-fallback' guess."""
+        import src.article_writer as aw
+
+        mock_create_writer.return_value = _mock_llm("gpt-5.4", "# A\n\nB.")
+        recorder = _RecordingLogger()
+        monkeypatch.setattr(aw, "logger", recorder)
+
+        from src.article_writer import ArticleWriter
+
+        ArticleWriter(samples_dir=_samples_dir())
+
+        creations = recorder.named("creating_articlewriter_llm")
+        assert len(creations) == 1
+        assert creations[0]["provider"] == "openai"
+        assert creations[0]["model"] == "gpt-5.4"
+        assert "gemini-fallback" not in str(recorder.events)
 
 
 class TestArticleEditorTracing:

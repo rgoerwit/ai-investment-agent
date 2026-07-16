@@ -213,6 +213,15 @@ class TestFilingRegistry:
         assert reg.get_fetcher("AAPL") is None
         assert reg.get_fetcher("0005.HK") is None
 
+    def test_tokyo_suffix_does_not_match_taipei_exchange_suffix(self):
+        """A .T EDINET fetcher must not match .TWO Taiwan tickers."""
+        reg = FilingRegistry()
+        fetcher = _MockFetcher(["T"], "EDINET")
+        reg.register(fetcher)
+
+        assert reg.get_fetcher("7203.T") is fetcher
+        assert reg.get_fetcher("1264.TWO") is None
+
     def test_unavailable_fetcher_returns_none(self):
         """Unavailable fetcher (no API key) should return None."""
         reg = FilingRegistry()

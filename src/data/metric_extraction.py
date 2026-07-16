@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import statistics
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
@@ -11,6 +11,8 @@ import structlog
 
 from src.config import config
 from src.error_safety import summarize_exception
+from src.sector_normalization import normalize_sector_label
+from src.thesis_constants import SECTOR_MEDIAN_PE
 
 logger = structlog.get_logger(__name__)
 
@@ -28,6 +30,8 @@ STATEMENT_ROW_ALIASES: dict[str, tuple[str, ...]] = {
     "gross_profit": ("Gross Profit",),
     "operating_income": ("Operating Income", "Operating Income Loss"),
     "net_income": ("Net Income", "Net Income Common Stockholders"),
+    "eps_diluted": ("Diluted EPS",),
+    "eps_basic": ("Basic EPS",),
     "operating_cash_flow": (
         "Operating Cash Flow",
         "Cash Flow From Continuing Operating Activities",
@@ -43,6 +47,12 @@ STATEMENT_ROW_ALIASES: dict[str, tuple[str, ...]] = {
     "cash_only": ("Cash And Cash Equivalents", "Cash"),
     "cash_and_short_term_investments": ("Cash And Short Term Investments",),
     "short_term_investments": ("Short Term Investments",),
+    "cost_of_revenue": (
+        "Cost Of Revenue",
+        "Reconciled Cost Of Revenue",
+        "Cost Of Goods Sold",
+    ),
+    "inventory": ("Inventory",),
 }
 
 
@@ -53,6 +63,95 @@ def statement_value(df: pd.DataFrame, key: str, col: int = 0) -> float | None:
         if label in df.index:
             return _safe_float(df.loc[label].iloc[col])
     return None
+
+
+def _canonical_sector(value: Any) -> str | None:
+    normalized = normalize_sector_label(str(value) if value is not None else None)
+    return normalized if normalized in SECTOR_MEDIAN_PE else None
+
+
+def inventory_turnover_trend(
+    financials: pd.DataFrame, balance_sheet: pd.DataFrame
+) -> tuple[str, float] | None:
+    """Inventory-turnover (COGS/inventory) trend over available years, latest-first.
+
+    Distinguishes stocking-ahead-of-capacity from obsolescence for a build-out name:
+    RISING turnover = selling faster; FALLING = inventory building faster than sales.
+    Returns ``(trend, latest_turnover)`` or ``None`` when <2 comparable periods exist.
+    """
+    if financials.empty or balance_sheet.empty:
+        return None
+    years = min(len(financials.columns), len(balance_sheet.columns), 4)
+    turnovers: list[float] = []
+    for col in range(years):
+        cogs = statement_value(financials, "cost_of_revenue", col=col)
+        inv = statement_value(balance_sheet, "inventory", col=col)
+        if cogs is None or not inv or inv <= 0:
+            continue
+        turnovers.append(abs(cogs) / inv)
+    if len(turnovers) < 2:
+        return None
+    latest, oldest = turnovers[0], turnovers[-1]
+    if oldest <= 0:
+        return None
+    if latest > oldest * 1.1:
+        trend = "RISING"
+    elif latest < oldest * 0.9:
+        trend = "FALLING"
+    else:
+        trend = "STABLE"
+    return trend, round(latest, 2)
+
+
+def _statement_series(df: pd.DataFrame, key: str, max_years: int = 4) -> list[float]:
+    values: list[float] = []
+    if df.empty or key not in STATEMENT_ROW_ALIASES:
+        return values
+    for col in range(min(len(df.columns), max_years)):
+        value = statement_value(df, key, col=col)
+        if value is None:
+            continue
+        values.append(value)
+    return values
+
+
+def _statement_sum_series(
+    df: pd.DataFrame,
+    left_key: str,
+    right_key: str,
+    max_years: int = 4,
+) -> list[float]:
+    values: list[float] = []
+    if df.empty:
+        return values
+    for col in range(min(len(df.columns), max_years)):
+        left = statement_value(df, left_key, col=col)
+        right = statement_value(df, right_key, col=col)
+        if left is None or right is None:
+            continue
+        values.append(left + right)
+    return values
+
+
+def calculate_cagr_from_latest_series(values_latest_first: list[float]) -> float | None:
+    """Return CAGR from annual values ordered newest to oldest."""
+    if len(values_latest_first) < 4:
+        return None
+    latest = values_latest_first[0]
+    oldest = values_latest_first[3]
+    if latest <= 0 or oldest <= 0:
+        return None
+    return (latest / oldest) ** (1 / 3) - 1
+
+
+def classify_cycle_position(current_roa: float, average_roa: float) -> str:
+    if average_roa <= 0:
+        return "MID"
+    if current_roa > 1.5 * average_roa:
+        return "PEAK"
+    if current_roa < 0.6 * average_roa:
+        return "TROUGH"
+    return "MID"
 
 
 def _log_statement_field_extraction_failed(
@@ -88,6 +187,19 @@ def extract_from_financial_statements(
         fetcher.stats["sources"]["statements"] += 1
 
         if not financials.empty:
+            # Annual statements can lag a full fiscal year for some ex-US names
+            # (yfinance carries only through the prior FY). Flag when the latest
+            # annual column is older than a normal reporting lag, so a stale FY
+            # growth figure is surfaced rather than silently trusted (consumed by
+            # the GROWTH_DATA over-interpretation guard downstream).
+            latest_col = financials.columns[0]
+            if hasattr(latest_col, "to_pydatetime"):
+                age_days = (date.today() - latest_col.date()).days
+                extracted["_income_statement_date"] = latest_col.date().isoformat()
+                extracted["_statements_age_days"] = age_days
+                if age_days > 457:  # ~15 months: a completed FY is likely missing
+                    extracted["statements_stale"] = True
+                    extracted["_statements_stale_source"] = "calculated_from_statements"
             if len(financials.columns) >= 2:
                 try:
                     current = statement_value(financials, "total_revenue", col=0)
@@ -103,6 +215,42 @@ def extract_from_financial_statements(
                     _log_statement_field_extraction_failed(
                         symbol, "revenue_growth", exc
                     )
+                # FY EPS growth from the filed EPS rows (diluted > basic). Net-income
+                # growth is only a last-resort proxy (NI != EPS once share count moves
+                # via buybacks/dilution/splits), and is tagged as such so its lower
+                # reliability is visible to the merge and downstream.
+                try:
+                    eps_cur = statement_value(financials, "eps_diluted", col=0)
+                    eps_prev = statement_value(financials, "eps_diluted", col=1)
+                    eps_src = "calculated_from_statement_diluted_eps"
+                    if eps_cur is None or eps_prev is None:
+                        eps_cur = statement_value(financials, "eps_basic", col=0)
+                        eps_prev = statement_value(financials, "eps_basic", col=1)
+                        eps_src = "calculated_from_statement_basic_eps"
+                    if eps_cur is None or eps_prev is None:
+                        eps_cur = statement_value(financials, "net_income", col=0)
+                        eps_prev = statement_value(financials, "net_income", col=1)
+                        eps_src = "calculated_from_statement_net_income_proxy"
+                    # A non-positive prior base makes a YoY % meaningless; leave N/A
+                    # rather than fabricate a growth figure from a loss year.
+                    if eps_cur is not None and eps_prev is not None and eps_prev > 0:
+                        eps_growth = (eps_cur - eps_prev) / eps_prev
+                        if -1.0 < eps_growth < 5.0:
+                            extracted["earningsGrowth"] = eps_growth
+                            extracted["_earningsGrowth_source"] = eps_src
+                except Exception as exc:
+                    _log_statement_field_extraction_failed(
+                        symbol, "earnings_growth", exc
+                    )
+            try:
+                revenue_cagr = calculate_cagr_from_latest_series(
+                    _statement_series(financials, "total_revenue")
+                )
+                if revenue_cagr is not None:
+                    extracted["revenue_cagr_3y"] = revenue_cagr
+                    extracted["_revenue_cagr_3y_source"] = "calculated_from_statements"
+            except Exception as exc:
+                _log_statement_field_extraction_failed(symbol, "revenue_cagr_3y", exc)
 
             try:
                 revenue = statement_value(financials, "total_revenue")
@@ -140,6 +288,16 @@ def extract_from_financial_statements(
                     extracted["_freeCashflow_source"] = "calculated_from_statements"
             except Exception as exc:
                 _log_statement_field_extraction_failed(symbol, "cashflow", exc)
+            try:
+                fcf_values = _statement_sum_series(
+                    cashflow, "operating_cash_flow", "capital_expenditure"
+                )
+                fcf_cagr = calculate_cagr_from_latest_series(fcf_values)
+                if fcf_cagr is not None:
+                    extracted["fcf_cagr_3y"] = fcf_cagr
+                    extracted["_fcf_cagr_3y_source"] = "calculated_from_statements"
+            except Exception as exc:
+                _log_statement_field_extraction_failed(symbol, "fcf_cagr_3y", exc)
 
         if not balance_sheet.empty:
             statement_date = balance_sheet.columns[0]
@@ -158,6 +316,19 @@ def extract_from_financial_statements(
                     extracted["_currentRatio_source"] = "calculated_from_statements"
             except Exception as exc:
                 _log_statement_field_extraction_failed(symbol, "current_ratio", exc)
+
+            try:
+                inv_trend = inventory_turnover_trend(financials, balance_sheet)
+                if inv_trend is not None:
+                    extracted["inventoryTurnoverTrend"] = inv_trend[0]
+                    extracted["inventoryTurnoverLatest"] = inv_trend[1]
+                    extracted["_inventoryTurnoverTrend_source"] = (
+                        "calculated_from_statements"
+                    )
+            except Exception as exc:
+                _log_statement_field_extraction_failed(
+                    symbol, "inventory_turnover_trend", exc
+                )
 
             try:
                 debt = statement_value(balance_sheet, "total_debt")
@@ -244,6 +415,17 @@ def extract_from_financial_statements(
 def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
     """Extract TTM and MRQ growth/earnings/cash-flow horizons from quarterly statements."""
     extracted: dict[str, Any] = {}
+    diagnostics: list[dict[str, str]] = []
+
+    def add_diagnostic(field: str, reason: str) -> None:
+        diagnostics.append(
+            {
+                "field": field,
+                "status": "unavailable",
+                "reason": reason,
+            }
+        )
+
     try:
         qt_inc = ticker.quarterly_financials
         qt_cf = ticker.quarterly_cashflow
@@ -257,12 +439,17 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
                 provider="unknown",
             ),
         )
+        add_diagnostic("quarterly_horizons", "quarterly_data_unavailable")
+        extracted["_quarterly_diagnostics"] = diagnostics
         return extracted
 
     if qt_inc is not None and not qt_inc.empty:
         latest_q_date = qt_inc.columns[0]
         extracted["latest_quarter_date"] = str(latest_q_date.date())
         extracted["_latest_quarter_date_source"] = "yfinance_quarterly"
+
+    income_available = qt_inc is not None and not qt_inc.empty
+    cashflow_available = qt_cf is not None and not qt_cf.empty
 
     def _find_yoy_match_idx(
         series_index: pd.DatetimeIndex, latest_date: pd.Timestamp
@@ -279,8 +466,9 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
                 best_idx = i
         return best_idx
 
-    if qt_inc is not None and not qt_inc.empty and "Total Revenue" in qt_inc.index:
-        rev_series = qt_inc.loc["Total Revenue"].dropna()
+    if income_available and "Total Revenue" in qt_inc.index:
+        rev_raw = qt_inc.loc["Total Revenue"]
+        rev_series = rev_raw.dropna()
         if len(rev_series) >= 5:
             match_idx = _find_yoy_match_idx(rev_series.index, rev_series.index[0])
             if match_idx is not None:
@@ -293,6 +481,12 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
                         extracted["_revenueGrowth_MRQ_source"] = (
                             "calculated_from_quarterly"
                         )
+                else:
+                    add_diagnostic("revenueGrowth_MRQ", "nonpositive_prior_year_value")
+            else:
+                add_diagnostic("revenueGrowth_MRQ", "prior_year_quarter_not_matched")
+        else:
+            add_diagnostic("revenueGrowth_MRQ", "insufficient_quarterly_history")
         if len(rev_series) >= 8:
             ttm_current = rev_series.iloc[0:4].sum(min_count=4)
             ttm_prior = rev_series.iloc[4:8].sum(min_count=4)
@@ -304,9 +498,30 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
             if pd.notna(ttm_current):
                 extracted["revenue_TTM"] = float(ttm_current)
                 extracted["_revenue_TTM_source"] = "calculated_from_quarterly"
+            else:
+                add_diagnostic("revenue_TTM", "malformed_quarterly_window")
+            if "revenueGrowth_TTM" not in extracted:
+                add_diagnostic("revenueGrowth_TTM", "malformed_or_invalid_ttm_window")
+        else:
+            reason = (
+                "malformed_quarterly_window"
+                if len(rev_raw) >= 8
+                else "insufficient_quarterly_history"
+            )
+            add_diagnostic("revenueGrowth_TTM", reason)
+            add_diagnostic("revenue_TTM", reason)
+    elif income_available:
+        add_diagnostic("revenueGrowth_MRQ", "missing_total_revenue_row")
+        add_diagnostic("revenueGrowth_TTM", "missing_total_revenue_row")
+        add_diagnostic("revenue_TTM", "missing_total_revenue_row")
+    else:
+        add_diagnostic("revenueGrowth_MRQ", "quarterly_income_unavailable")
+        add_diagnostic("revenueGrowth_TTM", "quarterly_income_unavailable")
+        add_diagnostic("revenue_TTM", "quarterly_income_unavailable")
 
-    if qt_inc is not None and not qt_inc.empty and "Net Income" in qt_inc.index:
-        ni_series = qt_inc.loc["Net Income"].dropna()
+    if income_available and "Net Income" in qt_inc.index:
+        ni_raw = qt_inc.loc["Net Income"]
+        ni_series = ni_raw.dropna()
         if len(ni_series) >= 5:
             match_idx = _find_yoy_match_idx(ni_series.index, ni_series.index[0])
             if match_idx is not None:
@@ -319,11 +534,19 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
                         extracted["_earningsGrowth_MRQ_source"] = (
                             "calculated_from_quarterly"
                         )
+                else:
+                    add_diagnostic("earningsGrowth_MRQ", "nonpositive_prior_year_value")
+            else:
+                add_diagnostic("earningsGrowth_MRQ", "prior_year_quarter_not_matched")
+        else:
+            add_diagnostic("earningsGrowth_MRQ", "insufficient_quarterly_history")
         if len(ni_series) >= 4:
             ttm_ni = ni_series.iloc[0:4].sum(min_count=4)
             if pd.notna(ttm_ni):
                 extracted["netIncome_TTM"] = float(ttm_ni)
                 extracted["_netIncome_TTM_source"] = "calculated_from_quarterly"
+            else:
+                add_diagnostic("netIncome_TTM", "malformed_quarterly_window")
             if len(ni_series) >= 8:
                 ttm_ni_prior = ni_series.iloc[4:8].sum(min_count=4)
                 if pd.notna(ttm_ni) and pd.notna(ttm_ni_prior) and ttm_ni_prior > 0:
@@ -333,18 +556,58 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
                         extracted["_earningsGrowth_TTM_source"] = (
                             "calculated_from_quarterly"
                         )
+                if "earningsGrowth_TTM" not in extracted:
+                    add_diagnostic(
+                        "earningsGrowth_TTM", "malformed_or_invalid_ttm_window"
+                    )
+            else:
+                add_diagnostic(
+                    "earningsGrowth_TTM",
+                    "malformed_quarterly_window"
+                    if len(ni_raw) >= 8
+                    else "insufficient_quarterly_history",
+                )
+        else:
+            reason = (
+                "malformed_quarterly_window"
+                if len(ni_raw) >= 4
+                else "insufficient_quarterly_history"
+            )
+            add_diagnostic("netIncome_TTM", reason)
+            add_diagnostic("earningsGrowth_TTM", reason)
+    elif income_available:
+        add_diagnostic("earningsGrowth_MRQ", "missing_net_income_row")
+        add_diagnostic("earningsGrowth_TTM", "missing_net_income_row")
+        add_diagnostic("netIncome_TTM", "missing_net_income_row")
+    else:
+        add_diagnostic("earningsGrowth_MRQ", "quarterly_income_unavailable")
+        add_diagnostic("earningsGrowth_TTM", "quarterly_income_unavailable")
+        add_diagnostic("netIncome_TTM", "quarterly_income_unavailable")
 
-    if qt_cf is not None and not qt_cf.empty and "Operating Cash Flow" in qt_cf.index:
-        ocf_series = qt_cf.loc["Operating Cash Flow"].dropna()
+    if cashflow_available and "Operating Cash Flow" in qt_cf.index:
+        ocf_raw = qt_cf.loc["Operating Cash Flow"]
+        ocf_series = ocf_raw.dropna()
         if len(ocf_series) >= 4:
             ttm_ocf = ocf_series.iloc[0:4].sum(min_count=4)
             if pd.notna(ttm_ocf):
                 extracted["operatingCashflow_TTM"] = float(ttm_ocf)
                 extracted["_operatingCashflow_TTM_source"] = "calculated_from_quarterly"
+            else:
+                add_diagnostic("operatingCashflow_TTM", "malformed_quarterly_window")
+        else:
+            add_diagnostic(
+                "operatingCashflow_TTM",
+                "malformed_quarterly_window"
+                if len(ocf_raw) >= 4
+                else "insufficient_quarterly_history",
+            )
+    elif cashflow_available:
+        add_diagnostic("operatingCashflow_TTM", "missing_operating_cash_flow_row")
+    else:
+        add_diagnostic("operatingCashflow_TTM", "quarterly_cashflow_unavailable")
 
     if (
-        qt_cf is not None
-        and not qt_cf.empty
+        cashflow_available
         and "Operating Cash Flow" in qt_cf.index
         and "Capital Expenditure" in qt_cf.index
     ):
@@ -357,6 +620,14 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
             if pd.notna(ttm_fcf_ocf) and pd.notna(ttm_fcf_capex):
                 extracted["freeCashflow_TTM"] = float(ttm_fcf_ocf + ttm_fcf_capex)
                 extracted["_freeCashflow_TTM_source"] = "calculated_from_quarterly"
+            else:
+                add_diagnostic("freeCashflow_TTM", "malformed_quarterly_window")
+        else:
+            add_diagnostic("freeCashflow_TTM", "insufficient_quarterly_history")
+    elif cashflow_available:
+        add_diagnostic("freeCashflow_TTM", "missing_cashflow_or_capex_row")
+    else:
+        add_diagnostic("freeCashflow_TTM", "quarterly_cashflow_unavailable")
 
     extracted_mrq_growth = _safe_float(extracted.get("revenueGrowth_MRQ"))
     ttm_growth = _safe_float(extracted.get("revenueGrowth_TTM"))
@@ -385,6 +656,13 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
             "quarterly_horizons_extracted",
             symbol=symbol,
             fields=sorted(key for key in extracted if not key.startswith("_")),
+        )
+    if diagnostics:
+        extracted["_quarterly_diagnostics"] = diagnostics
+        logger.debug(
+            "quarterly_horizon_diagnostics",
+            symbol=symbol,
+            diagnostics=diagnostics,
         )
     return extracted
 
@@ -615,6 +893,20 @@ def calculate_capital_efficiency_signals(
             )
         if cash is not None and total_assets and total_assets > 0:
             signals["capital_cashToAssets"] = round(cash / total_assets, 4)
+        # Asset turnover (revenue / total assets): a structural proxy for the
+        # low-margin/high-turnover distribution model, used to gate relaxed margin
+        # floors for distributors (see SECTOR_OPERATING_MARGIN_MIN).
+        revenue = _safe_float(info.get("totalRevenue"))
+        if (
+            revenue is None
+            and not income_stmt.empty
+            and "Total Revenue" in income_stmt.index
+        ):
+            val = income_stmt.loc["Total Revenue"].iloc[0]
+            if pd.notna(val):
+                revenue = float(val)
+        if revenue is not None and total_assets and total_assets > 0:
+            signals["capital_assetTurnover"] = round(revenue / total_assets, 2)
         if capex is not None and d_and_a is not None and d_and_a != 0:
             capex_to_da_ratio = abs(capex) / abs(d_and_a)
             signals["capital_capexToDaRatio"] = round(capex_to_da_ratio, 2)
@@ -692,6 +984,7 @@ def calculate_return_trends(
                 avg_roa = statistics.mean(roas)
                 signals["roa_5y_avg"] = round(avg_roa * 100, 2)
                 signals["_roa_5y_years"] = len(roas)
+                signals["cycle_position"] = classify_cycle_position(roas[0], avg_roa)
                 signals["profitability_trend"] = compute_trend_regression(
                     list(reversed(roas)), avg_roa
                 )
@@ -710,9 +1003,11 @@ def calculate_return_trends(
         equity_key = (
             "Stockholders Equity"
             if "Stockholders Equity" in balance_sheet.index
-            else "Total Stockholder Equity"
-            if "Total Stockholder Equity" in balance_sheet.index
-            else None
+            else (
+                "Total Stockholder Equity"
+                if "Total Stockholder Equity" in balance_sheet.index
+                else None
+            )
         )
         if "Net Income" in financials.index and equity_key:
             roes: list[float] = []
@@ -808,6 +1103,14 @@ def calculate_derived_metrics(data: dict[str, Any], symbol: str) -> dict[str, An
                 if 0 < calculated_peg < 10:
                     calculated["pegRatio"] = calculated_peg
                     calculated["_pegRatio_source"] = "calculated_from_ttm_aligned"
+
+        sector = _canonical_sector(data.get("sector"))
+        pe = _safe_float(data.get("trailingPE"))
+        sector_median_pe = SECTOR_MEDIAN_PE[sector] if sector else None
+        if pe and sector_median_pe:
+            calculated["sectorMedianPE"] = sector_median_pe
+            calculated["peVsSector"] = round(pe / sector_median_pe, 2)
+            calculated["_peVsSector_source"] = "static_gics_sector_median"
 
         if data.get("growth_trajectory") is None:
             mrq = data.get("revenueGrowth_MRQ")

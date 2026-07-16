@@ -90,6 +90,13 @@ class TestConsultantNodeCreation:
         assert callable(node_func)
         mock_llm.bind_tools.assert_not_called()
 
+    def test_consultant_context_budgets_cover_native_and_value_trap_reports(self):
+        from src.agents.consultant_nodes import _CONSULTANT_CONTEXT_BUDGETS
+
+        for profile in ("full", "quick_standard", "quick_expanded"):
+            assert _CONSULTANT_CONTEXT_BUDGETS[profile]["foreign_language"] > 0
+            assert _CONSULTANT_CONTEXT_BUDGETS[profile]["value_trap"] > 0
+
 
 class TestConsultantNodeExecution:
     """Test suite for consultant node execution logic."""
@@ -137,6 +144,58 @@ class TestConsultantNodeExecution:
 
                 assert "consultant_review" in result
                 assert result["consultant_review"] == mock_response.content
+
+    @pytest.mark.asyncio
+    async def test_consultant_context_includes_native_source_and_value_trap_reports(
+        self,
+    ):
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = "CONSULTANT REVIEW: APPROVED"
+        captured: dict[str, str] = {}
+
+        async def mock_invoke(_llm, messages, **_kwargs):
+            captured["prompt"] = str(messages[0].content)
+            return mock_response
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                mock_prompt = Mock()
+                mock_prompt.system_message = "You are a consultant."
+                mock_prompt.agent_name = "External Consultant"
+                mock_get_prompt.return_value = mock_prompt
+
+                consultant_node = create_consultant_node(mock_llm, "consultant")
+                state = {
+                    "company_of_interest": "B3SA3.SA",
+                    "company_name": "B3",
+                    "market_report": "Market report",
+                    "sentiment_report": "Sentiment report",
+                    "news_report": "News report",
+                    "fundamentals_report": "Fundamentals report",
+                    "investment_debate_state": {"history": "Debate"},
+                    "investment_plan": (
+                        "Research Manager cites Foreign Language Analyst and "
+                        "Value Trap Detector."
+                    ),
+                    "foreign_language_report": "NATIVE SOURCE BODY",
+                    "value_trap_report": "VALUE TRAP BODY",
+                    "red_flags": [],
+                    "pre_screening_result": "PASS",
+                }
+
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2026-06-13")}
+                )
+
+                await consultant_node(state, config)
+
+        assert "FOREIGN-LANGUAGE / NATIVE-SOURCE ANALYST" in captured["prompt"]
+        assert "NATIVE SOURCE BODY" in captured["prompt"]
+        assert "VALUE TRAP DETECTOR" in captured["prompt"]
+        assert "VALUE TRAP BODY" in captured["prompt"]
 
     @pytest.mark.asyncio
     async def test_consultant_node_handles_missing_prompt(self):
@@ -348,6 +407,247 @@ class TestConsultantNodeExecution:
             result["artifact_statuses"]["consultant_review"]["message"]
             == "Consultant review completed with tool failures"
         )
+
+    async def _run_consultant_with_tool_results(self, tool_results: list):
+        """Drive one tool round with len(tool_results) calls, then synthesis."""
+        mock_llm = Mock()
+        tool_call_response = Mock()
+        tool_call_response.content = ""
+        tool_call_response.tool_calls = [
+            {
+                "name": "spot_check_metric",
+                "args": {"ticker": "0005.HK"},
+                "id": f"call_{i}",
+            }
+            for i in range(len(tool_results))
+        ]
+        final_response = Mock()
+        final_response.content = "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
+        final_response.tool_calls = []
+
+        mock_tool = Mock()
+        mock_tool.name = "spot_check_metric"
+        mock_tool.ainvoke = AsyncMock()
+
+        async def mock_invoke(*args, **kwargs):
+            if mock_invoke.calls == 0:
+                mock_invoke.calls += 1
+                return tool_call_response
+            return final_response
+
+        mock_invoke.calls = 0
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                tool_service = Mock()
+                tool_service.execute = AsyncMock(side_effect=tool_results)
+                with patch(
+                    "src.agents.consultant_nodes.get_current_tool_service",
+                    return_value=tool_service,
+                ):
+                    mock_prompt = Mock()
+                    mock_prompt.system_message = "You are a consultant."
+                    mock_prompt.agent_name = "External Consultant"
+                    mock_get_prompt.return_value = mock_prompt
+
+                    consultant_node = create_consultant_node(
+                        mock_llm, "consultant", tools=[mock_tool]
+                    )
+
+                    state = {
+                        "company_of_interest": "0005.HK",
+                        "company_name": "HSBC Holdings",
+                        "market_report": "Report",
+                        "sentiment_report": "Report",
+                        "news_report": "Report",
+                        "fundamentals_report": "Report",
+                        "investment_debate_state": {"history": "Debate"},
+                        "investment_plan": "Plan",
+                    }
+                    config = RunnableConfig(
+                        configurable={"context": Mock(trade_date="2025-12-13")}
+                    )
+
+                    return await consultant_node(state, config)
+
+    @pytest.mark.asyncio
+    async def test_consultant_minority_tool_failure_yields_partial_review(self):
+        """1-of-4 tool failures must degrade to PARTIAL, not exclude the review.
+
+        The 3393.T 2026-07-03 run lost the entire consultant counterweight
+        (and flipped the PM verdict) to a single failed verification call.
+        """
+        error_payload = (
+            '{"error":"upstream 500","provider":"fmp","failure_kind":"server_error"}'
+        )
+        result = await self._run_consultant_with_tool_results(
+            [
+                ToolResult(value=error_payload),
+                ToolResult(value="ok-1"),
+                ToolResult(value="ok-2"),
+                ToolResult(value="ok-3"),
+            ]
+        )
+
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is True
+        assert status["message"] == (
+            "Consultant review PARTIAL: 1/4 verification tool calls failed"
+        )
+        assert result["consultant_tool_failures"] == 1
+        assert result["consultant_review"].startswith("[PARTIAL REVIEW: 1 of 4")
+        assert "spot_check_metric" in result["consultant_review"]
+        assert result["consultant_review"].endswith(
+            "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
+        )
+
+    @pytest.mark.asyncio
+    async def test_consultant_majority_tool_failure_still_excluded(self):
+        """3-of-4 tool failures keep the previous not-ok exclusion behavior."""
+        error_payload = (
+            '{"error":"upstream 500","provider":"fmp","failure_kind":"server_error"}'
+        )
+        result = await self._run_consultant_with_tool_results(
+            [
+                ToolResult(value=error_payload),
+                ToolResult(value=error_payload),
+                ToolResult(value=error_payload),
+                ToolResult(value="ok-1"),
+            ]
+        )
+
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is False
+        assert status["message"] == "Consultant review completed with tool failures"
+        assert result["consultant_tool_failures"] == 3
+        assert not result["consultant_review"].startswith("[PARTIAL REVIEW")
+
+    @pytest.mark.asyncio
+    async def test_consultant_boundary_half_tool_failure_is_partial(self):
+        """2-of-4 failures (ratio exactly 0.5) sit on the inclusive <= boundary.
+
+        CONSULTANT_PARTIAL_TOOL_FAILURE_RATIO is 0.5 and the gate is
+        `failure_ratio <= ratio` — exactly-half must still degrade to PARTIAL,
+        not exclusion. Classic silent off-by-one regression spot.
+        """
+        error_payload = (
+            '{"error":"upstream 500","provider":"fmp","failure_kind":"server_error"}'
+        )
+        result = await self._run_consultant_with_tool_results(
+            [
+                ToolResult(value=error_payload),
+                ToolResult(value=error_payload),
+                ToolResult(value="ok-1"),
+                ToolResult(value="ok-2"),
+            ]
+        )
+
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is True
+        assert status["message"] == (
+            "Consultant review PARTIAL: 2/4 verification tool calls failed"
+        )
+        assert result["consultant_tool_failures"] == 2
+        assert result["consultant_review"].startswith("[PARTIAL REVIEW: 2 of 4")
+
+    @pytest.mark.asyncio
+    async def test_consultant_all_tool_failures_excluded(self):
+        """4-of-4 failures (ratio 1.0) stay excluded."""
+        error_payload = (
+            '{"error":"upstream 500","provider":"fmp","failure_kind":"server_error"}'
+        )
+        result = await self._run_consultant_with_tool_results(
+            [ToolResult(value=error_payload) for _ in range(4)]
+        )
+
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is False
+        assert result["consultant_tool_failures"] == 4
+        assert not result["consultant_review"].startswith("[PARTIAL REVIEW")
+
+    async def _run_consultant_with_loop_result(self, loop_result):
+        """Drive the node with a crafted loop result (bypasses the tool loop)."""
+        mock_llm = Mock()
+
+        with patch(
+            "src.agents.consultant_nodes.run_bounded_consultant_loop",
+            new=AsyncMock(return_value=loop_result),
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                mock_prompt = Mock()
+                mock_prompt.system_message = "You are a consultant."
+                mock_prompt.agent_name = "External Consultant"
+                mock_get_prompt.return_value = mock_prompt
+
+                consultant_node = create_consultant_node(
+                    mock_llm, "consultant", tools=[]
+                )
+
+                state = {
+                    "company_of_interest": "0005.HK",
+                    "company_name": "HSBC Holdings",
+                    "market_report": "Report",
+                    "sentiment_report": "Report",
+                    "news_report": "Report",
+                    "fundamentals_report": "Report",
+                    "investment_debate_state": {"history": "Debate"},
+                    "investment_plan": "Plan",
+                }
+                config = RunnableConfig(
+                    configurable={"context": Mock(trade_date="2025-12-13")}
+                )
+
+                return await consultant_node(state, config)
+
+    @pytest.mark.asyncio
+    async def test_consultant_zero_executed_tool_calls_no_zero_division(self):
+        """tool_call_count == 0 with failures must hit the `else 1.0` guard.
+
+        The ratio guard treats zero executed calls as full failure (excluded),
+        and must never raise ZeroDivisionError.
+        """
+        from src.agents.consultant_tool_loop import ConsultantLoopResult
+
+        loop_result = ConsultantLoopResult(
+            content="CONSULTANT REVIEW: CONDITIONAL APPROVAL",
+            response=Mock(),
+            had_tool_errors=True,
+            tool_failure_count=1,
+            tool_call_count=0,
+        )
+
+        result = await self._run_consultant_with_loop_result(loop_result)
+
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is False
+        assert status["message"] == "Consultant review completed with tool failures"
+        assert not result["consultant_review"].startswith("[PARTIAL REVIEW")
+
+    @pytest.mark.asyncio
+    async def test_consultant_empty_synthesis_with_failures_excluded(self):
+        """Blank synthesis + tool failures fails closed before the partial gate.
+
+        Empty consultant content trips should_fail_closed (missing required
+        structure), so the review is excluded rather than PARTIAL-tagged.
+        """
+        from src.agents.consultant_tool_loop import ConsultantLoopResult
+
+        loop_result = ConsultantLoopResult(
+            content="",
+            response=Mock(),
+            had_tool_errors=True,
+            tool_failure_count=1,
+            tool_call_count=4,
+        )
+
+        result = await self._run_consultant_with_loop_result(loop_result)
+
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["ok"] is False
+        assert status["message"] == "Consultant output missing required structure"
+        assert result["consultant_review"] == ""
 
     @pytest.mark.asyncio
     async def test_consultant_suppresses_repeated_fmp_alt_calls_after_failure(self):
@@ -676,7 +976,18 @@ class TestPortfolioManagerConsultantGating:
     async def test_pm_ignores_invalid_consultant_review_for_flag_generation(self):
         mock_llm = Mock()
         mock_response = Mock()
-        mock_response.content = "## FINAL DECISION: HOLD"
+        mock_response.content = (
+            "### PORTFOLIO MANAGER VERDICT: HOLD\n\n"
+            "### THESIS COMPLIANCE SUMMARY\n"
+            "Hard Fail Checks: PASS\n\n"
+            "### FINAL EXECUTION PARAMETERS\n"
+            "- Action: HOLD\n\n"
+            "### --- START PM_BLOCK ---\n"
+            "VERDICT: HOLD\n"
+            "RISK_TALLY: 0.5\n"
+            "ZONE: MODERATE\n"
+            "### --- END PM_BLOCK ---\n"
+        )
         captured_prompt: dict[str, str] = {}
 
         async def mock_invoke(*args, **kwargs):
@@ -739,7 +1050,179 @@ Conditions:
         prompt_text = captured_prompt["text"]
         assert "CONSULTANT_CONDITIONAL" not in prompt_text
         assert "N/A (consultant disabled or unavailable)" in prompt_text
-        assert result["final_trade_decision"] == "## FINAL DECISION: HOLD"
+        assert "PORTFOLIO MANAGER VERDICT: HOLD" in result["final_trade_decision"]
+
+    @pytest.mark.asyncio
+    async def test_pm_returns_generated_red_flags_for_downstream_reporting(self):
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = (
+            "### PORTFOLIO MANAGER VERDICT: HOLD\n\n"
+            "### THESIS COMPLIANCE SUMMARY\n"
+            "Hard Fail Checks: PASS\n\n"
+            "### FINAL EXECUTION PARAMETERS\n"
+            "- Action: HOLD\n\n"
+            "### --- START PM_BLOCK ---\n"
+            "VERDICT: HOLD\n"
+            "RISK_TALLY: 0.5\n"
+            "ZONE: MODERATE\n"
+            "### --- END PM_BLOCK ---\n"
+        )
+
+        async def mock_invoke(*args, **kwargs):
+            return mock_response
+
+        consultant_review = """
+### CONSULTANT REVIEW: CONDITIONAL APPROVAL
+
+**Overall Assessment**: CONDITIONAL APPROVAL
+"""
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                mock_prompt = Mock()
+                mock_prompt.system_message = "You are the portfolio manager."
+                mock_prompt.agent_name = "Portfolio Manager"
+                mock_get_prompt.return_value = mock_prompt
+
+                node = create_portfolio_manager_node(mock_llm, None)
+                state = {
+                    "market_report": "Market report",
+                    "sentiment_report": "Sentiment report",
+                    "news_report": "News report",
+                    "fundamentals_report": (
+                        "### --- START DATA_BLOCK ---\n"
+                        "PFIC_RISK: LOW\n"
+                        "VALUATION_INPUT_RELIABILITY: USABLE\n"
+                        "### --- END DATA_BLOCK ---"
+                    ),
+                    "value_trap_report": "",
+                    "investment_plan": "Research plan",
+                    "consultant_review": consultant_review,
+                    "trader_investment_plan": "Trader plan",
+                    "risk_debate_state": {
+                        "current_risky_response": "Risky view",
+                        "current_safe_response": "Safe view",
+                        "current_neutral_response": "Neutral view",
+                    },
+                    "company_of_interest": "TEST.T",
+                    "red_flags": [],
+                    "pre_screening_result": "PASS",
+                    "artifact_statuses": {
+                        "consultant_review": {
+                            "complete": True,
+                            "ok": True,
+                            "content": consultant_review,
+                        }
+                    },
+                }
+
+                result = await node(state, RunnableConfig(configurable={}))
+
+        assert any(
+            flag["type"] == "CONSULTANT_CONDITIONAL"
+            for flag in result.get("red_flags", [])
+        )
+
+    @pytest.mark.asyncio
+    async def test_pm_prompt_uses_resolved_ocf_period_mismatch_flag(self):
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = (
+            "### PORTFOLIO MANAGER VERDICT: HOLD\n\n"
+            "### THESIS COMPLIANCE SUMMARY\n"
+            "Hard Fail Checks: PASS\n\n"
+            "### FINAL EXECUTION PARAMETERS\n"
+            "- Action: HOLD\n\n"
+            "### --- START PM_BLOCK ---\n"
+            "VERDICT: HOLD\n"
+            "RISK_TALLY: 0.0\n"
+            "ZONE: LOW\n"
+            "### --- END PM_BLOCK ---\n"
+        )
+        captured_prompt: dict[str, str] = {}
+
+        async def mock_invoke(*args, **kwargs):
+            messages = args[1]
+            captured_prompt["text"] = messages[0].content
+            return mock_response
+
+        fundamentals_report = (
+            "### --- START DATA_BLOCK ---\n"
+            "OPERATING_CASH_FLOW: 151.97M PLN\n"
+            "OPERATING_CASH_FLOW_SOURCE: FILING\n"
+            "OCF_FILING_REASON: DISCREPANCY\n"
+            "VALUATION_INPUT_RELIABILITY: USABLE\n"
+            "### --- END DATA_BLOCK ---"
+        )
+        consultant_review = (
+            "### CONSULTANT REVIEW: CONDITIONAL APPROVAL\n\n"
+            "SPOT_CHECK operatingCashflow: DATA_BLOCK 151.97m PLN FY2025; "
+            "FMP 178.06m PLN TTM/Q1 — PERIOD MISMATCH, not a data conflict.\n\n"
+            "**Overall Assessment**: CONDITIONAL APPROVAL\n"
+        )
+        auditor_report = (
+            "Observed FY2025 figures used:\n- Operating cash flow: PLN 151.967m\n"
+        )
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                mock_prompt = Mock()
+                mock_prompt.system_message = "You are the portfolio manager."
+                mock_prompt.agent_name = "Portfolio Manager"
+                mock_get_prompt.return_value = mock_prompt
+
+                node = create_portfolio_manager_node(mock_llm, None)
+                state = {
+                    "market_report": "Market report",
+                    "sentiment_report": "Sentiment report",
+                    "news_report": "News report",
+                    "fundamentals_report": fundamentals_report,
+                    "value_trap_report": "",
+                    "investment_plan": "Research plan",
+                    "consultant_review": consultant_review,
+                    "auditor_report": auditor_report,
+                    "trader_investment_plan": "Trader plan",
+                    "risk_debate_state": {
+                        "current_risky_response": "Risky view",
+                        "current_safe_response": "Safe view",
+                        "current_neutral_response": "Neutral view",
+                    },
+                    "company_of_interest": "APR.WA",
+                    "red_flags": [
+                        {
+                            "type": "OCF_SOURCE_DISCREPANCY",
+                            "severity": "WARNING",
+                            "detail": "Filing and API OCF differ",
+                            "action": "RISK_PENALTY",
+                            "risk_penalty": 0.5,
+                        }
+                    ],
+                    "pre_screening_result": "PASS",
+                    "artifact_statuses": {
+                        "consultant_review": {
+                            "complete": True,
+                            "ok": True,
+                            "content": consultant_review,
+                        },
+                        "auditor_report": {
+                            "complete": True,
+                            "ok": True,
+                            "content": auditor_report,
+                        },
+                    },
+                }
+
+                result = await node(state, RunnableConfig(configurable={}))
+
+        prompt_text = captured_prompt["text"]
+        assert "OCF_PERIOD_MISMATCH_RESOLVED [risk_penalty +0.00]" in prompt_text
+        assert "OCF_SOURCE_DISCREPANCY [risk_penalty +0.50]" not in prompt_text
+        assert "PORTFOLIO MANAGER VERDICT: HOLD" in result["final_trade_decision"]
 
 
 class TestConsultantValueAddition:

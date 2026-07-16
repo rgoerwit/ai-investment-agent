@@ -6,6 +6,8 @@ UPDATED: Added tests for --brief mode functionality.
 
 from datetime import datetime
 
+import pytest
+
 from src.report_generator import QuietModeReporter, suppress_logging
 
 
@@ -734,6 +736,42 @@ RATIONALE: Market leader with pricing power and strong demand outlook.
 class TestSuppressLogging:
     """Test suppress_logging() function."""
 
+    @pytest.fixture(autouse=True)
+    def _restore_logging_state(self):
+        """suppress_logging() mutates process-global logging/warnings/structlog
+        state with no teardown; snapshot and restore it so log-asserting tests
+        that run later in the session (caplog, structlog capture) aren't
+        silently blinded (pm_risk_tally tests failed whenever this module ran
+        first)."""
+        import logging
+        import warnings
+
+        import structlog
+
+        root = logging.root
+        saved_root_level = root.level
+        saved_root_handlers = root.handlers[:]
+        saved_loggers = {
+            name: (lg.level, lg.propagate)
+            for name, lg in root.manager.loggerDict.items()
+            if isinstance(lg, logging.Logger)
+        }
+        saved_filters = warnings.filters[:]
+        saved_structlog = structlog.get_config()
+        try:
+            yield
+        finally:
+            root.setLevel(saved_root_level)
+            root.handlers[:] = saved_root_handlers
+            for name, lg in root.manager.loggerDict.items():
+                if not isinstance(lg, logging.Logger):
+                    continue
+                level, propagate = saved_loggers.get(name, (logging.NOTSET, True))
+                lg.setLevel(level)
+                lg.propagate = propagate
+            warnings.filters[:] = saved_filters
+            structlog.configure(**saved_structlog)
+
     def test_suppress_logging_no_errors(self):
         """Test suppress_logging runs without errors."""
         # Should not raise any exceptions
@@ -1226,6 +1264,34 @@ class TestTraderSectionVerdictGating:
         assert "PM_BLOCK verdict was DO NOT INITIATE" in report
         assert "6.00 NZD" not in report
 
+    def test_invalid_consultant_review_is_caveated_not_rendered(self):
+        reporter = QuietModeReporter("TEST.NZ")
+        result = self._result("#### PORTFOLIO MANAGER VERDICT: HOLD\n\nRationale.")
+        result.update(
+            {
+                "consultant_review": (
+                    "### CONSULTANT REVIEW: CONDITIONAL APPROVAL\n\n"
+                    "### SECTION 1: FACTUAL VERIFICATION\n"
+                    "Useful-looking text that failed validation."
+                ),
+                "artifact_statuses": {
+                    "consultant_review": {
+                        "complete": True,
+                        "ok": False,
+                        "message": "Consultant review completed with tool failures",
+                    }
+                },
+            }
+        )
+
+        report = reporter.generate_report(result)
+
+        assert "Verification Caveats" in report
+        assert "External consultant review excluded" in report
+        assert "completed with tool failures" in report
+        assert "External Consultant Review (Cross-Validation)" not in report
+        assert "Useful-looking text that failed validation" not in report
+
     def test_dni_risk_debate_is_labeled_non_executable(self):
         reporter = QuietModeReporter("TEST.NZ")
         report = reporter.generate_report(
@@ -1312,19 +1378,20 @@ class TestCleanTextPMBlock:
         if "START PM_BLOCK" in result:
             assert "Important prose after." in result
 
-    def test_strips_pm_block_with_three_hash_markers(self):
-        """### (3-hash) PM_BLOCK — common LLM drift variant — must be stripped."""
-        text = (
-            "Verdict prose.\n"
-            "### --- START PM_BLOCK ---\n"
-            "VERDICT: BUY\nRISK_ZONE: LOW\n"
-            "### --- END PM_BLOCK ---\n"
-            "Trailing prose."
-        )
-        result = self._clean(text)
-        assert "START PM_BLOCK" not in result
-        assert "Verdict prose." in result
-        assert "Trailing prose." in result
+    def test_strips_pm_block_with_shared_marker_drift(self):
+        """PM_BLOCK stripping uses the shared tolerant marker matcher."""
+        for hashes, dashes in (("##", "--"), ("###", "---"), ("####", "----")):
+            text = (
+                "Verdict prose.\n"
+                f"{hashes} {dashes} START PM_BLOCK {dashes}\n"
+                "VERDICT: BUY\nRISK_ZONE: LOW\n"
+                f"{hashes} {dashes} END PM_BLOCK {dashes}\n"
+                "Trailing prose."
+            )
+            result = self._clean(text)
+            assert "START PM_BLOCK" not in result
+            assert "Verdict prose." in result
+            assert "Trailing prose." in result
 
     def test_strips_pm_block_label_with_three_hash(self):
         """### PM_BLOCK label + fenced block — also stripped."""
@@ -1641,17 +1708,20 @@ class TestMoveDataBlockToEnd:
         assert result.count("START DATA_BLOCK") == 1
         assert result.count("END DATA_BLOCK") == 1
 
-    def test_moves_data_block_with_three_hash_markers(self):
-        """### (3-hash) DATA_BLOCK markers — common LLM drift — are moved correctly."""
-        text = (
-            "### --- START DATA_BLOCK ---\n"
-            "SECTOR: Financials\n"
-            "### --- END DATA_BLOCK ---\n\n"
-            "Prose section follows."
-        )
-        result = QuietModeReporter._move_data_block_to_end(text)
-        assert result.index("Prose section follows.") < result.index("START DATA_BLOCK")
-        assert result.count("START DATA_BLOCK") == 1
+    def test_moves_data_block_with_shared_marker_drift(self):
+        """DATA_BLOCK relocation uses the shared tolerant marker matcher."""
+        for hashes, dashes in (("##", "--"), ("###", "---"), ("####", "----")):
+            text = (
+                f"{hashes} {dashes} START DATA_BLOCK {dashes}\n"
+                "SECTOR: Financials\n"
+                f"{hashes} {dashes} END DATA_BLOCK {dashes}\n\n"
+                "Prose section follows."
+            )
+            result = QuietModeReporter._move_data_block_to_end(text)
+            assert result.index("Prose section follows.") < result.index(
+                "START DATA_BLOCK"
+            )
+            assert result.count("START DATA_BLOCK") == 1
 
     def test_moves_data_block_with_parenthetical_annotation(self):
         """DATA_BLOCK (INTERNAL SCORING…) parenthetical variant is moved correctly."""

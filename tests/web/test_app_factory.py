@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.web.ibkr_dashboard.app import create_app
-from src.web.ibkr_dashboard.settings import DashboardSettings
+from src.web.ibkr_dashboard.settings import DashboardPreferencesStore, DashboardSettings
 
 
 def test_create_app_registers_dashboard_services(tmp_path):
@@ -41,6 +41,69 @@ def test_create_app_applies_startup_preference_overrides(tmp_path):
     assert preferences.account_id == "U1234567"
     assert preferences.watchlist_name == "default watchlist"
     assert preferences.read_only is True
+
+
+def test_create_app_preference_precedence_saved_over_defaults_startup_over_saved(
+    tmp_path,
+):
+    """Dashboard precedence is startup args > saved prefs > env/default settings."""
+    runtime_dir = tmp_path / "runtime"
+    settings = DashboardSettings(
+        runtime_dir=runtime_dir,
+        read_only=False,
+        account_id="DEFAULT",
+        max_age_days=30,
+        default_refresh_limit=12,
+    )
+    DashboardPreferencesStore(runtime_dir / "settings.json").save(
+        {
+            "read_only": True,
+            "account_id": "SAVED",
+            "max_age_days": 21,
+            "refresh_limit": 9,
+        },
+        settings,
+    )
+
+    app = create_app(
+        settings,
+        preferences_override={
+            "read_only": False,
+            "max_age_days": 7,
+        },
+    )
+
+    preferences = app.config["SNAPSHOT_SERVICE"].current_preferences()
+    assert preferences.read_only is False
+    assert preferences.max_age_days == 7
+    assert preferences.account_id == "SAVED"
+    assert preferences.refresh_limit == 9
+
+
+def test_create_app_saved_preferences_override_dashboard_settings(tmp_path):
+    """Without startup overrides, saved preferences beat DashboardSettings values."""
+    runtime_dir = tmp_path / "runtime"
+    settings = DashboardSettings(
+        runtime_dir=runtime_dir,
+        read_only=False,
+        account_id="DEFAULT",
+        max_age_days=30,
+    )
+    DashboardPreferencesStore(runtime_dir / "settings.json").save(
+        {
+            "read_only": True,
+            "account_id": "SAVED",
+            "max_age_days": 21,
+        },
+        settings,
+    )
+
+    app = create_app(settings)
+
+    preferences = app.config["SNAPSHOT_SERVICE"].current_preferences()
+    assert preferences.read_only is True
+    assert preferences.account_id == "SAVED"
+    assert preferences.max_age_days == 21
 
 
 def test_dashboard_defaults_match_ibkr_config_defaults():

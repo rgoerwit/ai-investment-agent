@@ -159,6 +159,53 @@ def _build_quick_consultant_summary(
     }
 
 
+def _derive_consultant_verdict(consultant_status: dict[str, Any]) -> str:
+    """Distinguish 'consultant ran' from 'consultant approved'.
+
+    Mirrors the auditor's ran-vs-clean distinction. Reuses the canonical
+    ``parse_consultant_conditions`` (the same parser the PM uses to raise
+    ``CONSULTANT_*`` flags) on the stored review content rather than inventing a
+    second parse, so the verdict stays consistent with red-flag detection.
+
+    Returns one of: ``REJECTED`` (hard stop), ``MAJOR_CONCERNS`` (mandate breach
+    or major concerns), ``CONDITIONAL`` (conditional approval), ``CLEAN``
+    (approved), ``SKIPPED`` (intentionally bypassed by the quick-mode gate),
+    ``UNPARSED`` (ran ok but verdict unclassifiable), ``ERROR`` (ran but failed),
+    ``NOT_RUN`` (absent).
+    """
+    if not consultant_status:
+        return "NOT_RUN"
+    if not consultant_status.get("ok"):
+        return "ERROR" if consultant_status.get("complete") else "NOT_RUN"
+
+    # The quick-mode gate bypass writes a completed, ok artifact whose content is
+    # the SKIPPED_BY_GATE sentinel (provider="bypass"; see routing.py). That is an
+    # intentional cost-saving skip, not a garbled review — surface it as SKIPPED so
+    # run_summary and the memo/source-confidence renderers don't misread the bypass
+    # as an unparseable verdict (which wrongly downgrades cross-check confidence).
+    content = consultant_status.get("content") or ""
+    if consultant_status.get("provider") == "bypass" or (
+        isinstance(content, str) and content.startswith("SKIPPED_BY_GATE")
+    ):
+        return "SKIPPED"
+
+    from src.validators.supplemental_extractors import parse_consultant_conditions
+
+    conditions = parse_consultant_conditions(consultant_status.get("content") or "")
+    if conditions.get("has_hard_stop"):
+        return "REJECTED"
+    if conditions.get("has_mandate_breach"):
+        return "MAJOR_CONCERNS"
+    verdict = conditions.get("verdict")
+    if verdict == "MAJOR_CONCERNS":
+        return "MAJOR_CONCERNS"
+    if verdict == "CONDITIONAL_APPROVAL":
+        return "CONDITIONAL"
+    if verdict == "APPROVED":
+        return "CLEAN"
+    return "UNPARSED"
+
+
 def build_run_summary(
     result: dict,
     *,
@@ -229,19 +276,62 @@ def build_run_summary(
     providers_used = _collect_used_providers()
     runtime_config = get_runtime_config(config)
 
+    # "Successful" must mean the auditor completed a verified audit, not merely that it
+    # emitted well-formed prose. Caveated statuses are no data (INSUFFICIENT_DATA/
+    # UNAVAILABLE/N/A) or an incomplete/unverified audit (PARTIAL_DATA). A missing or
+    # unparseable STATUS line (parse → None) is *also* not a clean pass — we must not
+    # let malformed output read as HIGH confidence. So success requires an explicitly
+    # parsed, non-caveated status; everything else reads as "ran with caveats" (MEDIUM).
+    from src.graph.routing import parse_auditor_status
+
+    _AUDITOR_CAVEATED_STATUSES = {
+        "INSUFFICIENT_DATA",
+        "UNAVAILABLE",
+        "N/A",
+        "PARTIAL_DATA",
+    }
+    auditor_report_status = parse_auditor_status(auditor_status.get("content"))
+    auditor_successful = (
+        bool(auditor_status.get("ok"))
+        and auditor_report_status is not None
+        and auditor_report_status not in _AUDITOR_CAVEATED_STATUSES
+    )
+
+    # The consultant gets the same "ran vs approved" distinction the auditor has:
+    # `consultant_successful` (= bare `ok`) only means it returned a parseable
+    # review, NOT that it approved. Derive the approval verdict once, here, by
+    # reusing the canonical consultant-condition parser on the stored review
+    # content — the same parser the PM uses to raise CONSULTANT_* flags — so the
+    # memo/source-confidence renderers can branch on a single ready value.
+    consultant_verdict = _derive_consultant_verdict(consultant_status)
+
     summary = {
         "quick_mode": quick_mode,
         "quick_model": runtime_config.quick_think_llm,
         "deep_model": runtime_config.deep_think_llm,
         "provider_preflight": provider_preflight or {},
         "pre_screening_result": result.get("pre_screening_result", ""),
-        "debate_rounds": result.get("investment_debate_state", {}).get("count", 0),
+        # `count` tallies debate *turns* (one Bull + one Bear per round → even), so
+        # actual rounds = count // 2 (quick=1, full=2). `debate_turns` keeps the raw value.
+        "debate_rounds": result.get("investment_debate_state", {}).get("count", 0) // 2,
+        "debate_turns": result.get("investment_debate_state", {}).get("count", 0),
+        # Honest flag: reflects whether the quick-mode qualification note was actually
+        # appended to the PM text (marker presence), never a recomputed `quick and BUY`
+        # that would lie if the hook no-ops on PM-block parse drift.
+        "verdict_qualified_by_quick_mode": "QUICK-MODE QUALIFICATION"
+        in (result.get("final_trade_decision") or ""),
+        # Honest flag: marker presence of the weak-asymmetry BUY caveat, same
+        # rationale as verdict_qualified_by_quick_mode above.
+        "verdict_weak_valuation_asymmetry": "WEAK VALUATION ASYMMETRY"
+        in (result.get("final_trade_decision") or ""),
         "consultant_completed": consultant_finished,
         "auditor_completed": auditor_finished,
         "consultant_finished": consultant_finished,
         "auditor_finished": auditor_finished,
         "consultant_successful": bool(consultant_status.get("ok")),
-        "auditor_successful": bool(auditor_status.get("ok")),
+        "consultant_verdict": consultant_verdict,
+        "auditor_successful": auditor_successful,
+        "auditor_status": auditor_report_status,
         "apac_specialist_completed": apac_finished,
         "apac_specialist_successful": bool(apac_status.get("ok")),
         "apac_specialist_status": (
@@ -283,6 +373,36 @@ def build_run_summary(
             result, tracker_stats
         )
     return summary
+
+
+def attach_run_summary(
+    result: dict[str, Any],
+    *,
+    quick_mode: bool,
+    article_requested: bool = False,
+    provider_preflight: dict[str, dict[str, str]] | None = None,
+) -> None:
+    """Attach ``analysis_validity`` + the compact ``run_summary`` onto ``result``.
+
+    Single source of truth for run-summary enrichment, shared by the main analyzer
+    (``src.main._attach_run_summary``) and the portfolio_manager refresh save path.
+    Without this, refresh-saved analyses carried a bare ``run_summary`` missing the
+    macro-context provenance fields, which made the macro self-check in
+    ``save_results_to_file`` fire a spurious ``analysis_artifact_macro_mismatch``
+    on every refreshed ticker.
+
+    ``build_analysis_validity`` is imported lazily to avoid a module-level import
+    cycle (``runtime_diagnostics`` imports from this module at call time).
+    """
+    from src.runtime_diagnostics import build_analysis_validity
+
+    result["analysis_validity"] = build_analysis_validity(result)
+    result["run_summary"] = build_run_summary(
+        result,
+        quick_mode=quick_mode,
+        article_requested=article_requested,
+        provider_preflight=provider_preflight or {},
+    )
 
 
 def _normalize_macro_context_metadata(
@@ -505,6 +625,7 @@ def save_results_to_file(
             "decision": result.get("final_trade_decision", ""),
             "processed_signal": None,
         },
+        "red_flags": result.get("red_flags", []),
         "pre_screening_result": result.get("pre_screening_result", ""),
         "run_summary": result.get("run_summary", {}),
         "analysis_validity": result.get("analysis_validity", {}),
@@ -649,6 +770,32 @@ def save_results_to_file(
     return filepath
 
 
+def patch_saved_run_summary(
+    path: str | Path,
+    fields: dict[str, Any],
+    *,
+    logger_obj=logger,
+) -> None:
+    """Merge ``fields`` into ``run_summary`` of an already-saved analysis JSON.
+
+    Used to record post-persistence facts (e.g. the article writer model /
+    fallback flag) without re-running the full save path. Fail-open: a patch
+    failure must never break the run.
+    """
+    from src.error_safety import summarize_exception
+
+    try:
+        filepath = Path(path)
+        data = json.loads(filepath.read_text(encoding="utf-8"))
+        data.setdefault("run_summary", {}).update(fields)
+        filepath.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as exc:
+        logger_obj.warning(
+            "run_summary_patch_failed",
+            **summarize_exception(exc, operation="patching saved run_summary"),
+        )
+
+
 def _persist_analysis_outputs(
     result: dict,
     args: Any,
@@ -682,6 +829,10 @@ def _persist_analysis_outputs(
             strict_mode=getattr(args, "strict", False),
             logger_obj=logger_obj,
         )
+        # Internal-only marker (save_data is a curated dict, so this never
+        # self-persists): lets post-persistence steps such as the article
+        # writer-model stamp patch the saved JSON in place.
+        result["_saved_analysis_path"] = str(filepath)
         if not args.quiet and not args.brief and console_obj is not None:
             console_obj.print(
                 f"[green]Results saved to:[/green] [cyan]{filepath}[/cyan]{cost_suffix_fn()}"

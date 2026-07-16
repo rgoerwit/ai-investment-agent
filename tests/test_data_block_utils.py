@@ -3,15 +3,37 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.data_block_utils import (
+    BLOCK_SHAPES,
+    BlockShape,
+    build_fenced_block,
     extract_last_data_block,
     extract_last_fenced_block,
+    fenced_end,
+    fenced_start,
     has_parseable_data_block,
     has_parseable_fenced_block,
     normalize_legacy_data_block_report,
     normalize_structured_block_boundaries,
+    unfenced_label,
 )
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "data_block_utils"
+
+
+def test_marker_helpers_emit_canonical_form_and_parse_back():
+    block = build_fenced_block("PM_BLOCK", "VERDICT: BUY")
+
+    assert fenced_start("PM_BLOCK") == "### --- START PM_BLOCK ---"
+    assert fenced_end("PM_BLOCK") == "### --- END PM_BLOCK ---"
+    assert extract_last_fenced_block(block, "PM_BLOCK").strip() == "VERDICT: BUY"
+
+
+def test_block_shape_registry_classifies_known_block_families():
+    assert BLOCK_SHAPES["DATA_BLOCK"] is BlockShape.FENCED
+    assert BLOCK_SHAPES["PM_BLOCK"] is BlockShape.FENCED
+    assert BLOCK_SHAPES["TRADE_BLOCK"] is BlockShape.UNFENCED
+    assert BLOCK_SHAPES["FORENSIC_DATA_BLOCK"] is BlockShape.UNFENCED
+    assert unfenced_label("TRADE_BLOCK") == "TRADE_BLOCK:"
 
 
 def test_has_parseable_data_block_requires_fenced_block():
@@ -37,6 +59,17 @@ def test_extract_last_data_block_accepts_four_hash_marker():
 #### --- START DATA_BLOCK ---
 NET_DEBT_EBITDA: -0.01
 #### --- END DATA_BLOCK ---
+"""
+
+    assert has_parseable_data_block(report) is True
+    assert "NET_DEBT_EBITDA: -0.01" in extract_last_data_block(report)
+
+
+def test_extract_last_data_block_accepts_two_hash_and_dash_marker():
+    report = """
+## -- START DATA_BLOCK --
+NET_DEBT_EBITDA: -0.01
+## -- END DATA_BLOCK --
 """
 
     assert has_parseable_data_block(report) is True
@@ -285,6 +318,60 @@ def test_normalize_structured_block_boundaries_repairs_glued_pm_block_heading():
 
     assert normalized is not None
     assert "### --- END PM_BLOCK ---\n\n### POSITION SIZING" in normalized
+
+
+def test_normalize_structured_block_boundaries_repairs_leading_glued_start_marker():
+    report = (
+        "Assets should improve as the project comes online.### --- START DATA_BLOCK ---\n"
+        "SECTOR: Energy\n"
+        "### --- END DATA_BLOCK ---\n"
+    )
+
+    normalized = normalize_structured_block_boundaries(report)
+
+    assert normalized is not None
+    assert "online.\n### --- START DATA_BLOCK ---" in normalized
+    assert has_parseable_data_block(normalized) is True
+    assert "SECTOR: Energy" in extract_last_data_block(report)
+
+
+def test_normalize_structured_block_boundaries_repairs_two_hash_leading_glue():
+    report = (
+        "Prose before## -- START DATA_BLOCK --\n"
+        "SECTOR: Energy\n"
+        "## -- END DATA_BLOCK --\n"
+    )
+
+    normalized = normalize_structured_block_boundaries(report)
+
+    assert normalized is not None
+    assert "Prose before\n## -- START DATA_BLOCK --" in normalized
+    assert has_parseable_data_block(normalized) is True
+
+
+def test_normalize_structured_block_boundaries_repairs_glued_end_marker():
+    report = (
+        "### --- START DATA_BLOCK ---\n" "SECTOR: Energy### --- END DATA_BLOCK ---\n"
+    )
+
+    normalized = normalize_structured_block_boundaries(report)
+
+    assert normalized is not None
+    assert "SECTOR: Energy\n### --- END DATA_BLOCK ---" in normalized
+    assert has_parseable_data_block(normalized) is True
+
+
+def test_normalize_structured_block_boundaries_is_idempotent_after_leading_repair():
+    report = (
+        "Prose before### --- START DATA_BLOCK ---\n"
+        "SECTOR: Energy\n"
+        "### --- END DATA_BLOCK ---### FINANCIAL HEALTH DETAIL\n"
+    )
+
+    once = normalize_structured_block_boundaries(report)
+    twice = normalize_structured_block_boundaries(once)
+
+    assert once == twice
 
 
 def test_normalize_structured_block_boundaries_leaves_clean_text_unchanged():

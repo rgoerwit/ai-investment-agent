@@ -13,6 +13,152 @@ from src.validators.metric_extractor import parse_ratio_or_percent
 
 logger = structlog.get_logger(__name__)
 
+# Canonical legal-status enum vocabularies. These are the single source of truth
+# for the alternations below AND for the L0 parity test, which asserts each set
+# equals the tokens the Legal Counsel prompt advertises (and, for CMIC, the chart
+# extractor's own copy). Keep in sync with prompts/legal_counsel.json.
+PFIC_STATUS_TOKENS = ("CLEAN", "UNCERTAIN", "PROBABLE", "N/A")
+VIE_STRUCTURE_TOKENS = ("YES", "NO", "N/A")
+CMIC_STATUS_TOKENS = ("FLAGGED", "UNCERTAIN", "CLEAR", "N/A")
+
+
+def _alternation(tokens: tuple[str, ...]) -> str:
+    """Build a capturing regex alternation from an enum token tuple."""
+    return "(" + "|".join(tokens) + ")"
+
+
+# A large operating-metric decline stated in narrative text. Deliberately
+# limited to operating metrics + decline language so share-price drawdowns and
+# small moves do not match. Threshold applied in the extractor below.
+#
+# Pattern A: English prose with an explicit decline verb
+#   ("operating profit was down 53%", "OP collapsed 53%").
+_MATERIAL_OPERATING_MOVE_RE = re.compile(
+    r"\b(operating profit|operating income|operating earnings|OP|ordinary profit|"
+    r"recurring profit|ebit|ebitda|net (?:income|profit)|pre-?tax profit|earnings)\b"
+    r"[^\n]{0,80}?\b(?:down|declin\w*|decreas\w*|fell|fall|drop\w*|collaps\w*|"
+    r"plunge\w*|slump\w*|sank|tumbl\w*)\b"
+    r"[^\n]{0,15}?(\d{2,3}(?:\.\d+)?)\s*%",
+    re.IGNORECASE,
+)
+# Pattern B: terse earnings-table / abbreviation / Japanese forms with an
+# explicit negative marker (-, unicode minus, JP ▲/△) or the JP suffix 減
+#   ("operating profit -53.2% YoY", "OP -53.2%", "営業利益 ▲53.2%", "営業利益 53.2%減").
+_MATERIAL_OPERATING_TERSE_RE = re.compile(
+    r"(?P<metric>\bOP\b|op\.?\s*profit|operating profit|operating income|"
+    r"net (?:income|profit)|recurring profit|ordinary profit|"
+    r"営業利益|経常利益|純利益|当期純利益)"
+    r"[^\n]{0,20}?"
+    r"(?:[-−▲△]\s*(?P<pct_sign>\d{2,3}(?:\.\d+)?)\s*%"
+    r"|(?P<pct_jp>\d{2,3}(?:\.\d+)?)\s*%\s*減)",
+    re.IGNORECASE,
+)
+_MATERIAL_OPERATING_MIN_DECLINE_PCT = 30.0
+
+
+def extract_material_unverified_operating_signal(
+    text: str | None,
+) -> dict[str, Any] | None:
+    """Detect a large operating-metric decline mentioned in narrative text.
+
+    Returns ``{"metric", "decline_pct"}`` for a >=30% decline of an operating
+    metric (operating profit/income, EBIT(DA), net income, earnings), else None.
+    Matches both English prose (pattern A) and terse table / abbreviation /
+    Japanese forms with an explicit negative marker or 減 suffix (pattern B).
+    Restricted to operating metrics + decline markers so share-price drawdowns,
+    positive moves, and sub-30% moves do not match.
+    """
+    if not text:
+        return None
+
+    match = _MATERIAL_OPERATING_MOVE_RE.search(text)
+    if match:
+        decline_pct = float(match.group(2))
+        if decline_pct >= _MATERIAL_OPERATING_MIN_DECLINE_PCT:
+            return {"metric": match.group(1).lower(), "decline_pct": decline_pct}
+
+    terse = _MATERIAL_OPERATING_TERSE_RE.search(text)
+    if terse:
+        raw_pct = terse.group("pct_sign") or terse.group("pct_jp")
+        if raw_pct:
+            decline_pct = float(raw_pct)
+            if decline_pct >= _MATERIAL_OPERATING_MIN_DECLINE_PCT:
+                return {
+                    "metric": terse.group("metric").strip().lower(),
+                    "decline_pct": decline_pct,
+                }
+
+    return None
+
+
+MATERIAL_EVENTS_TOKENS = ("FOUND", "NONE_FOUND")
+
+# Leading [\s*-]* tolerates bullets and markdown-bold token wrappers.
+_MATERIAL_EVENTS_TOKEN_RE = re.compile(
+    rf"(?im)^[\s*-]*MATERIAL_EVENTS_90D\*{{0,2}}:\s*\*{{0,2}}"
+    rf"({_alternation(MATERIAL_EVENTS_TOKENS)})\b"
+)
+# Legacy fallback for pre-v5.4 news reports that state the absence in prose,
+# e.g. "No material operational events ... have been reported in the last 90 days."
+_NO_MATERIAL_EVENTS_PROSE_RE = re.compile(
+    r"(?i)\bno (?:material|significant|notable)\b"
+    r"[^.\n]{0,80}\b(?:operational\s+)?(?:events?|news|developments?)\b"
+)
+_DRAWDOWN_EXPLANATION_RE = re.compile(
+    r"(?im)^[\s*-]*DRAWDOWN_EXPLANATION\*{0,2}:\s*([^\n]+)"
+)
+
+
+def extract_material_events_status(news_report: str | None) -> str | None:
+    """Return FOUND / NONE_FOUND from the news report, or None when unstated.
+
+    Prefers the structured ``MATERIAL_EVENTS_90D`` token (news prompt >= v5.4);
+    falls back to the legacy "no material ... events" prose so older reports
+    still classify. An empty/absent report returns None — artifact absence is
+    penalized elsewhere and must not read as "no events".
+    """
+    if not news_report:
+        return None
+    token = _MATERIAL_EVENTS_TOKEN_RE.search(news_report)
+    if token:
+        return token.group(1).upper()
+    if _NO_MATERIAL_EVENTS_PROSE_RE.search(news_report):
+        return "NONE_FOUND"
+    return None
+
+
+_DRAWDOWN_NOT_FOUND_VALUES = {"NOT_FOUND", "N/A", "NONE"}
+
+
+def extract_drawdown_explanation(news_report: str | None) -> str | None:
+    """Return the DRAWDOWN_EXPLANATION line value, or None when absent/NOT_FOUND."""
+    if not news_report:
+        return None
+    match = _DRAWDOWN_EXPLANATION_RE.search(news_report)
+    if not match:
+        return None
+    value = match.group(1).strip().strip("*").strip()
+    if not value or value.upper().rstrip(".") in _DRAWDOWN_NOT_FOUND_VALUES:
+        return None
+    return value
+
+
+def drawdown_explanation_not_found(news_report: str | None) -> bool:
+    """True when the news report *explicitly* reports DRAWDOWN_EXPLANATION: NOT_FOUND.
+
+    Distinct from the line being absent: an explicit NOT_FOUND means the drawdown
+    protocol ran its targeted searches and failed — the strongest available
+    evidence the decline is uninvestigated.
+    """
+    if not news_report:
+        return False
+    match = _DRAWDOWN_EXPLANATION_RE.search(news_report)
+    if not match:
+        return False
+    value = match.group(1).strip().strip("*").strip()
+    return value.upper().rstrip(".") in _DRAWDOWN_NOT_FOUND_VALUES
+
+
 _CONSULTANT_GROWTH_QUALITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\borganic\s+vs\.?\s+acquired\b", re.IGNORECASE),
     re.compile(
@@ -22,7 +168,7 @@ _CONSULTANT_GROWTH_QUALITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bacquisition-led growth\b", re.IGNORECASE),
     re.compile(r"\bm&a illusion\b", re.IGNORECASE),
     re.compile(
-        r"\b(?:incremental roic|incremental return(?:s)?|synerg(?:y|ies))\b.*\b(?:unknown|unproven|not proven|not demonstrated|missing)\b",
+        r"\b(?:incremental roic|incremental return(?:s)?|return on invested capital|synerg(?:y|ies))\b.*\b(?:unknown|unproven|not proven|not demonstrated|missing|weak|poor)\b",
         re.IGNORECASE,
     ),
     re.compile(
@@ -31,6 +177,10 @@ _CONSULTANT_GROWTH_QUALITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
     re.compile(
         r"\b(?:recurring revenue|service mix|maintenance-as-a-service)\b.*\b(?:not evidenced|unsupported|unverified|unverifiable|not proven)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:buybacks?|repurchases?|shareholder returns?|payouts?|dilution)\b.*\b(?:unsupported|unverified|unverifiable|not proven|(?<!not )weak|(?<!not )poor|(?<!not )excessive)\b",
         re.IGNORECASE,
     ),
 )
@@ -57,6 +207,40 @@ _CONSULTANT_VERDICT_PATTERNS = (
 )
 _CONSULTANT_MANDATE_BREACH_PATTERN = re.compile(r"MANDATE[\s_-]BREACH", re.IGNORECASE)
 _CONSULTANT_HARD_STOP_PATTERN = re.compile(r"HARD[\s_-]STOP", re.IGNORECASE)
+# A negation shortly before a breach/hard-stop mention on the same
+# line/sentence ("No mandate breach triggered", "not yet a mandate breach")
+# means the consultant is clearing the condition, not raising it (3393.T
+# 2026-07-04: a cleared mandate charged a false +2.0 CONSULTANT_MANDATE_BREACH).
+_CONSULTANT_NEGATION_BEFORE_PATTERN = re.compile(
+    r"\b(?:no|not|none|without|never|absent)\b[^.\n]{0,50}$", re.IGNORECASE
+)
+# When the review has a FINAL CONSULTANT VERDICT section, breach/hard-stop
+# markers are read from that section only — body prose discusses these
+# conditions hypothetically ("...though not yet a mandate breach").
+_CONSULTANT_FINAL_VERDICT_SECTION_PATTERN = re.compile(
+    r"FINAL\s+CONSULTANT\s+VERDICT.*\Z", re.IGNORECASE | re.DOTALL
+)
+# Structured verdict-block tokens (consultant prompt v2.12+): explicit
+# `MANDATE_BREACH: NONE | <description>` lines. Preferred over prose scanning
+# when present; tolerate bullet/bold decoration around the key.
+_CONSULTANT_MANDATE_BREACH_TOKEN_PATTERN = re.compile(
+    r"^[ \t]*(?:[-•*][ \t]+)?\**MANDATE[ _-]BREACH\**[ \t]*:[ \t]*(.+)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_CONSULTANT_HARD_STOP_TOKEN_PATTERN = re.compile(
+    r"^[ \t]*(?:[-•*][ \t]+)?\**HARD[ _-]STOP\**[ \t]*:[ \t]*(.+)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+# Token values that clear the condition: "NONE", "N/A", a bare "No", or a
+# negated restatement ("No breach detected", "Not triggered"). Anything else
+# is treated as a breach description.
+_CONSULTANT_TOKEN_CLEAR_PATTERN = re.compile(
+    r"(?:NONE|N/?A)\b"
+    r"|NO[.!]*$"
+    r"|(?:NO|NOT)\b[^.\n]{0,40}"
+    r"\b(?:BREACH|STOP|TRIGGERED|DETECTED|IDENTIFIED|FOUND|APPLICABLE)\b",
+    re.IGNORECASE,
+)
 
 
 def extract_legal_risks(legal_report: str) -> dict[str, Any]:
@@ -121,7 +305,7 @@ def extract_legal_risks(legal_report: str) -> dict[str, Any]:
         )
 
     pfic_match = re.search(
-        r'"?pfic_status"?\s*:\s*"?(CLEAN|UNCERTAIN|PROBABLE|N/A)"?',
+        rf'"?pfic_status"?\s*:\s*"?{_alternation(PFIC_STATUS_TOKENS)}"?',
         legal_report,
         re.IGNORECASE,
     )
@@ -129,13 +313,15 @@ def extract_legal_risks(legal_report: str) -> dict[str, Any]:
         risks["pfic_status"] = pfic_match.group(1).upper()
 
     vie_match = re.search(
-        r'"?vie_structure"?\s*:\s*"?(YES|NO|N/A)"?', legal_report, re.IGNORECASE
+        rf'"?vie_structure"?\s*:\s*"?{_alternation(VIE_STRUCTURE_TOKENS)}"?',
+        legal_report,
+        re.IGNORECASE,
     )
     if vie_match:
         risks["vie_structure"] = vie_match.group(1).upper()
 
     cmic_match = re.search(
-        r'"?cmic_status"?\s*:\s*"?(FLAGGED|UNCERTAIN|CLEAR|N/A)"?',
+        rf'"?cmic_status"?\s*:\s*"?{_alternation(CMIC_STATUS_TOKENS)}"?',
         legal_report,
         re.IGNORECASE,
     )
@@ -403,7 +589,66 @@ def extract_capital_efficiency_signals(fundamentals_report: str) -> dict[str, An
         if value != "N/A":
             signals["capital_plan_status"] = value
 
+    plan_strength_match = re.search(
+        r"VALUE_UP_PLAN_STRENGTH:\s*(STRONG|MODERATE|WEAK|NONE|UNKNOWN|N/A)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if plan_strength_match:
+        value = plan_strength_match.group(1).upper()
+        if value != "N/A":
+            signals["value_up_plan_strength"] = value
+
+    execution_match = re.search(
+        r"SHAREHOLDER_RETURN_EXECUTION:\s*(PROVEN|PARTIAL|ANNOUNCED_ONLY|NONE|UNKNOWN|N/A)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if execution_match:
+        value = execution_match.group(1).upper()
+        if value != "N/A":
+            signals["shareholder_return_execution"] = value
+
     return signals
+
+
+def _non_negated_search(pattern: re.Pattern[str], text: str) -> bool:
+    """True when *pattern* matches without a negation shortly before it."""
+    for match in pattern.finditer(text):
+        prefix = text[max(0, match.start() - 60) : match.start()]
+        if not _CONSULTANT_NEGATION_BEFORE_PATTERN.search(prefix):
+            return True
+    return False
+
+
+def _breach_token_value(token_pattern: re.Pattern[str], text: str) -> bool | None:
+    """Read structured ``KEY: value`` verdict tokens; None when absent/empty.
+
+    A token carrying a breach description wins over a clearing token —
+    conservative when a review contains both forms.
+    """
+    saw_clear = False
+    for match in token_pattern.finditer(text):
+        value = match.group(1).strip("* \t")
+        if not value:
+            continue
+        if _CONSULTANT_TOKEN_CLEAR_PATTERN.match(value):
+            saw_clear = True
+        else:
+            return True
+    return False if saw_clear else None
+
+
+def _breach_marker_present(
+    token_pattern: re.Pattern[str],
+    prose_pattern: re.Pattern[str],
+    text: str,
+) -> bool:
+    """Structured token wins when present; otherwise negation-aware prose scan."""
+    token = _breach_token_value(token_pattern, text)
+    if token is not None:
+        return token
+    return _non_negated_search(prose_pattern, text)
 
 
 def parse_consultant_conditions(consultant_review: str) -> dict[str, Any]:
@@ -426,16 +671,29 @@ def parse_consultant_conditions(consultant_review: str) -> dict[str, Any]:
         except Exception:
             return result
 
+    # The verdict is authoritative only in the FINAL CONSULTANT VERDICT section
+    # ("Overall Assessment: <verdict>"). Body prose can mention "major concern"
+    # discursively and must not override a section-level CONDITIONAL APPROVAL
+    # (3771.T 2026-07-12: a stray body "major concern" beat the section verdict).
+    # Scope the verdict scan to the same section as the breach markers; fall back
+    # to the whole review when no section exists.
+    section_match = _CONSULTANT_FINAL_VERDICT_SECTION_PATTERN.search(consultant_review)
+    scan_text = section_match.group(0) if section_match else consultant_review
+
     for pattern, verdict in _CONSULTANT_VERDICT_PATTERNS:
-        if pattern.search(consultant_review):
+        if pattern.search(scan_text):
             result["verdict"] = verdict
             break
 
-    result["has_mandate_breach"] = bool(
-        _CONSULTANT_MANDATE_BREACH_PATTERN.search(consultant_review)
+    result["has_mandate_breach"] = _breach_marker_present(
+        _CONSULTANT_MANDATE_BREACH_TOKEN_PATTERN,
+        _CONSULTANT_MANDATE_BREACH_PATTERN,
+        scan_text,
     )
-    result["has_hard_stop"] = bool(
-        _CONSULTANT_HARD_STOP_PATTERN.search(consultant_review)
+    result["has_hard_stop"] = _breach_marker_present(
+        _CONSULTANT_HARD_STOP_TOKEN_PATTERN,
+        _CONSULTANT_HARD_STOP_PATTERN,
+        scan_text,
     )
 
     discrepancy_matches = re.findall(

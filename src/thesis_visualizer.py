@@ -67,10 +67,13 @@ class ThesisMetrics:
 
     # Core scores (higher = better, min 50%)
     health_score: float | None = None
+    health_pass: bool | None = None
     growth_score: float | None = None
+    growth_pass: bool | None = None
 
     # Valuation (lower = better)
     pe_ratio: float | None = None
+    pe_pass: bool | None = None
     peg_ratio: float | None = None
 
     # Hard fail checks
@@ -123,32 +126,75 @@ class ThesisVisualizer:
         # Note: Patterns use \*?\*? to handle optional markdown bold markers
 
         # Financial Health: 71% (Adjusted) - PASS
-        # Also matches: **Financial Health**: 71%
-        health_match = re.search(
-            r"\*?\*?Financial Health\*?\*?[:\s]*(\d+(?:\.\d+)?)\s*%",
+        # Primary: gate line with the PM's verdict token, mirroring pe_gate —
+        # health/growth gates can PASS below the raw 50% threshold via the
+        # Data-Vacuum Exception, so the ✓/✗ must follow the PM's token, not a
+        # re-derived score comparison. Fallback: number-only (legacy/minimal
+        # PM text). Also matches: **Financial Health**: 71%
+        health_gate = re.search(
+            r"\*?\*?Financial Health\*?\*?[:\s]*(\d+(?:\.\d+)?)\s*%"
+            r"[^\n]*?\b(PASS|FAIL|MARGINAL)\b",
             self.text,
             re.IGNORECASE,
         )
-        if health_match:
-            metrics.health_score = float(health_match.group(1))
+        if health_gate:
+            metrics.health_score = float(health_gate.group(1))
+            metrics.health_pass = health_gate.group(2).upper() in ("PASS", "MARGINAL")
+        else:
+            health_match = re.search(
+                r"\*?\*?Financial Health\*?\*?[:\s]*(\d+(?:\.\d+)?)\s*%",
+                self.text,
+                re.IGNORECASE,
+            )
+            if health_match:
+                metrics.health_score = float(health_match.group(1))
 
         # Growth Transition: 100% (Adjusted) - PASS
-        growth_match = re.search(
-            r"\*?\*?Growth\s*(?:Transition)?\*?\*?[:\s]*(\d+(?:\.\d+)?)\s*%",
+        growth_gate = re.search(
+            r"\*?\*?Growth\s*(?:Transition)?\*?\*?[:\s]*(\d+(?:\.\d+)?)\s*%"
+            r"[^\n]*?\b(PASS|FAIL|MARGINAL)\b",
             self.text,
             re.IGNORECASE,
         )
-        if growth_match:
-            metrics.growth_score = float(growth_match.group(1))
+        if growth_gate:
+            metrics.growth_score = float(growth_gate.group(1))
+            metrics.growth_pass = growth_gate.group(2).upper() in ("PASS", "MARGINAL")
+        else:
+            growth_match = re.search(
+                r"\*?\*?Growth\s*(?:Transition)?\*?\*?[:\s]*(\d+(?:\.\d+)?)\s*%",
+                self.text,
+                re.IGNORECASE,
+            )
+            if growth_match:
+                metrics.growth_score = float(growth_match.group(1))
 
         # P/E Ratio: 11.80 (PEG: 0.16) - PASS
-        pe_match = re.search(
-            r"\*?\*?P/?E\s*(?:Ratio)?\*?\*?[:\s]*(\d+(?:\.\d+)?)",
+        # Primary: anchor to the gate line and capture BOTH the number and the
+        # PM's verdict token. Require the literal word "Ratio" (excludes
+        # "Forward P/E 19.2" and "SECTOR_MEDIAN_PE 25.00" concern-bullet numbers,
+        # neither of which carries "Ratio") and a word-bounded verdict token
+        # (excludes prose "passes"/"fails"). pe_pass reflects the PM's actual
+        # gate decision rather than a re-derived pe_ratio <= PE_MAX (P/E <= 18 is
+        # a soft thesis target, not a hard fail).
+        pe_gate = re.search(
+            r"\*?\*?P/?E\s+Ratio\*?\*?[:\s]*(\d+(?:\.\d+)?)"
+            r"[^\n]*?\b(PASS|FAIL|MARGINAL)\b",
             self.text,
             re.IGNORECASE,
         )
-        if pe_match:
-            metrics.pe_ratio = float(pe_match.group(1))
+        if pe_gate:
+            metrics.pe_ratio = float(pe_gate.group(1))
+            metrics.pe_pass = pe_gate.group(2).upper() in ("PASS", "MARGINAL")
+        else:
+            # Fallback: label-anchored number only (legacy/minimal PM text with
+            # no verdict token). Still requires "Ratio" to avoid the greedy match.
+            pe_num = re.search(
+                r"\*?\*?P/?E\s+Ratio\*?\*?[:\s]*(\d+(?:\.\d+)?)",
+                self.text,
+                re.IGNORECASE,
+            )
+            if pe_num:
+                metrics.pe_ratio = float(pe_num.group(1))
 
         peg_match = re.search(r"PEG[:\s()]*(\d+(?:\.\d+)?)", self.text, re.IGNORECASE)
         if peg_match:
@@ -318,20 +364,35 @@ class ThesisVisualizer:
             lines.append("CORE SCORES (Higher = Better)")
             lines.append("─" * 56)
 
+            # Prefer the PM's parsed gate verdict (Data-Vacuum Exception can
+            # PASS below the raw threshold); "(PM gate)" flags disagreement,
+            # mirroring the P/E row below.
             if m.health_score is not None:
                 bar = self._bar(m.health_score, 100.0)
-                check = self._check(m.health_score >= self.HEALTH_MIN, c)
-                lines.append(
-                    f"Financial Health  {bar} {m.health_score:5.1f}% {check} "
+                threshold_ok = m.health_score >= self.HEALTH_MIN
+                health_ok = m.health_pass if m.health_pass is not None else threshold_ok
+                check = self._check(health_ok, c)
+                suffix = (
                     f"(min {self.HEALTH_MIN:.0f}%)"
+                    if health_ok == threshold_ok
+                    else "(PM gate)"
+                )
+                lines.append(
+                    f"Financial Health  {bar} {m.health_score:5.1f}% {check} {suffix}"
                 )
 
             if m.growth_score is not None:
                 bar = self._bar(m.growth_score, 100.0)
-                check = self._check(m.growth_score >= self.GROWTH_MIN, c)
-                lines.append(
-                    f"Growth Transition {bar} {m.growth_score:5.1f}% {check} "
+                threshold_ok = m.growth_score >= self.GROWTH_MIN
+                growth_ok = m.growth_pass if m.growth_pass is not None else threshold_ok
+                check = self._check(growth_ok, c)
+                suffix = (
                     f"(min {self.GROWTH_MIN:.0f}%)"
+                    if growth_ok == threshold_ok
+                    else "(PM gate)"
+                )
+                lines.append(
+                    f"Growth Transition {bar} {m.growth_score:5.1f}% {check} {suffix}"
                 )
 
             lines.append("")
@@ -347,10 +408,21 @@ class ThesisVisualizer:
                 bar = self._bar(
                     m.pe_ratio, self.PE_MAX * 1.5
                 )  # Scale to 27 for visibility
-                check = self._check(m.pe_ratio <= self.PE_MAX, c)
+                # Prefer the PM's parsed gate verdict; fall back to the soft
+                # threshold only when the verdict token wasn't captured.
+                pe_ok = (
+                    m.pe_pass if m.pe_pass is not None else (m.pe_ratio <= self.PE_MAX)
+                )
+                check = self._check(pe_ok, c)
+                # When the PM's verdict disagrees with the raw threshold (e.g.
+                # a soft-target PASS at 19.0 > 18), "(max 18)" would contradict
+                # the checkmark — label the row as PM-gated instead.
+                threshold_ok = m.pe_ratio <= self.PE_MAX
+                suffix = (
+                    f"(max {self.PE_MAX:.0f})" if pe_ok == threshold_ok else "(PM gate)"
+                )
                 lines.append(
-                    f"P/E Ratio         {bar} {m.pe_ratio:5.1f}  {check} "
-                    f"(max {self.PE_MAX:.0f})"
+                    f"P/E Ratio         {bar} {m.pe_ratio:5.1f}  {check} {suffix}"
                 )
 
             if m.peg_ratio is not None:

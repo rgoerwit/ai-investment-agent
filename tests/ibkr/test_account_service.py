@@ -15,11 +15,16 @@ class FakeClient:
         self.connected = False
         self.closed = False
 
-    def connect(self, *, brokerage_session: bool) -> None:
+    def connect(
+        self, brokerage_session: bool = False, *, maintain: bool = False
+    ) -> None:
         assert brokerage_session is False
         self.connected = True
 
     def close(self) -> None:
+        self.closed = True
+
+    def logout(self) -> None:
         self.closed = True
 
     def get_accounts(self) -> list[str]:

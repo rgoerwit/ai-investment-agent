@@ -908,3 +908,255 @@ class TestConfigThresholds:
 
         assert config.leverage_suspect_ratio == 2.0
         assert config.leverage_engineered_ratio == 3.0
+
+
+class TestCapitalEfficiencyBonusSuppression:
+    """The -0.5 CAPITAL_EFFICIENT bonus must be suppressed under peak/transient.
+
+    Penalty flags (value destruction, engineered returns, below hurdle, idle
+    cash) must be unaffected — only the durable-quality bonus is gated.
+    """
+
+    def _block(self, *extra: str) -> str:
+        base = [
+            "ROIC_PERCENT: 20.00",
+            "ROIC_QUALITY: STRONG",
+            "LEVERAGE_QUALITY: GENUINE",
+            "ROE_ROIC_RATIO: 1.30",
+        ]
+        lines = "\n".join((*base, *extra))
+        return f"### --- START DATA_BLOCK ---\n{lines}\n### --- END DATA_BLOCK ---"
+
+    def test_bonus_fires_without_peak(self):
+        """Happy path: STRONG + GENUINE with benign cycle still earns -0.5."""
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._block("CYCLE_POSITION: MID"), "OK"
+        )
+        types = [f["type"] for f in flags]
+        assert "CAPITAL_EFFICIENT" in types
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" not in types
+
+    def test_cycle_peak_suppresses_bonus(self):
+        """Edge: CYCLE_POSITION: PEAK replaces the -0.5 bonus with a 0.0 suppression flag."""
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._block("CYCLE_POSITION: PEAK"), "PEAK"
+        )
+        types = [f["type"] for f in flags]
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" in types
+        assert "CAPITAL_EFFICIENT" not in types
+        assert sum(f["risk_penalty"] for f in flags) == 0.0
+
+    def test_unmitigated_underinvestment_suppresses_bonus(self):
+        """Edge: strong ROIC gets no bonus when capex underinvestment is unresolved."""
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._block(
+                "CAPEX_TO_DA_STATUS: UNDERINVESTING",
+                "CAPITAL_PLAN_STATUS: NONE",
+            ),
+            "CAPEX",
+        )
+
+        types = [f["type"] for f in flags]
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" in types
+        assert "CAPITAL_EFFICIENT" not in types
+        suppressed = next(
+            f for f in flags if f["type"] == "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED"
+        )
+        assert suppressed["risk_penalty"] == 0.0
+        assert "underinvestment" in suppressed["detail"]
+        assert "maintenance-capex adequacy" in suppressed["detail"]
+
+    def test_underinvestment_with_explicit_plan_preserves_bonus(self):
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._block(
+                "CAPEX_TO_DA_STATUS: UNDERINVESTING",
+                "CAPITAL_PLAN_STATUS: EXPLICIT",
+            ),
+            "PLAN",
+        )
+
+        types = [f["type"] for f in flags]
+        assert "CAPITAL_EFFICIENT" in types
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" not in types
+
+    def test_underinvestment_with_backlog_cover_preserves_bonus(self):
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._block(
+                "CAPEX_TO_DA_STATUS: UNDERINVESTING",
+                "CAPITAL_PLAN_STATUS: NONE",
+                "REVENUE_BACKLOG_COVERAGE: 1.2",
+            ),
+            "BACKLOG",
+        )
+
+        types = [f["type"] for f in flags]
+        assert "CAPITAL_EFFICIENT" in types
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" not in types
+
+    @pytest.mark.parametrize("capex_status", ["MAINTENANCE", "GROWTH_INVESTING"])
+    def test_maintenance_or_growth_capex_preserves_bonus(self, capex_status: str):
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._block(f"CAPEX_TO_DA_STATUS: {capex_status}"), "CAPEX"
+        )
+
+        types = [f["type"] for f in flags]
+        assert "CAPITAL_EFFICIENT" in types
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" not in types
+
+    def test_peak_suppression_reason_takes_precedence_over_underinvestment(self):
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._block(
+                "CYCLE_POSITION: PEAK",
+                "CAPEX_TO_DA_STATUS: UNDERINVESTING",
+                "CAPITAL_PLAN_STATUS: NONE",
+            ),
+            "PEAK",
+        )
+
+        suppressed = next(
+            f for f in flags if f["type"] == "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED"
+        )
+        assert "CYCLE_POSITION: PEAK" in suppressed["detail"]
+        assert "maintenance-capex adequacy" not in suppressed["detail"]
+
+    def test_transient_marker_suppresses_bonus(self):
+        """Edge: acquisition-led consolidation marker suppresses the bonus."""
+        report = (
+            self._block()
+            + "\nReturns were flattered by an acquisition-led consolidation this year."
+        )
+        types = [
+            f["type"]
+            for f in RedFlagDetector.detect_capital_efficiency_flags(report, "MNA")
+        ]
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" in types
+        assert "CAPITAL_EFFICIENT" not in types
+
+    def test_empty_report_safe(self):
+        """Error handling: empty input yields no flags, no crash."""
+        assert RedFlagDetector.detect_capital_efficiency_flags("", "E") == []
+
+
+class TestAssetTurnoverSignal:
+    """capital_assetTurnover = revenue / total assets (distribution-model proxy)."""
+
+    def _fetch(self):
+        from src.data.fetcher import SmartMarketDataFetcher
+
+        return SmartMarketDataFetcher()
+
+    def test_asset_turnover_from_info_revenue(self):
+        income_stmt = pd.DataFrame({"2024": [0.0]}, index=["EBIT"])
+        balance_sheet = pd.DataFrame({"2024": [500_000_000]}, index=["Total Assets"])
+        info = {"totalRevenue": 1_000_000_000, "totalAssets": 500_000_000}
+        signals = self._fetch()._calculate_capital_efficiency_signals(
+            income_stmt, balance_sheet, info, "TEST"
+        )
+        assert signals["capital_assetTurnover"] == pytest.approx(2.0, rel=0.01)
+
+    def test_asset_turnover_statement_revenue_fallback(self):
+        # info has no revenue -> derive from income statement Total Revenue.
+        income_stmt = pd.DataFrame(
+            {"2024": [0.0, 800_000_000]}, index=["EBIT", "Total Revenue"]
+        )
+        balance_sheet = pd.DataFrame({"2024": [400_000_000]}, index=["Total Assets"])
+        info = {"totalAssets": 400_000_000}
+        signals = self._fetch()._calculate_capital_efficiency_signals(
+            income_stmt, balance_sheet, info, "TEST"
+        )
+        assert signals["capital_assetTurnover"] == pytest.approx(2.0, rel=0.01)
+
+    def test_asset_turnover_omitted_when_assets_missing(self):
+        income_stmt = pd.DataFrame({"2024": [0.0]}, index=["EBIT"])
+        balance_sheet = pd.DataFrame({"2024": [0.0]}, index=["Other"])
+        info = {"totalRevenue": 1_000_000_000}
+        signals = self._fetch()._calculate_capital_efficiency_signals(
+            income_stmt, balance_sheet, info, "TEST"
+        )
+        assert "capital_assetTurnover" not in signals
+
+    def test_asset_turnover_omitted_when_assets_zero(self):
+        income_stmt = pd.DataFrame({"2024": [0.0]}, index=["EBIT"])
+        balance_sheet = pd.DataFrame({"2024": [0.0]}, index=["Total Assets"])
+        info = {"totalRevenue": 1_000_000_000, "totalAssets": 0}
+        signals = self._fetch()._calculate_capital_efficiency_signals(
+            income_stmt, balance_sheet, info, "TEST"
+        )
+        assert "capital_assetTurnover" not in signals
+
+    def test_asset_turnover_omitted_when_revenue_missing(self):
+        income_stmt = pd.DataFrame({"2024": [0.0]}, index=["EBIT"])
+        balance_sheet = pd.DataFrame({"2024": [500_000_000]}, index=["Total Assets"])
+        info = {"totalAssets": 500_000_000}
+        signals = self._fetch()._calculate_capital_efficiency_signals(
+            income_stmt, balance_sheet, info, "TEST"
+        )
+        assert "capital_assetTurnover" not in signals
+
+
+class TestSuppressionZoneBoundary:
+    """Pin the 6831.HK-shaped tally interaction at the RISK_ZONE_HIGH boundary.
+
+    On 2026-07-01 (pre-suppression) the PM tally was 1.50 = MODERATE->HOLD, with a
+    code subtotal of -0.50 that included an unjustified CAPITAL_EFFICIENT -0.5
+    while CAPEX_TO_DA_STATUS was UNDERINVESTING. Suppressing that bonus moves the
+    same inputs to exactly 2.00 = RISK_ZONE_HIGH (default SELL). That flip is
+    intended, but must stay attributable: the suppressed flag carries the reason.
+    """
+
+    _PM_QUALITATIVE_PENALTIES = 2.0  # jurisdiction +1.0, ownership concentration +1.0
+
+    def _hk6831_report(self) -> str:
+        lines = [
+            "ROIC_PERCENT: 20.00",
+            "ROIC_QUALITY: STRONG",
+            "LEVERAGE_QUALITY: GENUINE",
+            "ROE_ROIC_RATIO: 1.30",
+            "CAPEX_TO_DA: 0.73",
+            "CAPEX_TO_DA_STATUS: UNDERINVESTING",
+            "CAPITAL_PLAN_STATUS: NONE",
+        ]
+        body = "\n".join(lines)
+        return f"### --- START DATA_BLOCK ---\n{body}\n### --- END DATA_BLOCK ---"
+
+    def _code_subtotal(self, flags: list[dict]) -> float:
+        other_code_flags = (
+            0.5 + -1.0 + 0.5
+        )  # VIE, MOAT_DURABLE_ADVANTAGE, CONSULTANT_CONDITIONAL
+        return other_code_flags + sum(f.get("risk_penalty", 0.0) for f in flags)
+
+    def test_suppressed_bonus_lands_tally_exactly_on_high_zone_boundary(self):
+        from src.thesis_constants import RISK_ZONE_HIGH
+
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._hk6831_report(), "6831.HK"
+        )
+
+        types = [f["type"] for f in flags]
+        assert "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED" in types
+        assert "CAPITAL_EFFICIENT" not in types
+
+        tally = self._code_subtotal(flags) + self._PM_QUALITATIVE_PENALTIES
+        assert tally == pytest.approx(RISK_ZONE_HIGH)
+        assert tally >= RISK_ZONE_HIGH  # >= boundary is HIGH zone: default SELL
+
+    def test_pre_suppression_bonus_kept_tally_in_moderate_zone(self):
+        """Documents the HOLD->DNI flip: with the bonus the same inputs were 1.50."""
+        from src.thesis_constants import RISK_ZONE_HIGH, RISK_ZONE_MODERATE
+
+        pre_fix_tally = (
+            self._code_subtotal([{"risk_penalty": -0.5}])
+            + self._PM_QUALITATIVE_PENALTIES
+        )
+        assert pre_fix_tally == pytest.approx(1.5)
+        assert RISK_ZONE_MODERATE <= pre_fix_tally < RISK_ZONE_HIGH
+
+    def test_suppression_reason_is_attributable(self):
+        flags = RedFlagDetector.detect_capital_efficiency_flags(
+            self._hk6831_report(), "6831.HK"
+        )
+        suppressed = next(
+            f for f in flags if f["type"] == "CAPITAL_EFFICIENCY_BONUS_SUPPRESSED"
+        )
+        assert suppressed["risk_penalty"] == 0.0
+        assert "underinvestment" in suppressed["detail"].lower()

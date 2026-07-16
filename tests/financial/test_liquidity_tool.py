@@ -1,13 +1,16 @@
 """Tests for liquidity calculation tool with comprehensive edge case coverage."""
 
+import re
+from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
 import yfinance as yf
 
+import src.liquidity_calculation_tool as _liq
 from src.liquidity_calculation_tool import calculate_liquidity_metrics
 
 # ==================== TEST FIXTURES ====================
@@ -596,3 +599,115 @@ async def test_liquidity_happy_path_unchanged_by_sanitization():
 
     assert "Status: ERROR" not in result
     assert "Avg Daily Turnover (USD)" in result
+
+
+# ============ UNIT-PROVENANCE (GBp->GBP double-scale regression) ============
+# Regression suite for the GAMA.L false DO_NOT_INITIATE: a fetcher-normalized
+# GBp->GBP anchor price was divided by 100 a second time off the bare ``.L``
+# suffix, undercounting turnover ~100x ($7.7M -> $77k). Resolution is now driven
+# by price provenance, not the suffix.
+
+
+def _turnover_usd(result: str) -> int:
+    match = re.search(r"Turnover \(USD\): \$([\d,]+)", result)
+    return int(match.group(1).replace(",", "")) if match else -1
+
+
+@contextmanager
+def _anchor_fetcher(anchor, close_mean, *, vol=694_355, n=60, fx=1.3198):
+    """Patch the liquidity fetcher to serve a specific anchor + history, with a
+    deterministic FX rate (overrides the module's autouse fetcher fixture)."""
+    prices = close_mean + np.random.uniform(-close_mean * 0.004, close_mean * 0.004, n)
+    hist = pd.DataFrame({"Close": prices, "Volume": [vol] * n})
+    fetcher = SimpleNamespace(
+        get_financial_metrics=AsyncMock(return_value=anchor),
+        get_historical_prices=AsyncMock(return_value=hist),
+    )
+    with (
+        patch.object(_liq, "_market_data_fetcher", return_value=fetcher),
+        patch.object(_liq, "get_fx_rate", AsyncMock(return_value=(fx, "yfinance"))),
+    ):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_liquidity_normalized_anchor_not_double_divided():
+    """Fetcher-normalized GBp->GBP anchor must NOT be /100 again (the GAMA bug)."""
+    anchor = {
+        "currentPrice": 8.425,
+        "currency": "GBP",
+        "_unit_normalization": {"kind": "quote_minor_to_major", "to_currency": "GBP"},
+    }
+    with _anchor_fetcher(anchor, 842.5):
+        result = await calculate_liquidity_metrics.ainvoke({"ticker": "GAMA.L"})
+
+    assert "PASS" in result
+    assert _turnover_usd(result) > 1_000_000  # ~$7.7M, not the buggy ~$77k
+    assert "price_source=anchor" in result
+    assert "unit=anchor_already_major" in result
+
+
+@pytest.mark.asyncio
+async def test_liquidity_unnormalized_gbp_pence_anchor_scaled():
+    """Un-normalized GBp anchor is still scaled to pounds (back-compat path)."""
+    anchor = {"currentPrice": 842.5, "currency": "GBp"}
+    with _anchor_fetcher(anchor, 842.5):
+        result = await calculate_liquidity_metrics.ainvoke({"ticker": "GAMA.L"})
+
+    assert "PASS" in result
+    assert _turnover_usd(result) > 1_000_000
+    assert "unit=anchor_minor_scaled" in result
+
+
+@pytest.mark.asyncio
+async def test_liquidity_gbp_native_anchor_not_divided():
+    """A .L anchor already in major GBP (no normalization meta) is not /100'd."""
+    anchor = {"currentPrice": 8.425, "currency": "GBP"}
+    with _anchor_fetcher(anchor, 842.5):
+        result = await calculate_liquidity_metrics.ainvoke({"ticker": "X.L"})
+
+    assert "Status: ERROR" not in result
+    assert _turnover_usd(result) > 1_000_000
+    assert "unit=anchor_major" in result
+
+
+@pytest.mark.asyncio
+async def test_liquidity_unit_mismatch_sentinel_errors():
+    """A ~100x anchor/history gap surfaces ERROR, never a silent liquidity FAIL."""
+    # Simulated regression: anchor resolves to 0.08425 while .L history (842.5
+    # pence) scales to 8.425 -> ratio 100.
+    anchor = {
+        "currentPrice": 0.08425,
+        "currency": "GBP",
+        "_unit_normalization": {"kind": "quote_minor_to_major", "to_currency": "GBP"},
+    }
+    with _anchor_fetcher(anchor, 842.5):
+        result = await calculate_liquidity_metrics.ainvoke({"ticker": "GAMA.L"})
+
+    assert "Status: ERROR" in result
+    assert "unit mismatch" in result
+    assert "FAIL" not in result
+
+
+@pytest.mark.asyncio
+async def test_liquidity_sentinel_quiet_on_normal_drift():
+    """Ordinary price drift between spot and 3mo mean must not trip the sentinel."""
+    anchor = {"currentPrice": 60.0, "currency": "HKD"}
+    with _anchor_fetcher(anchor, 78.0, vol=100_000):  # ~30% gap, nowhere near 100x
+        result = await calculate_liquidity_metrics.ainvoke({"ticker": "0005.HK"})
+
+    assert "Status: ERROR" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_price", [float("inf"), float("nan"), 0.0, -5.0])
+async def test_liquidity_non_finite_anchor_falls_back_to_history(bad_price):
+    """A non-finite/non-positive anchor price must not flow into turnover math;
+    the tool falls back to the history price rather than emitting ``$inf``."""
+    anchor = {"currentPrice": bad_price, "currency": "USD"}
+    with _anchor_fetcher(anchor, 50.0, vol=200_000):
+        result = await calculate_liquidity_metrics.ainvoke({"ticker": "AAPL"})
+
+    assert "$inf" not in result and "$nan" not in result.lower()
+    assert "price_source=history" in result
+    assert _turnover_usd(result) > 1_000_000

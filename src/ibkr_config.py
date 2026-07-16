@@ -7,6 +7,12 @@ Follows src/config.py pattern: Pydantic Settings, SecretStr for credentials, .en
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.ibkr.portfolio_defaults import (
+    DEFAULT_CASH_BUFFER_PCT,
+    DEFAULT_DRIFT_PCT,
+    DEFAULT_MAX_AGE_DAYS,
+)
+
 
 class IbkrSettings(BaseSettings):
     """IBKR connection and portfolio management settings."""
@@ -58,19 +64,19 @@ class IbkrSettings(BaseSettings):
 
     # --- Portfolio Management Defaults ---
     ibkr_max_analysis_age_days: int = Field(
-        default=14,
+        default=DEFAULT_MAX_AGE_DAYS,
         ge=1,
         validation_alias="IBKR_MAX_ANALYSIS_AGE_DAYS",
         description="Max analysis age in days before considered stale",
     )
     ibkr_drift_threshold_pct: float = Field(
-        default=15.0,
+        default=DEFAULT_DRIFT_PCT,
         ge=0.0,
         validation_alias="IBKR_DRIFT_THRESHOLD_PCT",
         description="Price drift threshold percentage for staleness",
     )
     ibkr_cash_buffer_pct: float = Field(
-        default=0.05,
+        default=DEFAULT_CASH_BUFFER_PCT,
         ge=0.0,
         le=1.0,
         validation_alias="IBKR_CASH_BUFFER_PCT",

@@ -14,6 +14,11 @@ from src.ibkr.models import (
     ReconciliationItem,
 )
 from src.ibkr.portfolio_data_service import IbkrPortfolioDataService, PortfolioSnapshot
+from src.ibkr.portfolio_defaults import (
+    DEFAULT_OVERWEIGHT_PCT,
+    DEFAULT_REFRESH_LIMIT,
+    DEFAULT_UNDERWEIGHT_PCT,
+)
 from src.ibkr.portfolio_health import compute_portfolio_health
 from src.ibkr.reconciler import ReconciliationDiagnostics, reconcile
 from src.ibkr.refresh_service import (
@@ -61,13 +66,13 @@ class PortfolioRecommendationRequest:
     drift_pct: float
     sector_limit_pct: float
     exchange_limit_pct: float
-    overweight_pct: float = 20.0
-    underweight_pct: float = 20.0
+    overweight_pct: float = DEFAULT_OVERWEIGHT_PCT
+    underweight_pct: float = DEFAULT_UNDERWEIGHT_PCT
     recommend: bool = False
     read_only: bool = False
     quick_mode: bool = False
     refresh_policy: RefreshPolicy = "off"
-    refresh_limit: int = 10
+    refresh_limit: int = DEFAULT_REFRESH_LIMIT
 
 
 @dataclass
@@ -80,6 +85,9 @@ class PortfolioRecommendationBundle:
     watchlist_total: int | None = None
     watchlist_candidates_blocked_by_cash: int = 0
     live_orders: list[dict] = field(default_factory=list)
+    # Non-fatal data-source failures (e.g. {"live_orders": "..."}) surfaced from the
+    # snapshot so the report/JSON can flag degraded sections (e.g. order-dedup off).
+    errors: dict[str, str] = field(default_factory=dict)
     items: list[ReconciliationItem] = field(default_factory=list)
     health_flags: list[str] = field(default_factory=list)
     freshness_summary: AnalysisFreshnessSummary = field(
@@ -135,6 +143,7 @@ class PortfolioRecommendationService:
         watchlist_name: str | None = None
         watchlist_total: int | None = None
         live_orders: list[dict] = []
+        errors: dict[str, str] = {}
 
         if not request.read_only:
             if self._portfolio_data_service is None:
@@ -156,6 +165,7 @@ class PortfolioRecommendationService:
             watchlist_name = snapshot.watchlist.loaded_name
             watchlist_total = snapshot.watchlist.total
             live_orders = snapshot.live_orders
+            errors = dict(snapshot.errors)
 
         (
             items,
@@ -219,6 +229,7 @@ class PortfolioRecommendationService:
             watchlist_total=watchlist_total,
             watchlist_candidates_blocked_by_cash=watchlist_candidates_blocked_by_cash,
             live_orders=live_orders,
+            errors=errors,
             items=items,
             health_flags=health_flags,
             freshness_summary=freshness_summary,
@@ -232,7 +243,14 @@ class PortfolioRecommendationService:
         watchlist_name: str | None,
     ) -> None:
         watchlist = snapshot.watchlist
-        if not watchlist.found and watchlist.explicitly_requested:
+        # Unavailable (brokerage session down) is a degrade-not-abort case: the run
+        # continues on holdings with a warning (snapshot.errors["watchlist"] drives
+        # the report banner). Only a genuinely not-found named watchlist aborts.
+        if (
+            not watchlist.found
+            and not watchlist.unavailable
+            and watchlist.explicitly_requested
+        ):
             raise ValueError(f"watchlist '{watchlist_name or ''}' not found in IBKR")
 
     def _reconcile_and_classify(

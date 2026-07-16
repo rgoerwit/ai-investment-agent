@@ -141,6 +141,38 @@ class TestExtractStringContentDictHandling:
         result = extract_string_content(reasoning_dict)
         assert result == ""
 
+    def test_function_call_type_dict_returns_empty_string(self):
+        """A tool-call block must not stringify into content (3679.T: a raw
+        function_call dict was persisted as the consultant review, suppressing
+        the loop's empty-content forced-synthesis fallback)."""
+        fc_dict = {
+            "arguments": '{"ticker":"3679.T","metric":"netIncomeToCommon"}',
+            "call_id": "call_x",
+            "name": "spot_check_metric_mcp_fmp",
+            "type": "function_call",
+            "id": "fc_1",
+            "status": "completed",
+        }
+        result = extract_string_content(fc_dict)
+        assert result == ""
+
+    def test_tool_use_type_dict_returns_empty_string(self):
+        """Anthropic tool_use blocks are likewise non-textual."""
+        result = extract_string_content(
+            {"type": "tool_use", "id": "tu_1", "name": "get_news", "input": {}}
+        )
+        assert result == ""
+
+    def test_list_with_text_and_function_call_keeps_text_only(self):
+        """Mixed content lists drop the tool-call block, keep the prose."""
+        content = [
+            {"type": "text", "text": "FINAL CONSULTANT VERDICT: CONDITIONAL"},
+            {"type": "function_call", "name": "spot_check_metric", "call_id": "c1"},
+        ]
+        result = extract_string_content(content)
+        assert result == "FINAL CONSULTANT VERDICT: CONDITIONAL"
+        assert "function_call" not in result
+
     def test_dict_without_type_key_still_uses_str_fallback(self):
         """Non-reasoning unknown dicts still fall back to str() — no regression."""
         input_dict = {"unknown_key": "some value", "another": 123}

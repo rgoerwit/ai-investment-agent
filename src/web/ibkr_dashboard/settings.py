@@ -7,6 +7,15 @@ from typing import Any
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
+from src.ibkr.portfolio_defaults import (
+    DEFAULT_CASH_BUFFER_PCT,
+    DEFAULT_DRIFT_PCT,
+    DEFAULT_EXCHANGE_LIMIT_PCT,
+    DEFAULT_MAX_AGE_DAYS,
+    DEFAULT_REFRESH_LIMIT,
+    DEFAULT_SECTOR_LIMIT_PCT,
+)
+
 
 class DashboardSettings(BaseSettings):
     results_dir: Path = Path("results")
@@ -16,18 +25,18 @@ class DashboardSettings(BaseSettings):
     # Safe default: disk-only mode. Live IBKR portfolio access is opt-in via
     # IBKR_DASHBOARD_READ_ONLY=false or saved preferences.
     read_only: bool = True
-    cash_buffer: float = 0.05
-    max_age_days: int = 14
-    drift_pct: float = 15.0
-    sector_limit_pct: float = 30.0
-    exchange_limit_pct: float = 40.0
+    cash_buffer: float = DEFAULT_CASH_BUFFER_PCT
+    max_age_days: int = DEFAULT_MAX_AGE_DAYS
+    drift_pct: float = DEFAULT_DRIFT_PCT
+    sector_limit_pct: float = DEFAULT_SECTOR_LIMIT_PCT
+    exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT
 
     host: str = "127.0.0.1"
     port: int = 5050
     debug: bool = False
 
     snapshot_timeout_seconds: int = 60
-    default_refresh_limit: int = 10
+    default_refresh_limit: int = DEFAULT_REFRESH_LIMIT
     runtime_dir: Path = Path("runtime") / "ibkr_dashboard"
 
     model_config = {
@@ -41,9 +50,9 @@ class DashboardPreferences(BaseModel):
     account_id: str | None = None
     read_only: bool = True
     watchlist_name: str | None = None
-    max_age_days: int = 14
+    max_age_days: int = DEFAULT_MAX_AGE_DAYS
     quick_mode_default: bool = True
-    refresh_limit: int = 10
+    refresh_limit: int = DEFAULT_REFRESH_LIMIT
     risk_thresholds: dict[str, float] = Field(default_factory=dict)
     notes: str = ""
 

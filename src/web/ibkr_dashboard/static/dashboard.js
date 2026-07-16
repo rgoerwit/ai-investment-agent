@@ -810,6 +810,8 @@ function renderSettings() {
             <option value="true" ${modeValue === "true" ? "selected" : ""}>Read-only results only</option>
           </select>
         </label>
+        <!-- 14 / 10 are last-resort fallbacks only used if /api/settings omits a value;
+             /api/settings (DashboardSettings ← src/ibkr/portfolio_defaults) is authoritative. -->
         <label>Max age days<input name="max_age_days" type="number" value="${escapeHtmlAttr(settings.max_age_days ?? 14)}"></label>
         <label>Refresh limit<input name="refresh_limit" type="number" value="${escapeHtmlAttr(settings.refresh_limit ?? 10)}"></label>
         <label>Quick mode default

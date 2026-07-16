@@ -12,11 +12,19 @@ class TestTickerFromIbkr:
 
     # Known exchange codes (static IBKR_TO_YFINANCE map wins)
 
-    def test_tse_japan(self):
-        t = Ticker.from_ibkr("7203", "TSE", "JPY")
+    def test_tsej_japan(self):
+        # IBKR Client Portal reports Tokyo as "TSEJ" (not "TSE").
+        t = Ticker.from_ibkr("7203", "TSEJ", "JPY")
         assert t.suffix == ".T"
         assert t.yf == "7203.T"
         assert t.ibkr == "7203"
+
+    def test_tse_toronto(self):
+        # IBKR Client Portal reports Toronto as "TSE" → must map to .TO, not .T.
+        t = Ticker.from_ibkr("PEY", "TSE", "CAD")
+        assert t.suffix == ".TO"
+        assert t.yf == "PEY.TO"
+        assert t.ibkr == "PEY"
 
     def test_sehk_hong_kong(self):
         t = Ticker.from_ibkr("5", "SEHK", "HKD")

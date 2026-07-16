@@ -1,52 +1,18 @@
 # Trivy Ignore File
-# Use this to suppress specific CVEs that are false positives or accepted risks
-# Format: One CVE ID per line, with optional comment explaining why it's ignored
+# Suppress specific CVEs that are verified false positives or accepted risks.
+# Format: one CVE ID per line, with a comment explaining WHY and (if temporary)
+# an expiration date, e.g.:
+#   CVE-2024-12345  # False positive: affects Windows only, we deploy on Linux. Expires: 2026-09-01
 #
-# Documentation: https://aquasecurity.github.io/trivy/latest/docs/configuration/filtering/
-
-# ══════════════════════════════════════════════════════════════════════════
-# Example: Ignored CVEs (remove these examples and add your own)
-# ══════════════════════════════════════════════════════════════════════════
-
-# CVE-2023-XXXXX - Example: Known false positive in test dependency
-# Only affects development environment, not production
-
-# CVE-2024-YYYYY - Example: Vulnerability in optional feature we don't use
-# Our code doesn't use the affected module/function
-
-# ══════════════════════════════════════════════════════════════════════════
-# INSTRUCTIONS
-# ══════════════════════════════════════════════════════════════════════════
-# 1. Run Trivy and review findings
-# 2. For each CVE you want to ignore:
-#    a. Research the CVE thoroughly (NVD, vendor advisory)
-#    b. Verify it's actually a false positive or accepted risk
-#    c. Document WHY you're ignoring it (comment above the CVE line)
-#    d. Add expiration date if temporary (e.g., "# Expires: 2025-03-01")
-# 3. Review this file quarterly - remove stale ignores
-# 4. Never ignore CRITICAL severity without security team approval
+# NOTE: the Trivy CI jobs are currently DISABLED (see .github/workflows/security.yml,
+# "TRIVY JOBS DISABLED — March 2026"). This file is retained so accepted-risk ignores
+# have a home the moment Trivy is re-enabled. Dependency (SCA) ignores otherwise live
+# in .snyk / pip-audit --ignore-vuln / dependency-review allow-ghsas — keep those in sync.
 #
-# Example workflow:
-#   $ trivy fs . --severity CRITICAL,HIGH
-#   # Review output, decide CVE-2024-12345 is false positive
-#   # Add to this file:
-#   # CVE-2024-12345 - False positive: affects Windows only, we deploy on Linux
+# Before adding an entry: research the CVE (NVD/vendor advisory), confirm it's truly a
+# false positive or accepted risk, and never ignore a CRITICAL without explicit sign-off.
 #
-# ══════════════════════════════════════════════════════════════════════════
-# COMMON FALSE POSITIVES (examples - verify for your case)
-# ══════════════════════════════════════════════════════════════════════════
+# Docs: https://aquasecurity.github.io/trivy/latest/docs/configuration/filtering/
 
-# Python test dependencies (pytest, coverage, etc.) - LOW priority
-# Usually safe to ignore unless running tests in production
-
-# Documentation tools (Sphinx, mkdocs) - LOW priority
-# Only used during doc generation, not in runtime
-
-# Development linters/formatters (black, ruff, mypy) - LOW priority
-# Not included in production deployments
-
-# ══════════════════════════════════════════════════════════════════════════
-# ACTUAL IGNORES START HERE (add your CVEs below)
-# ══════════════════════════════════════════════════════════════════════════
-
-# (none yet - add as needed)
+# ── Accepted ignores (add below) ────────────────────────────────────────────
+# (none yet)

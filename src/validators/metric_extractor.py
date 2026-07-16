@@ -53,7 +53,12 @@ def parse_ratio_or_percent(raw_value: str) -> float | None:
     return value
 
 
-def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
+def extract_metrics(
+    fundamentals_report: str,
+    *,
+    ticker: str | None = None,
+    source_file: str | None = None,
+) -> dict[str, Any]:
     """Extract financial metrics from the Senior Fundamentals DATA_BLOCK and body."""
     metrics: dict[str, Any] = {
         "debt_to_equity": None,
@@ -61,8 +66,12 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         "fcf": None,
         "interest_coverage": None,
         "pe_ratio": None,
+        "sector_median_pe": None,
+        "pe_vs_sector": None,
         "pb_ratio": None,
         "adjusted_health_score": None,
+        "health_score_consistency": None,
+        "growth_score_consistency": None,
         "payout_ratio": None,
         "dividend_coverage": None,
         "net_margin": None,
@@ -75,6 +84,7 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         "ocf": None,
         "ocf_source": None,
         "ocf_filing_reason": None,
+        "ocf_period": None,
         "segment_flag": None,
         "parent_company": None,
         "listing_role": None,
@@ -83,6 +93,9 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         "metric_scope_ocf": None,
         "analyst_coverage_total_est": None,
         "growth_trajectory": None,
+        "revenue_cagr_3y": None,
+        "fcf_cagr_3y": None,
+        "cycle_position": None,
         "revenue_growth_ttm": None,
         "revenue_backlog_coverage": None,
         "latest_quarter_date": None,
@@ -91,6 +104,10 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         "net_debt_ebitda": None,
         "capex_to_da": None,
         "capex_to_da_status": None,
+        "asset_turnover": None,
+        "inventory_turnover_trend": None,
+        "capacity_utilization": None,
+        "facility_buildout_status": None,
         "capital_plan_status": None,
         "sector": None,
         "industry": None,
@@ -102,18 +119,40 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
 
     data_block = extract_last_data_block(fundamentals_report)
     if not data_block:
-        logger.warning("no_data_block_found_in_fundamentals_report")
+        log_fields: dict[str, Any] = {}
+        if ticker:
+            log_fields["ticker"] = ticker
+        if source_file:
+            log_fields["file"] = source_file
+        logger.warning("no_data_block_found_in_fundamentals_report", **log_fields)
         return metrics
 
     health_match = re.search(r"ADJUSTED_HEALTH_SCORE:\s*(\d+(?:\.\d+)?)%", data_block)
     if health_match:
         metrics["adjusted_health_score"] = float(health_match.group(1))
 
-    pe_match = re.search(r"PE_RATIO_TTM:\s*([0-9.]+)", data_block)
+    for kind in ("HEALTH", "GROWTH"):
+        consistency_match = re.search(
+            rf"{kind}_SCORE_CONSISTENCY:\s*SUSPECT\b", data_block
+        )
+        if consistency_match:
+            metrics[f"{kind.lower()}_score_consistency"] = "SUSPECT"
+
+    pe_match = re.search(r"PE_RATIO_TTM:\s*(\d+(?:\.\d+)?)", data_block)
     if pe_match:
         metrics["pe_ratio"] = float(pe_match.group(1))
 
-    pb_match = re.search(r"PB_RATIO:\s*([0-9.]+)", data_block)
+    sector_median_pe_match = re.search(
+        r"SECTOR_MEDIAN_PE:\s*(\d+(?:\.\d+)?)", data_block
+    )
+    if sector_median_pe_match:
+        metrics["sector_median_pe"] = float(sector_median_pe_match.group(1))
+
+    pe_vs_sector_match = re.search(r"PE_VS_SECTOR:\s*(\d+(?:\.\d+)?)", data_block)
+    if pe_vs_sector_match:
+        metrics["pe_vs_sector"] = float(pe_vs_sector_match.group(1))
+
+    pb_match = re.search(r"PB_RATIO:\s*(\d+(?:\.\d+)?)", data_block)
     if pb_match:
         metrics["pb_ratio"] = float(pb_match.group(1))
 
@@ -169,12 +208,12 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
     if roe_avg_match:
         metrics["roe_5y_avg"] = float(roe_avg_match.group(1))
 
-    peg_match = re.search(r"PEG_RATIO:\s*([0-9.]+)", data_block)
+    peg_match = re.search(r"PEG_RATIO:\s*(\d+(?:\.\d+)?)", data_block)
     if peg_match:
         metrics["peg_ratio"] = float(peg_match.group(1))
 
     ocf_match = re.search(
-        r"OPERATING_CASH_FLOW:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
+        r"OPERATING_CASH_FLOW:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
         data_block,
         re.IGNORECASE,
     )
@@ -202,6 +241,16 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         value = ocf_reason_match.group(1).upper()
         if value != "N/A":
             metrics["ocf_filing_reason"] = value
+
+    ocf_period_match = re.search(
+        r"OPERATING_CASH_FLOW_PERIOD:\s*([^\n]+)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if ocf_period_match:
+        value = ocf_period_match.group(1).strip()
+        if value.upper() not in ("N/A", ""):
+            metrics["ocf_period"] = value
 
     segment_flag_match = re.search(
         r"SEGMENT_FLAG:\s*(DETERIORATING|STABLE|N/A)", data_block, re.IGNORECASE
@@ -275,6 +324,24 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
         if value != "N/A":
             metrics["growth_trajectory"] = value
 
+    revenue_cagr_match = re.search(r"REVENUE_CAGR_3Y:\s*(-?\d+(?:\.\d+)?)%", data_block)
+    if revenue_cagr_match:
+        metrics["revenue_cagr_3y"] = float(revenue_cagr_match.group(1))
+
+    fcf_cagr_match = re.search(r"FCF_CAGR_3Y:\s*(-?\d+(?:\.\d+)?)%", data_block)
+    if fcf_cagr_match:
+        metrics["fcf_cagr_3y"] = float(fcf_cagr_match.group(1))
+
+    cycle_position_match = re.search(
+        r"CYCLE_POSITION:\s*(PEAK|MID|TROUGH|N/A)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if cycle_position_match:
+        value = cycle_position_match.group(1).upper()
+        if value != "N/A":
+            metrics["cycle_position"] = value
+
     rev_ttm_match = re.search(r"REVENUE_GROWTH_TTM:\s*(-?\d+(?:\.\d+)?)%", data_block)
     if rev_ttm_match:
         metrics["revenue_growth_ttm"] = float(rev_ttm_match.group(1))
@@ -327,6 +394,45 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
             except ValueError:
                 pass
 
+    asset_turnover_match = re.search(
+        r"ASSET_TURNOVER:\s*([0-9]+(?:\.[0-9]+)?)", data_block
+    )
+    if asset_turnover_match:
+        try:
+            metrics["asset_turnover"] = float(asset_turnover_match.group(1))
+        except ValueError:
+            pass
+
+    inv_trend_match = re.search(
+        r"INVENTORY_TURNOVER_TREND:\s*(RISING|STABLE|FALLING|N/A)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if inv_trend_match:
+        value = inv_trend_match.group(1).upper()
+        if value != "N/A":
+            metrics["inventory_turnover_trend"] = value
+
+    capacity_util_match = re.search(
+        r"CAPACITY_UTILIZATION:\s*([0-9]+(?:\.[0-9]+)?)\s*%", data_block
+    )
+    if capacity_util_match:
+        try:
+            metrics["capacity_utilization"] = float(capacity_util_match.group(1))
+        except ValueError:
+            pass
+
+    facility_status_match = re.search(
+        r"FACILITY_BUILDOUT_STATUS:\s*"
+        r"(UNDER_CONSTRUCTION|RAMPING|AT_CAPACITY|NONE|N/A)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if facility_status_match:
+        value = facility_status_match.group(1).upper()
+        if value != "N/A":
+            metrics["facility_buildout_status"] = value
+
     capex_status_match = re.search(
         r"CAPEX_TO_DA_STATUS:\s*(UNDERINVESTING|MAINTENANCE|GROWTH_INVESTING|N/A)",
         data_block,
@@ -368,17 +474,20 @@ def extract_metrics(fundamentals_report: str) -> dict[str, Any]:
 def extract_debt_to_equity(report: str) -> float | None:
     """Extract D/E ratio, converting a ratio to percentage where needed."""
     patterns = [
-        r"(?:^|\n)\s*-?\s*D/E:\s*([0-9.]+)(%?)",
-        r"(?:^|\n)\s*-?\s*Debt/Equity:\s*([0-9.]+)(%?)",
-        r"(?:^|\n)\s*-?\s*Debt-to-Equity:\s*([0-9.]+)(%?)",
-        r"D/E:\s*([0-9.]+)(%?)",
-        r"Debt/Equity:\s*([0-9.]+)(%?)",
-        r"DE_RATIO:\s*([0-9.]+)(%?)",
+        r"(?:^|\n)\s*-?\s*D/E:\s*(\d+(?:\.\d+)?)(%?)",
+        r"(?:^|\n)\s*-?\s*Debt/Equity:\s*(\d+(?:\.\d+)?)(%?)",
+        r"(?:^|\n)\s*-?\s*Debt-to-Equity:\s*(\d+(?:\.\d+)?)(%?)",
+        r"D/E:\s*(\d+(?:\.\d+)?)(%?)",
+        r"Debt/Equity:\s*(\d+(?:\.\d+)?)(%?)",
+        r"DE_RATIO:\s*(\d+(?:\.\d+)?)(%?)",
     ]
     for pattern in patterns:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
         if match:
-            value = float(match.group(1))
+            try:
+                value = float(match.group(1))
+            except ValueError:
+                continue
             if match.group(2):
                 return value
             return value if value >= 10 else value * 100
@@ -388,25 +497,30 @@ def extract_debt_to_equity(report: str) -> float | None:
 def extract_interest_coverage(report: str) -> float | None:
     """Extract interest coverage ratio."""
     patterns = [
-        r"\*\*Interest Coverage\*\*:\s*([0-9.]+)x?",
-        r"Interest Coverage:\s*([0-9.]+)x?",
-        r"Interest Coverage Ratio:\s*([0-9.]+)x?",
+        r"\*\*Interest Coverage\*\*:\s*(\d+(?:\.\d+)?)x?",
+        r"Interest Coverage:\s*(\d+(?:\.\d+)?)x?",
+        r"Interest Coverage Ratio:\s*(\d+(?:\.\d+)?)x?",
     ]
     for pattern in patterns:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
         if match:
-            return float(match.group(1))
+            try:
+                return float(match.group(1))
+            except ValueError:
+                continue
     return None
 
 
 def extract_free_cash_flow(report: str) -> float | None:
     """Extract free cash flow with support for signs and B/M/K multipliers."""
     patterns = [
-        r"\*\*Free Cash Flow\*\*:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
-        r"(?:^|\n)\s*Free Cash Flow:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
-        r"(?:^|\n)\s*FCF:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
-        r"(?:Free Cash Flow|FCF):\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
-        r"Positive FCF:\s*[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
+        # Canonical DATA_BLOCK field (fundamentals prompt v9.31)
+        r"(?:^|\n)\s*FREE_CASH_FLOW:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        r"\*\*Free Cash Flow\*\*:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        r"(?:^|\n)\s*Free Cash Flow:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        r"(?:^|\n)\s*FCF:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        r"(?:Free Cash Flow|FCF):\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        r"Positive FCF:\s*[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
     ]
     for pattern in patterns:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
@@ -421,9 +535,9 @@ def extract_free_cash_flow(report: str) -> float | None:
 def extract_net_income(report: str) -> float | None:
     """Extract net income with support for signs and B/M/K multipliers."""
     patterns = [
-        r"\*\*Net Income\*\*:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
-        r"(?:^|\n)\s*Net Income:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
-        r"Net Income:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
+        r"\*\*Net Income\*\*:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        r"(?:^|\n)\s*Net Income:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        r"Net Income:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
     ]
     for pattern in patterns:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
@@ -436,10 +550,10 @@ def extract_net_income(report: str) -> float | None:
 def extract_operating_cash_flow(report: str) -> float | None:
     """Extract operating cash flow with support for signs and B/M/K multipliers."""
     patterns = [
-        r"\*\*Operating Cash Flow\*\*:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
-        r"(?:^|\n)\s*Operating Cash Flow:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
-        r"(?:^|\n)\s*OCF:\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
-        r"(?:Operating Cash Flow|OCF):\s*([+-]?)[$¥€£]?\s*([0-9,.]+)\s*([BMK])?",
+        r"\*\*Operating Cash Flow\*\*:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        r"(?:^|\n)\s*Operating Cash Flow:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        r"(?:^|\n)\s*OCF:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        r"(?:Operating Cash Flow|OCF):\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
     ]
     for pattern in patterns:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)

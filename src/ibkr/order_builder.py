@@ -11,6 +11,7 @@ import re
 
 import structlog
 
+from src.data_block_utils import unfenced_label
 from src.ibkr.models import TradeBlockData
 
 logger = structlog.get_logger(__name__)
@@ -66,8 +67,9 @@ def parse_trade_block(text: str) -> TradeBlockData | None:
         return None
 
     # Find the TRADE_BLOCK section (may be wrapped in markdown code fences)
+    trade_label = re.escape(unfenced_label("TRADE_BLOCK").rstrip(":"))
     block_match = re.search(
-        r"TRADE_BLOCK[:\s]*\n(.*?)(?:\n```|\n---|\n\n\n|\Z)",
+        rf"{trade_label}\s*:?\s*\n(.*?)(?:\n```|\n---|\n\n\n|\Z)",
         text,
         re.DOTALL | re.IGNORECASE,
     )

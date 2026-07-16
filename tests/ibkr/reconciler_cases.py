@@ -1,13 +1,17 @@
 """Shared reconciler test cases and helpers for IBKR split test modules."""
 
 import json
-import multiprocessing
+import os
+import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 from src.ibkr.analysis_index import (
     AnalysisLoadProgress,
@@ -36,7 +40,15 @@ from src.ibkr.reconciliation_rules import (
     check_target_hit,
 )
 from src.ibkr.ticker import Ticker
-from tests.ibkr.lock_helpers import hold_analysis_index_lock
+
+
+def _recent(days_ago: int) -> str:
+    """ISO date `days_ago` before today — for macro tests that must fall
+    within the (recent) macro-override window regardless of the run date."""
+    from datetime import date, timedelta
+
+    return (date.today() - timedelta(days=days_ago)).isoformat()
+
 
 # ── Fixtures ──
 
@@ -77,6 +89,8 @@ def _make_analysis(
     size_pct: float = 5.0,
     current_price: float = 2100.0,
     capital_flag_types: tuple[str, ...] = (),
+    risk_tally: float | None = None,
+    quality_flag_types: tuple[str, ...] = (),
 ) -> AnalysisRecord:
     from datetime import datetime, timedelta
 
@@ -104,6 +118,8 @@ def _make_analysis(
             target_2_price=target_2,
         ),
         capital_flag_types=capital_flag_types,
+        risk_tally=risk_tally,
+        quality_flag_types=quality_flag_types,
     )
 
 
@@ -1173,8 +1189,10 @@ CAPITAL_PLAN_STATUS: NONE
             second = load_latest_analyses(tmp_path)
 
         assert second["7203.T"].ticker == "7203.T"
-        info_events = [call.args[0] for call in mock_logger.info.call_args_list]
-        assert "analysis_index_mtime_mismatch_accepted" in info_events
+        # The accept is logged at debug (intentionally quiet — it fires on every
+        # load given full-ns dir mtime never matches second-granular reads).
+        debug_events = [call.args[0] for call in mock_logger.debug.call_args_list]
+        assert "analysis_index_mtime_mismatch_accepted" in debug_events
 
     def test_load_latest_analyses_rebuilds_when_analysis_file_count_changes(
         self, tmp_path
@@ -1710,27 +1728,48 @@ CAPITAL_PLAN_STATUS: NONE
         record = _build_analysis_record_from_data(second_path, second)
         assert record is not None
 
-        ctx = multiprocessing.get_context("spawn")
-        ready = ctx.Event()
-        proc = ctx.Process(
-            target=hold_analysis_index_lock,
-            args=(str(tmp_path), 0.4, ready),
+        # Launch the lock-holder as a posix_spawn subprocess (close_fds=False, no
+        # cwd=) rather than a multiprocessing "spawn" Process: the latter calls
+        # fork(), which SIGSEGVs in Apple's Network.framework atfork handler on
+        # macOS once the gRPC stack is loaded. Readiness is signaled via a marker
+        # file. See CLAUDE.md (macOS-Specific Issues).
+        ready_path = tmp_path / ".lock_holder_ready"
+        child_env = {**os.environ}
+        child_env["PYTHONPATH"] = (
+            str(_REPO_ROOT) + os.pathsep + child_env["PYTHONPATH"]
+            if child_env.get("PYTHONPATH")
+            else str(_REPO_ROOT)
         )
-        proc.start()
-        assert ready.wait(2.0)
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "tests.ibkr.lock_helpers",
+                str(tmp_path),
+                "0.4",
+                str(ready_path),
+            ],
+            env=child_env,
+            close_fds=False,
+        )
+        try:
+            deadline = time.time() + 2.0
+            while not ready_path.exists() and time.time() < deadline:
+                time.sleep(0.01)
+            assert ready_path.exists(), "lock holder did not signal readiness"
 
-        start = time.perf_counter()
-        with patch("src.ibkr.analysis_index.logger") as mock_logger:
-            updated = update_latest_analyses_index(
-                tmp_path,
-                record,
-                previous_dir_mtime_ns=previous_dir_mtime_ns,
-                analysis_file_count_before_save=1,
-            )
-        elapsed = time.perf_counter() - start
-
-        proc.join(timeout=2.0)
-        assert proc.exitcode == 0
+            start = time.perf_counter()
+            with patch("src.ibkr.analysis_index.logger") as mock_logger:
+                updated = update_latest_analyses_index(
+                    tmp_path,
+                    record,
+                    previous_dir_mtime_ns=previous_dir_mtime_ns,
+                    analysis_file_count_before_save=1,
+                )
+            elapsed = time.perf_counter() - start
+        finally:
+            proc.wait(timeout=2.0)
+        assert proc.returncode == 0
         assert updated is True
         assert elapsed >= 0.25
         mock_logger.debug.assert_any_call(
@@ -1791,7 +1830,9 @@ CAPITAL_PLAN_STATUS: NONE
             )
 
         assert updated is True
-        mock_logger.info.assert_any_call(
+        # The accept is logged at debug (intentionally quiet); the index still
+        # updates incrementally because the pre-save file count proves it current.
+        mock_logger.debug.assert_any_call(
             "analysis_index_incremental_update_mtime_mismatch_accepted",
             ticker="6758.T",
             path=str(index_path),
@@ -2021,10 +2062,15 @@ class TestExchangeFromPosition:
         pos = self._pos("MEGP", ibkr_exchange="KLSE", currency="MYR")
         assert _exchange_from_position(pos) == "KL"
 
-    def test_ibkr_tse_maps_to_t(self):
-        """IBKR TSE (Tokyo Stock Exchange) → 'T'."""
-        pos = self._pos("7203", ibkr_exchange="TSE", currency="JPY")
+    def test_ibkr_tsej_maps_to_t(self):
+        """IBKR Client Portal Tokyo code 'TSEJ' → 'T'."""
+        pos = self._pos("7203", ibkr_exchange="TSEJ", currency="JPY")
         assert _exchange_from_position(pos) == "T"
+
+    def test_ibkr_tse_maps_to_to(self):
+        """IBKR Client Portal Toronto code 'TSE' → 'TO' (not Tokyo's 'T')."""
+        pos = self._pos("PEY", ibkr_exchange="TSE", currency="CAD")
+        assert _exchange_from_position(pos) == "TO"
 
     def test_ibkr_wse_maps_to_wa(self):
         """IBKR WSE (Warsaw Stock Exchange) → 'WA'."""
@@ -2437,8 +2483,12 @@ class TestProfitTakeClassification:
         assert item.reason.startswith("Target hit:")
 
     def test_idle_cash_risk_needs_target_hit_or_large_gain(self):
+        # entry_price near current isolates this from drift-staleness: the point is
+        # that a RISK flag with neither a target hit nor a large (>=50%) gain does not
+        # profit-take — gain here is +27.5% off cost, below the large-gain bar.
         pos = _make_position(avg_cost=2000, current_price=2550)
         analysis = _make_analysis(
+            entry_price=2500,
             target_1=3000,
             capital_flag_types=("CAPITAL_IDLE_CASH_RISK",),
         )
@@ -2509,14 +2559,20 @@ def _make_multi_sell_scenario(
     n_stop_breaches: int,
     n_hard_rejects: int,
     n_holds: int,
-    sell_date: str = "2026-03-05",
+    sell_date: str | None = None,
 ) -> tuple[list, dict, "PortfolioSummary"]:
     """
     Build positions + analyses for a correlated-sell scenario.
 
     Returns (positions, analyses, portfolio) ready for reconcile().
+
+    ``sell_date`` defaults to a recent date (within the macro override window) so
+    the demotion fires; pass an older date to exercise the lapsed-override path.
     """
     from datetime import datetime, timedelta
+
+    if sell_date is None:
+        sell_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
 
     positions = []
     analyses = {}
@@ -3115,11 +3171,11 @@ class TestCorrelatedSellDetectionWindow:
         """
         items = (
             [
-                _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+                _make_sell_item_on_date(f"S{i}.T", _recent(18), conid=100 + i)
                 for i in range(3)
             ]
             + [
-                _make_sell_item_on_date(f"T{i}.T", "2026-03-10", conid=200 + i)
+                _make_sell_item_on_date(f"T{i}.T", _recent(13), conid=200 + i)
                 for i in range(3)
             ]
             + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(2)]
@@ -3141,11 +3197,11 @@ class TestCorrelatedSellDetectionWindow:
         """
         items = (
             [
-                _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+                _make_sell_item_on_date(f"S{i}.T", _recent(18), conid=100 + i)
                 for i in range(3)
             ]
             + [
-                _make_sell_item_on_date(f"T{i}.T", "2026-03-20", conid=200 + i)
+                _make_sell_item_on_date(f"T{i}.T", _recent(3), conid=200 + i)
                 for i in range(3)
             ]
             + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(2)]
@@ -3167,11 +3223,11 @@ class TestCorrelatedSellDetectionWindow:
         Both methods agree here; test documents expected behaviour.
         """
         sells_d0 = [
-            _make_sell_item_on_date(f"A{i}.T", "2026-03-05", conid=100 + i)
+            _make_sell_item_on_date(f"A{i}.T", _recent(18), conid=100 + i)
             for i in range(18)
         ]
         sells_d1 = [
-            _make_sell_item_on_date(f"B{i}.T", "2026-03-06", conid=200 + i)
+            _make_sell_item_on_date(f"B{i}.T", _recent(17), conid=200 + i)
             for i in range(4)
         ]
         holds = [
@@ -3191,11 +3247,11 @@ class TestCorrelatedSellDetectionWindow:
         # 3 sells on day 0 + 3 sells on day 2 = within 3-day window → 6 total
         items_close = (
             [
-                _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+                _make_sell_item_on_date(f"S{i}.T", _recent(18), conid=100 + i)
                 for i in range(3)
             ]
             + [
-                _make_sell_item_on_date(f"T{i}.T", "2026-03-07", conid=200 + i)
+                _make_sell_item_on_date(f"T{i}.T", _recent(16), conid=200 + i)
                 for i in range(3)
             ]
             + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(2)]
@@ -3215,11 +3271,11 @@ class TestCorrelatedSellDetectionWindow:
         # 3 sells on day 0 + 3 sells on day 4 = outside 3-day window → max 3 < 5
         items_far = (
             [
-                _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=400 + i)
+                _make_sell_item_on_date(f"S{i}.T", _recent(18), conid=400 + i)
                 for i in range(3)
             ]
             + [
-                _make_sell_item_on_date(f"T{i}.T", "2026-03-09", conid=500 + i)
+                _make_sell_item_on_date(f"T{i}.T", _recent(14), conid=500 + i)
                 for i in range(3)
             ]
             + [_make_hold_item_for_health(f"H{i}.T", conid=600 + i) for i in range(2)]
@@ -3250,11 +3306,11 @@ class TestSecondaryRatioCorrelatedSell:
                 for i in range(2)
             ]
             + [
-                _make_sell_item_on_date(f"B{i}.T", "2026-03-05", conid=200 + i)
+                _make_sell_item_on_date(f"B{i}.T", _recent(18), conid=200 + i)
                 for i in range(2)
             ]
             + [
-                _make_sell_item_on_date(f"C{i}.T", "2026-03-20", conid=300 + i)
+                _make_sell_item_on_date(f"C{i}.T", _recent(3), conid=300 + i)
                 for i in range(3)
             ]
             + [
@@ -3320,7 +3376,13 @@ class TestSecondaryRatioCorrelatedSell:
         ]
         assert len(soft_before) == 10
 
-        compute_portfolio_health(positions, {}, portfolio, reconciliation_items=items)
+        compute_portfolio_health(
+            positions,
+            {},
+            portfolio,
+            reconciliation_items=items,
+            macro_override_max_age_days=10**6,
+        )
 
         # After: demoted to REVIEW
         soft_after = [
@@ -3866,6 +3928,211 @@ class TestMacroEventTriggersJune2026:
         assert len(demoted) == 2
         assert all("active GEOPOLITICAL event" in i.reason for i in demoted)
 
+    def test_active_event_within_window_demotes(self):
+        """Within the brief override window, a recent active event still demotes."""
+        from datetime import date, timedelta
+        from types import SimpleNamespace
+
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", self._spread_date(i), conid=100 + i)
+            for i in range(2)
+        ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(18)]
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        recent = (date.today() - timedelta(days=3)).isoformat()
+        event = SimpleNamespace(
+            event_type="GEOPOLITICAL",
+            expiry="2026-12-01",
+            event_date=recent,
+            detected_date=recent,
+        )
+        flags = compute_portfolio_health(
+            positions,
+            {},
+            portfolio,
+            reconciliation_items=items,
+            active_macro_events=[event],
+        )
+        assert any("ACTIVE_MACRO_EVENT" in f for f in flags)
+        assert len([i for i in items if i.action == "REVIEW"]) == 2
+
+    def test_active_event_lapses_past_override_window(self):
+        """Past the brief override window, demotion lapses (impaired positions can
+        exit) and a distinct MACRO_EVENT_ONGOING flag keeps the dip-buy/panic banner
+        off while signalling the event is still live."""
+        from datetime import date, timedelta
+        from types import SimpleNamespace
+
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", self._spread_date(i), conid=100 + i)
+            for i in range(2)
+        ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(18)]
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        old = (date.today() - timedelta(days=40)).isoformat()
+        event = SimpleNamespace(
+            event_type="GEOPOLITICAL",
+            expiry="2026-12-01",
+            event_date=old,
+            detected_date=old,
+        )
+        flags = compute_portfolio_health(
+            positions,
+            {},
+            portfolio,
+            reconciliation_items=items,
+            active_macro_events=[event],
+        )
+        assert any("MACRO_EVENT_ONGOING" in f for f in flags)
+        assert not any("ACTIVE_MACRO_EVENT" in f for f in flags)
+        assert all(i.action == "SELL" for i in items[:2])  # not demoted — can exit
+
+    def test_fresh_window_detection_wins_over_old_lapsed_active_event(self):
+        """A new verdict-cluster macro signal must not be suppressed by an older
+        unexpired event whose brief override window has already lapsed."""
+        from datetime import date, timedelta
+        from types import SimpleNamespace
+
+        recent = (date.today() - timedelta(days=3)).isoformat()
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", recent, conid=100 + i) for i in range(6)
+        ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(14)]
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        old = (date.today() - timedelta(days=45)).isoformat()
+        old_event = SimpleNamespace(
+            event_type="GEOPOLITICAL",
+            expiry="2026-12-01",
+            event_date=old,
+            detected_date=old,
+        )
+
+        flags = compute_portfolio_health(
+            positions,
+            {},
+            portfolio,
+            reconciliation_items=items,
+            active_macro_events=[old_event],
+        )
+
+        assert any("CORRELATED_SELL_EVENT" in f and "[window]" in f for f in flags)
+        assert not any("MACRO_EVENT_ONGOING" in f for f in flags)
+        assert len([i for i in items[:6] if i.action == "REVIEW"]) == 6
+
+    def test_fresh_cumulative_detection_wins_over_old_lapsed_active_event(self):
+        """Fresh cumulative sell pressure is separate from a prior lapsed event."""
+        from datetime import date, timedelta
+        from types import SimpleNamespace
+
+        items = [
+            _make_sell_item_on_date(
+                f"S{i}.T",
+                (date.today() - timedelta(days=13 * i)).isoformat(),
+                conid=100 + i,
+            )
+            for i in range(9)
+        ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(11)]
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        old = (date.today() - timedelta(days=45)).isoformat()
+        old_event = SimpleNamespace(
+            event_type="GEOPOLITICAL",
+            expiry="2026-12-01",
+            event_date=old,
+            detected_date=old,
+        )
+
+        flags = compute_portfolio_health(
+            positions,
+            {},
+            portfolio,
+            reconciliation_items=items,
+            active_macro_events=[old_event],
+        )
+
+        assert any("CORRELATED_SELL_EVENT" in f and "[cumulative]" in f for f in flags)
+        assert not any("MACRO_EVENT_ONGOING" in f for f in flags)
+        assert len([i for i in items[:9] if i.action == "REVIEW"]) == 9
+
+    def test_old_active_event_blocks_drawdown_only_reanchoring(self):
+        """Drawdown breadth alone can be the same old structural impairment, so an
+        old active event should not let it restart the brief override every run."""
+        from datetime import date, timedelta
+        from types import SimpleNamespace
+
+        items = [
+            _make_hold_item_for_health(f"H{i:02d}.T", conid=100 + i) for i in range(24)
+        ]
+        for item in items[:10]:
+            item.ibkr_position.current_price_local = 1800.0  # entry 2100 → -14.3%
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        old = (date.today() - timedelta(days=45)).isoformat()
+        old_event = SimpleNamespace(
+            event_type="GEOPOLITICAL",
+            expiry="2026-12-01",
+            event_date=old,
+            detected_date=old,
+        )
+
+        flags = compute_portfolio_health(
+            positions,
+            {},
+            portfolio,
+            reconciliation_items=items,
+            active_macro_events=[old_event],
+        )
+
+        assert any("MACRO_EVENT_ONGOING" in f for f in flags)
+        assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
+        assert not any("ACTIVE_MACRO_EVENT" in f for f in flags)
+
+    def test_recent_active_event_wins_when_older_active_event_is_first(self):
+        """If multiple stored events are active, use a within-window event for the
+        sustained override instead of letting an older first event force lapse."""
+        from datetime import date, timedelta
+        from types import SimpleNamespace
+
+        items = [
+            _make_sell_item_on_date(f"S{i}.T", self._spread_date(i), conid=100 + i)
+            for i in range(2)
+        ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(18)]
+        positions = [i.ibkr_position for i in items if i.ibkr_position]
+        portfolio = _make_portfolio(value=len(positions) * 1000, cash=0)
+        portfolio.exchange_weights = {}
+        old = (date.today() - timedelta(days=45)).isoformat()
+        recent = (date.today() - timedelta(days=3)).isoformat()
+        events = [
+            SimpleNamespace(
+                event_type="OLD_EVENT",
+                expiry="2026-12-01",
+                event_date=old,
+                detected_date=old,
+            ),
+            SimpleNamespace(
+                event_type="RECENT_EVENT",
+                expiry="2026-09-01",
+                event_date=recent,
+                detected_date=recent,
+            ),
+        ]
+
+        flags = compute_portfolio_health(
+            positions,
+            {},
+            portfolio,
+            reconciliation_items=items,
+            active_macro_events=events,
+        )
+
+        assert any("ACTIVE_MACRO_EVENT: RECENT_EVENT" in f for f in flags)
+        assert all("active RECENT_EVENT event" in i.reason for i in items[:2])
+
     def test_no_active_event_no_fresh_detection_no_demotion(self):
         items = [
             _make_sell_item_on_date(f"S{i}.T", self._spread_date(i), conid=100 + i)
@@ -3974,12 +4241,12 @@ class TestMacroDetectorInputRobustness:
 
     def test_malformed_dates_dont_crash_or_mask_detection(self):
         items = [
-            _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+            _make_sell_item_on_date(f"S{i}.T", _recent(18), conid=100 + i)
             for i in range(5)
         ]
         bad_dates = [None, "", "not-a-date", "2026-13-45"]
         for i, bad in enumerate(bad_dates):
-            item = _make_sell_item_on_date(f"B{i}.T", "2026-03-05", conid=200 + i)
+            item = _make_sell_item_on_date(f"B{i}.T", _recent(18), conid=200 + i)
             item.analysis.analysis_date = bad
             items.append(item)
         items += [
@@ -3996,7 +4263,7 @@ class TestMacroDetectorInputRobustness:
     def test_all_malformed_dates_fall_through_to_drawdown(self):
         items = []
         for i in range(9):
-            item = _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+            item = _make_sell_item_on_date(f"S{i}.T", _recent(18), conid=100 + i)
             item.analysis.analysis_date = "garbage"
             items.append(item)
         items += [
@@ -4014,7 +4281,7 @@ class TestMacroDetectorInputRobustness:
 
     def test_none_analysis_and_none_position_items_skipped_safely(self):
         items = [
-            _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+            _make_sell_item_on_date(f"S{i}.T", _recent(18), conid=100 + i)
             for i in range(6)
         ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(4)]
         no_analysis = _make_hold_item_for_health("NA.T", conid=400)
@@ -4091,7 +4358,11 @@ class TestMacroDetectorInputRobustness:
         positions, portfolio = self._book(items)
 
         flags = compute_portfolio_health(
-            positions, {}, portfolio, reconciliation_items=items
+            positions,
+            {},
+            portfolio,
+            reconciliation_items=items,
+            macro_override_max_age_days=10**6,
         )
         assert any("CORRELATED_SELL_EVENT" in f for f in flags)
 
@@ -4107,7 +4378,7 @@ class TestMacroDetectorInputRobustness:
     def test_all_position_none_items_zero_held_no_division_error(self):
         holds = [_make_hold_item_for_health(f"H{i}.T", conid=100 + i) for i in range(3)]
         positions, portfolio = self._book(holds)
-        orphan = _make_sell_item_on_date("S0.T", "2026-03-05", conid=200)
+        orphan = _make_sell_item_on_date("S0.T", _recent(18), conid=200)
         orphan.ibkr_position = None
 
         flags = compute_portfolio_health(
@@ -4116,7 +4387,7 @@ class TestMacroDetectorInputRobustness:
         assert not any("CORRELATED_SELL_EVENT" in f for f in flags)
 
     def test_tiny_book_never_fires(self):
-        items = [_make_sell_item_on_date("S0.T", "2026-03-05", conid=100)]
+        items = [_make_sell_item_on_date("S0.T", _recent(18), conid=100)]
         positions, portfolio = self._book(items)
 
         flags = compute_portfolio_health(
@@ -4145,7 +4416,11 @@ class TestMacroDetectorInputRobustness:
         positions, portfolio = self._book(items)
 
         flags = compute_portfolio_health(
-            positions, {}, portfolio, reconciliation_items=items
+            positions,
+            {},
+            portfolio,
+            reconciliation_items=items,
+            macro_override_max_age_days=10**6,
         )
         # 8 evidence items / 20 held = 40% >= 35%, count 8 >= 8 → cumulative fires
         event_flags = [f for f in flags if "CORRELATED_SELL_EVENT" in f]
@@ -4193,7 +4468,7 @@ class TestMacroDetectorBoundaries:
 
     def _window_case(self, holds: int) -> list[str]:
         items = [
-            _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+            _make_sell_item_on_date(f"S{i}.T", _recent(18), conid=100 + i)
             for i in range(5)
         ] + [
             _make_hold_item_for_health(f"H{i:02d}.T", conid=300 + i)
@@ -4220,7 +4495,11 @@ class TestMacroDetectorBoundaries:
         ]
         positions, portfolio = self._book(items)
         flags = compute_portfolio_health(
-            positions, {}, portfolio, reconciliation_items=items
+            positions,
+            {},
+            portfolio,
+            reconciliation_items=items,
+            macro_override_max_age_days=10**6,
         )
         event_flags = [f for f in flags if "CORRELATED_SELL_EVENT" in f]
         assert event_flags and "[cumulative]" in event_flags[0]  # 14/40 = 35.0%
@@ -4304,7 +4583,7 @@ class TestMacroTriggerPrecedence:
         # 8 same-day sells / 12 held: window (67%), cumulative (67%), AND
         # broad drawdown all satisfied — window must win the label.
         items = [
-            _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+            _make_sell_item_on_date(f"S{i}.T", _recent(18), conid=100 + i)
             for i in range(8)
         ] + [_make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(4)]
         for item in items:
@@ -4362,7 +4641,7 @@ class TestMacroTriggerPrecedence:
 
         # Path 1: fresh detection (8 soft same-day + weak stop / 12 held)
         items = [
-            _make_sell_item_on_date(f"S{i}.T", "2026-03-05", conid=100 + i)
+            _make_sell_item_on_date(f"S{i}.T", _recent(18), conid=100 + i)
             for i in range(8)
         ] + [weak_stop(900)]
         items += [
@@ -4399,7 +4678,7 @@ class TestSustainedOverrideEdgeCases:
     def test_degenerate_event_object_uses_defaults(self):
         from types import SimpleNamespace
 
-        items = [_make_sell_item_on_date("S0.T", "2026-03-05", conid=100)] + [
+        items = [_make_sell_item_on_date("S0.T", _recent(18), conid=100)] + [
             _make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(9)
         ]
         positions, portfolio = self._book(items)
@@ -4417,7 +4696,7 @@ class TestSustainedOverrideEdgeCases:
     def test_multiple_active_events_first_wins(self):
         from types import SimpleNamespace
 
-        items = [_make_sell_item_on_date("S0.T", "2026-03-05", conid=100)] + [
+        items = [_make_sell_item_on_date("S0.T", _recent(18), conid=100)] + [
             _make_hold_item_for_health(f"H{i}.T", conid=300 + i) for i in range(9)
         ]
         positions, portfolio = self._book(items)

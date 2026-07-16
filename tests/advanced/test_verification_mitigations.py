@@ -239,6 +239,12 @@ class TestSourceConflictDetection:
         assert conflict["resolved_by_quality"] is True
         assert conflict["winner_quality"] == 9
         assert conflict["loser_quality"] == 6
+        # Explicit winner fields must track the actual merged winner regardless of
+        # new/old iteration order (guards the resolved-conflict formatter).
+        assert conflict["winner_source"] == "yfinance"
+        assert conflict["winner_value"] == 8.1212
+        assert conflict["loser_source"] == "yahooquery"
+        assert conflict["loser_value"] == 77.9191
         assert not any(
             call.args and call.args[0] == "source_data_conflicts"
             for call in mock_logger.warning.call_args_list
@@ -374,6 +380,108 @@ class TestFormatConflictTable:
         assert "yahooquery" in result
         assert "yfinance" in result
         assert "bidSize" not in result
+
+    def test_resolved_conflict_segregated_from_actionable(self):
+        """A resolved_by_quality conflict lands under RESOLVED, not the actionable list."""
+        from langchain_core.messages import ToolMessage
+
+        from src.agents import format_conflict_table
+
+        tool_content = json.dumps(
+            {
+                "_source_conflicts": {
+                    "revenueGrowth": {
+                        "old": 0.301,
+                        "old_source": "yahooquery",
+                        "new": 0.0484,
+                        "new_source": "yfinance",
+                        "variance_pct": 83.9,
+                        "resolved_by_quality": True,
+                        "winner_quality": 10,
+                        "loser_quality": 6,
+                    }
+                },
+            }
+        )
+        messages = [ToolMessage(content=tool_content, tool_call_id="c1")]
+
+        result = format_conflict_table(messages)
+        assert "RESOLVED BY DATA QUALITY" in result
+        assert "do NOT apply a Tier C2" in result
+        assert "DATA SOURCE CONFLICTS (>20% variance — UNRESOLVED)" not in result
+        assert "quality 10" in result
+
+    def test_resolved_section_labels_winner_when_old_side_won(self):
+        """When should_use was False, the OLD value won — formatter must not claim new."""
+        from langchain_core.messages import ToolMessage
+
+        from src.agents import format_conflict_table
+
+        # old (yfinance, q10) beat new (yahooquery, q6): winner_* point at the old side.
+        tool_content = json.dumps(
+            {
+                "_source_conflicts": {
+                    "trailingPE": {
+                        "old": 11.47,
+                        "old_source": "yfinance",
+                        "new": 30.1,
+                        "new_source": "yahooquery",
+                        "winner_source": "yfinance",
+                        "winner_value": 11.47,
+                        "loser_source": "yahooquery",
+                        "loser_value": 30.1,
+                        "variance_pct": 162.4,
+                        "resolved_by_quality": True,
+                        "winner_quality": 10,
+                        "loser_quality": 6,
+                    }
+                },
+            }
+        )
+        messages = [ToolMessage(content=tool_content, tool_call_id="c1")]
+
+        result = format_conflict_table(messages)
+        assert "kept yfinance=11.47 (quality 10)" in result
+        assert "over yahooquery=30.1 (quality 6)" in result
+        assert "kept yahooquery" not in result
+
+    def test_mixed_resolved_and_actionable_render_both_sections(self):
+        """Mixed conflicts render both the actionable and resolved sections."""
+        from langchain_core.messages import ToolMessage
+
+        from src.agents import format_conflict_table
+
+        tool_content = json.dumps(
+            {
+                "_source_conflicts": {
+                    "revenueGrowth": {
+                        "old": 0.301,
+                        "old_source": "yahooquery",
+                        "new": 0.0484,
+                        "new_source": "yfinance",
+                        "variance_pct": 83.9,
+                        "resolved_by_quality": True,
+                        "winner_quality": 10,
+                        "loser_quality": 6,
+                    },
+                    "trailingPE": {
+                        "old": 10.0,
+                        "old_source": "yahooquery",
+                        "new": 15.0,
+                        "new_source": "fmp",
+                        "variance_pct": 50.0,
+                        "resolved_by_quality": False,
+                    },
+                },
+            }
+        )
+        messages = [ToolMessage(content=tool_content, tool_call_id="c1")]
+
+        result = format_conflict_table(messages)
+        assert "UNRESOLVED" in result
+        assert "RESOLVED BY DATA QUALITY" in result
+        assert "trailingPE" in result
+        assert "revenueGrowth" in result
 
 
 # =============================================================================

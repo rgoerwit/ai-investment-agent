@@ -19,11 +19,12 @@ from src.agents.decision_nodes import (
     _requires_apac_resolution,
 )
 
+_PM_START_MARKER = "#### -- START PM_BLOCK --"
 _PM_WITH_BLOCK = (
     "Some PM rationale.\n\n"
-    "### --- START PM_BLOCK ---\n"
+    f"{_PM_START_MARKER}\n"
     "VERDICT: BUY\n"
-    "### --- END PM_BLOCK ---\n"
+    "#### -- END PM_BLOCK --\n"
 )
 
 _PM_WITHOUT_BLOCK = "Some PM rationale without a PM_BLOCK fence.\n"
@@ -80,7 +81,7 @@ def test_ensure_apac_inserts_before_pm_block_when_missing() -> None:
     out = _ensure_apac_resolution_block(_PM_WITH_BLOCK, apac)
     assert "APAC_RESOLUTION:" in out
     apac_pos = out.find("APAC_RESOLUTION:")
-    pm_pos = out.find("### --- START PM_BLOCK ---")
+    pm_pos = out.find(_PM_START_MARKER)
     assert apac_pos < pm_pos, "APAC block must precede PM_BLOCK"
     assert "VERDICT: UNVERIFIABLE" in out
     assert "promoter pledges" in out
@@ -129,7 +130,7 @@ def test_ensure_auditor_inserts_when_anomalies_present() -> None:
     out = _ensure_auditor_resolution_block(_PM_WITH_BLOCK, auditor)
     assert "AUDITOR_RESOLUTION:" in out
     audit_pos = out.find("AUDITOR_RESOLUTION:")
-    pm_pos = out.find("### --- START PM_BLOCK ---")
+    pm_pos = out.find(_PM_START_MARKER)
     assert audit_pos < pm_pos
 
 
@@ -203,12 +204,77 @@ def test_normalize_pm_block_contract_rewrites_only_final_block() -> None:
         "VERDICT: HOLD\n"
         "POSITION_SIZE: 2.0\n"
         "### --- END PM_BLOCK ---\n\n"
-        "### --- START PM_BLOCK ---\n"
+        "## -- START PM_BLOCK --\n"
         "VERDICT: DO_NOT_INITIATE\n"
         "POSITION_SIZE: 5.0\n"
-        "### --- END PM_BLOCK ---\n"
+        "## -- END PM_BLOCK --\n"
     )
     out = _normalize_pm_block_contract(pm)
     assert "POSITION_SIZE: 2.0" in out
     assert "POSITION_SIZE: 0.0" in out
     assert "POSITION_SIZE: 5.0" not in out
+
+
+def test_normalize_pm_block_contract_reconciles_prose_sizing() -> None:
+    # The 3773.T shape: HOLD with both a nonzero block token and a nonzero prose line.
+    pm = (
+        "**Recommended Position Size**: 2.5%\n\n"
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: HOLD\n"
+        "POSITION_SIZE: 2.5\n"
+        "### --- END PM_BLOCK ---\n"
+    )
+    out = _normalize_pm_block_contract(pm)
+    assert "POSITION_SIZE: 0.0" in out
+    assert "2.5" not in out
+    assert "Recommended Position Size**: 0.0% (monitor only — no initiation)" in out
+
+
+def test_normalize_pm_block_contract_reconciles_prose_when_token_already_zero() -> None:
+    # Block token already correct; prose still contradicts — must still be reconciled
+    # (the case an emitted_size==0 early return would have skipped).
+    pm = (
+        "**Recommended Position Size**: 2.5%\n\n"
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: HOLD\n"
+        "POSITION_SIZE: 0.0\n"
+        "### --- END PM_BLOCK ---\n"
+    )
+    out = _normalize_pm_block_contract(pm)
+    assert "Recommended Position Size**: 0.0% (monitor only — no initiation)" in out
+
+
+def test_normalize_pm_block_contract_preserves_buy_prose() -> None:
+    pm = (
+        "**Recommended Position Size**: 3.0%\n\n"
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: BUY\n"
+        "POSITION_SIZE: 3.0\n"
+        "### --- END PM_BLOCK ---\n"
+    )
+    assert _normalize_pm_block_contract(pm) == pm
+
+
+def test_demotion_then_normalize_zeroes_both_surfaces() -> None:
+    # Proves the late placement composes: a BUY demoted to HOLD by
+    # maybe_demote_buy_on_blocking_flags leaves stale sizing that
+    # _normalize_pm_block_contract (run after) must clean.
+    from src.agents.verdict_policy import maybe_demote_buy_on_blocking_flags
+
+    pm = (
+        "#### PORTFOLIO MANAGER VERDICT: BUY\n\n"
+        "**Recommended Position Size**: 3.0%\n\n"
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: BUY\n"
+        "POSITION_SIZE: 3.0\n"
+        "### --- END PM_BLOCK ---\n"
+    )
+    red_flags = [{"type": "HEALTH_SCORE_UNRELIABLE", "blocks_buy": True}]
+    demoted, was_demoted = maybe_demote_buy_on_blocking_flags(
+        pm, red_flags=red_flags, ticker="TEST"
+    )
+    assert was_demoted is True
+    out = _normalize_pm_block_contract(demoted)
+    assert "POSITION_SIZE: 0.0" in out
+    assert "POSITION_SIZE: 3.0" not in out
+    assert "Recommended Position Size**: 0.0% (monitor only — no initiation)" in out
