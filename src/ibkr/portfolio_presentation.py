@@ -616,6 +616,10 @@ def group_portfolio_actions(
     watchlist_tickers: set[str] | None = None,
     dip_watch_limit: int = _DEFAULT_DIP_WATCH_LIMIT,
     macro_event_active: bool = False,
+    exchange_weights: dict[str, float] | None = None,
+    sector_weights: dict[str, float] | None = None,
+    exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT,
+    sector_limit_pct: float = DEFAULT_SECTOR_LIMIT_PCT,
 ) -> PortfolioActionGroups:
     stop_sells = tuple(
         item
@@ -700,6 +704,10 @@ def group_portfolio_actions(
             collect_dip_watch_source_items(items),
             macro_event_active=macro_event_active,
             limit=dip_watch_limit,
+            exchange_weights=exchange_weights,
+            sector_weights=sector_weights,
+            exchange_limit_pct=exchange_limit_pct,
+            sector_limit_pct=sector_limit_pct,
         )
     )
 

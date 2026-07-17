@@ -5,7 +5,10 @@ from __future__ import annotations
 import structlog
 
 from src.ibkr.models import AnalysisRecord, NormalizedPosition, PortfolioSummary
-from src.ibkr.portfolio_defaults import DEFAULT_MAX_AGE_DAYS
+from src.ibkr.portfolio_defaults import (
+    DEFAULT_EXCHANGE_LIMIT_PCT,
+    DEFAULT_MAX_AGE_DAYS,
+)
 from src.ibkr.reconciliation_rules import _EXCHANGE_LONG_NAMES
 
 logger = structlog.get_logger(__name__)
@@ -112,6 +115,7 @@ def compute_portfolio_health(
     cumulative_fallback_ratio: float = 0.35,
     active_macro_events: list | None = None,
     macro_override_max_age_days: int = _DEFAULT_MACRO_OVERRIDE_MAX_AGE_DAYS,
+    exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT,
 ) -> list[str]:
     """Compute portfolio-level health flags using data already in held analyses."""
     if not positions or portfolio.portfolio_value_usd <= 0:
@@ -229,7 +233,7 @@ def compute_portfolio_health(
             flags.append(stale_message)
 
     for exch, pct in portfolio.exchange_weights.items():
-        if pct > 40:
+        if pct > exchange_limit_pct:
             long_name = _EXCHANGE_LONG_NAMES.get(exch, exch)
             flags.append(
                 f"GEOGRAPHY_CONCENTRATION: {pct:.1f}% in {exch} ({long_name})"

@@ -4844,3 +4844,40 @@ class TestSustainedOverrideEdgeCases:
             active_macro_events=[event],
         )
         assert not any("ACTIVE_MACRO_EVENT" in f for f in flags)
+
+
+class TestGeographyConcentration:
+    """GEOGRAPHY_CONCENTRATION honors the configured exchange limit."""
+
+    def _flags(self, weight: float, **kwargs) -> list[str]:
+        pos = _make_position(market_value_usd=10000, currency="JPY")
+        analysis = _make_analysis(age_days=5)
+        analysis.health_adj = 75.0
+        analysis.growth_adj = 70.0
+        portfolio = _make_portfolio(value=100000)
+        portfolio.exchange_weights = {"T": weight}
+        return compute_portfolio_health(
+            [pos], {"7203.T": analysis}, portfolio, **kwargs
+        )
+
+    def test_flags_above_default_limit(self):
+        flags = self._flags(45.0)
+        assert any("GEOGRAPHY_CONCENTRATION: 45.0% in T" in f for f in flags)
+
+    def test_configured_limit_respected(self):
+        flags = self._flags(45.0, exchange_limit_pct=50.0)
+        assert not any("GEOGRAPHY_CONCENTRATION" in f for f in flags)
+
+    def test_exact_limit_is_silent(self):
+        flags = self._flags(40.0)
+        assert not any("GEOGRAPHY_CONCENTRATION" in f for f in flags)
+
+    def test_empty_exchange_weights_no_flag_no_crash(self):
+        pos = _make_position(market_value_usd=10000, currency="JPY")
+        analysis = _make_analysis(age_days=5)
+        analysis.health_adj = 75.0
+        analysis.growth_adj = 70.0
+        portfolio = _make_portfolio(value=100000)
+        portfolio.exchange_weights = {}
+        flags = compute_portfolio_health([pos], {"7203.T": analysis}, portfolio)
+        assert not any("GEOGRAPHY_CONCENTRATION" in f for f in flags)

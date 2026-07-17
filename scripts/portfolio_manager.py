@@ -45,7 +45,14 @@ from src.ibkr.cli_options import (
     portfolio_request_kwargs_from_args,
     validate_common_portfolio_request_args,
 )
-from src.ibkr.dip_watch import dip_watch_source, score_dip_watch_item
+from src.ibkr.dip_watch import (
+    DIP_CONCENTRATION_MIN_SCORE,
+    collect_dip_watch_source_items,
+    dip_watch_source,
+    score_dip_watch_item,
+    screen_dip_candidates_by_concentration,
+    select_dip_watch_candidates,
+)
 from src.ibkr.exceptions import IBKRAuthError, IBKRError
 from src.ibkr.models import (
     AnalysisRecord,
@@ -53,10 +60,17 @@ from src.ibkr.models import (
     PortfolioSummary,
     ReconciliationItem,
 )
-from src.ibkr.portfolio_defaults import DEFAULT_MAX_AGE_DAYS
+from src.ibkr.portfolio_defaults import (
+    DEFAULT_EXCHANGE_LIMIT_PCT,
+    DEFAULT_MAX_AGE_DAYS,
+    DEFAULT_SECTOR_LIMIT_PCT,
+)
 from src.ibkr.portfolio_presentation import (
+    CONCENTRATION_EXCEPTION_MIN_SCORE,
+    CONCENTRATION_INCUMBENT_MIN_SCORE,
     SELL_RECOMMENDATIONS_TITLE,
     SELL_RELATED_REVIEWS_TITLE,
+    ConcentrationNote,
     build_action_summary_counts,
     build_cash_summary,
     build_watchlist_optimization_summary,
@@ -1098,6 +1112,8 @@ def format_report(
     screening_freshness: ScreeningFreshnessSummary | None = None,
     portfolio_data_loaded: bool = True,
     current_macro_event: MacroEvent | None = None,
+    exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT,
+    sector_limit_pct: float = DEFAULT_SECTOR_LIMIT_PCT,
 ) -> str:
     """Format reconciliation results as sectioned human-readable text.
 
@@ -1202,6 +1218,23 @@ def format_report(
         items,
         watchlist_tickers=watchlist_tickers,
         macro_event_active=_macro_event_active,
+        exchange_weights=portfolio.exchange_weights,
+        sector_weights=portfolio.sector_weights,
+        exchange_limit_pct=exchange_limit_pct,
+        sector_limit_pct=sector_limit_pct,
+    )
+    # Dip transparency: names the concentration screen dropped from DIP WATCH
+    # (overweight bucket, below the ★★★ bar). Recomputed from the same
+    # exported screen the selector uses — one policy, no second copy.
+    _, _dips_withheld_by_concentration = screen_dip_candidates_by_concentration(
+        select_dip_watch_candidates(
+            collect_dip_watch_source_items(items),
+            macro_event_active=_macro_event_active,
+        ),
+        exchange_weights=portfolio.exchange_weights,
+        sector_weights=portfolio.sector_weights,
+        exchange_limit_pct=exchange_limit_pct,
+        sector_limit_pct=sector_limit_pct,
     )
     _optimization_in_flight = tuple(
         item
@@ -1232,6 +1265,10 @@ def format_report(
         watchlist_tickers=watchlist_tickers,
         watchlist_supplied=(watchlist_total is not None and not watchlist_unavailable),
         watchlist_unavailable=watchlist_unavailable,
+        exchange_weights=portfolio.exchange_weights,
+        sector_weights=portfolio.sector_weights,
+        exchange_limit_pct=exchange_limit_pct,
+        sector_limit_pct=sector_limit_pct,
     )
     _selected_watchlist_buy_ids = {
         candidate.ticker.yf.upper()
@@ -1438,7 +1475,7 @@ def format_report(
             a = item.analysis
             pos = item.ibkr_position
             score = _compute_dip_score(item)
-            if score >= 75:
+            if score >= DIP_CONCENTRATION_MIN_SCORE:
                 stars = "★★★"
             elif score >= 60:
                 stars = "★★ "
@@ -2091,6 +2128,16 @@ def format_report(
     ]
     if display_dip_candidates:
         _render_dip_watch_section(display_dip_candidates)
+    if _dips_withheld_by_concentration:
+        _dw_n = len(_dips_withheld_by_concentration)
+        _dw_syms = ", ".join(
+            _display_ticker(item) for item in _dips_withheld_by_concentration
+        )
+        lines.append(
+            f"  ({_dw_n} dip candidate{'s' if _dw_n != 1 else ''} withheld "
+            f"— overweight bucket, below ★★★: {_dw_syms})"
+        )
+        lines.append("")
 
     # ── TRIMS ────────────────────────────────────────────────────────────────
     if trims:
@@ -2130,6 +2177,20 @@ def format_report(
             lines.append("")
 
     # ── WATCHLIST OPTIMIZATION ───────────────────────────────────────────────
+    _conc_screened_n = len(watchlist_optimization.withheld_candidates) + sum(
+        1
+        for move in watchlist_optimization.remove
+        if move.reason == "concentration_displaced"
+    )
+    _partial_fill_subtitle = (
+        f"optimal BUY-ready set under-filled ({len(watchlist_optimization.optimal)}"
+        f" of {watchlist_optimization.target_size})"
+    )
+    if _conc_screened_n:
+        _partial_fill_subtitle = (
+            f"{_partial_fill_subtitle[:-1]} — {_conc_screened_n} withheld by "
+            "concentration)"
+        )
     _case_subtitles = {
         "no_watchlist": "no watchlist loaded — additions only",
         "watchlist_unavailable": (
@@ -2138,10 +2199,7 @@ def format_report(
         ),
         "nothing_actionable": "no medium-or-better candidates",
         "empty_pool": "no medium-or-better candidates; existing entries retained for review",
-        "partial_fill": (
-            f"optimal BUY-ready set under-filled ({len(watchlist_optimization.optimal)}"
-            f" of {watchlist_optimization.target_size})"
-        ),
+        "partial_fill": _partial_fill_subtitle,
         "aligned": "current watchlist already matches the BUY-ready target",
         "full_optimize": (
             f"top {watchlist_optimization.target_size} medium-or-higher BUY-ready slots"
@@ -2155,6 +2213,16 @@ def format_report(
     def _watchlist_symbol(item: ReconciliationItem) -> str:
         yf_hint = f" ({item.ticker.yf})" if "." in item.ticker.yf else ""
         return f"{_display_ticker(item)}{yf_hint}"
+
+    def _breach_text(note: ConcentrationNote) -> str:
+        """Describe every over-limit bucket behind one concentration decision."""
+        return " + ".join(
+            f"overweight {breach.dimension} {breach.key} "
+            f"(projected {breach.projected_pct:.1f}% > {breach.limit_pct:.0f}%)"
+            for breach in note.breaches
+        )
+
+    _keep_ids = {item.ticker.yf.upper() for item in watchlist_optimization.keep}
 
     def _render_watchlist_candidate(item: ReconciliationItem, label: str) -> None:
         analysis = item.analysis
@@ -2200,6 +2268,23 @@ def format_report(
             _render_watchlist_candidate(item, "+ ADD")
         lines.append("")
 
+    if watchlist_optimization.admitted_over_limit:
+        # Escape-hatch visibility: every slot claimed despite an over-limit
+        # bucket says so, with the tier bar that actually applied.
+        for note in watchlist_optimization.admitted_over_limit:
+            _bar = (
+                f"{CONCENTRATION_INCUMBENT_MIN_SCORE:.0f} (incumbent)"
+                if note.item.ticker.yf.upper() in _keep_ids
+                else f"{CONCENTRATION_EXCEPTION_MIN_SCORE:.0f}"
+            )
+            lines.append(
+                f"  ⚠ over-limit admit  {_watchlist_symbol(note.item)}  — "
+                f"high conviction, score "
+                f"{watchlist_candidate_score(note.item):.0f}/200 ≥ {_bar}; "
+                + _breach_text(note)
+            )
+        lines.append("")
+
     _must_remove = [
         move
         for move in watchlist_optimization.remove
@@ -2223,7 +2308,14 @@ def format_report(
             "  OPTIONAL OPTIMIZATION (retain if you disagree with the ranking):"
         )
         for move in _optional_remove:
-            reason = move.reason.replace("_", " ")
+            if move.reason == "concentration_displaced" and move.note is not None:
+                reason = (
+                    f"{_breach_text(move.note)}; below retention bar "
+                    f"(needs high conviction + score ≥ "
+                    f"{CONCENTRATION_INCUMBENT_MIN_SCORE:.0f})"
+                )
+            else:
+                reason = move.reason.replace("_", " ")
             lines.append(
                 f"    − REMOVE FROM WATCHLIST  {_watchlist_symbol(move.item)}  — {reason}"
             )
@@ -2281,6 +2373,22 @@ def format_report(
         lines.append(
             "  Excluded below medium conviction: "
             f"{len(watchlist_optimization.excluded_low_conviction)}"
+        )
+    if watchlist_optimization.withheld_candidates:
+        lines.append(
+            "  Withheld by concentration "
+            f"({len(watchlist_optimization.withheld_candidates)}): "
+            + ", ".join(
+                f"{_watchlist_symbol(note.item)} "
+                + "["
+                + "; ".join(
+                    f"{breach.dimension} {breach.key} "
+                    f"{breach.projected_pct:.1f}% > {breach.limit_pct:.0f}%"
+                    for breach in note.breaches
+                )
+                + "]"
+                for note in watchlist_optimization.withheld_candidates
+            )
         )
     if watchlist_candidates_blocked_by_cash:
         lines.append(
@@ -2666,7 +2774,9 @@ def format_report(
                 _dp = _di.ibkr_position
                 _dscore = _compute_dip_score(_di)
                 _dstars = (
-                    "★★★" if _dscore >= 75 else ("★★ " if _dscore >= 60 else "★  ")
+                    "★★★"
+                    if _dscore >= DIP_CONCENTRATION_MIN_SCORE
+                    else ("★★ " if _dscore >= 60 else "★  ")
                 )
                 _dqty = (
                     f"{_dp.quantity:,.0f} sh held" if (_dp and _dp.quantity) else "held"
@@ -3336,6 +3446,8 @@ def main() -> None:
             screening_freshness=screening_freshness,
             portfolio_data_loaded=not args.read_only,
             current_macro_event=_current_macro_event,
+            exchange_limit_pct=args.exchange_limit,
+            sector_limit_pct=args.sector_limit,
         )
 
     if args.output:

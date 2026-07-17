@@ -46,6 +46,27 @@ def _make_request(**overrides) -> PortfolioRecommendationRequest:
 
 
 @pytest.mark.asyncio
+async def test_health_check_receives_configured_exchange_limit():
+    """The request's --exchange-limit reaches compute_portfolio_health, so the
+    GEOGRAPHY_CONCENTRATION flag and the selection screen share one limit."""
+    health_kwargs: list[dict] = []
+
+    def fake_health(**kwargs):
+        health_kwargs.append(kwargs)
+        return []
+
+    service = PortfolioRecommendationService(
+        load_analyses_fn=lambda path: {"7203.T": _make_analysis(ticker="7203.T")},
+        reconcile_fn=lambda **kwargs: [],
+        compute_portfolio_health_fn=fake_health,
+    )
+
+    await service.build_bundle(_make_request(read_only=True, exchange_limit_pct=33.0))
+
+    assert [kwargs["exchange_limit_pct"] for kwargs in health_kwargs] == [33.0]
+
+
+@pytest.mark.asyncio
 async def test_build_bundle_read_only_skips_portfolio_fetch():
     service = PortfolioRecommendationService(
         load_analyses_fn=lambda path: {"7203.T": _make_analysis(ticker="7203.T")},

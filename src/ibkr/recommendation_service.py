@@ -283,6 +283,7 @@ class PortfolioRecommendationService:
             max_age_days=request.max_age_days,
             reconciliation_items=items,
             active_macro_events=_load_active_macro_events(),
+            exchange_limit_pct=request.exchange_limit_pct,
         )
         freshness_summary = self._refresh_service.classify(
             items,
