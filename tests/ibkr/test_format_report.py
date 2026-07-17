@@ -2909,3 +2909,177 @@ class TestWatchlistOptimizationReporting:
         assert "KEEPING ACTIVE (1):" in report
         assert "+ ADD" in report
         assert "raw IBKR symbols are exchange-ambiguous" in report
+
+
+def _make_watchlist_review(ticker: str, *, quick: bool) -> ReconciliationItem:
+    """Build a watchlist REVIEW item as the evaluator emits it (quick-mode BUY
+    verdicts and stale analyses both arrive as REVIEW, never BUY)."""
+    analysis = AnalysisRecord(
+        ticker=ticker,
+        analysis_date="2026-07-01",
+        verdict="BUY" if quick else "HOLD",
+        health_adj=70.0,
+        growth_adj=60.0,
+        trade_block=TradeBlockData(conviction="High", size_pct=3.0),
+        conviction="High",
+        is_quick_mode=quick,
+    )
+    reason = (
+        "Watchlist quick-mode screening BUY (2026-07-01) — "
+        "re-run full analysis before acting"
+        if quick
+        else "Watchlist: stale analysis (age 30d)"
+    )
+    return ReconciliationItem(
+        ticker=ticker,
+        action="REVIEW",
+        urgency="LOW",
+        reason=reason,
+        analysis=analysis,
+        is_watchlist=True,
+    )
+
+
+class TestExecutableBuyAlignment:
+    """CASH SUMMARY, ACTION PLAN (TODAY), and Plan turnover all follow the
+    merit-selected optimal set via one shared executable-buy predicate — a
+    sized-but-displaced watchlist BUY must not reserve cash or get an order."""
+
+    def _report(self, items, watchlist_total):
+        return format_report(
+            items,
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_total=watchlist_total,
+        )
+
+    def test_selected_watchlist_buy_in_both_cash_summary_and_today(self):
+        report = self._report([_make_buy_item("7203.T")], watchlist_total=1)
+        cash_block = report.split("CASH SUMMARY")[1].split("ACTION PLAN")[0]
+        today_block = report.split("ACTION PLAN")[1]
+        assert "BUY  7203  (100 sh):" in cash_block
+        assert "→ BUY  7203" in today_block
+
+    def test_displaced_watchlist_buy_excluded_from_cash_today_and_turnover(self):
+        selected = [_make_buy_item(f"720{i}.T", conviction="High") for i in range(1, 7)]
+        displaced = _make_buy_item("8888.T", conviction="Medium")
+        report = self._report([*selected, displaced], watchlist_total=7)
+
+        opt_block = report.split("WATCHLIST OPTIMIZATION")[1].split("CASH SUMMARY")[0]
+        assert "OPTIONAL OPTIMIZATION" in opt_block
+        assert "REMOVE FROM WATCHLIST  8888 (8888.T)" in opt_block
+
+        cash_block = report.split("CASH SUMMARY")[1].split("ACTION PLAN")[0]
+        today_block = report.split("ACTION PLAN")[1]
+        for item in selected:
+            sym = item.ticker.ibkr
+            assert f"BUY  {sym}  (100 sh):" in cash_block
+            assert f"→ BUY  {sym}" in today_block
+        assert "8888" not in cash_block
+        assert "8888" not in today_block
+        # Turnover counts the six selected buys only (6 × $1,752), not seven.
+        assert "buys ~$10,512" in report
+
+    def test_advisory_offwatch_buy_reserves_no_cash_and_no_order(self):
+        report = self._report([_make_offwatch_buy("WDO.TO")], watchlist_total=0)
+        assert "+ ADD" in report
+        assert "→ BUY  WDO" not in report
+        assert "BUY  WDO  (100 sh):" not in report
+        assert "Plan turnover" not in report
+
+    def test_unsized_selected_buy_is_kept_without_phantom_cash(self):
+        item = _make_buy_item(suggested_quantity=None, cash_impact_usd=0.0)
+        report = self._report([item], watchlist_total=1)
+        assert "KEEPING ACTIVE (1): 7203 (7203.T)" in report
+        cash_block = report.split("CASH SUMMARY")[1]
+        assert "BUY  7203  (" not in cash_block
+        assert "ACTION PLAN" not in report
+
+    def test_unsized_displaced_buy_renders_only_as_optional_removal(self):
+        """A cash-blocked (unsized) watchlist BUY that also loses its slot must
+        surface as an optional removal only — no cash line, no order, no crash."""
+        selected = [_make_buy_item(f"720{i}.T", conviction="High") for i in range(1, 7)]
+        displaced = _make_buy_item(
+            "8888.T",
+            conviction="Medium",
+            suggested_quantity=None,
+            cash_impact_usd=0.0,
+        )
+        report = self._report([*selected, displaced], watchlist_total=7)
+        opt_block = report.split("WATCHLIST OPTIMIZATION")[1].split("CASH SUMMARY")[0]
+        assert "REMOVE FROM WATCHLIST  8888 (8888.T)" in opt_block
+        assert "8888" not in report.split("CASH SUMMARY")[1]
+
+    def test_turnover_shows_sells_while_excluding_advisory_buys(self):
+        """Executable sells still drive the turnover line even when every BUY
+        in the run is advisory (off-watch) and contributes $0."""
+        sell = _make_sell_item("9201.T").model_copy(update={"cash_impact_usd": 900.0})
+        report = self._report([sell, _make_offwatch_buy("WDO.TO")], watchlist_total=0)
+        assert "executable sells ~$900" in report
+        assert "buys ~$0" in report
+
+
+class TestKeepingReviewsQuickMarker:
+    """Quick-mode BUY verdicts surface as watchlist REVIEWs; the KEEPING
+    REVIEWS summary line carries a quick count so the 'run full first' signal
+    is visible inside the optimization section itself."""
+
+    def test_quick_review_count_annotated(self):
+        items = [
+            _make_watchlist_review("7203.T", quick=True),
+            _make_watchlist_review("6758.T", quick=False),
+        ]
+        report = format_report(
+            items,
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_total=2,
+        )
+        assert "KEEPING REVIEWS (2):" in report
+        assert "(1 quick — re-run full)" in report
+        # The full instruction still lives in the main REVIEWS section.
+        assert "re-run full analysis before acting" in report
+
+    def test_no_suffix_when_no_quick_reviews(self):
+        report = format_report(
+            [_make_watchlist_review("6758.T", quick=False)],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_total=1,
+        )
+        assert "KEEPING REVIEWS (1):" in report
+        assert "quick — re-run full" not in report
+
+    def test_review_without_analysis_renders_without_crash(self):
+        """A 'no analysis found' watchlist REVIEW (analysis=None) must render
+        and never count toward the quick suffix."""
+        item = ReconciliationItem(
+            ticker="6971.T",
+            action="REVIEW",
+            urgency="MEDIUM",
+            reason="Watchlist: no analysis found",
+            analysis=None,
+            is_watchlist=True,
+        )
+        report = format_report(
+            [item],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_total=1,
+        )
+        assert "KEEPING REVIEWS (1): 6971 (6971.T)" in report
+        assert "quick — re-run full" not in report
+
+    def test_mode_unknown_review_not_counted_quick(self):
+        """is_quick_mode is tri-state; None (mode unknown, legacy artifact)
+        must not be counted as quick."""
+        item = _make_watchlist_review("6758.T", quick=False)
+        item.analysis.is_quick_mode = None
+        report = format_report(
+            [item],
+            _make_portfolio(),
+            show_recommendations=True,
+            watchlist_total=1,
+        )
+        assert "KEEPING REVIEWS (1):" in report
+        assert "quick — re-run full" not in report

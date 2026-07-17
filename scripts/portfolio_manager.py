@@ -1233,6 +1233,25 @@ def format_report(
         watchlist_supplied=(watchlist_total is not None and not watchlist_unavailable),
         watchlist_unavailable=watchlist_unavailable,
     )
+    _selected_watchlist_buy_ids = {
+        candidate.ticker.yf.upper()
+        for candidate in watchlist_optimization.optimal
+        if candidate.is_watchlist
+    }
+
+    def _is_executable_buy(item: ReconciliationItem) -> bool:
+        """A buy the operator is being told to place now: an ADD, or a watchlist
+        BUY that survived merit selection. Off-watch and displaced watchlist
+        BUYs are advisory (WATCHLIST OPTIMIZATION '+ ADD' / optional removals)
+        and must not reserve cash or count toward executable turnover."""
+        if item.action == "ADD":
+            return True
+        return (
+            item.action == "BUY"
+            and item.is_watchlist
+            and item.ticker.yf.upper() in _selected_watchlist_buy_ids
+        )
+
     stop_sells = list(action_groups.stop_sells)
     hard_sells = list(action_groups.hard_sells)
     profit_take_sells = list(action_groups.profit_take_sells)
@@ -2224,12 +2243,24 @@ def format_report(
             )
         )
     if watchlist_optimization.reviews:
+        # Quick-mode BUY verdicts arrive here as REVIEW items (converted by the
+        # evaluators before any BUY exists), so this line — not the buy rows —
+        # is where the "run full first" signal belongs in this section.
+        _quick_review_n = sum(
+            1
+            for item in watchlist_optimization.reviews
+            if item.analysis and item.analysis.is_quick_mode
+        )
+        _quick_suffix = (
+            f"  ({_quick_review_n} quick — re-run full)" if _quick_review_n else ""
+        )
         lines.append(
             "  KEEPING REVIEWS "
             f"({len(watchlist_optimization.reviews)}): "
             + ", ".join(
                 _watchlist_symbol(item) for item in watchlist_optimization.reviews
             )
+            + _quick_suffix
         )
     if watchlist_optimization.protected_tickers:
         lines.append(
@@ -2436,11 +2467,7 @@ def format_report(
         _section("CASH SUMMARY")
 
         buy_cost_items = [
-            i
-            for i in items
-            if i.action in ("ADD", "BUY")
-            and i.cash_impact_usd < 0
-            and (i.action != "BUY" or i.is_watchlist)  # exclude unvetted candidates
+            i for i in items if _is_executable_buy(i) and i.cash_impact_usd < 0
         ]
         lines.append(
             f"  Settled cash:                                ${settled:>7,.0f}"
@@ -2513,25 +2540,8 @@ def format_report(
     from datetime import date
 
     today_str = date.today().isoformat()
-    _selected_watchlist_buy_ids = {
-        candidate.ticker.yf.upper()
-        for candidate in watchlist_optimization.optimal
-        if candidate.is_watchlist
-    }
     action_today = [i for i in items if i.action in ("SELL", "TRIM")]
-    funded_today = [
-        i
-        for i in items
-        if (
-            i.action == "ADD"
-            or (
-                i.action == "BUY"
-                and i.is_watchlist
-                and i.ticker.yf.upper() in _selected_watchlist_buy_ids
-            )
-        )
-        and i.cash_impact_usd < 0
-    ]
+    funded_today = [i for i in items if _is_executable_buy(i) and i.cash_impact_usd < 0]
     # Sell proceeds grouped by settlement date (confirmed only; soft sells separate)
     settle_groups: dict[str, float] = {}
     settle_conditional: dict[str, float] = {}
@@ -2771,7 +2781,7 @@ def format_report(
     buy_notional = sum(
         abs(i.cash_impact_usd)
         for i in items
-        if i.action in ("BUY", "ADD") and i.cash_impact_usd
+        if _is_executable_buy(i) and i.cash_impact_usd
     )
     if sell_notional or buy_notional:
         nav = portfolio.portfolio_value_usd
