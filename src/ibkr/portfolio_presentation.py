@@ -508,6 +508,38 @@ def resolve_watchlist_optimization(
     )
 
 
+def selected_watchlist_buy_ids(optimization: WatchlistOptimization) -> set[str]:
+    """Identities of watchlist BUYs that survived merit+concentration selection."""
+    return {
+        _item_ticker_identity(item)
+        for item in optimization.optimal
+        if item.is_watchlist
+    }
+
+
+def is_executable_buy(item: ReconciliationItem, selected_ids: set[str]) -> bool:
+    """A buy the operator is being told to place now: an ADD, or a watchlist
+    BUY that survived merit+concentration selection. Off-watch and displaced
+    watchlist BUYs are advisory (watchlist additions / optional removals) and
+    must not reserve cash or count toward executable turnover."""
+    if item.action == "ADD":
+        return True
+    return (
+        item.action == "BUY"
+        and item.is_watchlist
+        and _item_ticker_identity(item) in selected_ids
+    )
+
+
+def concentration_breach_summary(note: ConcentrationNote) -> str:
+    """Describe every over-limit bucket behind one concentration decision."""
+    return " + ".join(
+        f"overweight {breach.dimension} {breach.key} "
+        f"(projected {breach.projected_pct:.1f}% > {breach.limit_pct:.0f}%)"
+        for breach in note.breaches
+    )
+
+
 def build_watchlist_optimization_summary(
     optimization: WatchlistOptimization,
 ) -> dict[str, int]:
@@ -913,19 +945,35 @@ def _soft_sell_proceeds_usd(items: list[ReconciliationItem]) -> float:
 def build_cash_summary(
     items: list[ReconciliationItem],
     portfolio: PortfolioSummary,
+    *,
+    watchlist_optimization: WatchlistOptimization | None = None,
 ) -> CashSummaryView:
     settled_cash = portfolio.settled_cash_usd
     available_cash = portfolio.available_cash_usd
     total_cash = portfolio.cash_balance_usd
     buffer_reserve = max(settled_cash - available_cash, 0.0)
     unsettled_cash = max(total_cash - settled_cash, 0.0)
-    recommended_buy_cost = sum(
-        abs(item.cash_impact_usd)
-        for item in items
-        if item.action in {"ADD", "BUY"}
-        and item.cash_impact_usd < 0
-        and (item.action != "BUY" or item.is_watchlist)
-    )
+    if watchlist_optimization is not None:
+        # Optimizer-aware: only buys that survived merit+concentration
+        # selection reserve cash (screened/displaced watchlist BUYs still
+        # carry a negative cash_impact_usd and must not count).
+        selected_ids = selected_watchlist_buy_ids(watchlist_optimization)
+        recommended_buy_cost = sum(
+            abs(item.cash_impact_usd)
+            for item in items
+            if is_executable_buy(item, selected_ids) and item.cash_impact_usd < 0
+        )
+    else:
+        # Legacy: every sized watchlist BUY. Kept for callers without an
+        # optimization in hand; can overstate when the optimizer would
+        # screen or displace names.
+        recommended_buy_cost = sum(
+            abs(item.cash_impact_usd)
+            for item in items
+            if item.action in {"ADD", "BUY"}
+            and item.cash_impact_usd < 0
+            and (item.action != "BUY" or item.is_watchlist)
+        )
     pending_inflows = build_cash_timeline(items)
     return CashSummaryView(
         total_cash_usd=total_cash,

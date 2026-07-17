@@ -20,7 +20,12 @@ from src.ibkr.models import (
     ReconciliationItem,
     TradeBlockData,
 )
-from src.ibkr.portfolio_presentation import build_cash_summary, build_live_order_note
+from src.ibkr.portfolio_presentation import (
+    build_cash_summary,
+    build_live_order_note,
+    group_portfolio_actions,
+    resolve_watchlist_optimization,
+)
 from src.ibkr.refresh_service import RefreshActivity
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
 from src.ibkr.ticker import Ticker
@@ -3083,6 +3088,59 @@ class TestKeepingReviewsQuickMarker:
         )
         assert "KEEPING REVIEWS (1):" in report
         assert "quick — re-run full" not in report
+
+
+class TestBuildCashSummaryOptimizerAware:
+    """build_cash_summary counts only merit+concentration-selected buys when
+    given the optimization, and preserves legacy behavior exactly when not —
+    other callers still depend on the unsafe legacy mode."""
+
+    def _items_and_optimization(self):
+        screened = _make_buy_item("7203.T", conviction="Medium")  # T over limit
+        selected = _make_buy_item("MEGP.L", conviction="Medium")
+        items = [screened, selected]
+        groups = group_portfolio_actions(
+            items,
+            watchlist_tickers={"7203.T", "MEGP.L"},
+            exchange_weights={"T": 45.0},
+        )
+        optimization = resolve_watchlist_optimization(
+            items,
+            groups,
+            watchlist_tickers={"7203.T", "MEGP.L"},
+            watchlist_supplied=True,
+            watchlist_unavailable=False,
+            exchange_weights={"T": 45.0},
+        )
+        return items, optimization
+
+    def test_optimizer_aware_excludes_screened_buy(self):
+        items, optimization = self._items_and_optimization()
+        summary = build_cash_summary(
+            items, _make_portfolio(), watchlist_optimization=optimization
+        )
+        assert summary.recommended_buy_cost_usd == 1752.0  # MEGP only
+
+    def test_legacy_none_counts_every_watchlist_buy(self):
+        items, _ = self._items_and_optimization()
+        legacy = build_cash_summary(items, _make_portfolio())
+        assert legacy.recommended_buy_cost_usd == 3504.0  # both, pre-optimizer
+
+    def test_empty_optimal_yields_zero_recommended_cost(self):
+        items, _ = self._items_and_optimization()
+        groups = group_portfolio_actions(items, watchlist_tickers=set())
+        empty_opt = resolve_watchlist_optimization(
+            items,
+            groups,
+            watchlist_tickers=set(),
+            watchlist_supplied=True,
+            watchlist_unavailable=False,
+            target_size=0,
+        )
+        summary = build_cash_summary(
+            items, _make_portfolio(), watchlist_optimization=empty_opt
+        )
+        assert summary.recommended_buy_cost_usd == 0.0
 
 
 class TestWatchlistConcentration:

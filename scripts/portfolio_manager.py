@@ -70,10 +70,10 @@ from src.ibkr.portfolio_presentation import (
     CONCENTRATION_INCUMBENT_MIN_SCORE,
     SELL_RECOMMENDATIONS_TITLE,
     SELL_RELATED_REVIEWS_TITLE,
-    ConcentrationNote,
     build_action_summary_counts,
     build_cash_summary,
     build_watchlist_optimization_summary,
+    concentration_breach_summary,
     get_action_label,
     group_portfolio_actions,
     resolve_watchlist_optimization,
@@ -85,6 +85,12 @@ from src.ibkr.portfolio_presentation import (
 )
 from src.ibkr.portfolio_presentation import (
     find_live_order as shared_find_live_order,
+)
+from src.ibkr.portfolio_presentation import (
+    is_executable_buy as shared_is_executable_buy,
+)
+from src.ibkr.portfolio_presentation import (
+    selected_watchlist_buy_ids as shared_selected_watchlist_buy_ids,
 )
 from src.ibkr.reconciliation_rules import _EXCHANGE_LONG_NAMES, stop_staleness_note
 from src.ibkr.refresh_service import (
@@ -1138,82 +1144,8 @@ def format_report(
         for f in (portfolio_health_flags or [])
     )
 
-    # ── Header ──────────────────────────────────────────────────────────────
-    lines.append(f"=== IBKR Portfolio Reconciliation  {now} ===")
-    lines.append("")
-    if not portfolio_data_loaded:
-        lines.append(
-            "⚠ READ-ONLY — no IBKR connection; holdings, watchlist, and cash were "
-            "NOT loaded."
-        )
-        lines.append(
-            "  BUYs below come from saved analyses; whether you already own/watch "
-            "them is UNKNOWN."
-        )
-        lines.append("")
-    if (errors or {}).get("watchlist"):
-        lines.append(
-            "⚠ WATCHLIST UNAVAILABLE — could not read your IBKR watchlist (brokerage "
-            "session unavailable). Holdings/SELL/HOLD analysis below is unaffected. "
-            "Watchlist filtering is unavailable; unheld BUY analyses are shown as "
-            "BUY CANDIDATES and should be verified in IBKR before acting."
-        )
-        lines.append("")
-    if show_recommendations and (errors or {}).get("live_orders"):
-        lines.append(
-            "⚠ LIVE ORDERS UNAVAILABLE — open-order dedup is disabled; an order you "
-            "already have working may be re-suggested. Verify in IBKR before placing "
-            "orders."
-        )
-        lines.append("")
-    nlv = portfolio.portfolio_value_usd
-    cash = portfolio.cash_balance_usd
-    settled = portfolio.settled_cash_usd
-    available = portfolio.available_cash_usd
-    cash_summary = build_cash_summary(items, portfolio)
-    buffer_amt = cash_summary.buffer_reserve_usd
-    unsettled_amt = cash_summary.unsettled_cash_usd
-
-    if not portfolio_data_loaded:
-        # Read-only run: no IBKR connection, so these are unknown, not zero.
-        lines.append("  Account:          not loaded (read-only)")
-        lines.append("  Net liquidation:  not loaded")
-        lines.append("  Cash (total):     not loaded")
-        lines.append("  Settled cash:     not loaded")
-        lines.append("  Available:        not loaded")
-    else:
-        lines.append(f"  Account:          {portfolio.account_id or 'N/A'}")
-        lines.append(f"  Net liquidation:  ${nlv:>10,.0f}")
-        if nlv > 0:
-            if unsettled_amt > 0:
-                cash_note = (
-                    f"  includes ${unsettled_amt:,.0f} of unsettled sale proceeds "
-                    "(not yet spendable)"
-                )
-            else:
-                cash_note = "  all shown cash is settled"
-            lines.append(
-                f"  Cash (total):     ${cash:>10,.0f}   ({cash / nlv * 100:.1f}%)"
-                f"{cash_note}"
-            )
-            lines.append(
-                f"  Settled cash:     ${settled:>10,.0f}   ({settled / nlv * 100:.1f}%)"
-                "  fully settled"
-            )
-            lines.append(
-                f"  Buffer reserve:   ${buffer_amt:>10,.0f}   ({buffer_amt / nlv * 100:.1f}%)"
-                "  cash buffer — not deployed into new buys"
-            )
-            lines.append(
-                f"  Available:        ${available:>10,.0f}"
-                "           deployable into new buys (settled − buffer)"
-            )
-        else:
-            lines.append(f"  Cash (total):     ${cash:,.0f}")
-            lines.append(f"  Settled cash:     ${settled:,.0f}")
-            lines.append(f"  Available:        ${available:,.0f}")
-    lines.append("")
-
+    # ── Pure computation (no rendering) — hoisted above the header so the
+    # cash summary can be optimizer-aware ────────────────────────────────────
     action_groups = group_portfolio_actions(
         items,
         watchlist_tickers=watchlist_tickers,
@@ -1270,24 +1202,89 @@ def format_report(
         exchange_limit_pct=exchange_limit_pct,
         sector_limit_pct=sector_limit_pct,
     )
-    _selected_watchlist_buy_ids = {
-        candidate.ticker.yf.upper()
-        for candidate in watchlist_optimization.optimal
-        if candidate.is_watchlist
-    }
+    _selected_ids = shared_selected_watchlist_buy_ids(watchlist_optimization)
 
     def _is_executable_buy(item: ReconciliationItem) -> bool:
-        """A buy the operator is being told to place now: an ADD, or a watchlist
-        BUY that survived merit selection. Off-watch and displaced watchlist
-        BUYs are advisory (WATCHLIST OPTIMIZATION '+ ADD' / optional removals)
-        and must not reserve cash or count toward executable turnover."""
-        if item.action == "ADD":
-            return True
-        return (
-            item.action == "BUY"
-            and item.is_watchlist
-            and item.ticker.yf.upper() in _selected_watchlist_buy_ids
+        """Delegates to the shared predicate — see portfolio_presentation."""
+        return shared_is_executable_buy(item, _selected_ids)
+
+    # ── Header ──────────────────────────────────────────────────────────────
+    lines.append(f"=== IBKR Portfolio Reconciliation  {now} ===")
+    lines.append("")
+    if not portfolio_data_loaded:
+        lines.append(
+            "⚠ READ-ONLY — no IBKR connection; holdings, watchlist, and cash were "
+            "NOT loaded."
         )
+        lines.append(
+            "  BUYs below come from saved analyses; whether you already own/watch "
+            "them is UNKNOWN."
+        )
+        lines.append("")
+    if (errors or {}).get("watchlist"):
+        lines.append(
+            "⚠ WATCHLIST UNAVAILABLE — could not read your IBKR watchlist (brokerage "
+            "session unavailable). Holdings/SELL/HOLD analysis below is unaffected. "
+            "Watchlist filtering is unavailable; unheld BUY analyses are shown as "
+            "BUY CANDIDATES and should be verified in IBKR before acting."
+        )
+        lines.append("")
+    if show_recommendations and (errors or {}).get("live_orders"):
+        lines.append(
+            "⚠ LIVE ORDERS UNAVAILABLE — open-order dedup is disabled; an order you "
+            "already have working may be re-suggested. Verify in IBKR before placing "
+            "orders."
+        )
+        lines.append("")
+    nlv = portfolio.portfolio_value_usd
+    cash = portfolio.cash_balance_usd
+    settled = portfolio.settled_cash_usd
+    available = portfolio.available_cash_usd
+    cash_summary = build_cash_summary(
+        items, portfolio, watchlist_optimization=watchlist_optimization
+    )
+    buffer_amt = cash_summary.buffer_reserve_usd
+    unsettled_amt = cash_summary.unsettled_cash_usd
+
+    if not portfolio_data_loaded:
+        # Read-only run: no IBKR connection, so these are unknown, not zero.
+        lines.append("  Account:          not loaded (read-only)")
+        lines.append("  Net liquidation:  not loaded")
+        lines.append("  Cash (total):     not loaded")
+        lines.append("  Settled cash:     not loaded")
+        lines.append("  Available:        not loaded")
+    else:
+        lines.append(f"  Account:          {portfolio.account_id or 'N/A'}")
+        lines.append(f"  Net liquidation:  ${nlv:>10,.0f}")
+        if nlv > 0:
+            if unsettled_amt > 0:
+                cash_note = (
+                    f"  includes ${unsettled_amt:,.0f} of unsettled sale proceeds "
+                    "(not yet spendable)"
+                )
+            else:
+                cash_note = "  all shown cash is settled"
+            lines.append(
+                f"  Cash (total):     ${cash:>10,.0f}   ({cash / nlv * 100:.1f}%)"
+                f"{cash_note}"
+            )
+            lines.append(
+                f"  Settled cash:     ${settled:>10,.0f}   ({settled / nlv * 100:.1f}%)"
+                "  fully settled"
+            )
+            lines.append(
+                f"  Buffer reserve:   ${buffer_amt:>10,.0f}   ({buffer_amt / nlv * 100:.1f}%)"
+                "  cash buffer — not deployed into new buys"
+            )
+            lines.append(
+                f"  Available:        ${available:>10,.0f}"
+                "           deployable into new buys (settled − buffer)"
+            )
+        else:
+            lines.append(f"  Cash (total):     ${cash:,.0f}")
+            lines.append(f"  Settled cash:     ${settled:,.0f}")
+            lines.append(f"  Available:        ${available:,.0f}")
+    lines.append("")
 
     stop_sells = list(action_groups.stop_sells)
     hard_sells = list(action_groups.hard_sells)
@@ -2214,13 +2211,9 @@ def format_report(
         yf_hint = f" ({item.ticker.yf})" if "." in item.ticker.yf else ""
         return f"{_display_ticker(item)}{yf_hint}"
 
-    def _breach_text(note: ConcentrationNote) -> str:
-        """Describe every over-limit bucket behind one concentration decision."""
-        return " + ".join(
-            f"overweight {breach.dimension} {breach.key} "
-            f"(projected {breach.projected_pct:.1f}% > {breach.limit_pct:.0f}%)"
-            for breach in note.breaches
-        )
+    # Breach descriptions come from the shared helper so the CLI and the
+    # dashboard serializer render identical concentration wording.
+    _breach_text = concentration_breach_summary
 
     _keep_ids = {item.ticker.yf.upper() for item in watchlist_optimization.keep}
 
