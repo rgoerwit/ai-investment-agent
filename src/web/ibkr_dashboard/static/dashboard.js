@@ -632,7 +632,14 @@ function renderWatchlist() {
       { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
     ])}
     ${renderActionTable("Watchlist Monitoring", actions.watchlist_monitor)}
-    ${renderActionTable("Watchlist Remove", actions.watchlist_remove)}
+    ${renderActionTable("Watchlist Remove", actions.watchlist_remove, [
+      { label: "Why", render: (item) => escapeHtml(item.concentration || item.removal_reason || "—") },
+    ])}
+    ${(actions.watchlist_withheld || []).length
+      ? renderActionTable("Withheld By Concentration", actions.watchlist_withheld, [
+          { label: "Why", render: (item) => escapeHtml(item.concentration || item.reason || "—") },
+        ])
+      : ""}
   `;
 }
 

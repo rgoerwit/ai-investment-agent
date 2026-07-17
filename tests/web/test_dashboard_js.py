@@ -298,6 +298,89 @@ return renderWatchlist();
     assert "$0" not in html
 
 
+def test_render_watchlist_withheld_table_shows_breach():
+    html = _run_dashboard_js("""
+const { renderWatchlist, state } = __dashboardTest;
+state.snapshot = {
+  watchlist: { name: "watchlist-2026", total: 2, tickers: ["7203.T"] },
+  actions: {
+    watchlist_buy: [],
+    watchlist_candidate: [],
+    watchlist_monitor: [],
+    watchlist_remove: [
+      {
+        ticker_yf: "7203.T",
+        ticker_ibkr: "7203",
+        action: "BUY",
+        reason: "Watchlist BUY — Medium conviction",
+        removal_reason: "concentration_displaced",
+        concentration: "overweight exchange T (projected 49.0% > 40%)",
+      },
+    ],
+    watchlist_withheld: [
+      {
+        ticker_yf: "9984.T",
+        ticker_ibkr: "9984",
+        action: "BUY",
+        reason: "New BUY — Medium conviction",
+        concentration: "overweight exchange T (projected 49.0% > 40%)",
+      },
+    ],
+  },
+};
+return renderWatchlist();
+""")
+
+    assert "Withheld By Concentration" in html
+    assert "9984" in html
+    assert html.count("overweight exchange T (projected 49.0% &gt; 40%)") == 2
+
+
+def test_render_watchlist_withheld_table_absent_when_missing_or_empty():
+    html = _run_dashboard_js("""
+const { renderWatchlist, state } = __dashboardTest;
+state.snapshot = {
+  watchlist: { name: "watchlist-2026", total: 1, tickers: ["7203.T"] },
+  actions: {
+    watchlist_buy: [],
+    watchlist_candidate: [],
+    watchlist_monitor: [],
+    watchlist_remove: [],
+  },
+};
+return renderWatchlist();
+""")
+
+    assert "Withheld By Concentration" not in html
+
+
+def test_render_watchlist_withheld_entry_without_concentration_falls_back():
+    html = _run_dashboard_js("""
+const { renderWatchlist, state } = __dashboardTest;
+state.snapshot = {
+  watchlist: { name: "watchlist-2026", total: 1, tickers: [] },
+  actions: {
+    watchlist_buy: [],
+    watchlist_candidate: [],
+    watchlist_monitor: [],
+    watchlist_remove: [],
+    watchlist_withheld: [
+      {
+        ticker_yf: "9984.T",
+        ticker_ibkr: "9984",
+        action: "BUY",
+        reason: "New BUY — Medium conviction",
+      },
+    ],
+  },
+};
+return renderWatchlist();
+""")
+
+    assert "Withheld By Concentration" in html
+    assert "New BUY — Medium conviction" in html
+
+
 def test_render_drilldown_keeps_long_structured_content_out_of_side_panel():
     html = _run_dashboard_js("""
 const { renderDrilldown } = __dashboardTest;
