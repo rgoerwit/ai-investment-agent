@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -8,13 +9,27 @@ from src.ibkr.dip_watch import (
     select_dip_watch_candidates,
 )
 from src.ibkr.models import PortfolioSummary, ReconciliationItem
+from src.ibkr.portfolio_defaults import (
+    DEFAULT_EXCHANGE_LIMIT_PCT,
+    DEFAULT_SECTOR_LIMIT_PCT,
+)
+from src.ibkr.reconciliation_rules import _exchange_from_ticker
 from src.ibkr.refresh_service import AnalysisFreshnessSummary, RefreshActivity
 from src.ibkr.ticker import Ticker
+from src.sector_normalization import normalize_sector_label
 
 _DEFAULT_DIP_WATCH_LIMIT = 7
 TARGET_WATCHLIST_SIZE = 6
 WATCHLIST_MIN_CONVICTION = "medium"
 _WATCHLIST_CONVICTION_RANK = {"high": 0, "medium": 1, "low": 2}
+# Concentration escape hatch ("very, very good buy"): an over-limit candidate
+# may still claim a BUY-ready slot iff conviction is high AND combined
+# health+growth score (out of 200) clears the tier bar. Incumbents (already on
+# the watchlist) get a lower bar than newcomers — the 15-point band is
+# anti-flap hysteresis so a borderline name doesn't oscillate ADD/REMOVE on
+# re-analysis score noise. Module constants by design: no env/CLI knob.
+CONCENTRATION_EXCEPTION_MIN_SCORE = 150.0
+CONCENTRATION_INCUMBENT_MIN_SCORE = 135.0
 SELL_RECOMMENDATIONS_TITLE = "SELL RECOMMENDATIONS"
 SELL_RELATED_REVIEWS_TITLE = "SELL-RELATED REVIEWS"
 SELL_TYPE_LABELS: dict[str | None, str] = {
@@ -76,9 +91,31 @@ class WatchlistOptCase(str, Enum):
 
 
 @dataclass(frozen=True)
+class ConcentrationBreach:
+    """One dimension's projected-weight limit breach for a candidate."""
+
+    dimension: str  # "exchange" | "sector"
+    key: str  # bucket key: "T" / "HK" / "Industrials" …
+    candidate_pct: float  # size_pct proxy (% of NAV)
+    projected_pct: float  # running bucket weight incl. prior admits + candidate
+    limit_pct: float
+
+
+@dataclass(frozen=True)
+class ConcentrationNote:
+    """A candidate's concentration decision (withheld or over-limit-admitted)."""
+
+    item: ReconciliationItem
+    breaches: tuple[ConcentrationBreach, ...]  # ≥1; both dimensions possible
+
+
+@dataclass(frozen=True)
 class WatchlistMove:
     item: ReconciliationItem
     reason: str
+    # Set for "concentration_displaced" moves — carries the breach detail so
+    # the renderer can say which bucket was overweight and by how much.
+    note: ConcentrationNote | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +139,12 @@ class WatchlistOptimization:
     protected_tickers: tuple[str, ...]
     excluded_low_conviction: tuple[ReconciliationItem, ...]
     pool_size: int
+    # Concentration outcomes (default-empty so existing constructors hold):
+    # off-watch candidates screened out (not added), and escape-hatch admits
+    # that claimed a slot despite an over-limit bucket (subset of ``optimal``).
+    # On-watch screened names ride ``remove`` as "concentration_displaced".
+    withheld_candidates: tuple[ConcentrationNote, ...] = ()
+    admitted_over_limit: tuple[ConcentrationNote, ...] = ()
 
 
 def _watchlist_ticker_identity(ticker: str) -> str:
@@ -134,6 +177,111 @@ def watchlist_candidate_score(item: ReconciliationItem) -> float:
     return (analysis.health_adj or 0.0) + (analysis.growth_adj or 0.0)
 
 
+def _candidate_size_pct(item: ReconciliationItem) -> float:
+    """Target position size (% of NAV) — the projected-weight proxy.
+
+    The resolver is deliberately cash-free, so the analysis's target size
+    stands in for the buy's would-be portfolio weight. Missing sizing
+    degrades to 0.0: the candidate is then screened only when its bucket is
+    already over the limit.
+    """
+    analysis = item.analysis
+    if analysis is None:
+        return 0.0
+    return float(analysis.trade_block.size_pct or analysis.position_size or 0.0)
+
+
+def _candidate_exchange(item: ReconciliationItem) -> str:
+    """Exchange bucket key — same composite the reconciler warning paths use."""
+    analysis = item.analysis
+    return (analysis.exchange if analysis else "") or _exchange_from_ticker(
+        item.ticker.yf
+    )
+
+
+def _candidate_sector(item: ReconciliationItem) -> str | None:
+    """Sector bucket key; ``None`` skips the sector dimension for this item."""
+    analysis = item.analysis
+    if analysis is None or not analysis.sector:
+        return None
+    return normalize_sector_label(analysis.sector)
+
+
+@dataclass(frozen=True)
+class _ConcentrationDimension:
+    """One active concentration dimension with its running bucket weights."""
+
+    name: str
+    running: dict[str, float]  # mutated as candidates are accepted
+    limit_pct: float
+    key_of: Callable[[ReconciliationItem], str | None]
+
+
+def _select_with_concentration_headroom(
+    ranked: list[ReconciliationItem],
+    *,
+    target_size: int,
+    dimensions: list[_ConcentrationDimension],
+    is_incumbent: Callable[[ReconciliationItem], bool],
+) -> tuple[list[ReconciliationItem], list[ConcentrationNote], list[ConcentrationNote]]:
+    """Greedy rank-order fill with per-bucket projected-weight headroom.
+
+    A candidate whose acceptance would push any dimension's bucket over its
+    limit is skipped — the slot falls to the next-ranked under-limit name —
+    unless the two-tier escape hatch passes (high conviction + tier score
+    bar; incumbents get the lower bar). Admits still consume headroom so the
+    next same-bucket name is judged against the higher base. Deterministic:
+    iteration order is the caller's existing rank sort. No dimensions (empty
+    portfolio) reproduces the pure-merit slice exactly.
+    """
+    if not dimensions or target_size <= 0:
+        return ranked[:target_size], [], []
+    selected: list[ReconciliationItem] = []
+    admitted: list[ConcentrationNote] = []
+    withheld: list[ConcentrationNote] = []
+    for item in ranked:
+        if len(selected) >= target_size:
+            break
+        size_pct = _candidate_size_pct(item)
+        projections: list[tuple[_ConcentrationDimension, str, float]] = []
+        breaches: list[ConcentrationBreach] = []
+        for dim in dimensions:
+            key = dim.key_of(item)
+            if key is None:
+                continue
+            projected = dim.running.get(key, 0.0) + size_pct
+            projections.append((dim, key, projected))
+            if projected > dim.limit_pct:  # strict > breaches; == passes
+                breaches.append(
+                    ConcentrationBreach(
+                        dimension=dim.name,
+                        key=key,
+                        candidate_pct=size_pct,
+                        projected_pct=projected,
+                        limit_pct=dim.limit_pct,
+                    )
+                )
+        if breaches:
+            note = ConcentrationNote(item=item, breaches=tuple(breaches))
+            bar = (
+                CONCENTRATION_INCUMBENT_MIN_SCORE
+                if is_incumbent(item)
+                else CONCENTRATION_EXCEPTION_MIN_SCORE
+            )
+            if (
+                watchlist_candidate_conviction(item) == "high"
+                and watchlist_candidate_score(item) >= bar
+            ):
+                admitted.append(note)
+            else:
+                withheld.append(note)
+                continue
+        selected.append(item)
+        for dim, key, projected in projections:
+            dim.running[key] = projected
+    return selected, admitted, withheld
+
+
 def resolve_watchlist_optimization(
     items: list[ReconciliationItem],
     groups: PortfolioActionGroups,
@@ -143,11 +291,23 @@ def resolve_watchlist_optimization(
     watchlist_unavailable: bool,
     target_size: int = TARGET_WATCHLIST_SIZE,
     min_conviction: str = WATCHLIST_MIN_CONVICTION,
+    exchange_weights: dict[str, float] | None = None,
+    sector_weights: dict[str, float] | None = None,
+    exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT,
+    sector_limit_pct: float = DEFAULT_SECTOR_LIMIT_PCT,
 ) -> WatchlistOptimization:
     """Select up to ``target_size`` medium-or-higher unheld BUYs safely.
 
     Membership and deduplication use full yfinance identities, rather than base
     symbols, to avoid collapsing listings that happen to share a ticker.
+
+    When ``exchange_weights``/``sector_weights`` are supplied (held-position
+    bucket weights, % of NAV), selection applies a symmetric concentration
+    screen: a candidate whose projected bucket weight breaches its limit only
+    claims a slot via the two-tier escape hatch (see the
+    CONCENTRATION_*_MIN_SCORE constants). Watchlist membership does not shield
+    a name — a screened on-watch BUY becomes a "concentration_displaced"
+    removal. Empty/None weights (no held positions) disable the screen.
     """
     if target_size < 0:
         raise ValueError("target_size must be non-negative")
@@ -190,17 +350,48 @@ def resolve_watchlist_optimization(
         else:
             eligible.append(item)
 
-    optimal = tuple(
-        sorted(
-            eligible,
-            key=lambda item: (
-                _WATCHLIST_CONVICTION_RANK[watchlist_candidate_conviction(item)],
-                -watchlist_candidate_score(item),
-                not item.is_watchlist,
-                _item_ticker_identity(item),
-            ),
-        )[:target_size]
+    ranked = sorted(
+        eligible,
+        key=lambda item: (
+            _WATCHLIST_CONVICTION_RANK[watchlist_candidate_conviction(item)],
+            -watchlist_candidate_score(item),
+            not item.is_watchlist,
+            _item_ticker_identity(item),
+        ),
     )
+
+    def _is_incumbent(item: ReconciliationItem) -> bool:
+        # Same predicate ``keep`` uses — already-on-watchlist names get the
+        # lower escape-hatch bar (anti-flap hysteresis).
+        return item.is_watchlist or _item_ticker_identity(item) in raw_watchlist
+
+    dimensions: list[_ConcentrationDimension] = []
+    if exchange_weights:
+        dimensions.append(
+            _ConcentrationDimension(
+                name="exchange",
+                running=dict(exchange_weights),
+                limit_pct=exchange_limit_pct,
+                key_of=_candidate_exchange,
+            )
+        )
+    if sector_weights:
+        dimensions.append(
+            _ConcentrationDimension(
+                name="sector",
+                running=dict(sector_weights),
+                limit_pct=sector_limit_pct,
+                key_of=_candidate_sector,
+            )
+        )
+    selected, admitted, withheld = _select_with_concentration_headroom(
+        ranked,
+        target_size=target_size,
+        dimensions=dimensions,
+        is_incumbent=_is_incumbent,
+    )
+    optimal = tuple(selected)
+    admitted_over_limit = tuple(admitted)
     optimal_ids = {_item_ticker_identity(item) for item in optimal}
 
     if watchlist_unavailable:
@@ -217,6 +408,10 @@ def resolve_watchlist_optimization(
             protected_tickers=(),
             excluded_low_conviction=tuple(excluded_low_conviction),
             pool_size=len(pool),
+            # No keep/remove authority without a readable watchlist — every
+            # screened name is reported as a withheld candidate, never a move.
+            withheld_candidates=tuple(withheld),
+            admitted_over_limit=admitted_over_limit,
         )
 
     if not watchlist_supplied:
@@ -233,6 +428,8 @@ def resolve_watchlist_optimization(
             protected_tickers=(),
             excluded_low_conviction=tuple(excluded_low_conviction),
             pool_size=len(pool),
+            withheld_candidates=tuple(withheld),
+            admitted_over_limit=admitted_over_limit,
         )
 
     reject_ids = {_item_ticker_identity(item) for item in groups.removes}
@@ -256,11 +453,22 @@ def resolve_watchlist_optimization(
         for item in groups.reviews
         if item.is_watchlist and _item_ticker_identity(item) not in optimal_ids
     )
-    removals: list[WatchlistMove] = []
+    # Symmetric screen: membership does not shield a name. A screened
+    # incumbent is moved OUT (concentration_displaced); a screened newcomer
+    # is simply not added. Split is identity-based — ReconciliationItem is a
+    # non-frozen pydantic model (unhashable), so never set(notes).
+    conc_removed = [n for n in withheld if _is_incumbent(n.item)]
+    withheld_candidates = tuple(n for n in withheld if not _is_incumbent(n.item))
+    conc_removed_ids = {_item_ticker_identity(n.item) for n in conc_removed}
+    removals: list[WatchlistMove] = [
+        WatchlistMove(n.item, "concentration_displaced", note=n) for n in conc_removed
+    ]
     for item in watchlist_items:
         identity = _item_ticker_identity(item)
         if identity in optimal_ids or identity in monitor_ids or identity in review_ids:
             continue
+        if identity in conc_removed_ids:
+            continue  # already moved out for concentration — never two moves
         if identity in reject_ids or item.action == "REMOVE":
             removals.append(WatchlistMove(item, "verdict_reject"))
         elif item.action == "BUY":
@@ -295,6 +503,8 @@ def resolve_watchlist_optimization(
         protected_tickers=protected_tickers,
         excluded_low_conviction=tuple(excluded_low_conviction),
         pool_size=len(pool),
+        withheld_candidates=withheld_candidates,
+        admitted_over_limit=admitted_over_limit,
     )
 
 
