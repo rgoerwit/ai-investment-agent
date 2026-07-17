@@ -192,11 +192,18 @@ def _candidate_size_pct(item: ReconciliationItem) -> float:
 
 
 def _candidate_exchange(item: ReconciliationItem) -> str:
-    """Exchange bucket key — same composite the reconciler warning paths use."""
+    """Exchange bucket key — suffix-first, matching ``_exchange_from_position``.
+
+    The ticker suffix always wins when present so a corrupted or legacy
+    ``analysis.exchange`` value (anything outside the yf-suffix namespace)
+    cannot silently desync a candidate from its weight bucket (unknown key
+    → weight 0.0 → screen bypassed). ``analysis.exchange`` is consulted only
+    for bare tickers, where the suffix carries no information.
+    """
+    if "." in item.ticker.yf:
+        return _exchange_from_ticker(item.ticker.yf)
     analysis = item.analysis
-    return (analysis.exchange if analysis else "") or _exchange_from_ticker(
-        item.ticker.yf
-    )
+    return (analysis.exchange if analysis else "") or "US"
 
 
 def _candidate_sector(item: ReconciliationItem) -> str | None:

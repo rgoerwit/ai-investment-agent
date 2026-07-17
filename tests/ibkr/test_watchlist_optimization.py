@@ -697,6 +697,29 @@ def test_bare_ticker_buckets_as_us_exchange():
     assert optimization.withheld_candidates[0].breaches[0].key == "US"
 
 
+def test_corrupted_snapshot_exchange_cannot_bypass_screen():
+    """Suffix-first: a suffixed ticker buckets by its suffix even when the
+    persisted snapshot exchange is garbage — an unknown alias key would read
+    weight 0.0 and silently skip the screen."""
+    candidate = _buy("7203.T", conviction="Medium", size_pct=4.0)
+    candidate.analysis.exchange = "TSEJ"  # IBKR code — not the yf-suffix space
+
+    optimization = _resolve([candidate], set(), exchange_weights={"T": 45.0})
+
+    assert optimization.optimal == ()
+    assert optimization.withheld_candidates[0].breaches[0].key == "T"
+
+
+def test_bare_ticker_uses_snapshot_exchange_when_present():
+    candidate = _buy("ACME", conviction="Medium", size_pct=4.0)
+    candidate.analysis.exchange = "KS"
+
+    optimization = _resolve([candidate], set(), exchange_weights={"KS": 45.0})
+
+    assert optimization.optimal == ()
+    assert optimization.withheld_candidates[0].breaches[0].key == "KS"
+
+
 def test_analysis_none_item_is_excluded_before_screen_without_crash():
     no_analysis = ReconciliationItem(
         ticker="9432.T",
