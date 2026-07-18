@@ -27,6 +27,7 @@ from src.ibkr.portfolio_presentation import (
 from src.ibkr.recommendation_service import PortfolioRecommendationBundle
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
 from src.ibkr.watchlist_optimization import (
+    ConcentrationNote,
     WatchlistMove,
     concentration_breach_summary,
 )
@@ -100,7 +101,27 @@ def serialize_dashboard_snapshot(
         "summary_counts": _summary_counts(bundle.items, view),
         "cash_summary": cash_summary,
         "cash_timeline": list(cash_summary["pending_inflows"]),
+        # Limits let the concentration cards render "limit 40%" and warn near cap.
+        "concentration_limits": {
+            "sector": bundle.sector_limit_pct,
+            "exchange": bundle.exchange_limit_pct,
+        },
+        # Non-fatal data-source failures (e.g. {"live_orders": "..."}) so the UI
+        # can distinguish "no live orders" from "live orders could not load".
+        "errors": dict(bundle.errors),
     }
+
+
+def _serialize_breaches(note: ConcentrationNote) -> list[dict[str, Any]]:
+    return [
+        {
+            "dimension": breach.dimension,
+            "key": breach.key,
+            "projected_pct": breach.projected_pct,
+            "limit_pct": breach.limit_pct,
+        }
+        for breach in note.breaches
+    ]
 
 
 def _watchlist_status(bundle: PortfolioRecommendationBundle) -> str:
@@ -275,6 +296,7 @@ def _serialize_watchlist_move(
     row["removal_reason"] = move.reason
     if move.note is not None:
         row["concentration"] = concentration_breach_summary(move.note)
+        row["breaches"] = _serialize_breaches(move.note)
     return row
 
 
@@ -348,6 +370,7 @@ def _serialize_actions(
             {
                 **serialize_item(note.item, live_orders=live_orders),
                 "concentration": concentration_breach_summary(note),
+                "breaches": _serialize_breaches(note),
             }
             for note in optimization.withheld_candidates
         ],

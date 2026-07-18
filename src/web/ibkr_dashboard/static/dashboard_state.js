@@ -12,7 +12,9 @@ const state = {
   settings: null,
   currentDrilldown: null,
   jobsPollHandle: null,
+  globalJobsPollHandle: null,
   snapshotPollHandle: null,
+  reloadDismissedAt: null,
   concentrationSorts: {
     sector: { key: "weight", direction: "desc" },
     exchange: { key: "weight", direction: "desc" },
@@ -26,6 +28,7 @@ const elements = {
   errorBanner: () => document.getElementById("error-banner"),
   macroAlert: () => document.getElementById("macro-alert"),
   modeAlert: () => document.getElementById("mode-alert"),
+  reloadAlert: () => document.getElementById("reload-alert"),
   status: () => document.getElementById("snapshot-status"),
   context: () => document.getElementById("snapshot-context"),
   drilldown: () => document.getElementById("drilldown-panel"),

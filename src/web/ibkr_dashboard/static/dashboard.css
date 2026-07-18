@@ -193,6 +193,22 @@ th {
   text-align: right;
 }
 
+th.num,
+td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+td.conc-warn {
+  color: var(--warning);
+  font-weight: bold;
+}
+
+.conc-limit {
+  font-size: 0.85rem;
+  font-weight: normal;
+}
+
 .sort-button {
   width: 100%;
   border: 0;

@@ -9,9 +9,23 @@ function fmtCurrency(value) {
 
 function fmtLocalMoney(value, currency) {
   if (value === null || value === undefined) return "—";
-  const num = Number(value).toFixed(2);
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  const num = new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(number);
   if (!currency) return `? ${num}`;
   return `${currency.toUpperCase()} ${num}`;
+}
+
+// Health / growth scores arrive on a 0–100 scale; render them as whole percents
+// so a column of "72%" reads consistently instead of raw floats like "72.0".
+function fmtScorePct(value) {
+  if (value === null || value === undefined || value === "") return "—";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return escapeHtml(String(value));
+  return `${number.toFixed(0)}%`;
 }
 
 function fmtNumber(value, digits = 1) {
@@ -87,27 +101,67 @@ function renderTickerLink(item) {
   return `<button type="button" class="ticker-link" data-ticker="${escapeHtmlAttr(ticker)}">${escapeHtml(item.ticker_ibkr || ticker)}</button>`;
 }
 
-function renderActionTable(title, items, extraColumns = []) {
+// Mirror of the CLI's normalize_reason (src/ibkr/portfolio_report_formatting.py):
+// keep the two substitutions in lockstep so dashboard heads match the report.
+function normalizeReason(reason) {
+  return String(reason ?? "")
+    .replaceAll("DO_NOT_INITIATE", "REJECT")
+    .replaceAll("Verdict → ", "Verdict: ");
+}
+
+// Mirror of split_reason(): the head before " — "; the full text goes in a
+// tooltip. Only split when there is real detail after the dash (else the whole
+// reason is the head), matching the Python semantics exactly.
+function reasonHead(reason) {
+  const norm = normalizeReason(reason);
+  if (!norm) return "—";
+  const idx = norm.indexOf(" — ");
+  if (idx > 0 && norm.slice(idx + 3).trim()) {
+    return norm.slice(0, idx).trimEnd();
+  }
+  return norm;
+}
+
+// Columns are a uniform list of {label, render, numeric?, title?} so headers and
+// cells share alignment classes and optional per-cell tooltips. The Ticker,
+// Action and (unless omitted) Reason columns are always present; callers pass
+// the trailing extras. omitReason drops the boilerplate Reason column (Holds).
+function renderActionTable(title, items, extraColumns = [], options = {}) {
   if (!items || !items.length) {
     return `<section><h3 class="section-title">${escapeHtml(title)}</h3><p class="muted">None.</p></section>`;
   }
-  const headers = ["Ticker", "Action", "Reason", ...extraColumns.map((col) => col.label)];
+  const columns = [
+    { label: "Ticker", render: (item) => renderTickerLink(item) },
+    { label: "Action", render: (item) => escapeHtml(item.action) },
+  ];
+  if (!options.omitReason) {
+    columns.push({
+      label: "Reason",
+      render: (item) => escapeHtml(reasonHead(item.reason)),
+      title: (item) => normalizeReason(item.reason),
+    });
+  }
+  columns.push(...extraColumns);
+  const headers = columns
+    .map((col) => `<th${col.numeric ? ' class="num"' : ""}>${escapeHtml(col.label)}</th>`)
+    .join("");
   const rows = items
     .map((item) => {
-      const cells = [
-        renderTickerLink(item),
-        escapeHtml(item.action),
-        escapeHtml(item.reason),
-        ...extraColumns.map((col) => col.render(item)),
-      ];
-      return `<tr>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`;
+      const cells = columns
+        .map((col) => {
+          const cls = col.numeric ? ' class="num"' : "";
+          const title = col.title ? ` title="${escapeHtmlAttr(col.title(item))}"` : "";
+          return `<td${cls}${title}>${col.render(item)}</td>`;
+        })
+        .join("");
+      return `<tr>${cells}</tr>`;
     })
     .join("");
   return `
     <section>
       <h3 class="section-title">${escapeHtml(title)}</h3>
       <table>
-        <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>
+        <thead><tr>${headers}</tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </section>
@@ -126,9 +180,7 @@ function profitTakeDetail(item) {
   if (item.position?.tax_term) {
     parts.push(`tax: ${item.position.tax_term}`);
   }
-  if (item.reason) {
-    parts.push(item.reason);
-  }
+  // item.reason is already the table's Reason column — do not repeat it here.
   return escapeHtml(parts.join(" · ") || "—");
 }
 
@@ -142,9 +194,9 @@ function renderCandidatePreview(title, items, limit = 5) {
       (item) => `
         <tr>
           <td>${renderTickerLink(item)}</td>
-          <td>${escapeHtml(item.reason || "—")}</td>
-          <td>${escapeHtml(item.analysis?.health_adj ?? "—")}</td>
-          <td>${escapeHtml(item.analysis?.growth_adj ?? "—")}</td>
+          <td title="${escapeHtmlAttr(normalizeReason(item.reason))}">${escapeHtml(reasonHead(item.reason))}</td>
+          <td class="num">${fmtScorePct(item.analysis?.health_adj)}</td>
+          <td class="num">${fmtScorePct(item.analysis?.growth_adj)}</td>
         </tr>
       `,
     )
@@ -158,7 +210,7 @@ function renderCandidatePreview(title, items, limit = 5) {
     <section>
       <h3 class="section-title">${escapeHtml(title)}</h3>
       <table>
-        <thead><tr><th>Ticker</th><th>Reason</th><th>Health</th><th>Growth</th></tr></thead>
+        <thead><tr><th>Ticker</th><th>Reason</th><th class="num">Health</th><th class="num">Growth</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
       ${footer}
@@ -281,23 +333,38 @@ function renderConcentrationHeader(section, key, label) {
   `;
 }
 
-function renderConcentrationCard(section, title, label, weights, emptyMessage) {
+function renderConcentrationCard(
+  section,
+  title,
+  label,
+  weights,
+  emptyMessage,
+  limitPct = null,
+) {
+  const hasLimit = typeof limitPct === "number" && Number.isFinite(limitPct);
   const rows = getSortedConcentrationEntries(section, weights)
-    .map(
-      (entry) => `
+    .map((entry) => {
+      // Mirror the CLI convention: warn (amber ⚠) once a bucket reaches 90% of
+      // its limit, so the raw percentage becomes actionable against the cap.
+      const warn = hasLimit && entry.weight >= limitPct * 0.9;
+      const pct = warn ? `${fmtPct(entry.weight)} ⚠` : fmtPct(entry.weight);
+      return `
         <tr>
           <td>${escapeHtml(entry.label)}</td>
-          <td>${fmtPct(entry.weight)}</td>
+          <td class="${warn ? "conc-warn" : ""}">${pct}</td>
         </tr>
-      `,
-    )
+      `;
+    })
     .join("");
   const body =
     rows ||
     `<tr><td colspan="2" class="muted">${escapeHtml(emptyMessage)}</td></tr>`;
+  const limitNote = hasLimit
+    ? ` <span class="muted conc-limit">limit ${Number(limitPct).toFixed(0)}%</span>`
+    : "";
   return `
     <article class="card">
-      <h3>${escapeHtml(title)}</h3>
+      <h3>${escapeHtml(title)}${limitNote}</h3>
       <table class="concentration-table">
         <thead>
           <tr>

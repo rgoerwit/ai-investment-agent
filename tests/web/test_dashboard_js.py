@@ -60,7 +60,7 @@ const context = {{
 
     vm.createContext(context);
     vm.runInContext(
-      source + "\\nglobalThis.__dashboardTest = {{ escapeHtmlText, escapeHtmlAttr, renderTickerLink, renderSettings, renderConcentrationHeader, renderActiveTab, renderRefresh, renderWatchlist, renderDrilldown, openReportViewer, closeReportViewer, updateMacroAlert, updateModeAlert, updateStatus, state, elements }};",
+      source + "\\nglobalThis.__dashboardTest = {{ escapeHtmlText, escapeHtmlAttr, renderTickerLink, renderSettings, renderConcentrationHeader, renderConcentrationCard, renderActiveTab, renderRefresh, renderActions, renderWatchlist, renderOrders, renderDrilldown, openReportViewer, closeReportViewer, updateMacroAlert, updateModeAlert, updateReloadAlert, updateStatus, fmtLocalMoney, fmtScorePct, reasonHead, normalizeReason, renderActionTable, state, elements }};",
       context,
     );
 const __dashboardTest = context.__dashboardTest;
@@ -634,3 +634,314 @@ return alert.innerHTML;
 
     assert "scratch/results-custom" in result
     assert "<code>results/</code>" not in result
+
+
+def test_fmt_local_money_uses_thousands_separators():
+    result = _run_dashboard_js("""
+const { fmtLocalMoney } = __dashboardTest;
+return {
+  jpy: fmtLocalMoney(24500, "jpy"),
+  none: fmtLocalMoney(null, "JPY"),
+  no_currency: fmtLocalMoney(12.5, null),
+  non_numeric: fmtLocalMoney("abc", "USD"),
+};
+""")
+
+    assert result["jpy"] == "JPY 24,500.00"
+    assert result["none"] == "—"
+    assert result["no_currency"] == "? 12.50"
+    assert result["non_numeric"] == "—"
+
+
+def test_fmt_score_pct_renders_whole_percent():
+    result = _run_dashboard_js("""
+const { fmtScorePct } = __dashboardTest;
+return {
+  score: fmtScorePct(72),
+  float: fmtScorePct(66.7),
+  missing: fmtScorePct(null),
+  blank: fmtScorePct(""),
+};
+""")
+
+    assert result["score"] == "72%"
+    assert result["float"] == "67%"
+    assert result["missing"] == "—"
+    assert result["blank"] == "—"
+
+
+def test_reason_head_splits_at_dash_and_normalizes_tokens():
+    result = _run_dashboard_js("""
+const { reasonHead } = __dashboardTest;
+return {
+  split: reasonHead("Watchlist BUY (2026-07-05) — Medium conviction, target 4.0%"),
+  no_dash: reasonHead("Position remains within thesis"),
+  empty: reasonHead(""),
+  verdict: reasonHead("Verdict → DO_NOT_INITIATE — stale analysis"),
+  dash_no_detail: reasonHead("Something — "),
+};
+""")
+
+    assert result["split"] == "Watchlist BUY (2026-07-05)"
+    assert result["no_dash"] == "Position remains within thesis"
+    assert result["empty"] == "—"
+    # DO_NOT_INITIATE → REJECT and Verdict → : normalization applied before split.
+    assert result["verdict"] == "Verdict: REJECT"
+    assert result["dash_no_detail"] == "Something — "
+
+
+def test_render_action_table_puts_reason_head_in_cell_and_full_in_tooltip():
+    html = _run_dashboard_js("""
+const { renderActionTable } = __dashboardTest;
+return renderActionTable("Sells", [
+  {
+    ticker_yf: "7203.T",
+    ticker_ibkr: "7203",
+    action: "SELL",
+    reason: "Confirmed thesis failure — health 42% below gate, two full analyses agree",
+  },
+], []);
+""")
+
+    assert "Confirmed thesis failure</td>" in html
+    assert (
+        'title="Confirmed thesis failure — health 42% below gate, two full analyses agree"'
+        in html
+    )
+
+
+def test_render_action_table_omit_reason_drops_reason_column():
+    html = _run_dashboard_js("""
+const { renderActionTable } = __dashboardTest;
+return renderActionTable("Holds", [
+  { ticker_yf: "7203.T", ticker_ibkr: "7203", action: "HOLD", reason: "Position remains within thesis" },
+], [{ label: "Weight", numeric: true, render: () => "5.0%" }], { omitReason: true });
+""")
+
+    assert "<th>Reason</th>" not in html
+    assert "Position remains within thesis" not in html
+    assert '<th class="num">Weight</th>' in html
+    assert '<td class="num">5.0%</td>' in html
+
+
+def test_render_hold_row_shows_weight_gain_stop_target():
+    html = _run_dashboard_js("""
+const { renderActions, state } = __dashboardTest;
+state.snapshot = {
+  portfolio: { net_liquidation_usd: 100000 },
+  actions: {
+    action_sections: [
+      {
+        key: "hold",
+        title: "Holds",
+        kind: "reconciliation_items",
+        items: [
+          {
+            ticker_yf: "7203.T",
+            ticker_ibkr: "7203",
+            action: "HOLD",
+            reason: "Position remains within thesis",
+            analysis: { entry_price: 2000, stop_price: 1700, target_1_price: 2600, currency: "JPY" },
+            position: { current_price_local: 2300, currency: "JPY", market_value_usd: 15000 },
+          },
+        ],
+      },
+    ],
+  },
+};
+return renderActions();
+""")
+
+    assert "<th>Reason</th>" not in html
+    assert "15.0%" in html  # weight = 15000 / 100000
+    assert "+15.0%" in html  # gain = (2300 - 2000) / 2000
+    assert "JPY 1,700.00" in html  # stop
+    assert "JPY 2,600.00" in html  # target
+
+
+def test_render_hold_row_falls_back_to_cost_basis_for_entry():
+    html = _run_dashboard_js("""
+const { renderActions, state } = __dashboardTest;
+state.snapshot = {
+  portfolio: { net_liquidation_usd: 100000 },
+  actions: {
+    action_sections: [
+      {
+        key: "hold",
+        title: "Holds",
+        kind: "reconciliation_items",
+        items: [
+          {
+            ticker_yf: "MEGP.L",
+            ticker_ibkr: "MEGP",
+            action: "HOLD",
+            reason: "Position remains within thesis",
+            analysis: null,
+            position: { avg_cost_local: 100, current_price_local: 120, currency: "GBP", market_value_usd: 5000 },
+          },
+        ],
+      },
+    ],
+  },
+};
+return renderActions();
+""")
+
+    assert "+20.0%" in html  # gain from cost basis 100 → 120
+    assert 'title="Cost basis (average cost) — no analysis entry price"' in html
+
+
+def test_render_concentration_card_shows_limit_and_warns_near_cap():
+    html = _run_dashboard_js("""
+const { renderConcentrationCard } = __dashboardTest;
+return renderConcentrationCard(
+  "exchange",
+  "Exchange Concentration",
+  "Exchange",
+  { T: 38, US: 20 },
+  "No positions.",
+  40,
+);
+""")
+
+    assert "limit 40%" in html
+    # T at 38 is >= 90% of 40 (=36) → warn; US at 20 is not.
+    assert 'class="conc-warn"' in html
+    assert "⚠" in html
+
+
+def test_render_concentration_card_without_limit_has_no_warn():
+    html = _run_dashboard_js("""
+const { renderConcentrationCard } = __dashboardTest;
+return renderConcentrationCard(
+  "exchange",
+  "Exchange Concentration",
+  "Exchange",
+  { T: 38 },
+  "No positions.",
+  null,
+);
+""")
+
+    assert "limit" not in html
+    assert "conc-warn" not in html
+
+
+def test_render_watchlist_remove_uses_structured_breaches():
+    html = _run_dashboard_js("""
+const { renderWatchlist, state } = __dashboardTest;
+state.snapshot = {
+  watchlist: { name: "wl", total: 1, tickers: ["7203.T"] },
+  actions: {
+    watchlist_buy: [], watchlist_candidate: [], watchlist_monitor: [],
+    watchlist_remove: [
+      {
+        ticker_yf: "7203.T", ticker_ibkr: "7203", action: "BUY",
+        reason: "Watchlist BUY", removal_reason: "concentration_displaced",
+        concentration: "overweight exchange T (projected 52.7% > 40%)",
+        breaches: [{ dimension: "exchange", key: "T", projected_pct: 52.7, limit_pct: 40 }],
+      },
+    ],
+  },
+};
+return renderWatchlist();
+""")
+
+    assert "exchange T 52.7% &gt; 40%" in html
+
+
+def test_render_withheld_groups_same_category_into_one_row():
+    html = _run_dashboard_js("""
+const { renderWatchlist, state } = __dashboardTest;
+state.snapshot = {
+  watchlist: { name: "wl", total: 1, tickers: [] },
+  actions: {
+    watchlist_buy: [], watchlist_candidate: [], watchlist_monitor: [], watchlist_remove: [],
+    watchlist_withheld: [
+      {
+        ticker_yf: "9984.T", ticker_ibkr: "9984", action: "BUY", reason: "New BUY",
+        concentration: "overweight exchange T (projected 49.0% > 40%)",
+        breaches: [{ dimension: "exchange", key: "T", projected_pct: 49.0, limit_pct: 40 }],
+      },
+      {
+        ticker_yf: "6758.T", ticker_ibkr: "6758", action: "BUY", reason: "New BUY",
+        concentration: "overweight exchange T (projected 52.7% > 40%)",
+        breaches: [{ dimension: "exchange", key: "T", projected_pct: 52.7, limit_pct: 40 }],
+      },
+    ],
+  },
+};
+return renderWatchlist();
+""")
+
+    # Two names in the same overweight bucket collapse to a single grouped row.
+    assert "Withheld By Concentration" in html
+    assert "exchange T up to 52.7% &gt; 40%" in html
+    assert "9984, 6758" in html or "6758, 9984" in html
+    assert html.count("<tbody>") == 1
+
+
+def test_render_orders_shows_failure_banner_distinct_from_empty():
+    failed = _run_dashboard_js("""
+const { renderOrders, state } = __dashboardTest;
+state.snapshot = {
+  read_only: false,
+  orders: [],
+  cash_summary: {},
+  errors: { live_orders: "IBKR session not authenticated" },
+};
+return renderOrders();
+""")
+    empty = _run_dashboard_js("""
+const { renderOrders, state } = __dashboardTest;
+state.snapshot = {
+  read_only: false,
+  orders: [],
+  cash_summary: {},
+  errors: {},
+};
+return renderOrders();
+""")
+
+    assert "Live orders unavailable" in failed
+    assert "IBKR session not authenticated" in failed
+    assert "Live-order data could not be loaded." in failed
+    assert "Live orders unavailable" not in empty
+    assert "No live orders." in empty
+
+
+def test_update_reload_alert_prompts_when_job_completes_after_cached_snapshot():
+    shown = _run_dashboard_js("""
+const { updateReloadAlert, state, elements } = __dashboardTest;
+const alert = { classList: { add() {}, remove() {} }, innerHTML: "" };
+elements.reloadAlert = () => alert;
+state.snapshot = { cache_hit: true, as_of: "2026-07-18T10:00:00+00:00" };
+state.jobs = [{ status: "completed", finished_at: "2026-07-18T11:00:00+00:00" }];
+state.reloadDismissedAt = null;
+updateReloadAlert();
+return alert.innerHTML;
+""")
+    stale_job = _run_dashboard_js("""
+const { updateReloadAlert, state, elements } = __dashboardTest;
+const alert = { classList: { add() {}, remove() {} }, innerHTML: "" };
+elements.reloadAlert = () => alert;
+state.snapshot = { cache_hit: true, as_of: "2026-07-18T12:00:00+00:00" };
+state.jobs = [{ status: "completed", finished_at: "2026-07-18T11:00:00+00:00" }];
+state.reloadDismissedAt = null;
+updateReloadAlert();
+return alert.innerHTML;
+""")
+    fresh_snapshot = _run_dashboard_js("""
+const { updateReloadAlert, state, elements } = __dashboardTest;
+const alert = { classList: { add() {}, remove() {} }, innerHTML: "" };
+elements.reloadAlert = () => alert;
+state.snapshot = { cache_hit: false, as_of: "2026-07-18T10:00:00+00:00" };
+state.jobs = [{ status: "completed", finished_at: "2026-07-18T11:00:00+00:00" }];
+state.reloadDismissedAt = null;
+updateReloadAlert();
+return alert.innerHTML;
+""")
+
+    assert "Analyses refreshed since this data was loaded." in shown
+    assert stale_job == ""
+    assert fresh_snapshot == ""

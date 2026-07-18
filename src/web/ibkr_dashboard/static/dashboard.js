@@ -58,6 +58,7 @@ function applySnapshotPayload(payload) {
     last_error: payload.load_error || payload.last_error || null,
   };
   updateMacroAlert();
+  updateReloadAlert();
   updateStatus();
   renderActiveTab();
 
@@ -105,11 +106,64 @@ async function loadJobs() {
   try {
     const payload = await fetchJson("/api/refresh/jobs");
     state.jobs = payload.jobs || [];
+    updateReloadAlert();
     if (state.activeTab === "refresh") {
       renderActiveTab();
     }
   } catch (error) {
     setError(error.message);
+  }
+}
+
+function latestCompletedJobFinish() {
+  return (state.jobs || []).reduce((latest, job) => {
+    if (job.status !== "completed" && job.status !== "partial") return latest;
+    if (!job.finished_at) return latest;
+    return !latest || job.finished_at > latest ? job.finished_at : latest;
+  }, null);
+}
+
+// UI-level mitigation for the known no-auto-invalidation gap: when a refresh job
+// completes after the currently displayed (cached) snapshot was loaded, prompt a
+// reload instead of silently showing stale data. Works from any tab via the
+// global jobs poll started in initializeDashboard().
+function updateReloadAlert() {
+  const alert = elements.reloadAlert();
+  const snapshot = state.snapshot;
+  const asOf = snapshot?.as_of;
+  const hide = () => {
+    alert.classList.add("hidden");
+    alert.innerHTML = "";
+  };
+  if (!snapshot || !snapshot.cache_hit || !asOf) {
+    hide();
+    return;
+  }
+  const latest = latestCompletedJobFinish();
+  const dismissed = state.reloadDismissedAt;
+  const superseding =
+    latest && latest > asOf && (!dismissed || latest > dismissed);
+  if (!superseding) {
+    hide();
+    return;
+  }
+  alert.classList.remove("hidden");
+  alert.innerHTML =
+    "<strong>Analyses refreshed since this data was loaded.</strong> " +
+    "The view below is cached and may be stale. " +
+    '<button type="button" id="reload-alert-reload">Reload Data</button> ' +
+    '<button type="button" id="reload-alert-dismiss">Dismiss</button>';
+  const reloadButton = document.getElementById("reload-alert-reload");
+  if (reloadButton) {
+    reloadButton.addEventListener("click", () => loadPortfolio(true));
+  }
+  const dismissButton = document.getElementById("reload-alert-dismiss");
+  if (dismissButton) {
+    dismissButton.addEventListener("click", () => {
+      // Stay dismissed until a job completes later than the newest one we saw.
+      state.reloadDismissedAt = latestCompletedJobFinish();
+      updateReloadAlert();
+    });
   }
 }
 
@@ -367,11 +421,22 @@ function bindStaticHandlers() {
   });
 }
 
+function startGlobalJobsPoll() {
+  if (state.globalJobsPollHandle) {
+    return;
+  }
+  // Slow, tab-independent poll so the "refresh finished — reload" banner can
+  // appear from any tab. The Refresh tab keeps its own faster 5s poll.
+  state.globalJobsPollHandle = setInterval(loadJobs, 30000);
+}
+
 async function initializeDashboard() {
   bindStaticHandlers();
   await loadSettings();
   await loadPortfolio(false);
+  await loadJobs();
   syncJobsPolling();
+  startGlobalJobsPoll();
 }
 
 initializeDashboard();

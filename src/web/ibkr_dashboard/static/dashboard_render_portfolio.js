@@ -1,3 +1,37 @@
+// Hold-row helpers mirror the CLI HOLDS renderer
+// (src/ibkr/portfolio_report_positions.py): entry falls back from the analysis
+// entry price to the position's average cost, and gain/weight are derived the
+// same way so the dashboard and the printed report agree.
+function holdEntry(item) {
+  if (item.analysis?.entry_price) return item.analysis.entry_price;
+  if (item.position?.avg_cost_local) return item.position.avg_cost_local;
+  return null;
+}
+
+function holdEntryLabel(item) {
+  return item.analysis?.entry_price
+    ? "Entry price from analysis"
+    : "Cost basis (average cost) — no analysis entry price";
+}
+
+function holdCurrency(item) {
+  return item.analysis?.currency || item.position?.currency;
+}
+
+function holdWeight(item) {
+  const marketValue = item.position?.market_value_usd;
+  const nav = state.snapshot?.portfolio?.net_liquidation_usd;
+  if (!marketValue || !nav || nav <= 0) return "—";
+  return `${((marketValue / nav) * 100).toFixed(1)}%`;
+}
+
+function holdGain(item) {
+  const entry = holdEntry(item);
+  const current = item.position?.current_price_local;
+  if (!entry || !current) return "—";
+  return fmtPct(((current - entry) / entry) * 100);
+}
+
 function renderOverview() {
   const snapshot = state.snapshot;
   const portfolio = snapshot.portfolio;
@@ -70,6 +104,7 @@ function renderOverview() {
         "Sector",
         portfolio.sector_weights,
         "No live portfolio positions loaded.",
+        snapshot.concentration_limits?.sector,
       )}
       ${renderConcentrationCard(
         "exchange",
@@ -77,6 +112,7 @@ function renderOverview() {
         "Exchange",
         portfolio.exchange_weights,
         "No live portfolio positions loaded.",
+        snapshot.concentration_limits?.exchange,
       )}
     </section>
   `;
@@ -118,7 +154,7 @@ function renderActions() {
       if (section.key === "sell_recommendations") {
         return renderActionTable(section.title, section.items, [
           { label: "Type", render: (item) => escapeHtml(sellTypeLabel(item)) },
-          { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
+          { label: "Price", numeric: true, render: (item) => fmtNumber(item.suggested_price, 2) },
           {
             label: "Would Settle",
             render: (item) => escapeHtml(item.settlement_date || "—"),
@@ -129,20 +165,20 @@ function renderActions() {
       if (section.key === "sell_related_reviews") {
         return renderActionTable(section.title, section.items, [
           { label: "Type", render: (item) => escapeHtml(sellTypeLabel(item)) },
-          { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
-          { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
+          { label: "Health", numeric: true, render: (item) => fmtScorePct(item.analysis?.health_adj) },
+          { label: "Growth", numeric: true, render: (item) => fmtScorePct(item.analysis?.growth_adj) },
           { label: "Profit-Take Detail", render: profitTakeDetail },
         ]);
       }
       if (section.key === "add") {
         return renderActionTable(section.title, section.items, [
-          { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
-          { label: "Cost", render: (item) => fmtCurrency(Math.abs(item.cash_impact_usd ?? 0)) },
+          { label: "Price", numeric: true, render: (item) => fmtNumber(item.suggested_price, 2) },
+          { label: "Cost", numeric: true, render: (item) => fmtCurrency(Math.abs(item.cash_impact_usd ?? 0)) },
         ]);
       }
       if (section.key === "trim") {
         return renderActionTable(section.title, section.items, [
-          { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
+          { label: "Price", numeric: true, render: (item) => fmtNumber(item.suggested_price, 2) },
           {
             label: "Would Settle",
             render: (item) => escapeHtml(item.settlement_date || "—"),
@@ -151,26 +187,46 @@ function renderActions() {
       }
       if (section.key === "review") {
         return renderActionTable(section.title, section.items, [
-          { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
-          { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
+          { label: "Health", numeric: true, render: (item) => fmtScorePct(item.analysis?.health_adj) },
+          { label: "Growth", numeric: true, render: (item) => fmtScorePct(item.analysis?.growth_adj) },
         ]);
       }
       if (section.key === "dip_watch") {
         return renderDipWatch(section.items);
       }
       if (section.key === "hold") {
-        return renderActionTable(section.title, section.items, [
-          {
-            label: "Entry",
-            render: (item) =>
-              fmtLocalMoney(item.analysis?.entry_price, item.analysis?.currency),
-          },
-          {
-            label: "Current",
-            render: (item) =>
-              fmtLocalMoney(item.position?.current_price_local, item.position?.currency),
-          },
-        ]);
+        return renderActionTable(
+          section.title,
+          section.items,
+          [
+            { label: "Weight", numeric: true, render: holdWeight },
+            {
+              label: "Entry",
+              numeric: true,
+              render: (item) => fmtLocalMoney(holdEntry(item), holdCurrency(item)),
+              title: holdEntryLabel,
+            },
+            {
+              label: "Current",
+              numeric: true,
+              render: (item) =>
+                fmtLocalMoney(item.position?.current_price_local, item.position?.currency),
+            },
+            { label: "Gain %", numeric: true, render: holdGain },
+            {
+              label: "Stop",
+              numeric: true,
+              render: (item) => fmtLocalMoney(item.analysis?.stop_price, holdCurrency(item)),
+            },
+            {
+              label: "Target",
+              numeric: true,
+              render: (item) =>
+                fmtLocalMoney(item.analysis?.target_1_price, holdCurrency(item)),
+            },
+          ],
+          { omitReason: true },
+        );
       }
       return renderActionTable(section.title, section.items, []);
     })
@@ -187,9 +243,9 @@ function renderDipWatch(items) {
       <tr>
         <td>${escapeHtml(item.stars)}</td>
         <td><button type="button" class="ticker-link" data-ticker="${escapeHtml(item.ticker_yf)}">${escapeHtml(item.ticker_ibkr)}</button></td>
-        <td>${fmtNumber(item.score, 1)}</td>
-        <td>${fmtPct(item.dip_pct)}</td>
-        <td>${item.risk_reward ?? "—"}</td>
+        <td class="num">${fmtNumber(item.score, 1)}</td>
+        <td class="num">${fmtPct(item.dip_pct)}</td>
+        <td class="num">${escapeHtml(item.risk_reward ?? "—")}</td>
         <td>${escapeHtml(item.run_ticker)}</td>
       </tr>
     `,
@@ -199,7 +255,7 @@ function renderDipWatch(items) {
     <section>
       <h3 class="section-title">Dip Watch</h3>
       <table>
-        <thead><tr><th>Stars</th><th>Ticker</th><th>Score</th><th>Dip</th><th>R/R</th><th>Run Ticker</th></tr></thead>
+        <thead><tr><th>Stars</th><th>Ticker</th><th class="num">Score</th><th class="num">Dip</th><th class="num">R/R</th><th>Run Ticker</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </section>
@@ -262,18 +318,96 @@ function renderLoadedWatchlist(watchlist) {
   `;
 }
 
+// One short line per breached dimension: "exchange T 52.7% > 40%".
+function breachLines(breaches) {
+  return breaches
+    .map((breach) =>
+      escapeHtml(
+        `${breach.dimension} ${breach.key} ` +
+          `${Number(breach.projected_pct).toFixed(1)}% > ${Number(breach.limit_pct).toFixed(0)}%`,
+      ),
+    )
+    .join("<br>");
+}
+
+// "Why" cell: prefer the structured breach list, fall back to the pre-joined
+// concentration string (or a plain removal reason) for back-compat.
+function breachWhy(item) {
+  if (Array.isArray(item.breaches) && item.breaches.length) {
+    return breachLines(item.breaches);
+  }
+  return escapeHtml(item.concentration || item.removal_reason || item.reason || "—");
+}
+
+// Grouping label without per-candidate projections — mirrors _breach_category
+// (src/ibkr/portfolio_report.py) so items with the same overweight bucket collapse.
+function breachCategory(breaches) {
+  return breaches
+    .map((breach) => `${breach.dimension} ${breach.key} > ${Number(breach.limit_pct).toFixed(0)}%`)
+    .join(" + ");
+}
+
+// Per-group display label, keeping the worst projection per dimension so the
+// magnitude survives grouping (mirrors the CLI withheld-by-concentration footer).
+function breachGroupLabel(notes) {
+  return notes[0].breaches
+    .map((breach, dim) => {
+      const worst = Math.max(
+        ...notes.map((note) => Number(note.breaches[dim].projected_pct)),
+      );
+      return (
+        `${breach.dimension} ${breach.key} up to ` +
+        `${worst.toFixed(1)}% > ${Number(breach.limit_pct).toFixed(0)}%`
+      );
+    })
+    .join(" + ");
+}
+
+function renderWithheldGrouped(items) {
+  if (!items || !items.length) return "";
+  const groups = new Map();
+  for (const item of items) {
+    const breaches = Array.isArray(item.breaches) ? item.breaches : [];
+    const key = breaches.length
+      ? breachCategory(breaches)
+      : item.concentration || item.reason || "—";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  const rows = [...groups.values()]
+    .map((notes) => {
+      const label = notes[0].breaches?.length
+        ? breachGroupLabel(notes)
+        : notes[0].concentration || notes[0].reason || "—";
+      const tickers = notes
+        .map((note) => escapeHtml(note.ticker_ibkr || note.ticker_yf || "—"))
+        .join(", ");
+      return `<tr><td>${escapeHtml(label)}</td><td>${tickers}</td></tr>`;
+    })
+    .join("");
+  return `
+    <section>
+      <h3 class="section-title">Withheld By Concentration</h3>
+      <table>
+        <thead><tr><th>Overweight bucket</th><th>Withheld tickers</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </section>
+  `;
+}
+
 function renderWatchlist() {
   const actions = state.snapshot.actions;
   const watchlist = state.snapshot.watchlist || {};
   return `
     ${renderLoadedWatchlist(watchlist)}
     ${renderActionTable("New Buys", actions.watchlist_buy, [
-      { label: "Price", render: (item) => fmtNumber(item.suggested_price, 2) },
-      { label: "Cost", render: fmtBuyCost },
+      { label: "Price", numeric: true, render: (item) => fmtNumber(item.suggested_price, 2) },
+      { label: "Cost", numeric: true, render: fmtBuyCost },
     ])}
     ${renderActionTable("Watchlist Candidates", actions.watchlist_candidate, [
-      { label: "Health", render: (item) => escapeHtml(item.analysis?.health_adj ?? "—") },
-      { label: "Growth", render: (item) => escapeHtml(item.analysis?.growth_adj ?? "—") },
+      { label: "Health", numeric: true, render: (item) => fmtScorePct(item.analysis?.health_adj) },
+      { label: "Growth", numeric: true, render: (item) => fmtScorePct(item.analysis?.growth_adj) },
     ])}
     ${(actions.watchlist_in_flight || []).length
       ? renderActionTable("BUY Orders Already In Flight", actions.watchlist_in_flight, [
@@ -288,13 +422,9 @@ function renderWatchlist() {
       : ""}
     ${renderActionTable("Watchlist Monitoring", actions.watchlist_monitor)}
     ${renderActionTable("Watchlist Remove", actions.watchlist_remove, [
-      { label: "Why", render: (item) => escapeHtml(item.concentration || item.removal_reason || "—") },
+      { label: "Why", render: breachWhy },
     ])}
-    ${(actions.watchlist_withheld || []).length
-      ? renderActionTable("Withheld By Concentration", actions.watchlist_withheld, [
-          { label: "Why", render: (item) => escapeHtml(item.concentration || item.reason || "—") },
-        ])
-      : ""}
+    ${renderWithheldGrouped(actions.watchlist_withheld)}
   `;
 }
 
@@ -319,6 +449,7 @@ function renderOrders() {
     immediateBuyCost > 0
       ? "<p class='muted'>Only immediate ADD and watchlist BUY actions reserve cash here.</p>"
       : "<p class='muted'>Dip-watch ideas and off-watchlist candidates do not reserve cash here. Cash only moves once a name becomes an ADD or a watchlist BUY.</p>";
+  const ordersError = state.snapshot.errors?.live_orders;
   const rows = orders
     .map(
       (order) => `
@@ -332,6 +463,14 @@ function renderOrders() {
       `,
     )
     .join("");
+  // A live-orders fetch failure must not look like "no open orders" — that would
+  // invite a duplicate order. Surface the degraded state explicitly.
+  const ordersEmptyRow = ordersError
+    ? "<tr><td colspan='5' class='muted'>Live-order data could not be loaded.</td></tr>"
+    : "<tr><td colspan='5' class='muted'>No live orders.</td></tr>";
+  const ordersErrorBanner = ordersError
+    ? `<p class="error">Live orders unavailable — open-order dedup is disabled; verify open orders directly in IBKR before placing new ones. (${escapeHtml(ordersError)})</p>`
+    : "";
   return `
     ${renderCards([
       { label: "Settled cash", value: fmtCurrency(cashSummary.settled_cash_usd) },
@@ -367,9 +506,10 @@ function renderOrders() {
     </section>
     <section>
       <h3 class="section-title">Live Orders</h3>
+      ${ordersErrorBanner}
       <table>
         <thead><tr><th>Ticker</th><th>Side</th><th>Type</th><th>Status</th><th>Remaining</th></tr></thead>
-        <tbody>${rows || "<tr><td colspan='5' class='muted'>No live orders.</td></tr>"}</tbody>
+        <tbody>${rows || ordersEmptyRow}</tbody>
       </table>
     </section>
   `;

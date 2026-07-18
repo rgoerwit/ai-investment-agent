@@ -330,3 +330,35 @@ def test_dashboard_custom_bundle_limits_honored():
     assert actions["watchlist_remove"] == []
     assert actions["watchlist_withheld"] == []
     assert "6758.T" in [row["ticker_yf"] for row in actions["dip_watch"]]
+
+
+def test_dashboard_emits_structured_breaches_alongside_string():
+    payload = serialize_dashboard_snapshot(_concentration_bundle())
+    actions = payload["actions"]
+
+    withheld = actions["watchlist_withheld"][0]
+    assert isinstance(withheld["breaches"], list) and withheld["breaches"]
+    breach = withheld["breaches"][0]
+    assert set(breach) == {"dimension", "key", "projected_pct", "limit_pct"}
+    assert breach["dimension"] == "exchange"
+    assert breach["key"] == "T"
+    assert breach["limit_pct"] == 40.0
+
+    removed = {row["ticker_yf"]: row for row in actions["watchlist_remove"]}
+    assert removed["7203.T"]["breaches"][0]["dimension"] == "exchange"
+
+
+def test_dashboard_snapshot_includes_concentration_limits(sample_bundle):
+    payload = serialize_dashboard_snapshot(sample_bundle)
+
+    assert payload["concentration_limits"] == {
+        "sector": sample_bundle.sector_limit_pct,
+        "exchange": sample_bundle.exchange_limit_pct,
+    }
+
+
+def test_dashboard_snapshot_passes_through_errors(sample_bundle):
+    sample_bundle.errors["live_orders"] = "IBKR session not authenticated"
+    payload = serialize_dashboard_snapshot(sample_bundle)
+
+    assert payload["errors"]["live_orders"] == "IBKR session not authenticated"
