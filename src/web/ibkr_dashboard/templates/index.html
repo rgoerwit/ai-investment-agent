@@ -61,6 +61,8 @@
       </article>
     </section>
 
-    <script src="{{ url_for('static', filename='dashboard.js', v=dashboard_js_version) }}"></script>
+    {% for script in dashboard_scripts %}
+    <script src="{{ url_for('static', filename=script, v=dashboard_js_version) }}"></script>
+    {% endfor %}
   </body>
 </html>

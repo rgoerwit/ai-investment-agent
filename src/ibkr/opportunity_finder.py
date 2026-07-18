@@ -7,6 +7,12 @@ from typing import TYPE_CHECKING
 import structlog
 
 from src.config import config
+from src.ibkr.concentration import (
+    canonical_exchange_bucket,
+    canonical_sector_bucket,
+    format_concentration_warnings,
+    project_concentration_breaches,
+)
 from src.ibkr.models import (
     AnalysisRecord,
     PortfolioSummary,
@@ -17,7 +23,6 @@ logger = structlog.get_logger(__name__)
 from src.ibkr.order_builder import calculate_quantity
 from src.ibkr.reconciliation_rules import (
     _MIN_ORDER_USD,
-    _exchange_from_ticker,
     _normalize_verdict,
     _resolve_fx,
     check_staleness,
@@ -165,20 +170,20 @@ def find_opportunities(
 
         buy_reason = f"New BUY ({analysis.analysis_date}) — {conviction} conviction, target {size_pct:.1f}%"
         if portfolio.portfolio_value_usd > 0:
-            exch = analysis.exchange or _exchange_from_ticker(ticker)
-            sect = analysis.sector or "Unknown"
             projected_weight = buy_cost_usd / portfolio.portfolio_value_usd * 100
-            proj_exch = exchange_weights.get(exch, 0.0) + projected_weight
-            proj_sect = sector_weights.get(sect, 0.0) + projected_weight
-            conc_warns = []
-            if proj_exch > exchange_limit_pct:
-                conc_warns.append(
-                    f"⚠ {exch} → {proj_exch:.0f}% (limit {exchange_limit_pct:.0f}%)"
-                )
-            if proj_sect > sector_limit_pct:
-                conc_warns.append(
-                    f"⚠ {sect} sector → {proj_sect:.0f}% (limit {sector_limit_pct:.0f}%)"
-                )
+            breaches = project_concentration_breaches(
+                exchange_key=canonical_exchange_bucket(
+                    ticker,
+                    analysis_exchange=analysis.exchange,
+                ),
+                sector_key=canonical_sector_bucket(analysis.sector),
+                candidate_pct=projected_weight,
+                exchange_weights=exchange_weights,
+                sector_weights=sector_weights,
+                exchange_limit_pct=exchange_limit_pct,
+                sector_limit_pct=sector_limit_pct,
+            )
+            conc_warns = format_concentration_warnings(breaches)
             if conc_warns:
                 buy_reason += "  " + "; ".join(conc_warns)
 

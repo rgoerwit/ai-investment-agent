@@ -1,0 +1,122 @@
+=== IBKR Portfolio Reconciliation  2026-07-17 12:00 ===
+
+⚠ WATCHLIST UNAVAILABLE — could not read your IBKR watchlist (brokerage session unavailable). Holdings/SELL/HOLD analysis below is unaffected. Watchlist filtering is unavailable; unheld BUY analyses are shown as BUY CANDIDATES and should be verified in IBKR before acting.
+
+  Account:          U-GOLDEN
+  Net liquidation:  $   100,000
+  Cash (total):     $    15,000   (15.0%)  includes $3,000 of unsettled sale proceeds (not yet spendable)
+  Settled cash:     $    12,000   (12.0%)  fully settled
+  Buffer reserve:   $     5,000   (5.0%)  cash buffer — not deployed into new buys
+  Available:        $     7,000           deployable into new buys (settled − buffer)
+
+╔══════════════════════════════════════════════════════╗
+║  !! MACRO ALERT                                      ║
+║  8 positions impacted (as of 2026-03-05)             ║
+║  (80% of held positions) — probable macro event      ║
+║  Likely macro event, not individual thesis failure.  ║
+║  Pause thesis changes; re-evaluate intrinsic value.  ║
+║  1 weak-fundamentals stop SELL(s) remain live.       ║
+╚══════════════════════════════════════════════════════╝
+
+══════════════════════════════════════════════════════
+  SCREENING FRESHNESS  (last completed broad market sweep)
+══════════════════════════════════════════════════════
+
+  No broad-screen completion recorded.
+  → Run: ./scripts/run_pipeline.sh
+
+══════════════════════════════════════════════════════
+  SELL RECOMMENDATIONS  (review sell reason labels before executing)
+══════════════════════════════════════════════════════
+
+⚠ SELL    STOP          LMT  (no entry price — re-run analysis)  [STOP BREACH] Stop breached: price 1700.00 < stop 1900.00
+             est. gain:  +JPY 10,000  (+5.0% vs IBKR cost basis JPY 2,000.00)  ·  verify holding period in IBKR
+
+⚠ SELL    HARD          LMT  (no entry price — re-run analysis)  [FUNDAMENTAL FAILURE] analyzed 2026-03-05
+             est. gain:  +JPY 10,000  (+5.0% vs IBKR cost basis JPY 2,000.00)  ·  verify holding period in IBKR
+
+══════════════════════════════════════════════════════
+  SELL-RELATED REVIEWS  (tax, macro, or intact-thesis review before acting)
+══════════════════════════════════════════════════════
+
+△ REVIEW  SOFT00        [SOFT REJECTION] Verdict: REJECT  (2026-03-05)
+             P/L vs IBKR: +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
+             holding: 100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+
+△ REVIEW  SOFT01        [SOFT REJECTION] Verdict: REJECT  (2026-03-05)
+             P/L vs IBKR: +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
+             holding: 100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+
+△ REVIEW  SOFT02        [SOFT REJECTION] Verdict: REJECT  (2026-03-05)
+             P/L vs IBKR: +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
+             holding: 100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+
+△ REVIEW  SOFT03        [SOFT REJECTION] Verdict: REJECT  (2026-03-05)
+             P/L vs IBKR: +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
+             holding: 100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+
+△ REVIEW  SOFT04        [SOFT REJECTION] Verdict: REJECT  (2026-03-05)
+             P/L vs IBKR: +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
+             holding: 100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+
+△ REVIEW  SOFT05        [SOFT REJECTION] Verdict: REJECT  (2026-03-05)
+             P/L vs IBKR: +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
+             holding: 100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+
+△ REVIEW  SOFT06        [SOFT REJECTION] Verdict: REJECT  (2026-03-05)
+             P/L vs IBKR: +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
+             holding: 100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+
+△ REVIEW  SOFT07        [SOFT REJECTION] Verdict: REJECT  (2026-03-05)
+             P/L vs IBKR: +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
+             holding: 100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+
+══════════════════════════════════════════════════════
+  WATCHLIST OPTIMIZATION  (watchlist status UNKNOWN — additions only; confirm watchlist status and re-check IBKR before acting)
+══════════════════════════════════════════════════════
+
+  ✓ 1 BUY order already in flight (WDO (WDO.TO)) — excluded from changes
+  LIVE ORDER STATUS:
+    WDO (WDO.TO)  [PARTIAL ORDER: 50 of 100 shares already submitted — enter 50 more]
+
+══════════════════════════════════════════════════════
+  CONCENTRATION
+══════════════════════════════════════════════════════
+
+  Sector:
+    Industrials             24.0%  ███████████░░░
+    Information Technology  18.0%  ████████░░░░░░
+
+  Exchange:
+    T     (Japan        )  31.0%  ███████████░░░
+    US    (United States)  27.0%  █████████░░░░░
+
+  Currency:
+    JPY                     31.0%  █████████░░░░░
+    USD                     27.0%  ████████░░░░░░
+
+══════════════════════════════════════════════════════
+  PORTFOLIO HEALTH  (cross-portfolio signals)
+══════════════════════════════════════════════════════
+
+  !! CORRELATED_SELL_EVENT: 8 positions changed verdict within 7d of 2026-03-05 (80% of held positions) — probable macro event. Execute stop-breach SELLs only; review verdict-change SELLs before acting.
+
+══════════════════════════════════════════════════════
+  CASH SUMMARY
+══════════════════════════════════════════════════════
+
+  Settled cash:                                $ 12,000
+  Cash buffer (held back, not for new buys):  -$  5,000
+  Deployable into new buys:                    $  7,000
+  No confirmed sale proceeds pending.
+  Conditional (soft-sell reviews if executed):  ~$11,200
+
+══════════════════════════════════════════════════════
+  ACTION PLAN  (execution orders · settlement · refresh follow-through)
+══════════════════════════════════════════════════════
+
+  TODAY (2026-07-17):
+    → SELL  STOP  LMT
+    → SELL  HARD  LMT
+
+  Summary:  2 SELL  ·  8 MACRO_WATCH

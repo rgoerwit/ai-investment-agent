@@ -1,35 +1,75 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Set
 from dataclasses import dataclass
-from enum import Enum
 
 from src.ibkr.dip_watch import (
     collect_dip_watch_source_items,
     select_dip_watch_candidates,
 )
 from src.ibkr.models import PortfolioSummary, ReconciliationItem
+from src.ibkr.order_presentation import (
+    LiveOrderMatch as LiveOrderMatch,
+)
+from src.ibkr.order_presentation import (
+    base_ticker as base_ticker,
+)
+from src.ibkr.order_presentation import (
+    base_ticker_value as base_ticker_value,
+)
+from src.ibkr.order_presentation import (
+    build_live_order_note as build_live_order_note,
+)
+from src.ibkr.order_presentation import (
+    find_live_order as find_live_order,
+)
 from src.ibkr.portfolio_defaults import (
     DEFAULT_EXCHANGE_LIMIT_PCT,
     DEFAULT_SECTOR_LIMIT_PCT,
 )
-from src.ibkr.reconciliation_rules import _exchange_from_ticker
 from src.ibkr.refresh_service import AnalysisFreshnessSummary, RefreshActivity
-from src.ibkr.ticker import Ticker
-from src.sector_normalization import normalize_sector_label
+from src.ibkr.watchlist_optimization import (
+    CONCENTRATION_EXCEPTION_MIN_SCORE as CONCENTRATION_EXCEPTION_MIN_SCORE,
+)
+from src.ibkr.watchlist_optimization import (
+    CONCENTRATION_INCUMBENT_MIN_SCORE as CONCENTRATION_INCUMBENT_MIN_SCORE,
+)
+from src.ibkr.watchlist_optimization import (
+    ConcentrationNote as ConcentrationNote,
+)
+from src.ibkr.watchlist_optimization import (
+    WatchlistMove as WatchlistMove,
+)
+from src.ibkr.watchlist_optimization import (
+    WatchlistOptCase as WatchlistOptCase,
+)
+from src.ibkr.watchlist_optimization import (
+    WatchlistOptimization as WatchlistOptimization,
+)
+from src.ibkr.watchlist_optimization import (
+    build_watchlist_optimization_summary as build_watchlist_optimization_summary,
+)
+from src.ibkr.watchlist_optimization import (
+    concentration_breach_summary as concentration_breach_summary,
+)
+from src.ibkr.watchlist_optimization import (
+    is_executable_buy as is_executable_buy,
+)
+from src.ibkr.watchlist_optimization import (
+    resolve_watchlist_optimization as resolve_watchlist_optimization,
+)
+from src.ibkr.watchlist_optimization import (
+    selected_watchlist_buy_ids as selected_watchlist_buy_ids,
+)
+from src.ibkr.watchlist_optimization import (
+    watchlist_candidate_conviction as watchlist_candidate_conviction,
+)
+from src.ibkr.watchlist_optimization import (
+    watchlist_candidate_score as watchlist_candidate_score,
+)
 
 _DEFAULT_DIP_WATCH_LIMIT = 7
-TARGET_WATCHLIST_SIZE = 6
-WATCHLIST_MIN_CONVICTION = "medium"
-_WATCHLIST_CONVICTION_RANK = {"high": 0, "medium": 1, "low": 2}
-# Concentration escape hatch ("very, very good buy"): an over-limit candidate
-# may still claim a BUY-ready slot iff conviction is high AND combined
-# health+growth score (out of 200) clears the tier bar. Incumbents (already on
-# the watchlist) get a lower bar than newcomers — the 15-point band is
-# anti-flap hysteresis so a borderline name doesn't oscillate ADD/REMOVE on
-# re-analysis score noise. Module constants by design: no env/CLI knob.
-CONCENTRATION_EXCEPTION_MIN_SCORE = 150.0
-CONCENTRATION_INCUMBENT_MIN_SCORE = 135.0
+
 SELL_RECOMMENDATIONS_TITLE = "SELL RECOMMENDATIONS"
 SELL_RELATED_REVIEWS_TITLE = "SELL-RELATED REVIEWS"
 SELL_TYPE_LABELS: dict[str | None, str] = {
@@ -78,493 +118,6 @@ class PortfolioActionGroups:
     dip_candidates: tuple[ReconciliationItem, ...]
 
 
-class WatchlistOptCase(str, Enum):
-    """Operator-facing states for the watchlist optimizer."""
-
-    NO_WATCHLIST = "no_watchlist"
-    WATCHLIST_UNAVAILABLE = "watchlist_unavailable"
-    NOTHING_ACTIONABLE = "nothing_actionable"
-    EMPTY_POOL = "empty_pool"
-    PARTIAL_FILL = "partial_fill"
-    ALIGNED = "aligned"
-    FULL_OPTIMIZE = "full_optimize"
-
-
-@dataclass(frozen=True)
-class ConcentrationBreach:
-    """One dimension's projected-weight limit breach for a candidate."""
-
-    dimension: str  # "exchange" | "sector"
-    key: str  # bucket key: "T" / "HK" / "Industrials" …
-    candidate_pct: float  # size_pct proxy (% of NAV)
-    projected_pct: float  # running bucket weight incl. prior admits + candidate
-    limit_pct: float
-
-
-@dataclass(frozen=True)
-class ConcentrationNote:
-    """A candidate's concentration decision (withheld or over-limit-admitted)."""
-
-    item: ReconciliationItem
-    breaches: tuple[ConcentrationBreach, ...]  # ≥1; both dimensions possible
-
-
-@dataclass(frozen=True)
-class WatchlistMove:
-    item: ReconciliationItem
-    reason: str
-    # Set for "concentration_displaced" moves — carries the breach detail so
-    # the renderer can say which bucket was overweight and by how much.
-    note: ConcentrationNote | None = None
-
-
-@dataclass(frozen=True)
-class WatchlistOptimization:
-    """Pure watchlist recommendation separated from report rendering.
-
-    ``protected_tickers`` are live holdings or unresolved watchlist entries. They
-    are deliberately retained outside the six BUY-ready slots because their
-    membership cannot be safely changed from this reconciliation alone.
-    """
-
-    case: WatchlistOptCase
-    watchlist_supplied: bool
-    target_size: int
-    optimal: tuple[ReconciliationItem, ...]
-    keep: tuple[ReconciliationItem, ...]
-    add: tuple[ReconciliationItem, ...]
-    remove: tuple[WatchlistMove, ...]
-    monitors: tuple[ReconciliationItem, ...]
-    reviews: tuple[ReconciliationItem, ...]
-    protected_tickers: tuple[str, ...]
-    excluded_low_conviction: tuple[ReconciliationItem, ...]
-    pool_size: int
-    # Concentration outcomes (default-empty so existing constructors hold):
-    # off-watch candidates screened out (not added), and escape-hatch admits
-    # that claimed a slot despite an over-limit bucket (subset of ``optimal``).
-    # On-watch screened names ride ``remove`` as "concentration_displaced".
-    withheld_candidates: tuple[ConcentrationNote, ...] = ()
-    admitted_over_limit: tuple[ConcentrationNote, ...] = ()
-
-
-def _watchlist_ticker_identity(ticker: str) -> str:
-    """Return the exchange-qualified identity already managed by ``Ticker``.
-
-    Never strip a suffix here: same-base symbols can be distinct listings. A
-    bare symbol remains bare and is protected if it cannot be matched exactly.
-    """
-    return Ticker.from_yf(ticker).yf.upper()
-
-
-def _item_ticker_identity(item: ReconciliationItem) -> str:
-    return item.ticker.yf.upper()
-
-
-def watchlist_candidate_conviction(item: ReconciliationItem) -> str:
-    """Return the normalized conviction token used by selection and rendering."""
-    analysis = item.analysis
-    if analysis is None:
-        return ""
-    raw = analysis.conviction or analysis.trade_block.conviction or ""
-    return raw.strip().lower()
-
-
-def watchlist_candidate_score(item: ReconciliationItem) -> float:
-    """Return the deterministic health-plus-growth rank score."""
-    analysis = item.analysis
-    if analysis is None:
-        return 0.0
-    return (analysis.health_adj or 0.0) + (analysis.growth_adj or 0.0)
-
-
-def _candidate_size_pct(item: ReconciliationItem) -> float:
-    """Target position size (% of NAV) — the projected-weight proxy.
-
-    The resolver is deliberately cash-free, so the analysis's target size
-    stands in for the buy's would-be portfolio weight. Missing sizing
-    degrades to 0.0: the candidate is then screened only when its bucket is
-    already over the limit.
-    """
-    analysis = item.analysis
-    if analysis is None:
-        return 0.0
-    return float(analysis.trade_block.size_pct or analysis.position_size or 0.0)
-
-
-def _candidate_exchange(item: ReconciliationItem) -> str:
-    """Exchange bucket key — suffix-first, matching ``_exchange_from_position``.
-
-    The ticker suffix always wins when present so a corrupted or legacy
-    ``analysis.exchange`` value (anything outside the yf-suffix namespace)
-    cannot silently desync a candidate from its weight bucket (unknown key
-    → weight 0.0 → screen bypassed). ``analysis.exchange`` is consulted only
-    for bare tickers, where the suffix carries no information.
-    """
-    if "." in item.ticker.yf:
-        return _exchange_from_ticker(item.ticker.yf)
-    analysis = item.analysis
-    return (analysis.exchange if analysis else "") or "US"
-
-
-def _candidate_sector(item: ReconciliationItem) -> str | None:
-    """Sector bucket key; ``None`` skips the sector dimension for this item."""
-    analysis = item.analysis
-    if analysis is None or not analysis.sector:
-        return None
-    return normalize_sector_label(analysis.sector)
-
-
-@dataclass(frozen=True)
-class _ConcentrationDimension:
-    """One active concentration dimension with its running bucket weights."""
-
-    name: str
-    running: dict[str, float]  # mutated as candidates are accepted
-    limit_pct: float
-    key_of: Callable[[ReconciliationItem], str | None]
-
-
-def _select_with_concentration_headroom(
-    ranked: list[ReconciliationItem],
-    *,
-    target_size: int,
-    dimensions: list[_ConcentrationDimension],
-    is_incumbent: Callable[[ReconciliationItem], bool],
-) -> tuple[list[ReconciliationItem], list[ConcentrationNote], list[ConcentrationNote]]:
-    """Greedy rank-order fill with per-bucket projected-weight headroom.
-
-    A candidate whose acceptance would push any dimension's bucket over its
-    limit is skipped — the slot falls to the next-ranked under-limit name —
-    unless the two-tier escape hatch passes (high conviction + tier score
-    bar; incumbents get the lower bar). Admits still consume headroom so the
-    next same-bucket name is judged against the higher base. Deterministic:
-    iteration order is the caller's existing rank sort. No dimensions (empty
-    portfolio) reproduces the pure-merit slice exactly.
-    """
-    if not dimensions or target_size <= 0:
-        return ranked[:target_size], [], []
-    selected: list[ReconciliationItem] = []
-    admitted: list[ConcentrationNote] = []
-    withheld: list[ConcentrationNote] = []
-    for item in ranked:
-        if len(selected) >= target_size:
-            break
-        size_pct = _candidate_size_pct(item)
-        projections: list[tuple[_ConcentrationDimension, str, float]] = []
-        breaches: list[ConcentrationBreach] = []
-        for dim in dimensions:
-            key = dim.key_of(item)
-            if key is None:
-                continue
-            projected = dim.running.get(key, 0.0) + size_pct
-            projections.append((dim, key, projected))
-            if projected > dim.limit_pct:  # strict > breaches; == passes
-                breaches.append(
-                    ConcentrationBreach(
-                        dimension=dim.name,
-                        key=key,
-                        candidate_pct=size_pct,
-                        projected_pct=projected,
-                        limit_pct=dim.limit_pct,
-                    )
-                )
-        if breaches:
-            note = ConcentrationNote(item=item, breaches=tuple(breaches))
-            bar = (
-                CONCENTRATION_INCUMBENT_MIN_SCORE
-                if is_incumbent(item)
-                else CONCENTRATION_EXCEPTION_MIN_SCORE
-            )
-            if (
-                watchlist_candidate_conviction(item) == "high"
-                and watchlist_candidate_score(item) >= bar
-            ):
-                admitted.append(note)
-            else:
-                withheld.append(note)
-                continue
-        selected.append(item)
-        for dim, key, projected in projections:
-            dim.running[key] = projected
-    return selected, admitted, withheld
-
-
-def resolve_watchlist_optimization(
-    items: list[ReconciliationItem],
-    groups: PortfolioActionGroups,
-    *,
-    watchlist_tickers: set[str] | None,
-    watchlist_supplied: bool,
-    watchlist_unavailable: bool,
-    target_size: int = TARGET_WATCHLIST_SIZE,
-    min_conviction: str = WATCHLIST_MIN_CONVICTION,
-    exchange_weights: dict[str, float] | None = None,
-    sector_weights: dict[str, float] | None = None,
-    exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT,
-    sector_limit_pct: float = DEFAULT_SECTOR_LIMIT_PCT,
-) -> WatchlistOptimization:
-    """Select up to ``target_size`` medium-or-higher unheld BUYs safely.
-
-    Membership and deduplication use full yfinance identities, rather than base
-    symbols, to avoid collapsing listings that happen to share a ticker.
-
-    When ``exchange_weights``/``sector_weights`` are supplied (held-position
-    bucket weights, % of NAV), selection applies a symmetric concentration
-    screen: a candidate whose projected bucket weight breaches its limit only
-    claims a slot via the two-tier escape hatch (see the
-    CONCENTRATION_*_MIN_SCORE constants). Watchlist membership does not shield
-    a name — a screened on-watch BUY becomes a "concentration_displaced"
-    removal. Empty/None weights (no held positions) disable the screen.
-    """
-    if target_size < 0:
-        raise ValueError("target_size must be non-negative")
-
-    min_rank = _WATCHLIST_CONVICTION_RANK.get(min_conviction.lower())
-    if min_rank is None:
-        raise ValueError(f"unsupported watchlist conviction: {min_conviction}")
-
-    raw_watchlist = {
-        _watchlist_ticker_identity(ticker) for ticker in (watchlist_tickers or set())
-    }
-    watchlist_items = tuple(item for item in items if item.is_watchlist)
-    watched_item_ids = {_item_ticker_identity(item) for item in watchlist_items}
-    held_ids = {
-        _item_ticker_identity(item) for item in items if item.ibkr_position is not None
-    }
-    protected_tickers = tuple(
-        sorted((raw_watchlist - watched_item_ids) | (raw_watchlist & held_ids))
-    )
-
-    # Retain the first exact identity, preferring a current watchlist member to
-    # minimize churn. Full identities intentionally keep BHP.AX and BHP.L apart.
-    pooled_by_identity: dict[str, ReconciliationItem] = {}
-    pool_candidates = sorted(
-        (item for item in items if item.action == "BUY" and item.ibkr_position is None),
-        key=lambda item: (not item.is_watchlist, _item_ticker_identity(item)),
-    )
-    for item in pool_candidates:
-        pooled_by_identity.setdefault(_item_ticker_identity(item), item)
-
-    pool = tuple(pooled_by_identity.values())
-    eligible: list[ReconciliationItem] = []
-    excluded_low_conviction: list[ReconciliationItem] = []
-    for item in pool:
-        conviction_rank = _WATCHLIST_CONVICTION_RANK.get(
-            watchlist_candidate_conviction(item), len(_WATCHLIST_CONVICTION_RANK)
-        )
-        if conviction_rank > min_rank:
-            excluded_low_conviction.append(item)
-        else:
-            eligible.append(item)
-
-    ranked = sorted(
-        eligible,
-        key=lambda item: (
-            _WATCHLIST_CONVICTION_RANK[watchlist_candidate_conviction(item)],
-            -watchlist_candidate_score(item),
-            not item.is_watchlist,
-            _item_ticker_identity(item),
-        ),
-    )
-
-    def _is_incumbent(item: ReconciliationItem) -> bool:
-        # Same predicate ``keep`` uses — already-on-watchlist names get the
-        # lower escape-hatch bar (anti-flap hysteresis).
-        return item.is_watchlist or _item_ticker_identity(item) in raw_watchlist
-
-    dimensions: list[_ConcentrationDimension] = []
-    if exchange_weights:
-        dimensions.append(
-            _ConcentrationDimension(
-                name="exchange",
-                running=dict(exchange_weights),
-                limit_pct=exchange_limit_pct,
-                key_of=_candidate_exchange,
-            )
-        )
-    if sector_weights:
-        dimensions.append(
-            _ConcentrationDimension(
-                name="sector",
-                running=dict(sector_weights),
-                limit_pct=sector_limit_pct,
-                key_of=_candidate_sector,
-            )
-        )
-    selected, admitted, withheld = _select_with_concentration_headroom(
-        ranked,
-        target_size=target_size,
-        dimensions=dimensions,
-        is_incumbent=_is_incumbent,
-    )
-    optimal = tuple(selected)
-    admitted_over_limit = tuple(admitted)
-    optimal_ids = {_item_ticker_identity(item) for item in optimal}
-
-    if watchlist_unavailable:
-        return WatchlistOptimization(
-            case=WatchlistOptCase.WATCHLIST_UNAVAILABLE,
-            watchlist_supplied=False,
-            target_size=target_size,
-            optimal=optimal,
-            keep=(),
-            add=optimal,
-            remove=(),
-            monitors=(),
-            reviews=(),
-            protected_tickers=(),
-            excluded_low_conviction=tuple(excluded_low_conviction),
-            pool_size=len(pool),
-            # No keep/remove authority without a readable watchlist — every
-            # screened name is reported as a withheld candidate, never a move.
-            withheld_candidates=tuple(withheld),
-            admitted_over_limit=admitted_over_limit,
-        )
-
-    if not watchlist_supplied:
-        return WatchlistOptimization(
-            case=WatchlistOptCase.NO_WATCHLIST,
-            watchlist_supplied=False,
-            target_size=target_size,
-            optimal=optimal,
-            keep=(),
-            add=optimal,
-            remove=(),
-            monitors=(),
-            reviews=(),
-            protected_tickers=(),
-            excluded_low_conviction=tuple(excluded_low_conviction),
-            pool_size=len(pool),
-            withheld_candidates=tuple(withheld),
-            admitted_over_limit=admitted_over_limit,
-        )
-
-    reject_ids = {_item_ticker_identity(item) for item in groups.removes}
-    monitor_ids = {_item_ticker_identity(item) for item in groups.holds_watch}
-    review_ids = {
-        _item_ticker_identity(item) for item in groups.reviews if item.is_watchlist
-    }
-    keep = tuple(
-        item
-        for item in optimal
-        if item.is_watchlist or _item_ticker_identity(item) in raw_watchlist
-    )
-    add = tuple(item for item in optimal if item not in keep)
-    monitors = tuple(
-        item
-        for item in groups.holds_watch
-        if _item_ticker_identity(item) not in optimal_ids
-    )
-    reviews = tuple(
-        item
-        for item in groups.reviews
-        if item.is_watchlist and _item_ticker_identity(item) not in optimal_ids
-    )
-    # Symmetric screen: membership does not shield a name. A screened
-    # incumbent is moved OUT (concentration_displaced); a screened newcomer
-    # is simply not added. Split is identity-based — ReconciliationItem is a
-    # non-frozen pydantic model (unhashable), so never set(notes).
-    conc_removed = [n for n in withheld if _is_incumbent(n.item)]
-    withheld_candidates = tuple(n for n in withheld if not _is_incumbent(n.item))
-    conc_removed_ids = {_item_ticker_identity(n.item) for n in conc_removed}
-    removals: list[WatchlistMove] = [
-        WatchlistMove(n.item, "concentration_displaced", note=n) for n in conc_removed
-    ]
-    for item in watchlist_items:
-        identity = _item_ticker_identity(item)
-        if identity in optimal_ids or identity in monitor_ids or identity in review_ids:
-            continue
-        if identity in conc_removed_ids:
-            continue  # already moved out for concentration — never two moves
-        if identity in reject_ids or item.action == "REMOVE":
-            removals.append(WatchlistMove(item, "verdict_reject"))
-        elif item.action == "BUY":
-            reason = (
-                "below_medium_conviction"
-                if item in excluded_low_conviction
-                else "displaced_by_higher_conviction"
-            )
-            removals.append(WatchlistMove(item, reason))
-
-    if not optimal and not raw_watchlist and not watchlist_items:
-        case = WatchlistOptCase.NOTHING_ACTIONABLE
-    elif not optimal:
-        case = WatchlistOptCase.EMPTY_POOL
-    elif len(optimal) < target_size:
-        case = WatchlistOptCase.PARTIAL_FILL
-    elif not add and not removals:
-        case = WatchlistOptCase.ALIGNED
-    else:
-        case = WatchlistOptCase.FULL_OPTIMIZE
-
-    return WatchlistOptimization(
-        case=case,
-        watchlist_supplied=True,
-        target_size=target_size,
-        optimal=optimal,
-        keep=keep,
-        add=add,
-        remove=tuple(removals),
-        monitors=monitors,
-        reviews=reviews,
-        protected_tickers=protected_tickers,
-        excluded_low_conviction=tuple(excluded_low_conviction),
-        pool_size=len(pool),
-        withheld_candidates=withheld_candidates,
-        admitted_over_limit=admitted_over_limit,
-    )
-
-
-def selected_watchlist_buy_ids(optimization: WatchlistOptimization) -> set[str]:
-    """Identities of watchlist BUYs that survived merit+concentration selection."""
-    return {
-        _item_ticker_identity(item)
-        for item in optimization.optimal
-        if item.is_watchlist
-    }
-
-
-def is_executable_buy(item: ReconciliationItem, selected_ids: set[str]) -> bool:
-    """A buy the operator is being told to place now: an ADD, or a watchlist
-    BUY that survived merit+concentration selection. Off-watch and displaced
-    watchlist BUYs are advisory (watchlist additions / optional removals) and
-    must not reserve cash or count toward executable turnover."""
-    if item.action == "ADD":
-        return True
-    return (
-        item.action == "BUY"
-        and item.is_watchlist
-        and _item_ticker_identity(item) in selected_ids
-    )
-
-
-def concentration_breach_summary(note: ConcentrationNote) -> str:
-    """Describe every over-limit bucket behind one concentration decision."""
-    return " + ".join(
-        f"overweight {breach.dimension} {breach.key} "
-        f"(projected {breach.projected_pct:.1f}% > {breach.limit_pct:.0f}%)"
-        for breach in note.breaches
-    )
-
-
-def build_watchlist_optimization_summary(
-    optimization: WatchlistOptimization,
-) -> dict[str, int]:
-    """Return CLI-specific watchlist counts without changing dashboard buckets."""
-    counts: dict[str, int] = {}
-    if optimization.keep:
-        counts["WATCHLIST_KEEP"] = len(optimization.keep)
-    if optimization.add:
-        counts["WATCHLIST_ADD"] = len(optimization.add)
-    if optimization.remove:
-        counts["WATCHLIST_REMOVE"] = len(optimization.remove)
-    if optimization.monitors:
-        counts["WATCHLIST_MONITOR"] = len(optimization.monitors)
-    if optimization.reviews:
-        counts["WATCHLIST_REVIEW"] = len(optimization.reviews)
-    return counts
-
-
 @dataclass(frozen=True)
 class CashTimelineEntry:
     ticker_yf: str
@@ -586,7 +139,7 @@ class CashSummaryView:
     settled_cash_after_recommended_buys_usd: float
     pending_inflows: tuple[CashTimelineEntry, ...]
     pending_inflows_total_usd: float
-    conditional_proceeds_usd: float  # soft-sell proceeds (review before acting)
+    conditional_proceeds_usd: float
     next_settlement_date: str | None
 
 
@@ -616,16 +169,6 @@ class PortfolioOverviewView:
     position_count: int
     has_live_positions: bool
     is_candidate_heavy: bool
-
-
-@dataclass(frozen=True)
-class LiveOrderMatch:
-    order: dict
-    side: str
-    quantity: int | None
-    price: float | str | None
-    order_type: str
-    status: str
 
 
 @dataclass(frozen=True)
@@ -954,13 +497,22 @@ def build_cash_summary(
     portfolio: PortfolioSummary,
     *,
     watchlist_optimization: WatchlistOptimization | None = None,
+    executable_buy_ids: Set[str] | None = None,
 ) -> CashSummaryView:
     settled_cash = portfolio.settled_cash_usd
     available_cash = portfolio.available_cash_usd
     total_cash = portfolio.cash_balance_usd
     buffer_reserve = max(settled_cash - available_cash, 0.0)
     unsettled_cash = max(total_cash - settled_cash, 0.0)
-    if watchlist_optimization is not None:
+    if watchlist_optimization is not None and executable_buy_ids is not None:
+        raise ValueError("pass watchlist_optimization or executable_buy_ids, not both")
+    if executable_buy_ids is not None:
+        recommended_buy_cost = sum(
+            abs(item.cash_impact_usd)
+            for item in items
+            if is_executable_buy(item, executable_buy_ids) and item.cash_impact_usd < 0
+        )
+    elif watchlist_optimization is not None:
         # Optimizer-aware: only buys that survived merit+concentration
         # selection reserve cash (screened/displaced watchlist BUYs still
         # carry a negative cash_impact_usd and must not count).
@@ -1044,129 +596,3 @@ def build_portfolio_overview(
         is_candidate_heavy=position_count == 0
         and (candidate_count > 0 or new_buy_count > 0),
     )
-
-
-# Orders in a terminal state are not live: Cancelled/Inactive never annotate,
-# Filled is surfaced only as historical context when no open order matches.
-_TERMINAL_ORDER_STATUSES = frozenset({"cancelled", "inactive", "filled"})
-
-
-def _build_live_order_match(order: dict) -> LiveOrderMatch:
-    raw_quantity = order.get("remainingSize") or order.get("totalSize")
-    quantity: int | None
-    try:
-        quantity = int(raw_quantity) if raw_quantity is not None else None
-    except (TypeError, ValueError):
-        quantity = None
-    side = "SELL" if str(order.get("side", "")).upper() in {"S", "SELL"} else "BUY"
-    return LiveOrderMatch(
-        order=order,
-        side=side,
-        quantity=quantity,
-        price=order.get("price") or order.get("auxPrice"),
-        order_type=str(order.get("orderType") or "LMT"),
-        status=str(order.get("status") or ""),
-    )
-
-
-def find_live_order(
-    item: ReconciliationItem,
-    live_orders: list[dict] | None,
-) -> LiveOrderMatch | None:
-    """Match the first genuinely open order for the item; a Filled order is
-    returned only when no open order matches (open-before-filled — a filled
-    order encountered first must not hide a later open cross-side conflict)."""
-    if not live_orders:
-        return None
-
-    pos = item.ibkr_position
-    conid = pos.conid if pos else None
-    yf_base = item.ticker.ibkr.upper()
-    hk_padded = item.ticker.yf.split(".")[0].upper()
-    symbol_candidates: set[str] = {yf_base, hk_padded}
-    if pos and pos.symbol:
-        symbol_candidates.add(pos.symbol.upper())
-
-    filled_fallback: LiveOrderMatch | None = None
-    for order in live_orders:
-        matched = False
-        order_conid = order.get("conid")
-        order_symbol = (order.get("ticker") or order.get("symbol") or "").upper()
-        if conid and order_conid is not None:
-            try:
-                if int(order_conid) != int(conid):
-                    # Comparable conids that differ are authoritative — never
-                    # fall back to symbol (bare-symbol collisions across
-                    # exchanges, e.g. SGX AGS vs Brussels Ageas AGS).
-                    continue
-                matched = True
-            except (TypeError, ValueError):
-                matched = False
-        if not matched and order_symbol in symbol_candidates:
-            matched = True
-        if not matched:
-            continue
-
-        status = str(order.get("status") or "").strip().lower()
-        if status in _TERMINAL_ORDER_STATUSES:
-            # Filled is historical context, kept only if no open order
-            # matches; Cancelled/Inactive are dead and never annotate.
-            if status == "filled" and filled_fallback is None:
-                filled_fallback = _build_live_order_match(order)
-            continue
-
-        return _build_live_order_match(order)
-    return filled_fallback
-
-
-def build_live_order_note(
-    item: ReconciliationItem,
-    live_orders: list[dict] | None,
-) -> str | None:
-    match = find_live_order(item, live_orders)
-    if match is None:
-        return None
-
-    if isinstance(match.price, int | float):
-        price_str = f" @ {float(match.price):.2f}"
-    elif match.price:
-        price_str = f" @ {match.price}"
-    else:
-        price_str = ""
-
-    rec_side = "SELL" if item.action in {"SELL", "TRIM"} else "BUY"
-    display_qty = match.quantity if match.quantity is not None else "?"
-    if match.status.strip().lower() == "filled":
-        # Historical information, not a live order — no conflict language and
-        # no "do not re-enter" imperative.
-        return (
-            f"[ORDER FILLED: {match.side} {display_qty}{price_str} {match.order_type}]"
-        )
-    if match.side == rec_side:
-        rec_qty = item.suggested_quantity
-        if (
-            match.quantity is not None
-            and rec_qty is not None
-            and match.quantity < rec_qty
-        ):
-            need = rec_qty - match.quantity
-            return (
-                f"[PARTIAL ORDER: {match.quantity} of {rec_qty} shares already submitted"
-                f" — enter {need} more]"
-            )
-        return (
-            f"[ORDER ALREADY SUBMITTED: {match.side} {display_qty}{price_str}"
-            f" {match.order_type} ({match.status}) — do not re-enter]"
-        )
-    return (
-        f"[CONFLICT: live {match.side} order {display_qty}{price_str}"
-        f" {match.order_type} ({match.status}) while recommending {rec_side}]"
-    )
-
-
-def base_ticker(item: ReconciliationItem) -> str:
-    return base_ticker_value(item.ticker.yf)
-
-
-def base_ticker_value(ticker: str) -> str:
-    return ticker.split(".")[0].upper()

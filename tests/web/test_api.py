@@ -122,12 +122,15 @@ def test_get_portfolio_returns_payload(tmp_path: Path, sample_bundle):
 
 
 def test_index_busts_static_asset_cache(client):
+    from src.web.ibkr_dashboard.views import DASHBOARD_SCRIPTS
+
     response = client.get("/")
     body = response.get_data(as_text=True)
 
     assert response.status_code == 200
     assert "dashboard.css?v=" in body
-    assert "dashboard.js?v=" in body
+    script_positions = [body.index(f"/{script}?") for script in DASHBOARD_SCRIPTS]
+    assert script_positions == sorted(script_positions)
     assert "Reload Data" in body
     assert "Analysis Refresh" in body
     assert "Reload Snapshot" not in body

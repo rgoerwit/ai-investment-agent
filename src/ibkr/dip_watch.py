@@ -3,18 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from src.ibkr.concentration import (
+    canonical_exchange_bucket,
+    canonical_sector_bucket,
+    project_concentration_breaches,
+)
 from src.ibkr.models import ReconciliationItem
 from src.ibkr.portfolio_defaults import (
     DEFAULT_EXCHANGE_LIMIT_PCT,
     DEFAULT_SECTOR_LIMIT_PCT,
 )
-from src.ibkr.reconciliation_rules import (
-    _exchange_from_position,
-    _normalize_verdict,
-    _normalize_zone,
-)
+from src.ibkr.reconciliation_rules import _normalize_verdict, _normalize_zone
 from src.ibkr.refresh_service import run_ticker_for
-from src.sector_normalization import normalize_sector_label
 
 _DEFAULT_DIP_WATCH_MAX_AGE_DAYS = 30
 _DEFAULT_DIP_WATCH_EXCLUDED_ZONES = frozenset({"HIGH"})
@@ -216,17 +216,22 @@ def _dip_bucket_overweight(
     Current weights only — dip adds are unsized advisories, so there is no
     projected-weight proxy. Unknown sector skips the sector dimension.
     """
-    position = item.ibkr_position
-    if position is not None and exchange_weights:
-        exchange = _exchange_from_position(position)
-        if exchange_weights.get(exchange, 0.0) > exchange_limit_pct:
-            return True
     analysis = item.analysis
-    if analysis is not None and analysis.sector and sector_weights:
-        sector = normalize_sector_label(analysis.sector)
-        if sector_weights.get(sector, 0.0) > sector_limit_pct:
-            return True
-    return False
+    return bool(
+        project_concentration_breaches(
+            exchange_key=canonical_exchange_bucket(
+                item.ticker,
+                analysis_exchange=analysis.exchange if analysis else None,
+                position=item.ibkr_position,
+            ),
+            sector_key=canonical_sector_bucket(analysis.sector if analysis else None),
+            candidate_pct=0.0,
+            exchange_weights=exchange_weights,
+            sector_weights=sector_weights,
+            exchange_limit_pct=exchange_limit_pct,
+            sector_limit_pct=sector_limit_pct,
+        )
+    )
 
 
 def screen_dip_candidates_by_concentration(

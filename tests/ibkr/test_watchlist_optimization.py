@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 
 from src.ibkr.models import ReconciliationItem
-from src.ibkr.portfolio_presentation import (
+from src.ibkr.portfolio_presentation import group_portfolio_actions
+from src.ibkr.watchlist_optimization import (
     WatchlistOptCase,
-    group_portfolio_actions,
     resolve_watchlist_optimization,
 )
 from tests.ibkr.reconciler_cases import _make_analysis, _make_position

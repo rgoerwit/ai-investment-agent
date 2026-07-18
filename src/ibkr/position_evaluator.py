@@ -5,6 +5,12 @@ from __future__ import annotations
 import structlog
 
 from src.ibkr.buy_stability import PriorVerdict, load_recent_same_ticker_history
+from src.ibkr.concentration import (
+    canonical_exchange_bucket,
+    canonical_sector_bucket,
+    format_concentration_warnings,
+    project_concentration_breaches,
+)
 from src.ibkr.models import (
     AnalysisRecord,
     NormalizedPosition,
@@ -21,7 +27,6 @@ from src.ibkr.reconciliation_rules import (
     _REJECT_VERDICTS,
     SCREEN_REVIEW_DNI_ZONES,
     _classify_sell_type,
-    _exchange_from_position,
     _normalize_verdict,
     _normalize_zone,
     _settlement_date,
@@ -566,22 +571,23 @@ def evaluate_positions(
                 else:
                     remaining_cash -= add_value_usd
                     add_reason = f"Underweight: {actual_pct:.1f}% vs target {target_size_pct:.1f}% (-{shortfall_pct:.1f}%)"
-                    exch = analysis.exchange or _exchange_from_position(pos)
-                    sect = analysis.sector or "Unknown"
                     projected_weight = (
                         add_value_usd / portfolio.portfolio_value_usd * 100
                     )
-                    proj_exch = exchange_weights.get(exch, 0.0) + projected_weight
-                    proj_sect = sector_weights.get(sect, 0.0) + projected_weight
-                    conc_warns = []
-                    if proj_exch > exchange_limit_pct:
-                        conc_warns.append(
-                            f"⚠ {exch} → {proj_exch:.0f}% (limit {exchange_limit_pct:.0f}%)"
-                        )
-                    if proj_sect > sector_limit_pct:
-                        conc_warns.append(
-                            f"⚠ {sect} sector → {proj_sect:.0f}% (limit {sector_limit_pct:.0f}%)"
-                        )
+                    breaches = project_concentration_breaches(
+                        exchange_key=canonical_exchange_bucket(
+                            item_ticker,
+                            analysis_exchange=analysis.exchange,
+                            position=pos,
+                        ),
+                        sector_key=canonical_sector_bucket(analysis.sector),
+                        candidate_pct=projected_weight,
+                        exchange_weights=exchange_weights,
+                        sector_weights=sector_weights,
+                        exchange_limit_pct=exchange_limit_pct,
+                        sector_limit_pct=sector_limit_pct,
+                    )
+                    conc_warns = format_concentration_warnings(breaches)
                     if conc_warns:
                         add_reason += "  " + "; ".join(conc_warns)
                     items.append(

@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-_DASHBOARD_JS = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "web"
-    / "ibkr_dashboard"
-    / "static"
-    / "dashboard.js"
+from src.web.ibkr_dashboard.views import DASHBOARD_SCRIPTS
+
+_DASHBOARD_STATIC = (
+    Path(__file__).resolve().parents[2] / "src" / "web" / "ibkr_dashboard" / "static"
+)
+_DASHBOARD_JS_FILES = tuple(
+    _DASHBOARD_STATIC / filename for filename in DASHBOARD_SCRIPTS
 )
 
 
@@ -26,8 +26,8 @@ def _run_dashboard_js(expression: str):
 const fs = require("fs");
 const vm = require("vm");
 
-const sourcePath = {json.dumps(str(_DASHBOARD_JS))};
-let source = fs.readFileSync(sourcePath, "utf8");
+const sourcePaths = {json.dumps([str(path) for path in _DASHBOARD_JS_FILES])};
+let source = sourcePaths.map((path) => fs.readFileSync(path, "utf8")).join("\\n");
 source = source.replace(/\\ninitializeDashboard\\(\\);\\s*$/, "\\n");
 
 function makeElement() {{
@@ -379,6 +379,51 @@ return renderWatchlist();
 
     assert "Withheld By Concentration" in html
     assert "New BUY — Medium conviction" in html
+
+
+def test_render_watchlist_distinguishes_unavailable_from_empty():
+    unavailable = _run_dashboard_js("""
+const { renderWatchlist, state } = __dashboardTest;
+state.snapshot = {
+  watchlist: { name: "missing", total: null, tickers: [], status: "unavailable" },
+  actions: { watchlist_buy: [], watchlist_candidate: [], watchlist_monitor: [], watchlist_remove: [] },
+};
+return renderWatchlist();
+""")
+    empty = _run_dashboard_js("""
+const { renderWatchlist, state } = __dashboardTest;
+state.snapshot = {
+  watchlist: { name: "empty", total: 0, tickers: [], status: "loaded" },
+  actions: { watchlist_buy: [], watchlist_candidate: [], watchlist_monitor: [], watchlist_remove: [] },
+};
+return renderWatchlist();
+""")
+
+    assert "IBKR Watchlist Unavailable" in unavailable
+    assert "Membership is unknown" in unavailable
+    assert "Loaded IBKR Watchlist: empty" in empty
+    assert "No tickers were loaded" in empty
+
+
+def test_render_watchlist_labels_in_flight_membership_unknown():
+    html = _run_dashboard_js("""
+const { renderWatchlist, state } = __dashboardTest;
+state.snapshot = {
+  watchlist: { name: null, total: null, tickers: [], status: "not_loaded" },
+  actions: {
+    watchlist_buy: [], watchlist_candidate: [], watchlist_monitor: [], watchlist_remove: [],
+    watchlist_in_flight: [{
+      ticker_yf: "WDO.TO", ticker_ibkr: "WDO", action: "BUY",
+      reason: "New BUY", watchlist_membership: "unknown",
+    }],
+  },
+};
+return renderWatchlist();
+""")
+
+    assert "No IBKR Watchlist Loaded" in html
+    assert "BUY Orders Already In Flight" in html
+    assert "Membership unknown" in html
 
 
 def test_render_drilldown_keeps_long_structured_content_out_of_side_panel():
