@@ -37,9 +37,11 @@
   SELL RECOMMENDATIONS  (review sell reason labels before executing)
 ══════════════════════════════════════════════════════
 
-⚠ SELL    7203          100 shares  @ JPY 1,800.00  LMT  [STOP BREACH] Stop breached: price 1800.00 < stop 1850.00
-             Last analysis (2026-07-10):  Health:72  Growth:64  ·  Risk zone:MODERATE  ·  BUY (High)
-             est. loss:  -JPY 20,000  (-10.0% vs IBKR cost basis JPY 2,000.00)  ·  Proceeds: ~$1,200 USD  ·  spendable on 2026-07-20
+⚠ SELL    7203          100 shares  @ JPY 1,800.00  LMT  [STOP BREACH]
+             reason:    Stop breached: price 1800.00 < stop 1850.00
+             analysis:  2026-07-10  ·  Health:72  Growth:64  ·  Risk zone:MODERATE  ·  BUY (High)
+             est. loss: -JPY 20,000  (-10.0% vs IBKR cost basis JPY 2,000.00)
+             proceeds:  ~$1,200 USD  ·  spendable on 2026-07-20
 
 ══════════════════════════════════════════════════════
   ADDS  (increase underweight positions)
@@ -61,7 +63,7 @@
   HOLDS  (no action)
 ══════════════════════════════════════════════════════
 
-  HOLD    9432          0.9%  analysis entry JPY 2,000.00  now JPY 160.00  (-92.0%)  stop JPY 1,850.00  target JPY 2,500.00
+  HOLD    9432          0.9%  JPY  entry   2,000.00 →     160.00  (-92.0%)  stop   1,850.00  target   2,500.00
 
 ══════════════════════════════════════════════════════
   CONCENTRATION
@@ -74,10 +76,6 @@
   Exchange:
     T     (Japan        )  31.0%  ███████████░░░
     US    (United States)  27.0%  █████████░░░░░
-
-  Currency:
-    JPY                     31.0%  █████████░░░░░
-    USD                     27.0%  ████████░░░░░░
 
 ══════════════════════════════════════════════════════
   CASH SUMMARY

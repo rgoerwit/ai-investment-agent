@@ -335,8 +335,8 @@ class TestReportRendering:
         from scripts.portfolio_manager import format_report
 
         report = format_report([], portfolio, portfolio_health_flags=[])
-        assert "Currency:" in report
-        assert "JPY" in report
+        # Currency block was removed July 2026 — sector + exchange suffice.
+        assert "Currency:" not in report
 
 
 class TestSerializerAdditive:
@@ -587,7 +587,7 @@ class TestReviewRowPresentation:
         items = self._review_items()
         assert items[0].action == "REVIEW"
         report = self._render(items)
-        assert "holding: 100 shares" in report
+        assert "holding:   100 shares" in report
         assert "potential exit ~$" in report
         assert "no entry price — re-run analysis" not in report
         review_line = next(

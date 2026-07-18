@@ -29,14 +29,21 @@ def _append_account_header(lines: list[str], context: PortfolioReportContext) ->
     if context.errors.get("watchlist"):
         lines.extend(
             (
-                "⚠ WATCHLIST UNAVAILABLE — could not read your IBKR watchlist (brokerage session unavailable). Holdings/SELL/HOLD analysis below is unaffected. Watchlist filtering is unavailable; unheld BUY analyses are shown as BUY CANDIDATES and should be verified in IBKR before acting.",
+                "⚠ WATCHLIST UNAVAILABLE — could not read your IBKR watchlist "
+                "(brokerage session unavailable).",
+                "  Holdings/SELL/HOLD analysis below is unaffected. Watchlist "
+                "filtering is unavailable;",
+                "  unheld BUY analyses are shown as BUY CANDIDATES and should be "
+                "verified in IBKR before acting.",
                 "",
             )
         )
     if context.show_recommendations and context.errors.get("live_orders"):
         lines.extend(
             (
-                "⚠ LIVE ORDERS UNAVAILABLE — open-order dedup is disabled; an order you already have working may be re-suggested. Verify in IBKR before placing orders.",
+                "⚠ LIVE ORDERS UNAVAILABLE — open-order dedup is disabled; an "
+                "order you already have working",
+                "  may be re-suggested. Verify in IBKR before placing orders.",
                 "",
             )
         )

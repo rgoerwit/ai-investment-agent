@@ -21,6 +21,11 @@ ACTION_SYMBOLS = {
 DIVIDER = "═" * 54
 DETAIL_INDENT = "             "
 DETAIL_WRAP_WIDTH = 96
+# Detail lines lead with a fixed-width key label ("verdict:", "scores:", ...)
+# so the load-bearing item of every line sits in one scannable column.
+DETAIL_LABEL_WIDTH = 11
+# Minimum content columns a wrapped listing must retain beside its label.
+_MIN_LISTING_ROOM = 20
 
 
 def currency_prefix(currency: str | None) -> str:
@@ -53,6 +58,46 @@ def display_ticker(item: ReconciliationItem) -> str:
 def normalize_reason(reason: str) -> str:
     return reason.replace("DO_NOT_INITIATE", "REJECT").replace(
         "Verdict → ", "Verdict: "
+    )
+
+
+def split_reason(reason: str) -> tuple[str, str | None]:
+    """Split a reason into a short head and its explanation for a detail line."""
+    head, separator, detail = reason.partition(" — ")
+    if separator and detail.strip():
+        return head.rstrip(), detail.strip()
+    return reason, None
+
+
+def wrap_listing(
+    label: str,
+    entries: list[str],
+    *,
+    separator: str = ", ",
+    width: int = DETAIL_WRAP_WIDTH,
+) -> list[str]:
+    """Wrap ``label`` + comma-joined entries, aligning continuations under it.
+
+    A label that leaves too little room (e.g. a non-canonical exchange key in a
+    grouped concentration reason) goes on its own line with the entries wrapped
+    under an indent, instead of crashing textwrap with a non-positive width.
+    """
+    if len(label) + _MIN_LISTING_ROOM >= width:
+        indent = " " * (len(label) - len(label.lstrip(" "))) + "    "
+        return [
+            label.rstrip(),
+            *ReportBuffer.wrap_banner_value(
+                indent,
+                separator.join(entries),
+                width=width,
+                max_lines=len(entries) + 1,
+            ),
+        ]
+    return ReportBuffer.wrap_banner_value(
+        label,
+        separator.join(entries),
+        width=width,
+        max_lines=len(entries) + 1,
     )
 
 
@@ -116,9 +161,12 @@ class ReportBuffer:
         if not value:
             return []
         subsequent = " " * len(label)
+        # Floor the content width: a label near/over `width` must degrade to a
+        # narrow wrap, never crash textwrap with a non-positive width.
+        content_width = max(width - len(subsequent), _MIN_LISTING_ROOM)
         wrapped = textwrap.wrap(
             value,
-            width=width - len(subsequent),
+            width=content_width,
             initial_indent=label,
             subsequent_indent=subsequent,
             break_long_words=True,
@@ -132,7 +180,7 @@ class ReportBuffer:
             subsequent
             + textwrap.shorten(
                 remaining,
-                width=width - len(subsequent),
+                width=content_width,
                 placeholder=" [truncated]",
             )
         )
@@ -163,22 +211,26 @@ class ReportBuffer:
         pos = item.ibkr_position
         if pos is None or not pos.quantity:
             return None
-        parts = [f"holding: {abs(pos.quantity):,.0f} shares"]
+        parts = [f"{abs(pos.quantity):,.0f} shares"]
         if pos.current_price_local:
             parts.append(
                 f"last {currency_prefix(currency)}{pos.current_price_local:,.2f}"
             )
         if pos.market_value_usd:
             parts.append(f"potential exit ~${pos.market_value_usd:,.0f} USD")
-        return DETAIL_INDENT + "  ·  ".join(parts)
+        return f"{DETAIL_INDENT}{'holding:':<{DETAIL_LABEL_WIDTH}}" + "  ·  ".join(
+            parts
+        )
 
     def proceeds_line(self, item: ReconciliationItem) -> str | None:
         if not self.show_recommendations or not item.cash_impact_usd:
             return None
-        parts = [f"Proceeds: ~${item.cash_impact_usd:,.0f} USD"]
+        parts = [f"~${item.cash_impact_usd:,.0f} USD"]
         if item.settlement_date:
             parts.append(f"spendable on {item.settlement_date}")
-        return DETAIL_INDENT + "  ·  ".join(parts)
+        return f"{DETAIL_INDENT}{'proceeds:':<{DETAIL_LABEL_WIDTH}}" + "  ·  ".join(
+            parts
+        )
 
     def cost_line(self, item: ReconciliationItem, label: str = "Cost") -> str | None:
         if not self.show_recommendations or not item.cash_impact_usd:
@@ -235,12 +287,9 @@ class ReportBuffer:
             analysis.health_adj is None and analysis.growth_adj is None
         ):
             return None
-        date_label = (
-            f"Last analysis ({analysis.analysis_date}):"
-            if analysis.analysis_date and analysis.age_days < 9999
-            else "Last analysis:"
-        )
         parts: list[str] = []
+        if analysis.analysis_date and analysis.age_days < 9999:
+            parts.append(analysis.analysis_date)
         if analysis.health_adj is not None and analysis.growth_adj is not None:
             parts.append(
                 f"Health:{analysis.health_adj:.0f}  Growth:{analysis.growth_adj:.0f}"
@@ -256,7 +305,9 @@ class ReportBuffer:
             verdict += f" ({analysis.conviction})" if verdict else analysis.conviction
         if verdict:
             parts.append(verdict)
-        return f"{DETAIL_INDENT}{date_label}  " + "  ·  ".join(parts)
+        return f"{DETAIL_INDENT}{'analysis:':<{DETAIL_LABEL_WIDTH}}" + "  ·  ".join(
+            parts
+        )
 
     @staticmethod
     def pnl_line(item: ReconciliationItem) -> str | None:
@@ -270,7 +321,10 @@ class ReportBuffer:
             return None
         pct = (pos.current_price_local - pos.avg_cost_local) / pos.avg_cost_local * 100
         if abs(pct) >= 90.0:
-            return f"{DETAIL_INDENT}est. P&L: (⚠ cost basis may have currency-unit mismatch)"
+            return (
+                f"{DETAIL_INDENT}{'est. P&L:':<{DETAIL_LABEL_WIDTH}}"
+                "(⚠ cost basis may have currency-unit mismatch)"
+            )
         sell_qty = abs(item.suggested_quantity or pos.quantity)
         pnl_local = (pos.current_price_local - pos.avg_cost_local) * sell_qty
         symbol = currency_prefix(pos.currency)
@@ -278,7 +332,8 @@ class ReportBuffer:
         label = "est. gain:" if pnl_local >= 0 else "est. loss:"
         tax_note = "  ·  verify holding period in IBKR" if pnl_local > 0 else ""
         return (
-            f"{DETAIL_INDENT}{label}  {sign}{symbol}{abs(pnl_local):,.0f}"
+            f"{DETAIL_INDENT}{label:<{DETAIL_LABEL_WIDTH}}{sign}{symbol}"
+            f"{abs(pnl_local):,.0f}"
             f"  ({pct:+.1f}% vs IBKR cost basis {symbol}{pos.avg_cost_local:,.2f})"
             f"{tax_note}"
         )
@@ -348,6 +403,40 @@ class ReportBuffer:
             segments.append(f"settles {item.settlement_date}")
         return segments
 
+    def labeled_detail(self, label: str, text: str) -> None:
+        """A detail line leading with an aligned key label, wrapped under it."""
+        prefix = f"{DETAIL_INDENT}{label:<{DETAIL_LABEL_WIDTH}}"
+        # wrap_banner_value caps total line length at width - len(prefix);
+        # compensate so lines run to ~110 columns before wrapping.
+        self.lines.extend(
+            self.wrap_banner_value(
+                prefix, text, width=DETAIL_WRAP_WIDTH + 14 + len(prefix), max_lines=3
+            )
+        )
+
+    def append_reason_detail(self, reason: str) -> None:
+        """Reason text on its own labeled detail line(s), never on the header."""
+        label, _, rest = reason.partition(": ")
+        if label == "Verdict" and rest:
+            self.labeled_detail("verdict:", rest)
+        else:
+            self.labeled_detail("reason:", reason)
+
+    def append_soft_rejection_details(self, item: ReconciliationItem) -> None:
+        """One labeled line per detail group (scores, thesis, P/L) —
+        deterministic layout instead of greedy packing, which merged groups
+        only when they happened to fit."""
+        scores = self.soft_rejection_score_segments(item)
+        if scores:
+            self.labeled_detail("scores:", "  ·  ".join(scores))
+        thesis = self.soft_rejection_thesis_segment(item)
+        if thesis:
+            self.labeled_detail("thesis:", thesis.removeprefix("thesis: "))
+        pnl = self.soft_rejection_pnl_segments(item)
+        if pnl:
+            first = pnl[0].removeprefix("P/L vs IBKR: ").removeprefix("P/L: ")
+            self.labeled_detail("P/L:", "  ·  ".join([first, *pnl[1:]]))
+
     @staticmethod
     def sell_type_label(item: ReconciliationItem) -> str:
         return get_action_label(item)
@@ -369,13 +458,13 @@ class ReportBuffer:
     def append_pnl_proceeds(
         self, item: ReconciliationItem, _currency: str | None
     ) -> None:
+        # Deliberately separate lines: the joined form routinely exceeded a
+        # 120-column terminal.
         pnl = self.pnl_line(item)
         proceeds = self.proceeds_line(item)
-        if pnl and proceeds:
-            self.lines.append(pnl + "  ·  " + proceeds.lstrip())
-        elif pnl:
+        if pnl:
             self.lines.append(pnl)
-        elif proceeds:
+        if proceeds:
             self.lines.append(proceeds)
 
     @staticmethod

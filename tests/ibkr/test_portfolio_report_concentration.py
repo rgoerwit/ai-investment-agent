@@ -140,7 +140,7 @@ class TestWatchlistConcentration:
         )
 
         assert "Withheld by concentration (1):" in report
-        assert "WDO (WDO.TO) [exchange TO 48.0% > 40%]" in report
+        assert "    · exchange TO up to 48.0% > 40%:  WDO (WDO.TO)" in report
         assert "+ ADD" not in report
 
     def test_empty_weights_render_no_concentration_lines(self):
@@ -224,3 +224,36 @@ class TestWatchlistConcentration:
 
         assert "9201" in report.split("DIP WATCH")[1].split("═" * 54)[1]
         assert "withheld — overweight bucket" not in report
+
+
+class TestWrapListingDegradedLabels:
+    """A grouped concentration label longer than the wrap width must degrade
+    gracefully (label on its own line), never crash textwrap with a
+    non-positive width (e.g. a non-canonical exchange key from a corrupted
+    snapshot)."""
+
+    def test_overlong_label_moves_to_own_line(self):
+        from src.ibkr.portfolio_report_formatting import wrap_listing
+
+        label = (
+            "    · exchange SOME_VERY_LONG_NONCANONICAL_EXCHANGE_KEY up to "
+            "52.7% > 40% + sector Information Technology up to 35.4% > 30%:  "
+        )
+        lines = wrap_listing(label, ["7606 (7606.T)", "2307 (2307.T)"])
+        assert lines[0] == label.rstrip()
+        assert any("7606 (7606.T)" in line for line in lines[1:])
+        assert all(line.startswith("    ") for line in lines)
+
+    def test_normal_label_keeps_inline_layout(self):
+        from src.ibkr.portfolio_report_formatting import wrap_listing
+
+        lines = wrap_listing("    · exchange T up to 52.7% > 40%:  ", ["7606 (7606.T)"])
+        assert lines == ["    · exchange T up to 52.7% > 40%:  7606 (7606.T)"]
+
+    def test_wrap_banner_value_floors_width_instead_of_raising(self):
+        from src.ibkr.portfolio_report_formatting import ReportBuffer
+
+        lines = ReportBuffer.wrap_banner_value(
+            "x" * 120, "some value here", width=96, max_lines=4
+        )
+        assert lines  # narrow wrap, but no ValueError

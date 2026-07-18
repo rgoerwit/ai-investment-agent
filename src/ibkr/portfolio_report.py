@@ -10,19 +10,36 @@ from src.ibkr.models import PortfolioSummary, ReconciliationItem
 from src.ibkr.order_presentation import build_live_order_note
 from src.ibkr.portfolio_action_plan import PortfolioActionPlan
 from src.ibkr.portfolio_presentation import CashSummaryView
+from src.ibkr.portfolio_report_formatting import ReportBuffer, wrap_listing
 from src.ibkr.refresh_service import AnalysisFreshnessSummary, RefreshActivity
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
 from src.ibkr.ticker import Ticker
 from src.ibkr.watchlist_optimization import (
     CONCENTRATION_EXCEPTION_MIN_SCORE,
     CONCENTRATION_INCUMBENT_MIN_SCORE,
-    concentration_breach_summary,
+    ConcentrationNote,
     watchlist_candidate_conviction,
     watchlist_candidate_score,
 )
 from src.memory import MacroEvent
 
 _DIVIDER = "═" * 54
+
+
+def _breach_bullets(note: ConcentrationNote, indent: str) -> list[str]:
+    return [
+        f"{indent}· overweight {breach.dimension} {breach.key} "
+        f"(projected {breach.projected_pct:.1f}% > {breach.limit_pct:.0f}%)"
+        for breach in note.breaches
+    ]
+
+
+def _breach_category(note: ConcentrationNote) -> str:
+    """Reason label without per-candidate projections, for grouping."""
+    return " + ".join(
+        f"{breach.dimension} {breach.key} > {breach.limit_pct:.0f}%"
+        for breach in note.breaches
+    )
 
 
 @dataclass(frozen=True)
@@ -122,14 +139,18 @@ def render_watchlist_optimization(
             f"top {optimization.target_size} medium-or-higher BUY-ready slots"
         ),
     }
-    lines.extend(
-        (
-            _DIVIDER,
-            f"  WATCHLIST OPTIMIZATION  ({case_subtitles[optimization.case.value]})",
-            _DIVIDER,
-            "",
-        )
-    )
+    subtitle = case_subtitles[optimization.case.value]
+    header = f"  WATCHLIST OPTIMIZATION  ({subtitle})"
+    if len(header) <= 100:
+        header_lines: list[str] = [header]
+    else:
+        header_lines = [
+            "  WATCHLIST OPTIMIZATION",
+            *ReportBuffer.wrap_banner_value(
+                "  ", f"({subtitle})", width=100, max_lines=3
+            ),
+        ]
+    lines.extend((_DIVIDER, *header_lines, _DIVIDER, ""))
 
     def render_candidate(item: ReconciliationItem, label: str) -> None:
         analysis = item.analysis
@@ -196,9 +217,9 @@ def render_watchlist_optimization(
         lines.append(
             f"  ⚠ over-limit admit  {_watchlist_symbol(note.item)}  — "
             f"high conviction, score "
-            f"{watchlist_candidate_score(note.item):.0f}/200 ≥ {threshold}; "
-            + concentration_breach_summary(note)
+            f"{watchlist_candidate_score(note.item):.0f}/200 ≥ {threshold}"
         )
+        lines.extend(_breach_bullets(note, "        "))
     if optimization.admitted_over_limit:
         lines.append("")
 
@@ -223,28 +244,34 @@ def render_watchlist_optimization(
         )
         for move in optional_remove:
             if move.reason == "concentration_displaced" and move.note is not None:
-                reason = (
-                    f"{concentration_breach_summary(move.note)}; below retention bar "
-                    f"(needs high conviction + score ≥ "
-                    f"{CONCENTRATION_INCUMBENT_MIN_SCORE:.0f})"
+                lines.append(
+                    f"    − REMOVE FROM WATCHLIST  {_watchlist_symbol(move.item)}"
+                )
+                lines.extend(_breach_bullets(move.note, "        "))
+                lines.append(
+                    "        · below retention bar (needs high conviction + "
+                    f"score ≥ {CONCENTRATION_INCUMBENT_MIN_SCORE:.0f})"
                 )
             else:
-                reason = move.reason.replace("_", " ")
-            lines.append(
-                f"    − REMOVE FROM WATCHLIST  {_watchlist_symbol(move.item)}  "
-                f"— {reason}"
-            )
+                lines.append(
+                    f"    − REMOVE FROM WATCHLIST  {_watchlist_symbol(move.item)}  "
+                    f"— {move.reason.replace('_', ' ')}"
+                )
         lines.append("")
 
     if optimization.keep:
-        lines.append(
-            f"  KEEPING ACTIVE ({len(optimization.keep)}): "
-            + ", ".join(_watchlist_symbol(item) for item in optimization.keep)
+        lines.extend(
+            wrap_listing(
+                f"  KEEPING ACTIVE ({len(optimization.keep)}): ",
+                [_watchlist_symbol(item) for item in optimization.keep],
+            )
         )
     if optimization.monitors:
-        lines.append(
-            f"  KEEPING MONITORS ({len(optimization.monitors)}): "
-            + ", ".join(_watchlist_symbol(item) for item in optimization.monitors)
+        lines.extend(
+            wrap_listing(
+                f"  KEEPING MONITORS ({len(optimization.monitors)}): ",
+                [_watchlist_symbol(item) for item in optimization.monitors],
+            )
         )
     if optimization.reviews:
         quick_review_count = sum(
@@ -252,22 +279,22 @@ def render_watchlist_optimization(
             for item in optimization.reviews
             if item.analysis and item.analysis.is_quick_mode
         )
-        quick_suffix = (
-            f"  ({quick_review_count} quick — re-run full)"
-            if quick_review_count
-            else ""
+        lines.extend(
+            wrap_listing(
+                f"  KEEPING REVIEWS ({len(optimization.reviews)}): ",
+                [_watchlist_symbol(item) for item in optimization.reviews],
+            )
         )
-        lines.append(
-            f"  KEEPING REVIEWS ({len(optimization.reviews)}): "
-            + ", ".join(_watchlist_symbol(item) for item in optimization.reviews)
-            + quick_suffix
-        )
+        if quick_review_count:
+            lines.append(f"    ({quick_review_count} quick — re-run full)")
     if optimization.protected_tickers:
-        lines.append(
-            f"  KEEPING PROTECTED ({len(optimization.protected_tickers)}): "
-            + ", ".join(optimization.protected_tickers)
-            + "  (held or unresolved; not changed automatically)"
+        lines.extend(
+            wrap_listing(
+                f"  KEEPING PROTECTED ({len(optimization.protected_tickers)}): ",
+                list(optimization.protected_tickers),
+            )
         )
+        lines.append("    (held or unresolved; not changed automatically)")
     if (
         optimization.keep
         or optimization.monitors
@@ -283,18 +310,22 @@ def render_watchlist_optimization(
         )
     if optimization.withheld_candidates:
         lines.append(
-            f"  Withheld by concentration ({len(optimization.withheld_candidates)}): "
-            + ", ".join(
-                f"{_watchlist_symbol(note.item)} ["
-                + "; ".join(
-                    f"{breach.dimension} {breach.key} "
-                    f"{breach.projected_pct:.1f}% > {breach.limit_pct:.0f}%"
-                    for breach in note.breaches
-                )
-                + "]"
-                for note in optimization.withheld_candidates
-            )
+            f"  Withheld by concentration ({len(optimization.withheld_candidates)}):"
         )
+        grouped: dict[str, list[ConcentrationNote]] = {}
+        for note in optimization.withheld_candidates:
+            grouped.setdefault(_breach_category(note), []).append(note)
+        for notes in grouped.values():
+            # Same breach shape across the group; keep the worst projection
+            # per dimension so magnitude survives the grouping.
+            label = " + ".join(
+                f"{group[0].dimension} {group[0].key} up to "
+                f"{max(breach.projected_pct for breach in group):.1f}%"
+                f" > {group[0].limit_pct:.0f}%"
+                for group in zip(*(note.breaches for note in notes), strict=True)
+            )
+            symbols = [_watchlist_symbol(note.item) for note in notes]
+            lines.extend(wrap_listing(f"    · {label}:  ", symbols))
     if watchlist_candidates_blocked_by_cash:
         lines.append(
             "  Cash-blocked candidates retained for ranking: "
@@ -335,7 +366,9 @@ def render_watchlist_optimization(
         and not optional_remove
         and len(replacement_symbols) == len(set(replacement_symbols))
     ):
-        lines.append("  [Update IBKR watchlist to]: " + ", ".join(replacement_symbols))
+        lines.extend(
+            wrap_listing("  [Update IBKR watchlist to]: ", replacement_symbols)
+        )
     elif optional_remove:
         lines.append(
             "  Exact replacement list withheld — decide optional removals first."

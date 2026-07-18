@@ -3,7 +3,8 @@
 ⚠ READ-ONLY — no IBKR connection; holdings, watchlist, and cash were NOT loaded.
   BUYs below come from saved analyses; whether you already own/watch them is UNKNOWN.
 
-⚠ LIVE ORDERS UNAVAILABLE — open-order dedup is disabled; an order you already have working may be re-suggested. Verify in IBKR before placing orders.
+⚠ LIVE ORDERS UNAVAILABLE — open-order dedup is disabled; an order you already have working
+  may be re-suggested. Verify in IBKR before placing orders.
 
   Account:          not loaded (read-only)
   Net liquidation:  not loaded

@@ -66,7 +66,8 @@ class TestWatchlistUnavailableDegradation:
         assert "WATCHLIST UNAVAILABLE" in report
         assert "Watchlist filtering is unavailable" in report
         assert "WATCHLIST OPTIMIZATION" in report
-        assert "confirm watchlist status and re-check IBKR before acting" in report
+        assert "confirm watchlist status" in report
+        assert "re-check IBKR before" in report
         assert "WATCHLIST CANDIDATES" not in report
         assert "ADD TO WATCHLIST" not in report
         assert "NEW BUYS and watchlist filtering are omitted" not in report

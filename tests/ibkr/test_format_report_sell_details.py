@@ -192,7 +192,7 @@ class TestScoreLine:
         """Score line includes analysis date so operator knows how stale the scores are."""
         item = _make_sell_item_with_analysis(analysis_date="2026-01-15")
         report = self._report_for(item)
-        assert "Last analysis (2026-01-15):" in report
+        assert "analysis:  2026-01-15" in report
 
     def test_score_line_suppressed_when_no_analysis(self):
         """Item with no analysis → no score line (no Health/Growth in output)."""

@@ -413,8 +413,8 @@ class TestPortfolioManagerOutputTightening:
             _make_portfolio(),
             portfolio_health_flags=[CORRELATED_SELL_EVENT_FLAG],
         )
-        assert "thesis: entry JPY 2,800.00 -> now JPY 2,700.00" in report
-        assert "P/L vs IBKR:" in report
+        assert "thesis:    entry JPY 2,800.00 -> now JPY 2,700.00" in report
+        assert "P/L:" in report
         assert "vs JPY 2,000.00" in report
 
     def test_soft_rejection_detail_lines_stay_readable_width(self):

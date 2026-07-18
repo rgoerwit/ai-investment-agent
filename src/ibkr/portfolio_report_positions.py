@@ -20,6 +20,7 @@ from src.ibkr.portfolio_report import (
     select_report_dip_candidates,
 )
 from src.ibkr.portfolio_report_formatting import (
+    DETAIL_INDENT,
     DIVIDER,
     ReportBuffer,
     as_of_date,
@@ -28,6 +29,7 @@ from src.ibkr.portfolio_report_formatting import (
     display_ticker,
     item_currency,
     normalize_reason,
+    split_reason,
 )
 from src.ibkr.reconciliation_rules import _EXCHANGE_LONG_NAMES, stop_staleness_note
 from src.ibkr.refresh_service import run_ticker_for
@@ -104,14 +106,18 @@ def _render_dip_watch(
                 )
         lines.append(
             f"  {stars}  {display_ticker(item):<12}  Health:{health}%  "
-            f"Growth:{growth}%  |  {entry_text}  |  {risk_reward}"
+            f"Growth:{growth}%  |  {risk_reward}"
         )
+        lines.append(f"{DETAIL_INDENT}{entry_text}")
         if dip_watch_source(item) == "macro_review":
             as_of = analysis.analysis_date if analysis else "?"
-            lines.append(
-                "             macro dip — fundamentals intact, review "
-                f"{as_of}; standalone verdict was REJECT (often valuation, which "
-                "the dip improves) — review before adding"
+            lines.extend(
+                (
+                    f"{DETAIL_INDENT}macro dip — fundamentals intact, review "
+                    f"{as_of}; standalone verdict was REJECT",
+                    f"{DETAIL_INDENT}(often valuation, which the dip improves) "
+                    "— review before adding",
+                )
             )
     lines.extend(("", "  → Re-run before acting:"))
     for item in candidates:
@@ -160,20 +166,16 @@ def render_position_and_risk_sections(
             )
             lines.append(
                 f"{writer.order_line(item, currency)}  "
-                f"[{writer.sell_type_label(item)}] {reason}"
+                f"[{writer.sell_type_label(item)}]"
             )
+            writer.append_reason_detail(reason)
             if item.sell_type in ("STOP_BREACH", "HARD_REJECT"):
                 score_line = writer.score_line(item)
                 if score_line:
                     lines.append(score_line)
                 writer.append_pnl_proceeds(item, currency)
             elif item.sell_type == "SOFT_REJECT":
-                details = writer.soft_rejection_score_segments(item)
-                thesis = writer.soft_rejection_thesis_segment(item)
-                if thesis:
-                    details.append(thesis)
-                writer.append_wrapped_segments(details)
-                writer.append_wrapped_segments(writer.soft_rejection_pnl_segments(item))
+                writer.append_soft_rejection_details(item)
             elif item.sell_type == "PROFIT_TAKE":
                 writer.append_wrapped_segments(writer.profit_take_segments(item))
             note = writer.order_note(item)
@@ -198,17 +200,13 @@ def render_position_and_risk_sections(
             )
             lines.append(
                 f"{writer.order_line(item, currency)}  "
-                f"[{writer.sell_type_label(item)}] {reason}"
+                f"[{writer.sell_type_label(item)}]"
             )
+            writer.append_reason_detail(reason)
             if item.sell_type == "PROFIT_TAKE":
                 writer.append_wrapped_segments(writer.profit_take_segments(item))
             elif item.sell_type == "SOFT_REJECT":
-                details = writer.soft_rejection_score_segments(item)
-                thesis = writer.soft_rejection_thesis_segment(item)
-                if thesis:
-                    details.append(thesis)
-                writer.append_wrapped_segments(details)
-                writer.append_wrapped_segments(writer.soft_rejection_pnl_segments(item))
+                writer.append_soft_rejection_details(item)
             else:
                 score_line = writer.score_line(item)
                 if score_line:
@@ -306,45 +304,46 @@ def render_position_and_risk_sections(
         for item in groups.holds_real:
             pos = item.ibkr_position
             analysis = item.analysis
-            symbol = currency_prefix(item_currency(item))
+            # Currency once per row (all four prices share it) keeps the table
+            # comfortably under 120 columns.
+            currency = item_currency(item) or "?"
             weight = ""
             if pos and context.portfolio.portfolio_value_usd > 0:
                 weight = f"{pos.market_value_usd / context.portfolio.portfolio_value_usd * 100:.1f}%"
-            price = ""
+            label = ""
+            entry_text = now_text = gain_text = "—"
             if pos and pos.current_price_local:
                 entry = (
                     analysis.entry_price if analysis and analysis.entry_price else None
                 ) or (pos.avg_cost_local if pos.avg_cost_local else None)
-                label = (
-                    "analysis entry"
-                    if analysis and analysis.entry_price
-                    else "IBKR cost basis"
-                )
+                label = "entry" if analysis and analysis.entry_price else "cost"
                 if entry:
                     gain = (pos.current_price_local - entry) / entry * 100
-                    price = (
-                        f"{label} {symbol}{entry:,.2f}  now "
-                        f"{symbol}{pos.current_price_local:,.2f}  ({gain:+.1f}%)"
-                    )
-            stop = (
-                f"stop {symbol}{analysis.stop_price:,.2f}"
+                    entry_text = f"{entry:,.2f}"
+                    now_text = f"{pos.current_price_local:,.2f}"
+                    gain_text = f"({gain:+.1f}%)"
+            stop_text = (
+                f"{analysis.stop_price:,.2f}"
                 if analysis and analysis.stop_price
-                else ""
+                else "—"
             )
-            target = (
-                f"target {symbol}{analysis.target_1_price:,.2f}"
+            target_text = (
+                f"{analysis.target_1_price:,.2f}"
                 if analysis and analysis.target_1_price
-                else ""
+                else "—"
             )
             note = ""
             if item.action_basis == "DE_MINIMIS":
                 note = "de-minimis — monitor only"
             elif analysis and pos:
                 note = stop_staleness_note(analysis, pos.current_price_local) or ""
-            row = "  ".join(
-                part for part in (weight, price, stop, target, note) if part
+            lines.append(
+                f"  {'HOLD':<6}  {display_ticker(item):<12} {weight:>5}  "
+                f"{currency:<4} {label:<5} {entry_text:>10} → {now_text:>10}"
+                f"  {gain_text:>8}  stop {stop_text:>10}  target {target_text:>10}"
             )
-            lines.append(f"  {'HOLD':<6}  {display_ticker(item):<12}  {row}")
+            if note:
+                lines.append(f"{DETAIL_INDENT}{note}")
         lines.append("")
 
     if groups.holds_watch:
@@ -365,13 +364,16 @@ def render_position_and_risk_sections(
             reason = item.reason.replace("Stale analysis: ", "").replace(
                 "Position held but no evaluator analysis found", "no analysis found"
             )
+            head, reason_detail = split_reason(reason)
             ticker = run_ticker_for(item)
             suffix_warning = (
                 "  ← ⚠ exchange unknown, verify suffix" if "." not in ticker else ""
             )
+            lines.append(f"  {'REVIEW':<6}  {display_ticker(item):<12}  {head}")
+            if reason_detail:
+                lines.append(f"{DETAIL_INDENT}{reason_detail}")
             lines.append(
-                f"  {'REVIEW':<6}  {display_ticker(item):<12}  {reason}  →  "
-                f"{analysis_command(ticker)}{suffix_warning}"
+                f"{DETAIL_INDENT}→  {analysis_command(ticker)}{suffix_warning}"
             )
         lines.append("")
 
@@ -380,8 +382,7 @@ def render_position_and_risk_sections(
 
     sector_weights = aggregate_sector_weights(context.portfolio.sector_weights)
     exchange_weights = context.portfolio.exchange_weights
-    currency_weights = context.portfolio.currency_weights
-    if sector_weights or exchange_weights or currency_weights:
+    if sector_weights or exchange_weights:
         writer.section("CONCENTRATION")
         if sector_weights:
             lines.append("  Sector:")
@@ -402,19 +403,16 @@ def render_position_and_risk_sections(
                     f"{bar_chart(pct, context.exchange_limit_pct)}"
                 )
             lines.append("")
-        if currency_weights:
-            lines.append("  Currency:")
-            for currency, pct in sorted(
-                currency_weights.items(), key=lambda row: -row[1]
-            ):
-                lines.append(f"    {currency:<22} {pct:>5.1f}%  {bar_chart(pct, 50.0)}")
-            lines.append("")
 
     if context.portfolio_health_flags:
         writer.section("PORTFOLIO HEALTH", "cross-portfolio signals")
         for flag in context.portfolio_health_flags:
             first, *continuation = flag.split("\n")
-            lines.append(f"  !! {first}")
+            lines.extend(
+                ReportBuffer.wrap_banner_value(
+                    "  !! ", first, width=110 + 5, max_lines=4
+                )
+            )
             lines.extend(f"  {line}" for line in continuation)
         lines.append("")
     return tuple(lines)
