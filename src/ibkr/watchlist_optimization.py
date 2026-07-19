@@ -79,6 +79,7 @@ class WatchlistOptimization:
     pool_size: int
     withheld_candidates: tuple[ConcentrationNote, ...] = ()
     admitted_over_limit: tuple[ConcentrationNote, ...] = ()
+    retained_for_watchlist_floor: tuple[WatchlistMove, ...] = ()
 
 
 def _watchlist_ticker_identity(ticker: str) -> str:
@@ -389,6 +390,31 @@ def resolve_watchlist_optimization(
             )
             removals.append(WatchlistMove(item, reason))
 
+    # IBKR does not permit an empty watchlist. When every current entry would
+    # be removed, retain the strongest one as a non-executable operational floor.
+    retained_for_watchlist_floor: tuple[WatchlistMove, ...] = ()
+    final_entries = (*optimal, *monitors, *reviews, *protected_tickers)
+    if (
+        watchlist_supplied
+        and not final_entries
+        and (raw_watchlist or watchlist_items)
+        and removals
+    ):
+        floor_move = min(
+            removals,
+            key=lambda move: (
+                move.reason == "verdict_reject",
+                _WATCHLIST_CONVICTION_RANK.get(
+                    watchlist_candidate_conviction(move.item),
+                    len(_WATCHLIST_CONVICTION_RANK),
+                ),
+                -watchlist_candidate_score(move.item),
+                _item_ticker_identity(move.item),
+            ),
+        )
+        retained_for_watchlist_floor = (floor_move,)
+        removals = [move for move in removals if move is not floor_move]
+
     if not optimal and not raw_watchlist and not watchlist_items:
         case = WatchlistOptCase.NOTHING_ACTIONABLE
     elif not optimal:
@@ -415,6 +441,7 @@ def resolve_watchlist_optimization(
         pool_size=len(pool),
         withheld_candidates=withheld_candidates,
         admitted_over_limit=admitted_over_limit,
+        retained_for_watchlist_floor=retained_for_watchlist_floor,
     )
 
 

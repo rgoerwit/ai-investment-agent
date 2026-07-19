@@ -85,6 +85,46 @@ class TestWatchlistOptimizationReporting:
         assert "+ ADD" not in report
         assert "REMOVE FROM WATCHLIST" not in report
 
+    def test_empty_result_does_not_recommend_emptying_supplied_watchlist(self):
+        items = [
+            self._set_score(
+                _make_buy_item(ticker, is_watchlist=True, conviction="High"),
+                score,
+            )
+            for ticker, score in (("3393.T", 100), ("1926.T", 110), ("3762.T", 105))
+        ]
+        portfolio = _make_portfolio()
+        portfolio.exchange_weights = {"T": 45.0}
+
+        report = format_report(
+            items,
+            portfolio,
+            show_recommendations=True,
+            watchlist_tickers={item.ticker.yf for item in items},
+            watchlist_total=len(items),
+        )
+        machine = json.loads(
+            format_json(
+                items,
+                portfolio,
+                watchlist_tickers={item.ticker.yf for item in items},
+                watchlist_total=len(items),
+            )
+        )
+
+        assert (
+            "no eligible replacements; strongest current entry retained as IBKR floor"
+            in report
+        )
+        assert "RETAINED TO KEEP WATCHLIST NON-EMPTY:" in report
+        assert report.count("REMOVE FROM WATCHLIST") == 2
+        assert [
+            row["ticker_yf"]
+            for row in machine["recommendation_plan"]["watchlist"][
+                "retained_for_watchlist_floor"
+            ]
+        ] == ["1926.T"]
+
     def test_supplied_empty_watchlist_with_no_items_reports_no_recommendation(self):
         report = format_report(
             [],
@@ -164,7 +204,8 @@ class TestWatchlistOptimizationReporting:
         )
 
         assert "MUST REMOVE (verdict reject):" in report
-        assert "OPTIONAL OPTIMIZATION" in report
+        assert "OPTIONAL OPTIMIZATION" not in report
+        assert "RETAINED TO KEEP WATCHLIST NON-EMPTY:" in report
         assert "verdict DO_NOT_INITIATE" in report
         assert "below medium conviction" in report
 

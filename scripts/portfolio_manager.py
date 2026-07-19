@@ -1191,6 +1191,14 @@ def _plan_note_ref(note: Any) -> dict[str, object]:
     }
 
 
+def _plan_move_ref(move: Any) -> dict[str, object]:
+    return {
+        **_plan_item_ref(move.item),
+        "reason": move.reason,
+        "concentration": _plan_note_ref(move.note) if move.note is not None else None,
+    }
+
+
 def _serialize_recommendation_plan(
     plan: PortfolioActionPlan,
     items: list[ReconciliationItem],
@@ -1209,18 +1217,13 @@ def _serialize_recommendation_plan(
             "target_size": optimization.target_size,
             "keep": [_plan_item_ref(item) for item in optimization.keep],
             "add": [_plan_item_ref(item) for item in optimization.add],
-            "remove": [
-                {
-                    **_plan_item_ref(move.item),
-                    "reason": move.reason,
-                    "concentration": (
-                        _plan_note_ref(move.note) if move.note is not None else None
-                    ),
-                }
-                for move in optimization.remove
-            ],
+            "remove": [_plan_move_ref(move) for move in optimization.remove],
             "monitors": [_plan_item_ref(item) for item in optimization.monitors],
             "reviews": [_plan_item_ref(item) for item in optimization.reviews],
+            "retained_for_watchlist_floor": [
+                _plan_move_ref(move)
+                for move in optimization.retained_for_watchlist_floor
+            ],
             "withheld": [
                 _plan_note_ref(note) for note in optimization.withheld_candidates
             ],

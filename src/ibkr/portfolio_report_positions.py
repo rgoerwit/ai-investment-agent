@@ -417,9 +417,7 @@ def render_position_and_risk_sections(
         for flag in context.portfolio_health_flags:
             first, *continuation = flag.split("\n")
             lines.extend(
-                ReportBuffer.wrap_banner_value(
-                    "  !! ", first, width=110 + 5, max_lines=4
-                )
+                ReportBuffer.wrap_banner_value("  !! ", first, width=110, max_lines=4)
             )
             lines.extend(f"  {line}" for line in continuation)
         lines.append("")

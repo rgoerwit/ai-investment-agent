@@ -307,6 +307,32 @@ def test_dashboard_hides_concentration_screened_watchlist_buy():
     assert payload["cash_summary"]["recommended_buy_cost_usd"] == 1752.0
 
 
+def test_dashboard_exposes_nonempty_watchlist_floor_retention():
+    items = [
+        _watch_buy(ticker, conviction="High")
+        for ticker in ("3393.T", "1926.T", "3762.T")
+    ]
+    for item, score in zip(items, (100.0, 110.0, 105.0), strict=True):
+        item.analysis.health_adj = score / 2
+        item.analysis.growth_adj = score / 2
+    bundle = _concentration_bundle(
+        items=items,
+        watchlist_tickers={item.ticker.yf for item in items},
+        watchlist_total=len(items),
+    )
+
+    actions = serialize_dashboard_snapshot(bundle)["actions"]
+
+    retained = actions["watchlist_floor_retained"]
+    assert [row["ticker_yf"] for row in retained] == ["1926.T"]
+    assert retained[0]["retention_reason"] == "concentration_displaced"
+    assert retained[0]["breaches"][0]["dimension"] == "exchange"
+    assert [row["ticker_yf"] for row in actions["watchlist_remove"]] == [
+        "3762.T",
+        "3393.T",
+    ]
+
+
 def test_dashboard_withholds_offwatch_and_screens_dip():
     payload = serialize_dashboard_snapshot(_concentration_bundle())
     actions = payload["actions"]

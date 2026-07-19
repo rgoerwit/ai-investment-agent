@@ -142,8 +142,18 @@ def render_watchlist_optimization(
     """Render the action plan's watchlist section without recomputing policy."""
     optimization = plan.optimization
     lines: list[str] = []
-    concentration_screened = len(optimization.withheld_candidates) + sum(
-        1 for move in optimization.remove if move.reason == "concentration_displaced"
+    concentration_screened = (
+        len(optimization.withheld_candidates)
+        + sum(
+            1
+            for move in optimization.remove
+            if move.reason == "concentration_displaced"
+        )
+        + sum(
+            1
+            for move in optimization.retained_for_watchlist_floor
+            if move.reason == "concentration_displaced"
+        )
     )
     partial_fill_subtitle = (
         f"optimal BUY-ready set under-filled ({len(optimization.optimal)}"
@@ -154,6 +164,20 @@ def render_watchlist_optimization(
             f"{partial_fill_subtitle[:-1]} — {concentration_screened} withheld by "
             "concentration)"
         )
+    if optimization.retained_for_watchlist_floor:
+        empty_pool_subtitle = (
+            "no eligible replacements; strongest current entry retained as IBKR floor"
+        )
+    elif optimization.remove:
+        empty_pool_subtitle = "no eligible replacements; current removals listed below"
+    elif concentration_screened:
+        empty_pool_subtitle = (
+            "no eligible replacements; existing non-BUY entries retained for review"
+        )
+    else:
+        empty_pool_subtitle = (
+            "no medium-or-better candidates; existing entries retained for review"
+        )
     case_subtitles = {
         "no_watchlist": "no watchlist loaded — additions only",
         "watchlist_unavailable": (
@@ -161,9 +185,7 @@ def render_watchlist_optimization(
             "and re-check IBKR before acting"
         ),
         "nothing_actionable": "no medium-or-better candidates",
-        "empty_pool": (
-            "no medium-or-better candidates; existing entries retained for review"
-        ),
+        "empty_pool": empty_pool_subtitle,
         "partial_fill": partial_fill_subtitle,
         "aligned": "current watchlist already matches the BUY-ready target",
         "full_optimize": (
@@ -290,6 +312,18 @@ def render_watchlist_optimization(
                 )
         lines.append("")
 
+    if optimization.retained_for_watchlist_floor:
+        lines.append("  RETAINED TO KEEP WATCHLIST NON-EMPTY:")
+        for move in optimization.retained_for_watchlist_floor:
+            reason = move.reason.replace("_", " ")
+            if move.reason == "verdict_reject":
+                verdict = move.item.analysis.verdict if move.item.analysis else "REJECT"
+                reason = f"verdict {verdict}"
+            lines.append(f"    {_watchlist_symbol(move.item)}  — " f"{reason}")
+            if move.note is not None:
+                lines.extend(_breach_bullets(move.note, "        "))
+        lines.append("")
+
     if optimization.keep:
         lines.extend(
             wrap_listing(
@@ -413,6 +447,7 @@ def render_watchlist_optimization(
         *optimization.optimal,
         *optimization.monitors,
         *optimization.reviews,
+        *(move.item for move in optimization.retained_for_watchlist_floor),
     ]
     replacement_symbols = [item.ticker.ibkr for item in replacement_entries]
     replacement_symbols.extend(

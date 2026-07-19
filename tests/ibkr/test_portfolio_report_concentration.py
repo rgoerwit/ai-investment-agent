@@ -258,3 +258,24 @@ class TestWrapListingDegradedLabels:
             "x" * 120, "some value here", width=96, max_lines=4
         )
         assert lines  # narrow wrap, but no ValueError
+
+    def test_midlength_label_does_not_split_every_character(self):
+        """A label that clears the own-line guard but is still wide (e.g.
+        "lowest-scored held in Information Technology:") must wrap the value on
+        word boundaries, never one character per line. ``wrap_banner_value``
+        passed ``width - len(indent)`` to textwrap as the *total* width, leaving
+        ``width - 2*len(indent)`` of room — negative for a 53-char label, which
+        made textwrap break every character (the 442.T (H:79 G:33) garbage)."""
+        from src.ibkr.portfolio_report_formatting import wrap_listing
+
+        label = "      lowest-scored held in Information Technology:  "
+        entries = ["4432.T (H:79 G:33)", "2432.T (H:79 G:33)", "3097.T (H:58 G:33)"]
+        lines = wrap_listing(label, entries)
+
+        # No continuation line may be a lone character (the split-per-char bug).
+        for line in lines:
+            assert len(line.strip()) > 1
+        # Each ticker survives intact on some line.
+        joined = "\n".join(lines)
+        for entry in entries:
+            assert entry in joined

@@ -852,6 +852,31 @@ return renderWatchlist();
     assert "exchange T 52.7% &gt; 40%" in html
 
 
+def test_render_watchlist_shows_nonempty_floor_retention():
+    html = _run_dashboard_js("""
+const { renderWatchlist, state } = __dashboardTest;
+state.snapshot = {
+  watchlist: { name: "wl", total: 3, tickers: ["3393.T", "1926.T", "3762.T"] },
+  actions: {
+    watchlist_buy: [], watchlist_candidate: [], watchlist_monitor: [],
+    watchlist_floor_retained: [
+      {
+        ticker_yf: "1926.T", ticker_ibkr: "1926", action: "BUY",
+        reason: "Watchlist BUY", retention_reason: "concentration_displaced",
+        breaches: [{ dimension: "exchange", key: "T", projected_pct: 52.7, limit_pct: 40 }],
+      },
+    ],
+    watchlist_remove: [],
+  },
+};
+return renderWatchlist();
+""")
+
+    assert "Retained to Keep Watchlist Non-Empty" in html
+    assert "1926" in html
+    assert "exchange T 52.7% &gt; 40%" in html
+
+
 def test_render_withheld_groups_same_category_into_one_row():
     html = _run_dashboard_js("""
 const { renderWatchlist, state } = __dashboardTest;

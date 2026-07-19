@@ -294,9 +294,10 @@ def _serialize_watchlist_move(
     move: WatchlistMove,
     *,
     live_orders: list[dict] | None,
+    reason_key: str = "removal_reason",
 ) -> dict[str, Any]:
     row = serialize_item(move.item, live_orders=live_orders)
-    row["removal_reason"] = move.reason
+    row[reason_key] = move.reason
     if move.note is not None:
         row["concentration"] = concentration_breach_summary(move.note)
         row["breaches"] = _serialize_breaches(move.note)
@@ -353,8 +354,8 @@ def _serialize_actions(
         ],
         "dip_watch": dip_watch,
         # Watchlist lists mirror the CLI's WATCHLIST OPTIMIZATION section:
-        # merit+concentration-selected keeps/adds, all moves (with reasons),
-        # and concentration-withheld off-watch names — never the raw groups.
+        # selected keeps/adds, removals, the non-empty floor, and
+        # concentration-withheld off-watch names — never the raw groups.
         "watchlist_buy": [
             serialize_item(item, live_orders=live_orders) for item in optimization.keep
         ],
@@ -368,6 +369,14 @@ def _serialize_actions(
         "watchlist_remove": [
             _serialize_watchlist_move(move, live_orders=live_orders)
             for move in optimization.remove
+        ],
+        "watchlist_floor_retained": [
+            _serialize_watchlist_move(
+                move,
+                live_orders=live_orders,
+                reason_key="retention_reason",
+            )
+            for move in optimization.retained_for_watchlist_floor
         ],
         "watchlist_withheld": [
             {

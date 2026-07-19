@@ -94,7 +94,7 @@ def test_watchlist_warning_and_optimizer_use_identical_canonical_keys():
     assert "⚠ T →" in item.reason
     assert "⚠ Information Technology sector →" in item.reason
     assert "TSEJ" not in item.reason
-    move = optimization.remove[0]
+    move = optimization.retained_for_watchlist_floor[0]
     assert move.note is not None
     assert [(row.dimension, row.key) for row in move.note.breaches] == [
         ("exchange", "T"),

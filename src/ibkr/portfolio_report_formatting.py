@@ -172,9 +172,14 @@ class ReportBuffer:
         # Floor the content width: a label near/over `width` must degrade to a
         # narrow wrap, never crash textwrap with a non-positive width.
         content_width = max(width - len(subsequent), _MIN_LISTING_ROOM)
+        # ``textwrap.wrap``'s ``width`` is the *total* line width including the
+        # indent, so pass the full target width (floored so ``width - indent``
+        # stays >= _MIN_LISTING_ROOM); ``content_width`` alone would leave
+        # ``width - 2*len(indent)`` of room and break every character on a long
+        # label (the "Information Technology" bucket regression).
         wrapped = textwrap.wrap(
             value,
-            width=content_width,
+            width=content_width + len(subsequent),
             initial_indent=label,
             subsequent_indent=subsequent,
             break_long_words=True,
@@ -418,11 +423,10 @@ class ReportBuffer:
     def labeled_detail(self, label: str, text: str) -> None:
         """A detail line leading with an aligned key label, wrapped under it."""
         prefix = f"{DETAIL_INDENT}{label:<{DETAIL_LABEL_WIDTH}}"
-        # wrap_banner_value caps total line length at width - len(prefix);
-        # compensate so lines run to ~110 columns before wrapping.
+        # wrap_banner_value's ``width`` is the total line width; run to ~110 cols.
         self.lines.extend(
             self.wrap_banner_value(
-                prefix, text, width=DETAIL_WRAP_WIDTH + 14 + len(prefix), max_lines=3
+                prefix, text, width=DETAIL_WRAP_WIDTH + 14, max_lines=3
             )
         )
 

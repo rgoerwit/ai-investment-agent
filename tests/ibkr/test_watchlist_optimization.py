@@ -210,9 +210,48 @@ def test_supplied_watchlist_with_only_low_conviction_entries_is_empty_pool():
 
     assert optimization.case is WatchlistOptCase.EMPTY_POOL
     assert optimization.optimal == ()
-    assert [(move.item, move.reason) for move in optimization.remove] == [
-        (low, "below_medium_conviction")
+    assert optimization.remove == ()
+    assert [move.item for move in optimization.retained_for_watchlist_floor] == [low]
+
+
+def test_concentration_withholds_all_incumbents_without_emptying_watchlist():
+    incumbents = [
+        _buy("3393.T", score=100, is_watchlist=True),
+        _buy("1926.T", score=110, is_watchlist=True),
+        _buy("3762.T", score=105, is_watchlist=True),
     ]
+
+    optimization = _resolve(
+        incumbents,
+        {item.ticker.yf for item in incumbents},
+        exchange_weights={"T": 45.0},
+    )
+
+    assert optimization.optimal == ()
+    assert optimization.withheld_candidates == ()
+    assert [move.item.ticker.yf for move in optimization.remove] == [
+        "3762.T",
+        "3393.T",
+    ]
+    assert [
+        move.item.ticker.yf for move in optimization.retained_for_watchlist_floor
+    ] == ["1926.T"]
+
+
+def test_floor_degrades_safely_when_no_removal_candidate_exists():
+    malformed_add = ReconciliationItem(
+        ticker="7203.T",
+        action="ADD",
+        reason="Legacy ADD without a position",
+        urgency="LOW",
+        is_watchlist=True,
+    )
+
+    optimization = _resolve([malformed_add], {"7203.T"})
+
+    assert optimization.optimal == ()
+    assert optimization.remove == ()
+    assert optimization.retained_for_watchlist_floor == ()
 
 
 def test_case_3_partial_fill_keeps_all_available_medium_or_higher_candidates():

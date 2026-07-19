@@ -330,12 +330,14 @@ function breachLines(breaches) {
 }
 
 // "Why" cell: prefer the structured breach list, fall back to the pre-joined
-// concentration string (or a plain removal reason) for back-compat.
+// concentration string (or a plain retention/removal reason) for back-compat.
 function breachWhy(item) {
   if (Array.isArray(item.breaches) && item.breaches.length) {
     return breachLines(item.breaches);
   }
-  return escapeHtml(item.concentration || item.removal_reason || item.reason || "—");
+  return escapeHtml(
+    item.concentration || item.retention_reason || item.removal_reason || item.reason || "—",
+  );
 }
 
 // Grouping label without per-candidate projections — mirrors _breach_category
@@ -420,6 +422,9 @@ function renderWatchlist() {
         ])
       : ""}
     ${renderActionTable("Watchlist Monitoring", actions.watchlist_monitor)}
+    ${renderActionTable("Retained to Keep Watchlist Non-Empty", actions.watchlist_floor_retained, [
+      { label: "Why it would otherwise be removed", render: breachWhy },
+    ])}
     ${renderActionTable("Watchlist Remove", actions.watchlist_remove, [
       { label: "Why", render: breachWhy },
     ])}
