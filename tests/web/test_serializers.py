@@ -12,6 +12,7 @@ from src.ibkr.recommendation_service import PortfolioRecommendationBundle
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
 from src.ibkr.ticker import Ticker
 from src.web.ibkr_dashboard.serializers import (
+    _serialize_position,
     serialize_dashboard_snapshot,
     serialize_equity_drilldown,
 )
@@ -191,6 +192,80 @@ def test_serialize_dashboard_snapshot_exposes_ticker_resolution_provenance(
     assert row["action"] == "REVIEW"
     assert position["ticker_identity_verified"] is False
     assert position["ticker_resolution_source"] == "yfinance_search"
+    assert position["market_value_basis"] == "BROKER_USD"
+    assert position["unrealized_pnl_basis"] == "BROKER_USD"
+    assert position["valuation_valid"] is True
+    assert position["valuation_issue"] is None
+    assert "fx_return_issue" in position
+
+
+def test_serialize_position_exposes_valid_implied_fx_split():
+    position = NormalizedPosition(
+        conid=1,
+        ticker=Ticker.from_yf("HERDEZ.MX", currency="MXN"),
+        quantity=100,
+        avg_cost_local=100.0,
+        current_price_local=105.5,
+        currency="MXN",
+        market_value_usd=800.0,
+        unrealized_pnl_usd=-205.0,
+        market_value_basis="BROKER_USD",
+        unrealized_pnl_basis="BROKER_USD",
+    )
+
+    payload = _serialize_position(position)
+
+    assert payload is not None
+    assert payload["local_return_pct"] == 5.5
+    assert payload["fx_effect_pct"] is not None
+    assert payload["usd_return_pct"] is not None
+    assert payload["fx_return_issue"] is None
+
+
+def test_serialize_position_withholds_split_for_local_converted_pnl():
+    position = NormalizedPosition(
+        conid=1,
+        ticker=Ticker.from_yf("7203.T", currency="JPY"),
+        quantity=100,
+        avg_cost_local=2_000.0,
+        current_price_local=2_100.0,
+        currency="JPY",
+        market_value_usd=1_407.0,
+        unrealized_pnl_usd=67.0,
+        market_value_basis="LOCAL_CONVERTED",
+        unrealized_pnl_basis="LOCAL_CONVERTED",
+    )
+
+    payload = _serialize_position(position)
+
+    assert payload is not None
+    assert payload["local_return_pct"] is None
+    assert payload["fx_effect_pct"] is None
+    assert payload["usd_return_pct"] is None
+    assert payload["fx_return_issue"] is None
+
+
+def test_serialize_invalid_position_exposes_issue_and_no_returns():
+    position = NormalizedPosition(
+        conid=1,
+        ticker=Ticker.from_yf("7203.T", currency="JPY"),
+        quantity=100,
+        currency="JPY",
+        market_value_basis="UNAVAILABLE",
+        unrealized_pnl_basis="UNAVAILABLE",
+        valuation_valid=False,
+        valuation_issue="Broker value units could not be verified",
+    )
+
+    payload = _serialize_position(position)
+
+    assert payload is not None
+    assert payload["valuation_valid"] is False
+    assert payload["valuation_issue"] == "Broker value units could not be verified"
+    assert payload["local_return_pct"] is None
+    assert payload["fx_effect_pct"] is None
+    assert payload["usd_return_pct"] is None
+    assert payload["fx_return_issue"] == "Broker value units could not be verified"
 
 
 def test_serialize_equity_drilldown_includes_structured_and_markdown(sample_bundle):
@@ -231,12 +306,12 @@ def _watch_buy(ticker: str, conviction: str = "Medium") -> ReconciliationItem:
 
 
 def _offwatch_buy(ticker: str) -> ReconciliationItem:
-    analysis = make_analysis(ticker=ticker, conviction="Medium", size_pct=4.0)
+    analysis = make_analysis(ticker=ticker, conviction="High", size_pct=4.0)
     return ReconciliationItem(
         ticker=ticker,
         action="BUY",
         urgency="MEDIUM",
-        reason="New BUY — Medium conviction",
+        reason="New BUY — High conviction",
         analysis=analysis,
         suggested_quantity=100,
         suggested_price=100.0,
@@ -342,6 +417,26 @@ def test_dashboard_withholds_offwatch_and_screens_dip():
     assert "9984.T" not in [row["ticker_yf"] for row in actions["watchlist_candidate"]]
     assert "6758.T" not in [row["ticker_yf"] for row in actions["dip_watch"]]
     assert payload["summary_counts"]["watchlist_withheld"] == 1
+
+
+def test_dashboard_keeps_medium_offwatch_buy_visible_but_non_actionable():
+    candidate = _offwatch_buy("9984.T")
+    assert candidate.analysis is not None
+    candidate.analysis.conviction = "Medium"
+    candidate.analysis.trade_block.conviction = "Medium"
+    bundle = _concentration_bundle(
+        items=[candidate],
+        watchlist_tickers=set(),
+        watchlist_total=0,
+    )
+    bundle.portfolio.exchange_weights = {}
+
+    actions = serialize_dashboard_snapshot(bundle)["actions"]
+
+    assert actions["watchlist_candidate"] == []
+    assert [row["ticker_yf"] for row in actions["watchlist_below_conviction"]] == [
+        "9984.T"
+    ]
 
 
 def test_dashboard_screen_inactive_without_weights():

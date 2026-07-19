@@ -108,10 +108,11 @@
              holding:   100 shares  ·  last JPY 2,100.00  ·  position value ~$1,400 USD
 
 ══════════════════════════════════════════════════════
-  WATCHLIST OPTIMIZATION
-  (watchlist status UNKNOWN — additions only; confirm watchlist status and re-check IBKR before
-  acting)
+  WATCHLIST ADDITION REVIEW
+  (watchlist status unknown; additions are advisory until IBKR is rechecked)
 ══════════════════════════════════════════════════════
+
+  ADDITIONS RECOMMENDED NOW: None
 
   ✓ 1 BUY order already in flight (WDO (WDO.TO)) — excluded from changes
   LIVE ORDER STATUS:

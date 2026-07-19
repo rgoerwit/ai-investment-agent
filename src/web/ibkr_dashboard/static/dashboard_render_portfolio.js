@@ -388,11 +388,12 @@ function renderWithheldGrouped(items) {
     .join("");
   return `
     <section>
-      <h3 class="section-title">Withheld By Concentration</h3>
+      <h3 class="section-title">Unheld BUY Analyses Not Recommended — Current Concentration</h3>
       <table>
-        <thead><tr><th>Overweight bucket</th><th>Withheld tickers</th></tr></thead>
+        <thead><tr><th>Current concentration conflict</th><th>Unheld analyzed tickers</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
+      <p class="muted">Evaluated against current holdings; no sale or trim is assumed.</p>
     </section>
   `;
 }
@@ -400,13 +401,25 @@ function renderWithheldGrouped(items) {
 function renderWatchlist() {
   const actions = state.snapshot.actions;
   const watchlist = state.snapshot.watchlist || {};
+  const additions = actions.watchlist_candidate || [];
+  const additionReview = additions.length
+    ? renderActionTable("Additions Recommended Now", additions, [
+        { label: "Health", numeric: true, render: (item) => fmtScorePct(item.analysis?.health_adj) },
+        { label: "Growth", numeric: true, render: (item) => fmtScorePct(item.analysis?.growth_adj) },
+      ])
+    : `<section><h3 class="section-title">Additions Recommended Now</h3><p class="muted">None from the current portfolio and watchlist state.</p></section>`;
   return `
     ${renderLoadedWatchlist(watchlist)}
-    ${renderActionTable("New Buys", actions.watchlist_buy, [
+    ${additionReview}
+    ${renderActionTable("Current Buy-Ready Watchlist Entries", actions.watchlist_buy, [
       { label: "Price", numeric: true, render: (item) => fmtNumber(item.suggested_price, 2) },
       { label: "Cost", numeric: true, render: fmtBuyCost },
     ])}
-    ${renderActionTable("Watchlist Candidates", actions.watchlist_candidate, [
+    ${renderActionTable("Qualified BUY Analyses — No Current Watchlist Capacity", actions.watchlist_capacity_limited || [], [
+      { label: "Health", numeric: true, render: (item) => fmtScorePct(item.analysis?.health_adj) },
+      { label: "Growth", numeric: true, render: (item) => fmtScorePct(item.analysis?.growth_adj) },
+    ])}
+    ${renderActionTable("Analyzed BUYs Not Recommended — Below Conviction Bar", actions.watchlist_below_conviction || [], [
       { label: "Health", numeric: true, render: (item) => fmtScorePct(item.analysis?.health_adj) },
       { label: "Growth", numeric: true, render: (item) => fmtScorePct(item.analysis?.growth_adj) },
     ])}
@@ -422,7 +435,7 @@ function renderWatchlist() {
         ])
       : ""}
     ${renderActionTable("Watchlist Monitoring", actions.watchlist_monitor)}
-    ${renderActionTable("Retained to Keep Watchlist Non-Empty", actions.watchlist_floor_retained, [
+    ${renderActionTable("Administrative Watchlist Retention — Not a Buy Recommendation", actions.watchlist_floor_retained, [
       { label: "Why it would otherwise be removed", render: breachWhy },
     ])}
     ${renderActionTable("Watchlist Remove", actions.watchlist_remove, [

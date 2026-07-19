@@ -301,3 +301,59 @@ class TestFxReturnSplit:
         assert fx_return_split(self._pos(avg_cost_local=0.0)) is None
         # A 100x local-price ratio is a likely pence/pounds or feed mismatch.
         assert fx_return_split(self._pos(current_price_local=10000.0)) is None
+
+    def test_local_converted_pnl_does_not_fabricate_historical_fx(self):
+        from src.ibkr.portfolio_presentation import fx_return_split
+
+        assert (
+            fx_return_split(self._pos(unrealized_pnl_basis="LOCAL_CONVERTED")) is None
+        )
+
+    def test_implausible_residual_is_withheld_with_diagnostic(self):
+        from src.ibkr.portfolio_presentation import fx_return_split_diagnostic
+
+        split, issue = fx_return_split_diagnostic(
+            self._pos(
+                current_price_local=98.5,
+                market_value_usd=312.0,
+                unrealized_pnl_usd=-688.0,
+            )
+        )
+
+        assert split is None
+        assert issue is not None
+        assert "implausible" in issue
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_inputs_are_withheld_with_diagnostic(self, value):
+        from src.ibkr.portfolio_presentation import fx_return_split_diagnostic
+
+        split, issue = fx_return_split_diagnostic(self._pos(unrealized_pnl_usd=value))
+
+        assert split is None
+        assert issue is not None
+        assert "non-finite" in issue
+
+    def test_fx_residual_plausibility_boundary_is_explicit(self):
+        from src.ibkr.portfolio_presentation import fx_return_split_diagnostic
+
+        at_boundary, boundary_issue = fx_return_split_diagnostic(
+            self._pos(
+                current_price_local=100.0,
+                market_value_usd=1500.0,
+                unrealized_pnl_usd=500.0,
+            )
+        )
+        above_boundary, above_issue = fx_return_split_diagnostic(
+            self._pos(
+                current_price_local=100.0,
+                market_value_usd=1501.0,
+                unrealized_pnl_usd=501.0,
+            )
+        )
+
+        assert at_boundary is not None
+        assert at_boundary[1] == pytest.approx(50.0)
+        assert boundary_issue is None
+        assert above_boundary is None
+        assert above_issue is not None

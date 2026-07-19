@@ -22,7 +22,7 @@ from src.ibkr.portfolio_presentation import (
     build_action_summary_counts,
     build_cash_summary,
     build_freshness_overview,
-    fx_return_split,
+    fx_return_split_diagnostic,
     get_sell_type_label,
     retail_safe_action,
 )
@@ -353,7 +353,7 @@ def _serialize_actions(
             serialize_item(item, live_orders=live_orders) for item in groups.trims
         ],
         "dip_watch": dip_watch,
-        # Watchlist lists mirror the CLI's WATCHLIST OPTIMIZATION section:
+        # Watchlist lists mirror the CLI's WATCHLIST ADDITION REVIEW section:
         # selected keeps/adds, removals, the non-empty floor, and
         # concentration-withheld off-watch names — never the raw groups.
         "watchlist_buy": [
@@ -385,6 +385,14 @@ def _serialize_actions(
                 "breaches": _serialize_breaches(note),
             }
             for note in optimization.withheld_candidates
+        ],
+        "watchlist_capacity_limited": [
+            serialize_item(item, live_orders=live_orders)
+            for item in optimization.capacity_limited_candidates
+        ],
+        "watchlist_below_conviction": [
+            serialize_item(item, live_orders=live_orders)
+            for item in optimization.excluded_low_conviction
         ],
         "watchlist_in_flight": [
             {
@@ -459,7 +467,7 @@ def _serialize_dip_watch(candidate: DipWatchCandidate) -> dict[str, Any]:
 def _serialize_position(position: NormalizedPosition | None) -> dict[str, Any] | None:
     if position is None:
         return None
-    split = fx_return_split(position)
+    split, fx_return_issue = fx_return_split_diagnostic(position)
     local_pct, fx_pct, usd_pct = split if split is not None else (None, None, None)
     return {
         "ticker_yf": position.ticker.yf,
@@ -472,11 +480,17 @@ def _serialize_position(position: NormalizedPosition | None) -> dict[str, Any] |
         "currency": position.currency,
         "market_value_usd": position.market_value_usd,
         "unrealized_pnl_usd": position.unrealized_pnl_usd,
-        # Local-price vs FX decomposition (multiplicative residual; None when
-        # unavailable — the dashboard shows the local leg as primary).
+        "fx_rate_to_usd": position.fx_rate_to_usd,
+        "market_value_basis": position.market_value_basis,
+        "unrealized_pnl_basis": position.unrealized_pnl_basis,
+        "valuation_valid": position.valuation_valid,
+        "valuation_issue": position.valuation_issue,
+        # Local-price vs implied FX/basis decomposition (multiplicative
+        # residual; None when unavailable).
         "local_return_pct": local_pct,
         "fx_effect_pct": fx_pct,
         "usd_return_pct": usd_pct,
+        "fx_return_issue": fx_return_issue,
         "acquired_date": position.acquired_date,
         "holding_period_days": position.holding_period_days,
         "tax_term": position.tax_term,

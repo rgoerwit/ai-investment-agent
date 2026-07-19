@@ -124,9 +124,12 @@ def _populate_portfolio_weights(
     sector_weights: dict[str, float] = {}
     exchange_weights: dict[str, float] = {}
     currency_weights: dict[str, float] = {}
-    total_position_value = sum(position.market_value_usd for position in positions)
+    valid_positions = [position for position in positions if position.valuation_valid]
+    total_position_value = sum(
+        position.market_value_usd for position in valid_positions
+    )
     if total_position_value > 0:
-        for pos in positions:
+        for pos in valid_positions:
             current_ticker = pos.ticker.yf
             analysis = analyses.get(current_ticker)
             if (

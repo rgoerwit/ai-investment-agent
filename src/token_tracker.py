@@ -19,16 +19,23 @@ logger = structlog.get_logger(__name__)
 
 # LLM pricing per 1M tokens, standard/interactive tier (July 2026).
 # Sources: ai.google.dev/gemini-api/docs/pricing, developers.openai.com/api/docs/pricing,
-# platform.claude.com/docs/en/pricing, api-docs.deepseek.com/quick_start/pricing.
+# platform.claude.com/docs/en/pricing, docs.z.ai/guides/overview/pricing,
+# api-docs.deepseek.com/quick_start/pricing.
 # IMPORTANT: Prefix-matched in insertion order — more specific keys (mini/lite/
 # preview variants) must come before their parents. Gemini >200k-context rate
-# differences are not modeled (single blended rate per model); cached-input
-# tokens are priced via CACHED_PROMPT_MULTIPLIER below.
+# differences are not modeled (single blended rate per model). Provider-specific
+# cached-input rates use ``cached_prompt`` when present; otherwise they use
+# CACHED_PROMPT_MULTIPLIER below.
 MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     # Current-generation models only — retired/deprecated models are
     # deliberately absent; if one is somehow used it hits the default-pricing
     # fallback and logs unknown_model_pricing.
     # --- OpenAI gpt-5.x (consultant/auditor/editor; mini before parent) ---
+    "gpt-5.6-sol": {"prompt": 5.00, "completion": 30.00},
+    "gpt-5.6-terra": {"prompt": 2.50, "completion": 15.00},
+    "gpt-5.6-luna": {"prompt": 1.00, "completion": 6.00},
+    # Official alias for Sol; keep after the more-specific family variants.
+    "gpt-5.6": {"prompt": 5.00, "completion": 30.00},
     "gpt-5.5": {"prompt": 5.00, "completion": 30.00},
     "gpt-5.4-mini": {"prompt": 0.75, "completion": 4.50},
     "gpt-5.4": {"prompt": 2.50, "completion": 15.00},
@@ -51,6 +58,8 @@ MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     "claude-opus-4": {"prompt": 5.00, "completion": 25.00},
     "claude-sonnet-4": {"prompt": 3.00, "completion": 15.00},
     "claude-haiku-4": {"prompt": 1.00, "completion": 5.00},
+    # --- Z.AI (APAC regional specialist) ---
+    "glm-5.2": {"prompt": 1.40, "cached_prompt": 0.26, "completion": 4.40},
     # --- DeepSeek (APAC regional specialist) ---
     "deepseek-v4": {"prompt": 0.435, "completion": 0.87},
 }
@@ -64,13 +73,20 @@ DEFAULT_PRICING_PER_1M: dict[str, float] = {"prompt": 0.30, "completion": 2.50}
 # Gemini and OpenAI (July 2026 published pricing).
 FLEX_TIER_MULTIPLIER = 0.5
 
-# Cached prompt-prefix tokens bill at 10% of the standard input rate on both
-# vendors (verified 2026-07-03: ai.google.dev/gemini-api/docs/pricing context
+# Cached prompt-prefix tokens bill at 10% of the standard input rate on Gemini
+# and OpenAI (verified 2026-07-03: ai.google.dev/gemini-api/docs/pricing context
 # caching = input/10 for every 2.5/3.x model; developers.openai.com/api/docs/
 # pricing cached input = input/10 for every gpt-5.x model). OpenAI documents
 # that flex does NOT further discount cached input, so the cached portion is
 # priced at this rate without the tier multiplier.
 CACHED_PROMPT_MULTIPLIER = 0.10
+
+# GPT-5.6 prices the full request at higher rates above this input threshold.
+# Cache writes are a subset of input tokens and cost more than ordinary input.
+GPT56_LONG_CONTEXT_INPUT_THRESHOLD = 272_000
+GPT56_LONG_CONTEXT_PROMPT_MULTIPLIER = 2.0
+GPT56_LONG_CONTEXT_COMPLETION_MULTIPLIER = 1.5
+CACHE_WRITE_PROMPT_MULTIPLIER = 1.25
 
 _warned_unknown_pricing_models: set[str] = set()
 
@@ -89,6 +105,20 @@ def _lookup_model_pricing(model_name: str) -> dict[str, float]:
             note="add this model to MODEL_PRICING_PER_1M in src/token_tracker.py",
         )
     return DEFAULT_PRICING_PER_1M
+
+
+def _context_price_multipliers(
+    model_name: str, prompt_tokens: int
+) -> tuple[float, float]:
+    if (
+        model_name.startswith("gpt-5.6")
+        and prompt_tokens > GPT56_LONG_CONTEXT_INPUT_THRESHOLD
+    ):
+        return (
+            GPT56_LONG_CONTEXT_PROMPT_MULTIPLIER,
+            GPT56_LONG_CONTEXT_COMPLETION_MULTIPLIER,
+        )
+    return 1.0, 1.0
 
 
 @dataclass
@@ -110,6 +140,8 @@ class TokenUsage:
     # Prompt-prefix cache hits, a subset of prompt_tokens (both vendors count
     # cached tokens inside the reported prompt total).
     cached_prompt_tokens: int = 0
+    # Cache-miss tokens written into the prompt cache, also inside prompt_tokens.
+    cache_write_prompt_tokens: int = 0
 
     @property
     def estimated_cost_usd(self) -> float:
@@ -118,23 +150,48 @@ class TokenUsage:
 
         Uses ``MODEL_PRICING_PER_1M`` (standard-tier rates, prefix-matched)
         with a 0.5x multiplier when this call ran on a flex tier. Cached prompt
-        tokens bill at ``CACHED_PROMPT_MULTIPLIER`` of the input rate and are
-        exempt from the flex multiplier (vendors don't stack the discounts).
+        tokens bill at a model-specific rate when available, otherwise at
+        ``CACHED_PROMPT_MULTIPLIER`` of the input rate. They are exempt from the
+        flex multiplier (vendors don't stack the discounts).
         """
         model_pricing = _lookup_model_pricing(self.model_name)
         cached_tokens = min(max(self.cached_prompt_tokens, 0), self.prompt_tokens)
-        uncached_prompt_tokens = self.prompt_tokens - cached_tokens
-        prompt_cost = (uncached_prompt_tokens / 1_000_000) * model_pricing["prompt"]
+        cache_write_tokens = min(
+            max(self.cache_write_prompt_tokens, 0),
+            self.prompt_tokens - cached_tokens,
+        )
+        ordinary_prompt_tokens = self.prompt_tokens - cached_tokens - cache_write_tokens
+        prompt_multiplier, completion_multiplier = _context_price_multipliers(
+            self.model_name, self.prompt_tokens
+        )
+        prompt_cost = (
+            (ordinary_prompt_tokens / 1_000_000)
+            * model_pricing["prompt"]
+            * prompt_multiplier
+        )
+        cache_write_cost = (
+            (cache_write_tokens / 1_000_000)
+            * model_pricing["prompt"]
+            * CACHE_WRITE_PROMPT_MULTIPLIER
+            * prompt_multiplier
+        )
         cached_cost = (
             (cached_tokens / 1_000_000)
-            * model_pricing["prompt"]
-            * CACHED_PROMPT_MULTIPLIER
+            * model_pricing.get(
+                "cached_prompt",
+                model_pricing["prompt"] * CACHED_PROMPT_MULTIPLIER,
+            )
+            * prompt_multiplier
         )
-        completion_cost = (self.completion_tokens / 1_000_000) * model_pricing[
-            "completion"
-        ]
+        completion_cost = (
+            (self.completion_tokens / 1_000_000)
+            * model_pricing["completion"]
+            * completion_multiplier
+        )
         multiplier = FLEX_TIER_MULTIPLIER if self.service_tier == "flex" else 1.0
-        return (prompt_cost + completion_cost) * multiplier + cached_cost
+        return (
+            prompt_cost + cache_write_cost + completion_cost
+        ) * multiplier + cached_cost
 
 
 @dataclass
@@ -147,6 +204,7 @@ class AgentTokenStats:
     total_completion_tokens: int = 0
     total_tokens: int = 0
     total_cached_prompt_tokens: int = 0
+    total_cache_write_prompt_tokens: int = 0
     total_cost_usd: float = 0.0
     wall_clock_seconds: float = 0.0
     wall_clock_max_seconds: float = 0.0
@@ -160,6 +218,7 @@ class AgentTokenStats:
         self.total_completion_tokens += usage.completion_tokens
         self.total_tokens += usage.total_tokens
         self.total_cached_prompt_tokens += usage.cached_prompt_tokens
+        self.total_cache_write_prompt_tokens += usage.cache_write_prompt_tokens
         self.total_cost_usd += usage.estimated_cost_usd
         if usage.elapsed_seconds is not None:
             self.wall_clock_seconds += usage.elapsed_seconds
@@ -233,6 +292,7 @@ class TokenTracker:
         elapsed_seconds: float | None = None,
         service_tier: str | None = None,
         cached_prompt_tokens: int = 0,
+        cache_write_prompt_tokens: int = 0,
     ):
         """Record token usage for a specific agent."""
         usage = TokenUsage(
@@ -245,6 +305,7 @@ class TokenTracker:
             elapsed_seconds=elapsed_seconds,
             service_tier=service_tier,
             cached_prompt_tokens=cached_prompt_tokens,
+            cache_write_prompt_tokens=cache_write_prompt_tokens,
         )
 
         with self._lock:
@@ -263,6 +324,7 @@ class TokenTracker:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cached_prompt_tokens=cached_prompt_tokens or None,
+                cache_write_prompt_tokens=cache_write_prompt_tokens or None,
                 total_tokens=usage.total_tokens,
                 estimated_cost_usd=f"${usage.estimated_cost_usd:.6f}",
                 elapsed_seconds=elapsed_seconds,
@@ -336,6 +398,10 @@ class TokenTracker:
             total_cached = sum(
                 stats.total_cached_prompt_tokens for stats in self.agent_stats.values()
             )
+            total_cache_write = sum(
+                stats.total_cache_write_prompt_tokens
+                for stats in self.agent_stats.values()
+            )
             total_cost = sum(
                 stats.total_cost_usd for stats in self.agent_stats.values()
             )
@@ -348,6 +414,7 @@ class TokenTracker:
                 "total_completion_tokens": total_completion,
                 "total_tokens": total_prompt + total_completion,
                 "total_cached_prompt_tokens": total_cached,
+                "total_cache_write_prompt_tokens": total_cache_write,
                 "total_cost_usd": total_cost,
                 "session_start": self.session_start,
                 "agents": {
@@ -357,6 +424,9 @@ class TokenTracker:
                         "completion_tokens": stats.total_completion_tokens,
                         "total_tokens": stats.total_tokens,
                         "cached_prompt_tokens": stats.total_cached_prompt_tokens,
+                        "cache_write_prompt_tokens": (
+                            stats.total_cache_write_prompt_tokens
+                        ),
                         "cost_usd": stats.total_cost_usd,
                         "wall_clock_seconds": round(stats.wall_clock_seconds, 4),
                         "wall_clock_max_seconds": round(
@@ -667,6 +737,7 @@ class TokenTrackingCallback(BaseCallbackHandler):
         prompt_tokens = usage.input_tokens or 0
         completion_tokens = usage.total_output_tokens or 0
         cached_prompt_tokens = usage.cached_input_tokens or 0
+        cache_write_prompt_tokens = usage.cache_write_input_tokens or 0
 
         if prompt_tokens > 0 or completion_tokens > 0:
             self.tracker.record_usage(
@@ -677,6 +748,7 @@ class TokenTrackingCallback(BaseCallbackHandler):
                 elapsed_seconds=elapsed_seconds,
                 service_tier=service_tier,
                 cached_prompt_tokens=cached_prompt_tokens,
+                cache_write_prompt_tokens=cache_write_prompt_tokens,
             )
             if self.output_token_cap and completion_tokens > 0:
                 intent_utilization = (

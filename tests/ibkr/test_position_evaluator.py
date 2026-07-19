@@ -43,6 +43,45 @@ def test_low_zone_dni_held_position_routes_to_review_not_sell():
     assert item.settlement_date is None
 
 
+def test_invalid_position_valuation_blocks_all_trade_actions():
+    pos = _make_position(ticker="7203.T").model_copy(
+        update={
+            "market_value_usd": 0.0,
+            "unrealized_pnl_usd": 0.0,
+            "valuation_valid": False,
+            "valuation_issue": "Broker value units could not be verified",
+        }
+    )
+    analysis = _make_analysis(ticker="7203.T", verdict="DO_NOT_INITIATE")
+    analysis.zone = "HIGH"
+
+    items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+    item = _first_item_for_ticker(items, "7203.T")
+
+    assert item.action == "REVIEW"
+    assert item.action_basis == "DATA_QUALITY"
+    assert item.sell_type == "DATA_QUALITY_REVIEW"
+    assert item.suggested_quantity is None
+    assert item.cash_impact_usd == 0.0
+
+
+def test_invalid_position_with_unparseable_quantity_still_surfaces_for_review():
+    pos = _make_position(ticker="7203.T", quantity=0).model_copy(
+        update={
+            "valuation_valid": False,
+            "valuation_issue": "Malformed broker numeric field(s): quantity",
+        }
+    )
+    analysis = _make_analysis(ticker="7203.T", verdict="BUY")
+
+    items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+    item = _first_item_for_ticker(items, "7203.T")
+
+    assert item.action == "REVIEW"
+    assert item.action_basis == "DATA_QUALITY"
+    assert "quantity" in item.reason
+
+
 def test_moderate_zone_dni_held_position_routes_to_review_not_sell():
     """MODERATE-zone DNI follows the same screen-review path as LOW-zone DNI."""
     pos = _make_position(ticker="4396.T", current_price=1009.30)

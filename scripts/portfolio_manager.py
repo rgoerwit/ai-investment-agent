@@ -1215,6 +1215,8 @@ def _serialize_recommendation_plan(
         "watchlist": {
             "case": optimization.case.value,
             "target_size": optimization.target_size,
+            "current_size": optimization.current_size,
+            "available_addition_slots": optimization.available_addition_slots,
             "keep": [_plan_item_ref(item) for item in optimization.keep],
             "add": [_plan_item_ref(item) for item in optimization.add],
             "remove": [_plan_move_ref(move) for move in optimization.remove],
@@ -1226,6 +1228,13 @@ def _serialize_recommendation_plan(
             ],
             "withheld": [
                 _plan_note_ref(note) for note in optimization.withheld_candidates
+            ],
+            "capacity_limited": [
+                _plan_item_ref(item)
+                for item in optimization.capacity_limited_candidates
+            ],
+            "below_conviction_bar": [
+                _plan_item_ref(item) for item in optimization.excluded_low_conviction
             ],
             "admitted_over_limit": [
                 _plan_note_ref(note) for note in optimization.admitted_over_limit

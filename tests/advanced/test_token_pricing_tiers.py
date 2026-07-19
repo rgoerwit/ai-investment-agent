@@ -10,9 +10,13 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
 from src.token_tracker import (
+    CACHE_WRITE_PROMPT_MULTIPLIER,
     CACHED_PROMPT_MULTIPLIER,
     DEFAULT_PRICING_PER_1M,
     FLEX_TIER_MULTIPLIER,
+    GPT56_LONG_CONTEXT_COMPLETION_MULTIPLIER,
+    GPT56_LONG_CONTEXT_INPUT_THRESHOLD,
+    GPT56_LONG_CONTEXT_PROMPT_MULTIPLIER,
     MODEL_PRICING_PER_1M,
     TokenTrackingCallback,
     TokenUsage,
@@ -21,16 +25,25 @@ from src.token_tracker import (
 )
 
 
-def _usage(model: str, tier: str | None = None, cached: int = 0) -> TokenUsage:
+def _usage(
+    model: str,
+    tier: str | None = None,
+    cached: int = 0,
+    *,
+    prompt: int = 1_000_000,
+    completion: int = 1_000_000,
+    cache_write: int = 0,
+) -> TokenUsage:
     return TokenUsage(
         timestamp="2026-07-03T12:00:00",
         agent_name="test",
         model_name=model,
-        prompt_tokens=1_000_000,
-        completion_tokens=1_000_000,
-        total_tokens=2_000_000,
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=prompt + completion,
         service_tier=tier,
         cached_prompt_tokens=cached,
+        cache_write_prompt_tokens=cache_write,
     )
 
 
@@ -48,7 +61,12 @@ class TestCurrentModelPricing:
             ("gpt-5.4", 2.50 + 15.00),
             ("gpt-5.4-mini", 0.75 + 4.50),
             ("gpt-5.5", 5.00 + 30.00),
+            ("gpt-5.6-sol", 5.00 * 2.00 + 30.00 * 1.50),
+            ("gpt-5.6-terra", 2.50 * 2.00 + 15.00 * 1.50),
+            ("gpt-5.6-luna", 1.00 * 2.00 + 6.00 * 1.50),
+            ("gpt-5.6", 5.00 * 2.00 + 30.00 * 1.50),
             ("claude-opus-4-6", 5.00 + 25.00),
+            ("glm-5.2", 1.40 + 4.40),
             ("deepseek-v4-pro", 0.435 + 0.87),
         ],
     )
@@ -65,7 +83,12 @@ class TestCurrentModelPricing:
             "gemini-3-flash-preview",
             "gpt-5.4",
             "gpt-5.4-mini",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.6",
             "claude-opus-4-6",
+            "glm-5.2",
             "deepseek-v4-pro",
         ):
             assert _lookup_model_pricing(model) is not DEFAULT_PRICING_PER_1M, model
@@ -73,6 +96,60 @@ class TestCurrentModelPricing:
     def test_mini_and_lite_variants_match_before_parents(self):
         assert _lookup_model_pricing("gpt-5.4-mini")["completion"] == 4.50
         assert _lookup_model_pricing("gemini-2.5-flash-lite")["prompt"] == 0.10
+
+    @pytest.mark.parametrize(
+        ("model", "prompt_rate", "completion_rate"),
+        [
+            ("gpt-5.6-sol", 5.00, 30.00),
+            ("gpt-5.6-terra", 2.50, 15.00),
+            ("gpt-5.6-luna", 1.00, 6.00),
+        ],
+    )
+    def test_gpt56_long_context_surcharge_starts_above_threshold(
+        self, model, prompt_rate, completion_rate
+    ):
+        completion = 10_000
+        at_threshold = _usage(
+            model,
+            prompt=GPT56_LONG_CONTEXT_INPUT_THRESHOLD,
+            completion=completion,
+        )
+        expected_base = (
+            GPT56_LONG_CONTEXT_INPUT_THRESHOLD / 1_000_000 * prompt_rate
+            + completion / 1_000_000 * completion_rate
+        )
+        assert at_threshold.estimated_cost_usd == pytest.approx(expected_base)
+
+        above_threshold = _usage(
+            model,
+            prompt=GPT56_LONG_CONTEXT_INPUT_THRESHOLD + 1,
+            completion=completion,
+        )
+        expected_surcharged = (
+            (GPT56_LONG_CONTEXT_INPUT_THRESHOLD + 1)
+            / 1_000_000
+            * prompt_rate
+            * GPT56_LONG_CONTEXT_PROMPT_MULTIPLIER
+            + completion
+            / 1_000_000
+            * completion_rate
+            * GPT56_LONG_CONTEXT_COMPLETION_MULTIPLIER
+        )
+        assert above_threshold.estimated_cost_usd == pytest.approx(expected_surcharged)
+
+    def test_gpt56_cache_writes_use_published_multiplier(self):
+        usage = _usage(
+            "gpt-5.6-luna",
+            prompt=100_000,
+            completion=10_000,
+            cache_write=40_000,
+        )
+        expected = (
+            60_000 / 1_000_000 * 1.00
+            + 40_000 / 1_000_000 * 1.00 * CACHE_WRITE_PROMPT_MULTIPLIER
+            + 10_000 / 1_000_000 * 6.00
+        )
+        assert usage.estimated_cost_usd == pytest.approx(expected)
 
 
 class TestFlexTierPricing:
@@ -94,8 +171,7 @@ class TestFlexTierPricing:
 
 
 class TestCachedPromptPricing:
-    """Cached prompt-prefix tokens bill at 10% of the input rate (both
-    vendors, verified July 2026); flex does not stack on the cached portion."""
+    """Cached prompt-prefix tokens use provider-published rates."""
 
     def test_cached_tokens_reduce_prompt_cost(self):
         # gpt-5.4: 1M prompt (600k cached) + 1M completion
@@ -108,6 +184,13 @@ class TestCachedPromptPricing:
     def test_fully_cached_prompt(self):
         expected = 2.50 * CACHED_PROMPT_MULTIPLIER + 15.00
         assert _usage("gpt-5.4", cached=1_000_000).estimated_cost_usd == pytest.approx(
+            expected
+        )
+
+    def test_glm_uses_model_specific_cached_input_rate(self):
+        # 1M prompt (600k cached) + 1M completion
+        expected = 0.4 * 1.40 + 0.6 * 0.26 + 4.40
+        assert _usage("glm-5.2", cached=600_000).estimated_cost_usd == pytest.approx(
             expected
         )
 
@@ -154,6 +237,26 @@ class TestCachedTokenExtraction:
         assert breakdown.input_tokens == 10_000
         assert breakdown.cached_input_tokens == 8_000
 
+    def test_langchain_flex_cache_and_reasoning_details_extracted(self):
+        from src.llm_usage import extract_token_usage_breakdown
+
+        result = self._result_with_usage(
+            {
+                "input_tokens": 10_000,
+                "output_tokens": 500,
+                "total_tokens": 10_500,
+                "input_token_details": {
+                    "flex_cache_read": 7_000,
+                    "flex_cache_creation": 1_000,
+                },
+                "output_token_details": {"flex_reasoning": 300},
+            }
+        )
+        breakdown = extract_token_usage_breakdown(result)
+        assert breakdown.cached_input_tokens == 7_000
+        assert breakdown.cache_write_input_tokens == 1_000
+        assert breakdown.thinking_tokens == 300
+
     def test_openai_raw_prompt_tokens_details_extracted(self):
         from src.llm_usage import extract_token_usage_breakdown
 
@@ -190,12 +293,16 @@ class TestCachedTokenExtraction:
                     "input_tokens": 10_000,
                     "output_tokens": 500,
                     "total_tokens": 10_500,
-                    "input_token_details": {"cache_read": 8_000},
+                    "input_token_details": {
+                        "cache_read": 7_000,
+                        "cache_creation": 1_000,
+                    },
                 }
             )
         )
         assert recorded["prompt_tokens"] == 10_000
-        assert recorded["cached_prompt_tokens"] == 8_000
+        assert recorded["cached_prompt_tokens"] == 7_000
+        assert recorded["cache_write_prompt_tokens"] == 1_000
 
 
 class TestUnknownModelWarning:

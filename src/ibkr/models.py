@@ -51,6 +51,7 @@ The single source of truth for the FX conversion rate is
 `AnalysisRecord.fx_rate_to_usd` (saved at analysis time).  When it is
 missing, `src.ibkr.reconciliation_rules._resolve_fx()` applies a hardcoded
 fallback from `src.fx_normalization.FALLBACK_RATES_TO_USD`, logging a warning.
+If neither source provides a trustworthy non-USD rate, order sizing fails closed.
 
 ## GBX (British pence) note
 ----------------------------------------------------------------------
@@ -85,6 +86,10 @@ class NormalizedPosition(BaseModel):
     • unrealized_pnl_usd – running P&L in USD
     • currency           – ISO code for the LOCAL currency ("GBX" not "GBP" for .L)
 
+    The value-basis fields record whether the broker supplied a value in USD
+    or whether normalization converted it from local currency. Invalid or
+    unclassifiable values are zeroed and routed to a data-quality review.
+
     The `ticker` field carries symbol, exchange, and currency together.
     Backward-compatible properties (yf_ticker, symbol, exchange) are preserved.
     """
@@ -97,6 +102,15 @@ class NormalizedPosition(BaseModel):
     avg_cost_local: float = 0.0  # LOCAL currency — e.g. JPY, GBX, HKD
     market_value_usd: float = 0.0  # USD (FX-converted)
     unrealized_pnl_usd: float = 0.0  # USD (FX-converted)
+    fx_rate_to_usd: float | None = None
+    market_value_basis: Literal["BROKER_USD", "LOCAL_CONVERTED", "UNAVAILABLE"] = (
+        "BROKER_USD"
+    )
+    unrealized_pnl_basis: Literal["BROKER_USD", "LOCAL_CONVERTED", "UNAVAILABLE"] = (
+        "BROKER_USD"
+    )
+    valuation_valid: bool = True
+    valuation_issue: str | None = None
     currency: str = "USD"  # ISO code for the LOCAL currency above
     current_price_local: float = 0.0  # LOCAL currency
     acquired_date: str | None = None  # YYYY-MM-DD if lot/history data is available

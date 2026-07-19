@@ -469,7 +469,7 @@ class TestReadOnlyDataNotLoaded:
             reason="Analysis says BUY",
             ibkr_position=None,
             is_watchlist=False,
-            analysis=_make_analysis(ticker="7203.T", verdict="BUY"),
+            analysis=_make_analysis(ticker="7203.T", verdict="BUY", conviction="High"),
             suggested_price=2100.0,
         )
 
@@ -488,7 +488,7 @@ class TestReadOnlyDataNotLoaded:
         # Header/cash relabeled to "not loaded" rather than a misleading $0/N/A.
         assert "Account:          not loaded (read-only)" in report
         assert "Net liquidation:  not loaded" in report
-        assert "no watchlist loaded — additions only" in report
+        assert "no watchlist loaded; additions evaluated" in report
         assert "inspect and add to watchlist before acting" not in report
 
     def test_loaded_default_marks_the_candidate_as_a_watchlist_addition(self):
@@ -498,11 +498,11 @@ class TestReadOnlyDataNotLoaded:
             _make_portfolio(),
             show_recommendations=True,
         )
-        assert "+ ADD" in report
+        assert "  ADD" in report
         assert "[own/watchlist status unknown]" not in report
         assert "READ-ONLY — no IBKR connection" not in report
         assert "not loaded (read-only)" not in report
-        assert "no watchlist loaded — additions only" in report
+        assert "no watchlist loaded; additions evaluated" in report
 
     def test_format_json_surfaces_portfolio_data_loaded(self):
         """format_json exposes the flag both ways for machine consumers."""

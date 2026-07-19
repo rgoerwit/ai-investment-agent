@@ -1513,8 +1513,9 @@ class TestConsultantQuickMode:
                 assert llm._configured_api_completion_tokens == 10240
                 assert llm._configured_reasoning_reserve_tokens == 2048
 
-    def test_consultant_quick_full_gpt5_uses_minimal_reasoning_effort(self):
-        """Quick-mode full gpt-5 (non-mini) should use 'minimal'."""
+    @pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
+    def test_consultant_quick_gpt56_models_use_low_reasoning_effort(self, model):
+        """Quick-mode GPT-5.6 variants must use their documented low effort."""
         try:
             import langchain_openai  # noqa: F401
         except ImportError:
@@ -1527,15 +1528,15 @@ class TestConsultantQuickMode:
 
             with patch("src.llms.config") as mock_config:
                 mock_config.enable_consultant = True
-                mock_config.consultant_quick_model = "gpt-5.4"
+                mock_config.consultant_quick_model = model
                 mock_config.consultant_model = "gpt-5.4"
                 mock_config.get_openai_api_key.return_value = "test-key"
 
                 create_consultant_llm(quick_mode=True)
 
                 call_kwargs = mock_chatgpt.call_args[1]
-                assert call_kwargs["model"] == "gpt-5.4"
-                assert call_kwargs["reasoning_effort"] == "minimal"
+                assert call_kwargs["model"] == model
+                assert call_kwargs["reasoning_effort"] == "low"
 
     def test_quick_mode_falls_back_to_full_consultant_model_when_blank(self):
         """Blank quick model should not disable consultant; it should fall back."""
@@ -1560,7 +1561,7 @@ class TestConsultantQuickMode:
                 assert llm is not None
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-5.4"
-                assert call_kwargs["reasoning_effort"] == "minimal"
+                assert call_kwargs["reasoning_effort"] == "low"
 
     def test_get_consultant_llm_keeps_consultant_enabled_in_quick_mode(self):
         """Quick mode should still build the consultant with quick settings."""

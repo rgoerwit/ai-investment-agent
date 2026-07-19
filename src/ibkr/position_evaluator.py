@@ -170,7 +170,7 @@ def evaluate_positions(
     held_tickers: set[str] = set()
 
     for pos in positions:
-        if pos.quantity <= 0:
+        if pos.quantity <= 0 and pos.valuation_valid:
             continue
 
         yf_key = pos.ticker.yf
@@ -241,6 +241,24 @@ def evaluate_positions(
                     and analysis_key.split(".")[0].upper() == held_base
                 ):
                     held_tickers.add(analysis_key)
+
+        if not pos.valuation_valid:
+            items.append(
+                ReconciliationItem(
+                    ticker=item_ticker,
+                    action="REVIEW",
+                    reason=(
+                        "Position valuation unavailable — "
+                        f"{pos.valuation_issue or 'broker value units could not be verified'}"
+                    ),
+                    urgency="HIGH",
+                    ibkr_position=pos,
+                    analysis=analysis,
+                    sell_type="DATA_QUALITY_REVIEW",
+                    action_basis="DATA_QUALITY",
+                )
+            )
+            continue
 
         if analysis is None:
             items.append(

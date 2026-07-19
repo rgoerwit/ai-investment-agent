@@ -88,7 +88,7 @@ def sample_bundle(tmp_path: Path) -> PortfolioRecommendationBundle:
         action="BUY",
         urgency="MEDIUM",
         reason="Plain buy candidate",
-        analysis=make_analysis(ticker="BMW.DE", verdict="BUY"),
+        analysis=make_analysis(ticker="BMW.DE", verdict="BUY", conviction="High"),
     )
     freshness = AnalysisFreshnessSummary(
         blocking_now=[

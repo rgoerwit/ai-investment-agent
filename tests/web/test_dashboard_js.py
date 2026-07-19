@@ -331,7 +331,7 @@ state.snapshot = {
 return renderWatchlist();
 """)
 
-    assert "Withheld By Concentration" in html
+    assert "Unheld BUY Analyses Not Recommended — Current Concentration" in html
     assert "9984" in html
     assert html.count("overweight exchange T (projected 49.0% &gt; 40%)") == 2
 
@@ -351,7 +351,7 @@ state.snapshot = {
 return renderWatchlist();
 """)
 
-    assert "Withheld By Concentration" not in html
+    assert "Unheld BUY Analyses Not Recommended" not in html
 
 
 def test_render_watchlist_withheld_entry_without_concentration_falls_back():
@@ -377,7 +377,7 @@ state.snapshot = {
 return renderWatchlist();
 """)
 
-    assert "Withheld By Concentration" in html
+    assert "Unheld BUY Analyses Not Recommended — Current Concentration" in html
     assert "New BUY — Medium conviction" in html
 
 
@@ -466,6 +466,56 @@ return renderDrilldown({
     assert "Long investment analysis should not appear" not in html
     assert "Long risk analysis should not appear" not in html
     assert "Full Report Body" not in html
+
+
+def test_render_drilldown_marks_invalid_position_values_unavailable():
+    html = _run_dashboard_js("""
+const { renderDrilldown } = __dashboardTest;
+return renderDrilldown({
+  ticker_ibkr: "7203",
+  action: "REVIEW",
+  reason: "Position valuation unavailable",
+  urgency: "HIGH",
+  position: {
+    valuation_valid: false,
+    valuation_issue: "Broker value units could not be verified",
+    market_value_usd: 0,
+    unrealized_pnl_usd: 0,
+    fx_return_issue: "FX decomposition withheld",
+  },
+  analysis: {},
+  structured: {},
+});
+""")
+
+    assert "Broker value units could not be verified" in html
+    assert html.count("Unavailable") >= 2
+    assert "FX decomposition withheld" in html
+
+
+def test_render_drilldown_labels_valid_residual_as_implied_fx_basis():
+    html = _run_dashboard_js("""
+const { renderDrilldown } = __dashboardTest;
+return renderDrilldown({
+  ticker_ibkr: "HERDEZ",
+  action: "HOLD",
+  reason: "Position monitored",
+  urgency: "LOW",
+  position: {
+    valuation_valid: true,
+    market_value_usd: 800,
+    unrealized_pnl_usd: -205,
+    local_return_pct: 5.5,
+    fx_effect_pct: -24.5,
+  },
+  analysis: {},
+  structured: {},
+});
+""")
+
+    assert "Implied FX / basis" in html
+    assert "-24.5%" in html
+    assert "FX effect" not in html
 
 
 def test_open_report_viewer_renders_selected_report_html():
@@ -872,7 +922,7 @@ state.snapshot = {
 return renderWatchlist();
 """)
 
-    assert "Retained to Keep Watchlist Non-Empty" in html
+    assert "Administrative Watchlist Retention — Not a Buy Recommendation" in html
     assert "1926" in html
     assert "exchange T 52.7% &gt; 40%" in html
 
@@ -902,7 +952,7 @@ return renderWatchlist();
 """)
 
     # Two names in the same overweight bucket collapse to a single grouped row.
-    assert "Withheld By Concentration" in html
+    assert "Unheld BUY Analyses Not Recommended — Current Concentration" in html
     assert "exchange T up to 52.7% &gt; 40%" in html
     assert "9984, 6758" in html or "6758, 9984" in html
     assert html.count("<tbody>") == 1

@@ -85,7 +85,10 @@ def test_unresolved_bare_watchlist_symbol_is_protected_not_suffix_matched():
 
     optimization = _resolve([candidate], {"5434"}, target_size=1)
 
-    assert optimization.add == (candidate,)
+    assert optimization.add == ()
+    assert optimization.capacity_limited_candidates == (candidate,)
+    assert optimization.current_size == 1
+    assert optimization.available_addition_slots == 0
     assert optimization.protected_tickers == ("5434",)
     assert optimization.remove == ()
 
@@ -103,7 +106,8 @@ def test_held_watchlist_member_is_protected_from_optimization_removal():
     optimization = _resolve([held, candidate], {"AAPL"}, target_size=1)
 
     assert optimization.protected_tickers == ("AAPL",)
-    assert optimization.add == (candidate,)
+    assert optimization.add == ()
+    assert optimization.capacity_limited_candidates == (candidate,)
     assert optimization.remove == ()
 
 
@@ -254,7 +258,7 @@ def test_floor_degrades_safely_when_no_removal_candidate_exists():
     assert optimization.retained_for_watchlist_floor == ()
 
 
-def test_case_3_partial_fill_keeps_all_available_medium_or_higher_candidates():
+def test_case_3_partial_fill_adds_only_high_conviction_candidates():
     candidates = [
         _buy("7203.T", conviction="High"),
         _buy("6758.T", conviction="Medium"),
@@ -263,13 +267,14 @@ def test_case_3_partial_fill_keeps_all_available_medium_or_higher_candidates():
     optimization = _resolve(candidates, set())
 
     assert optimization.case is WatchlistOptCase.PARTIAL_FILL
-    assert optimization.optimal == tuple(candidates)
-    assert optimization.add == tuple(candidates)
+    assert optimization.optimal == (candidates[0],)
+    assert optimization.add == (candidates[0],)
+    assert optimization.excluded_low_conviction == (candidates[1],)
     assert optimization.keep == ()
     assert optimization.remove == ()
 
 
-def test_case_4_full_pool_keeps_best_current_names_and_swaps_weaker_ones():
+def test_current_state_capacity_does_not_assume_optional_watchlist_removals():
     keep_high = _buy("7203.T", score=200, is_watchlist=True)
     keep_high_2 = _buy("6758.T", score=180, is_watchlist=True)
     displaced_medium = _buy("9432.T", conviction="Medium", score=50, is_watchlist=True)
@@ -290,24 +295,33 @@ def test_case_4_full_pool_keeps_best_current_names_and_swaps_weaker_ones():
     )
 
     assert optimization.case is WatchlistOptCase.FULL_OPTIMIZE
-    assert optimization.keep == (keep_high, keep_high_2)
-    assert optimization.add == tuple(additions)
-    assert [(move.item, move.reason) for move in optimization.remove] == [
-        (displaced_medium, "displaced_by_higher_conviction"),
-        (displaced_medium_2, "displaced_by_higher_conviction"),
-    ]
+    assert optimization.keep == (
+        keep_high,
+        keep_high_2,
+        displaced_medium,
+        displaced_medium_2,
+    )
+    assert optimization.add == tuple(additions[:2])
+    assert optimization.current_size == 4
+    assert optimization.available_addition_slots == 2
+    assert {item.ticker.yf for item in optimization.excluded_low_conviction} == {
+        item.ticker.yf for item in additions[2:]
+    }
+    assert optimization.remove == ()
 
 
-def test_no_current_equity_is_kept_when_all_worthy_names_are_new_candidates():
+def test_full_current_watchlist_does_not_assume_a_low_conviction_removal():
     low_current = _buy("7203.T", conviction="Low", is_watchlist=True)
     candidate = _buy("6758.T")
 
     optimization = _resolve([low_current, candidate], {"7203.T"}, target_size=1)
 
     assert optimization.keep == ()
-    assert optimization.add == (candidate,)
-    assert [(move.item, move.reason) for move in optimization.remove] == [
-        (low_current, "below_medium_conviction")
+    assert optimization.add == ()
+    assert optimization.capacity_limited_candidates == (candidate,)
+    assert optimization.remove == ()
+    assert [move.item for move in optimization.retained_for_watchlist_floor] == [
+        low_current
     ]
 
 
@@ -436,7 +450,7 @@ def test_invalid_optimizer_configuration_fails_closed(
 
 def test_projected_weight_trigger_accepts_under_and_withholds_over():
     """35% + 4% ≤ 40 accepted; 38% + 4% > 40 withheld (projected basis)."""
-    candidate = _buy("7203.T", conviction="Medium", size_pct=4.0)
+    candidate = _buy("7203.T", conviction="High", size_pct=4.0)
 
     under = _resolve([candidate], set(), exchange_weights={"T": 35.0})
     over = _resolve([candidate], set(), exchange_weights={"T": 38.0})
@@ -452,16 +466,16 @@ def test_projected_weight_trigger_accepts_under_and_withholds_over():
 
 
 def test_projected_exactly_at_limit_passes():
-    candidate = _buy("7203.T", conviction="Medium", size_pct=4.0)
+    candidate = _buy("7203.T", conviction="High", size_pct=4.0)
     optimization = _resolve([candidate], set(), exchange_weights={"T": 36.0})
     assert optimization.optimal == (candidate,)
     assert optimization.withheld_candidates == ()
 
 
 def test_withheld_slot_refills_with_next_ranked_under_limit_name():
-    over_limit = _buy("7203.T", conviction="Medium", score=190)
-    refill_hk = _buy("0005.HK", conviction="Medium", score=120)
-    refill_us = _buy("ACME", conviction="Medium", score=110)
+    over_limit = _buy("7203.T", conviction="High", score=190)
+    refill_hk = _buy("0005.HK", conviction="High", score=120)
+    refill_us = _buy("ACME", conviction="High", score=110)
 
     optimization = _resolve(
         [over_limit, refill_hk, refill_us],
@@ -474,8 +488,8 @@ def test_withheld_slot_refills_with_next_ranked_under_limit_name():
     assert [n.item.ticker.yf for n in optimization.withheld_candidates] == ["7203.T"]
 
 
-def test_newcomer_escape_hatch_boundaries():
-    """Newcomers need HIGH conviction AND score ≥ 150 to claim an over-limit slot."""
+def test_newcomers_never_assume_a_concentration_override():
+    """Even exceptional newcomers remain visible but blocked when over limit."""
     admitted = _buy("7203.T", conviction="High", score=150.0)
     below_bar = _buy("6758.T", conviction="High", score=149.9)
     high_score_medium = _buy("6971.T", conviction="Medium", score=180.0)
@@ -486,12 +500,13 @@ def test_newcomer_escape_hatch_boundaries():
         exchange_weights={"T": 45.0},
     )
 
-    assert [item.ticker.yf for item in optimization.optimal] == ["7203.T"]
-    assert [n.item.ticker.yf for n in optimization.admitted_over_limit] == ["7203.T"]
+    assert optimization.optimal == ()
+    assert optimization.admitted_over_limit == ()
     assert sorted(n.item.ticker.yf for n in optimization.withheld_candidates) == [
         "6758.T",
-        "6971.T",
+        "7203.T",
     ]
+    assert optimization.excluded_low_conviction == (high_score_medium,)
 
 
 def test_incumbent_escape_hatch_lower_bar_and_removal_below_it():
@@ -532,35 +547,40 @@ def test_hysteresis_band_incumbent_survives_where_identical_newcomer_fails():
     assert optimization.remove == ()
 
 
-def test_hatch_admit_consumes_headroom_for_next_same_bucket_name():
-    """The second name is judged against the post-admit base (42+4, not 38+4)."""
+def test_candidates_are_screened_independently_against_current_holdings():
     star = _buy("7203.T", conviction="High", score=168.0, size_pct=4.0)
-    follower = _buy("6758.T", conviction="Medium", score=160.0, size_pct=4.0)
+    follower = _buy("6758.T", conviction="High", score=160.0, size_pct=4.0)
 
     optimization = _resolve([star, follower], set(), exchange_weights={"T": 38.0})
 
-    assert [n.item.ticker.yf for n in optimization.admitted_over_limit] == ["7203.T"]
-    follower_note = optimization.withheld_candidates[0]
-    assert follower_note.item.ticker.yf == "6758.T"
-    assert follower_note.breaches[0].projected_pct == pytest.approx(46.0)
+    assert optimization.admitted_over_limit == ()
+    assert [note.item.ticker.yf for note in optimization.withheld_candidates] == [
+        "7203.T",
+        "6758.T",
+    ]
+    assert all(
+        note.breaches[0].projected_pct == pytest.approx(42.0)
+        for note in optimization.withheld_candidates
+    )
 
 
-def test_normal_accept_consumes_headroom_and_flips_next_to_withheld():
-    """25 + 4 = 29 accepted; the next same-bucket 29 + 4 = 33 > 30 withheld."""
-    first = _buy("7203.T", conviction="Medium", score=190, sector="Industrials")
-    second = _buy("6758.T", conviction="Medium", score=120, sector="Industrials")
+def test_normal_accept_does_not_assume_other_candidates_were_bought():
+    first = _buy("7203.T", conviction="High", score=190, sector="Industrials")
+    second = _buy("6758.T", conviction="High", score=120, sector="Industrials")
 
     optimization = _resolve(
         [first, second], set(), sector_weights={"Industrials": 25.0}
     )
 
-    assert [item.ticker.yf for item in optimization.optimal] == ["7203.T"]
-    assert [n.item.ticker.yf for n in optimization.withheld_candidates] == ["6758.T"]
-    assert optimization.withheld_candidates[0].breaches[0].dimension == "sector"
+    assert [item.ticker.yf for item in optimization.optimal] == [
+        "7203.T",
+        "6758.T",
+    ]
+    assert optimization.withheld_candidates == ()
 
 
 def test_sector_only_breach_withholds():
-    candidate = _buy("7203.T", conviction="Medium", sector="Industrials", size_pct=4.0)
+    candidate = _buy("7203.T", conviction="High", sector="Industrials", size_pct=4.0)
 
     optimization = _resolve(
         [candidate],
@@ -576,7 +596,7 @@ def test_sector_only_breach_withholds():
 
 
 def test_both_dimensions_breach_one_note_two_breaches():
-    candidate = _buy("7203.T", conviction="Medium", sector="Industrials", size_pct=4.0)
+    candidate = _buy("7203.T", conviction="High", sector="Industrials", size_pct=4.0)
 
     optimization = _resolve(
         [candidate],
@@ -591,7 +611,7 @@ def test_both_dimensions_breach_one_note_two_breaches():
 
 def test_unknown_sector_skips_sector_dimension():
     """No sector on the analysis ⇒ the sector screen cannot attribute — pass."""
-    candidate = _buy("7203.T", conviction="Medium", sector="")
+    candidate = _buy("7203.T", conviction="High", sector="")
 
     optimization = _resolve(
         [candidate],
@@ -605,7 +625,7 @@ def test_unknown_sector_skips_sector_dimension():
 
 
 def test_missing_size_pct_screens_only_when_bucket_already_over():
-    zero_sized = _buy("7203.T", conviction="Medium", size_pct=0.0)
+    zero_sized = _buy("7203.T", conviction="High", size_pct=0.0)
 
     under = _resolve([zero_sized], set(), exchange_weights={"T": 38.0})
     already_over = _resolve([zero_sized], set(), exchange_weights={"T": 45.0})
@@ -644,8 +664,8 @@ def test_screen_is_deterministic_across_identical_calls():
 
 
 def test_concentration_underfill_reports_partial_fill_with_notes():
-    withheld = _buy("7203.T", conviction="Medium")
-    accepted = _buy("0005.HK", conviction="Medium")
+    withheld = _buy("7203.T", conviction="High")
+    accepted = _buy("0005.HK", conviction="High")
 
     optimization = _resolve(
         [withheld, accepted], set(), target_size=6, exchange_weights={"T": 45.0}
@@ -678,7 +698,7 @@ def test_screened_incumbent_gets_exactly_one_move():
     # what displaces it; a lower-ranked name then takes the slot. A merely
     # outranked incumbent keeps the legacy displaced_by_higher_conviction.
     screened = _buy("7203.T", conviction="Medium", score=190, is_watchlist=True)
-    refill = _buy("0005.HK", conviction="Medium", score=120)
+    refill = _buy("0005.HK", conviction="High", score=120)
 
     optimization = _resolve(
         [screened, refill],
@@ -687,7 +707,11 @@ def test_screened_incumbent_gets_exactly_one_move():
         exchange_weights={"T": 45.0},
     )
 
-    moves = [m for m in optimization.remove if m.item.ticker.yf == "7203.T"]
+    moves = [
+        m
+        for m in optimization.retained_for_watchlist_floor
+        if m.item.ticker.yf == "7203.T"
+    ]
     assert [(m.reason, m.note is not None) for m in moves] == [
         ("concentration_displaced", True)
     ]
@@ -728,7 +752,7 @@ def test_target_size_zero_with_weights_selects_nothing_and_notes_nothing():
 
 
 def test_bare_ticker_buckets_as_us_exchange():
-    candidate = _buy("ACME", conviction="Medium", size_pct=4.0)
+    candidate = _buy("ACME", conviction="High", size_pct=4.0)
 
     optimization = _resolve([candidate], set(), exchange_weights={"US": 45.0})
 
@@ -740,7 +764,7 @@ def test_corrupted_snapshot_exchange_cannot_bypass_screen():
     """Suffix-first: a suffixed ticker buckets by its suffix even when the
     persisted snapshot exchange is garbage — an unknown alias key would read
     weight 0.0 and silently skip the screen."""
-    candidate = _buy("7203.T", conviction="Medium", size_pct=4.0)
+    candidate = _buy("7203.T", conviction="High", size_pct=4.0)
     candidate.analysis.exchange = "TSEJ"  # IBKR code — not the yf-suffix space
 
     optimization = _resolve([candidate], set(), exchange_weights={"T": 45.0})
@@ -750,7 +774,7 @@ def test_corrupted_snapshot_exchange_cannot_bypass_screen():
 
 
 def test_bare_ticker_uses_snapshot_exchange_when_present():
-    candidate = _buy("ACME", conviction="Medium", size_pct=4.0)
+    candidate = _buy("ACME", conviction="High", size_pct=4.0)
     candidate.analysis.exchange = "KS"
 
     optimization = _resolve([candidate], set(), exchange_weights={"KS": 45.0})
@@ -767,7 +791,7 @@ def test_analysis_none_item_is_excluded_before_screen_without_crash():
         urgency="MEDIUM",
         analysis=None,
     )
-    healthy = _buy("7203.T", conviction="Medium")
+    healthy = _buy("7203.T", conviction="High")
 
     optimization = _resolve([no_analysis, healthy], set(), exchange_weights={"T": 10.0})
 

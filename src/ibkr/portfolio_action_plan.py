@@ -149,6 +149,8 @@ def build_action_plan_counts(
         "watchlist": sum(1 for item in items if item.is_watchlist),
         "watchlist_removes": len(optimization.remove),
         "watchlist_withheld": len(optimization.withheld_candidates),
+        "watchlist_capacity_limited": len(optimization.capacity_limited_candidates),
+        "watchlist_below_conviction": len(optimization.excluded_low_conviction),
         "watchlist_in_flight": len(plan.in_flight_buys),
         "total": len(items),
     }

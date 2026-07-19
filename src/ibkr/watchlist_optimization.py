@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Set
+from collections.abc import Iterable, Set
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -25,12 +25,11 @@ if TYPE_CHECKING:
 
 TARGET_WATCHLIST_SIZE = 6
 WATCHLIST_MIN_CONVICTION = "medium"
+WATCHLIST_ADDITION_MIN_CONVICTION = "high"
 _WATCHLIST_CONVICTION_RANK = {"high": 0, "medium": 1, "low": 2}
 
-# An over-limit candidate may still claim a slot when both conviction and the
-# health-plus-growth score clear the applicable bar. The lower incumbent bar
-# supplies anti-flap hysteresis for existing watchlist members.
-CONCENTRATION_EXCEPTION_MIN_SCORE = 150.0
+# Existing watchlist members get a narrow anti-flap exception. New additions
+# must fit current concentration and never use this exception.
 CONCENTRATION_INCUMBENT_MIN_SCORE = 135.0
 
 
@@ -68,6 +67,8 @@ class WatchlistOptimization:
     case: WatchlistOptCase
     watchlist_supplied: bool
     target_size: int
+    current_size: int | None
+    available_addition_slots: int
     optimal: tuple[ReconciliationItem, ...]
     keep: tuple[ReconciliationItem, ...]
     add: tuple[ReconciliationItem, ...]
@@ -78,6 +79,7 @@ class WatchlistOptimization:
     excluded_low_conviction: tuple[ReconciliationItem, ...]
     pool_size: int
     withheld_candidates: tuple[ConcentrationNote, ...] = ()
+    capacity_limited_candidates: tuple[ReconciliationItem, ...] = ()
     admitted_over_limit: tuple[ConcentrationNote, ...] = ()
     retained_for_watchlist_floor: tuple[WatchlistMove, ...] = ()
 
@@ -179,7 +181,8 @@ def _select_with_concentration_headroom(
     sector_weights: dict[str, float] | None,
     exchange_limit_pct: float,
     sector_limit_pct: float,
-    is_incumbent: Callable[[ReconciliationItem], bool],
+    allow_over_limit: bool = True,
+    accumulate_selected: bool = True,
 ) -> tuple[list[ReconciliationItem], list[ConcentrationNote], list[ConcentrationNote]]:
     if (not exchange_weights and not sector_weights) or target_size <= 0:
         return ranked[:target_size], [], []
@@ -205,25 +208,21 @@ def _select_with_concentration_headroom(
         )
         if breaches:
             note = ConcentrationNote(item=item, breaches=breaches)
-            bar = (
-                CONCENTRATION_INCUMBENT_MIN_SCORE
-                if is_incumbent(item)
-                else CONCENTRATION_EXCEPTION_MIN_SCORE
-            )
             if (
-                watchlist_candidate_conviction(item) == "high"
-                and watchlist_candidate_score(item) >= bar
+                allow_over_limit
+                and watchlist_candidate_conviction(item) == "high"
+                and watchlist_candidate_score(item) >= CONCENTRATION_INCUMBENT_MIN_SCORE
             ):
                 admitted.append(note)
             else:
                 withheld.append(note)
                 continue
         selected.append(item)
-        if exchange_weights:
+        if accumulate_selected and exchange_weights:
             running_exchange[exchange_key] = (
                 running_exchange.get(exchange_key, 0.0) + size_pct
             )
-        if sector_weights and sector_key is not None:
+        if accumulate_selected and sector_weights and sector_key is not None:
             running_sector[sector_key] = running_sector.get(sector_key, 0.0) + size_pct
     return selected, admitted, withheld
 
@@ -237,6 +236,7 @@ def resolve_watchlist_optimization(
     watchlist_unavailable: bool,
     target_size: int = TARGET_WATCHLIST_SIZE,
     min_conviction: str = WATCHLIST_MIN_CONVICTION,
+    addition_min_conviction: str = WATCHLIST_ADDITION_MIN_CONVICTION,
     exchange_weights: dict[str, float] | None = None,
     sector_weights: dict[str, float] | None = None,
     exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT,
@@ -248,6 +248,11 @@ def resolve_watchlist_optimization(
     min_rank = _WATCHLIST_CONVICTION_RANK.get(min_conviction.lower())
     if min_rank is None:
         raise ValueError(f"unsupported watchlist conviction: {min_conviction}")
+    addition_min_rank = _WATCHLIST_CONVICTION_RANK.get(addition_min_conviction.lower())
+    if addition_min_rank is None:
+        raise ValueError(
+            f"unsupported watchlist addition conviction: {addition_min_conviction}"
+        )
 
     raw_watchlist = {
         _watchlist_ticker_identity(ticker) for ticker in (watchlist_tickers or set())
@@ -270,39 +275,90 @@ def resolve_watchlist_optimization(
         pooled_by_identity.setdefault(_item_ticker_identity(item), item)
 
     pool = tuple(pooled_by_identity.values())
-    eligible: list[ReconciliationItem] = []
+
+    def is_incumbent(item: ReconciliationItem) -> bool:
+        return item.is_watchlist or _item_ticker_identity(item) in raw_watchlist
+
+    eligible_incumbents: list[ReconciliationItem] = []
+    eligible_additions: list[ReconciliationItem] = []
     excluded_low_conviction: list[ReconciliationItem] = []
     for item in pool:
         conviction_rank = _WATCHLIST_CONVICTION_RANK.get(
             watchlist_candidate_conviction(item), len(_WATCHLIST_CONVICTION_RANK)
         )
-        if conviction_rank > min_rank:
+        required_rank = min_rank if is_incumbent(item) else addition_min_rank
+        if conviction_rank > required_rank:
             excluded_low_conviction.append(item)
+        elif is_incumbent(item):
+            eligible_incumbents.append(item)
         else:
-            eligible.append(item)
+            eligible_additions.append(item)
 
-    ranked = sorted(
-        eligible,
-        key=lambda item: (
-            _WATCHLIST_CONVICTION_RANK[watchlist_candidate_conviction(item)],
-            -watchlist_candidate_score(item),
-            not item.is_watchlist,
-            _item_ticker_identity(item),
-        ),
+    def rank_candidates(
+        candidates: list[ReconciliationItem],
+    ) -> list[ReconciliationItem]:
+        return sorted(
+            candidates,
+            key=lambda item: (
+                _WATCHLIST_CONVICTION_RANK[watchlist_candidate_conviction(item)],
+                -watchlist_candidate_score(item),
+                _item_ticker_identity(item),
+            ),
+        )
+
+    ranked_incumbents = rank_candidates(eligible_incumbents)
+    ranked_additions = rank_candidates(eligible_additions)
+
+    # Existing watchlist BUYs are maintenance decisions. Evaluate each against
+    # the portfolio as it exists now; do not pretend every watchlist name has
+    # already been bought when assessing the next one.
+    selected_incumbents, admitted_incumbents, withheld_incumbents = (
+        _select_with_concentration_headroom(
+            ranked_incumbents,
+            target_size=target_size,
+            exchange_weights=exchange_weights,
+            sector_weights=sector_weights,
+            exchange_limit_pct=exchange_limit_pct,
+            sector_limit_pct=sector_limit_pct,
+            accumulate_selected=False,
+        )
     )
 
-    def is_incumbent(item: ReconciliationItem) -> bool:
-        return item.is_watchlist or _item_ticker_identity(item) in raw_watchlist
-
-    selected, admitted, withheld = _select_with_concentration_headroom(
-        ranked,
-        target_size=target_size,
-        exchange_weights=exchange_weights,
-        sector_weights=sector_weights,
-        exchange_limit_pct=exchange_limit_pct,
-        sector_limit_pct=sector_limit_pct,
-        is_incumbent=is_incumbent,
+    # New additions are deliberately stricter: they must be high-conviction and
+    # fit current portfolio concentration without assuming trims, sales, or any
+    # other recommended candidate has already been purchased.
+    if target_size > 0:
+        qualified_additions, _, withheld_additions = (
+            _select_with_concentration_headroom(
+                ranked_additions,
+                target_size=len(ranked_additions),
+                exchange_weights=exchange_weights,
+                sector_weights=sector_weights,
+                exchange_limit_pct=exchange_limit_pct,
+                sector_limit_pct=sector_limit_pct,
+                allow_over_limit=False,
+                accumulate_selected=False,
+            )
+        )
+    else:
+        qualified_additions, withheld_additions = [], []
+    current_watchlist_ids = raw_watchlist | watched_item_ids
+    available_slots = (
+        target_size
+        if not watchlist_supplied or watchlist_unavailable
+        else max(target_size - len(current_watchlist_ids), 0)
     )
+    current_size = (
+        None
+        if not watchlist_supplied or watchlist_unavailable
+        else len(current_watchlist_ids)
+    )
+    selected_additions = qualified_additions[:available_slots]
+    capacity_limited_candidates = tuple(qualified_additions[available_slots:])
+
+    selected = [*selected_incumbents, *selected_additions]
+    admitted = admitted_incumbents
+    withheld = [*withheld_incumbents, *withheld_additions]
     optimal = tuple(selected)
     admitted_over_limit = tuple(admitted)
     optimal_ids = {_item_ticker_identity(item) for item in optimal}
@@ -312,6 +368,8 @@ def resolve_watchlist_optimization(
             case=WatchlistOptCase.WATCHLIST_UNAVAILABLE,
             watchlist_supplied=False,
             target_size=target_size,
+            current_size=None,
+            available_addition_slots=available_slots,
             optimal=optimal,
             keep=(),
             add=optimal,
@@ -322,6 +380,7 @@ def resolve_watchlist_optimization(
             excluded_low_conviction=tuple(excluded_low_conviction),
             pool_size=len(pool),
             withheld_candidates=tuple(withheld),
+            capacity_limited_candidates=capacity_limited_candidates,
             admitted_over_limit=admitted_over_limit,
         )
     if not watchlist_supplied:
@@ -329,6 +388,8 @@ def resolve_watchlist_optimization(
             case=WatchlistOptCase.NO_WATCHLIST,
             watchlist_supplied=False,
             target_size=target_size,
+            current_size=None,
+            available_addition_slots=available_slots,
             optimal=optimal,
             keep=(),
             add=optimal,
@@ -339,6 +400,7 @@ def resolve_watchlist_optimization(
             excluded_low_conviction=tuple(excluded_low_conviction),
             pool_size=len(pool),
             withheld_candidates=tuple(withheld),
+            capacity_limited_candidates=capacity_limited_candidates,
             admitted_over_limit=admitted_over_limit,
         )
 
@@ -352,7 +414,7 @@ def resolve_watchlist_optimization(
         for item in optimal
         if item.is_watchlist or _item_ticker_identity(item) in raw_watchlist
     )
-    add = tuple(item for item in optimal if item not in keep)
+    add = tuple(selected_additions)
     monitors = tuple(
         item
         for item in groups.holds_watch
@@ -430,6 +492,8 @@ def resolve_watchlist_optimization(
         case=case,
         watchlist_supplied=True,
         target_size=target_size,
+        current_size=current_size,
+        available_addition_slots=available_slots,
         optimal=optimal,
         keep=keep,
         add=add,
@@ -440,6 +504,7 @@ def resolve_watchlist_optimization(
         excluded_low_conviction=tuple(excluded_low_conviction),
         pool_size=len(pool),
         withheld_candidates=withheld_candidates,
+        capacity_limited_candidates=capacity_limited_candidates,
         admitted_over_limit=admitted_over_limit,
         retained_for_watchlist_floor=retained_for_watchlist_floor,
     )
@@ -481,6 +546,7 @@ def build_watchlist_optimization_summary(
         ("WATCHLIST_REMOVE", optimization.remove),
         ("WATCHLIST_MONITOR", optimization.monitors),
         ("WATCHLIST_REVIEW", optimization.reviews),
+        ("WATCHLIST_CAPACITY_LIMITED", optimization.capacity_limited_candidates),
     ):
         if values:
             counts[key] = len(values)

@@ -3695,11 +3695,10 @@ class TestResolveFx:
         assert rate != 1.0
         assert 0.12 < rate < 0.18
 
-    def test_unknown_currency_falls_back_to_1(self):
-        """Truly unknown currency code → 1.0 last resort (same old behaviour,
-        but now logged as an error rather than silent)."""
+    def test_unknown_currency_fails_closed(self):
+        """Unknown currency must disable sizing rather than masquerade as USD."""
         a = self._analysis("ZZZ", None)
-        assert _resolve_fx(a) == 1.0
+        assert _resolve_fx(a) is None
 
     def test_sek_cost_calculation_is_plausible(self):
         """Regression for CAG.ST: 3 shares @ kr104.50 should cost ~$29-35, not ~$314."""
@@ -3729,6 +3728,16 @@ class TestResolveFx:
         a = self._analysis("JPY", 1.0)
         rate = _resolve_fx(a)
         assert rate < 0.05, f"JPY rate {rate} must be ~0.007, not 1.0"
+
+    def test_inverse_jpy_quote_is_rejected_as_unit_mismatch(self):
+        """USD/JPY (~150) must not be accepted where JPY/USD (~0.007) is required."""
+        a = self._analysis("JPY", 150.0)
+        rate = _resolve_fx(a)
+        assert rate == pytest.approx(0.0067)
+
+    def test_non_finite_saved_rate_uses_fallback(self):
+        a = self._analysis("JPY", float("nan"))
+        assert _resolve_fx(a) == pytest.approx(0.0067)
 
     def test_usd_rate_1_is_trusted(self):
         """For USD, fx_rate_to_usd=1.0 is correct and must NOT be overridden."""

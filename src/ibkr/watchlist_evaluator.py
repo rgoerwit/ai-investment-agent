@@ -150,6 +150,22 @@ def evaluate_watchlist(
                     analysis.position_size or 0
                 )
                 fx_rate = _resolve_fx(analysis)
+                if fx_rate is None:
+                    items.append(
+                        ReconciliationItem(
+                            ticker=Ticker.from_yf(ticker),
+                            action="REVIEW",
+                            reason=(
+                                "Watchlist BUY blocked — no trustworthy local-to-USD "
+                                "FX rate is available"
+                            ),
+                            urgency="HIGH",
+                            analysis=analysis,
+                            action_basis="DATA_QUALITY",
+                            is_watchlist=True,
+                        )
+                    )
+                    continue
                 buy_qty = calculate_quantity(
                     available_cash_usd=remaining_cash,
                     entry_price_local=entry_price or 0.0,

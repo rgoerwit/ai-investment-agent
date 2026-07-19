@@ -15,12 +15,10 @@ from src.ibkr.refresh_service import AnalysisFreshnessSummary, RefreshActivity
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
 from src.ibkr.ticker import Ticker
 from src.ibkr.watchlist_optimization import (
-    CONCENTRATION_EXCEPTION_MIN_SCORE,
     CONCENTRATION_INCUMBENT_MIN_SCORE,
     ConcentrationNote,
     watchlist_candidate_conviction,
     watchlist_candidate_score,
-    weakest_bucket_incumbents,
 )
 from src.memory import MacroEvent
 
@@ -99,36 +97,6 @@ def _watchlist_symbol(item: ReconciliationItem) -> str:
     return f"{item.ticker.ibkr}{yf_hint}"
 
 
-def _held_items_for_incumbent_ranking(groups) -> list[ReconciliationItem]:
-    """Every grouped item backed by an actual IBKR position (deduped later)."""
-    held: list[ReconciliationItem] = []
-    for field_items in (
-        groups.holds_real,
-        groups.reviews,
-        groups.profit_take_reviews,
-        groups.macro_reviews,
-        groups.macro_stop_reviews,
-        groups.adds,
-        groups.trims,
-        groups.stop_sells,
-        groups.hard_sells,
-        groups.soft_sells,
-        groups.profit_take_sells,
-    ):
-        held.extend(item for item in field_items if item.ibkr_position is not None)
-    return held
-
-
-def _incumbent_summary(item: ReconciliationItem) -> str:
-    analysis = item.analysis
-    if analysis is None:
-        return f"{item.ticker.yf} (no current analysis)"
-    health = f"{analysis.health_adj:.0f}" if analysis.health_adj is not None else "?"
-    growth = f"{analysis.growth_adj:.0f}" if analysis.growth_adj is not None else "?"
-    stale = " stale" if analysis.age_days > 30 else ""
-    return f"{item.ticker.yf} (H:{health} G:{growth}{stale})"
-
-
 def render_watchlist_optimization(
     plan: PortfolioActionPlan,
     *,
@@ -142,68 +110,42 @@ def render_watchlist_optimization(
     """Render the action plan's watchlist section without recomputing policy."""
     optimization = plan.optimization
     lines: list[str] = []
-    concentration_screened = (
-        len(optimization.withheld_candidates)
-        + sum(
-            1
-            for move in optimization.remove
-            if move.reason == "concentration_displaced"
+    addition_count = len(optimization.add)
+    if optimization.case.value == "watchlist_unavailable":
+        subtitle = (
+            "watchlist status unknown; additions are advisory until IBKR is rechecked"
         )
-        + sum(
-            1
-            for move in optimization.retained_for_watchlist_floor
-            if move.reason == "concentration_displaced"
+    elif optimization.case.value == "no_watchlist":
+        subtitle = "no watchlist loaded; additions evaluated without membership changes"
+    elif addition_count:
+        subtitle = (
+            f"{addition_count} addition{'s' if addition_count != 1 else ''} "
+            "recommended from current state"
         )
-    )
-    partial_fill_subtitle = (
-        f"optimal BUY-ready set under-filled ({len(optimization.optimal)}"
-        f" of {optimization.target_size})"
-    )
-    if concentration_screened:
-        partial_fill_subtitle = (
-            f"{partial_fill_subtitle[:-1]} — {concentration_screened} withheld by "
-            "concentration)"
-        )
-    if optimization.retained_for_watchlist_floor:
-        empty_pool_subtitle = (
-            "no eligible replacements; strongest current entry retained as IBKR floor"
-        )
-    elif optimization.remove:
-        empty_pool_subtitle = "no eligible replacements; current removals listed below"
-    elif concentration_screened:
-        empty_pool_subtitle = (
-            "no eligible replacements; existing non-BUY entries retained for review"
-        )
+    elif optimization.capacity_limited_candidates:
+        subtitle = "no additions; current watchlist has no open target slots"
+    elif optimization.withheld_candidates:
+        subtitle = "no additions; analyzed BUYs conflict with current concentration"
     else:
-        empty_pool_subtitle = (
-            "no medium-or-better candidates; existing entries retained for review"
-        )
-    case_subtitles = {
-        "no_watchlist": "no watchlist loaded — additions only",
-        "watchlist_unavailable": (
-            "watchlist status UNKNOWN — additions only; confirm watchlist status "
-            "and re-check IBKR before acting"
-        ),
-        "nothing_actionable": "no medium-or-better candidates",
-        "empty_pool": empty_pool_subtitle,
-        "partial_fill": partial_fill_subtitle,
-        "aligned": "current watchlist already matches the BUY-ready target",
-        "full_optimize": (
-            f"top {optimization.target_size} medium-or-higher BUY-ready slots"
-        ),
-    }
-    subtitle = case_subtitles[optimization.case.value]
-    header = f"  WATCHLIST OPTIMIZATION  ({subtitle})"
+        subtitle = "no additions recommended from current state"
+    header = f"  WATCHLIST ADDITION REVIEW  ({subtitle})"
     if len(header) <= 100:
         header_lines: list[str] = [header]
     else:
         header_lines = [
-            "  WATCHLIST OPTIMIZATION",
+            "  WATCHLIST ADDITION REVIEW",
             *ReportBuffer.wrap_banner_value(
                 "  ", f"({subtitle})", width=100, max_lines=3
             ),
         ]
     lines.extend((_DIVIDER, *header_lines, _DIVIDER, ""))
+    if optimization.current_size is not None:
+        lines.append(
+            f"  Current watchlist size: {optimization.current_size}  ·  "
+            f"target: {optimization.target_size}  ·  "
+            f"open target slots now: {optimization.available_addition_slots}"
+        )
+        lines.append("")
 
     def render_candidate(item: ReconciliationItem, label: str) -> None:
         analysis = item.analysis
@@ -255,22 +197,21 @@ def render_watchlist_optimization(
             )
             lines.append(f"             Cost: ~${cost:,.0f} USD  ·  {funded}")
 
-    for item in optimization.add:
-        render_candidate(item, "+ ADD")
     if optimization.add:
-        lines.append("")
+        lines.append("  ADDITIONS RECOMMENDED NOW:")
+        for item in optimization.add:
+            render_candidate(item, "ADD")
+    else:
+        lines.append("  ADDITIONS RECOMMENDED NOW: None")
+    lines.append("")
 
-    keep_ids = {item.ticker.yf.upper() for item in optimization.keep}
     for note in optimization.admitted_over_limit:
-        threshold = (
-            f"{CONCENTRATION_INCUMBENT_MIN_SCORE:.0f} (incumbent)"
-            if note.item.ticker.yf.upper() in keep_ids
-            else f"{CONCENTRATION_EXCEPTION_MIN_SCORE:.0f}"
-        )
         lines.append(
-            f"  ⚠ over-limit admit  {_watchlist_symbol(note.item)}  — "
+            f"  ⚠ CURRENT WATCHLIST CONCENTRATION EXCEPTION  "
+            f"{_watchlist_symbol(note.item)}  — "
             f"high conviction, score "
-            f"{watchlist_candidate_score(note.item):.0f}/200 ≥ {threshold}"
+            f"{watchlist_candidate_score(note.item):.0f}/200 ≥ "
+            f"{CONCENTRATION_INCUMBENT_MIN_SCORE:.0f} (incumbent)"
         )
         lines.extend(_breach_bullets(note, "        "))
     if optimization.admitted_over_limit:
@@ -313,15 +254,19 @@ def render_watchlist_optimization(
         lines.append("")
 
     if optimization.retained_for_watchlist_floor:
-        lines.append("  RETAINED TO KEEP WATCHLIST NON-EMPTY:")
+        lines.append("  ADMINISTRATIVE WATCHLIST RETENTION — NOT A BUY RECOMMENDATION:")
         for move in optimization.retained_for_watchlist_floor:
             reason = move.reason.replace("_", " ")
             if move.reason == "verdict_reject":
                 verdict = move.item.analysis.verdict if move.item.analysis else "REJECT"
                 reason = f"verdict {verdict}"
-            lines.append(f"    {_watchlist_symbol(move.item)}  — " f"{reason}")
+            lines.append(f"    {_watchlist_symbol(move.item)}  — {reason}")
             if move.note is not None:
                 lines.extend(_breach_bullets(move.note, "        "))
+            lines.append(
+                "        · retained only to keep the IBKR watchlist non-empty; "
+                "no holding sale or trim is assumed"
+            )
         lines.append("")
 
     if optimization.keep:
@@ -369,19 +314,27 @@ def render_watchlist_optimization(
         lines.append("")
 
     if optimization.excluded_low_conviction:
+        lines.extend(
+            wrap_listing(
+                "  ANALYZED BUYS NOT RECOMMENDED — BELOW CONVICTION BAR: ",
+                [
+                    _watchlist_symbol(item)
+                    for item in optimization.excluded_low_conviction
+                ],
+            )
+        )
         lines.append(
-            "  Excluded below medium conviction: "
-            f"{len(optimization.excluded_low_conviction)}"
+            "      (new additions require High; current watchlist entries require "
+            "at least Medium)"
         )
     if optimization.withheld_candidates:
         lines.append(
-            f"  Withheld by concentration ({len(optimization.withheld_candidates)}):"
+            "  UNHELD BUY ANALYSES NOT RECOMMENDED — CURRENT CONCENTRATION "
+            f"({len(optimization.withheld_candidates)}):"
         )
         grouped: dict[str, list[ConcentrationNote]] = {}
         for note in optimization.withheld_candidates:
             grouped.setdefault(_breach_category(note), []).append(note)
-        held_for_buckets = _held_items_for_incumbent_ranking(plan.groups)
-        shown_buckets: set[tuple[str, str]] = set()
         for notes in grouped.values():
             # Same breach shape across the group; keep the worst projection
             # per dimension so magnitude survives the grouping.
@@ -393,31 +346,23 @@ def render_watchlist_optimization(
             )
             symbols = [_watchlist_symbol(note.item) for note in notes]
             lines.extend(wrap_listing(f"    · {label}:  ", symbols))
-            # Informational comparison only: show the lowest-scored holdings in
-            # each breached bucket. Scores are not a tax-aware trim decision.
-            for breach in notes[0].breaches:
-                bucket_id = (breach.dimension, breach.key)
-                if bucket_id in shown_buckets:
-                    continue
-                shown_buckets.add(bucket_id)
-                incumbents = weakest_bucket_incumbents(
-                    held_for_buckets,
-                    dimension=breach.dimension,
-                    key=breach.key,
-                )
-                if not incumbents:
-                    continue
-                entries = [_incumbent_summary(item) for item in incumbents]
-                lines.extend(
-                    wrap_listing(
-                        f"      lowest-scored held in {breach.key}:  ", entries
-                    )
-                )
-        if shown_buckets:
-            lines.append(
-                "      (research comparison only — not a trim recommendation; "
-                "verify thesis quality, stale data, and tax lots first)"
+        lines.append(
+            "      (evaluated against current holdings; no sale or trim is assumed)"
+        )
+    if optimization.capacity_limited_candidates:
+        lines.extend(
+            wrap_listing(
+                "  QUALIFIED BUY ANALYSES — NO CURRENT WATCHLIST CAPACITY: ",
+                [
+                    _watchlist_symbol(item)
+                    for item in optimization.capacity_limited_candidates
+                ],
             )
+        )
+        lines.append(
+            "      (not additions; no removal is assumed — change the current "
+            "watchlist and rerun if desired)"
+        )
     if watchlist_candidates_blocked_by_cash:
         lines.append(
             "  Cash-blocked candidates retained for ranking: "

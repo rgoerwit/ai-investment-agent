@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Set
 from dataclasses import dataclass
 
@@ -29,9 +30,6 @@ from src.ibkr.portfolio_defaults import (
 )
 from src.ibkr.reconciliation_rules import analysis_identity_verified
 from src.ibkr.refresh_service import AnalysisFreshnessSummary, RefreshActivity
-from src.ibkr.watchlist_optimization import (
-    CONCENTRATION_EXCEPTION_MIN_SCORE as CONCENTRATION_EXCEPTION_MIN_SCORE,
-)
 from src.ibkr.watchlist_optimization import (
     CONCENTRATION_INCUMBENT_MIN_SCORE as CONCENTRATION_INCUMBENT_MIN_SCORE,
 )
@@ -84,37 +82,71 @@ def cost_basis_unit_mismatch(position) -> bool:
     return ratio > 50.0 or ratio < 0.02
 
 
-def fx_return_split(position) -> tuple[float, float, float] | None:
+_MAX_PLAUSIBLE_FX_EFFECT_PCT = 50.0
+
+
+def fx_return_split_diagnostic(
+    position,
+) -> tuple[tuple[float, float, float] | None, str | None]:
     """Decompose a position's return into (local_pct, fx_pct, usd_pct).
 
     Local-price return is IBKR local cost basis → current local price (it
     includes valuation and sentiment, so it is labeled "local-price", never
-    "business"). USD return derives from observed IBKR USD P&L; the FX effect
-    is the multiplicative residual: (1+usd) = (1+local) × (1+fx). Returns None
+    "business"). USD return derives from observed IBKR USD P&L; the implied
+    FX/basis effect is the multiplicative residual:
+    (1+usd) = (1+local) × (1+fx). Returns None
     for USD positions or when any observed input is missing/degenerate —
-    honest absence beats a fabricated split.
+    honest absence beats a fabricated split. The decomposition is available
+    only when IBKR supplied P&L in USD; P&L converted from local currency at
+    today's rate contains no historical entry-FX information.
     """
     if position is None:
-        return None
+        return None, None
+    if not getattr(position, "valuation_valid", True):
+        return None, (
+            getattr(position, "valuation_issue", None)
+            or "Position valuation is unavailable pending a data-quality review"
+        )
     currency = (position.currency or "USD").upper()
     if currency in ("USD", ""):
-        return None
+        return None, None
+    if getattr(position, "unrealized_pnl_basis", "BROKER_USD") != "BROKER_USD":
+        return None, None
+    numeric_inputs = (
+        position.avg_cost_local,
+        position.current_price_local,
+        position.market_value_usd,
+        position.unrealized_pnl_usd,
+    )
+    if not all(math.isfinite(value) for value in numeric_inputs):
+        return None, "FX decomposition withheld: position contains non-finite values"
     if (
         position.avg_cost_local <= 0
         or position.current_price_local <= 0
         or position.market_value_usd == 0
         or cost_basis_unit_mismatch(position)
     ):
-        return None
+        return None, None
     local_ret = (
         position.current_price_local - position.avg_cost_local
     ) / position.avg_cost_local
     usd_cost_basis = position.market_value_usd - position.unrealized_pnl_usd
     if usd_cost_basis <= 0:
-        return None
+        return None, None
     usd_ret = position.unrealized_pnl_usd / usd_cost_basis
     fx_ret = (1.0 + usd_ret) / (1.0 + local_ret) - 1.0
-    return (local_ret * 100.0, fx_ret * 100.0, usd_ret * 100.0)
+    split = (local_ret * 100.0, fx_ret * 100.0, usd_ret * 100.0)
+    if abs(split[1]) > _MAX_PLAUSIBLE_FX_EFFECT_PCT:
+        return None, (
+            "FX decomposition withheld: broker values imply an implausible "
+            f"{split[1]:+.1f}% residual; verify value units or entry FX"
+        )
+    return split, None
+
+
+def fx_return_split(position) -> tuple[float, float, float] | None:
+    """Backward-compatible split-only view of :func:`fx_return_split_diagnostic`."""
+    return fx_return_split_diagnostic(position)[0]
 
 
 SELL_RECOMMENDATIONS_TITLE = "SELL RECOMMENDATIONS"

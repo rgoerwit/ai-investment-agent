@@ -91,12 +91,12 @@ class TestWatchlistConcentration:
             watchlist_tickers={"7203.T"},
         )
 
-        assert "⚠ over-limit admit  7203 (7203.T)" in report
+        assert "⚠ CURRENT WATCHLIST CONCENTRATION EXCEPTION  7203 (7203.T)" in report
         assert "score 137/200 ≥ 135 (incumbent)" in report
         assert "KEEPING ACTIVE (1): 7203 (7203.T)" in report
         assert "[Update IBKR watchlist to]: 7203" in report
 
-    def test_newcomer_hatch_admit_renders_newcomer_tier(self):
+    def test_exceptional_newcomer_remains_blocked_by_current_concentration(self):
         item = _make_offwatch_buy("WDO.TO")
         item.analysis.health_adj = 80.0
         item.analysis.growth_adj = 75.0
@@ -109,9 +109,9 @@ class TestWatchlistConcentration:
             watchlist_total=0,
         )
 
-        assert "⚠ over-limit admit  WDO (WDO.TO)" in report
-        assert "score 155/200 ≥ 150" in report
-        assert "(incumbent)" not in report
+        assert "CURRENT WATCHLIST CONCENTRATION EXCEPTION" not in report
+        assert "UNHELD BUY ANALYSES NOT RECOMMENDED — CURRENT CONCENTRATION" in report
+        assert "WDO (WDO.TO)" in report
 
     def test_sector_breach_renders_sector_dimension(self):
         item = _make_buy_item("7203.T", conviction="Medium")
@@ -139,9 +139,11 @@ class TestWatchlistConcentration:
             watchlist_total=0,
         )
 
-        assert "Withheld by concentration (1):" in report
+        assert (
+            "UNHELD BUY ANALYSES NOT RECOMMENDED — CURRENT CONCENTRATION (1):" in report
+        )
         assert "    · exchange TO up to 48.0% > 40%:  WDO (WDO.TO)" in report
-        assert "+ ADD" not in report
+        assert "ADDITIONS RECOMMENDED NOW: None" in report
 
     def test_empty_weights_render_no_concentration_lines(self):
         report = format_report(
@@ -153,8 +155,8 @@ class TestWatchlistConcentration:
         )
 
         assert "overweight" not in report
-        assert "Withheld by concentration" not in report
-        assert "over-limit admit" not in report
+        assert "UNHELD BUY ANALYSES NOT RECOMMENDED" not in report
+        assert "CURRENT WATCHLIST CONCENTRATION EXCEPTION" not in report
 
     def test_read_only_run_emits_no_concentration_lines(self):
         report = format_report(
@@ -165,7 +167,7 @@ class TestWatchlistConcentration:
         )
 
         assert "overweight" not in report
-        assert "Withheld by concentration" not in report
+        assert "UNHELD BUY ANALYSES NOT RECOMMENDED" not in report
 
     def test_dip_screen_withholds_sub_star3_and_keeps_star3(self):
         """End-to-end dip check: a sub-★★★ dip in the overweight bucket leaves

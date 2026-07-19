@@ -61,6 +61,47 @@ def _langchain_openai_available() -> bool:
 
 _THINKING_BUDGETS = {"low": 512, "medium": 4096, "high": 16384}
 
+# OpenAI GPT-5 reasoning capabilities documented for the model families this
+# repository can select.  GPT-5.1+ models no longer use the legacy
+# ``minimal`` setting; ``low`` is the portable quick-mode setting across the
+# current GPT-5.x families, including GPT-5.6 Sol/Terra/Luna.
+_OPENAI_GPT5_REASONING_EFFORTS: tuple[tuple[str, frozenset[str]], ...] = (
+    ("gpt-5.6", frozenset({"none", "low", "medium", "high", "xhigh", "max"})),
+    ("gpt-5.5", frozenset({"none", "low", "medium", "high", "xhigh"})),
+    ("gpt-5.4", frozenset({"none", "low", "medium", "high", "xhigh"})),
+    ("gpt-5.2", frozenset({"none", "low", "medium", "high", "xhigh"})),
+    ("gpt-5.1", frozenset({"none", "low", "medium", "high"})),
+    ("gpt-5", frozenset({"minimal", "low", "medium", "high"})),
+)
+
+
+def _openai_gpt5_reasoning_effort(model_name: str, *, quick_mode: bool) -> str | None:
+    """Return a documented reasoning setting for a GPT-5 model.
+
+    ``low`` is deliberately used for quick mode even when a legacy model also
+    accepts ``minimal``.  This keeps the quick path valid for current GPT-5.6
+    models, whose documented settings do not include ``minimal``.
+    """
+    normalized_name = model_name.lower()
+    if not normalized_name.startswith("gpt-5") or "pro" in normalized_name:
+        return None
+
+    supported_efforts: frozenset[str] | None = None
+    for prefix, efforts in _OPENAI_GPT5_REASONING_EFFORTS:
+        if normalized_name.startswith(prefix):
+            supported_efforts = efforts
+            break
+    if supported_efforts is None:
+        return None
+
+    preferred = "low" if quick_mode else "medium"
+    if preferred in supported_efforts:
+        return preferred
+    if quick_mode and "minimal" in supported_efforts:
+        return "minimal"
+    return None
+
+
 # Relax safety settings slightly for financial/market analysis context
 SAFETY_SETTINGS = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
@@ -1214,15 +1255,9 @@ def create_consultant_llm(
     else:
         _warn_openai_unthrottled_once("consultant")
 
-    # GPT-5 non-pro models support configurable reasoning effort. Quick mode
-    # uses a lower setting to keep the consultant active without paying full
-    # synthesis cost; normal mode preserves the current medium effort.
-    # Note: gpt-5.x-mini variants reject "minimal" — only full gpt-5.x accepts it.
-    if model_name.startswith("gpt-5") and "pro" not in model_name:
-        if quick_mode:
-            kwargs["reasoning_effort"] = "low" if "mini" in model_name else "minimal"
-        else:
-            kwargs["reasoning_effort"] = "medium"
+    reasoning_effort = _openai_gpt5_reasoning_effort(model_name, quick_mode=quick_mode)
+    if reasoning_effort is not None:
+        kwargs["reasoning_effort"] = reasoning_effort
 
     budget = _resolve_generation_budget(
         intent_tokens=kwargs["max_completion_tokens"],
@@ -1263,8 +1298,9 @@ def create_auditor_llm(
     4. If CONSULTANT_MODEL is set -> Use it (Fallback)
     5. Default -> gpt-4o
 
-    In quick mode, gpt-5 reasoning effort is dropped to "minimal" to keep the
-    auditor cheap on screening passes; normal mode preserves "medium".
+    In quick mode, current GPT-5.x models use the documented ``low`` effort;
+    normal mode uses ``medium``.  This includes GPT-5.6 Sol/Terra/Luna, which
+    do not support the legacy ``minimal`` setting.
     """
     if not _langchain_openai_available():
         logger.warning("langchain_openai_missing")
@@ -1311,12 +1347,9 @@ def create_auditor_llm(
     else:
         _warn_openai_unthrottled_once("auditor")
 
-    # gpt-5.x-mini variants reject "minimal" — only full gpt-5.x accepts it.
-    if model_name.startswith("gpt-5") and "pro" not in model_name:
-        if quick_mode:
-            kwargs["reasoning_effort"] = "low" if "mini" in model_name else "minimal"
-        else:
-            kwargs["reasoning_effort"] = "medium"
+    reasoning_effort = _openai_gpt5_reasoning_effort(model_name, quick_mode=quick_mode)
+    if reasoning_effort is not None:
+        kwargs["reasoning_effort"] = reasoning_effort
 
     budget = _resolve_generation_budget(
         intent_tokens=kwargs["max_completion_tokens"],

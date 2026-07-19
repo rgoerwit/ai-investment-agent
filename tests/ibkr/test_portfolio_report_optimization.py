@@ -64,9 +64,9 @@ class TestWatchlistOptimizationReporting:
             show_recommendations=True,
         )
 
-        assert "WATCHLIST OPTIMIZATION" in report
-        assert "no watchlist loaded — additions only" in report
-        assert "+ ADD" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
+        assert "no watchlist loaded; additions evaluated" in report
+        assert "  ADD" in report
         assert "REMOVE FROM WATCHLIST" not in report
         assert "[Update IBKR watchlist to]" not in report
 
@@ -80,9 +80,11 @@ class TestWatchlistOptimizationReporting:
             watchlist_total=0,
         )
 
-        assert "no medium-or-better candidates" in report
-        assert "Excluded below medium conviction: 1" in report
-        assert "+ ADD" not in report
+        assert "no additions recommended from current state" in report
+        assert "ANALYZED BUYS NOT RECOMMENDED — BELOW CONVICTION BAR:" in report
+        assert "7203 (7203.T)" in report
+        assert "new additions require High" in report
+        assert "ADDITIONS RECOMMENDED NOW: None" in report
         assert "REMOVE FROM WATCHLIST" not in report
 
     def test_empty_result_does_not_recommend_emptying_supplied_watchlist(self):
@@ -112,11 +114,10 @@ class TestWatchlistOptimizationReporting:
             )
         )
 
+        assert "no additions recommended from current state" in report
         assert (
-            "no eligible replacements; strongest current entry retained as IBKR floor"
-            in report
+            "ADMINISTRATIVE WATCHLIST RETENTION — NOT A BUY RECOMMENDATION:" in report
         )
-        assert "RETAINED TO KEEP WATCHLIST NON-EMPTY:" in report
         assert report.count("REMOVE FROM WATCHLIST") == 2
         assert [
             row["ticker_yf"]
@@ -134,8 +135,8 @@ class TestWatchlistOptimizationReporting:
             watchlist_total=0,
         )
 
-        assert "no medium-or-better candidates" in report
-        assert "+ ADD" not in report
+        assert "no additions recommended from current state" in report
+        assert "ADDITIONS RECOMMENDED NOW: None" in report
         assert "REMOVE FROM WATCHLIST" not in report
 
     def test_case_3_partial_fill_reports_capacity_and_each_addition(self):
@@ -149,10 +150,10 @@ class TestWatchlistOptimizationReporting:
             watchlist_total=0,
         )
 
-        assert "optimal BUY-ready set under-filled (2 of 6)" in report
-        assert sum(line.startswith("  + ADD") for line in report.splitlines()) == 2
+        assert "1 addition recommended from current state" in report
+        assert sum(line.startswith("  ADD     ") for line in report.splitlines()) == 1
         assert "7203" in report
-        assert "6758" in report
+        assert "ANALYZED BUYS NOT RECOMMENDED — BELOW CONVICTION BAR:" in report
 
     def test_case_4_full_optimization_separates_keeps_additions_and_optional_swaps(
         self,
@@ -175,15 +176,11 @@ class TestWatchlistOptimizationReporting:
             watchlist_total=4,
         )
 
-        assert "top 6 medium-or-higher BUY-ready slots" in report
-        assert "KEEPING ACTIVE (2):" in report
-        assert sum(line.startswith("  + ADD") for line in report.splitlines()) == 4
-        assert "OPTIONAL OPTIMIZATION" in report
-        assert report.count("REMOVE FROM WATCHLIST") == 2
-        assert (
-            "Exact replacement list withheld — decide optional removals first."
-            in report
-        )
+        assert "2 additions recommended from current state" in report
+        assert "KEEPING ACTIVE (4):" in report
+        assert sum(line.startswith("  ADD     ") for line in report.splitlines()) == 2
+        assert "OPTIONAL OPTIMIZATION" not in report
+        assert "REMOVE FROM WATCHLIST" not in report
 
     def test_must_remove_is_visually_distinct_from_optional_optimization(self):
         rejected = ReconciliationItem(
@@ -205,7 +202,9 @@ class TestWatchlistOptimizationReporting:
 
         assert "MUST REMOVE (verdict reject):" in report
         assert "OPTIONAL OPTIMIZATION" not in report
-        assert "RETAINED TO KEEP WATCHLIST NON-EMPTY:" in report
+        assert (
+            "ADMINISTRATIVE WATCHLIST RETENTION — NOT A BUY RECOMMENDATION:" in report
+        )
         assert "verdict DO_NOT_INITIATE" in report
         assert "below medium conviction" in report
 
@@ -261,7 +260,7 @@ class TestWatchlistOptimizationReporting:
         )
 
         assert "KEEPING ACTIVE (1):" in report
-        assert "+ ADD" in report
+        assert "  ADD" in report
         assert "raw IBKR symbols are exchange-ambiguous" in report
 
 
@@ -290,7 +289,9 @@ class TestExecutableBuyAlignment:
         displaced = _make_buy_item("8888.T", conviction="Medium")
         report = self._report([*selected, displaced], watchlist_total=7)
 
-        opt_block = report.split("WATCHLIST OPTIMIZATION")[1].split("CASH SUMMARY")[0]
+        opt_block = report.split("WATCHLIST ADDITION REVIEW")[1].split("CASH SUMMARY")[
+            0
+        ]
         assert "OPTIONAL OPTIMIZATION" in opt_block
         assert "REMOVE FROM WATCHLIST  8888 (8888.T)" in opt_block
 
@@ -307,7 +308,7 @@ class TestExecutableBuyAlignment:
 
     def test_advisory_offwatch_buy_reserves_no_cash_and_no_order(self):
         report = self._report([_make_offwatch_buy("WDO.TO")], watchlist_total=0)
-        assert "+ ADD" in report
+        assert "  ADD" in report
         assert "→ BUY  WDO" not in report
         assert "BUY  WDO  (100 sh):" not in report
         assert "Plan turnover" not in report
@@ -331,7 +332,9 @@ class TestExecutableBuyAlignment:
             cash_impact_usd=0.0,
         )
         report = self._report([*selected, displaced], watchlist_total=7)
-        opt_block = report.split("WATCHLIST OPTIMIZATION")[1].split("CASH SUMMARY")[0]
+        opt_block = report.split("WATCHLIST ADDITION REVIEW")[1].split("CASH SUMMARY")[
+            0
+        ]
         assert "REMOVE FROM WATCHLIST  8888 (8888.T)" in opt_block
         assert "8888" not in report.split("CASH SUMMARY")[1]
 

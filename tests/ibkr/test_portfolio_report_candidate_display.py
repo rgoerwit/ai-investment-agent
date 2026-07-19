@@ -120,7 +120,7 @@ class TestIbkrDisplaySymbol:
             is_watchlist=True,
         )
         report = format_report([item], _make_portfolio())
-        assert "Excluded below medium conviction: 1" in report
+        assert "ANALYZED BUYS NOT RECOMMENDED — BELOW CONVICTION BAR:" in report
 
     def test_reviews_run_cmd_uses_analysis_ticker_when_item_ticker_bare(self):
         """When item.ticker has no suffix but analysis.ticker has one, REVIEWS run cmd uses analysis.ticker.
@@ -228,20 +228,20 @@ class TestWatchlistCandidatesInFlight:
         item = _make_offwatch_buy("WDO.TO")
         live_order = {"ticker": "WDO", "side": "B", "remainingSize": "100"}
         report = self._report([item], live_orders=[live_order])
-        assert "WATCHLIST OPTIMIZATION" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
         assert "already in flight" in report
         assert "WDO" in report
         assert not any(
-            line.startswith("  + ADD") and "WDO" in line for line in report.splitlines()
+            line.startswith("  ADD") and "WDO" in line for line in report.splitlines()
         )
 
     def test_candidate_without_live_order_shown_normally(self):
         """Off-watchlist BUY with no live order appears as an addition."""
         item = _make_offwatch_buy("WDO.TO")
         report = self._report([item], live_orders=[])
-        assert "WATCHLIST OPTIMIZATION" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
         assert "WDO" in report
-        assert "+ ADD" in report
+        assert "  ADD" in report
 
     def test_empty_section_shown_when_cash_policy_blocked_candidates(self):
         report = format_report(
@@ -251,7 +251,7 @@ class TestWatchlistCandidatesInFlight:
             watchlist_candidates_blocked_by_cash=2,
         )
 
-        assert "WATCHLIST OPTIMIZATION" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
         assert "Cash-blocked candidates retained for ranking: 2" in report
 
     def test_in_flight_candidate_excluded_from_watchlist_moves(self):
@@ -261,23 +261,22 @@ class TestWatchlistCandidatesInFlight:
         report = self._report([item], live_orders=[live_order])
         assert "WATCHLIST MOVES" not in report
         assert not any(
-            line.startswith("  + ADD") and "WDO" in line for line in report.splitlines()
+            line.startswith("  ADD") and "WDO" in line for line in report.splitlines()
         )
 
     def test_two_candidates_one_in_flight_other_shown(self):
         """When one candidate is in-flight and another is not, only the latter appears."""
         inflight = _make_offwatch_buy("WDO.TO", conviction="High")
-        pending = _make_offwatch_buy("TOTL.TO", conviction="Medium")
+        pending = _make_offwatch_buy("TOTL.TO", conviction="High")
         live_order = {"ticker": "WDO", "side": "B", "remainingSize": "100"}
         report = self._report([inflight, pending], live_orders=[live_order])
-        assert "WATCHLIST OPTIMIZATION" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
         assert "TOTL" in report
         assert any(
-            line.startswith("  + ADD") and "TOTL" in line
-            for line in report.splitlines()
+            line.startswith("  ADD") and "TOTL" in line for line in report.splitlines()
         )
         assert not any(
-            line.startswith("  + ADD") and "WDO" in line for line in report.splitlines()
+            line.startswith("  ADD") and "WDO" in line for line in report.splitlines()
         )
         assert "already in flight" in report
 
@@ -314,9 +313,9 @@ class TestExchangeQualifiedCandidateSafety:
             [sell, buy_cand], _make_portfolio(), show_recommendations=True
         )
         assert "SELL" in report
-        assert "WATCHLIST OPTIMIZATION" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
         assert "DLG" in report
-        assert "+ ADD" in report
+        assert "  ADD" in report
 
     def test_stop_breach_does_not_block_different_exchange_same_base_candidate(self):
         """Stop handling remains scoped to the exact exchange-qualified security."""
@@ -325,8 +324,8 @@ class TestExchangeQualifiedCandidateSafety:
         report = format_report(
             [sell, buy_cand], _make_portfolio(), show_recommendations=True
         )
-        assert "WATCHLIST OPTIMIZATION" in report
-        assert "+ ADD" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
+        assert "  ADD" in report
 
     def test_different_base_candidate_not_blocked(self):
         """SELL DLG does not suppress a candidate with a different base symbol."""
@@ -335,7 +334,7 @@ class TestExchangeQualifiedCandidateSafety:
         report = format_report(
             [sell, buy_cand], _make_portfolio(), show_recommendations=True
         )
-        assert "WATCHLIST OPTIMIZATION" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
         assert "WDO" in report
 
 
@@ -353,7 +352,7 @@ class TestWatchlistTickerIdentity:
             watchlist_total=1,
         )
         assert "KEEPING ACTIVE" in report
-        assert "+ ADD" not in report
+        assert "ADDITIONS RECOMMENDED NOW: None" in report
 
     def test_bare_watchlist_ticker_protects_itself_but_not_a_suffixed_listing(self):
         """A failed bare resolution cannot be assumed to equal 5434.TW."""
@@ -366,7 +365,7 @@ class TestWatchlistTickerIdentity:
             watchlist_total=1,
         )
         assert "KEEPING PROTECTED" in report
-        assert "+ ADD" in report
+        assert "  ADD" in report
 
     def test_none_watchlist_does_not_suppress(self):
         """watchlist_tickers=None → no watchlist filter applied."""
@@ -377,7 +376,7 @@ class TestWatchlistTickerIdentity:
             show_recommendations=True,
             watchlist_tickers=None,
         )
-        assert "WATCHLIST OPTIMIZATION" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
         assert "5434" in report
 
     def test_different_base_not_blocked(self):
@@ -389,7 +388,7 @@ class TestWatchlistTickerIdentity:
             show_recommendations=True,
             watchlist_tickers={"5434"},
         )
-        assert "WATCHLIST OPTIMIZATION" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
         assert "WDO" in report
 
 
@@ -496,9 +495,8 @@ class TestPortfolioManagerOutputTightening:
     def test_watchlist_moves_are_advisory_not_past_tense(self):
         high = _make_offwatch_buy("TOTL.JK", conviction="High")
         report = format_report([high], _make_portfolio(), show_recommendations=True)
-        assert "WATCHLIST OPTIMIZATION" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
         assert any(
-            line.startswith("  + ADD") and "TOTL" in line
-            for line in report.splitlines()
+            line.startswith("  ADD") and "TOTL" in line for line in report.splitlines()
         )
         assert "ADDED TO WATCHLIST" not in report

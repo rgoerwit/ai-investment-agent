@@ -53,8 +53,12 @@
              Cost: ~$240 USD  ·  use already-settled cash ($12,000 available)
 
 ══════════════════════════════════════════════════════
-  WATCHLIST OPTIMIZATION  (optimal BUY-ready set under-filled (1 of 6))
+  WATCHLIST ADDITION REVIEW  (no additions recommended from current state)
 ══════════════════════════════════════════════════════
+
+  Current watchlist size: 1  ·  target: 6  ·  open target slots now: 5
+
+  ADDITIONS RECOMMENDED NOW: None
 
   KEEPING ACTIVE (1): 9984 (9984.T)
 
@@ -65,7 +69,8 @@
 ══════════════════════════════════════════════════════
 
   HOLD    9432.T        0.9%  JPY  entry   2,000.00 →     160.00  (-92.0%)  H:72 G:64
-             return:    local-price -92.0%  ·  FX +1150.0%  ·  USD +0.0%
+             return:    FX decomposition withheld: broker values imply an implausible +1150.0% residual;
+                        verify value units or entry FX
 
 ══════════════════════════════════════════════════════
   CONCENTRATION

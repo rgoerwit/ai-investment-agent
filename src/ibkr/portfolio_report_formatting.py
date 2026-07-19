@@ -466,20 +466,23 @@ class ReportBuffer:
             self.labeled_detail("break if:", "  ·  ".join(criteria))
 
     def append_fx_split_line(self, item: ReconciliationItem) -> None:
-        """Local-price vs FX return decomposition for non-USD positions.
+        """Local-price vs implied FX/basis decomposition for non-USD positions.
 
         The local leg is the thesis-relevant number for an investor who treats
         EM-FX erosion as expected cost; the USD leg stays as quiet NAV context.
         """
-        from src.ibkr.portfolio_presentation import fx_return_split
+        from src.ibkr.portfolio_presentation import fx_return_split_diagnostic
 
-        split = fx_return_split(item.ibkr_position)
+        split, issue = fx_return_split_diagnostic(item.ibkr_position)
+        if issue:
+            self.labeled_detail("return:", issue)
+            return
         if split is None:
             return
         local_pct, fx_pct, usd_pct = split
         self.labeled_detail(
             "return:",
-            f"local-price {local_pct:+.1f}%  ·  FX {fx_pct:+.1f}%  ·  "
+            f"local-price {local_pct:+.1f}%  ·  implied FX/basis {fx_pct:+.1f}%  ·  "
             f"USD {usd_pct:+.1f}%",
         )
 

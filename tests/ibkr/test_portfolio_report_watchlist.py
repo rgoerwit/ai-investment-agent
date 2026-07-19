@@ -65,14 +65,14 @@ class TestWatchlistUnavailableDegradation:
         )
         assert "WATCHLIST UNAVAILABLE" in report
         assert "Watchlist filtering is unavailable" in report
-        assert "WATCHLIST OPTIMIZATION" in report
-        assert "confirm watchlist status" in report
-        assert "re-check IBKR before" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
+        assert "watchlist status unknown" in report
+        assert "IBKR is rechecked" in report
         assert "WATCHLIST CANDIDATES" not in report
         assert "ADD TO WATCHLIST" not in report
         assert "NEW BUYS and watchlist filtering are omitted" not in report
         assert "new-buy suggestions are omitted" not in report
-        assert "+ ADD" in report
+        assert "  ADD" in report
 
     def test_available_keeps_watchlist_add_framing(self):
         report = format_report(
@@ -83,8 +83,8 @@ class TestWatchlistUnavailableDegradation:
             portfolio_data_loaded=True,
         )
         assert "WATCHLIST UNAVAILABLE" not in report
-        assert "WATCHLIST OPTIMIZATION" in report
-        assert "+ ADD" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
+        assert "  ADD" in report
 
 
 class TestWatchlistOptimizationSection:
@@ -117,7 +117,7 @@ class TestWatchlistOptimizationSection:
             cash_impact_usd=-1752.0,
         )
         report = self._report([item])
-        assert "WATCHLIST OPTIMIZATION" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
         assert "high conviction" in report
         assert "target 4.0%" in report
         assert "Cost:" in report
@@ -166,8 +166,8 @@ class TestWatchlistOptimizationSection:
             cash_impact_usd=0.0,
         )
         report = self._report([item])
-        assert "Excluded below medium conviction: 1" in report
-        assert "+ ADD" not in report
+        assert "ANALYZED BUYS NOT RECOMMENDED — BELOW CONVICTION BAR:" in report
+        assert "ADDITIONS RECOMMENDED NOW: None" in report
 
     def test_no_analysis_is_excluded_from_the_buy_ready_pool(self):
         """A BUY with no analysis cannot safely occupy a BUY-ready slot."""
@@ -184,33 +184,33 @@ class TestWatchlistOptimizationSection:
             is_watchlist=True,
         )
         report = self._report([item])
-        assert "Excluded below medium conviction: 1" in report
-        assert "+ ADD" not in report
+        assert "ANALYZED BUYS NOT RECOMMENDED — BELOW CONVICTION BAR:" in report
+        assert "ADDITIONS RECOMMENDED NOW: None" in report
 
     def test_header_section_is_always_shown(self):
         """The unified section makes an empty optimization explicit."""
         item = _make_buy_item()
         report = self._report([item])
-        assert "WATCHLIST OPTIMIZATION" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
 
     def test_title_states_no_watchlist_when_snapshot_metadata_is_absent(self):
         """A name alone is not evidence that a watchlist was actually loaded."""
         item = _make_buy_item()
         report = self._report([item], watchlist_name="MyWatchlist")
-        assert "no watchlist loaded — additions only" in report
+        assert "no watchlist loaded; additions evaluated" in report
 
     def test_auto_discovered_watchlist_uses_total_not_name(self):
         """An auto-discovered watchlist is loaded when its total is present."""
         item = _make_buy_item()
         report = self._report([item], watchlist_name=None, watchlist_total=1)
-        assert "optimal BUY-ready set under-filled (1 of 6)" in report
+        assert "no additions recommended from current state" in report
         assert "no watchlist loaded" not in report
 
     def test_title_reports_the_buy_ready_target_when_watchlist_is_loaded(self):
         """The report uses the optimization target, not a raw watchlist BUY count."""
         items = [_make_buy_item("7203.T"), _make_buy_item("6752.T")]
         report = self._report(items, watchlist_name="MyWatchlist", watchlist_total=15)
-        assert "optimal BUY-ready set under-filled (2 of 6)" in report
+        assert "no additions recommended from current state" in report
 
     def test_title_does_not_treat_a_name_as_loaded_state(self):
         """A missing total remains an additions-only result."""
@@ -218,7 +218,7 @@ class TestWatchlistOptimizationSection:
         report = self._report(
             [item], watchlist_name="MyWatchlist", watchlist_total=None
         )
-        assert "no watchlist loaded — additions only" in report
+        assert "no watchlist loaded; additions evaluated" in report
 
     def test_offwatch_buy_is_an_addition_in_the_unified_section(self):
         """An off-watchlist BUY appears as an addition rather than a parallel list."""
@@ -231,7 +231,7 @@ class TestWatchlistOptimizationSection:
             is_watchlist=False,
         )
         report = self._report([item], watchlist_name="MyWatchlist")
-        assert "WATCHLIST OPTIMIZATION" in report
+        assert "WATCHLIST ADDITION REVIEW" in report
 
     # ── Order annotation for BUY items ────────────────────────────────────────
 

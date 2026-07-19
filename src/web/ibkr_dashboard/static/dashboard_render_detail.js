@@ -227,7 +227,20 @@ function renderDrilldown(payload) {
               ? fmtLocalMoney(position.current_price_local, position.currency)
               : undefined,
         },
-        { label: "Market value", value: fmtCurrency(position.market_value_usd) },
+        {
+          label: "Valuation status",
+          value:
+            position.valuation_valid === false
+              ? position.valuation_issue || "Review required"
+              : undefined,
+        },
+        {
+          label: "Market value",
+          value:
+            position.valuation_valid === false
+              ? "Unavailable"
+              : fmtCurrency(position.market_value_usd),
+        },
         {
           label: "Local-price return",
           value:
@@ -237,14 +250,21 @@ function renderDrilldown(payload) {
               : undefined,
         },
         {
-          label: "FX effect",
+          label: "Implied FX / basis",
           value:
             position.fx_effect_pct !== undefined &&
             position.fx_effect_pct !== null
               ? `${Number(position.fx_effect_pct).toFixed(1)}%`
               : undefined,
         },
-        { label: "Unrealized P/L (USD)", value: fmtCurrency(position.unrealized_pnl_usd) },
+        { label: "Return note", value: position.fx_return_issue },
+        {
+          label: "Unrealized P/L (USD)",
+          value:
+            position.valuation_valid === false
+              ? "Unavailable"
+              : fmtCurrency(position.unrealized_pnl_usd),
+        },
       ])}
       ${renderDetailSection("Latest Analysis", [
         { label: "Verdict", value: analysis.verdict },

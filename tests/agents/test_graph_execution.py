@@ -505,8 +505,9 @@ class TestAuditorLLMConfiguration:
                 assert kw["model"] == "gpt-5.4-mini"
                 assert kw["reasoning_effort"] == "low"
 
-    def test_auditor_quick_mode_full_gpt5_uses_minimal_effort(self):
-        """Quick-mode full gpt-5 auditor should use 'minimal'."""
+    @pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
+    def test_auditor_quick_mode_gpt56_models_use_low_effort(self, model):
+        """Quick-mode GPT-5.6 variants must use their documented low effort."""
         try:
             import langchain_openai  # noqa: F401
         except ImportError:
@@ -525,12 +526,12 @@ class TestAuditorLLMConfiguration:
                 cfg.enable_consultant = True
                 cfg.get_openai_api_key.return_value = "k"
                 cfg.auditor_model = None
-                cfg.auditor_quick_model = "gpt-5.4"
+                cfg.auditor_quick_model = model
                 cfg.consultant_model = "gpt-5.4"
                 create_auditor_llm(quick_mode=True)
                 kw = mock_chatgpt.call_args[1]
-                assert kw["model"] == "gpt-5.4"
-                assert kw["reasoning_effort"] == "minimal"
+                assert kw["model"] == model
+                assert kw["reasoning_effort"] == "low"
 
 
 class TestAuditorEnablementContract:

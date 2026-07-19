@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -24,28 +25,44 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
-def _resolve_fx(analysis: AnalysisRecord) -> float:
-    """Return FX rate (local → USD) for an analysis, with fallback chain."""
+def _resolve_fx(analysis: AnalysisRecord) -> float | None:
+    """Return a local-to-USD rate, or None when conversion cannot be trusted."""
     currency = (analysis.currency or "USD").strip().upper()
     saved = analysis.fx_rate_to_usd
 
-    if saved is not None:
-        if saved == 1.0 and currency not in ("USD", ""):
-            fallback = get_fx_rate_fallback(currency)
-            if fallback is not None:
-                logger.warning(
-                    "fx_rate_saved_1_overridden",
-                    ticker=analysis.ticker,
-                    currency=currency,
-                    fallback_rate=fallback,
-                    msg="Saved fx_rate=1.0 for non-USD currency replaced with fallback "
-                    "(legacy snapshot; re-run analysis to persist correct rate)",
-                )
-                return fallback
-        return saved
-
     if currency in ("USD", ""):
         return 1.0
+
+    if saved is not None:
+        fallback = get_fx_rate_fallback(currency)
+        saved_is_sentinel = saved == 1.0
+        saved_is_invalid = not math.isfinite(saved) or saved <= 0
+        saved_is_unit_mismatch = (
+            fallback is not None
+            and not saved_is_invalid
+            and (saved / fallback > 10.0 or saved / fallback < 0.1)
+        )
+        if not (saved_is_sentinel or saved_is_invalid or saved_is_unit_mismatch):
+            return saved
+        if fallback is not None:
+            logger.warning(
+                "fx_rate_saved_invalid_overridden",
+                ticker=analysis.ticker,
+                currency=currency,
+                saved_rate=saved,
+                fallback_rate=fallback,
+                reason="Saved non-USD FX rate is a sentinel, invalid, or unit mismatch",
+            )
+            return fallback
+        logger.error(
+            "fx_rate_saved_invalid",
+            ticker=analysis.ticker,
+            currency=currency,
+            saved_rate=saved,
+            reason="Saved non-USD FX rate cannot be trusted and no fallback exists",
+        )
+        return None
+
     rate = get_fx_rate_fallback(currency)
     if rate is not None:
         logger.warning(
@@ -60,9 +77,9 @@ def _resolve_fx(analysis: AnalysisRecord) -> float:
         "fx_rate_unknown",
         ticker=analysis.ticker,
         currency=currency,
-        msg="No FX rate available; cost/quantity will be wrong — re-run analysis to fix",
+        reason="No FX rate available; order sizing is disabled until the rate is fixed",
     )
-    return 1.0
+    return None
 
 
 _MIN_ORDER_USD: float = 200.0

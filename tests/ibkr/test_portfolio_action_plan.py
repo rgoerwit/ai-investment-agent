@@ -33,7 +33,7 @@ def _buy(
     is_watchlist: bool = False,
     cost: float = 1_500,
 ) -> ReconciliationItem:
-    analysis = make_analysis(ticker=ticker, conviction="Medium", size_pct=4.0)
+    analysis = make_analysis(ticker=ticker, conviction="High", size_pct=4.0)
     analysis.health_adj = 60.0
     analysis.growth_adj = 60.0
     return ReconciliationItem(

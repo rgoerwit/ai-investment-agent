@@ -10,11 +10,14 @@ from __future__ import annotations
 import structlog
 
 from src.error_safety import summarize_exception
-from src.fx_normalization import FALLBACK_RATES_TO_USD
 from src.ibkr.client import IbkrClient, mask_account
 from src.ibkr.exceptions import IBKRError
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
 from src.ibkr.portfolio_defaults import DEFAULT_CASH_BUFFER_PCT
+from src.ibkr.position_values import (
+    NormalizedPositionValues,
+    normalize_position_values,
+)
 from src.ibkr.ticker import Ticker
 from src.ibkr.ticker_mapper import (
     TickerResolution,
@@ -34,6 +37,28 @@ _MULTI_EXCHANGE_CURRENCIES: frozenset[str] = frozenset(
 )
 
 logger = structlog.get_logger(__name__)
+
+
+def _parse_position_number(
+    value: object, *, default: float = 0.0
+) -> tuple[float, bool]:
+    """Parse one broker number without letting a malformed row abort the snapshot."""
+    if value is None or value == "":
+        return default, True
+    if isinstance(value, bool):
+        return default, False
+    try:
+        return float(value), True  # type: ignore[arg-type]
+    except (OverflowError, TypeError, ValueError):
+        return default, False
+
+
+def _position_field(raw: dict, primary: str, fallback: str) -> object:
+    """Select an IBKR field without hiding malformed falsey primary values."""
+    value = raw.get(primary)
+    if value is None or value == "":
+        return raw.get(fallback, 0)
+    return value
 
 
 def normalize_positions(
@@ -139,22 +164,74 @@ def normalize_positions(
             ticker_identity_verified = True
             ticker_resolution_source = "operator_override"
 
-        raw_market_value = float(raw.get("mktValue", 0) or raw.get("marketValue", 0))
+        raw_market_value, market_value_valid = _parse_position_number(
+            _position_field(raw, "mktValue", "marketValue")
+        )
         currency = raw_currency or ("GBP" if ticker_obj.suffix == ".L" else "USD")
-        fx_rate = FALLBACK_RATES_TO_USD.get(currency.upper(), 1.0)
-        market_value_usd = raw_market_value * fx_rate
+        quantity, quantity_valid = _parse_position_number(
+            _position_field(raw, "position", "qty")
+        )
+        current_price_local, current_price_valid = _parse_position_number(
+            _position_field(raw, "mktPrice", "lastPrice")
+        )
+        avg_cost_local, avg_cost_valid = _parse_position_number(
+            _position_field(raw, "avgCost", "avgPrice")
+        )
+        raw_unrealized_pnl_value = raw.get("unrealizedPnl")
+        raw_unrealized_pnl, pnl_valid = _parse_position_number(raw_unrealized_pnl_value)
+        if raw_unrealized_pnl_value is None:
+            raw_unrealized_pnl = None
+        numeric_validity = {
+            "quantity": quantity_valid,
+            "market_value": market_value_valid,
+            "current_price": current_price_valid,
+            "avg_cost": avg_cost_valid,
+            "unrealized_pnl": pnl_valid,
+        }
+        malformed_fields = [
+            field for field, is_valid in numeric_validity.items() if not is_valid
+        ]
+        if malformed_fields:
+            normalized_values = NormalizedPositionValues(
+                market_value_usd=0.0,
+                unrealized_pnl_usd=0.0,
+                fx_rate_to_usd=None,
+                market_value_basis="UNAVAILABLE",
+                unrealized_pnl_basis="UNAVAILABLE",
+                valuation_valid=False,
+                valuation_issue=(
+                    "Malformed broker numeric field(s): " + ", ".join(malformed_fields)
+                ),
+            )
+        else:
+            normalized_values = normalize_position_values(
+                quantity=quantity,
+                current_price_local=current_price_local,
+                avg_cost_local=avg_cost_local,
+                raw_market_value=raw_market_value,
+                raw_unrealized_pnl=raw_unrealized_pnl,
+                currency=currency,
+            )
+        position_fx_rate = normalized_values.fx_rate_to_usd
+        if not normalized_values.valuation_valid:
+            logger.warning(
+                "position_valuation_unavailable",
+                ticker=ticker_obj.yf,
+                currency=currency,
+                reason=normalized_values.valuation_issue,
+            )
 
         # IBKR reports LSE (.L) prices in GBP; yfinance and saved downside/base-case
         # reference prices use GBX (pence). Multiply by 100 so review-level,
         # valuation-reference, drift, and P&L comparisons use consistent GBX units.
         # NOTE: market_value_usd is computed from IBKR's GBP mktValue (before ×100)
         # using the GBP FX rate, so it is correct — do NOT re-apply FX on GBX prices.
-        current_price_local = float(raw.get("mktPrice", 0) or raw.get("lastPrice", 0))
-        avg_cost_local = float(raw.get("avgCost", 0) or raw.get("avgPrice", 0))
         if ticker_obj.suffix == ".L" and currency.upper() == "GBP":
             current_price_local *= 100
             avg_cost_local *= 100  # GBP → GBX, consistent with analysis/yfinance prices
             currency = "GBX"  # Reflect actual denomination of *_local fields
+            if position_fx_rate is not None:
+                position_fx_rate *= 0.01
             # Re-build Ticker so its currency field is "GBX" (used in suffix fallback)
             ticker_obj = Ticker(
                 symbol=ticker_obj.symbol,
@@ -165,10 +242,15 @@ def normalize_positions(
         position = NormalizedPosition(
             conid=conid or 0,
             ticker=ticker_obj,
-            quantity=float(raw.get("position", 0) or raw.get("qty", 0)),
+            quantity=quantity,
             avg_cost_local=avg_cost_local,
-            market_value_usd=market_value_usd,
-            unrealized_pnl_usd=float(raw.get("unrealizedPnl", 0)),
+            market_value_usd=normalized_values.market_value_usd,
+            unrealized_pnl_usd=normalized_values.unrealized_pnl_usd,
+            fx_rate_to_usd=position_fx_rate,
+            market_value_basis=normalized_values.market_value_basis,
+            unrealized_pnl_basis=normalized_values.unrealized_pnl_basis,
+            valuation_valid=normalized_values.valuation_valid,
+            valuation_issue=normalized_values.valuation_issue,
             currency=currency,
             current_price_local=current_price_local,
             ticker_identity_verified=ticker_identity_verified,
