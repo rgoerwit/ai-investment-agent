@@ -33,6 +33,16 @@ _UNMAPPED_TOKEN_AGENTS: frozenset[str] = frozenset(
 )
 
 
+@pytest.fixture(autouse=True)
+def _reset_token_tracker():
+    from src.token_tracker import get_tracker
+
+    tracker = get_tracker()
+    tracker.reset()
+    yield
+    tracker.reset()
+
+
 def _baseline_result(extra: dict[str, Any] | None = None) -> dict[str, Any]:
     result: dict[str, Any] = {
         "market_report": "market text",
@@ -92,7 +102,7 @@ def test_agent_attribution_row_shape(tmp_path: Path) -> None:
     row = saved["agent_attribution"]["market_report"]
     assert row["agent"] == "market_analyst"
     assert row["artifact_field"] == "market_report"
-    assert row["token_agents"] == ["Market Analyst"]
+    assert row["token_agents"] == []
     assert row["present"] is True
     assert row["char_count"] == len("market text")
     assert row["direct_pm_input"] is True
@@ -126,11 +136,7 @@ def test_agent_attribution_risk_debate_aggregates_three_siblings(
     expected = len("risky view") + 1 + len("safe view") + 1 + len("neutral view")
     assert row["char_count"] == expected
     assert row["present"] is True
-    assert row["token_agents"] == [
-        "Risky Analyst",
-        "Safe Analyst",
-        "Neutral Analyst",
-    ]
+    assert row["token_agents"] == []
 
 
 def test_agent_attribution_risk_debate_absent_when_empty(tmp_path: Path) -> None:
@@ -178,6 +184,24 @@ def test_saved_json_persists_pm_source_artifacts(tmp_path: Path) -> None:
     }
 
 
+def test_saved_json_persists_auditor_budget_telemetry(tmp_path: Path) -> None:
+    telemetry = {
+        "policy": {"max_llm_calls": 4},
+        "tool_calls": {"get_official_document": 2},
+        "llm_calls": 2,
+        "evidence_chars": 18_000,
+        "evidence_truncated": True,
+        "outcomes": ["EVIDENCE_CHAR_LIMIT"],
+    }
+    saved = _save(tmp_path, _baseline_result({"auditor_budget": telemetry}))
+    assert saved["auditor_budget"] == telemetry
+
+
+def test_saved_json_uses_null_for_missing_auditor_budget(tmp_path: Path) -> None:
+    saved = _save(tmp_path, _baseline_result())
+    assert saved["auditor_budget"] is None
+
+
 def test_saved_json_bounds_large_source_artifacts(tmp_path: Path) -> None:
     saved = _save(
         tmp_path,
@@ -218,6 +242,40 @@ def test_agent_attribution_token_usage_joins_to_token_tracker_rows(
     assert market["completion_tokens"] == 50
     assert market["total_tokens"] == 150
     assert market["contributors"] == ["Market Analyst"]
+    assert saved["agent_attribution"]["market_report"]["token_agents"] == [
+        "Market Analyst"
+    ]
+    tracker.reset()
+
+
+def test_agent_attribution_omits_unused_fallback_models(tmp_path: Path) -> None:
+    """Initialized-but-unused Sol/direct-retry models are not contributors."""
+    from src.token_tracker import get_tracker
+
+    tracker = get_tracker()
+    tracker.reset()
+    tracker.record_usage(
+        agent_name="Global Forensic Auditor",
+        model_name="gpt-5.6-terra",
+        prompt_tokens=10,
+        completion_tokens=5,
+        elapsed_seconds=1.0,
+    )
+    tracker.record_usage(
+        agent_name="APAC Regional Specialist",
+        model_name="glm-5.2",
+        prompt_tokens=10,
+        completion_tokens=5,
+        elapsed_seconds=1.0,
+    )
+    saved = _save(tmp_path, _baseline_result())
+
+    assert saved["agent_attribution"]["auditor_report"]["token_agents"] == [
+        "Global Forensic Auditor"
+    ]
+    assert saved["agent_attribution"]["apac_regional_report"]["token_agents"] == [
+        "APAC Regional Specialist"
+    ]
     tracker.reset()
 
 

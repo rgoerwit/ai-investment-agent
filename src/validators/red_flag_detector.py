@@ -6,6 +6,8 @@ from src.validators.financial_rules import (
     detect_ocf_corroboration_flag,
     detect_red_flags,
     extract_auditor_ocf,
+    extract_auditor_ocf_observation,
+    extract_datablock_ocf_observation,
     is_ocf_period_mismatch_resolved,
     parse_ocf_amount,
     reconcile_ocf_period_mismatch_flags,
@@ -47,6 +49,8 @@ class RedFlagDetector:
         reconcile_ocf_period_mismatch_flags
     )
     extract_auditor_ocf = staticmethod(extract_auditor_ocf)
+    extract_auditor_ocf_observation = staticmethod(extract_auditor_ocf_observation)
+    extract_datablock_ocf_observation = staticmethod(extract_datablock_ocf_observation)
     parse_ocf_amount = staticmethod(parse_ocf_amount)
     extract_legal_risks = staticmethod(extract_legal_risks)
     detect_legal_flags = staticmethod(detect_legal_flags)

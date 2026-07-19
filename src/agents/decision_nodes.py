@@ -49,6 +49,7 @@ from src.runtime_diagnostics import (
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .evidence_constraints import downstream_evidence_constraints
 from .governance_prompt import governance_block, governance_card
 from .output_limits import cap_state_value
 from .output_validation import (
@@ -538,6 +539,7 @@ def create_trader_node(llm, memory: Any | None) -> Callable:
             f"\n\nVALUATION PARAMETERS:\n{valuation}" if valuation else ""
         )
         governance_section = governance_block(state, with_label=True)
+        evidence_constraints = downstream_evidence_constraints(state)
         macro_section = support.macro_section_for(config)
 
         market_report = get_valid_artifact_content(state, "market_report") or "N/A"
@@ -562,7 +564,7 @@ FUNDAMENTALS ANALYST REPORT:
 {support.summarize_for_pm(fundamentals_report, "fundamentals", 6000) if fundamentals_report != "N/A" else "N/A"}
 
 RESEARCH MANAGER PLAN:
-{support.summarize_for_pm(investment_plan, "research", 3500) if investment_plan != "N/A" else "N/A"}{macro_section}{apac_section}{consultant_section}{valuation_section}{governance_section}"""
+{support.summarize_for_pm(investment_plan, "research", 3500) if investment_plan != "N/A" else "N/A"}{macro_section}{apac_section}{consultant_section}{valuation_section}{governance_section}{evidence_constraints}"""
         prompt = (
             f"{agent_prompt.system_message}\n\n{all_input}\n\nCreate Position Plan."
         )
@@ -576,6 +578,12 @@ RESEARCH MANAGER PLAN:
                 model_name=support.get_model_name(llm),
             )
             content_str = message_utils.extract_string_content(response.content)
+            if re.search(r"(?im)^\s*ACTION:\s*DO_NOT_INITIATE\b", content_str):
+                content_str = re.sub(
+                    r"(?im)^\s*STOP:\s*[^\n]*$",
+                    "STOP: N/A (no position; use thesis-break conditions)",
+                    content_str,
+                )
             from src.utils import detect_truncation
 
             trunc_info = detect_truncation(content_str, agent="trader")
@@ -638,6 +646,7 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
             f"{consultant if consultant else 'N/A (consultant disabled or unavailable)'}"
         )
         governance_section = governance_block(state, with_label=True)
+        evidence_constraints = downstream_evidence_constraints(state)
         macro_section = support.macro_section_for(config)
 
         trader_plan = (
@@ -645,7 +654,7 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
         )
         prompt = (
             f"{agent_prompt.system_message}\n\nPOSITION PLANNER OUTPUT: "
-            f"{trader_plan}{consultant_section}{governance_section}{macro_section}\n\n"
+            f"{trader_plan}{consultant_section}{governance_section}{macro_section}{evidence_constraints}\n\n"
             "Provide risk assessment."
         )
         try:
@@ -804,6 +813,7 @@ NEUTRAL ANALYST (Balanced):
                 ticker,
                 m_and_a_status=extract_data_block_field(fundamentals, "M_AND_A_STATUS"),
                 capital_context=_value_trap_capital_context(fundamentals),
+                governance_card=state.get("entity_governance_card"),
             )
             if value_trap_warnings:
                 red_flags.extend(value_trap_warnings)
@@ -947,10 +957,8 @@ NEUTRAL ANALYST (Balanced):
         # auditor artifact is never parsed as a corroborating figure.
         auditor_report = get_valid_artifact_content(state, "auditor_report") or None
         ocf_corroboration_flag = RedFlagDetector.detect_ocf_corroboration_flag(
-            RedFlagDetector.parse_ocf_amount(
-                extract_data_block_field(fundamentals, "OPERATING_CASH_FLOW")
-            ),
-            RedFlagDetector.extract_auditor_ocf(auditor_report),
+            RedFlagDetector.extract_datablock_ocf_observation(fundamentals),
+            RedFlagDetector.extract_auditor_ocf_observation(auditor_report),
             ticker,
         )
         if ocf_corroboration_flag:
@@ -1215,8 +1223,11 @@ RISK TEAM DEBATE:
                     "thesis, and quote the basis for that choice."
                 )
 
+        constraint_state = dict(state)
+        constraint_state["red_flags"] = red_flags
+        evidence_constraints = downstream_evidence_constraints(constraint_state)
         prompt = (
-            f"{pm_system_msg}{governance_block(state)}{vehicle_directive}\n\n"
+            f"{pm_system_msg}{governance_block(state)}{vehicle_directive}{evidence_constraints}\n\n"
             f"{all_context}\n\nMake Portfolio Manager Verdict."
         )
 
@@ -1562,6 +1573,7 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                         capital_context=_value_trap_capital_context(
                             fundamentals_report
                         ),
+                        governance_card=card_payload,
                     )
                     if vt_warnings:
                         red_flags.extend(vt_warnings)

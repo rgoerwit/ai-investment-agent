@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -26,6 +28,18 @@ APAC_UNAVAILABLE_SENTINEL = "APAC_SPECIALIST_UNAVAILABLE"
 APAC_REPORT_FIELD = "apac_regional_report"
 
 
+def _is_glm_1301_policy_block(exc: BaseException) -> bool:
+    message = str(exc)
+    return bool(
+        re.search(r"(?<!\d)1301(?!\d)", message)
+        and re.search(
+            r"error|policy|content|sensitive|unsafe|moderation|不安全|敏感",
+            message,
+            re.IGNORECASE,
+        )
+    )
+
+
 def _clip(value: object, limit: int) -> str:
     text = "" if value is None else str(value)
     if len(text) <= limit:
@@ -46,8 +60,7 @@ def _shareholder_return_signal(state: AgentState) -> str:
     strength = signals.get("value_up_plan_strength") or "UNKNOWN"
     execution = signals.get("shareholder_return_execution") or "UNKNOWN"
     return (
-        f"VALUE_UP_PLAN_STRENGTH: {strength}\n"
-        f"SHAREHOLDER_RETURN_EXECUTION: {execution}"
+        f"VALUE_UP_PLAN_STRENGTH: {strength}\nSHAREHOLDER_RETURN_EXECUTION: {execution}"
     )
 
 
@@ -72,7 +85,7 @@ def build_apac_specialist_payload(state: AgentState) -> dict[str, str]:
     }
 
 
-def create_apac_specialist_node(llm) -> Callable:
+def create_apac_specialist_node(llm, *, fallback_llm=None) -> Callable:
     """Create the no-tools APAC Regional Specialist node."""
 
     async def apac_specialist_node(
@@ -107,15 +120,39 @@ def create_apac_specialist_node(llm) -> Callable:
             HumanMessage(content=wrapped_payload),
         ]
 
+        active_llm = llm
         try:
-            response = await agent_runtime.invoke_with_rate_limit_handling(
-                llm,
-                messages,
-                context=agent_prompt.agent_name,
-                provider=support.infer_provider_name(llm),
-                model_name=support.get_model_name(llm),
-                overall_timeout_seconds=240,
-            )
+            try:
+                response = await agent_runtime.invoke_with_rate_limit_handling(
+                    active_llm,
+                    messages,
+                    context=agent_prompt.agent_name,
+                    provider=support.infer_provider_name(active_llm),
+                    model_name=support.get_model_name(active_llm),
+                    overall_timeout_seconds=240,
+                )
+            except Exception as exc:
+                if fallback_llm is None or not _is_glm_1301_policy_block(exc):
+                    raise
+                payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+                logger.warning(
+                    "apac_policy_block_direct_retry",
+                    ticker=ticker,
+                    provider_code=1301,
+                    payload_sha256=hashlib.sha256(payload_json.encode()).hexdigest(),
+                    payload_chars=len(payload_json),
+                )
+                active_llm = fallback_llm
+                response = await agent_runtime.invoke_with_rate_limit_handling(
+                    active_llm,
+                    messages,
+                    context=f"{agent_prompt.agent_name}_direct_retry",
+                    provider=support.infer_provider_name(active_llm),
+                    model_name=support.get_model_name(active_llm),
+                    overall_timeout_seconds=240,
+                    max_attempts=1,
+                    max_transient_attempts=1,
+                )
             text = message_utils.extract_string_content(response.content).strip()
             if text != APAC_NO_MATERIAL_SENTINEL:
                 text = cap_state_value(text, APAC_REPORT_FIELD)
@@ -123,7 +160,7 @@ def create_apac_specialist_node(llm) -> Callable:
             result = success_artifact(
                 APAC_REPORT_FIELD,
                 text,
-                provider=support.infer_provider_name(llm),
+                provider=support.infer_provider_name(active_llm),
             )
             result["sender"] = "apac_regional_specialist"
             result["messages"] = [response]

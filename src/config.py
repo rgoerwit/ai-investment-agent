@@ -488,6 +488,49 @@ class Settings(BaseSettings):
         validation_alias="AUDITOR_QUICK_MODEL",
         description="Model for the auditor agent in --quick mode",
     )
+    auditor_escalation_model: str | None = Field(
+        default="gpt-5.6-sol",
+        validation_alias="AUDITOR_ESCALATION_MODEL",
+        description="Optional second-pass model for complete, complex forensic cases",
+    )
+    auditor_search_call_budget: int = Field(
+        default=3, ge=1, le=8, validation_alias="AUDITOR_SEARCH_CALL_BUDGET"
+    )
+    auditor_document_budget: int = Field(
+        default=2, ge=0, le=4, validation_alias="AUDITOR_DOCUMENT_BUDGET"
+    )
+    auditor_official_document_hosts: str = Field(
+        default="",
+        validation_alias="AUDITOR_OFFICIAL_DOCUMENT_HOSTS",
+        description=(
+            "Comma-separated issuer/investor-relations host allowlist for Auditor "
+            "documents not hosted by a supported exchange"
+        ),
+    )
+    auditor_max_document_bytes: int = Field(
+        default=15_000_000,
+        ge=100_000,
+        le=50_000_000,
+        validation_alias="AUDITOR_MAX_DOCUMENT_BYTES",
+    )
+    auditor_max_document_pages: int = Field(
+        default=250, ge=1, le=500, validation_alias="AUDITOR_MAX_DOCUMENT_PAGES"
+    )
+    auditor_max_selected_pages: int = Field(
+        default=12, ge=1, le=30, validation_alias="AUDITOR_MAX_SELECTED_PAGES"
+    )
+    auditor_max_evidence_chars: int = Field(
+        default=35_000,
+        ge=5_000,
+        le=100_000,
+        validation_alias="AUDITOR_MAX_EVIDENCE_CHARS",
+    )
+    auditor_max_tool_iterations: int = Field(
+        default=2, ge=1, le=3, validation_alias="AUDITOR_MAX_TOOL_ITERATIONS"
+    )
+    auditor_max_llm_calls: int = Field(
+        default=4, ge=2, le=6, validation_alias="AUDITOR_MAX_LLM_CALLS"
+    )
     enable_apac_specialist: bool = Field(
         default=False,
         validation_alias="ENABLE_APAC_SPECIALIST",

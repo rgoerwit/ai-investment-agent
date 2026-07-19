@@ -15,6 +15,7 @@ from langgraph.types import RunnableConfig
 from src.config import config as settings_config
 from src.data_block_utils import unfenced_label
 from src.error_safety import redact_sensitive_text, summarize_exception
+from src.forensic_budget import AuditorBudgetLedger, AuditorBudgetPolicy
 from src.runtime_diagnostics import ArtifactStatus, failure_artifact, success_artifact
 from src.runtime_services import get_current_tool_service
 from src.service_tiers import floor_llm_hard_timeout, floor_llm_total_timeout
@@ -53,7 +54,18 @@ CONSULTANT_TOTAL_TIMEOUT_SECONDS = 240.0
 CONSULTANT_PARTIAL_TOOL_FAILURE_RATIO = 0.5
 # Cap for the aggregator-metrics snapshot injected into the auditor's first
 # message (the loop's ToolMessage truncation cap is far larger at 63.5k).
-_AUDITOR_SNAPSHOT_MAX_CHARS = 20_000
+_AUDITOR_SNAPSHOT_MAX_CHARS = 8_000
+_AUDITOR_COMPLEXITY_MARKERS = (
+    "acquisition",
+    "business combination",
+    "accounting policy change",
+    "restatement",
+    "related-party",
+    "related party",
+    "qualified opinion",
+    "adverse opinion",
+    "disclaimer of opinion",
+)
 _CONSULTANT_QUICK_SCREENING_ADDENDUM = """
 ## QUICK SCREENING MODE
 
@@ -792,7 +804,11 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
     return legal_counsel_node
 
 
-async def _preload_metrics_snapshot(ticker: str, tools_by_name: dict) -> str:
+async def _preload_metrics_snapshot(
+    ticker: str,
+    tools_by_name: dict,
+    ledger: AuditorBudgetLedger | None = None,
+) -> str:
     """One deterministic get_financial_metrics call through the hook chain.
 
     Replaces the auditor's own aggregator-metrics tool rounds (the fetcher's
@@ -803,6 +819,8 @@ async def _preload_metrics_snapshot(ticker: str, tools_by_name: dict) -> str:
     """
     metrics_tool = tools_by_name.get("get_financial_metrics")
     if metrics_tool is None:
+        return ""
+    if ledger and ledger.consume_tool("get_financial_metrics"):
         return ""
     try:
 
@@ -831,7 +849,7 @@ async def _preload_metrics_snapshot(ticker: str, tools_by_name: dict) -> str:
             reason=type(exc).__name__,
         )
         return ""
-    return (
+    snapshot = (
         "\n\nPRE-LOADED AGGREGATOR SNAPSHOT "
         "(merged yfinance/FMP/EODHD metrics — aggregator tier, "
         "not filing ground truth):\n"
@@ -841,13 +859,40 @@ async def _preload_metrics_snapshot(ticker: str, tools_by_name: dict) -> str:
             provenance=f"merged aggregator metrics for {ticker}",
         )
     )
+    return ledger.cap_evidence(snapshot) if ledger else snapshot
 
 
-def create_auditor_node(llm, tools: list) -> Callable:
+def _auditor_should_escalate(content: str) -> bool:
+    status_match = re.search(r"(?im)^STATUS:\s*(CLEAN|CONCERN|RED_FLAG)\s*$", content)
+    if not status_match:
+        return False
+    folded = content.casefold()
+    return any(marker in folded for marker in _AUDITOR_COMPLEXITY_MARKERS)
+
+
+def _budget_exhausted_report(reason: str, ticker: str) -> str:
+    return f"""## FORENSIC AUDITOR REPORT
+
+**STATUS**: INSUFFICIENT_DATA
+
+**Reason**: {reason}
+
+**Recommendation**: Use the Fundamentals DATA_BLOCK as aggregator-tier evidence;
+the independent forensic review for {ticker} exhausted its bounded budget.
+
+---
+FORENSIC_DATA_BLOCK:
+STATUS: INSUFFICIENT_DATA
+META: REPORT_DATE=UNKNOWN | PERIOD=N/A | CONFIDENCE=LOW
+REASON: {reason}
+VERDICT: Independent forensic audit incomplete within configured budget.
+"""
+
+
+def create_auditor_node(llm, tools: list, *, escalation_llm=None) -> Callable:
     """
     Create the Global Forensic Auditor node.
     """
-    max_tool_output_chars = 63500
 
     async def auditor_node(state: AgentState, config: RunnableConfig) -> dict[str, str]:
         from src.prompts import get_prompt
@@ -864,6 +909,9 @@ def create_auditor_node(llm, tools: list) -> Callable:
         ticker = state.get("company_of_interest", "UNKNOWN")
         company_name = state.get("company_name", ticker)
         company_resolved = state.get("company_name_resolved", True)
+        policy = AuditorBudgetPolicy.from_settings()
+        ledger = AuditorBudgetLedger(policy)
+        evidence_fragments: list[str] = []
 
         context = support.get_context_from_config(config)
         current_date = (
@@ -874,7 +922,7 @@ def create_auditor_node(llm, tools: list) -> Callable:
             "" if company_resolved else f"\n{support._UNRESOLVED_NAME_WARNING}"
         )
         tools_by_name = {t.name: t for t in tools}
-        snapshot_block = await _preload_metrics_snapshot(ticker, tools_by_name)
+        snapshot_block = await _preload_metrics_snapshot(ticker, tools_by_name, ledger)
 
         human_msg = f"""Analyze financial statements for:
 Ticker: {ticker}
@@ -889,7 +937,7 @@ Perform a forensic audit using your tools.{snapshot_block}"""
         # model that regresses to one-search-per-turn is cut off economically
         # rather than allowed the old 6-round (create_react_agent-era) budget.
         # At the cap the loop forces a final answer from the data collected.
-        max_tool_iterations = 3
+        max_tool_iterations = policy.max_tool_iterations
 
         def _truncate_messages_for_llm(msgs: list) -> list:
             """Apply the auditor truncation hook to ToolMessages before LLM invocation."""
@@ -903,9 +951,9 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                         if isinstance(msg.content, str)
                         else str(msg.content)
                     )
-                    if len(content) > max_tool_output_chars:
-                        head_size = 58000
-                        tail_size = 5500
+                    if len(content) > policy.max_evidence_chars:
+                        head_size = max(1, policy.max_evidence_chars - 5500)
+                        tail_size = min(5500, policy.max_evidence_chars // 4)
                         truncated_chars = len(content) - head_size - tail_size
                         truncated = (
                             content[:head_size]
@@ -938,6 +986,9 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                 HumanMessage(content=human_msg),
             ]
             for iteration in range(max_tool_iterations + 1):
+                budget_reason = ledger.consume_llm()
+                if budget_reason:
+                    return _budget_exhausted_report(budget_reason, ticker)
                 llm_input = _truncate_messages_for_llm(messages)
                 response = await _invoke_agent_loop_llm(
                     active_llm,
@@ -962,6 +1013,12 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                     tool_fn = tools_by_name.get(tool_call["name"])
                     tool_call_id = tool_call.get("id", tool_call["name"])
                     if tool_fn:
+                        budget_reason = ledger.consume_tool(tool_call["name"])
+                        if budget_reason:
+                            return ToolMessage(
+                                content=f"STATUS: INSUFFICIENT_DATA\nREASON: {budget_reason}",
+                                tool_call_id=tool_call_id,
+                            )
                         try:
 
                             async def _run_auditor_tool(
@@ -978,7 +1035,8 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                                 ),
                                 runner=_run_auditor_tool,
                             )
-                            tool_output = str(tool_result.value)
+                            tool_output = ledger.cap_evidence(str(tool_result.value))
+                            evidence_fragments.append(tool_output)
                         except Exception as tool_err:
                             logger.warning(
                                 "auditor_tool_failed",
@@ -1023,21 +1081,62 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                 llm_with_tools, agent_prompt.system_message
             )
             response_str = canonicalize_forensic_auditor_output(response_str)
+
+            if escalation_llm is not None and _auditor_should_escalate(response_str):
+                if ledger.consume_llm():
+                    ledger.record_outcome("SOL_ESCALATION_NOT_BUDGETED")
+                else:
+                    evidence = "\n\n".join(evidence_fragments)
+                    escalation_messages = [
+                        SystemMessage(
+                            content=(
+                                "Independently review this complete but complex forensic "
+                                "case. Recalculate only from the deterministic tool output, "
+                                "preserve source periods/scopes, and emit the same required "
+                                "FORENSIC_DATA_BLOCK contract. Do not request tools."
+                            )
+                        ),
+                        HumanMessage(
+                            content=(
+                                format_untrusted_block(
+                                    evidence,
+                                    "BOUNDED_FORENSIC_EVIDENCE",
+                                    provenance="official-document and deterministic tools",
+                                )
+                                + "\n\nTERRA DRAFT:\n"
+                                + response_str
+                            )
+                        ),
+                    ]
+                    escalated = await _invoke_agent_loop_llm(
+                        escalation_llm,
+                        escalation_messages,
+                        context="global_forensic_auditor_escalation",
+                    )
+                    response_str = canonicalize_forensic_auditor_output(
+                        message_utils.extract_string_content(
+                            getattr(escalated, "content", "")
+                        )
+                    )
+                    ledger.record_outcome("SOL_ESCALATION_USED")
             validation = validate_required_output(
                 "global_forensic_auditor", response_str
             )
 
             if not validation["ok"]:
-                repaired = await repair_forensic_auditor_output(
-                    llm,
-                    invalid_output=response_str,
-                )
-                repaired = canonicalize_forensic_auditor_output(repaired)
-                repaired_validation = validate_required_output(
-                    "global_forensic_auditor", repaired
-                )
-                response_str = repaired
-                validation = repaired_validation
+                if ledger.consume_llm():
+                    ledger.record_outcome("LLM_REPAIR_NOT_BUDGETED")
+                else:
+                    repaired = await repair_forensic_auditor_output(
+                        llm,
+                        invalid_output=response_str,
+                    )
+                    repaired = canonicalize_forensic_auditor_output(repaired)
+                    repaired_validation = validate_required_output(
+                        "global_forensic_auditor", repaired
+                    )
+                    response_str = repaired
+                    validation = repaired_validation
 
             from src.utils import detect_truncation
 
@@ -1082,6 +1181,7 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                     fallback_content=response_str,
                 )
                 result["sender"] = "global_forensic_auditor"
+                result["auditor_budget"] = ledger.telemetry()
                 return result
 
             logger.debug("auditor_complete", ticker=ticker, length=len(response_str))
@@ -1091,13 +1191,14 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                 provider=support.infer_provider_name(llm),
             )
             result["sender"] = "global_forensic_auditor"
+            result["auditor_budget"] = ledger.telemetry()
             return result
         except Exception as exc:
             error_str = str(exc)
             logger.error(
                 "auditor_error",
                 ticker=ticker,
-                reason=error_str,
+                **summarize_exception(exc, operation="auditor_error"),
                 exc_info=True,
             )
 
@@ -1137,13 +1238,14 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                     error_kind="application_error",
                 )
                 result["sender"] = "global_forensic_auditor"
+                result["auditor_budget"] = ledger.telemetry()
                 return result
 
             if is_param_error:
                 logger.warning(
                     "auditor_param_error_retry",
                     ticker=ticker,
-                    reason=error_str,
+                    **summarize_exception(exc, operation="auditor_param_error_retry"),
                 )
                 try:
                     fallback_llm = _create_openai_responses_fallback_llm(llm)
@@ -1162,12 +1264,15 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                         provider=support.infer_provider_name(fallback_llm),
                     )
                     result["sender"] = "global_forensic_auditor"
+                    result["auditor_budget"] = ledger.telemetry()
                     return result
                 except Exception as retry_exc:
                     logger.error(
                         "auditor_retry_failed",
                         ticker=ticker,
-                        reason=str(retry_exc),
+                        **summarize_exception(
+                            retry_exc, operation="auditor_retry_failed"
+                        ),
                         exc_info=True,
                     )
 
@@ -1177,6 +1282,7 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                 provider=support.infer_provider_name(llm),
             )
             result["sender"] = "global_forensic_auditor"
+            result["auditor_budget"] = ledger.telemetry()
             return result
 
     return auditor_node

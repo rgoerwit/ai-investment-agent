@@ -366,6 +366,19 @@ def build_graph_components(
             "Auditor routing was enabled, but auditor LLM creation returned None."
         )
 
+    auditor_escalation_llm = None
+    if (
+        auditor_llm is not None
+        and not quick_mode
+        and config.auditor_escalation_model
+        and config.auditor_escalation_model != config.auditor_model
+    ):
+        auditor_escalation_llm = create_auditor_llm(
+            callbacks=tracked_callbacks("Global Forensic Auditor Escalation"),
+            max_completion_tokens=output_budget("Global Forensic Auditor"),
+            model_name_override=config.auditor_escalation_model,
+        )
+
     consultant_enabled = consultant_llm is not None
     auditor_enabled = auditor_llm is not None
     apac_specialist_llm = create_apac_specialist_llm(
@@ -374,6 +387,16 @@ def build_graph_components(
         quick_mode=quick_mode,
     )
     apac_specialist_enabled = apac_specialist_llm is not None
+    apac_specialist_fallback_llm = (
+        create_apac_specialist_llm(
+            callbacks=tracked_callbacks("APAC Regional Specialist Direct Retry"),
+            max_completion_tokens=output_budget("APAC Regional Specialist"),
+            quick_mode=quick_mode,
+            thinking_enabled=False,
+        )
+        if apac_specialist_enabled
+        else None
+    )
 
     logger.debug(
         "graph_llm_plan",
@@ -446,12 +469,12 @@ def build_graph_components(
     auditor = None
     auditor_tools = None
     if auditor_enabled:
-        auditor_tool_list = (
-            toolkit.get_foreign_language_tools()
-            + toolkit.get_junior_fundamental_tools()
-            + toolkit.get_news_tools()
+        auditor_tool_list = toolkit.get_auditor_tools()
+        auditor = create_auditor_node(
+            auditor_llm,
+            auditor_tool_list,
+            escalation_llm=auditor_escalation_llm,
         )
-        auditor = create_auditor_node(auditor_llm, auditor_tool_list)
         auditor_tools = create_agent_tool_node(
             auditor_tool_list, "global_forensic_auditor"
         )
@@ -534,7 +557,10 @@ def build_graph_components(
 
     apac_specialist = None
     if apac_specialist_enabled:
-        apac_specialist = create_apac_specialist_node(apac_specialist_llm)
+        apac_specialist = create_apac_specialist_node(
+            apac_specialist_llm,
+            fallback_llm=apac_specialist_fallback_llm,
+        )
         logger.debug("apac_specialist_node_enabled", ticker=ticker)
     else:
         logger.debug("apac_specialist_node_disabled", ticker=ticker)

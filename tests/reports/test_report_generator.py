@@ -1224,22 +1224,24 @@ class TestPositionPlanVerdictGating:
 
     def test_buy_includes_full_trader_section(self):
         reporter = QuietModeReporter("TEST.NZ")
-        report = reporter.generate_report(self._result("Action: BUY\n\nStrong thesis."))
+        report = reporter.generate_report(
+            self._result("#### PORTFOLIO MANAGER VERDICT: BUY\n\nStrong thesis.")
+        )
         assert "Position Plan" in report
         assert "6.00 NZD" in report
         assert "Stop Loss" not in report
         assert "downside review level" in report
         assert "not applicable" not in report
 
-    def test_hold_includes_full_trader_section(self):
+    def test_hold_suppresses_trader_section(self):
         reporter = QuietModeReporter("TEST.NZ")
         report = reporter.generate_report(
-            self._result("Action: HOLD\n\nWait for clarity.")
+            self._result("#### PORTFOLIO MANAGER VERDICT: HOLD\n\nWait for clarity.")
         )
         assert "Position Plan" in report
-        assert "6.00 NZD" in report
+        assert "6.00 NZD" not in report
         assert "Stop Loss" not in report
-        assert "not applicable" not in report
+        assert "not applicable" in report
 
     def test_heading_always_present_on_dni(self):
         """Section heading must appear even when body is suppressed."""
@@ -1295,6 +1297,31 @@ class TestPositionPlanVerdictGating:
         assert "External Consultant Review (Cross-Validation)" not in report
         assert "Useful-looking text that failed validation" not in report
 
+    def test_consultant_caveat_extracts_clean_material_error_bullets(self):
+        reporter = QuietModeReporter("AGS.SI")
+        caveat = reporter._build_verification_caveat(
+            {
+                "consultant_review": (
+                    "### SECTION 1: FACTUAL VERIFICATION\n"
+                    "**Material Errors**:\n"
+                    "- The zero-debt claim is unsupported by D/E data.\n"
+                    "2. The precise 83% ownership figure cannot verify.\n"
+                    "\n### FORENSIC ASSESSMENT\n"
+                    "- This unrelated line must not leak into the caveat.\n"
+                ),
+                "artifact_statuses": {
+                    "consultant_review": {"complete": True, "ok": True}
+                },
+            }
+        )
+
+        assert caveat is not None
+        assert "- The zero-debt claim is unsupported" in caveat
+        assert "- The precise 83% ownership figure cannot verify" in caveat
+        assert "- -" not in caveat
+        assert "- 2." not in caveat
+        assert "unrelated line" not in caveat
+
     def test_dni_risk_debate_is_labeled_non_executable(self):
         reporter = QuietModeReporter("TEST.NZ")
         report = reporter.generate_report(
@@ -1316,6 +1343,32 @@ class TestPositionPlanVerdictGating:
         assert "Risk Assessment — Archival Debate (Non-Executable)" in report
         assert "not position recommendations" in report
         assert "Recommended Initial Position Size: 6.0%" in report
+
+    def test_ags_hold_suppresses_execution_plan_and_labels_risk_archival(self):
+        reporter = QuietModeReporter("AGS.SI")
+        report = reporter.generate_report(
+            {
+                "final_trade_decision": (
+                    "#### PORTFOLIO MANAGER VERDICT: HOLD\n\n"
+                    "### --- START PM_BLOCK ---\nVERDICT: HOLD\n"
+                    "POSITION_SIZE: 0.0\n### --- END PM_BLOCK ---\n"
+                ),
+                "trader_investment_plan": "BUY 3.0% at SGD 0.41",
+                "market_report": (
+                    "## TECHNICAL REFERENCE LEVELS\nEntry: SGD 0.41\n\n"
+                    "## TREND\nNeutral"
+                ),
+                "risk_debate_state": {
+                    "current_risky_response": "Recommended Initial Position Size: 3.0%"
+                },
+                "analysis_validity": {"publishable": True},
+            }
+        )
+
+        assert "BUY 3.0% at SGD 0.41" not in report
+        assert "Entry: SGD 0.41" not in report
+        assert "Not actionable" in report
+        assert "Risk Assessment — Archival Debate (Non-Executable)" in report
 
 
 # ---------------------------------------------------------------------------
@@ -1500,12 +1553,7 @@ class TestCleanTextConsultantResolution:
 
     def test_strips_resolution_hash_no_colon(self):
         """#### CONSULTANT_RESOLUTION (no trailing colon) is also stripped."""
-        text = (
-            "#### CONSULTANT_RESOLUTION\n"
-            "- CONCERN: X\n"
-            "- VERDICT: REJECTED\n"
-            "\nProse."
-        )
+        text = "#### CONSULTANT_RESOLUTION\n- CONCERN: X\n- VERDICT: REJECTED\n\nProse."
         result = self._clean(text)
         assert "CONSULTANT_RESOLUTION" not in result
         assert "Prose." in result
@@ -1597,10 +1645,7 @@ class TestReformatMacroDetection:
 
     def test_triggered_yes_empty_headline_no_crash(self):
         text = (
-            "#### MACRO_DETECTION\n"
-            "TRIGGERED: YES\n"
-            "HEADLINE: \n"
-            "THESIS_IMPACT: UNKNOWN\n"
+            "#### MACRO_DETECTION\nTRIGGERED: YES\nHEADLINE: \nTHESIS_IMPACT: UNKNOWN\n"
         )
         result = self.reporter._reformat_macro_detection(text)  # must not raise
         assert isinstance(result, str)
@@ -1704,8 +1749,7 @@ class TestMoveDataBlockToEnd:
 
     def test_does_not_duplicate_block(self):
         text = (
-            "#### --- START DATA_BLOCK ---\nDATA\n#### --- END DATA_BLOCK ---\n\n"
-            "Prose."
+            "#### --- START DATA_BLOCK ---\nDATA\n#### --- END DATA_BLOCK ---\n\nProse."
         )
         result = QuietModeReporter._move_data_block_to_end(text)
         assert result.count("START DATA_BLOCK") == 1

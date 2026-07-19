@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from typing import Any
 
 import structlog
@@ -20,6 +22,45 @@ from src.validators.supplemental_extractors import (
 )
 
 logger = structlog.get_logger(__name__)
+
+_VALUE_TRAP_MAJORITY_LINE_RE = re.compile(r"(?im)^\s*MAJORITY_HOLDER:\s*(.+?)\s*$")
+_PERCENT_RE = re.compile(r"~?\s*(\d+(?:\.\d+)?)\s*%")
+
+
+def _value_trap_governance_conflicts(
+    value_trap_report: str,
+    governance_card: Mapping[str, Any] | None,
+) -> list[str]:
+    """Return score-bearing Value-Trap claims contradicted by the governance card."""
+    if not value_trap_report or not governance_card:
+        return []
+
+    conflicts: list[str] = []
+    controller = governance_card.get("controlling_shareholder")
+    card_pct = controller.get("pct") if isinstance(controller, Mapping) else None
+    majority = _VALUE_TRAP_MAJORITY_LINE_RE.search(value_trap_report)
+    if majority and isinstance(card_pct, int | float):
+        reported_pct_match = _PERCENT_RE.search(majority.group(1))
+        if reported_pct_match:
+            reported_pct = float(reported_pct_match.group(1))
+            if abs(reported_pct - float(card_pct)) > 2.0:
+                conflicts.append(
+                    "majority-holder percentage conflicts with authoritative "
+                    f"governance card ({reported_pct:g}% vs {float(card_pct):g}%)"
+                )
+
+    entity_role = str(governance_card.get("entity_role") or "").upper()
+    related = governance_card.get("related_listed")
+    if (
+        entity_role == "STANDALONE"
+        and not related
+        and re.search(r"\bconglomerate\b", value_trap_report, re.IGNORECASE)
+    ):
+        conflicts.append(
+            "conglomerate framing conflicts with authoritative STANDALONE entity role"
+        )
+
+    return conflicts
 
 
 def _truncate_at_boundary(text: str, limit: int = 100) -> str:
@@ -328,6 +369,7 @@ def detect_value_trap_flags(
     *,
     m_and_a_status: str | None = None,
     capital_context: dict[str, Any] | None = None,
+    governance_card: Mapping[str, Any] | None = None,
 ) -> list[dict]:
     """Parse VALUE_TRAP_BLOCK for deterministic warning flags.
 
@@ -363,8 +405,37 @@ def detect_value_trap_flags(
     reinvestment_downgrade = metrics.get(
         "capital_allocation_rating"
     ) == "POOR" and _reinvestment_context_contradicts_trap(capital_context)
+    governance_conflicts = _value_trap_governance_conflicts(
+        value_trap_report, governance_card
+    )
+    score_trusted = not governance_conflicts
 
-    if score is not None and score < 40:
+    if governance_conflicts and (score is not None or verdict == "TRAP"):
+        flags.append(
+            {
+                "type": "VALUE_TRAP_DATA_CONFLICT",
+                "severity": "WARNING",
+                "detail": (
+                    "Value Trap score/verdict downgraded to unverified: "
+                    + "; ".join(governance_conflicts)
+                ),
+                "action": "REVIEW_GOVERNANCE_EVIDENCE",
+                "risk_penalty": 0.5,
+                "rationale": (
+                    "A derived governance score cannot remain a hard fail after "
+                    "authoritative entity evidence rejects score-bearing inputs. "
+                    "Verified control and catalyst concerns remain review items."
+                ),
+            }
+        )
+        logger.info(
+            "value_trap_score_unreconciled",
+            ticker=ticker,
+            score=score,
+            conflict_count=len(governance_conflicts),
+        )
+
+    if score_trusted and score is not None and score < 40:
         if reinvestment_downgrade:
             flags.append(
                 {
@@ -400,7 +471,7 @@ def detect_value_trap_flags(
             logger.debug(
                 "value_trap_flag_high_risk", ticker=ticker, score=score, verdict=verdict
             )
-    elif score is not None and score < 60:
+    elif score_trusted and score is not None and score < 60:
         flags.append(
             {
                 "type": "VALUE_TRAP_MODERATE_RISK",
@@ -415,8 +486,10 @@ def detect_value_trap_flags(
             "value_trap_flag_moderate_risk", ticker=ticker, score=score, verdict=verdict
         )
 
-    if verdict == "TRAP" and not any(
-        flag["type"] == "VALUE_TRAP_HIGH_RISK" for flag in flags
+    if (
+        score_trusted
+        and verdict == "TRAP"
+        and not any(flag["type"] == "VALUE_TRAP_HIGH_RISK" for flag in flags)
     ):
         already_moderate = any(
             flag["type"] == "VALUE_TRAP_MODERATE_RISK" for flag in flags

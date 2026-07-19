@@ -48,8 +48,16 @@ _ARTIFACT_AGENT_MAP: list[tuple[str, str, tuple[str, ...]]] = [
     ("fundamentals_report", "senior_fundamentals", ("Fundamentals Analyst",)),
     ("value_trap_report", "value_trap_detector", ("Value Trap Detector",)),
     (GOVERNANCE_CARD_FIELD, "financial_health_validator", ()),
-    ("auditor_report", "global_forensic_auditor", ("Global Forensic Auditor",)),
-    ("apac_regional_report", "apac_regional_specialist", ("APAC Regional Specialist",)),
+    (
+        "auditor_report",
+        "global_forensic_auditor",
+        ("Global Forensic Auditor", "Global Forensic Auditor Escalation"),
+    ),
+    (
+        "apac_regional_report",
+        "apac_regional_specialist",
+        ("APAC Regional Specialist", "APAC Regional Specialist Direct Retry"),
+    ),
     (
         "investment_plan",
         "research_manager",
@@ -68,7 +76,8 @@ _ARTIFACT_AGENT_MAP: list[tuple[str, str, tuple[str, ...]]] = [
 
 
 def _aggregate_token_usage(token_agents: dict, names: tuple[str, ...]) -> dict | None:
-    rows = [token_agents[n] for n in names if n in token_agents]
+    contributors = [name for name in names if name in token_agents]
+    rows = [token_agents[name] for name in contributors]
     if not rows:
         return None
     return {
@@ -77,7 +86,7 @@ def _aggregate_token_usage(token_agents: dict, names: tuple[str, ...]) -> dict |
         "completion_tokens": sum(int(r.get("completion_tokens", 0) or 0) for r in rows),
         "total_tokens": sum(int(r.get("total_tokens", 0) or 0) for r in rows),
         "cost_usd": round(sum(float(r.get("cost_usd", 0.0) or 0.0) for r in rows), 6),
-        "contributors": list(names),
+        "contributors": contributors,
     }
 
 
@@ -114,7 +123,7 @@ def _build_agent_attribution(result: dict, token_agents: dict) -> dict:
 
         artifacts[field] = {
             "agent": agent_slug,
-            "token_agents": list(token_names),
+            "token_agents": [name for name in token_names if name in token_agents],
             "artifact_field": field,
             "present": valid,
             "char_count": len(content) if isinstance(content, str) else 0,
@@ -567,6 +576,7 @@ def save_results_to_file(
         },
         "memory_statistics": memory_stats,
         "entity_governance_card": result.get("entity_governance_card") or None,
+        "auditor_budget": result.get("auditor_budget") or None,
         "source_artifacts": {
             "raw_fundamentals_data": _persisted_source_artifact(
                 result.get("raw_fundamentals_data"),

@@ -19,6 +19,7 @@ from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .evidence_constraints import downstream_evidence_constraints
 from .governance_prompt import governance_block
 from .output_limits import cap_state_value
 from .output_validation import (
@@ -437,7 +438,8 @@ def create_research_manager_node(
                     **summarize_exception(exc, operation="lessons_injection_failed"),
                 )
 
-        prompt = f"{system_msg}{governance_block(state)}{lessons_block}\n\n{all_reports}\n\nProvide Investment Plan."
+        evidence_constraints = downstream_evidence_constraints(state)
+        prompt = f"{system_msg}{governance_block(state)}{evidence_constraints}{lessons_block}\n\n{all_reports}\n\nProvide Investment Plan."
 
         try:
             response = await agent_runtime.invoke_with_rate_limit_handling(

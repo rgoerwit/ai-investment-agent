@@ -147,17 +147,45 @@ def _build_mcp_access_failure(
     failure_kind: str,
     retryable: bool,
     source: str,
+    coverage_gap: bool = False,
 ) -> str:
-    return json.dumps(
-        {
-            "error": error,
-            "ticker": ticker,
-            key: lookup,
-            "provider": provider,
-            "failure_kind": failure_kind,
-            "retryable": retryable,
-            "source": source,
-        }
+    payload = {
+        "error": error,
+        "ticker": ticker,
+        key: lookup,
+        "provider": provider,
+        "failure_kind": failure_kind,
+        "retryable": retryable,
+        "source": source,
+    }
+    if coverage_gap:
+        payload.update(
+            {
+                "coverage_gap": True,
+                "skipped": True,
+                "suggestion": (
+                    "Use official filings or another primary source; the current "
+                    "provider subscription does not cover this endpoint."
+                ),
+            }
+        )
+    return json.dumps(payload)
+
+
+def _is_subscription_coverage_gap(message: str | None) -> bool:
+    normalized = str(message or "").lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "status 402",
+            "http 402",
+            "payment required",
+            "not available under your current subscription",
+            "not included in your current subscription",
+            "upgrade your plan",
+            "upgrade plan",
+            "subscription does not cover",
+        )
     )
 
 
@@ -568,15 +596,17 @@ async def spot_check_metric_mcp_fmp(
             scope="consultant",
         )
     except MCPCallError as exc:
+        coverage_gap = _is_subscription_coverage_gap(exc.message)
         return _build_mcp_access_failure(
             ticker=ticker,
             key="metric",
             lookup=metric,
             provider="fmp",
             error=exc.message,
-            failure_kind=exc.category.value,
+            failure_kind="coverage_gap" if coverage_gap else exc.category.value,
             retryable=exc.retryable,
             source="fmp_mcp",
+            coverage_gap=coverage_gap,
         )
     except Exception as exc:
         return json.dumps(
@@ -608,6 +638,18 @@ async def spot_check_metric_mcp_fmp(
 
     value = result.value
     if isinstance(value, str):
+        if _is_subscription_coverage_gap(value):
+            return _build_mcp_access_failure(
+                ticker=ticker,
+                key="metric",
+                lookup=metric,
+                provider="fmp",
+                error=value,
+                failure_kind="coverage_gap",
+                retryable=False,
+                source="fmp_mcp",
+                coverage_gap=True,
+            )
         return _build_mcp_text_payload(
             ticker=ticker,
             key="metric",
@@ -631,15 +673,18 @@ async def spot_check_metric_mcp_fmp(
     # Vendor-side error (isError=true on CallToolResult): surface text_content
     # as the error rather than falling through to opaque shape-extraction failure.
     if value.get("is_error"):
+        error = str(value.get("text_content") or "MCP tool returned isError=true")
+        coverage_gap = _is_subscription_coverage_gap(error)
         return _build_mcp_access_failure(
             ticker=ticker,
             key="metric",
             lookup=metric,
             provider="fmp",
-            error=str(value.get("text_content") or "MCP tool returned isError=true"),
-            failure_kind="tool_error",
+            error=error,
+            failure_kind="coverage_gap" if coverage_gap else "tool_error",
             retryable=False,
             source="fmp_mcp",
+            coverage_gap=coverage_gap,
         )
 
     normalized_payload = value

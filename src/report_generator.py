@@ -107,7 +107,7 @@ def _strip_fenced_pm_machine_block(text: str) -> str:
 # levels and the position plan are suppressed. Kept as one constant so the display
 # form here never drifts from the underscore form used elsewhere (e.g.
 # retrospective.py uses "DO_NOT_INITIATE").
-_NON_EXECUTABLE_VERDICTS = ("DO NOT INITIATE", "SELL")
+_NON_EXECUTABLE_VERDICTS = ("HOLD", "DO NOT INITIATE", "SELL")
 
 _ENTRY_EXIT_SUBSECTION_PATTERN = re.compile(
     # Matches both the legacy header and the v4.11 retail-framing rename.
@@ -920,16 +920,43 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         if consultant_status.get("ok", True) and not has_flagged_content:
             return None
 
+        lines = review.splitlines()
+        material_start = next(
+            (
+                index + 1
+                for index, raw_line in enumerate(lines)
+                if re.match(
+                    r"^\s*(?:#{1,6}\s*)?(?:\*\*)?Material Errors(?:\*\*)?\s*:?.*$",
+                    raw_line,
+                    flags=re.IGNORECASE,
+                )
+            ),
+            None,
+        )
+        candidate_source = lines
+        if material_start is not None:
+            material_lines: list[str] = []
+            for raw_line in lines[material_start:]:
+                if re.match(r"^\s*#{1,6}\s+", raw_line):
+                    break
+                material_lines.append(raw_line)
+            if any(line.strip() for line in material_lines):
+                candidate_source = material_lines
+
         candidate_lines = []
-        for raw_line in review.splitlines():
-            line = raw_line.strip()
+        for raw_line in candidate_source:
+            line = re.sub(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", "", raw_line).strip()
             if not line:
                 continue
             if line.startswith("#") or line.upper().startswith("CONSULTANT REVIEW"):
                 continue
-            if has_flagged_content and not any(
-                re.search(pattern, line, flags=re.IGNORECASE)
-                for pattern in flagged_patterns
+            if (
+                material_start is None
+                and has_flagged_content
+                and not any(
+                    re.search(pattern, line, flags=re.IGNORECASE)
+                    for pattern in flagged_patterns
+                )
             ):
                 continue
             candidate_lines.append(f"- {line}")

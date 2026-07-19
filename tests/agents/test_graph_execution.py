@@ -42,7 +42,7 @@ def _stub_graph_component_dependencies(monkeypatch):
     monkeypatch.setattr(
         components,
         "create_agent_tool_node",
-        lambda *args, **kwargs: (lambda state, config: {}),
+        lambda *args, **kwargs: lambda state, config: {},
     )
 
     def empty_tools():
@@ -778,7 +778,9 @@ class TestQuickModeGraphContracts:
         assert "APAC Regional Specialist" in full.nodes
         assert quick.apac_specialist_enabled is False
         assert "APAC Regional Specialist" not in quick.nodes
-        assert [call["quick_mode"] for call in calls] == [False, True]
+        assert [call["quick_mode"] for call in calls] == [False, False, True]
+        assert calls[0].get("thinking_enabled", True) is True
+        assert calls[1]["thinking_enabled"] is False
 
 
 class TestTradingContext:
@@ -1132,14 +1134,12 @@ class TestPostResearchSync:
         monkeypatch.setattr(
             components,
             "create_chart_generator_node",
-            lambda *_args, **_kwargs: (
-                lambda _state, _config=None: {"chart_paths": {}}
-            ),
+            lambda *_args, **_kwargs: lambda _state, _config=None: {"chart_paths": {}},
         )
         monkeypatch.setattr(
             components,
             "create_agent_tool_node",
-            lambda *_args, **_kwargs: (lambda _state, _config: {}),
+            lambda *_args, **_kwargs: lambda _state, _config: {},
         )
 
         for name in (

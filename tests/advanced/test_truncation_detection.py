@@ -154,6 +154,26 @@ class TestCompleteOutput:
         result = detect_truncation(text, agent="junior_fundamentals_analyst")
         assert result["truncated"] is False
 
+    def test_news_date_and_asset_footer_is_complete_terminator(self):
+        text = (
+            "## News assessment\n"
+            "No material event was found in the review window.\n\n"
+            "Date: 2026-07-19\n"
+            "Asset: AGS.SI\n"
+        )
+        result = detect_truncation(text, agent="news_analyst")
+        assert result == {
+            "truncated": False,
+            "source": None,
+            "marker": None,
+            "confidence": "high",
+        }
+
+    def test_news_incomplete_footer_still_uses_normal_truncation_checks(self):
+        text = "News summary.\nDate: 2026-07-19\nAsset: AGS.SI and"
+        result = detect_truncation(text, agent="news_analyst")
+        assert result["truncated"] is True
+
     def test_ends_with_period(self):
         """Text ending with period should not be flagged."""
         text = "The investment thesis is sound."

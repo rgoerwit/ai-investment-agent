@@ -1286,6 +1286,7 @@ def create_auditor_llm(
     callbacks: list[BaseCallbackHandler] | None = None,
     max_completion_tokens: int | None = None,
     quick_mode: bool = False,
+    model_name_override: str | None = None,
 ) -> BaseChatModel | None:
     """
     Create Auditor LLM with fallback logic.
@@ -1316,7 +1317,9 @@ def create_auditor_llm(
         return None
 
     # Determine model: quick override -> specific -> consultant -> default
-    if quick_mode and config.auditor_quick_model:
+    if model_name_override:
+        model_name = model_name_override
+    elif quick_mode and config.auditor_quick_model:
         model_name = config.auditor_quick_model
     else:
         model_name = config.auditor_model or config.consultant_model or "gpt-4o"
@@ -1378,6 +1381,7 @@ def create_apac_specialist_llm(
     callbacks: list[BaseCallbackHandler] | None = None,
     max_completion_tokens: int | None = None,
     quick_mode: bool = False,
+    thinking_enabled: bool = True,
 ) -> BaseChatModel | None:
     """Create the optional APAC Regional Specialist LLM."""
     if quick_mode:
@@ -1413,13 +1417,16 @@ def create_apac_specialist_llm(
         "base_url": config.apac_specialist_base_url,
         "api_key": api_key,
         "timeout": 240,
-        "max_retries": 1,
+        "max_retries": 1 if thinking_enabled else 0,
         "callbacks": callbacks or [],
         "max_completion_tokens": max_completion_tokens or 8192,
         "streaming": False,
-        "reasoning_effort": "max",
-        "extra_body": {"thinking": {"type": "enabled"}},
     }
+    if thinking_enabled:
+        kwargs["reasoning_effort"] = "max"
+        kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+    else:
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
     budget = _resolve_generation_budget(
         intent_tokens=kwargs["max_completion_tokens"],

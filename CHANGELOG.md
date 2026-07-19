@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Bounded Official-Document Evidence** — The forensic Auditor can retrieve approved exchange disclosures as HTML/text or bounded PDFs, using pinned `pypdf` with a `pdftotext` fallback, page/byte/evidence caps, content inspection, and typed failure reasons for scanned, malformed, oversized, timed-out, or unsupported documents.
+- **Live Exchange PDF Canary** — An opt-in integration test pulls AGS's 128-page FY2025 SGX annual report and verifies bounded auditor/cash-flow extraction without making normal CI network-dependent.
+- **Deterministic Forensic Gates** — Statement freshness, triad completeness, period/scope alignment, and auditor-opinion availability are code-calculated before ratios; forensic ratios use a deterministic tool rather than model-only arithmetic.
+- **Unified Auditor Budgeting** — Search, document, evidence-character, tool-turn, and logical LLM-call limits share one policy and emit saved telemetry; complete complex cases may receive a bounded `gpt-5.6-sol` review while incomplete cases remain on the base Auditor path.
+
+### Changed
+
+- **Evidence Semantics** — Labeled Fundamentals narrative conflicts now receive an authoritative DATA_BLOCK correction block, and downstream agents receive direct constraints preventing credit for unexecuted buybacks.
+- **Dual-Track Auditor Evidence** — Current statements and the latest signed audited baseline are selected and labeled separately; OCF comparisons now require aligned period type/end, currency, and consolidation scope, without inferring fiscal years from calendar dates.
+- **Retail Liquidity Discipline** — Downstream agents assess liquidity against proposed order notional; sub-10%-of-ADTV orders are sized and executed patiently rather than rejected on institutional absolute thresholds.
+- **APAC Resilience** — Exact GLM error 1301 policy blocks receive one direct-output retry with thinking disabled; other errors are not retried through this path and logs retain only payload size/hash metadata.
+
+### Fixed
+
+- **HOLD Report Contradictions** — HOLD now suppresses subordinate execution levels and position plans and labels risk-team output archival/non-executable.
+- **AGS Reconciliation Regressions** — Conflicted Value-Trap score inputs are quarantined instead of retained as hard fails; FMP MCP subscription paywalls are managed coverage gaps; News date/asset footers no longer trigger false truncation; unused fallback models are omitted from artifact attribution; Auditor budget telemetry is persisted; consultant caveat bullets render cleanly.
+
 ## [3.12.0] - 2026-07-12
 
 ### Added

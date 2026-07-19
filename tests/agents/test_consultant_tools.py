@@ -349,6 +349,40 @@ class TestMCPConsultantTools:
         assert result["source"] == "fmp_mcp"
 
     @pytest.mark.asyncio
+    async def test_fmp_mcp_subscription_paywall_is_managed_coverage_gap(self):
+        mock_runtime = MagicMock()
+        mock_runtime.execute_raw = AsyncMock(
+            return_value={
+                "server": "fmp_remote",
+                "tool": "statements",
+                "is_error": True,
+                "payload_profile": "free_text",
+                "text_content": (
+                    "HTTP 402 Payment Required: endpoint is not available under "
+                    "your current subscription; please upgrade your plan."
+                ),
+            }
+        )
+        services = RuntimeServices(
+            tool_service=ToolExecutionService(),
+            inspection_service=InspectionService(),
+            mcp_runtime=mock_runtime,
+        )
+
+        with use_runtime_services(services):
+            result = json.loads(
+                await spot_check_metric_mcp_fmp.ainvoke(
+                    {"ticker": "AGS.SI", "metric": "operatingCashflow"}
+                )
+            )
+
+        assert result["failure_kind"] == "coverage_gap"
+        assert result["coverage_gap"] is True
+        assert result["skipped"] is True
+        assert result["retryable"] is False
+        assert "official filings" in result["suggestion"]
+
+    @pytest.mark.asyncio
     async def test_fmp_mcp_wrapper_degrades_when_runtime_missing(self):
         with patch(
             "src.consultant_tools.get_current_runtime_services", return_value=None
