@@ -5,26 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.13.0] - 2026-07-19
 
 ### Added
 
-- **Bounded Official-Document Evidence** — The forensic Auditor can retrieve approved exchange disclosures as HTML/text or bounded PDFs, using pinned `pypdf` with a `pdftotext` fallback, page/byte/evidence caps, content inspection, and typed failure reasons for scanned, malformed, oversized, timed-out, or unsupported documents.
-- **Live Exchange PDF Canary** — An opt-in integration test pulls AGS's 128-page FY2025 SGX annual report and verifies bounded auditor/cash-flow extraction without making normal CI network-dependent.
-- **Deterministic Forensic Gates** — Statement freshness, triad completeness, period/scope alignment, and auditor-opinion availability are code-calculated before ratios; forensic ratios use a deterministic tool rather than model-only arithmetic.
-- **Unified Auditor Budgeting** — Search, document, evidence-character, tool-turn, and logical LLM-call limits share one policy and emit saved telemetry; complete complex cases may receive a bounded `gpt-5.6-sol` review while incomplete cases remain on the base Auditor path.
+- **Concentration-aware watchlists** — IBKR recommendations now select BUY-ready watchlist entries and dip adds within configurable exchange and sector limits, account for cash and working orders, protect existing holdings, and keep a safe non-empty watchlist floor.
+- **Business-quality decision context** — Investment memos surface code-derived ROIC quality and moat signals, while gate-passing `DO_NOT_INITIATE` outcomes are explicitly marked for review.
+- **Bounded forensic evidence** — The Auditor can use approved official disclosures in HTML/text or bounded PDF form, with deterministic freshness, period/scope, currency, and auditor-opinion gates plus shared budget telemetry.
 
 ### Changed
 
-- **Evidence Semantics** — Labeled Fundamentals narrative conflicts now receive an authoritative DATA_BLOCK correction block, and downstream agents receive direct constraints preventing credit for unexecuted buybacks.
-- **Dual-Track Auditor Evidence** — Current statements and the latest signed audited baseline are selected and labeled separately; OCF comparisons now require aligned period type/end, currency, and consolidation scope, without inferring fiscal years from calendar dates.
-- **Retail Liquidity Discipline** — Downstream agents assess liquidity against proposed order notional; sub-10%-of-ADTV orders are sized and executed patiently rather than rejected on institutional absolute thresholds.
-- **APAC Resilience** — Exact GLM error 1301 policy blocks receive one direct-output retry with thinking disabled; other errors are not retried through this path and logs retain only payload size/hash metadata.
+- **Safer held-position decisions** — Verdict rejects no longer become automatic sells; exits are confirmation-gated, while entry-constraint and price-weakness cases are routed to review or monitoring to reduce churn.
+- **Unified portfolio workflow** — CLI reconciliation and the Flask dashboard now share an action plan and consistent treatment of watchlists, concentration breaches, cash, turnover, freshness, live-order failures, and degraded broker state.
+- **Valuation and market-data handling** — Added GPT-5.6 model/pricing support and strengthened multi-exchange position identity, FX normalization, local-price valuation, and portfolio reporting.
 
 ### Fixed
 
-- **HOLD Report Contradictions** — HOLD now suppresses subordinate execution levels and position plans and labels risk-team output archival/non-executable.
-- **AGS Reconciliation Regressions** — Conflicted Value-Trap score inputs are quarantined instead of retained as hard fails; FMP MCP subscription paywalls are managed coverage gaps; News date/asset footers no longer trigger false truncation; unused fallback models are omitted from artifact attribution; Auditor budget telemetry is persisted; consultant caveat bullets render cleanly.
+- **Forensic and accounting reliability** — Current and audited evidence are kept separate and compared only when periods, scopes, and currencies align; bounded retrieval and explicit insufficiency states prevent unsupported evidence from being treated as clean.
+- **Portfolio/report consistency** — Watchlist candidate accounting, action sections, dashboard drilldowns, concentration explanations, and freshness/degraded-state warnings now use the same underlying decisions.
 
 ## [3.12.0] - 2026-07-12
 
