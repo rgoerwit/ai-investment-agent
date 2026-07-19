@@ -129,7 +129,7 @@ function renderActions() {
   ];
   const fallbackSections = [
     { key: "sell_recommendations", title: "Sell Recommendations", kind: "reconciliation_items", items: fallbackSellItems },
-    { key: "sell_related_reviews", title: "Sell-Related Reviews", kind: "reconciliation_items", items: [...(actions.review_stop_breach || []), ...(actions.review_macro || []), ...(actions.review_profit_take || [])] },
+    { key: "sell_related_reviews", title: "Position Reviews", kind: "reconciliation_items", items: [...(actions.review_stop_breach || []), ...(actions.review_macro || []), ...(actions.review_profit_take || [])] },
     { key: "add", title: "Adds", kind: "reconciliation_items", items: actions.add || [] },
     { key: "trim", title: "Trims", kind: "reconciliation_items", items: actions.trim || [] },
     { key: "review", title: "Review Queue", kind: "reconciliation_items", items: actions.review || [] },
@@ -214,15 +214,14 @@ function renderActions() {
             },
             { label: "Gain %", numeric: true, render: holdGain },
             {
-              label: "Stop",
+              label: "Health",
               numeric: true,
-              render: (item) => fmtLocalMoney(item.analysis?.stop_price, holdCurrency(item)),
+              render: (item) => fmtScorePct(item.analysis?.health_adj),
             },
             {
-              label: "Target",
+              label: "Growth",
               numeric: true,
-              render: (item) =>
-                fmtLocalMoney(item.analysis?.target_1_price, holdCurrency(item)),
+              render: (item) => fmtScorePct(item.analysis?.growth_adj),
             },
           ],
           { omitReason: true },
@@ -245,7 +244,7 @@ function renderDipWatch(items) {
         <td><button type="button" class="ticker-link" data-ticker="${escapeHtml(item.ticker_yf)}">${escapeHtml(item.ticker_ibkr)}</button></td>
         <td class="num">${fmtNumber(item.score, 1)}</td>
         <td class="num">${fmtPct(item.dip_pct)}</td>
-        <td class="num">${escapeHtml(item.risk_reward ?? "—")}</td>
+        <td class="num">${item.upside_pct != null ? escapeHtml(`+${Number(item.upside_pct).toFixed(0)}%`) : "—"}</td>
         <td>${escapeHtml(item.run_ticker)}</td>
       </tr>
     `,
@@ -255,7 +254,7 @@ function renderDipWatch(items) {
     <section>
       <h3 class="section-title">Dip Watch</h3>
       <table>
-        <thead><tr><th>Stars</th><th>Ticker</th><th class="num">Score</th><th class="num">Dip</th><th class="num">R/R</th><th>Run Ticker</th></tr></thead>
+        <thead><tr><th>Stars</th><th>Ticker</th><th class="num">Score</th><th class="num">Dip</th><th class="num">Upside</th><th>Run Ticker</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </section>

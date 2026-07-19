@@ -724,7 +724,7 @@ return renderActionTable("Holds", [
     assert '<td class="num">5.0%</td>' in html
 
 
-def test_render_hold_row_shows_weight_gain_stop_target():
+def test_render_hold_row_shows_weight_gain_and_fundamentals_not_action_levels():
     html = _run_dashboard_js("""
 const { renderActions, state } = __dashboardTest;
 state.snapshot = {
@@ -741,7 +741,7 @@ state.snapshot = {
             ticker_ibkr: "7203",
             action: "HOLD",
             reason: "Position remains within thesis",
-            analysis: { entry_price: 2000, stop_price: 1700, target_1_price: 2600, currency: "JPY" },
+            analysis: { entry_price: 2000, stop_price: 1700, target_1_price: 2600, currency: "JPY", health_adj: 78, growth_adj: 66 },
             position: { current_price_local: 2300, currency: "JPY", market_value_usd: 15000 },
           },
         ],
@@ -755,8 +755,10 @@ return renderActions();
     assert "<th>Reason</th>" not in html
     assert "15.0%" in html  # weight = 15000 / 100000
     assert "+15.0%" in html  # gain = (2300 - 2000) / 2000
-    assert "JPY 1,700.00" in html  # stop
-    assert "JPY 2,600.00" in html  # target
+    assert "78" in html
+    assert "66" in html
+    assert "JPY 1,700.00" not in html
+    assert "JPY 2,600.00" not in html
 
 
 def test_render_hold_row_falls_back_to_cost_basis_for_entry():

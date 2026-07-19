@@ -606,3 +606,56 @@ class TestTickerKeySanitizer:
             {"ticker": "GUD.AX:", "analysis_date": "2026-01-10", "file_path": "x"}
         )
         assert record.ticker == "GUD.AX"
+
+
+class TestKillCriteriaExtraction:
+    """Thesis-break triggers load from the saved bear history (v8)."""
+
+    _BEAR = (
+        "The bear case rests on leverage.\n"
+        "### --- START KILL_CRITERIA ---\n"
+        "TRIGGER_1: D/E ratio exceeds 1.8 for two consecutive quarters\n"
+        "TRIGGER_2: Two consecutive years of negative free cash flow\n"
+        "### --- END KILL_CRITERIA ---\n"
+    )
+
+    @staticmethod
+    def _record(investment_analysis):
+        return _build_analysis_record_from_data(
+            Path("TEST.T_20260701_000000_analysis.json"),
+            {
+                "prediction_snapshot": {
+                    "ticker": "TEST.T",
+                    "analysis_date": "2026-07-01",
+                    "verdict": "BUY",
+                    "currency": "JPY",
+                    "health_adj": 70.0,
+                },
+                "investment_analysis": investment_analysis,
+            },
+        )
+
+    def test_kill_criteria_loaded_from_bear_history(self):
+        record = self._record(
+            {
+                "trader_plan": "",
+                "investment_debate": {"bear_history": self._BEAR},
+            }
+        )
+        assert record is not None
+        assert record.kill_criteria == (
+            "D/E ratio exceeds 1.8 for two consecutive quarters",
+            "Two consecutive years of negative free cash flow",
+        )
+
+    def test_legacy_artifact_without_debate_yields_empty(self):
+        record = self._record({"trader_plan": ""})
+        assert record is not None
+        assert record.kill_criteria == ()
+
+    def test_malformed_debate_shape_yields_empty(self):
+        record = self._record(
+            {"trader_plan": "", "investment_debate": {"bear_history": None}}
+        )
+        assert record is not None
+        assert record.kill_criteria == ()

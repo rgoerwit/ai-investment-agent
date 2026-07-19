@@ -89,8 +89,9 @@ def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
                     or "Hard Fail Checks:" in content,
                 ),
                 (
-                    "execution_section",
-                    "FINAL EXECUTION PARAMETERS" in content
+                    "position_section",
+                    "FINAL POSITION PARAMETERS" in content
+                    or "FINAL EXECUTION PARAMETERS" in content  # legacy output
                     or "Recommended Position Size" in content
                     or "PM_BLOCK" in content,
                 ),

@@ -576,19 +576,18 @@ def sample_custom_prompt():
     }
 
 
-class TestNewsAnalystPromptV5:
-    """news_analyst.json v5.0 structural checks."""
+class TestNewsAnalystPrompt:
+    """news_analyst.json structural checks."""
 
     @pytest.fixture
     def prompt(self):
         path = Path("prompts/news_analyst.json")
         return json.loads(path.read_text())
 
-    def test_version_is_5_0(self, prompt):
-        # Version bumped to 5.1 when fleet/capacity guardrail was added.
+    def test_version_is_supported(self, prompt):
         assert re.match(
-            r"^5\.\d+$", prompt["version"]
-        ), f"Expected 5.x, got {prompt['version']}"
+            r"^(?:5|6)\.\d+$", prompt["version"]
+        ), f"Expected 5.x or 6.x, got {prompt['version']}"
 
     def test_macro_detection_block_in_system_message(self, prompt):
         assert "MACRO_DETECTION" in prompt["system_message"]

@@ -205,6 +205,13 @@ function renderDrilldown(payload) {
         { label: "Reason", value: payload.reason },
         { label: "Urgency", value: payload.urgency },
         { label: "Quantity", value: position.quantity },
+        {
+          label: "Listing mapping",
+          value:
+            position.ticker_identity_verified === false
+              ? `Review required (${position.ticker_resolution_source || "unresolved"})`
+              : undefined,
+        },
         { label: "Live order note", value: payload.live_order_note },
         {
           label: "Avg cost",
@@ -221,7 +228,23 @@ function renderDrilldown(payload) {
               : undefined,
         },
         { label: "Market value", value: fmtCurrency(position.market_value_usd) },
-        { label: "Unrealized P/L", value: fmtCurrency(position.unrealized_pnl_usd) },
+        {
+          label: "Local-price return",
+          value:
+            position.local_return_pct !== undefined &&
+            position.local_return_pct !== null
+              ? `${Number(position.local_return_pct).toFixed(1)}%`
+              : undefined,
+        },
+        {
+          label: "FX effect",
+          value:
+            position.fx_effect_pct !== undefined &&
+            position.fx_effect_pct !== null
+              ? `${Number(position.fx_effect_pct).toFixed(1)}%`
+              : undefined,
+        },
+        { label: "Unrealized P/L (USD)", value: fmtCurrency(position.unrealized_pnl_usd) },
       ])}
       ${renderDetailSection("Latest Analysis", [
         { label: "Verdict", value: analysis.verdict },
@@ -233,7 +256,14 @@ function renderDrilldown(payload) {
         { label: "Conviction", value: analysis.conviction },
         { label: "Quick mode", value: analysis.is_quick_mode },
       ])}
-      ${renderDetailSection("Trade Thesis", [
+      ${renderDetailSection("Thesis and Valuation", [
+        {
+          label: "Thesis break",
+          value:
+            Array.isArray(analysis.kill_criteria) && analysis.kill_criteria.length
+              ? analysis.kill_criteria.join(" · ")
+              : undefined,
+        },
         {
           label: "Entry",
           value:
@@ -242,29 +272,28 @@ function renderDrilldown(payload) {
               : undefined,
         },
         {
-          label: "Stop",
+          label: "Downside valuation review",
           value:
             analysis.stop_price !== undefined
               ? fmtLocalMoney(analysis.stop_price, analysis.currency)
               : undefined,
         },
         {
-          label: "Target 1",
+          label: "Base-case ref",
           value:
             analysis.target_1_price !== undefined
               ? fmtLocalMoney(analysis.target_1_price, analysis.currency)
               : undefined,
         },
         {
-          label: "Target 2",
+          label: "Stretch ref",
           value:
             analysis.target_2_price !== undefined
               ? fmtLocalMoney(analysis.target_2_price, analysis.currency)
               : undefined,
         },
-        { label: "Trade action", value: tradeBlock.action },
+        { label: "Standalone verdict", value: tradeBlock.action },
         { label: "Target size %", value: tradeBlock.size_pct },
-        { label: "Risk/Reward", value: tradeBlock.risk_reward },
       ])}
     </div>
     ${renderReportActions(payload)}

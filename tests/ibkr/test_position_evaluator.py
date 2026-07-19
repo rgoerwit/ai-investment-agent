@@ -171,8 +171,9 @@ def test_data_vacuum_high_zone_dni_routes_to_review_not_sell():
     assert item.cash_impact_usd == 0.0
 
 
-def test_data_vacuum_dni_stop_breach_still_routes_to_sell():
-    """Stop-loss protection remains executable even if analysis quality was poor."""
+def test_data_vacuum_dni_stop_breach_routes_to_review():
+    """A price break on a data-vacuum DNI is an urgent REVIEW — doubly so:
+    price alone never sells (July 2026), and the analysis quality is suspect."""
     pos = _make_position(
         ticker="1264.TW",
         quantity=50,
@@ -193,8 +194,9 @@ def test_data_vacuum_dni_stop_breach_still_routes_to_sell():
     items = reconcile([pos], {"1264.TW": analysis}, _make_portfolio())
     item = _first_item_for_ticker(items, "1264.TW")
 
-    assert item.action == "SELL"
-    assert item.sell_type == "STOP_BREACH"
+    assert item.action == "REVIEW"
+    assert item.urgency == "HIGH"
+    assert item.suggested_quantity is None
 
 
 def test_zero_score_no_price_dni_routes_to_review_not_sell():
@@ -228,8 +230,9 @@ def test_zero_score_no_price_dni_routes_to_review_not_sell():
     assert item.cash_impact_usd == 0.0
 
 
-def test_zero_score_no_price_dni_stop_breach_still_routes_to_sell():
-    """The zero-score guard must not suppress a genuine stop breach."""
+def test_zero_score_no_price_dni_stop_breach_routes_to_review():
+    """A price break on a zero-score no-price DNI routes to the data-quality
+    review — data quality outranks the price signal, and neither sells."""
     pos = _make_position(
         ticker="AGS",
         quantity=5,
@@ -252,8 +255,9 @@ def test_zero_score_no_price_dni_stop_breach_still_routes_to_sell():
     items = reconcile([pos], {"AGS": analysis}, _make_portfolio())
     item = _first_item_for_ticker(items, "AGS")
 
-    assert item.action == "SELL"
-    assert item.sell_type == "STOP_BREACH"
+    assert item.action == "REVIEW"
+    assert item.urgency == "HIGH"
+    assert item.sell_type == "DATA_QUALITY_REVIEW"
 
 
 def test_explicit_sell_verdict_reviews_until_confirmed_even_if_low_zone():

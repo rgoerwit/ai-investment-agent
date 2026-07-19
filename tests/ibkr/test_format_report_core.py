@@ -149,31 +149,31 @@ class TestFormatReportPanicDay:
         assert "Impact: STRUCTURAL" in report
 
     def test_stop_breached_section_present(self):
-        """STOP_BREACH item is labelled inside unified sell recommendations."""
+        """A legacy STOP_BREACH is downgraded into position reviews."""
         report = self._report_with_flag()
-        assert "SELL RECOMMENDATIONS" in report
-        assert "[STOP BREACH]" in report
+        assert "POSITION REVIEWS" in report
+        assert "[PRICE-DROP REVIEW]" in report
 
     def test_fundamental_failure_section_present(self):
-        """HARD_REJECT item is labelled inside unified sell recommendations."""
+        """A confirmation-gated thesis failure remains an executable sale."""
         report = self._report_with_flag()
         assert "SELL RECOMMENDATIONS" in report
-        assert "[FUNDAMENTAL FAILURE]" in report
+        assert "[CONFIRMED THESIS FAILURE]" in report
 
     def test_soft_rejection_section_present(self):
-        """Demoted macro_reviews render in the sell-related review section."""
+        """Demoted macro_reviews render in the position-review section."""
         report = self._report_with_flag()
-        assert "SELL-RELATED REVIEWS" in report
+        assert "POSITION REVIEWS" in report
         assert "[SOFT REJECTION]" in report
 
     def test_soft_rejection_section_shows_demoted_items(self):
-        """Demoted REVIEW + SOFT_REJECT items are listed in sell-related reviews."""
+        """Demoted REVIEW + SOFT_REJECT items are listed in position reviews."""
         report = self._report_with_flag()
         lines = report.split("\n")
         soft_rej_idx = next(
-            (i for i, ln in enumerate(lines) if "SELL-RELATED REVIEWS" in ln), None
+            (i for i, ln in enumerate(lines) if "POSITION REVIEWS" in ln), None
         )
-        assert soft_rej_idx is not None, "SELL-RELATED REVIEWS section missing"
+        assert soft_rej_idx is not None, "POSITION REVIEWS section missing"
         section_content = "\n".join(lines[soft_rej_idx:])
         # Held positions show IBKR symbol (no exchange suffix) in human-visible sections
         assert "SOFT00" in section_content
@@ -237,15 +237,15 @@ class TestFormatReportMacroStopReview:
         )
 
     def test_demoted_stop_appears_in_stop_breaches_under_review_section(self):
-        """REVIEW + STOP_BREACH item renders in sell-related reviews."""
+        """REVIEW + STOP_BREACH item renders in position reviews."""
         item = self._make_demoted_stop_item()
         report = format_report(
             [item],
             _make_portfolio(),
             portfolio_health_flags=[CORRELATED_SELL_EVENT_FLAG],
         )
-        assert "SELL-RELATED REVIEWS" in report
-        assert "[STOP BREACH]" in report
+        assert "POSITION REVIEWS" in report
+        assert "[PRICE-DROP REVIEW]" in report
 
     def test_demoted_stop_not_in_mechanical_stop_breached_section(self):
         """Demoted STOP_BREACH (action=REVIEW) must not appear in the mechanical 'STOP BREACHED' section."""
@@ -307,8 +307,8 @@ class TestFormatReportMacroStopReview:
         )
         assert "[MACRO_STOP:" not in report
 
-    def test_stop_breaches_under_review_section_absent_when_no_demoted_stops(self):
-        """Sell-related reviews do not render when macro_stop_reviews is empty."""
+    def test_legacy_stop_sell_is_downgraded_even_without_macro_demotion(self):
+        """Presentation safety does not depend on the macro-demotion path."""
         pos = _make_position(current_price=2100)
         # Only a regular SELL + STOP_BREACH (not demoted) — no macro_stop_reviews
         items = [
@@ -326,10 +326,9 @@ class TestFormatReportMacroStopReview:
             _make_portfolio(),
             portfolio_health_flags=[CORRELATED_SELL_EVENT_FLAG],
         )
-        assert "SELL-RELATED REVIEWS" not in report
-        # But the unified sell section should appear
-        assert "SELL RECOMMENDATIONS" in report
-        assert "[STOP BREACH]" in report
+        assert "POSITION REVIEWS" in report
+        assert "SELL RECOMMENDATIONS" not in report
+        assert "[PRICE-DROP REVIEW]" in report
 
     def test_summary_counts_demoted_stop_as_review_not_sell(self):
         """Demoted STOP_BREACH (action=REVIEW) contributes to REVIEW count, not SELL count."""
@@ -365,8 +364,8 @@ class TestFormatReportNormalDay:
         report = format_report(items, _make_portfolio(), portfolio_health_flags=[])
         assert "MACRO ALERT" not in report
 
-    def test_soft_sell_on_normal_day_is_sell_not_review(self):
-        """SOFT_REJECT with action=SELL appears in the unified sell section."""
+    def test_legacy_soft_sell_on_normal_day_is_review(self):
+        """A soft rejection lacks confirmed fundamental sale authority."""
         pos = _make_position(current_price=2100)
         items = [
             ReconciliationItem(
@@ -379,17 +378,18 @@ class TestFormatReportNormalDay:
             )
         ]
         report = format_report(items, _make_portfolio(), portfolio_health_flags=[])
-        assert "SELL RECOMMENDATIONS" in report
-        assert "[SOFT REJECTION]" in report
+        assert "REVIEWS" in report
+        assert "SELL RECOMMENDATIONS" not in report
+        assert "[THESIS REASSESSMENT]" in report
         lines = report.split("\n")
         soft_rej_idx = next(
-            (i for i, ln in enumerate(lines) if "SELL RECOMMENDATIONS" in ln), None
+            (i for i, ln in enumerate(lines) if ln.strip().startswith("REVIEWS")), None
         )
         assert soft_rej_idx is not None
-        # Check the next ~15 lines for the SELL action label and the ticker
+        # Check the next ~15 lines for the REVIEW action label and the ticker
         # Held positions show IBKR symbol ("7203") not yfinance ("7203.T") in display
         section_lines = lines[soft_rej_idx : soft_rej_idx + 15]
-        assert any("SELL" in ln and "7203" in ln for ln in section_lines)
+        assert any("REVIEW" in ln and "7203" in ln for ln in section_lines)
 
     def test_no_soft_rejection_section_when_no_soft_items(self):
         """Only STOP_BREACH items → SOFT REJECTION section not rendered."""

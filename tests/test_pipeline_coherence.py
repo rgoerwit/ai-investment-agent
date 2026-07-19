@@ -49,7 +49,7 @@ class TestPipelineCoherence:
         - CORRELATED_SELL_EVENT still fires — basis-aware evidence counts the
           price-down reviews, so permanent reviews don't erase event breadth
         - MACRO ALERT banner appears; the strong stop-breach is demoted
-        - SELL-RELATED REVIEWS section appears with basis labels
+        - POSITION REVIEWS section appears with basis labels
         """
         positions, analyses, portfolio = _make_multi_sell_scenario(
             n_soft_sells=8, n_stop_breaches=1, n_hard_rejects=1, n_holds=2
@@ -62,8 +62,8 @@ class TestPipelineCoherence:
 
         # Macro banner must appear
         assert "MACRO ALERT" in report
-        assert "SELL-RELATED REVIEWS" in report
-        assert "[STOP BREACH]" in report
+        assert "POSITION REVIEWS" in report
+        assert "[PRICE-DROP REVIEW]" in report
         assert "[THESIS REASSESSMENT]" in report
         # SOFT_REJECT items are REVIEW at source, never SELL
         soft = [i for i in items if i.sell_type == "SOFT_REJECT"]
@@ -76,8 +76,10 @@ class TestPipelineCoherence:
         ]
         assert len(stop_reviews) == 1
 
-    def test_panic_day_weak_stop_breach_stays_sell(self):
-        """STOP_BREACH item with weak fundamentals stays SELL even during correlated event."""
+    def test_panic_day_weak_stop_breach_is_review_at_source(self):
+        """A price break carries no sell authority even with weak fundamentals
+        (July 2026 retail alignment) — a weak-score reject exits only via the
+        confirmed-thesis-failure path, never off a price level on panic day."""
         positions, analyses, portfolio = _make_multi_sell_scenario(
             n_soft_sells=8, n_stop_breaches=1, n_hard_rejects=0, n_holds=2
         )
@@ -93,13 +95,13 @@ class TestPipelineCoherence:
         report = format_report(items, portfolio, portfolio_health_flags=health_flags)
 
         assert "MACRO ALERT" in report
-        # Weak stop-breach stays in the mechanical SELL section
-        assert "SELL RECOMMENDATIONS" in report
-        assert "[STOP BREACH]" in report
-        stop_sells = [
-            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
-        ]
-        assert len(stop_sells) == 1
+        # No mechanical SELL section — the price break is a labeled review.
+        assert "SELL RECOMMENDATIONS" not in report
+        assert "[PRICE-DROP REVIEW]" in report
+        stop_items = [i for i in items if i.sell_type == "STOP_BREACH"]
+        assert len(stop_items) == 1
+        assert stop_items[0].action == "REVIEW"
+        assert stop_items[0].urgency == "HIGH"
 
     def test_non_panic_day_soft_rejects_are_reviews_without_macro_tag(self):
         """3 SOFT_REJECTs + 17 HOLDs = 15% → below 25% threshold → no event.

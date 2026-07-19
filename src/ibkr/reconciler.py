@@ -116,7 +116,10 @@ def _populate_portfolio_weights(
     alpha_base_lookup: dict[str, AnalysisRecord],
 ) -> tuple[dict[str, float], dict[str, float]]:
     """Populate sector/exchange concentration weights on the portfolio."""
-    from src.ibkr.reconciliation_rules import _exchange_from_position
+    from src.ibkr.reconciliation_rules import (
+        _exchange_from_position,
+        base_match_allowed,
+    )
 
     sector_weights: dict[str, float] = {}
     exchange_weights: dict[str, float] = {}
@@ -132,7 +135,13 @@ def _populate_portfolio_weights(
                 and not pos.ticker.ibkr.isdigit()
             ):
                 best = alpha_base_lookup.get(pos.ticker.ibkr.upper())
-                if best and "." in best.ticker:
+                if (
+                    best
+                    and "." in best.ticker
+                    # Currency must agree — weight attribution must not book a
+                    # SMART/EUR position under a same-base foreign analysis.
+                    and base_match_allowed(pos, best)
+                ):
                     current_ticker = best.ticker
                     analysis = best
             sector = normalize_sector_label(analysis.sector if analysis else None)

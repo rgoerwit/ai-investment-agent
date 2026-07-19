@@ -28,6 +28,8 @@ def make_position(
         market_value_usd=market_value_usd,
         currency=currency,
         current_price_local=current_price,
+        ticker_identity_verified=True,
+        ticker_resolution_source="exchange_map",
     )
 
 

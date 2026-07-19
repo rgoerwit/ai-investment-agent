@@ -115,22 +115,15 @@ def _append_macro_banner(
             if match
             else ("?", "?", "?%")
         )
-        stop_count = sum(
-            1
-            for item in context.items
-            if item.action == "SELL" and item.sell_type == "STOP_BREACH"
-        )
         failure_count = sum(
             1
             for item in context.items
             if item.action == "SELL" and item.action_basis == "CONFIRMED_THESIS_FAILURE"
         )
         guidance = ["Pause thesis changes; re-evaluate intrinsic value."]
-        if stop_count:
-            guidance.append(f"{stop_count} weak-fundamentals stop SELL(s) remain live.")
         if failure_count:
             guidance.append(f"{failure_count} confirmed thesis failure(s) remain live.")
-        if not (stop_count or failure_count):
+        if not failure_count:
             guidance.append("No executable SELLs — all demoted to review.")
         banner = [
             "╔" + "═" * 54 + "╗",

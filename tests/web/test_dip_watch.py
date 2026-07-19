@@ -437,3 +437,69 @@ def test_screen_without_analysis_withholds_conservatively_without_crash():
         [item], exchange_weights={"T": 45.0}
     )
     assert withheld == [item]
+
+
+# ── Intact-thesis drawdown promotion (July 2026) ──────────────────────────────
+
+
+def _thesis_dip_item(
+    *,
+    action_basis: str = "THESIS_REASSESSMENT",
+    verdict: str = "DO_NOT_INITIATE",
+    current_price: float = 1680.0,  # -20% vs entry 2100
+    health_adj: float | None = 75.0,
+    growth_adj: float | None = 72.0,
+    age_days: int = 5,
+) -> ReconciliationItem:
+    item = _dip_item(
+        verdict=verdict,
+        current_price=current_price,
+        health_adj=health_adj,
+        growth_adj=growth_adj,
+        age_days=age_days,
+        action="REVIEW",
+        sell_type="SOFT_REJECT",
+    )
+    item.action_basis = action_basis
+    return item
+
+
+def test_thesis_reassessment_review_is_thesis_dip_source():
+    item = _thesis_dip_item()
+    assert dip_watch_source(item) == "held_thesis_dip"
+
+
+def test_entry_constraint_review_is_thesis_dip_source():
+    item = _thesis_dip_item(action_basis="ENTRY_CONSTRAINT")
+    assert dip_watch_source(item) == "held_thesis_dip"
+
+
+def test_intact_thesis_deep_dip_is_eligible_without_macro_event():
+    """The dead-money fix: a -20% intact-score reject reaches DIP WATCH with
+    no macro event required and no BUY verdict required."""
+    item = _thesis_dip_item()
+    assert is_dip_watch_eligible(item, macro_event_active=False)
+
+
+def test_intact_thesis_shallow_dip_below_15pct_not_promoted():
+    item = _thesis_dip_item(current_price=1953.0)  # -7% vs entry
+    assert not is_dip_watch_eligible(item, macro_event_active=False)
+
+
+def test_weak_score_thesis_reassessment_not_promoted():
+    """The weak-score unconfirmed reject also carries THESIS_REASSESSMENT —
+    the 55/55 eligibility floor keeps it out of the dip queue."""
+    item = _thesis_dip_item(health_adj=48.0, growth_adj=45.0)
+    assert not is_dip_watch_eligible(item, macro_event_active=False)
+
+
+def test_stale_thesis_dip_not_promoted():
+    item = _thesis_dip_item(age_days=45)
+    assert not is_dip_watch_eligible(item, macro_event_active=False)
+
+
+def test_compute_dip_score_is_stop_independent():
+    """Stop distance must not influence the dip score (July 2026)."""
+    near_stop = _dip_item(stop_price=1750.0)
+    far_stop = _dip_item(stop_price=900.0)
+    assert compute_dip_score(near_stop) == compute_dip_score(far_stop)

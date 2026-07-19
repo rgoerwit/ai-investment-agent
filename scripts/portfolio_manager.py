@@ -68,6 +68,7 @@ from src.ibkr.portfolio_defaults import (
 )
 from src.ibkr.portfolio_presentation import (
     build_cash_summary,
+    retail_safe_action,
 )
 from src.ibkr.portfolio_report import (
     PortfolioReportContext,
@@ -1099,6 +1100,7 @@ def format_report(
     than zero. The report avoids asserting own/watchlist status in that case.
     """
     generated_at = datetime.now()
+    items = [retail_safe_action(item) for item in items]
     error_map = errors or {}
     watchlist_unavailable = bool(error_map.get("watchlist")) and portfolio_data_loaded
     action_plan = build_portfolio_action_plan(
@@ -1254,6 +1256,7 @@ def format_json(
     ``portfolio_data_loaded`` is False in read-only/offline runs (no IBKR
     connection): account/cash/positions reflect an empty default, not live data.
     """
+    items = [retail_safe_action(item) for item in items]
     freshness_summary = freshness_summary or _refresh_service.classify(
         items,
         max_age_days=max_age_days,

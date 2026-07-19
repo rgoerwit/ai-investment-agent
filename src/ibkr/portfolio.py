@@ -17,9 +17,10 @@ from src.ibkr.models import NormalizedPosition, PortfolioSummary
 from src.ibkr.portfolio_defaults import DEFAULT_CASH_BUFFER_PCT
 from src.ibkr.ticker import Ticker
 from src.ibkr.ticker_mapper import (
+    TickerResolution,
     _yf_search_ticker,
     cache_conid_mapping,
-    ibkr_symbol_to_yf,
+    resolve_ibkr_ticker,
     yf_ticker_from_conid,
 )
 from src.ticker_corrections import apply_operator_override
@@ -76,6 +77,20 @@ def normalize_positions(
 
         # Build Ticker from IBKR fields — this is the authoritative conversion point.
         ticker_obj = Ticker.from_ibkr(raw_symbol, raw_exchange, raw_currency)
+        smart_non_usd = raw_exchange.upper() in {
+            "",
+            "SMART",
+        } and raw_currency.upper() not in {
+            "",
+            "USD",
+        }
+        ticker_identity_verified = ticker_obj.exchange_resolved and not smart_non_usd
+        if ticker_identity_verified:
+            ticker_resolution_source = "exchange_map"
+        elif ticker_obj.has_suffix:
+            ticker_resolution_source = "currency_fallback"
+        else:
+            ticker_resolution_source = "unresolved"
 
         conid = _parse_conid(raw.get("conid"))
         if (
@@ -87,14 +102,19 @@ def normalize_positions(
                 raw_currency=raw_currency,
             )
         ):
-            resolved_yf = _resolve_conid_to_yf(
+            resolution = _resolve_conid_ticker(
                 conid,
                 client,
                 force_live=True,
                 context="position",
             )
-            if resolved_yf:
-                ticker_obj = Ticker.from_yf(resolved_yf, currency=raw_currency)
+            if resolution.yf_ticker:
+                ticker_obj = Ticker.from_yf(
+                    resolution.yf_ticker,
+                    currency=raw_currency,
+                )
+                ticker_identity_verified = resolution.exchange_verified
+                ticker_resolution_source = resolution.source
 
         # Network fallback: for non-US positions where the exchange code is unknown
         # (not in IBKR_TO_YFINANCE), attempt a yfinance.Search to resolve the suffix.
@@ -107,6 +127,8 @@ def normalize_positions(
             yf_str = _yf_search_ticker(raw_symbol, raw_exchange, raw_currency)
             if yf_str:
                 ticker_obj = Ticker.from_yf(yf_str, currency=raw_currency)
+                ticker_identity_verified = False
+                ticker_resolution_source = "yfinance_search"
 
         # Operator-confirmed listing migrations (config/ticker_overrides.json):
         # keep position keys aligned with the analysis side until IBKR's own
@@ -114,15 +136,17 @@ def normalize_positions(
         overridden_yf, was_overridden = apply_operator_override(ticker_obj.yf)
         if was_overridden:
             ticker_obj = Ticker.from_yf(overridden_yf, currency=raw_currency)
+            ticker_identity_verified = True
+            ticker_resolution_source = "operator_override"
 
         raw_market_value = float(raw.get("mktValue", 0) or raw.get("marketValue", 0))
         currency = raw_currency or ("GBP" if ticker_obj.suffix == ".L" else "USD")
         fx_rate = FALLBACK_RATES_TO_USD.get(currency.upper(), 1.0)
         market_value_usd = raw_market_value * fx_rate
 
-        # IBKR reports LSE (.L) prices in GBP; yfinance and analysis stop/target
-        # prices use GBX (pence). Multiply by 100 so all downstream comparisons
-        # (stop breach, target hit, drift, P&L) use consistent GBX units.
+        # IBKR reports LSE (.L) prices in GBP; yfinance and saved downside/base-case
+        # reference prices use GBX (pence). Multiply by 100 so review-level,
+        # valuation-reference, drift, and P&L comparisons use consistent GBX units.
         # NOTE: market_value_usd is computed from IBKR's GBP mktValue (before ×100)
         # using the GBP FX rate, so it is correct — do NOT re-apply FX on GBX prices.
         current_price_local = float(raw.get("mktPrice", 0) or raw.get("lastPrice", 0))
@@ -147,6 +171,8 @@ def normalize_positions(
             unrealized_pnl_usd=float(raw.get("unrealizedPnl", 0)),
             currency=currency,
             current_price_local=current_price_local,
+            ticker_identity_verified=ticker_identity_verified,
+            ticker_resolution_source=ticker_resolution_source,
         )
         positions.append(position)
 
@@ -181,6 +207,8 @@ def _should_resolve_position_conid(
 
     if currency == "USD" and exchange in _US_EXCHANGES:
         return False
+    if currency not in {"", "USD"} and exchange in {"", "SMART"}:
+        return True
     if currency in _MULTI_EXCHANGE_CURRENCIES:
         return True
     return not ticker_obj.exchange_resolved
@@ -241,13 +269,13 @@ def build_portfolio_summary(
     )
 
 
-def _resolve_conid_to_yf(
+def _resolve_conid_ticker(
     conid: int,
     client: IbkrClient | None,
     *,
     force_live: bool = False,
     context: str = "watchlist",
-) -> str:
+) -> TickerResolution:
     """Resolve an IBKR conid to a yfinance ticker.
 
     Checks the local conid cache first (instant, no API call).  On a miss,
@@ -255,7 +283,8 @@ def _resolve_conid_to_yf(
     ticker using the same IBKR→yfinance table as live positions, and caches
     the result so subsequent runs are instant.
 
-    Returns the yfinance ticker string, or "" if resolution fails.
+    Returns the ticker plus resolution provenance. Inferred mappings remain
+    usable for research lookup but cannot authorize an order.
     """
     # Fast path: reverse-lookup in local cache.
     # A bare cached value (no ".") may be a correctly-resolved US ticker OR a
@@ -271,7 +300,7 @@ def _resolve_conid_to_yf(
             conid=conid,
             yf_ticker=cached,
         )
-        return cached
+        return TickerResolution(cached, "unresolved", False)
     if cached:
         logger.debug(
             "conid_bare_cache_bypass",
@@ -283,7 +312,7 @@ def _resolve_conid_to_yf(
 
     # Slow path: ask IBKR for contract details
     if client is None:
-        return cached or ""
+        return TickerResolution(cached or "", "unresolved", False)
 
     try:
         info = client.get_contract_info(conid, compete=False)
@@ -296,7 +325,7 @@ def _resolve_conid_to_yf(
             conid=conid,
             **summary,
         )
-        return cached or ""
+        return TickerResolution(cached or "", "unresolved", False)
 
     if not info:
         logger.debug("conid_no_contract_info", context=context, conid=conid)
@@ -315,7 +344,7 @@ def _resolve_conid_to_yf(
             )
             info = {}
         if not info:
-            return cached or ""  # fall back to bare cached value if API fails
+            return TickerResolution(cached or "", "unresolved", False)
 
     symbol = (info.get("symbol", "") or info.get("ticker", "") or "").strip()
     exchange = (
@@ -329,11 +358,12 @@ def _resolve_conid_to_yf(
 
     if not symbol:
         logger.debug("conid_no_symbol", context=context, conid=conid)
-        return cached or ""
+        return TickerResolution(cached or "", "unresolved", False)
 
-    yf_ticker = ibkr_symbol_to_yf(symbol, exchange, currency)
-    if yf_ticker:
-        cache_conid_mapping(yf_ticker, conid, symbol, exchange)
+    resolution = resolve_ibkr_ticker(symbol, exchange, currency)
+    if resolution.yf_ticker and resolution.exchange_verified:
+        cache_conid_mapping(resolution.yf_ticker, conid, symbol, exchange)
+    if resolution.yf_ticker:
         logger.debug(
             "conid_resolved",
             context=context,
@@ -341,9 +371,29 @@ def _resolve_conid_to_yf(
             symbol=symbol,
             exchange=exchange,
             currency=currency,
-            yf_ticker=yf_ticker,
+            yf_ticker=resolution.yf_ticker,
+            resolution_source=resolution.source,
+            exchange_verified=resolution.exchange_verified,
         )
-    return yf_ticker or cached or ""
+    if resolution.yf_ticker:
+        return resolution
+    return TickerResolution(cached or "", "unresolved", False)
+
+
+def _resolve_conid_to_yf(
+    conid: int,
+    client: IbkrClient | None,
+    *,
+    force_live: bool = False,
+    context: str = "watchlist",
+) -> str:
+    """Backward-compatible string projection of conid ticker resolution."""
+    return _resolve_conid_ticker(
+        conid,
+        client,
+        force_live=force_live,
+        context=context,
+    ).yf_ticker
 
 
 def _resolve_watchlist_conid(conid: int, client: IbkrClient | None) -> str:

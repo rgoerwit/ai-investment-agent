@@ -34,8 +34,8 @@ DEFAULT_OVERWEIGHT_PCT = 20.0
 DEFAULT_UNDERWEIGHT_PCT = 20.0
 
 # Positions below this USD value are de-minimis: never surfaced as executable
-# actions or attention-level reviews (hard triggers — stop breach, mandatory
-# exit — and compliance-class flags like PFIC are exempt from suppression).
+# actions or attention-level reviews (urgent price reviews, mandatory exits,
+# and compliance-class flags like PFIC are exempt from suppression).
 DEFAULT_MIN_ACTIONABLE_POSITION_USD = 300.0
 
 # A held-position thesis-failure SELL requires CONFIRMATION: the most recent

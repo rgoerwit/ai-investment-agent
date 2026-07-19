@@ -12,13 +12,19 @@ exit, but it must not decide among those alone.
 from datetime import datetime, timedelta
 
 from src.ibkr.buy_stability import PriorVerdict
-from src.ibkr.models import PortfolioEvidence
+from src.ibkr.models import NormalizedPosition, PortfolioEvidence
 from src.ibkr.portfolio_health import (
     compute_portfolio_health,
     is_macro_event_evidence,
 )
 from src.ibkr.reconciler import reconcile
-from src.ibkr.reconciliation_rules import classify_disposition, reject_confirmed
+from src.ibkr.reconciliation_rules import (
+    analysis_identity_verified,
+    base_match_allowed,
+    classify_disposition,
+    reject_confirmed,
+)
+from src.ibkr.ticker import Ticker
 from tests.ibkr.reconciler_cases import (
     _make_analysis,
     _make_hold_item_for_health,
@@ -119,6 +125,59 @@ class TestRejectConfirmed:
         history = [_prior("DO_NOT_INITIATE", 20), _prior("BUY", 2, quick=True)]
         assert reject_confirmed(a, history)
 
+
+class TestAnalysisIdentity:
+    @staticmethod
+    def _position(exchange: str, currency: str, conid: int = 123) -> NormalizedPosition:
+        return NormalizedPosition(
+            conid=conid,
+            ticker=Ticker.from_ibkr("AGS", exchange, currency),
+            quantity=100,
+            avg_cost_local=1.0,
+            current_price_local=1.0,
+            market_value_usd=100.0,
+            currency=currency,
+            ticker_identity_verified=True,
+            ticker_resolution_source="exchange_map",
+        )
+
+    def test_smart_non_us_currency_guess_cannot_authorize_sale(self):
+        position = self._position("SMART", "SGD")
+        analysis = _make_analysis(ticker="AGS.SI")
+        analysis.currency = "SGD"
+
+        assert position.ticker.yf == analysis.ticker
+        assert base_match_allowed(position, analysis)
+        assert not analysis_identity_verified(position, analysis)
+
+    def test_resolved_exchange_and_conid_verify_identity(self):
+        position = self._position("SGX", "SGD")
+        analysis = _make_analysis(ticker="AGS.SI")
+        analysis.currency = "SGD"
+
+        assert analysis_identity_verified(position, analysis)
+
+    def test_inferred_search_mapping_cannot_authorize_sale(self):
+        position = self._position("SGX", "SGD").model_copy(
+            update={
+                "ticker_identity_verified": False,
+                "ticker_resolution_source": "yfinance_search",
+            }
+        )
+        analysis = _make_analysis(ticker="AGS.SI")
+        analysis.currency = "SGD"
+
+        assert not analysis_identity_verified(position, analysis)
+
+    def test_missing_conid_or_currency_fails_closed(self):
+        position = self._position("SGX", "SGD", conid=0)
+        analysis = _make_analysis(ticker="AGS.SI")
+        analysis.currency = "SGD"
+        assert not analysis_identity_verified(position, analysis)
+
+        analysis.currency = ""
+        assert not base_match_allowed(self._position("SGX", "SGD"), analysis)
+
     def test_unparseable_analysis_date_never_confirms(self):
         a = _reject_analysis()
         a.analysis_date = "not-a-date"
@@ -137,12 +196,27 @@ class TestDeMinimis:
         assert items[0].action_basis == "DE_MINIMIS"
         assert "monitor only" in items[0].reason
 
-    def test_sub_floor_stop_breach_still_sells(self):
+    def test_sub_floor_price_break_is_monitor_only(self):
+        """A price break carries no sell authority (July 2026 retail
+        alignment), and on a de-minimis position it is monitor-only."""
         pos = _make_position(current_price=1700, market_value_usd=200)
         a = _make_analysis(stop_price=1900)
         items = reconcile([pos], {"7203.T": a}, _make_portfolio())
-        assert items[0].action == "SELL"
+        assert items[0].action == "HOLD"
+        assert items[0].action_basis == "DE_MINIMIS"
+
+    def test_actionable_price_break_is_high_urgency_review_not_sell(self):
+        """Above the de-minimis floor a price break raises an urgent REVIEW —
+        never an executable SELL; a sale needs fundamental failure evidence."""
+        pos = _make_position(current_price=1700, market_value_usd=5000)
+        a = _make_analysis(stop_price=1900)
+        items = reconcile([pos], {"7203.T": a}, _make_portfolio())
+        assert items[0].action == "REVIEW"
         assert items[0].action_basis == "STOP_LOSS"
+        assert items[0].urgency == "HIGH"
+        assert items[0].suggested_quantity is None
+        assert items[0].cash_impact_usd == 0.0
+        assert "fundamental failure" in items[0].reason
 
     def test_compliance_flag_exempts_from_suppression(self):
         """A $200 PFIC position still costs a Form 8621 — per-position burden
@@ -349,11 +423,14 @@ class TestSerializerAdditive:
         assert payload["action_basis"] == "THESIS_REASSESSMENT"
         assert payload["sell_type"] == "SOFT_REJECT"  # legacy field untouched
 
-    def test_legacy_item_serializes_none_basis(self):
+    def test_legacy_item_serializes_retail_safe_basis(self):
         from src.web.ibkr_dashboard.serializers import serialize_item
 
         item = _make_sell_item_on_date("7203.T", "2026-07-01")
-        assert serialize_item(item)["action_basis"] is None
+        payload = serialize_item(item)
+        assert payload["action"] == "REVIEW"
+        assert payload["action_basis"] == "THESIS_REASSESSMENT"
+        assert payload["suggested_quantity"] is None
 
 
 class TestDeMinimisBoundary:
@@ -371,16 +448,16 @@ class TestDeMinimisBoundary:
         assert items[0].action_basis == "DE_MINIMIS"
 
 
-class TestStopStalenessAdvisory:
+class TestReviewLevelAdvisory:
     def test_stop_inside_noise_band_is_flagged(self):
         pos = _make_position(current_price=1950)
         a = _make_analysis(verdict="BUY", stop_price=1900)  # 2.6% below
         items = reconcile([pos], {"7203.T": a}, _make_portfolio())
         hold = items[0]
         assert hold.action == "HOLD"
-        assert "inside noise range" in hold.reason
+        assert "inside daily noise" in hold.reason
 
-    def test_unrevised_stop_after_big_run_is_ratchet_candidate(self):
+    def test_review_level_does_not_ratchet_after_gain(self):
         pos = _make_position(current_price=2600)  # +23.8% vs entry 2100
         a = _make_analysis(verdict="BUY", stop_price=1900, target_1=3000)
         # widen drift so the +23.8% run does not trip staleness before HOLD
@@ -389,9 +466,9 @@ class TestStopStalenessAdvisory:
         )
         hold = items[0]
         assert hold.action == "HOLD"
-        assert "ratchet candidate" in hold.reason
+        assert "review level unrevised" not in hold.reason
 
-    def test_normal_stop_gets_no_advisory(self):
+    def test_normal_review_level_gets_no_advisory(self):
         pos = _make_position(current_price=2150)
         a = _make_analysis(verdict="BUY", stop_price=1900)
         items = reconcile([pos], {"7203.T": a}, _make_portfolio())
@@ -401,10 +478,10 @@ class TestStopStalenessAdvisory:
 class TestDispositionControlMatrix:
     """One row per exit control — the anti-churn contract pinned end to end.
 
-    An intact-score reject loses AUTOMATIC sell authority, nothing more:
-    mandatory exits, stop breaches, tender review, data-quality quarantine,
-    and confirmed below-gate deterioration retain theirs, and confirmation
-    itself requires provably full-mode analyses on both sides.
+    An intact-score reject loses automatic sell authority. Mandatory exits and
+    confirmed below-gate deterioration can retain it; price breaches, tender
+    mechanics, and data-quality concerns remain reviews. Confirmation itself
+    requires provably full-mode analyses on both sides.
     """
 
     # ── executable authority retained ────────────────────────────────────
@@ -422,17 +499,20 @@ class TestDispositionControlMatrix:
             True,
         )
 
-    def test_stop_breach_retains_executable_authority(self):
-        """Stop-breach handling precedes disposition classification and keeps
-        its executable authority regardless of intact scores."""
-        pos = _make_position(current_price=1850)  # below stop 1900
+    def test_price_break_has_no_sell_authority(self):
+        """A price break below the analysis review level raises an urgent
+        REVIEW — never an executable SELL (July 2026 retail alignment): the
+        confirmation gate must not be bypassable by a price level."""
+        pos = _make_position(current_price=1850)  # below review level 1900
         a = _make_analysis(verdict="BUY")
         a.health_adj = 80.0
         a.growth_adj = 70.0
         items = reconcile([pos], {"7203.T": a}, _make_portfolio())
-        assert items[0].action == "SELL"
+        assert items[0].action == "REVIEW"
         assert items[0].sell_type == "STOP_BREACH"
         assert items[0].action_basis == "STOP_LOSS"
+        assert items[0].urgency == "HIGH"
+        assert items[0].suggested_quantity is None
 
     def test_missing_scores_are_not_intact_so_confirmation_is_reachable(self):
         a = _reject_analysis()
@@ -465,8 +545,8 @@ class TestDispositionControlMatrix:
         assert (d.action, d.basis) == ("REVIEW", "ENTRY_CONSTRAINT")
 
     def test_intact_below_entry_with_confirming_history_is_price_weakness(self):
-        """A price drop alone must not trigger a sell — the stop-loss path
-        governs downside for intact names."""
+        """A price drop alone must not trigger a sell — fundamentals, not
+        price, govern exits for intact names."""
         a = _reject_analysis()
         d = classify_disposition(
             a,
@@ -475,7 +555,7 @@ class TestDispositionControlMatrix:
         )
         assert (d.action, d.basis) == ("REVIEW", "THESIS_REASSESSMENT")
         assert "price weakness" in d.detail
-        assert "stop-loss governs" in d.detail
+        assert "watch fundamentals" in d.detail
 
     def test_gate_boundary_exactly_50_counts_as_intact(self):
         a = _reject_analysis()
@@ -588,18 +668,18 @@ class TestReviewRowPresentation:
         assert items[0].action == "REVIEW"
         report = self._render(items)
         assert "holding:   100 shares" in report
-        assert "potential exit ~$" in report
+        assert "position value ~$" in report
         assert "no entry price — re-run analysis" not in report
         review_line = next(
             line for line in report.splitlines() if "REVIEW  7203" in line
         )
         assert "LMT" not in review_line
 
-    def test_entry_constraint_winner_gets_ratchet_advisory(self):
+    def test_entry_constraint_winner_does_not_get_ratchet_advisory(self):
         items = self._review_items(current_price=2600)  # +23.8% over entry
         assert items[0].action_basis == "ENTRY_CONSTRAINT"
         report = self._render(items)
-        assert "ratchet candidate" in report
+        assert "review level unrevised" not in report
 
     def test_conditional_bucket_uses_position_market_value(self):
         from src.ibkr.portfolio_presentation import _soft_sell_proceeds_usd
@@ -690,3 +770,32 @@ class TestPlanTurnoverLine:
         report = self._render(items, portfolio)
         assert "Plan turnover:" in report
         assert "% of NAV" not in report
+
+
+class TestThesisBreakDisplay:
+    """Kill criteria render as 'break if:' lines where stops used to show."""
+
+    def test_review_row_shows_thesis_break_triggers(self):
+        pos = _make_position(current_price=2400)
+        a = _reject_analysis()
+        a.kill_criteria = (
+            "D/E ratio exceeds 1.8",
+            "Two consecutive years negative FCF",
+        )
+        items = reconcile([pos], {"7203.T": a}, _make_portfolio())
+        assert items[0].action == "REVIEW"
+        from tests.ibkr.test_disposition import TestReviewRowPresentation
+
+        report = TestReviewRowPresentation()._render(items)
+        assert "break if:" in report
+        assert "D/E ratio exceeds 1.8" in report
+
+    def test_hold_row_shows_thesis_break_triggers(self):
+        pos = _make_position(current_price=2150)
+        a = _make_analysis(verdict="BUY")
+        a.kill_criteria = ("Operating margin below 8% for two quarters",)
+        items = reconcile([pos], {"7203.T": a}, _make_portfolio())
+        assert items[0].action == "HOLD"
+        report = TestReviewRowPresentation()._render(items)
+        assert "break if:" in report
+        assert "Operating margin below 8%" in report

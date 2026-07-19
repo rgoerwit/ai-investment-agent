@@ -9,12 +9,13 @@ from src.ibkr.models import (
     TradeBlockData,
 )
 from src.ibkr.ticker import Ticker
-from tests.ibkr.reconciler_cases import _make_position
+from tests.ibkr.reconciler_cases import _make_analysis, _make_position
 
 CORRELATED_SELL_EVENT_FLAG = (
     "CORRELATED_SELL_EVENT: 8 positions changed verdict within 7d of 2026-03-05"
     " (80% of held positions) — probable macro event."
-    " Execute stop-breach SELLs only; review verdict-change SELLs before acting."
+    " Do not sell into a correlated drop: exit only on confirmed fundamental"
+    " failure; review everything else."
 )
 
 
@@ -23,7 +24,8 @@ def _panic_items() -> list[ReconciliationItem]:
     Pre-demoted panic-day items for format_report isolation tests.
 
     8 SOFT_REJECT items already demoted to REVIEW (as compute_portfolio_health would do),
-    plus 1 STOP_BREACH and 1 HARD_REJECT that remain as SELL.
+    plus one legacy STOP_BREACH that presentation must downgrade and one
+    confirmed thesis-failure SELL.
     """
     pos = _make_position(current_price=2100)
     items: list[ReconciliationItem] = []
@@ -53,14 +55,25 @@ def _panic_items() -> list[ReconciliationItem]:
             sell_type="STOP_BREACH",
         )
     )
+    hard_analysis = _make_analysis(ticker="HARD.T", verdict="DO_NOT_INITIATE")
+    # Pin the date absolutely: this analysis renders in date-frozen golden
+    # snapshots, and _make_analysis derives analysis_date from real now() —
+    # a relative date here makes the goldens drift at midnight.
+    hard_analysis.analysis_date = "2026-07-12"
     items.append(
         ReconciliationItem(
             ticker="HARD.T",
             action="SELL",
             urgency="HIGH",
             reason="Verdict → DO_NOT_INITIATE  (2026-03-05)",
-            ibkr_position=pos,
+            ibkr_position=_make_position(ticker="HARD.T", current_price=2100),
+            analysis=hard_analysis,
             sell_type="HARD_REJECT",
+            action_basis="CONFIRMED_THESIS_FAILURE",
+            suggested_quantity=100,
+            suggested_price=2100.0,
+            cash_impact_usd=1400.0,
+            settlement_date="2026-03-09",
         )
     )
     return items
@@ -143,6 +156,8 @@ def _make_sell_item(
         unrealized_pnl_usd=unrealized_pnl_usd,
         market_value_usd=abs(current_price_local * quantity / 100),
         currency="JPY",
+        ticker_identity_verified=True,
+        ticker_resolution_source="exchange_map",
     )
     return ReconciliationItem(
         ticker=ticker,
@@ -177,6 +192,7 @@ def _make_sell_item_with_analysis(
                 growth_adj=growth,
                 zone=zone,
                 conviction=conviction,
+                currency="JPY",
             )
         }
     )

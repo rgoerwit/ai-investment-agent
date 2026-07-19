@@ -30,12 +30,14 @@ from src.ibkr.reconciliation_rules import (
     _normalize_verdict,
     _normalize_zone,
     _settlement_date,
+    analysis_identity_verified,
+    base_match_allowed,
+    check_base_case_reference_reached,
+    check_review_level_breach,
     check_staleness,
-    check_stop_breach,
-    check_target_hit,
     classify_disposition,
     classify_profit_take,
-    stop_staleness_note,
+    review_level_note,
 )
 from src.ibkr.ticker import Ticker
 from src.ticker_policy import sibling_ticker_candidates
@@ -103,13 +105,13 @@ _PROFIT_TAKE_REASON_LABELS = {
 
 def _profit_take_reason(reasons: tuple[str, ...], target_hit: bool) -> str:
     labels = [_PROFIT_TAKE_REASON_LABELS.get(reason, reason) for reason in reasons]
-    prefix = (
-        "Profit take" if "unknown_tax_term" not in reasons else "Profit take review"
-    )
     context = "; ".join(labels) if labels else "capital allocation discipline"
     if target_hit and "capital_idle_cash_risk_plus_target_hit" not in reasons:
         context = f"{context}; target hit"
-    return f"{prefix}: {context}"
+    return (
+        f"Profit-take review: {context} — advisory; verify lot gains/holding "
+        "period in IBKR before selling"
+    )
 
 
 def _same_base_sibling_keys(
@@ -141,25 +143,8 @@ def _data_vacuum_review_reason(
     return f"Data-vacuum DNI for {analysis.ticker}; verify data coverage."
 
 
-_CURRENCY_EQUIVALENTS = {"GBX": "GBP", "GBP": "GBX"}  # same economy, unit scaled
-
-
-def _base_match_allowed(pos: NormalizedPosition, analysis: AnalysisRecord) -> bool:
-    """Whether a base-symbol fallback match is safe for this position.
-
-    Suffix-less positions (IBKR couldn't resolve the exchange) may borrow the
-    single base-matched analysis. A SUFFIXED position may only do so when the
-    analysis currency agrees — otherwise it is a different listing entirely.
-    """
-    if not pos.ticker.has_suffix:
-        return True
-    a_ccy = (getattr(analysis, "currency", "") or "").upper()
-    p_ccy = (pos.currency or "").upper()
-    if not a_ccy or not p_ccy:
-        # Legacy records without a recorded currency: allow — ambiguous-base
-        # poisoning in the lookup builder already guards multi-listing bases.
-        return True
-    return a_ccy == p_ccy or _CURRENCY_EQUIVALENTS.get(a_ccy) == p_ccy
+# base_match_allowed lives in reconciliation_rules (shared with reconciler
+# weight attribution); suffix-less positions are currency-guarded there too.
 
 
 def evaluate_positions(
@@ -197,6 +182,18 @@ def evaluate_positions(
             and not pos.ticker.ibkr.isdigit()
         ):
             best = alpha_base_lookup.get(pos.ticker.ibkr.upper())
+            if best is not None and not base_match_allowed(pos, best):
+                # A suffix-less position (exchange unresolved) must still agree
+                # on currency — an EUR Brussels AGS reported as SMART must not
+                # adopt an SGD AGS.SI analysis.
+                logger.warning(
+                    "base_symbol_match_blocked",
+                    position_ticker=pos.ticker.yf,
+                    candidate_analysis=best.ticker,
+                    position_currency=pos.currency,
+                    analysis_currency=getattr(best, "currency", None),
+                )
+                best = None
             if best:
                 yf_key = best.ticker
                 analysis = best
@@ -212,7 +209,7 @@ def evaluate_positions(
 
         if analysis is None and pos.ticker.ibkr and not pos.ticker.ibkr.isdigit():
             candidate = alpha_base_lookup.get(pos.ticker.ibkr.upper())
-            if candidate is not None and not _base_match_allowed(pos, candidate):
+            if candidate is not None and not base_match_allowed(pos, candidate):
                 # A suffixed position must never borrow a different exchange's
                 # analysis (the AGS.BR-shows-AGS.SI bug) — currency must agree.
                 logger.warning(
@@ -259,25 +256,18 @@ def evaluate_positions(
 
         current_price = pos.current_price_local
 
-        if check_stop_breach(analysis, current_price):
-            items.append(
-                ReconciliationItem(
-                    ticker=item_ticker,
-                    action="SELL",
-                    reason=f"Stop breached: price {current_price:.2f} < stop {analysis.stop_price:.2f}",
-                    urgency="HIGH",
-                    ibkr_position=pos,
-                    analysis=analysis,
-                    suggested_quantity=abs(int(pos.quantity)),
-                    suggested_price=current_price,
-                    suggested_order_type="LMT",
-                    cash_impact_usd=pos.market_value_usd,
-                    settlement_date=_settlement_date(2),
-                    sell_type="STOP_BREACH",
-                    action_basis="STOP_LOSS",
-                )
-            )
-            continue
+        # A price break below the analysis-time review level raises urgency but
+        # carries NO sell authority (July 2026 retail alignment): a sale needs
+        # fundamental evidence — confirmed thesis failure, mandatory flags,
+        # tender mechanics — never a price level alone. The breach is threaded
+        # into the verdict flow below instead of short-circuiting it.
+        stop_breached = check_review_level_breach(analysis, current_price)
+
+        # Identity is verified only when the analysis was found under the
+        # position's own exchange-resolved yfinance key. Base-symbol borrows
+        # and currency-guessed suffixes are inferred mappings — they may
+        # inform reviews but must never authorize an executable exit.
+        identity_verified = analysis_identity_verified(pos, analysis)
 
         verdict_upper = _normalize_verdict(analysis.verdict or "")
         if verdict_upper in _REJECT_VERDICTS:
@@ -364,15 +354,42 @@ def evaluate_positions(
                 # also routes the item into the refresh blocking_now bucket
                 # (a SOFT_REJECT stamp would leave it on staleness cadence).
                 sell_type = "DATA_QUALITY_REVIEW"
+            detail = disposition.detail
+            if stop_breached:
+                detail += (
+                    f"; price {current_price:.2f} broke the analysis review "
+                    f"level {analysis.stop_price:.2f}"
+                )
+            reject_reason = (
+                f"Verdict → {analysis.verdict}  "
+                f"({analysis.analysis_date}) — {detail}"
+            )
             if disposition.action == "SELL":
+                if not identity_verified:
+                    # An exit order on an inferred symbol/exchange mapping can
+                    # sell the wrong listing — downgrade to review.
+                    items.append(
+                        ReconciliationItem(
+                            ticker=item_ticker,
+                            action="REVIEW",
+                            reason=(
+                                f"{reject_reason}; security identity unverified "
+                                "(exchange/currency mapping) — confirm the "
+                                "listing in IBKR before any exit"
+                            ),
+                            urgency="HIGH",
+                            ibkr_position=pos,
+                            analysis=analysis,
+                            sell_type=sell_type,
+                            action_basis=disposition.basis,
+                        )
+                    )
+                    continue
                 items.append(
                     ReconciliationItem(
                         ticker=item_ticker,
                         action="SELL",
-                        reason=(
-                            f"Verdict → {analysis.verdict}  "
-                            f"({analysis.analysis_date}) — {disposition.detail}"
-                        ),
+                        reason=reject_reason,
                         urgency="HIGH",
                         ibkr_position=pos,
                         analysis=analysis,
@@ -402,15 +419,44 @@ def evaluate_positions(
                 ReconciliationItem(
                     ticker=item_ticker,
                     action="REVIEW",
-                    reason=(
-                        f"Verdict → {analysis.verdict}  "
-                        f"({analysis.analysis_date}) — {disposition.detail}"
-                    ),
-                    urgency="MEDIUM",
+                    reason=reject_reason,
+                    urgency="HIGH" if stop_breached else "MEDIUM",
                     ibkr_position=pos,
                     analysis=analysis,
                     sell_type=sell_type,
                     action_basis=disposition.basis,
+                )
+            )
+            continue
+
+        if stop_breached:
+            if _is_de_minimis(pos, analysis, min_actionable_position_usd):
+                items.append(
+                    _de_minimis_hold(item_ticker, pos, analysis, "price-drop review")
+                )
+                continue
+            health = analysis.health_adj
+            growth = analysis.growth_adj
+            if health is not None and growth is not None:
+                scores_txt = f"last scored H:{health:.0f}% G:{growth:.0f}%"
+            else:
+                scores_txt = "scores unavailable"
+            items.append(
+                ReconciliationItem(
+                    ticker=item_ticker,
+                    action="REVIEW",
+                    reason=(
+                        f"Price {current_price:.2f} broke the analysis review "
+                        f"level {analysis.stop_price:.2f} — fundamentals "
+                        f"{scores_txt} ({analysis.analysis_date}); refresh the "
+                        "analysis. A sale needs fundamental failure evidence, "
+                        "not a price level"
+                    ),
+                    urgency="HIGH",
+                    ibkr_position=pos,
+                    analysis=analysis,
+                    sell_type="STOP_BREACH",
+                    action_basis="STOP_LOSS",
                 )
             )
             continue
@@ -423,14 +469,10 @@ def evaluate_positions(
             structural_macro_events=structural_macro_events,
         )
 
-        target_hit = check_target_hit(analysis, current_price)
-        # A profit-take is the disciplined EXIT when a winner reaches its target or
-        # posts a large gain — both of which necessarily push price >drift_threshold
-        # above entry. check_staleness flags large drift in *either* direction, so the
-        # very upward move that earns the profit-take would otherwise null it (the
-        # capital-allocation SELL was dead in production for any target >threshold above
-        # entry). Gate the profit-take on age/macro staleness only — an exit reacts to
-        # favorable drift, it is not invalidated by it.
+        target_hit = check_base_case_reference_reached(analysis, current_price)
+        # A capital-allocation review can be useful when a winner reaches its
+        # valuation reference or posts a large gain. Upward price drift should
+        # not suppress that review, but it never grants sale authority.
         non_drift_stale, _ = check_staleness(
             analysis,
             current_price,
@@ -478,7 +520,12 @@ def evaluate_positions(
                 ReconciliationItem(
                     ticker=item_ticker,
                     action="REVIEW",
-                    reason=f"Target hit: price {current_price:.2f} >= target {analysis.target_1_price:.2f}",
+                    reason=(
+                        "Base-case valuation reference reached: price "
+                        f"{current_price:.2f} >= reference "
+                        f"{analysis.target_1_price:.2f}; reassess forward return "
+                        "and tax lots before changing the position"
+                    ),
                     urgency="LOW",
                     ibkr_position=pos,
                     analysis=analysis,
@@ -512,6 +559,9 @@ def evaluate_positions(
             actual_pct = (pos.market_value_usd / portfolio.portfolio_value_usd) * 100
             excess_pct = actual_pct - target_size_pct
             if excess_pct > overweight_threshold_pct:
+                # Advisory only (July 2026 retail alignment): a drift trim is a
+                # sale — a capital-gains event on an intact position — so the
+                # sizing math is surfaced as information, never as an order.
                 target_value_usd = portfolio.portfolio_value_usd * (
                     target_size_pct / 100
                 )
@@ -527,16 +577,18 @@ def evaluate_positions(
                 items.append(
                     ReconciliationItem(
                         ticker=item_ticker,
-                        action="TRIM",
-                        reason=f"Overweight: {actual_pct:.1f}% vs target {target_size_pct:.1f}% (+{excess_pct:.1f}%)",
-                        urgency="MEDIUM",
+                        action="REVIEW",
+                        reason=(
+                            f"Overweight: {actual_pct:.1f}% vs target "
+                            f"{target_size_pct:.1f}% (+{excess_pct:.1f}%) — "
+                            f"advisory: trimming ≈{trim_qty} shares "
+                            f"(~${trim_value_usd:,.0f}) would restore target; "
+                            "verify lot gains/holding period in IBKR first"
+                        ),
+                        urgency="LOW",
                         ibkr_position=pos,
                         analysis=analysis,
-                        suggested_quantity=trim_qty,
-                        suggested_price=pos.current_price_local,
-                        suggested_order_type="LMT",
-                        cash_impact_usd=trim_value_usd,
-                        settlement_date=_settlement_date(2),
+                        action_basis="OVERWEIGHT",
                     )
                 )
                 continue
@@ -616,18 +668,18 @@ def evaluate_positions(
                 f"entry {analysis.entry_price:.2f} → {current_price:.2f} ({gain_pct:+.1f}%)"
             )
         if analysis.stop_price:
-            status_parts.append(f"stop {analysis.stop_price:.2f}")
-            stop_note = stop_staleness_note(analysis, current_price)
+            status_parts.append(f"review-below {analysis.stop_price:.2f}")
+            stop_note = review_level_note(analysis, current_price)
             if stop_note:
                 status_parts.append(stop_note)
         if analysis.target_1_price:
-            status_parts.append(f"target {analysis.target_1_price:.2f}")
+            status_parts.append(f"base-case reference {analysis.target_1_price:.2f}")
 
         items.append(
             ReconciliationItem(
                 ticker=item_ticker,
                 action="HOLD",
-                reason=f"Within targets — {'; '.join(status_parts)}"
+                reason=f"Monitoring context — {'; '.join(status_parts)}"
                 if status_parts
                 else "Position OK",
                 urgency="LOW",

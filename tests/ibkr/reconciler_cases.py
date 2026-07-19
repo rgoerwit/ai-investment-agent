@@ -74,6 +74,8 @@ def _make_position(
         currency=currency,
         current_price_local=current_price,
         tax_term=tax_term,
+        ticker_identity_verified=True,
+        ticker_resolution_source="exchange_map",
     )
 
 
@@ -269,10 +271,13 @@ class TestAlphaBaseFallback:
             currency="EUR",
             current_price_local=10,
         )
-        analyses = {
-            "CEK": _make_analysis(ticker="CEK", verdict="HOLD"),
-            "CEK.DE": _make_analysis(ticker="CEK.DE", verdict="BUY"),
-        }
+        # Currency must agree with the EUR position — the base-match guard
+        # blocks cross-currency borrows even for suffix-less positions.
+        cek = _make_analysis(ticker="CEK", verdict="HOLD")
+        cek.currency = "EUR"
+        cek_de = _make_analysis(ticker="CEK.DE", verdict="BUY")
+        cek_de.currency = "EUR"
+        analyses = {"CEK": cek, "CEK.DE": cek_de}
 
         items = reconcile(
             positions=[pos], analyses=analyses, portfolio=_make_portfolio()
@@ -414,15 +419,16 @@ class TestReconcile:
         assert items[0].action_basis == "ENTRY_CONSTRAINT"
 
     def test_held_stop_breached(self):
-        """Held + price below stop → urgent SELL via LMT at current price."""
+        """Held + price below the review level → urgent non-executable REVIEW
+        (July 2026: a price break has no sell authority)."""
         pos = _make_position(current_price=1700)
         analysis = _make_analysis(stop_price=1900)
         items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
-        assert items[0].action == "SELL"
+        assert items[0].action == "REVIEW"
         assert items[0].urgency == "HIGH"
-        assert "stop" in items[0].reason.lower()
-        assert items[0].suggested_order_type == "LMT"
-        assert items[0].suggested_price == 1700
+        assert "review level" in items[0].reason
+        assert items[0].suggested_quantity is None
+        assert items[0].cash_impact_usd == 0.0
 
     def test_zero_quantity_position_with_stop_breach_ignored(self):
         """IBKR position with quantity=0 (just sold) must not generate a SELL.
@@ -443,13 +449,13 @@ class TestReconcile:
         items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
         assert items == []
 
-    def test_held_target_hit(self):
-        """Held + price at target → REVIEW."""
+    def test_held_base_case_reference_reached(self):
+        """Held + price at base-case valuation reference → REVIEW."""
         pos = _make_position(current_price=2600)
         analysis = _make_analysis(target_1=2500)
         items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
         assert items[0].action == "REVIEW"
-        assert "target" in items[0].reason.lower()
+        assert "base-case valuation reference" in items[0].reason.lower()
 
     def test_held_stale_analysis(self):
         """Held + stale analysis → REVIEW."""
@@ -513,7 +519,8 @@ class TestReconcile:
         assert items[0].cash_impact_usd == 0.0
 
     def test_overweight_position(self):
-        """Overweight position → TRIM."""
+        """Overweight position → advisory REVIEW with trim math (July 2026:
+        a drift trim is a capital-gains sale the operator decides)."""
         pos = _make_position(market_value_usd=30000)  # 30% of 100k
         analysis = _make_analysis(verdict="BUY", size_pct=5.0)  # Target 5%
         items = reconcile(
@@ -522,7 +529,12 @@ class TestReconcile:
             _make_portfolio(value=100000),
             overweight_threshold_pct=20.0,
         )
-        assert items[0].action == "TRIM"
+        assert items[0].action == "REVIEW"
+        assert items[0].action_basis == "OVERWEIGHT"
+        assert "Overweight" in items[0].reason
+        assert "advisory" in items[0].reason
+        assert items[0].suggested_quantity is None
+        assert items[0].cash_impact_usd == 0.0
 
     def test_urgency_sorting(self):
         """HIGH urgency items should come first."""
@@ -2367,11 +2379,11 @@ class TestSellTypeTagging:
     """Test that SELL items are tagged with the correct sell_type."""
 
     def test_stop_breach_tagged_stop_breach(self):
-        """Price below stop → sell_type=STOP_BREACH."""
+        """Price below the review level → sell_type=STOP_BREACH, review-only."""
         pos = _make_position(current_price=1700)
         analysis = _make_analysis(stop_price=1900)
         items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
-        assert items[0].action == "SELL"
+        assert items[0].action == "REVIEW"
         assert items[0].sell_type == "STOP_BREACH"
 
     def test_fundamental_failure_tagged_hard_reject(self):
@@ -2418,7 +2430,9 @@ class TestSellTypeTagging:
 class TestProfitTakeClassification:
     """Profit-taking is capital-allocation driven, not a fundamentals-failure sell."""
 
-    def test_severe_idle_cash_long_term_becomes_sell(self):
+    def test_severe_idle_cash_long_term_is_advisory_review(self):
+        """Profit-taking is always advisory (July 2026) — even a long-term lot
+        with severe idle-cash flags surfaces as REVIEW, never an order."""
         pos = _make_position(
             avg_cost=2000,
             current_price=2600,
@@ -2432,12 +2446,13 @@ class TestProfitTakeClassification:
         items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
 
         item = items[0]
-        assert item.action == "SELL"
+        assert item.action == "REVIEW"
         assert item.sell_type == "PROFIT_TAKE"
         assert item.cost_basis_return_pct == pytest.approx(30.0)
         assert "capital_idle_cash_severe" in item.profit_take_reasons
-        assert item.suggested_quantity == 100
-        assert item.cash_impact_usd == pos.market_value_usd
+        assert item.suggested_quantity is None
+        assert item.cash_impact_usd == 0.0
+        assert "advisory" in item.reason
 
     def test_unknown_holding_period_defaults_to_review(self):
         pos = _make_position(avg_cost=2000, current_price=2600)
@@ -2455,7 +2470,9 @@ class TestProfitTakeClassification:
         assert item.suggested_quantity is None
         assert item.cash_impact_usd == 0.0
 
-    def test_unknown_holding_period_severe_large_gain_becomes_sell(self):
+    def test_unknown_holding_period_severe_large_gain_is_advisory_review(self):
+        """No severity override anymore — an unknown holding period with a
+        severe flag and a large gain is still an advisory REVIEW (July 2026)."""
         pos = _make_position(avg_cost=2000, current_price=3400)
         analysis = _make_analysis(
             target_1=4000,
@@ -2465,13 +2482,13 @@ class TestProfitTakeClassification:
         items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
 
         item = items[0]
-        assert item.action == "SELL"
+        assert item.action == "REVIEW"
         assert item.sell_type == "PROFIT_TAKE"
         assert item.cost_basis_return_pct == pytest.approx(70.0)
         assert "capital_idle_cash_severe" in item.profit_take_reasons
-        assert "unknown_tax_term_severity_override" in item.profit_take_reasons
-        assert item.suggested_quantity == 100
-        assert item.cash_impact_usd == pos.market_value_usd
+        assert "unknown_tax_term" in item.profit_take_reasons
+        assert item.suggested_quantity is None
+        assert item.cash_impact_usd == 0.0
 
     def test_short_term_holding_period_defaults_to_review(self):
         pos = _make_position(
@@ -2491,7 +2508,7 @@ class TestProfitTakeClassification:
         assert item.sell_type == "PROFIT_TAKE"
         assert "short_term_tax" in item.profit_take_reasons
 
-    def test_target_hit_without_capital_flag_keeps_existing_review(self):
+    def test_reference_reached_without_capital_flag_keeps_existing_review(self):
         pos = _make_position(avg_cost=2000, current_price=2600)
         analysis = _make_analysis(target_1=2500)
 
@@ -2500,7 +2517,7 @@ class TestProfitTakeClassification:
         item = items[0]
         assert item.action == "REVIEW"
         assert item.sell_type is None
-        assert item.reason.startswith("Target hit:")
+        assert item.reason.startswith("Base-case valuation reference reached:")
 
     def test_idle_cash_risk_needs_target_hit_or_large_gain(self):
         # entry_price near current isolates this from drift-staleness: the point is
@@ -2532,7 +2549,7 @@ class TestProfitTakeClassification:
         items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
 
         item = items[0]
-        assert item.action == "SELL"
+        assert item.action == "REVIEW"
         assert item.sell_type == "PROFIT_TAKE"
         assert "capital_idle_cash_risk_plus_large_gain" in item.profit_take_reasons
 
@@ -2553,7 +2570,9 @@ class TestProfitTakeClassification:
         assert items[0].action == "REVIEW"
         assert items[0].sell_type is None
 
-    def test_stop_breach_priority_beats_profit_take(self):
+    def test_price_break_priority_beats_profit_take(self):
+        """A price break outranks the profit-take path — the urgent review
+        fires before any capital-allocation advisory."""
         pos = _make_position(
             avg_cost=1000,
             current_price=1800,
@@ -2567,7 +2586,7 @@ class TestProfitTakeClassification:
 
         items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
 
-        assert items[0].action == "SELL"
+        assert items[0].action == "REVIEW"
         assert items[0].sell_type == "STOP_BREACH"
 
 
@@ -2769,12 +2788,13 @@ class TestCorrelatedSellDetection:
             positions, analyses, portfolio, reconciliation_items=items
         )
         assert any("CORRELATED_SELL_EVENT" in f for f in flags)
-        # Fixture stops have intact fundamentals (70/65) → demoted to REVIEW
-        demoted_stops = [
+        # Price breaks are REVIEW at source (July 2026 — no sell authority);
+        # they still count as event evidence via action_basis=STOP_LOSS.
+        stop_reviews = [
             i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
         ]
-        assert len(demoted_stops) == 10
-        assert all("MACRO_STOP" in i.reason for i in demoted_stops)
+        assert len(stop_reviews) == 10
+        assert all("review level" in i.reason for i in stop_reviews)
 
     def test_profit_take_not_counted_in_correlation(self):
         """PROFIT_TAKE exits stay excluded from event evidence."""
@@ -2919,8 +2939,9 @@ class TestCorrelatedSellDetection:
         hard = [i for i in items if i.sell_type == "HARD_REJECT"]
         assert all(i.action == "REVIEW" for i in hard)
 
-    def test_stop_breach_stays_sell_when_fundamentals_weak_on_correlated_day(self):
-        """STOP_BREACH SELLs on fundamentally weak positions stay SELL even when correlated event fires."""
+    def test_legacy_stop_sell_demotion_still_guards_hand_built_items(self):
+        """reconcile() no longer emits SELL+STOP_BREACH, but the macro demotion
+        pass still guards legacy/hand-built items with intact fundamentals."""
         positions, analyses, portfolio = _make_multi_sell_scenario(
             n_soft_sells=5,  # triggers event
             n_stop_breaches=2,
@@ -2928,22 +2949,25 @@ class TestCorrelatedSellDetection:
             n_holds=3,
         )
         items = reconcile(positions, analyses, portfolio)
-        # Force weak fundamentals on the stop-breach items so they are NOT demoted
+        # Simulate legacy artifacts: force the price-break reviews back to SELL.
         for item in items:
-            if item.sell_type == "STOP_BREACH" and item.analysis is not None:
-                item.analysis.health_adj = 35.0
-                item.analysis.growth_adj = 40.0
+            if item.sell_type == "STOP_BREACH":
+                item.action = "SELL"
         compute_portfolio_health(
             positions, analyses, portfolio, reconciliation_items=items
         )
 
-        stop_sells = [
-            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        # Intact fundamentals (70/65 from the fixture) → demoted with the tag.
+        stop_reviews = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
         ]
-        assert len(stop_sells) == 2  # weak fundamentals — unchanged
+        assert len(stop_reviews) == 2
+        assert all("MACRO_PRICE" in i.reason for i in stop_reviews)
 
-    def test_stop_breach_demoted_when_fundamentals_strong_on_correlated_day(self):
-        """STOP_BREACH SELLs with health ≥ 50 and growth ≥ 50 are demoted to REVIEW during a correlated event."""
+    def test_stop_breach_is_review_at_source_on_correlated_day(self):
+        """Price breaks are REVIEW at source (July 2026) — the macro demotion
+        pass finds no SELL+STOP_BREACH items to touch, and the review framing
+        already carries the fundamentals context."""
         positions, analyses, portfolio = _make_multi_sell_scenario(
             n_soft_sells=5,  # triggers event
             n_stop_breaches=2,
@@ -2951,17 +2975,16 @@ class TestCorrelatedSellDetection:
             n_holds=3,
         )
         items = reconcile(positions, analyses, portfolio)
-        # Confirm stop-breach items start as SELL
+        # Price breaks never start as SELL — review at source.
         stop_before = [
             i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
         ]
-        assert len(stop_before) == 2
+        assert len(stop_before) == 0
 
         compute_portfolio_health(
             positions, analyses, portfolio, reconciliation_items=items
         )
 
-        # health_adj=70 / growth_adj=65 (set by _make_multi_sell_scenario) → demoted
         stop_reviews = [
             i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
         ]
@@ -2970,12 +2993,11 @@ class TestCorrelatedSellDetection:
         ]
         assert len(stop_reviews) == 2
         assert len(stop_sells) == 0
-        assert all("MACRO_STOP" in i.reason for i in stop_reviews)
-        # Reason includes scores
-        assert all("health" in i.reason and "growth" in i.reason for i in stop_reviews)
+        # Reason carries the fundamentals context (scores from the analysis).
+        assert all("H:" in i.reason and "G:" in i.reason for i in stop_reviews)
 
-    def test_stop_breach_preserved_when_no_analysis_on_correlated_day(self):
-        """STOP_BREACH SELL with analysis=None stays SELL during correlated event (unknown fundamentals = conservative)."""
+    def test_legacy_stop_sell_without_analysis_is_downgraded(self):
+        """Unknown fundamentals cannot turn a price trigger into sale authority."""
         positions, analyses, portfolio = _make_multi_sell_scenario(
             n_soft_sells=5,  # triggers event
             n_stop_breaches=1,
@@ -2983,22 +3005,24 @@ class TestCorrelatedSellDetection:
             n_holds=3,
         )
         items = reconcile(positions, analyses, portfolio)
-        # Remove analysis from the stop-breach item
+        # Simulate a legacy SELL-at-source artifact with no analysis attached
         for item in items:
             if item.sell_type == "STOP_BREACH":
+                item.action = "SELL"
                 item.analysis = None
 
         compute_portfolio_health(
             positions, analyses, portfolio, reconciliation_items=items
         )
 
-        stop_sells = [
-            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        stop_reviews = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
         ]
-        assert len(stop_sells) == 1  # no analysis → stays SELL
+        assert len(stop_reviews) == 1
 
-    def test_stop_breach_not_demoted_without_correlated_event(self):
-        """STOP_BREACH SELL is never demoted when no correlated event is present."""
+    def test_price_break_is_review_without_correlated_event(self):
+        """A price break is REVIEW at source even with no macro event — the
+        review framing does not depend on correlated-event demotion."""
         positions, analyses, portfolio = _make_multi_sell_scenario(
             n_soft_sells=2,  # NOT enough to trigger event (need ≥5)
             n_stop_breaches=1,
@@ -3006,15 +3030,15 @@ class TestCorrelatedSellDetection:
             n_holds=10,
         )
         items = reconcile(positions, analyses, portfolio)
-        # health_adj=70 / growth_adj=65 — strong fundamentals, but no correlated event
         compute_portfolio_health(
             positions, analyses, portfolio, reconciliation_items=items
         )
 
-        stop_sells = [
-            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
-        ]
-        assert len(stop_sells) == 1  # no correlated event → unchanged
+        stop_items = [i for i in items if i.sell_type == "STOP_BREACH"]
+        assert len(stop_items) == 1
+        assert stop_items[0].action == "REVIEW"
+        # No macro tag without an event — the review stands on its own reason.
+        assert "MACRO_PRICE" not in stop_items[0].reason
 
     # ── Boundary / threshold tests ───────────────────────────────────────────
 
@@ -3022,7 +3046,12 @@ class TestCorrelatedSellDetection:
         self, health: float | None, growth: float | None
     ) -> list:
         """Return items after compute_portfolio_health, with a STOP_BREACH whose
-        analysis has the specified health_adj and growth_adj values."""
+        analysis has the specified health_adj and growth_adj values.
+
+        reconcile() emits price breaks as REVIEW at source (July 2026); these
+        boundary tests cover the legacy demotion pass in _apply_macro_demotions,
+        so the item is forced back to SELL to simulate a legacy artifact.
+        """
         positions, analyses, portfolio = _make_multi_sell_scenario(
             n_soft_sells=5,  # enough to trigger correlated event
             n_stop_breaches=1,
@@ -3032,6 +3061,7 @@ class TestCorrelatedSellDetection:
         items = reconcile(positions, analyses, portfolio)
         for item in items:
             if item.sell_type == "STOP_BREACH" and item.analysis is not None:
+                item.action = "SELL"  # simulate legacy SELL-at-source artifact
                 item.analysis.health_adj = health
                 item.analysis.growth_adj = growth
         compute_portfolio_health(
@@ -3055,56 +3085,52 @@ class TestCorrelatedSellDetection:
         ]
         assert len(reviews) == 1
 
-    def test_stop_breach_stays_sell_health_just_below_threshold(self):
-        """STOP_BREACH with health_adj=49.9 stays SELL (below 50.0 threshold)."""
+    def test_stop_breach_is_review_health_just_below_threshold(self):
+        """A weak score does not let a legacy price trigger bypass confirmation."""
         items = self._make_stop_breach_at_correlated_event(health=49.9, growth=65.0)
-        sells = [
-            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        reviews = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
         ]
-        assert len(sells) == 1
+        assert len(reviews) == 1
 
-    def test_stop_breach_stays_sell_growth_just_below_threshold(self):
-        """STOP_BREACH with growth_adj=49.9 stays SELL (below 50.0 threshold)."""
+    def test_stop_breach_is_review_growth_just_below_threshold(self):
+        """A weak score does not let a legacy price trigger bypass confirmation."""
         items = self._make_stop_breach_at_correlated_event(health=65.0, growth=49.9)
-        sells = [
-            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        reviews = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
         ]
-        assert len(sells) == 1
+        assert len(reviews) == 1
 
-    def test_stop_breach_stays_sell_when_health_weak_growth_strong(self):
-        """STOP_BREACH stays SELL when health<50 even if growth≥50 — both must pass."""
+    def test_stop_breach_is_review_when_health_weak_growth_strong(self):
         items = self._make_stop_breach_at_correlated_event(health=35.0, growth=65.0)
-        sells = [
-            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        reviews = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
         ]
-        assert len(sells) == 1
+        assert len(reviews) == 1
 
-    def test_stop_breach_stays_sell_when_health_strong_growth_weak(self):
-        """STOP_BREACH stays SELL when growth<50 even if health≥50 — both must pass."""
+    def test_stop_breach_is_review_when_health_strong_growth_weak(self):
         items = self._make_stop_breach_at_correlated_event(health=65.0, growth=35.0)
-        sells = [
-            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        reviews = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
         ]
-        assert len(sells) == 1
+        assert len(reviews) == 1
 
-    def test_stop_breach_stays_sell_when_health_adj_none(self):
-        """STOP_BREACH with health_adj=None stays SELL (None → 0.0 via 'or 0.0' guard)."""
+    def test_stop_breach_is_review_when_health_adj_none(self):
         items = self._make_stop_breach_at_correlated_event(health=None, growth=65.0)
-        sells = [
-            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        reviews = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
         ]
-        assert len(sells) == 1
+        assert len(reviews) == 1
 
-    def test_stop_breach_stays_sell_when_growth_adj_none(self):
-        """STOP_BREACH with growth_adj=None stays SELL (None → 0.0 via 'or 0.0' guard)."""
+    def test_stop_breach_is_review_when_growth_adj_none(self):
         items = self._make_stop_breach_at_correlated_event(health=65.0, growth=None)
-        sells = [
-            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
+        reviews = [
+            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
         ]
-        assert len(sells) == 1
+        assert len(reviews) == 1
 
-    def test_stop_breach_partial_demotion_mixed_fundamentals(self):
-        """5 STOP_BREACH items: 3 strong (demoted) + 2 weak (stays SELL) — partial demotion."""
+    def test_stop_breach_demotion_ignores_score_strength(self):
+        """All legacy price-trigger sales downgrade regardless of score state."""
         positions, analyses, portfolio = _make_multi_sell_scenario(
             n_soft_sells=5,  # triggers event
             n_stop_breaches=5,
@@ -3114,8 +3140,9 @@ class TestCorrelatedSellDetection:
         items = reconcile(positions, analyses, portfolio)
         stop_items = [i for i in items if i.sell_type == "STOP_BREACH"]
         assert len(stop_items) == 5
-        # Give 3 items strong fundamentals, 2 items weak
+        # Simulate legacy SELL-at-source; give 3 strong, 2 weak fundamentals.
         for i, item in enumerate(stop_items):
+            item.action = "SELL"
             if item.analysis is not None:
                 if i < 3:
                     item.analysis.health_adj = 70.0
@@ -3132,9 +3159,9 @@ class TestCorrelatedSellDetection:
         remaining_sells = [
             i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
         ]
-        assert len(demoted) == 3
-        assert len(remaining_sells) == 2
-        assert all("MACRO_STOP" in i.reason for i in demoted)
+        assert len(demoted) == 5
+        assert len(remaining_sells) == 0
+        assert all("MACRO_PRICE" in i.reason for i in demoted)
 
     def test_no_reconciliation_items_no_crash(self):
         """compute_portfolio_health with reconciliation_items=None doesn't crash."""
@@ -3759,8 +3786,11 @@ class TestIbkrSymbol:
             current_price=100.0,
         )
         items = self._reconcile_one(pos, a)
-        sell = next(i for i in items if i.action == "SELL")
-        assert sell.ibkr_symbol == "MEGP"
+        # Price break → urgent REVIEW (no sell authority); symbol still carried.
+        review = next(
+            i for i in items if i.action == "REVIEW" and i.sell_type == "STOP_BREACH"
+        )
+        assert review.ibkr_symbol == "MEGP"
 
     def test_review_no_analysis_has_ibkr_symbol(self):
         """REVIEW (no analysis) item carries ibkr_symbol."""
@@ -3897,6 +3927,7 @@ class TestAlphaBaseLookup:
         # Bare analysis is "newer" (age_days=1); suffixed is "older" (age_days=5).
         # load_latest_analyses() would return analyses={"CEK": a_bare, "CEK.DE": a_suffixed}.
         a_bare = _make_analysis(ticker="CEK", verdict="SELL", age_days=1)
+        a_bare.currency = "EUR"  # currency must agree with the EUR position
         a_suffixed = _make_analysis(
             ticker="CEK.DE",
             verdict="BUY",
@@ -3904,6 +3935,7 @@ class TestAlphaBaseLookup:
             entry_price=20.0,
             stop_price=15.0,
         )
+        a_suffixed.currency = "EUR"
         analyses = {"CEK": a_bare, "CEK.DE": a_suffixed}
         portfolio = _make_portfolio()
         items = reconcile([pos], analyses, portfolio)
@@ -4743,7 +4775,7 @@ class TestMacroTriggerPrecedence:
         assert demoted
         assert all("correlated event detected" in i.reason for i in demoted)
 
-    def test_weak_fundamentals_stop_survives_both_paths(self):
+    def test_weak_fundamentals_price_trigger_is_review_on_both_paths(self):
         from types import SimpleNamespace
 
         def weak_stop(conid):
@@ -4764,7 +4796,7 @@ class TestMacroTriggerPrecedence:
         ]
         positions, portfolio = self._book(items)
         compute_portfolio_health(positions, {}, portfolio, reconciliation_items=items)
-        assert items[8].action == "SELL"  # weak stop still executable
+        assert items[8].action == "REVIEW"
 
         # Path 2: sustained-only override
         items2 = [weak_stop(901)] + [
@@ -4779,7 +4811,7 @@ class TestMacroTriggerPrecedence:
             reconciliation_items=items2,
             active_macro_events=[event],
         )
-        assert items2[0].action == "SELL"
+        assert items2[0].action == "REVIEW"
 
 
 class TestSustainedOverrideEdgeCases:

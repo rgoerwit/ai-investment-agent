@@ -20,6 +20,7 @@ from src.ibkr.watchlist_optimization import (
     ConcentrationNote,
     watchlist_candidate_conviction,
     watchlist_candidate_score,
+    weakest_bucket_incumbents,
 )
 from src.memory import MacroEvent
 
@@ -96,6 +97,36 @@ def _currency_prefix(currency: str | None) -> str:
 def _watchlist_symbol(item: ReconciliationItem) -> str:
     yf_hint = f" ({item.ticker.yf})" if "." in item.ticker.yf else ""
     return f"{item.ticker.ibkr}{yf_hint}"
+
+
+def _held_items_for_incumbent_ranking(groups) -> list[ReconciliationItem]:
+    """Every grouped item backed by an actual IBKR position (deduped later)."""
+    held: list[ReconciliationItem] = []
+    for field_items in (
+        groups.holds_real,
+        groups.reviews,
+        groups.profit_take_reviews,
+        groups.macro_reviews,
+        groups.macro_stop_reviews,
+        groups.adds,
+        groups.trims,
+        groups.stop_sells,
+        groups.hard_sells,
+        groups.soft_sells,
+        groups.profit_take_sells,
+    ):
+        held.extend(item for item in field_items if item.ibkr_position is not None)
+    return held
+
+
+def _incumbent_summary(item: ReconciliationItem) -> str:
+    analysis = item.analysis
+    if analysis is None:
+        return f"{item.ticker.yf} (no current analysis)"
+    health = f"{analysis.health_adj:.0f}" if analysis.health_adj is not None else "?"
+    growth = f"{analysis.growth_adj:.0f}" if analysis.growth_adj is not None else "?"
+    stale = " stale" if analysis.age_days > 30 else ""
+    return f"{item.ticker.yf} (H:{health} G:{growth}{stale})"
 
 
 def render_watchlist_optimization(
@@ -315,6 +346,8 @@ def render_watchlist_optimization(
         grouped: dict[str, list[ConcentrationNote]] = {}
         for note in optimization.withheld_candidates:
             grouped.setdefault(_breach_category(note), []).append(note)
+        held_for_buckets = _held_items_for_incumbent_ranking(plan.groups)
+        shown_buckets: set[tuple[str, str]] = set()
         for notes in grouped.values():
             # Same breach shape across the group; keep the worst projection
             # per dimension so magnitude survives the grouping.
@@ -326,6 +359,31 @@ def render_watchlist_optimization(
             )
             symbols = [_watchlist_symbol(note.item) for note in notes]
             lines.extend(wrap_listing(f"    · {label}:  ", symbols))
+            # Informational comparison only: show the lowest-scored holdings in
+            # each breached bucket. Scores are not a tax-aware trim decision.
+            for breach in notes[0].breaches:
+                bucket_id = (breach.dimension, breach.key)
+                if bucket_id in shown_buckets:
+                    continue
+                shown_buckets.add(bucket_id)
+                incumbents = weakest_bucket_incumbents(
+                    held_for_buckets,
+                    dimension=breach.dimension,
+                    key=breach.key,
+                )
+                if not incumbents:
+                    continue
+                entries = [_incumbent_summary(item) for item in incumbents]
+                lines.extend(
+                    wrap_listing(
+                        f"      lowest-scored held in {breach.key}:  ", entries
+                    )
+                )
+        if shown_buckets:
+            lines.append(
+                "      (research comparison only — not a trim recommendation; "
+                "verify thesis quality, stale data, and tax lots first)"
+            )
     if watchlist_candidates_blocked_by_cash:
         lines.append(
             "  Cash-blocked candidates retained for ranking: "

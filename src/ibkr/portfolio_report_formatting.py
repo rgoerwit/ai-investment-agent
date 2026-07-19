@@ -52,6 +52,14 @@ def bar_chart(pct: float, limit: float, width: int = 14) -> str:
 
 
 def display_ticker(item: ReconciliationItem) -> str:
+    """Exchange-qualified ticker for non-US listings; bare symbol otherwise.
+
+    A bare base symbol is ambiguous across exchanges (SGX AGS vs Brussels AGS;
+    Tokyo 6741 vs Taiwan 6741) — two distinct positions must never render
+    identically. US listings have no suffix, so the bare symbol stays.
+    """
+    if item.ticker.has_suffix:
+        return item.ticker.yf
     return item.ticker.ibkr
 
 
@@ -217,7 +225,7 @@ class ReportBuffer:
                 f"last {currency_prefix(currency)}{pos.current_price_local:,.2f}"
             )
         if pos.market_value_usd:
-            parts.append(f"potential exit ~${pos.market_value_usd:,.0f} USD")
+            parts.append(f"position value ~${pos.market_value_usd:,.0f} USD")
         return f"{DETAIL_INDENT}{'holding:':<{DETAIL_LABEL_WIDTH}}" + "  ·  ".join(
             parts
         )
@@ -311,6 +319,8 @@ class ReportBuffer:
 
     @staticmethod
     def pnl_line(item: ReconciliationItem) -> str | None:
+        from src.ibkr.portfolio_presentation import cost_basis_unit_mismatch
+
         pos = item.ibkr_position
         if (
             not pos
@@ -320,7 +330,7 @@ class ReportBuffer:
         ):
             return None
         pct = (pos.current_price_local - pos.avg_cost_local) / pos.avg_cost_local * 100
-        if abs(pct) >= 90.0:
+        if cost_basis_unit_mismatch(pos):
             return (
                 f"{DETAIL_INDENT}{'est. P&L:':<{DETAIL_LABEL_WIDTH}}"
                 "(⚠ cost basis may have currency-unit mismatch)"
@@ -376,6 +386,8 @@ class ReportBuffer:
         )
 
     def soft_rejection_pnl_segments(self, item: ReconciliationItem) -> list[str]:
+        from src.ibkr.portfolio_presentation import cost_basis_unit_mismatch
+
         pos = item.ibkr_position
         if (
             not pos
@@ -385,7 +397,7 @@ class ReportBuffer:
         ):
             return []
         pct = (pos.current_price_local - pos.avg_cost_local) / pos.avg_cost_local * 100
-        if abs(pct) >= 90.0:
+        if cost_basis_unit_mismatch(pos):
             return ["P/L: cost basis may have currency-unit mismatch"]
         sell_qty = abs(item.suggested_quantity or pos.quantity)
         pnl_local = (pos.current_price_local - pos.avg_cost_local) * sell_qty
@@ -441,6 +453,32 @@ class ReportBuffer:
     def sell_type_label(item: ReconciliationItem) -> str:
         return get_action_label(item)
 
+    def append_thesis_break_line(self, item: ReconciliationItem) -> None:
+        """Bear thesis-break triggers — the fundamental exit conditions that
+        carry sell authority, shown ahead of legacy downside-price context."""
+        analysis = item.analysis
+        criteria = getattr(analysis, "kill_criteria", ()) if analysis else ()
+        if criteria:
+            self.labeled_detail("break if:", "  ·  ".join(criteria))
+
+    def append_fx_split_line(self, item: ReconciliationItem) -> None:
+        """Local-price vs FX return decomposition for non-USD positions.
+
+        The local leg is the thesis-relevant number for an investor who treats
+        EM-FX erosion as expected cost; the USD leg stays as quiet NAV context.
+        """
+        from src.ibkr.portfolio_presentation import fx_return_split
+
+        split = fx_return_split(item.ibkr_position)
+        if split is None:
+            return
+        local_pct, fx_pct, usd_pct = split
+        self.labeled_detail(
+            "return:",
+            f"local-price {local_pct:+.1f}%  ·  FX {fx_pct:+.1f}%  ·  "
+            f"USD {usd_pct:+.1f}%",
+        )
+
     def profit_take_segments(self, item: ReconciliationItem) -> list[str]:
         segments: list[str] = []
         if item.cost_basis_return_pct is not None:
@@ -454,6 +492,19 @@ class ReportBuffer:
         if self.show_recommendations and item.settlement_date:
             segments.append(f"settles {item.settlement_date}")
         return segments
+
+    def append_sale_tax_note(self, item: ReconciliationItem) -> None:
+        """Add honest tax-lot context to an actual sale recommendation."""
+        if item.action != "SELL" or item.ibkr_position is None:
+            return
+        tax_term = item.ibkr_position.tax_term
+        if tax_term == "SHORT_TERM":
+            text = "short-term holding indicated; verify selected lots and tax impact in IBKR"
+        elif tax_term == "LONG_TERM":
+            text = "long-term holding indicated; verify selected lots and realized gain in IBKR"
+        else:
+            text = "tax-lot holding periods unavailable; verify lots and realized gain in IBKR"
+        self.labeled_detail("tax:", text)
 
     def append_pnl_proceeds(
         self, item: ReconciliationItem, _currency: str | None

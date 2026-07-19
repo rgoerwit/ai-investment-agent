@@ -970,10 +970,10 @@ def detect_consultant_flags(
             {
                 "type": "CONSULTANT_HARD_STOP",
                 "severity": "CRITICAL",
-                "detail": "Consultant issued HARD STOP — restricted security",
+                "detail": "Consultant identified a restricted security",
                 "action": "AUTO_REJECT",
                 "risk_penalty": 3.0,
-                "rationale": "External consultant flagged a hard stop condition (e.g., CMIC restricted list). Position must not be initiated.",
+                "rationale": "External consultant identified a mandatory restriction (e.g., CMIC restricted list). Position must not be initiated.",
             }
         )
         logger.debug("consultant_flag_hard_stop", ticker=ticker)

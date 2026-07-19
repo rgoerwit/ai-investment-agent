@@ -47,7 +47,10 @@ from tests.ibkr.reconciler_cases import (
 
 
 class TestIbkrDisplaySymbol:
-    """format_report() shows ibkr_symbol in human-visible sections, yf ticker in run commands."""
+    """format_report() shows the exchange-qualified yf ticker for non-US
+    listings (July 2026 — a bare base symbol is ambiguous across exchanges:
+    SGX AGS vs Brussels AGS, Tokyo 6741 vs Taiwan 6741); run commands always
+    use the yf ticker."""
 
     def _held_hold(self, yf_ticker: str, ibkr_symbol: str) -> ReconciliationItem:
         pos = _make_position(ticker=yf_ticker, current_price=2100)
@@ -71,19 +74,19 @@ class TestIbkrDisplaySymbol:
             ibkr_position=pos,
         )
 
-    def test_holds_section_shows_ibkr_symbol(self):
-        """HOLDS section displays the IBKR symbol, not the yfinance ticker."""
+    def test_holds_section_shows_exchange_qualified_ticker(self):
+        """HOLDS section displays the exchange-qualified ticker for non-US."""
         item = self._held_hold("7203.T", "7203")
         report = format_report([item], _make_portfolio())
-        assert "7203   " in report or "7203  " in report  # displayed
-        assert "7203.T" not in report.split("HOLDS")[1].split("REVIEWS")[0]
+        holds_block = report.split("HOLDS")[1].split("REVIEWS")[0]
+        assert "7203.T" in holds_block
 
-    def test_holds_section_hk_symbol_no_zero_pad(self):
-        """HK positions display IBKR symbol '5' not yfinance '0005.HK'."""
+    def test_holds_section_hk_symbol_shows_suffix(self):
+        """HK positions display '0005.HK' — a bare '5' is ambiguous."""
         item = self._held_hold("0005.HK", "5")
         report = format_report([item], _make_portfolio())
         holds_block = report.split("HOLDS")[1] if "HOLDS" in report else report
-        assert "5     " in holds_block or "5  " in holds_block  # IBKR symbol
+        assert "0005.HK" in holds_block
 
     def test_holds_section_korean_symbol_keeps_fixed_width(self):
         """Korean positions display IBKR fixed-width symbol, not stripped base."""
@@ -100,16 +103,12 @@ class TestIbkrDisplaySymbol:
         # Run command in REVIEWS should reference yf ticker
         assert "--ticker 7203.T" in report
 
-    def test_reviews_display_uses_ibkr_symbol(self):
-        """REVIEWS label shows IBKR symbol, not yfinance ticker."""
+    def test_reviews_display_uses_exchange_qualified_ticker(self):
+        """REVIEWS label shows the exchange-qualified ticker for non-US."""
         item = self._held_review("7203.T", "7203")
         report = format_report([item], _make_portfolio())
         reviews_block = report.split("REVIEWS")[1] if "REVIEWS" in report else ""
-        # Display part (before the run cmd) uses ibkr symbol
-        assert "REVIEW" in reviews_block
-        # Ensure the display portion shows "7203" not "7203.T"
-        # (the run cmd has "--ticker 7203.T", the label has "7203 ")
-        assert "7203  " in reviews_block or "7203 " in reviews_block
+        assert "REVIEW  7203.T" in reviews_block
 
     def test_new_buy_without_analysis_is_excluded(self):
         """A missing analysis cannot be rendered as a BUY-ready watchlist row."""
@@ -289,16 +288,22 @@ class TestExchangeQualifiedCandidateSafety:
     def _make_sell_item(
         self, ticker: str, sell_type: str | None = "HARD_REJECT"
     ) -> ReconciliationItem:
-        pos = _make_position(ticker=ticker, current_price=35.50)
+        pos = _make_position(ticker=ticker, current_price=35.50, currency="USD")
+        analysis = _make_analysis(ticker=ticker, verdict="DO_NOT_INITIATE")
+        analysis.currency = "USD"
         return ReconciliationItem(
             ticker=ticker,
             action="SELL",
             reason="Verdict → DO_NOT_INITIATE",
             urgency="HIGH",
             ibkr_position=pos,
+            analysis=analysis,
             sell_type=sell_type,
             suggested_quantity=20,
             suggested_price=35.50,
+            cash_impact_usd=pos.market_value_usd,
+            settlement_date="2026-07-20",
+            action_basis="CONFIRMED_THESIS_FAILURE",
         )
 
     def test_sell_does_not_block_different_exchange_same_base_candidate(self):

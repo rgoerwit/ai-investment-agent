@@ -8,6 +8,7 @@ from src.ibkr.dip_watch import DIP_CONCENTRATION_MIN_SCORE, score_dip_watch_item
 from src.ibkr.portfolio_presentation import (
     build_action_summary_counts,
     is_executable_buy,
+    is_executable_sell,
 )
 from src.ibkr.portfolio_report import (
     PortfolioReportContext,
@@ -382,9 +383,7 @@ def _render_summary(context: PortfolioReportContext) -> tuple[str, ...]:
     )
     summary = [f"{counts[action]} {action}" for action in order if action in counts]
     sell_notional = sum(
-        item.cash_impact_usd
-        for item in context.items
-        if item.action in ("SELL", "TRIM") and item.cash_impact_usd > 0
+        item.cash_impact_usd for item in context.items if is_executable_sell(item)
     )
     buy_notional = sum(
         abs(item.cash_impact_usd)

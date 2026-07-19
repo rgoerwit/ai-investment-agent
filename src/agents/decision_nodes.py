@@ -563,7 +563,9 @@ FUNDAMENTALS ANALYST REPORT:
 
 RESEARCH MANAGER PLAN:
 {support.summarize_for_pm(investment_plan, "research", 3500) if investment_plan != "N/A" else "N/A"}{macro_section}{apac_section}{consultant_section}{valuation_section}{governance_section}"""
-        prompt = f"{agent_prompt.system_message}\n\n{all_input}\n\nCreate Trading Plan."
+        prompt = (
+            f"{agent_prompt.system_message}\n\n{all_input}\n\nCreate Position Plan."
+        )
 
         try:
             response = await agent_runtime.invoke_with_rate_limit_handling(
@@ -642,7 +644,7 @@ def create_risk_debater_node(llm, agent_key: str) -> Callable:
             get_valid_artifact_content(state, "trader_investment_plan") or "N/A"
         )
         prompt = (
-            f"{agent_prompt.system_message}\n\nTRADER PLAN: "
+            f"{agent_prompt.system_message}\n\nPOSITION PLANNER OUTPUT: "
             f"{trader_plan}{consultant_section}{governance_section}{macro_section}\n\n"
             "Provide risk assessment."
         )
@@ -1013,8 +1015,9 @@ NEUTRAL ANALYST (Balanced):
         if kill_criteria:
             kill_lines = "\n".join(f"- {trigger}" for trigger in kill_criteria)
             kill_criteria_section = (
-                "\n\nBEAR_KILL_CRITERIA (measurable triggers for immediate SELL; "
-                "surface these in the investment memo, not PM_BLOCK):\n"
+                "\n\nBEAR_KILL_CRITERIA (measurable fundamental triggers for "
+                "urgent reassessment; surface these in the investment memo, "
+                "not PM_BLOCK):\n"
                 f"{kill_lines}"
             )
         else:
@@ -1022,10 +1025,10 @@ NEUTRAL ANALYST (Balanced):
 
         # Scenario valuation section — only emitted when the Valuation
         # Calculator produced a parseable VALUATION_SCENARIOS block AND the
-        # fundamentals provide enough data to derive EPS_TTM. The v9.7 PM
-        # prompt directs PM to anchor stop-loss to BEAR_IV and reference
-        # WEIGHTED_IV; that hint is only useful if PM actually sees the
-        # values, which is exactly what this section provides.
+        # fundamentals provide enough data to derive EPS_TTM. The PM prompt
+        # directs PM to anchor the downside review level to BEAR_IV and
+        # reference WEIGHTED_IV; that hint is only useful if PM actually sees
+        # the values, which is exactly what this section provides.
         from src.charts.extractors.valuation import (
             extract_valuation_scenarios_for_fundamentals,
             format_iv,
@@ -1071,7 +1074,8 @@ NEUTRAL ANALYST (Balanced):
                 "\n\nVALUATION SCENARIOS (Python-computed IVs from "
                 f"{scenarios.methodology}; sufficiency {scenarios.data_sufficiency}; "
                 f"earnings basis {scenarios.earnings_basis}; "
-                "anchor stop-loss to BEAR_IV, reference WEIGHTED_IV in rationale):\n"
+                "anchor the downside review level to BEAR_IV, "
+                "reference WEIGHTED_IV in rationale):\n"
                 f"- BEAR_IV: {format_iv(scenarios.bear_iv)} "
                 f"({scenarios.bear.probability:.0f}%) — {scenarios.bear.drivers}\n"
                 f"- BASE_IV: {format_iv(scenarios.base_iv)} "
@@ -1183,7 +1187,7 @@ VALUE TRAP ANALYSIS:
 RESEARCH MANAGER RECOMMENDATION:
 {support.summarize_for_pm(inv_plan, "research", 3000) if inv_plan else "N/A"}{apac_section}{consultant_section}{kill_criteria_section}{valuation_section}{supplemental_flags_section}
 
-TRADER PROPOSAL:
+POSITION PLANNER PROPOSAL:
 {support.summarize_for_pm(trader, "trader", 2000) if trader else "N/A"}
 
 RISK TEAM DEBATE:

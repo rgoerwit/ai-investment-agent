@@ -73,7 +73,7 @@ class TestWatchlistConcentration:
         assert "Exact replacement list withheld — decide optional removals" in report
         cash_block = report.split("CASH SUMMARY")[1].split("ACTION PLAN")[0]
         today_block = report.split("ACTION PLAN")[1]
-        assert "BUY  MEGP  (100 sh):" in cash_block
+        assert "BUY  MEGP.L  (100 sh):" in cash_block
         assert "→ BUY  MEGP" in today_block
         assert "7203" not in cash_block
         assert "7203" not in today_block
@@ -205,7 +205,8 @@ class TestWatchlistConcentration:
         assert "6758" in dip_rows
         assert "9201" not in dip_rows
         assert (
-            "(1 dip candidate withheld — overweight bucket, below ★★★: 9201)" in report
+            "(1 dip candidate withheld — overweight bucket, below ★★★: 9201.T)"
+            in report
         )
 
     def test_dip_screen_inactive_without_weights(self):

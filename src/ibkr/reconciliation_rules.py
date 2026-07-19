@@ -67,6 +67,53 @@ def _resolve_fx(analysis: AnalysisRecord) -> float:
 
 _MIN_ORDER_USD: float = 200.0
 
+_CURRENCY_EQUIVALENTS = {"GBX": "GBP", "GBP": "GBX"}  # same economy, unit scaled
+
+
+def base_match_allowed(pos: NormalizedPosition, analysis: AnalysisRecord) -> bool:
+    """Whether a base-symbol fallback match is safe for this position.
+
+    A position may borrow the single base-matched analysis only when the
+    analysis currency agrees — otherwise it is a different listing entirely
+    (the AGS.BR-shows-AGS.SI bug). This applies to suffix-less positions too:
+    a Brussels AGS that IBKR reports as SMART/EUR must not adopt an SGD
+    ``AGS.SI`` analysis just because no ``.BR`` analysis exists to poison the
+    base. Unknown currency on either side fails closed: losing an analysis
+    match is safer than attaching another issuer's research to a live holding.
+    """
+    a_ccy = (getattr(analysis, "currency", "") or "").upper()
+    p_ccy = (pos.currency or "").upper()
+    if not a_ccy or not p_ccy:
+        return False
+    return a_ccy == p_ccy or _CURRENCY_EQUIVALENTS.get(a_ccy) == p_ccy
+
+
+def analysis_identity_verified(
+    pos: NormalizedPosition, analysis: AnalysisRecord
+) -> bool:
+    """Return whether a held position is safely linked to its analysis.
+
+    A conid proves which IBKR contract is held; an exact, exchange-qualified
+    yfinance key proves which saved analysis is attached. SMART plus a non-USD
+    currency is only a currency-derived suffix guess and therefore cannot
+    authorize a sale. US SMART/USD positions are the intentional suffix-less
+    exception.
+    """
+    if (
+        pos.conid <= 0
+        or not pos.ticker_identity_verified
+        or analysis.ticker.upper() != pos.ticker.yf.upper()
+    ):
+        return False
+    if not base_match_allowed(pos, analysis):
+        return False
+    exchange = (pos.ticker.exchange or "").upper()
+    currency = (pos.currency or pos.ticker.currency or "").upper()
+    if exchange in {"", "SMART"}:
+        return currency in {"", "USD"} and not pos.ticker.has_suffix
+    return pos.ticker.exchange_resolved
+
+
 _EXCHANGE_LONG_NAMES: dict[str, str] = {
     "HK": "Hong Kong",
     "T": "Japan",
@@ -172,13 +219,20 @@ _REJECT_VERDICTS = frozenset({"DO_NOT_INITIATE", "SELL", "REJECT"})
 SCREEN_REVIEW_DNI_ZONES = frozenset({"LOW", "MODERATE"})
 _PROFIT_TAKE_MIN_GAIN_PCT = 25.0
 _PROFIT_TAKE_RISK_LARGE_GAIN_PCT = 50.0
-_PROFIT_TAKE_UNKNOWN_TAX_SEVERE_GAIN_PCT = 60.0
 _CAPITAL_IDLE_CASH_RISK = "CAPITAL_IDLE_CASH_RISK"
 _CAPITAL_IDLE_CASH_SEVERE = "CAPITAL_IDLE_CASH_SEVERE"
 
 
 @dataclass(frozen=True)
 class ProfitTakeDecision:
+    """Advisory profit-take classification — ``action`` is always "REVIEW".
+
+    The Literal retains "SELL" only for legacy artifact compatibility;
+    classify_profit_take stopped granting executable sell authority in the
+    July 2026 retail alignment (selling an intact winner is a capital-gains
+    decision the operator makes, not the reconciler).
+    """
+
     qualifies: bool
     action: Literal["SELL", "REVIEW"] | None = None
     reasons: tuple[str, ...] = ()
@@ -230,11 +284,15 @@ def check_staleness(
     return False, ""
 
 
-def check_stop_breach(
+def check_review_level_breach(
     analysis: AnalysisRecord,
     current_price_local: float,
 ) -> bool:
-    """Check if current price has breached the stop-loss level."""
+    """Check whether price crossed the legacy downside review level.
+
+    This is a refresh/urgency signal only. It never grants sell authority.
+    ``stop_price`` remains the persisted field name for old TRADE_BLOCK data.
+    """
     stop = analysis.stop_price
     if stop and current_price_local > 0:
         ratio = stop / current_price_local
@@ -245,22 +303,33 @@ def check_stop_breach(
                 stop=stop,
                 current_price=current_price_local,
                 ratio=f"{ratio:.1f}x",
-                hint="Possible currency-unit mismatch or stale stop from different analysis",
+                hint=(
+                    "Possible currency-unit mismatch or stale downside level "
+                    "from a different analysis"
+                ),
             )
             return False
         return current_price_local < stop
     return False
 
 
-def check_target_hit(
+# Backward-compatible name for existing callers and saved-contract tests.
+check_stop_breach = check_review_level_breach
+
+
+def check_base_case_reference_reached(
     analysis: AnalysisRecord,
     current_price_local: float,
 ) -> bool:
-    """Check if current price has hit or exceeded TARGET_1."""
+    """Check whether price reached the legacy base-case valuation reference."""
     target = analysis.target_1_price
     if target and current_price_local > 0:
         return current_price_local >= target
     return False
+
+
+# Backward-compatible name for existing callers and saved-contract tests.
+check_target_hit = check_base_case_reference_reached
 
 
 def _cost_basis_return_pct(position: NormalizedPosition) -> float | None:
@@ -280,7 +349,7 @@ def classify_profit_take(
     position: NormalizedPosition,
     target_hit: bool,
 ) -> ProfitTakeDecision:
-    """Classify capital-allocation-driven profit-taking candidates."""
+    """Classify advisory capital-allocation reviews for appreciated holdings."""
     health_ok = (analysis.health_adj or 0.0) >= 50.0
     growth_ok = (analysis.growth_adj or 0.0) >= 50.0
     if not (health_ok and growth_ok):
@@ -306,27 +375,20 @@ def classify_profit_take(
     if not reasons:
         return ProfitTakeDecision(False, cost_basis_return_pct=gain_pct)
 
+    # Profit-taking is ALWAYS advisory (July 2026, retail alignment): selling an
+    # intact winner is a capital-gains event and a portfolio choice, not a
+    # thesis conclusion — the system surfaces the case (gain, idle-cash flags,
+    # tax context) and the operator decides. tax_term is annotated, never used
+    # to grant sell authority: IBKR lot data is not ingested, so the field is
+    # effectively UNKNOWN in practice and must not pretend precision.
     tax_term = position.tax_term
-    action: Literal["SELL", "REVIEW"]
-    if tax_term == "LONG_TERM" or (
-        tax_term == "UNKNOWN"
-        and severe_idle_cash
-        and gain_pct >= _PROFIT_TAKE_UNKNOWN_TAX_SEVERE_GAIN_PCT
-    ):
-        action = "SELL"
-    else:
-        action = "REVIEW"
     if tax_term == "SHORT_TERM":
         reasons.append("short_term_tax")
     elif tax_term == "UNKNOWN":
-        reasons.append(
-            "unknown_tax_term_severity_override"
-            if action == "SELL"
-            else "unknown_tax_term"
-        )
+        reasons.append("unknown_tax_term")
     return ProfitTakeDecision(
         True,
-        action=action,
+        action="REVIEW",
         reasons=tuple(reasons),
         cost_basis_return_pct=gain_pct,
     )
@@ -346,7 +408,7 @@ def _settlement_date(business_days: int) -> str:
 
 
 def _classify_sell_type(analysis: AnalysisRecord | None, stop_breached: bool) -> str:
-    """Classify why a position is being sold."""
+    """Classify a legacy sell/review reason for compatibility and grouping."""
     if stop_breached:
         return "STOP_BREACH"
     if analysis is None:
@@ -360,23 +422,17 @@ def _classify_sell_type(analysis: AnalysisRecord | None, stop_breached: bool) ->
     return "SOFT_REJECT" if (health_ok and growth_ok) else "HARD_REJECT"
 
 
-# Stop sitting closer than this to the current price is inside daily-noise
-# range — the analysis-time stop is stale and inflates target/stop R/R.
-STOP_NOISE_BAND_PCT = 5.0
-# A position that ran this far above analysis entry without a stop restatement
-# is a ratchet candidate (let winners run, with discipline).
-STOP_RATCHET_GAIN_PCT = 15.0
+# A legacy downside level this close to price sits inside routine daily noise.
+REVIEW_LEVEL_NOISE_BAND_PCT = 5.0
 
 
-def stop_staleness_note(
+def review_level_note(
     analysis: AnalysisRecord | None, current_price_local: float | None
 ) -> str | None:
-    """Advisory on a stop that has decayed since analysis time, or None.
+    """Flag a legacy downside level too close to price to be decision-useful.
 
-    Analysis-time stops are never restated automatically; the two decay modes
-    are a stop inside daily-noise range (fires on nothing, inflates R/R) and a
-    winner far above entry still carrying its original stop. Shared by the
-    position evaluator (reason text) and the CLI HOLDS renderer.
+    The level does not ratchet after gains and never acts as a sale trigger;
+    raising it mechanically would recreate trailing-stop behavior.
     """
     if analysis is None or not analysis.stop_price or not current_price_local:
         return None
@@ -385,18 +441,16 @@ def stop_staleness_note(
     stop_gap_pct = (
         (current_price_local - analysis.stop_price) / current_price_local * 100
     )
-    if stop_gap_pct < STOP_NOISE_BAND_PCT:
+    if stop_gap_pct < REVIEW_LEVEL_NOISE_BAND_PCT:
         return (
-            f"⚠ stop within {stop_gap_pct:.1f}% of price — inside noise range, "
-            "restate on refresh"
+            f"⚠ review level within {stop_gap_pct:.1f}% of price — inside daily "
+            "noise; treat it as context, not an action trigger"
         )
-    if analysis.entry_price and analysis.entry_price > 0:
-        gain_pct = (
-            (current_price_local - analysis.entry_price) / analysis.entry_price * 100
-        )
-        if gain_pct >= STOP_RATCHET_GAIN_PCT:
-            return f"⚠ stop unrevised after {gain_pct:+.1f}% run — ratchet candidate"
     return None
+
+
+# Backward-compatible alias; new code uses the retail-framed name above.
+stop_staleness_note = review_level_note
 
 
 @dataclass(frozen=True)
@@ -413,9 +467,9 @@ def _gate_scores_intact(analysis: AnalysisRecord) -> bool:
     """Both thesis gate scores at/above the 50% hard gates.
 
     Deliberately narrow: this tests only health_adj/growth_adj, not general
-    quality — an intact-score reject loses *automatic* SELL authority, nothing
-    more. Mandatory-exit flags, stop breaches, tender mechanics, and
-    data-quality quarantine retain theirs.
+    quality — an intact-score reject loses automatic sale authority. Mandatory
+    restrictions retain sale authority; downside-price breaches, tender
+    mechanics, and data-quality concerns remain review-only.
     """
     return (analysis.health_adj or 0.0) >= 50.0 and (analysis.growth_adj or 0.0) >= 50.0
 
@@ -467,9 +521,9 @@ def classify_disposition(
 
     A portfolio action requires portfolio evidence: a stock-level rejection may
     trigger refresh, review, replacement analysis, or an exit, but it must not
-    decide among those alone. The caller handles stop breaches and data-vacuum
-    quarantines before this point; this function decides SELL vs REVIEW for the
-    remaining reject verdicts, most-structural evidence first.
+    decide among those alone. A legacy downside-level breach may raise urgency
+    in the caller but has no sell authority. This function decides SELL vs
+    REVIEW for reject verdicts, most-structural evidence first.
     """
     evidence = analysis.evidence
 
@@ -508,8 +562,8 @@ def classify_disposition(
     # check deliberately precedes confirmation, otherwise every persistent
     # entry-screen rejection of a winner would escalate to SELL on its next
     # refresh ≥ min_spacing_days later (the 2026-07-14 nine-sell day). Exits
-    # for this class come from stop breaches, targets, tenders, or mandatory
-    # flags — never from repeated rejects alone.
+    # for this class require a future fundamental failure or mandatory
+    # restriction — never price levels or repeated entry-screen rejects alone.
     if _gate_scores_intact(analysis):
         entry = analysis.entry_price or analysis.current_price
         appreciated = bool(
@@ -530,8 +584,8 @@ def classify_disposition(
             "REVIEW",
             "THESIS_REASSESSMENT",
             detail=(
-                "Gate scores intact — price weakness alone; "
-                "stop-loss governs downside"
+                "Gate scores intact — price weakness alone is not exit "
+                "evidence; watch fundamentals, not price"
             ),
         )
 

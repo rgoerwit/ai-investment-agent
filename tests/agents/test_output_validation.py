@@ -35,7 +35,7 @@ def test_validate_required_output_detects_missing_pm_sections():
     validation = validate_required_output("portfolio_manager", content)
 
     assert validation["ok"] is False
-    assert "execution_section" in validation["missing"]
+    assert "position_section" in validation["missing"]
 
 
 def test_validate_required_output_accepts_consultant_structure():

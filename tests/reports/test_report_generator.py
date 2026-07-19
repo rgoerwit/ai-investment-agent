@@ -473,7 +473,7 @@ class TestGenerateReport:
         assert "Fundamental Analysis" in report
         assert "Market Sentiment" in report
         assert "News & Catalysts" in report
-        assert "Trading Strategy" in report
+        assert "Position Plan" in report
         assert "Risk Assessment" in report
 
     def test_investment_recommendation_shown_without_pm_output(self):
@@ -1184,8 +1184,8 @@ class TestRedFlagPreScreening:
         # Missing fields should use fallbacks from code
 
 
-class TestTraderSectionVerdictGating:
-    """Trading Strategy section must be suppressed for DO NOT INITIATE / SELL verdicts."""
+class TestPositionPlanVerdictGating:
+    """Position Plan details are suppressed for non-initiation verdicts."""
 
     _TRADER_CONTENT = (
         "Entry: 6.00 NZD\nStop Loss: 5.72 NZD\nTarget: 6.40 NZD\nScaled entry approach."
@@ -1205,7 +1205,7 @@ class TestTraderSectionVerdictGating:
                 "#### PORTFOLIO MANAGER VERDICT: DO NOT INITIATE\n\nRationale."
             )
         )
-        assert "Trading Strategy" in report
+        assert "Position Plan" in report
         assert "not applicable" in report
         assert "DO NOT INITIATE" in report
         # Trader's actual entry data must not bleed through
@@ -1217,7 +1217,7 @@ class TestTraderSectionVerdictGating:
         report = reporter.generate_report(
             self._result("VERDICT: SELL\n\nDeterioration detected.")
         )
-        assert "Trading Strategy" in report
+        assert "Position Plan" in report
         assert "not applicable" in report
         assert "SELL" in report
         assert "6.00 NZD" not in report
@@ -1225,8 +1225,10 @@ class TestTraderSectionVerdictGating:
     def test_buy_includes_full_trader_section(self):
         reporter = QuietModeReporter("TEST.NZ")
         report = reporter.generate_report(self._result("Action: BUY\n\nStrong thesis."))
-        assert "Trading Strategy" in report
+        assert "Position Plan" in report
         assert "6.00 NZD" in report
+        assert "Stop Loss" not in report
+        assert "downside review level" in report
         assert "not applicable" not in report
 
     def test_hold_includes_full_trader_section(self):
@@ -1234,8 +1236,9 @@ class TestTraderSectionVerdictGating:
         report = reporter.generate_report(
             self._result("Action: HOLD\n\nWait for clarity.")
         )
-        assert "Trading Strategy" in report
+        assert "Position Plan" in report
         assert "6.00 NZD" in report
+        assert "Stop Loss" not in report
         assert "not applicable" not in report
 
     def test_heading_always_present_on_dni(self):
@@ -1244,7 +1247,7 @@ class TestTraderSectionVerdictGating:
         report = reporter.generate_report(
             self._result("VERDICT: DO_NOT_INITIATE\n\nFails thesis.")
         )
-        assert "## Trading Strategy" in report
+        assert "## Position Plan" in report
 
     def test_pm_block_verdict_controls_report_title_and_caveat(self):
         reporter = QuietModeReporter("TEST.NZ")
@@ -1311,7 +1314,7 @@ class TestTraderSectionVerdictGating:
             }
         )
         assert "Risk Assessment — Archival Debate (Non-Executable)" in report
-        assert "not trade instructions" in report
+        assert "not position recommendations" in report
         assert "Recommended Initial Position Size: 6.0%" in report
 
 

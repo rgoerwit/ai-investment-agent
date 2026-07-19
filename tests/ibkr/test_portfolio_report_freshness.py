@@ -234,7 +234,10 @@ class TestCliUiSharedPresentationAlignment:
             analysis=_make_analysis(ticker="7203.T"),
             suggested_quantity=100,
             suggested_price=1950.0,
+            cash_impact_usd=1_300.0,
+            settlement_date="2026-03-31",
             sell_type="HARD_REJECT",
+            action_basis="CONFIRMED_THESIS_FAILURE",
         )
         live_orders = [
             {
@@ -256,6 +259,33 @@ class TestCliUiSharedPresentationAlignment:
         )
 
         assert build_live_order_note(item, live_orders) in report
+
+    def test_review_live_order_note_does_not_invent_a_buy_recommendation(self):
+        item = ReconciliationItem(
+            ticker="7203.T",
+            action="REVIEW",
+            reason="Legacy sell recommendation requires retail review",
+            urgency="MEDIUM",
+            ibkr_position=_make_position(ticker="7203.T", conid=1234),
+            analysis=_make_analysis(ticker="7203.T"),
+        )
+        live_orders = [
+            {
+                "conid": 1234,
+                "ticker": "7203",
+                "side": "SELL",
+                "remainingSize": 100,
+                "price": 1950.0,
+                "orderType": "LMT",
+                "status": "Submitted",
+            }
+        ]
+
+        note = build_live_order_note(item, live_orders)
+
+        assert note is not None
+        assert note.startswith("[OPEN ORDER REVIEW: live SELL order")
+        assert "while recommending BUY" not in note
 
     def test_shared_cash_summary_matches_report_pending_inflows(self):
         portfolio = PortfolioSummary(
@@ -279,6 +309,7 @@ class TestCliUiSharedPresentationAlignment:
             cash_impact_usd=1_300.0,
             settlement_date="2026-03-31",
             sell_type="HARD_REJECT",
+            action_basis="CONFIRMED_THESIS_FAILURE",
         )
         buy_item = ReconciliationItem(
             ticker="ASML.AS",
@@ -326,6 +357,7 @@ class TestCliUiSharedPresentationAlignment:
             cash_impact_usd=1_400.0,
             settlement_date="2026-04-21",
             sell_type="HARD_REJECT",
+            action_basis="CONFIRMED_THESIS_FAILURE",
         )
         soft_sell = ReconciliationItem(
             ticker="0005.HK",
@@ -349,8 +381,8 @@ class TestCliUiSharedPresentationAlignment:
         # Soft sell in conditional
         assert summary.conditional_proceeds_usd == 1_300.0
 
-    def test_hard_sells_and_stops_included_in_pending(self):
-        """HARD_REJECT and STOP_BREACH sells appear in pending_inflows."""
+    def test_only_confirmed_hard_sell_is_included_in_pending(self):
+        """A legacy price-trigger sale cannot fund purchases."""
         portfolio = PortfolioSummary(
             account_id="U1234567",
             portfolio_value_usd=50_000,
@@ -368,8 +400,10 @@ class TestCliUiSharedPresentationAlignment:
             ibkr_position=_make_position(ticker="7203.T"),
             analysis=_make_analysis(ticker="7203.T"),
             cash_impact_usd=1_000.0,
+            suggested_quantity=100,
             settlement_date="2026-04-21",
             sell_type="HARD_REJECT",
+            action_basis="CONFIRMED_THESIS_FAILURE",
         )
         stop = ReconciliationItem(
             ticker="0005.HK",
@@ -383,8 +417,8 @@ class TestCliUiSharedPresentationAlignment:
             sell_type="STOP_BREACH",
         )
         summary = build_cash_summary([hard, stop], portfolio)
-        assert summary.pending_inflows_total_usd == 1_800.0
-        assert len(summary.pending_inflows) == 2
+        assert summary.pending_inflows_total_usd == 1_000.0
+        assert len(summary.pending_inflows) == 1
         assert summary.conditional_proceeds_usd == 0.0
 
     def test_conditional_proceeds_shown_in_report(self):
@@ -538,6 +572,18 @@ class TestOrderMatcherAuthority:
         """A filled order encountered first must not hide a later open
         cross-side conflict."""
         item = _make_sell_item(ticker="9201.T")
+        item = item.model_copy(
+            update={
+                "action_basis": "CONFIRMED_THESIS_FAILURE",
+                "analysis": _make_analysis(
+                    ticker=item.ticker.yf,
+                    verdict="DO_NOT_INITIATE",
+                ),
+                "suggested_quantity": 100,
+                "cash_impact_usd": 900.0,
+                "settlement_date": "2026-07-20",
+            }
+        )
         filled = _make_order(conid=99999, side="S", status="Filled")
         open_buy = _make_order(conid=99999, side="B", status="Submitted")
         report = format_report(
@@ -548,6 +594,18 @@ class TestOrderMatcherAuthority:
 
     def test_non_numeric_conid_falls_back_to_symbol(self):
         item = _make_sell_item(ticker="9201.T")
+        item = item.model_copy(
+            update={
+                "action_basis": "CONFIRMED_THESIS_FAILURE",
+                "analysis": _make_analysis(
+                    ticker=item.ticker.yf,
+                    verdict="DO_NOT_INITIATE",
+                ),
+                "suggested_quantity": 100,
+                "cash_impact_usd": 900.0,
+                "settlement_date": "2026-07-20",
+            }
+        )
         order = _make_order(ticker="9201", side="S", remaining_size=100)
         order["conid"] = "not-a-number"
         report = format_report([item], _make_portfolio(), live_orders=[order])

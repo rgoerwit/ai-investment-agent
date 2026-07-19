@@ -97,6 +97,14 @@ def build_live_order_note(
         return (
             f"[ORDER FILLED: {match.side} {display_qty}{price_str} {match.order_type}]"
         )
+
+    if item.action == "REVIEW":
+        return (
+            f"[OPEN ORDER REVIEW: live {match.side} order {display_qty}{price_str}"
+            f" {match.order_type} ({match.status}) exists while the position is under"
+            " review - inspect or cancel it before acting]"
+        )
+
     if match.side == rec_side:
         rec_qty = item.suggested_quantity
         if (

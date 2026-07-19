@@ -241,7 +241,7 @@ class TestExecutableBuyAlignment:
         report = self._report([_make_buy_item("7203.T")], watchlist_total=1)
         cash_block = report.split("CASH SUMMARY")[1].split("ACTION PLAN")[0]
         today_block = report.split("ACTION PLAN")[1]
-        assert "BUY  7203  (100 sh):" in cash_block
+        assert "BUY  7203.T  (100 sh):" in cash_block
         assert "→ BUY  7203" in today_block
 
     def test_displaced_watchlist_buy_excluded_from_cash_today_and_turnover(self):
@@ -257,7 +257,7 @@ class TestExecutableBuyAlignment:
         today_block = report.split("ACTION PLAN")[1]
         for item in selected:
             sym = item.ticker.ibkr
-            assert f"BUY  {sym}  (100 sh):" in cash_block
+            assert f"BUY  {sym}.T  (100 sh):" in cash_block
             assert f"→ BUY  {sym}" in today_block
         assert "8888" not in cash_block
         assert "8888" not in today_block
@@ -297,7 +297,18 @@ class TestExecutableBuyAlignment:
     def test_turnover_shows_sells_while_excluding_advisory_buys(self):
         """Executable sells still drive the turnover line even when every BUY
         in the run is advisory (off-watch) and contributes $0."""
-        sell = _make_sell_item("9201.T").model_copy(update={"cash_impact_usd": 900.0})
+        sell = _make_sell_item("9201.T").model_copy(
+            update={
+                "action_basis": "CONFIRMED_THESIS_FAILURE",
+                "analysis": _make_analysis(
+                    ticker="9201.T",
+                    verdict="DO_NOT_INITIATE",
+                ),
+                "suggested_quantity": 100,
+                "cash_impact_usd": 900.0,
+                "settlement_date": "2026-07-20",
+            }
+        )
         report = self._report([sell, _make_offwatch_buy("WDO.TO")], watchlist_total=0)
         assert "executable sells ~$900" in report
         assert "buys ~$0" in report

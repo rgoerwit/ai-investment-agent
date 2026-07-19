@@ -142,8 +142,10 @@ def test_serialize_dashboard_snapshot_includes_profit_take_fields(sample_bundle)
     )
 
     payload = serialize_dashboard_snapshot(sample_bundle)
-    row = payload["actions"]["sell_profit_take"][0]
+    assert payload["actions"]["sell_profit_take"] == []
+    row = payload["actions"]["review_profit_take"][0]
 
+    assert row["action"] == "REVIEW"
     assert row["sell_type"] == "PROFIT_TAKE"
     assert row["cost_basis_return_pct"] == 42.5
     assert row["profit_take_reasons"] == ["capital_idle_cash_severe"]
@@ -168,6 +170,27 @@ def test_serialize_dashboard_snapshot_includes_currency_repair_metadata(sample_b
     assert analysis["currency_source"] == "repair_on_load"
     assert analysis["currency_repaired"] is True
     assert analysis["currency_repair_reason"] == "legacy_snapshot_usd_default"
+
+
+def test_serialize_dashboard_snapshot_exposes_ticker_resolution_provenance(
+    sample_bundle,
+):
+    sample_bundle.items[0].ibkr_position = sample_bundle.items[
+        0
+    ].ibkr_position.model_copy(
+        update={
+            "ticker_identity_verified": False,
+            "ticker_resolution_source": "yfinance_search",
+        }
+    )
+
+    payload = serialize_dashboard_snapshot(sample_bundle)
+    row = payload["actions"]["review"][0]
+    position = row["position"]
+
+    assert row["action"] == "REVIEW"
+    assert position["ticker_identity_verified"] is False
+    assert position["ticker_resolution_source"] == "yfinance_search"
 
 
 def test_serialize_equity_drilldown_includes_structured_and_markdown(sample_bundle):

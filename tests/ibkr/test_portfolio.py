@@ -316,7 +316,37 @@ class TestNormalizePositions:
         positions = normalize_positions(raw, client=client)
 
         assert positions[0].yf_ticker == "AAPL"
+        assert positions[0].ticker_identity_verified is True
         client.get_contract_info.assert_not_called()
+
+    def test_smart_eur_search_result_remains_unverified(self):
+        client = _contract_info_client(
+            {"symbol": "AGS", "primaryExch": "SMART", "currency": "EUR"}
+        )
+        raw = [
+            {
+                "conid": 123,
+                "contractDesc": "AGS",
+                "listingExchange": "SMART",
+                "position": 100,
+                "mktValue": 1000,
+                "currency": "EUR",
+            }
+        ]
+
+        with (
+            patch("src.ibkr.portfolio.cache_conid_mapping") as cache_mapping,
+            patch(
+                "src.ibkr.ticker_mapper._yf_search_ticker",
+                return_value="AGS.BR",
+            ),
+        ):
+            positions = normalize_positions(raw, client=client)
+
+        assert positions[0].yf_ticker == "AGS.BR"
+        assert positions[0].ticker_identity_verified is False
+        assert positions[0].ticker_resolution_source == "yfinance_search"
+        cache_mapping.assert_not_called()
 
     def test_korean_multi_exchange_currency_forces_live_resolution(self):
         client = _contract_info_client(
@@ -378,6 +408,8 @@ class TestNormalizePositions:
             positions = normalize_positions(raw, client=client)
 
         assert positions[0].yf_ticker == "1264.TWO"
+        assert positions[0].ticker_identity_verified is True
+        assert positions[0].ticker_resolution_source == "exchange_map"
         client.get_contract_info.assert_called_once_with(1264, compete=False)
         client.get_security_definition.assert_called_once_with(1264)
 

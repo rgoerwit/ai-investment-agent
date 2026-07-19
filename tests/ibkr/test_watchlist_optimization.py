@@ -734,3 +734,62 @@ def test_analysis_none_item_is_excluded_before_screen_without_crash():
 
     assert optimization.optimal == (healthy,)
     assert no_analysis in optimization.excluded_low_conviction
+
+
+class TestWeakestBucketIncumbents:
+    """Informational weakest-incumbent ranking for over-limit buckets."""
+
+    def _held(self, ticker: str, health: float, growth: float):
+        analysis = _make_analysis(ticker=ticker)
+        analysis.health_adj = health
+        analysis.growth_adj = growth
+        return ReconciliationItem(
+            ticker=ticker,
+            action="HOLD",
+            reason="Position OK",
+            urgency="LOW",
+            ibkr_position=_make_position(ticker=ticker),
+            analysis=analysis,
+        )
+
+    def test_ranks_weakest_first_within_bucket(self):
+        from src.ibkr.watchlist_optimization import weakest_bucket_incumbents
+
+        held = [
+            self._held("7203.T", 80, 75),
+            self._held("6758.T", 55, 52),
+            self._held("9432.T", 65, 60),
+            self._held("0005.HK", 40, 40),  # different bucket — excluded
+        ]
+        weakest = weakest_bucket_incumbents(held, dimension="exchange", key="T")
+        assert [item.ticker.yf for item in weakest] == [
+            "6758.T",
+            "9432.T",
+            "7203.T",
+        ]
+
+    def test_limit_and_dedup(self):
+        from src.ibkr.watchlist_optimization import weakest_bucket_incumbents
+
+        held = [self._held(f"720{i}.T", 60 + i, 60) for i in range(5)]
+        held.append(self._held("7200.T", 60, 60))  # duplicate identity
+        weakest = weakest_bucket_incumbents(
+            held, dimension="exchange", key="T", limit=2
+        )
+        assert len(weakest) == 2
+        assert weakest[0].ticker.yf == "7200.T"
+
+    def test_missing_analysis_ranks_last_and_empty_bucket_is_empty(self):
+        from src.ibkr.watchlist_optimization import weakest_bucket_incumbents
+
+        no_analysis = ReconciliationItem(
+            ticker="7209.T",
+            action="REVIEW",
+            reason="no analysis",
+            urgency="MEDIUM",
+            ibkr_position=_make_position(ticker="7209.T"),
+        )
+        held = [no_analysis, self._held("7203.T", 70, 65)]
+        weakest = weakest_bucket_incumbents(held, dimension="exchange", key="T")
+        assert weakest[-1].ticker.yf == "7209.T"  # unknown evidence ranks last
+        assert weakest_bucket_incumbents(held, dimension="exchange", key="HK") == []

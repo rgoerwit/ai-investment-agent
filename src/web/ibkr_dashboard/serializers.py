@@ -22,7 +22,9 @@ from src.ibkr.portfolio_presentation import (
     build_action_summary_counts,
     build_cash_summary,
     build_freshness_overview,
+    fx_return_split,
     get_sell_type_label,
+    retail_safe_action,
 )
 from src.ibkr.recommendation_service import PortfolioRecommendationBundle
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
@@ -161,6 +163,7 @@ def serialize_item(
     *,
     live_orders: list[dict] | None = None,
 ) -> dict[str, Any]:
+    item = retail_safe_action(item)
     return {
         "ticker_yf": item.ticker.yf,
         "ticker_ibkr": item.ticker.ibkr,
@@ -432,7 +435,7 @@ def _serialize_dip_watch(candidate: DipWatchCandidate) -> dict[str, Any]:
         "score": candidate.score,
         "stars": candidate.stars,
         "dip_pct": candidate.dip_pct,
-        "risk_reward": candidate.risk_reward,
+        "upside_pct": candidate.upside_pct,
         "held_quantity": candidate.held_quantity,
         "health_adj": candidate.health_adj,
         "growth_adj": candidate.growth_adj,
@@ -447,15 +450,24 @@ def _serialize_dip_watch(candidate: DipWatchCandidate) -> dict[str, Any]:
 def _serialize_position(position: NormalizedPosition | None) -> dict[str, Any] | None:
     if position is None:
         return None
+    split = fx_return_split(position)
+    local_pct, fx_pct, usd_pct = split if split is not None else (None, None, None)
     return {
         "ticker_yf": position.ticker.yf,
         "ticker_ibkr": position.ticker.ibkr,
+        "ticker_identity_verified": position.ticker_identity_verified,
+        "ticker_resolution_source": position.ticker_resolution_source,
         "quantity": position.quantity,
         "avg_cost_local": position.avg_cost_local,
         "current_price_local": position.current_price_local,
         "currency": position.currency,
         "market_value_usd": position.market_value_usd,
         "unrealized_pnl_usd": position.unrealized_pnl_usd,
+        # Local-price vs FX decomposition (multiplicative residual; None when
+        # unavailable — the dashboard shows the local leg as primary).
+        "local_return_pct": local_pct,
+        "fx_effect_pct": fx_pct,
+        "usd_return_pct": usd_pct,
         "acquired_date": position.acquired_date,
         "holding_period_days": position.holding_period_days,
         "tax_term": position.tax_term,
@@ -488,6 +500,9 @@ def _serialize_analysis(analysis: AnalysisRecord | None) -> dict[str, Any] | Non
         "exchange": analysis.exchange,
         "is_quick_mode": analysis.is_quick_mode,
         "capital_flag_types": list(analysis.capital_flag_types),
+        # Fundamental thesis-break triggers (bear KILL_CRITERIA) — the exit
+        # conditions the dashboard shows ahead of legacy downside-price context.
+        "kill_criteria": list(analysis.kill_criteria),
         "trade_block": {
             "action": analysis.trade_block.action,
             "size_pct": analysis.trade_block.size_pct,

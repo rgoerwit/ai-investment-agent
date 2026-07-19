@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -219,3 +219,56 @@ def _read_only_report() -> str:
 )
 def test_complete_report_contract(snapshot_name, render):
     assert f"{render()}\n" == (_SNAPSHOTS / snapshot_name).read_text()
+
+
+# ── Ambient-date independence guard ──────────────────────────────────────────
+# _fixed_report_clock freezes only RENDER-time clocks. Fixture builders (e.g.
+# reconciler_cases._make_analysis with age_days=…) import datetime at call time
+# and derive dates from the real ambient clock — if any such date reaches the
+# rendered bytes, the golden silently drifts at midnight (2026-07-19 incident:
+# a relative analysis_date rendered into macro_watchlist_unavailable.txt).
+# These classes shift the ambient clock by a large, non-round offset; rendering
+# must be byte-identical under the shift, which fails the day a leak is
+# introduced instead of the day after the golden is regenerated.
+
+_AMBIENT_SHIFT = timedelta(days=37)
+
+
+class _ShiftedDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return datetime.now(tz) + _AMBIENT_SHIFT
+
+    @classmethod
+    def today(cls):
+        return datetime.now() + _AMBIENT_SHIFT
+
+
+class _ShiftedDate(date):
+    @classmethod
+    def today(cls):
+        real = date.today()
+        shifted = real + _AMBIENT_SHIFT
+        return cls(shifted.year, shifted.month, shifted.day)
+
+
+@pytest.mark.parametrize(
+    ("snapshot_name", "render"),
+    (
+        ("mixed_portfolio.txt", _mixed_report),
+        ("macro_watchlist_unavailable.txt", _macro_degraded_report),
+        ("read_only_malformed_orders.txt", _read_only_report),
+    ),
+)
+def test_report_contract_is_ambient_date_independent(snapshot_name, render):
+    baseline = render()
+    with (
+        patch("datetime.datetime", _ShiftedDateTime),
+        patch("datetime.date", _ShiftedDate),
+    ):
+        shifted = render()
+    assert shifted == baseline, (
+        "Rendered report depends on the ambient clock — a fixture is deriving "
+        "a rendered date from real now()/today(). Pin absolute dates in the "
+        "fixture (see format_report_cases._panic_items)."
+    )

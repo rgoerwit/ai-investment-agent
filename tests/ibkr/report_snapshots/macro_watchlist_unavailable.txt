@@ -17,7 +17,7 @@
 ║  (80% of held positions) — probable macro event      ║
 ║  Likely macro event, not individual thesis failure.  ║
 ║  Pause thesis changes; re-evaluate intrinsic value.  ║
-║  1 weak-fundamentals stop SELL(s) remain live.       ║
+║  1 confirmed thesis failure(s) remain live.          ║
 ╚══════════════════════════════════════════════════════╝
 
 ══════════════════════════════════════════════════════
@@ -28,60 +28,84 @@
   → Run: ./scripts/run_pipeline.sh
 
 ══════════════════════════════════════════════════════
+  ANALYSIS FRESHNESS  (what is stale, what is queued, what happens next)
+══════════════════════════════════════════════════════
+
+  Needs review before action:
+    STOP         no analysis  →  poetry run python -m src.main --ticker STOP.T
+
+  Already in refresh queue:
+    None
+
+  Due soon:
+    None
+
+  Refresh activity this run:
+    Policy: off
+    No refresh actions were needed.
+
+  User action: run poetry run python scripts/portfolio_manager.py --recommend --refresh-policy blocking
+
+══════════════════════════════════════════════════════
   SELL RECOMMENDATIONS  (review sell reason labels before executing)
 ══════════════════════════════════════════════════════
 
-⚠ SELL    STOP          LMT  (no entry price — re-run analysis)  [STOP BREACH]
-             reason:    Stop breached: price 1700.00 < stop 1900.00
-             est. gain: +JPY 10,000  (+5.0% vs IBKR cost basis JPY 2,000.00)  ·  verify holding period in IBKR
-
-⚠ SELL    HARD          LMT  (no entry price — re-run analysis)  [FUNDAMENTAL FAILURE]
+⚠ SELL    HARD.T        100 shares  @ JPY 2,100.00  LMT  [CONFIRMED THESIS FAILURE]
              reason:    analyzed 2026-03-05
+             analysis:  2026-07-12  ·  Health:70  Growth:65  ·  DO_NOT_INITIATE (Medium)
              est. gain: +JPY 10,000  (+5.0% vs IBKR cost basis JPY 2,000.00)  ·  verify holding period in IBKR
+             proceeds:  ~$1,400 USD  ·  spendable on 2026-03-09
+             tax:       tax-lot holding periods unavailable; verify lots and realized gain in IBKR
 
 ══════════════════════════════════════════════════════
-  SELL-RELATED REVIEWS  (tax, macro, or intact-thesis review before acting)
+  POSITION REVIEWS  (tax, macro, or intact-thesis review before acting)
 ══════════════════════════════════════════════════════
 
-△ REVIEW  SOFT00        [SOFT REJECTION]
-             verdict:   REJECT  (2026-03-05)
-             P/L:       +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
-             holding:   100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+⚠ REVIEW  STOP.T        [PRICE-DROP REVIEW]
+             reason:    Stop breached: price 1700.00 < stop 1900.00 — sale downgraded: price movement is a
+                        review trigger, not sale authority
+             est. gain: +JPY 10,000  (+5.0% vs IBKR cost basis JPY 2,000.00)  ·  verify holding period in IBKR
+             holding:   100 shares  ·  last JPY 2,100.00  ·  position value ~$1,400 USD
 
-△ REVIEW  SOFT01        [SOFT REJECTION]
+△ REVIEW  SOFT00.T      [SOFT REJECTION]
              verdict:   REJECT  (2026-03-05)
              P/L:       +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
-             holding:   100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+             holding:   100 shares  ·  last JPY 2,100.00  ·  position value ~$1,400 USD
 
-△ REVIEW  SOFT02        [SOFT REJECTION]
+△ REVIEW  SOFT01.T      [SOFT REJECTION]
              verdict:   REJECT  (2026-03-05)
              P/L:       +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
-             holding:   100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+             holding:   100 shares  ·  last JPY 2,100.00  ·  position value ~$1,400 USD
 
-△ REVIEW  SOFT03        [SOFT REJECTION]
+△ REVIEW  SOFT02.T      [SOFT REJECTION]
              verdict:   REJECT  (2026-03-05)
              P/L:       +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
-             holding:   100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+             holding:   100 shares  ·  last JPY 2,100.00  ·  position value ~$1,400 USD
 
-△ REVIEW  SOFT04        [SOFT REJECTION]
+△ REVIEW  SOFT03.T      [SOFT REJECTION]
              verdict:   REJECT  (2026-03-05)
              P/L:       +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
-             holding:   100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+             holding:   100 shares  ·  last JPY 2,100.00  ·  position value ~$1,400 USD
 
-△ REVIEW  SOFT05        [SOFT REJECTION]
+△ REVIEW  SOFT04.T      [SOFT REJECTION]
              verdict:   REJECT  (2026-03-05)
              P/L:       +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
-             holding:   100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+             holding:   100 shares  ·  last JPY 2,100.00  ·  position value ~$1,400 USD
 
-△ REVIEW  SOFT06        [SOFT REJECTION]
+△ REVIEW  SOFT05.T      [SOFT REJECTION]
              verdict:   REJECT  (2026-03-05)
              P/L:       +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
-             holding:   100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+             holding:   100 shares  ·  last JPY 2,100.00  ·  position value ~$1,400 USD
 
-△ REVIEW  SOFT07        [SOFT REJECTION]
+△ REVIEW  SOFT06.T      [SOFT REJECTION]
              verdict:   REJECT  (2026-03-05)
              P/L:       +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
-             holding:   100 shares  ·  last JPY 2,100.00  ·  potential exit ~$1,400 USD
+             holding:   100 shares  ·  last JPY 2,100.00  ·  position value ~$1,400 USD
+
+△ REVIEW  SOFT07.T      [SOFT REJECTION]
+             verdict:   REJECT  (2026-03-05)
+             P/L:       +JPY 10,000 (+5.0% vs JPY 2,000.00)  ·  holding period: verify in IBKR
+             holding:   100 shares  ·  last JPY 2,100.00  ·  position value ~$1,400 USD
 
 ══════════════════════════════════════════════════════
   WATCHLIST OPTIMIZATION
@@ -110,7 +134,8 @@
 ══════════════════════════════════════════════════════
 
   !! CORRELATED_SELL_EVENT: 8 positions changed verdict within 7d of 2026-03-05 (80% of held positions) —
-     probable macro event. Execute stop-breach SELLs only; review verdict-change SELLs before acting.
+     probable macro event. Do not sell into a correlated drop: exit only on confirmed fundamental failure;
+     review everything else.
 
 ══════════════════════════════════════════════════════
   CASH SUMMARY
@@ -119,15 +144,26 @@
   Settled cash:                                $ 12,000
   Cash buffer (held back, not for new buys):  -$  5,000
   Deployable into new buys:                    $  7,000
-  No confirmed sale proceeds pending.
-  Conditional (soft-sell reviews if executed):  ~$11,200
+  Pending inflows (sale proceeds, clears 2026-03-09):
+    SELL  HARD  (100 sh):                     + $ 1,400
+  Total pending:                                $ 1,400
+  Conditional (soft-sell reviews):              $11,200
+
+  ⚠  Do NOT spend sale proceeds today — they have not settled yet.
+     If orders fill by market close, funds clear 2026-03-09.
+     Place additional BUYs only after that settlement date.
 
 ══════════════════════════════════════════════════════
   ACTION PLAN  (execution orders · settlement · refresh follow-through)
 ══════════════════════════════════════════════════════
 
   TODAY (2026-07-17):
-    → SELL  STOP  LMT
-    → SELL  HARD  LMT
+    → SELL  HARD.T  100 shares  @ JPY 2,100.00  LMT
 
-  Summary:  2 SELL  ·  8 MACRO_WATCH
+  2026-03-09 — sale proceeds from today's sells/trims clear:
+    → $1,400 available on this date
+    → Run before placing any additional buys:
+        poetry run python scripts/portfolio_manager.py --recommend
+
+  Plan turnover:  executable sells ~$1,400 (1.4% of NAV)  ·  buys ~$0 (0.0% of NAV)
+  Summary:  1 SELL  ·  1 REVIEW  ·  8 MACRO_WATCH

@@ -109,8 +109,9 @@ class TestComputeDipScore:
         # Verify by checking price_bonus = 0 path: dip_pct = (1800-2000)/1800 < 0
         assert score >= base_only  # at minimum base score
 
-    def test_rr_bonus_for_good_risk_reward(self):
-        """Higher upside/downside ratio → higher score."""
+    def test_upside_bonus_ignores_stop_distance(self):
+        """The valuation bonus is upside-only (July 2026) — stop distance no
+        longer influences dip scoring, so identical upside scores identically."""
         tight_stop = _make_dip_item(
             "A.T",
             health=70,
@@ -129,9 +130,29 @@ class TestComputeDipScore:
             stop=1000,
             target=2400,
         )
-        # tight_stop: upside=(2400-1900)/1900=26.3%, downside=(1900-1850)/1900=2.6% → R/R 10.1 (capped at 8 pts)
-        # wide_stop: downside=(1900-1000)/1900=47.4% → R/R 0.55 (small bonus)
-        assert _compute_dip_score(tight_stop) > _compute_dip_score(wide_stop)
+        assert _compute_dip_score(tight_stop) == _compute_dip_score(wide_stop)
+
+    def test_upside_bonus_scales_with_valuation_upside(self):
+        """More upside to the base-case reference → higher score."""
+        high_upside = _make_dip_item(
+            "A.T",
+            health=70,
+            growth=70,
+            entry=2000,
+            current_price=1900,
+            stop=1500,
+            target=2400,
+        )
+        low_upside = _make_dip_item(
+            "A.T",
+            health=70,
+            growth=70,
+            entry=2000,
+            current_price=1900,
+            stop=1500,
+            target=2000,
+        )
+        assert _compute_dip_score(high_upside) > _compute_dip_score(low_upside)
 
 
 class TestDipWatch:

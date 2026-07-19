@@ -131,6 +131,17 @@ class TestPnlLine:
             current_price_local=2200.0,
             suggested_quantity=50,
         )
+        item = item.model_copy(
+            update={
+                "action_basis": "CONFIRMED_THESIS_FAILURE",
+                "analysis": _make_analysis(
+                    ticker=item.ticker.yf,
+                    verdict="DO_NOT_INITIATE",
+                ),
+                "cash_impact_usd": 1100.0,
+                "settlement_date": "2026-07-20",
+            }
+        )
         report = self._report_for(item)
         assert "+JPY 10,000" in report
         assert "est. gain:" in report
@@ -144,9 +155,21 @@ class TestPnlLine:
             current_price_local=1728.0,
             unrealized_pnl_usd=180.0,
         )
+        item = item.model_copy(
+            update={
+                "action_basis": "CONFIRMED_THESIS_FAILURE",
+                "analysis": _make_analysis(
+                    ticker=item.ticker.yf,
+                    verdict="DO_NOT_INITIATE",
+                ),
+                "suggested_quantity": 100,
+                "cash_impact_usd": item.ibkr_position.market_value_usd,
+                "settlement_date": "2026-07-20",
+            }
+        )
         report = format_report([item], _make_portfolio(), show_recommendations=False)
         assert "SELL RECOMMENDATIONS" in report
-        assert "[FUNDAMENTAL FAILURE]" in report
+        assert "[CONFIRMED THESIS FAILURE]" in report
         assert "est. gain:" in report
 
 
@@ -182,6 +205,14 @@ class TestScoreLine:
             zone="HIGH",
             verdict="DO_NOT_INITIATE",
             conviction="Low",
+        )
+        item = item.model_copy(
+            update={
+                "action_basis": "CONFIRMED_THESIS_FAILURE",
+                "suggested_quantity": 100,
+                "cash_impact_usd": item.ibkr_position.market_value_usd,
+                "settlement_date": "2026-07-20",
+            }
         )
         report = self._report_for(item)
         assert "Health:38" in report
@@ -261,6 +292,27 @@ class TestScoreLine:
 class TestOrderAnnotation:
     """format_report() live-order annotation via live_orders parameter."""
 
+    @staticmethod
+    def _confirmed(item: ReconciliationItem) -> ReconciliationItem:
+        position = item.ibkr_position
+        quantity = abs(int(position.quantity)) if position else 1
+        proceeds = position.market_value_usd if position else 1.0
+        analysis = item.analysis or _make_analysis(
+            ticker=item.ticker.yf,
+            verdict="DO_NOT_INITIATE",
+        )
+        if position is not None:
+            analysis = analysis.model_copy(update={"currency": position.currency})
+        return item.model_copy(
+            update={
+                "action_basis": "CONFIRMED_THESIS_FAILURE",
+                "analysis": analysis,
+                "suggested_quantity": item.suggested_quantity or quantity,
+                "cash_impact_usd": proceeds,
+                "settlement_date": "2026-07-20",
+            }
+        )
+
     def test_sell_with_matching_open_order_shows_note(self):
         """SELL item with matching open SELL order (by conid) → 'ORDER ALREADY SUBMITTED' shown."""
         item = _make_sell_item(
@@ -268,6 +320,7 @@ class TestOrderAnnotation:
             sell_type="STOP_BREACH",
             reason="Stop breached: price 2700.00 < stop 2780.00",
         )
+        item = self._confirmed(item)
         # Position conid = 99999 (set by _make_sell_item via NormalizedPosition)
         order = _make_order(conid=99999, side="S", remaining_size=100, price=2780.0)
         report = format_report([item], _make_portfolio(), live_orders=[order])
@@ -299,6 +352,7 @@ class TestOrderAnnotation:
     def test_opposite_side_order_shows_conflict_note(self):
         """Open BUY order when recommending SELL → CONFLICT warning shown."""
         item = _make_sell_item(ticker="9201.T", sell_type="STOP_BREACH")
+        item = self._confirmed(item)
         order = _make_order(conid=99999, side="B", remaining_size=100, price=2780.0)
         report = format_report([item], _make_portfolio(), live_orders=[order])
         assert "CONFLICT" in report
@@ -307,6 +361,7 @@ class TestOrderAnnotation:
     def test_no_orders_no_annotation(self):
         """Empty live_orders list → no order annotation anywhere in report."""
         item = _make_sell_item()
+        item = self._confirmed(item)
         report = format_report([item], _make_portfolio(), live_orders=[])
         assert "ORDER ALREADY SUBMITTED" not in report
         assert "CONFLICT" not in report
@@ -314,6 +369,7 @@ class TestOrderAnnotation:
     def test_order_for_different_ticker_not_shown(self):
         """Order with a different conid and non-matching symbol → not annotated."""
         item = _make_sell_item(ticker="9201.T")
+        item = self._confirmed(item)
         # item.ibkr_position.conid == 99999; order has conid 11111 and ticker "XXXX"
         order = _make_order(conid=11111, ticker="XXXX", side="S", remaining_size=100)
         report = format_report([item], _make_portfolio(), live_orders=[order])
@@ -323,6 +379,7 @@ class TestOrderAnnotation:
     def test_live_orders_none_no_annotation(self):
         """live_orders omitted (default None) → no annotation."""
         item = _make_sell_item()
+        item = self._confirmed(item)
         report = format_report([item], _make_portfolio())
         assert "ORDER ALREADY SUBMITTED" not in report
 
@@ -335,6 +392,7 @@ class TestOrderAnnotation:
             quantity=100,
             suggested_quantity=100,
         )
+        item = self._confirmed(item)
         # Only 40 shares ordered, but 100 recommended
         order = _make_order(conid=99999, side="S", remaining_size=40, price=2780.0)
         report = format_report([item], _make_portfolio(), live_orders=[order])
@@ -351,6 +409,7 @@ class TestOrderAnnotation:
             quantity=100,
             suggested_quantity=100,
         )
+        item = self._confirmed(item)
         order = _make_order(conid=99999, side="S", remaining_size=100, price=2780.0)
         report = format_report([item], _make_portfolio(), live_orders=[order])
         assert "ORDER ALREADY SUBMITTED" in report
@@ -360,6 +419,7 @@ class TestOrderAnnotation:
         """Regression: HK yf ticker '0005.HK' has zero-padded base '0005', but IBKR
         live orders use unpadded '5'.  Symbol fallback must match both forms."""
         item = _make_sell_item(ticker="0005.HK", sell_type="HARD_REJECT")
+        item = self._confirmed(item)
         # Simulate IBKR live order using its own unpadded symbol "5"
         order = _make_order(conid=99999, side="S", remaining_size=400, price=55.0)
         # conid=99999 matches → this works even without symbol fallback
@@ -401,6 +461,8 @@ class TestOrderAnnotation:
             current_price_local=34000,
             avg_cost_local=30000,
             market_value_usd=434000,
+            ticker_identity_verified=True,
+            ticker_resolution_source="exchange_map",
         )
         item = ReconciliationItem(
             ticker="0700.HK",
@@ -410,6 +472,7 @@ class TestOrderAnnotation:
             ibkr_position=pos,
             sell_type="HARD_REJECT",
         )
+        item = self._confirmed(item)
         order = _make_order(conid=77777, side="S", remaining_size=100, price=34000.0)
         report = format_report([item], _make_portfolio(), live_orders=[order])
         assert "ORDER ALREADY SUBMITTED" in report
@@ -425,6 +488,8 @@ class TestOrderAnnotation:
             current_price_local=1500,
             avg_cost_local=1200,
             market_value_usd=15000,
+            ticker_identity_verified=True,
+            ticker_resolution_source="exchange_map",
         )
         item = ReconciliationItem(
             ticker="MELI",
@@ -434,6 +499,7 @@ class TestOrderAnnotation:
             ibkr_position=pos,
             sell_type="STOP_BREACH",
         )
+        item = self._confirmed(item)
         order = _make_order(conid=55555, side="S", remaining_size=10, price=1490.0)
         report = format_report([item], _make_portfolio(), live_orders=[order])
         assert "ORDER ALREADY SUBMITTED" in report

@@ -69,12 +69,11 @@ def _apply_macro_demotions(
 ) -> int:
     """Demote macro-driven SELLs to REVIEW; returns number demoted.
 
-    Fundamentals-intact rejections are now REVIEW at source (disposition
-    classifier), so only two SELL classes remain demotable here: legacy
-    SOFT_REJECT sells (items produced without a basis) and STOP_BREACH sells
-    with intact fundamentals — weak positions keep their executable stop.
-    CONFIRMED_THESIS_FAILURE never demotes: two independent full analyses
-    agreed, and that forcing function must survive macro windows.
+    Fundamentals-intact rejections and price-level breaches are REVIEW at
+    source. This compatibility path also demotes every legacy STOP_BREACH sell,
+    regardless of score: old artifacts must not recover price-only authority.
+    CONFIRMED_THESIS_FAILURE never demotes because two spaced full analyses
+    agreed on a fundamental failure.
     """
     demoted = 0
     for item in reconciliation_items:
@@ -89,17 +88,22 @@ def _apply_macro_demotions(
             demoted += 1
         elif item.action == "SELL" and item.sell_type == "STOP_BREACH":
             analysis = item.analysis
-            if (
-                analysis is not None
-                and (analysis.health_adj or 0.0) >= 50.0
-                and (analysis.growth_adj or 0.0) >= 50.0
-            ):
-                item.action = "REVIEW"
-                item.urgency = "MEDIUM"
+            item.action = "REVIEW"
+            item.urgency = "HIGH"
+            item.suggested_quantity = None
+            item.cash_impact_usd = 0.0
+            item.settlement_date = None
+            if analysis is not None:
                 item.reason += stop_tag_template.format(
-                    health=analysis.health_adj, growth=analysis.growth_adj
+                    health=analysis.health_adj or 0.0,
+                    growth=analysis.growth_adj or 0.0,
                 )
-                demoted += 1
+            else:
+                item.reason += (
+                    "  [MACRO_PRICE: legacy price-trigger sale downgraded — "
+                    "refresh fundamentals before acting]"
+                )
+            demoted += 1
     return demoted
 
 
@@ -244,8 +248,8 @@ def compute_portfolio_health(
         from datetime import date as _date
         from datetime import timedelta as _td
 
-        # Event evidence: thesis/verdict failures PLUS stop breaches — a burst
-        # of breached stops is the purest same-time price-shock signal.
+        # Event evidence: thesis/verdict failures plus downside-review breaches;
+        # a burst of price-level breaches is the clearest same-time shock signal.
         # PROFIT_TAKE stays excluded (capital-allocation exits are firm-specific),
         # as are ENTRY_CONSTRAINT reviews (winners appreciating out of the entry
         # screen are not distress). Keyed on action_basis via the canonical
@@ -440,9 +444,9 @@ def compute_portfolio_health(
             flags.append(
                 f"CORRELATED_SELL_EVENT: {peak_count} positions {evidence}"
                 f" ({peak_count / total_held:.0%} of held"
-                f" positions) — probable macro event [{trigger}]. Execute"
-                f" stop-breach SELLs on fundamentally weak positions only;"
-                f" review others before acting."
+                f" positions) — probable macro event [{trigger}]. Do not sell"
+                f" into a correlated drop: exit only on confirmed fundamental"
+                f" failure; review everything else."
             )
             demoted = _apply_macro_demotions(
                 reconciliation_items,
@@ -450,9 +454,9 @@ def compute_portfolio_health(
                     "  [MACRO_WATCH: demoted from SELL — correlated" " event detected]"
                 ),
                 stop_tag_template=(
-                    "  [MACRO_STOP: stop breach during correlated event"
+                    "  [MACRO_PRICE: price-drop review during correlated event"
                     " — fundamentals intact (health {health:.0f}%, growth"
-                    " {growth:.0f}%); review before executing]"
+                    " {growth:.0f}%); no sale without fundamental failure]"
                 ),
             )
             logger.info(
@@ -481,9 +485,9 @@ def compute_portfolio_health(
                     f" until {expiry} — demoted from SELL]"
                 ),
                 stop_tag_template=(
-                    f"  [MACRO_STOP: stop breach during active {event_type}"
+                    f"  [MACRO_PRICE: price-drop review during active {event_type}"
                     " event — fundamentals intact (health {health:.0f}%,"
-                    " growth {growth:.0f}%); review before executing]"
+                    " growth {growth:.0f}%); no sale without fundamental failure]"
                 ),
             )
             if demoted:
@@ -512,8 +516,8 @@ def compute_portfolio_health(
             )
             flags.append(
                 f"MACRO_EVENT_ONGOING: {event_type} event onset ~{days}d ago — brief"
-                f" macro override (≤{macro_override_max_age_days}d) has lapsed; SELL"
-                " recommendations now flow normally on re-priced verdicts, and"
+                f" macro override (≤{macro_override_max_age_days}d) has lapsed;"
+                " confirmed fundamental exits can flow normally, and"
                 " buy-the-dip is suppressed (no transient mean-reversion assumed for"
                 " a sustained event)."
             )

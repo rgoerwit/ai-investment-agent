@@ -112,7 +112,7 @@ class TestRiskNodeInputs:
         node = create_risk_debater_node(_mock_llm(), "risky_analyst")
         prompt = await _captured_prompt(node, state)
         assert STUB not in prompt
-        assert "TRADER PLAN: N/A" in prompt
+        assert "POSITION PLANNER OUTPUT: N/A" in prompt
         assert "N/A (consultant disabled or unavailable)" in prompt
 
     @pytest.mark.asyncio
@@ -133,7 +133,7 @@ class TestRiskNodeInputs:
         node = create_risk_debater_node(_mock_llm(), "risky_analyst")
         prompt = await _captured_prompt(node, state)
         assert "CONSULTANT BODY" in prompt
-        assert "TRADER PLAN: TRADE PLAN BODY" in prompt
+        assert "POSITION PLANNER OUTPUT: TRADE PLAN BODY" in prompt
 
 
 class TestResearchBundleInputs:

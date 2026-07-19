@@ -20,6 +20,7 @@ from typing import Any
 import structlog
 
 from src.currency_resolver import resolve_local_trading_currency
+from src.data_block_utils import extract_kill_criteria
 from src.error_safety import summarize_exception
 from src.fx_normalization import FALLBACK_RATES_TO_USD, normalize_minor_unit_currency
 from src.ibkr.models import AnalysisRecord, PortfolioEvidence, TradeBlockData
@@ -43,7 +44,9 @@ logger = structlog.get_logger(__name__)
 # v7: is_quick_mode tri-state (None = snapshot predates the field — cached
 #     v6 records stored the false-full default, which granted legacy
 #     artifacts sell-confirmation authority).
-_ANALYSIS_INDEX_VERSION = 7
+# v8: kill_criteria (bear thesis-break triggers from the saved bear history) —
+#     the fundamental exit conditions surfaced ahead of legacy downside levels.
+_ANALYSIS_INDEX_VERSION = 8
 _DATA_VACUUM_COVERAGE_THRESHOLD_PCT = 40.0
 
 
@@ -503,6 +506,17 @@ def _build_analysis_record_from_data(
     trader_plan = data.get("investment_analysis", {}).get("trader_plan", "") or ""
     trade_block = parse_trade_block(trader_plan) or TradeBlockData()
 
+    # Thesis-break triggers from the saved bear history (fenced machine block,
+    # not free prose). These are the fundamental exit conditions the operator
+    # sees ahead of legacy downside levels; legacy artifacts yield ().
+    bear_history = (
+        data.get("investment_analysis", {})
+        .get("investment_debate", {})
+        .get("bear_history", "")
+        or ""
+    )
+    kill_criteria = tuple(extract_kill_criteria(bear_history))
+
     repaired_currency = _repair_legacy_snapshot_currency(
         snapshot,
         ticker=ticker,
@@ -556,6 +570,7 @@ def _build_analysis_record_from_data(
         capital_flag_types=capital_flag_types,
         risk_tally=snapshot.get("risk_tally"),
         quality_flag_types=quality_flag_types,
+        kill_criteria=kill_criteria,
         macro_regime=macro_regime,
         data_quality=data_quality,
         m_and_a_status=(snapshot.get("m_and_a_status") or "").strip().upper(),

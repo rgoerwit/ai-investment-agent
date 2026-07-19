@@ -102,6 +102,8 @@ class NormalizedPosition(BaseModel):
     acquired_date: str | None = None  # YYYY-MM-DD if lot/history data is available
     holding_period_days: int | None = None
     tax_term: Literal["SHORT_TERM", "LONG_TERM", "UNKNOWN"] = "UNKNOWN"
+    ticker_identity_verified: bool = False
+    ticker_resolution_source: str = "unresolved"
 
     @field_validator("ticker", mode="before")
     @classmethod
@@ -130,7 +132,11 @@ class NormalizedPosition(BaseModel):
 #
 #   MANDATORY_EXIT             – compliance/operator-declared restriction (empty
 #                                by default today; reserved for explicit policy)
-#   STOP_LOSS                  – validated stop-price breach
+#   STOP_LOSS                  – price broke the analysis-time review level.
+#                                Review-only since July 2026: raises urgency and
+#                                counts as macro-event evidence, but carries no
+#                                sell authority (a sale needs fundamental
+#                                failure evidence, never a price level alone)
 #   CONFIRMED_THESIS_FAILURE   – reject verdict confirmed by a prior full-mode
 #                                reject with minimum spacing (the forcing function
 #                                that prevents deadwood accumulating forever)
@@ -143,7 +149,11 @@ class NormalizedPosition(BaseModel):
 #   DATA_QUALITY               – evidence indeterminate (data vacuum, unreliable
 #                                gate arithmetic) — never punish the stock for
 #                                the model's uncertainty
-#   CAPITAL_ALLOCATION         – profit-take / rebalancing discipline
+#   CAPITAL_ALLOCATION         – profit-take discipline (advisory review only —
+#                                selling an intact winner is the operator's
+#                                capital-gains decision)
+#   OVERWEIGHT                 – position drifted above its target size; trim
+#                                math surfaced as advisory information only
 #   DE_MINIMIS                 – position too small to be worth an action
 ActionBasis = Literal[
     "MANDATORY_EXIT",
@@ -154,6 +164,7 @@ ActionBasis = Literal[
     "SPECIAL_SITUATION_REVIEW",
     "DATA_QUALITY",
     "CAPITAL_ALLOCATION",
+    "OVERWEIGHT",
     "DE_MINIMIS",
 ]
 
@@ -250,6 +261,11 @@ class AnalysisRecord(BaseModel):
     # moat/capital-efficiency bonus-suppression markers). Consumed by the BUY
     # stability gate; intentionally distinct from idle-cash `capital_flag_types`.
     quality_flag_types: tuple[str, ...] = ()
+    # Bear Researcher thesis-break triggers (fenced KILL_CRITERIA block in the
+    # saved bear history; ≤3 entries). These are the fundamental exit
+    # conditions surfaced to the operator where downside price levels once led —
+    # empty for legacy artifacts without the block.
+    kill_criteria: tuple[str, ...] = ()
     macro_regime: dict[str, Any] = Field(default_factory=dict)
     data_quality: dict[str, Any] = Field(default_factory=dict)
     # Special-situation routing (Senior promotes from Foreign Language M&A EVENT

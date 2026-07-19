@@ -31,7 +31,7 @@ from src.ibkr.portfolio_report_formatting import (
     normalize_reason,
     split_reason,
 )
-from src.ibkr.reconciliation_rules import _EXCHANGE_LONG_NAMES, stop_staleness_note
+from src.ibkr.reconciliation_rules import _EXCHANGE_LONG_NAMES
 from src.ibkr.refresh_service import run_ticker_for
 from src.sector_normalization import aggregate_sector_weights
 
@@ -46,7 +46,7 @@ def _render_dip_watch(
         "  DIP WATCH  (existing positions — consider adding)",
         DIVIDER,
         "",
-        "  Ranked by fundamental quality × dip depth × risk/reward:",
+        "  Ranked by fundamental quality × dip depth × valuation upside:",
         "",
     ]
     for item in candidates:
@@ -88,28 +88,24 @@ def _render_dip_watch(
             )
         else:
             entry_text = "(no entry price recorded)"
-        risk_reward = "—"
+        upside_text = "—"
         if (
             analysis
             and analysis.target_1_price
-            and analysis.stop_price
             and pos
             and pos.current_price_local
+            and pos.current_price_local > 0
         ):
             current = pos.current_price_local
-            if current > 0 and current > analysis.stop_price:
-                upside = (analysis.target_1_price - current) / current * 100
-                downside = max((current - analysis.stop_price) / current * 100, 0.001)
-                risk_reward = (
-                    f"R/R {upside / downside:.1f}×  "
-                    f"(target +{upside:.0f}% / stop -{downside:.0f}%)"
-                )
+            upside = (analysis.target_1_price - current) / current * 100
+            upside_text = f"upside +{upside:.0f}% to base-case reference"
         lines.append(
             f"  {stars}  {display_ticker(item):<12}  Health:{health}%  "
-            f"Growth:{growth}%  |  {risk_reward}"
+            f"Growth:{growth}%  |  {upside_text}"
         )
         lines.append(f"{DETAIL_INDENT}{entry_text}")
-        if dip_watch_source(item) == "macro_review":
+        source = dip_watch_source(item)
+        if source == "macro_review":
             as_of = analysis.analysis_date if analysis else "?"
             lines.extend(
                 (
@@ -118,6 +114,13 @@ def _render_dip_watch(
                     f"{DETAIL_INDENT}(often valuation, which the dip improves) "
                     "— review before adding",
                 )
+            )
+        elif source == "held_thesis_dip":
+            as_of = analysis.analysis_date if analysis else "?"
+            lines.append(
+                f"{DETAIL_INDENT}intact-thesis drawdown — scores hold the "
+                f"gates ({as_of}); verdict reflects price/entry screen, "
+                "not deterioration — refresh before adding"
             )
     lines.extend(("", "  → Re-run before acting:"))
     for item in candidates:
@@ -178,6 +181,8 @@ def render_position_and_risk_sections(
                 writer.append_soft_rejection_details(item)
             elif item.sell_type == "PROFIT_TAKE":
                 writer.append_wrapped_segments(writer.profit_take_segments(item))
+            writer.append_thesis_break_line(item)
+            writer.append_sale_tax_note(item)
             note = writer.order_note(item)
             if note:
                 lines.append(note)
@@ -196,7 +201,9 @@ def render_position_and_risk_sections(
         for item in sell_reviews:
             currency = item_currency(item)
             reason = normalize_reason(
-                item.reason.split("  [MACRO_STOP:")[0].split("  [MACRO_WATCH:")[0]
+                item.reason.split("  [MACRO_PRICE:")[0]
+                .split("  [MACRO_STOP:")[0]
+                .split("  [MACRO_WATCH:")[0]
             )
             lines.append(
                 f"{writer.order_line(item, currency)}  "
@@ -216,13 +223,7 @@ def render_position_and_risk_sections(
                 holding = writer.holding_line(item, currency)
                 if holding:
                     lines.append(holding)
-                if item.action_basis == "ENTRY_CONSTRAINT":
-                    pos = item.ibkr_position
-                    ratchet = stop_staleness_note(
-                        item.analysis, pos.current_price_local if pos else None
-                    )
-                    if ratchet:
-                        lines.append("             " + ratchet)
+            writer.append_thesis_break_line(item)
             note = writer.order_note(item)
             if note:
                 lines.append(note)
@@ -304,8 +305,8 @@ def render_position_and_risk_sections(
         for item in groups.holds_real:
             pos = item.ibkr_position
             analysis = item.analysis
-            # Currency once per row (all four prices share it) keeps the table
-            # comfortably under 120 columns.
+            # Routine HOLD rows emphasize ownership context and local return;
+            # legacy downside/target levels stay in drilldown, not the action table.
             currency = item_currency(item) or "?"
             weight = ""
             if pos and context.portfolio.portfolio_value_usd > 0:
@@ -322,28 +323,25 @@ def render_position_and_risk_sections(
                     entry_text = f"{entry:,.2f}"
                     now_text = f"{pos.current_price_local:,.2f}"
                     gain_text = f"({gain:+.1f}%)"
-            stop_text = (
-                f"{analysis.stop_price:,.2f}"
-                if analysis and analysis.stop_price
-                else "—"
-            )
-            target_text = (
-                f"{analysis.target_1_price:,.2f}"
-                if analysis and analysis.target_1_price
-                else "—"
-            )
             note = ""
             if item.action_basis == "DE_MINIMIS":
                 note = "de-minimis — monitor only"
-            elif analysis and pos:
-                note = stop_staleness_note(analysis, pos.current_price_local) or ""
+            scores = ""
+            if (
+                analysis
+                and analysis.health_adj is not None
+                and analysis.growth_adj is not None
+            ):
+                scores = f"  H:{analysis.health_adj:.0f} G:{analysis.growth_adj:.0f}"
             lines.append(
                 f"  {'HOLD':<6}  {display_ticker(item):<12} {weight:>5}  "
                 f"{currency:<4} {label:<5} {entry_text:>10} → {now_text:>10}"
-                f"  {gain_text:>8}  stop {stop_text:>10}  target {target_text:>10}"
+                f"  {gain_text:>8}{scores}"
             )
             if note:
                 lines.append(f"{DETAIL_INDENT}{note}")
+            writer.append_fx_split_line(item)
+            writer.append_thesis_break_line(item)
         lines.append("")
 
     if groups.holds_watch:
@@ -369,9 +367,19 @@ def render_position_and_risk_sections(
             suffix_warning = (
                 "  ← ⚠ exchange unknown, verify suffix" if "." not in ticker else ""
             )
-            lines.append(f"  {'REVIEW':<6}  {display_ticker(item):<12}  {head}")
+            lines.append(
+                f"  {'REVIEW':<6}  {display_ticker(item):<12}  {head}  "
+                f"[{writer.sell_type_label(item)}]"
+            )
             if reason_detail:
                 lines.append(f"{DETAIL_INDENT}{reason_detail}")
+            holding = writer.holding_line(item, item_currency(item))
+            if holding:
+                lines.append(holding)
+            writer.append_thesis_break_line(item)
+            note = writer.order_note(item)
+            if note:
+                lines.append(note)
             lines.append(
                 f"{DETAIL_INDENT}→  {analysis_command(ticker)}{suffix_warning}"
             )

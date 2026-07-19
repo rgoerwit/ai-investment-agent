@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Set
+from collections.abc import Callable, Iterable, Set
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -126,6 +126,48 @@ def _candidate_exchange(item: ReconciliationItem) -> str:
 def _candidate_sector(item: ReconciliationItem) -> str | None:
     analysis = item.analysis
     return canonical_sector_bucket(analysis.sector if analysis else None)
+
+
+def weakest_bucket_incumbents(
+    held_items: Iterable[ReconciliationItem],
+    *,
+    dimension: str,
+    key: str,
+    limit: int = 3,
+) -> list[ReconciliationItem]:
+    """Return the lowest-scoring held positions in an over-limit bucket.
+
+    Informational only: when a withheld buy names an overweight bucket, the
+    operator may compare it with current holdings. This is not a claim that the
+    lowest score is the weakest investment: stale evidence, valuation, thesis
+    quality, and tax lots still require review. It never pairs a sale with a
+    buy or emits an order.
+    """
+    in_bucket: list[ReconciliationItem] = []
+    seen: set[str] = set()
+    for item in held_items:
+        if item.ibkr_position is None:
+            continue
+        identity = _item_ticker_identity(item)
+        if identity in seen:
+            continue
+        bucket = (
+            _candidate_exchange(item)
+            if dimension == "exchange"
+            else _candidate_sector(item)
+        )
+        if bucket != key:
+            continue
+        seen.add(identity)
+        in_bucket.append(item)
+    in_bucket.sort(
+        key=lambda item: (
+            item.analysis is None,
+            watchlist_candidate_score(item),
+            item.ticker.yf,
+        )
+    )
+    return in_bucket[:limit]
 
 
 def _select_with_concentration_headroom(

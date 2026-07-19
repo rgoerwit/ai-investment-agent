@@ -27,6 +27,7 @@ from src.ibkr.portfolio_defaults import (
     DEFAULT_EXCHANGE_LIMIT_PCT,
     DEFAULT_SECTOR_LIMIT_PCT,
 )
+from src.ibkr.reconciliation_rules import analysis_identity_verified
 from src.ibkr.refresh_service import AnalysisFreshnessSummary, RefreshActivity
 from src.ibkr.watchlist_optimization import (
     CONCENTRATION_EXCEPTION_MIN_SCORE as CONCENTRATION_EXCEPTION_MIN_SCORE,
@@ -70,10 +71,58 @@ from src.ibkr.watchlist_optimization import (
 
 _DEFAULT_DIP_WATCH_LIMIT = 7
 
+
+def cost_basis_unit_mismatch(position) -> bool:
+    """Return whether local cost/current prices have a likely 100x unit mismatch."""
+    if (
+        position is None
+        or position.avg_cost_local <= 0
+        or position.current_price_local <= 0
+    ):
+        return False
+    ratio = position.current_price_local / position.avg_cost_local
+    return ratio > 50.0 or ratio < 0.02
+
+
+def fx_return_split(position) -> tuple[float, float, float] | None:
+    """Decompose a position's return into (local_pct, fx_pct, usd_pct).
+
+    Local-price return is IBKR local cost basis → current local price (it
+    includes valuation and sentiment, so it is labeled "local-price", never
+    "business"). USD return derives from observed IBKR USD P&L; the FX effect
+    is the multiplicative residual: (1+usd) = (1+local) × (1+fx). Returns None
+    for USD positions or when any observed input is missing/degenerate —
+    honest absence beats a fabricated split.
+    """
+    if position is None:
+        return None
+    currency = (position.currency or "USD").upper()
+    if currency in ("USD", ""):
+        return None
+    if (
+        position.avg_cost_local <= 0
+        or position.current_price_local <= 0
+        or position.market_value_usd == 0
+        or cost_basis_unit_mismatch(position)
+    ):
+        return None
+    local_ret = (
+        position.current_price_local - position.avg_cost_local
+    ) / position.avg_cost_local
+    usd_cost_basis = position.market_value_usd - position.unrealized_pnl_usd
+    if usd_cost_basis <= 0:
+        return None
+    usd_ret = position.unrealized_pnl_usd / usd_cost_basis
+    fx_ret = (1.0 + usd_ret) / (1.0 + local_ret) - 1.0
+    return (local_ret * 100.0, fx_ret * 100.0, usd_ret * 100.0)
+
+
 SELL_RECOMMENDATIONS_TITLE = "SELL RECOMMENDATIONS"
-SELL_RELATED_REVIEWS_TITLE = "SELL-RELATED REVIEWS"
+SELL_RELATED_REVIEWS_TITLE = "POSITION REVIEWS"
 SELL_TYPE_LABELS: dict[str | None, str] = {
-    "STOP_BREACH": "STOP BREACH",
+    # Retail framing (July 2026): a price break is a review trigger, not an
+    # order class — the label must not read as a standing sell instruction.
+    "STOP_BREACH": "PRICE-DROP REVIEW",
     "HARD_REJECT": "FUNDAMENTAL FAILURE",
     "SOFT_REJECT": "SOFT REJECTION",
     "SCREEN_REJECT": "SCREEN REVIEW",
@@ -87,13 +136,14 @@ SELL_TYPE_LABELS: dict[str | None, str] = {
 # so a confirmation-gated exit reads as what it is, not a generic "failure".
 ACTION_BASIS_LABELS: dict[str, str] = {
     "MANDATORY_EXIT": "MANDATORY EXIT",
-    "STOP_LOSS": "STOP BREACH",
+    "STOP_LOSS": "PRICE-DROP REVIEW",
     "CONFIRMED_THESIS_FAILURE": "CONFIRMED THESIS FAILURE",
     "THESIS_REASSESSMENT": "THESIS REASSESSMENT",
     "ENTRY_CONSTRAINT": "ENTRY CONSTRAINT",
     "SPECIAL_SITUATION_REVIEW": "M&A TENDER REVIEW",
     "DATA_QUALITY": "DATA REVIEW",
-    "CAPITAL_ALLOCATION": "PROFIT TAKE",
+    "CAPITAL_ALLOCATION": "CAPITAL ALLOCATION REVIEW",
+    "OVERWEIGHT": "OVERWEIGHT",
     "DE_MINIMIS": "DE MINIMIS",
 }
 
@@ -192,6 +242,95 @@ def get_action_label(item: ReconciliationItem) -> str:
     return get_sell_type_label(item.sell_type)
 
 
+_EXECUTABLE_SELL_BASES = frozenset({"MANDATORY_EXIT", "CONFIRMED_THESIS_FAILURE"})
+
+
+def _sell_identity_verified(item: ReconciliationItem) -> bool:
+    position = item.ibkr_position
+    return bool(
+        position is not None
+        and position.conid > 0
+        and position.ticker_identity_verified
+        and (
+            item.action_basis == "MANDATORY_EXIT"
+            or (
+                item.analysis is not None
+                and analysis_identity_verified(position, item.analysis)
+            )
+        )
+    )
+
+
+def is_executable_sell(item: ReconciliationItem) -> bool:
+    """Return whether an item is a decision-safe sale under retail policy."""
+    return bool(
+        item.action == "SELL"
+        and item.action_basis in _EXECUTABLE_SELL_BASES
+        and _sell_identity_verified(item)
+        and item.suggested_quantity is not None
+        and item.suggested_quantity > 0
+        and item.cash_impact_usd > 0
+    )
+
+
+def retail_safe_action(item: ReconciliationItem) -> ReconciliationItem:
+    """Downgrade legacy sale/trim records that lack current retail authority.
+
+    Saved bundles can predate the confirmation, identity, and tax-aware policy.
+    Normalizing at the shared presentation boundary prevents those records from
+    becoming executable again in either the CLI or dashboard.
+    """
+    if item.action == "SELL" and not is_executable_sell(item):
+        if item.sell_type == "STOP_BREACH":
+            basis = "STOP_LOSS"
+            explanation = "price movement is a review trigger, not sale authority"
+        elif item.sell_type == "PROFIT_TAKE":
+            basis = "CAPITAL_ALLOCATION"
+            explanation = "selling an intact winner requires tax-lot review"
+        else:
+            basis = item.action_basis or "THESIS_REASSESSMENT"
+            if (
+                item.action_basis in _EXECUTABLE_SELL_BASES
+                and not _sell_identity_verified(item)
+            ):
+                explanation = "security identity or listing mapping is unverified"
+            elif item.action_basis in _EXECUTABLE_SELL_BASES:
+                explanation = "executable quantity or proceeds are incomplete"
+            else:
+                explanation = (
+                    "sale lacks confirmed thesis-failure or mandatory-exit evidence"
+                )
+        return item.model_copy(
+            update={
+                "action": "REVIEW",
+                "action_basis": basis,
+                "reason": f"{item.reason} — sale downgraded: {explanation}",
+                "urgency": "HIGH" if item.sell_type == "STOP_BREACH" else "MEDIUM",
+                "suggested_quantity": None,
+                "suggested_price": None,
+                "cash_impact_usd": 0.0,
+                "settlement_date": None,
+            }
+        )
+    if item.action == "TRIM":
+        return item.model_copy(
+            update={
+                "action": "REVIEW",
+                "action_basis": "OVERWEIGHT",
+                "reason": (
+                    f"{item.reason} — legacy trim downgraded: verify tax lots and "
+                    "after-friction benefit before changing an intact position"
+                ),
+                "urgency": "LOW",
+                "suggested_quantity": None,
+                "suggested_price": None,
+                "cash_impact_usd": 0.0,
+                "settlement_date": None,
+            }
+        )
+    return item
+
+
 def group_portfolio_actions(
     items: list[ReconciliationItem],
     *,
@@ -203,6 +342,11 @@ def group_portfolio_actions(
     exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT,
     sector_limit_pct: float = DEFAULT_SECTOR_LIMIT_PCT,
 ) -> PortfolioActionGroups:
+    items = [retail_safe_action(item) for item in items]
+
+    def is_macro_review(item: ReconciliationItem) -> bool:
+        return "[MACRO_" in item.reason
+
     stop_sells = tuple(
         item
         for item in items
@@ -231,7 +375,9 @@ def group_portfolio_actions(
     macro_reviews = tuple(
         item
         for item in items
-        if item.action == "REVIEW" and item.sell_type == "SOFT_REJECT"
+        if item.action == "REVIEW"
+        and item.sell_type == "SOFT_REJECT"
+        and is_macro_review(item)
     )
     macro_stop_reviews = tuple(
         item
@@ -263,7 +409,8 @@ def group_portfolio_actions(
         item
         for item in items
         if item.action == "REVIEW"
-        and item.sell_type not in ("SOFT_REJECT", "STOP_BREACH", "PROFIT_TAKE")
+        and item.sell_type not in ("STOP_BREACH", "PROFIT_TAKE")
+        and not (item.sell_type == "SOFT_REJECT" and is_macro_review(item))
     )
 
     action_bases = frozenset(
@@ -443,11 +590,11 @@ def build_action_display_sections(
 def build_cash_timeline(
     items: list[ReconciliationItem],
 ) -> tuple[CashTimelineEntry, ...]:
-    """Build confirmed pending inflows from sells/trims.
+    """Build pending inflows from confirmed fundamental/mandatory exits only.
 
-    SOFT_REJECT sells are excluded — they are "review before acting" and
-    should not be counted as confirmed liquidity.  Their individual proceeds
-    are still shown in the soft-sell display section.
+    Price reviews, profit-taking reviews, legacy trims, and soft rejections do
+    not fund new purchases. They are tax- and friction-sensitive operator
+    choices, not executable cash.
     """
     rows = [
         CashTimelineEntry(
@@ -459,10 +606,7 @@ def build_cash_timeline(
             settlement_date=item.settlement_date,
         )
         for item in items
-        if item.action in {"SELL", "TRIM"}
-        and item.sell_type != "SOFT_REJECT"
-        and item.cash_impact_usd > 0
-        and item.settlement_date
+        if is_executable_sell(item) and item.settlement_date
     ]
     rows.sort(key=lambda row: (row.settlement_date or "", row.ticker_yf))
     return tuple(rows)

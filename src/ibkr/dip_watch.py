@@ -30,7 +30,14 @@ _DIP_POSTURE_PRICE_MULTIPLIERS = {
     "WAIT_FOR_CONFIRMATION": 0.60,
     "AVOID": 0.30,
 }
-DipWatchSource = Literal["held_buy_pullback", "macro_review"]
+DipWatchSource = Literal["held_buy_pullback", "macro_review", "held_thesis_dip"]
+
+# A held name whose thesis is intact but whose verdict flipped off BUY on price
+# (THESIS_REASSESSMENT) or entry-screen grounds (ENTRY_CONSTRAINT) is dead
+# money unless the drawdown is surfaced as an averaging-down candidate. The
+# deeper bar (vs the 5% general dip) keeps routine volatility out of the queue.
+INTACT_THESIS_DIP_MIN_PCT = 15.0
+_THESIS_DIP_BASES = ("THESIS_REASSESSMENT", "ENTRY_CONSTRAINT")
 
 
 @dataclass(frozen=True)
@@ -40,7 +47,10 @@ class DipWatchCandidate:
     score: float
     stars: str
     dip_pct: float
+    # Deprecated compatibility field. New reports/API surfaces use upside_pct;
+    # no active path computes or displays stop-anchored risk/reward.
     risk_reward: float | None
+    upside_pct: float | None
     held_quantity: float
     health_adj: float | None
     growth_adj: float | None
@@ -79,6 +89,14 @@ def dip_watch_source(item: ReconciliationItem) -> DipWatchSource | None:
         and _normalize_verdict(item.analysis.verdict if item.analysis else "") == "BUY"
     ):
         return "held_buy_pullback"
+    if (
+        item.action == "REVIEW"
+        and getattr(item, "action_basis", None) in _THESIS_DIP_BASES
+    ):
+        # Intact-thesis drawdown (July 2026): the disposition layer already
+        # certified the gate scores intact for these bases; eligibility adds
+        # the deeper INTACT_THESIS_DIP_MIN_PCT bar, recency, and 55/55 floors.
+        return "held_thesis_dip"
     if item.action == "REVIEW" and item.sell_type == "SOFT_REJECT":
         return "macro_review"
     return None
@@ -122,15 +140,19 @@ def compute_dip_score(
     if current_dip_pct > 0:
         price_bonus = min(current_dip_pct * 1.5, 12.0) * regime_multiplier
 
-    rr_bonus = 0.0
-    if analysis.target_1_price and analysis.stop_price and position:
+    # Valuation margin-of-safety bonus (July 2026): upside to the base-case
+    # valuation reference only. The old risk/reward bonus divided by distance
+    # to the stop price — stop-anchored math has no place in a long-term
+    # dip-buying score (legacy stop fields remain readable but inert here).
+    # Same 8-point cap keeps the ★★★/★★ thresholds calibrated.
+    upside_bonus = 0.0
+    if analysis.target_1_price and position:
         current = position.current_price_local
-        if current > 0 and current > analysis.stop_price:
+        if current > 0:
             upside = (analysis.target_1_price - current) / current
-            downside = max((current - analysis.stop_price) / current, 0.001)
-            rr_bonus = min((upside / downside) * 2.5, 8.0)
+            upside_bonus = min(max(upside, 0.0) * 20.0, 8.0)
 
-    return base + price_bonus + rr_bonus
+    return base + price_bonus + upside_bonus
 
 
 def score_dip_watch_item(item: ReconciliationItem) -> float:
@@ -187,11 +209,16 @@ def is_dip_watch_eligible(
     if source is None:
         return False
     macro_dip = macro_event_active and source == "macro_review"
-    if not macro_dip:
+    thesis_dip = source == "held_thesis_dip"
+    if not (macro_dip or thesis_dip):
         if _normalize_verdict(analysis.verdict or "") != "BUY":
             return False
         if _normalize_zone(analysis.zone) in excluded_zones:
             return False
+    if thesis_dip and dip_pct(item) < INTACT_THESIS_DIP_MIN_PCT:
+        # Intact-thesis promotions require a material drawdown — routine
+        # volatility on a reject-verdict name is not an averaging-down signal.
+        return False
     if analysis.age_days > max_age_days:
         return False
     if (analysis.health_adj or 0.0) < min_health:
@@ -348,6 +375,11 @@ def build_dip_watch_candidates(
             continue
         current_price = position.current_price_local
         score = score_dip_watch_item(item)
+        upside_pct: float | None = None
+        if analysis.target_1_price and current_price > 0:
+            upside_pct = round(
+                (analysis.target_1_price - current_price) / current_price * 100, 1
+            )
         rows.append(
             DipWatchCandidate(
                 ticker_yf=item.ticker.yf,
@@ -359,7 +391,8 @@ def build_dip_watch_candidates(
                     else ("★★" if score >= 60 else "★")
                 ),
                 dip_pct=round(dip_pct(item), 1),
-                risk_reward=risk_reward_ratio(item),
+                risk_reward=None,
+                upside_pct=upside_pct,
                 held_quantity=position.quantity,
                 health_adj=analysis.health_adj,
                 growth_adj=analysis.growth_adj,
