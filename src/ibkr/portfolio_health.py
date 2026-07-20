@@ -5,7 +5,10 @@ from __future__ import annotations
 import structlog
 
 from src.ibkr.models import AnalysisRecord, NormalizedPosition, PortfolioSummary
-from src.ibkr.portfolio_defaults import DEFAULT_MAX_AGE_DAYS
+from src.ibkr.portfolio_defaults import (
+    DEFAULT_EXCHANGE_LIMIT_PCT,
+    DEFAULT_MAX_AGE_DAYS,
+)
 from src.ibkr.reconciliation_rules import _EXCHANGE_LONG_NAMES
 
 logger = structlog.get_logger(__name__)
@@ -18,35 +21,89 @@ logger = structlog.get_logger(__name__)
 _DEFAULT_MACRO_OVERRIDE_MAX_AGE_DAYS = 21
 
 
+def _entry_and_current(item) -> tuple[float | None, float | None]:
+    """Return (analysis entry, current position price), both LOCAL currency."""
+    analysis = getattr(item, "analysis", None)
+    pos = getattr(item, "ibkr_position", None)
+    if analysis is None or pos is None:
+        return None, None
+    entry = analysis.entry_price or analysis.current_price
+    current = pos.current_price_local
+    if not entry or not current or entry <= 0 or current <= 0:
+        return None, None
+    return entry, current
+
+
+def _below_entry(item) -> bool:
+    entry, current = _entry_and_current(item)
+    return entry is not None and current is not None and current < entry
+
+
+def is_macro_event_evidence(item) -> bool:
+    """Whether a reconciliation item is evidence of a correlated market event.
+
+    Keys on ``action_basis`` (the decision layer), not the final action —
+    permanent reviews must not erase event breadth. ENTRY_CONSTRAINT items are
+    deliberately excluded: a winner appreciating out of the entry screen is a
+    verdict flip with the price UP, which is screen behavior, not distress.
+    Price-down thesis reassessments count; price-up/flat ones do not.
+    Legacy items without a basis fall back to the pre-basis SELL predicate.
+
+    This is the single canonical predicate — the CLI report must import it,
+    not re-declare the tuple (the scripts/portfolio_manager.py:959 duplicate).
+    """
+    basis = getattr(item, "action_basis", None)
+    if basis is not None:
+        if basis in ("STOP_LOSS", "CONFIRMED_THESIS_FAILURE"):
+            return True
+        return basis == "THESIS_REASSESSMENT" and _below_entry(item)
+    return item.action == "SELL" and item.sell_type in (
+        "HARD_REJECT",
+        "SOFT_REJECT",
+        "STOP_BREACH",
+    )
+
+
 def _apply_macro_demotions(
     reconciliation_items: list, soft_tag: str, stop_tag_template: str
 ) -> int:
     """Demote macro-driven SELLs to REVIEW; returns number demoted.
 
-    SOFT_REJECT sells always demote. STOP_BREACH sells demote only when
-    fundamentals are intact (health and growth both >= 50%) — weak positions
-    keep their executable stop.
+    Fundamentals-intact rejections and price-level breaches are REVIEW at
+    source. This compatibility path also demotes every legacy STOP_BREACH sell,
+    regardless of score: old artifacts must not recover price-only authority.
+    CONFIRMED_THESIS_FAILURE never demotes because two spaced full analyses
+    agreed on a fundamental failure.
     """
     demoted = 0
     for item in reconciliation_items:
-        if item.action == "SELL" and item.sell_type == "SOFT_REJECT":
+        if (
+            item.action == "SELL"
+            and item.sell_type == "SOFT_REJECT"
+            and getattr(item, "action_basis", None) is None
+        ):
             item.action = "REVIEW"
             item.urgency = "MEDIUM"
             item.reason += soft_tag
             demoted += 1
         elif item.action == "SELL" and item.sell_type == "STOP_BREACH":
             analysis = item.analysis
-            if (
-                analysis is not None
-                and (analysis.health_adj or 0.0) >= 50.0
-                and (analysis.growth_adj or 0.0) >= 50.0
-            ):
-                item.action = "REVIEW"
-                item.urgency = "MEDIUM"
+            item.action = "REVIEW"
+            item.urgency = "HIGH"
+            item.suggested_quantity = None
+            item.cash_impact_usd = 0.0
+            item.settlement_date = None
+            if analysis is not None:
                 item.reason += stop_tag_template.format(
-                    health=analysis.health_adj, growth=analysis.growth_adj
+                    health=analysis.health_adj or 0.0,
+                    growth=analysis.growth_adj or 0.0,
                 )
-                demoted += 1
+            else:
+                item.reason += (
+                    "  [MACRO_PRICE: legacy price-trigger sale downgraded — "
+                    "refresh fundamentals before acting]"
+                )
+            demoted += 1
     return demoted
 
 
@@ -62,6 +119,7 @@ def compute_portfolio_health(
     cumulative_fallback_ratio: float = 0.35,
     active_macro_events: list | None = None,
     macro_override_max_age_days: int = _DEFAULT_MACRO_OVERRIDE_MAX_AGE_DAYS,
+    exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT,
 ) -> list[str]:
     """Compute portfolio-level health flags using data already in held analyses."""
     if not positions or portfolio.portfolio_value_usd <= 0:
@@ -179,7 +237,7 @@ def compute_portfolio_health(
             flags.append(stale_message)
 
     for exch, pct in portfolio.exchange_weights.items():
-        if pct > 40:
+        if pct > exchange_limit_pct:
             long_name = _EXCHANGE_LONG_NAMES.get(exch, exch)
             flags.append(
                 f"GEOGRAPHY_CONCENTRATION: {pct:.1f}% in {exch} ({long_name})"
@@ -190,14 +248,14 @@ def compute_portfolio_health(
         from datetime import date as _date
         from datetime import timedelta as _td
 
-        # Event evidence: thesis/verdict failures PLUS stop breaches — a burst
-        # of breached stops is the purest same-time price-shock signal.
-        # PROFIT_TAKE stays excluded (capital-allocation exits are firm-specific).
+        # Event evidence: thesis/verdict failures plus downside-review breaches;
+        # a burst of price-level breaches is the clearest same-time shock signal.
+        # PROFIT_TAKE stays excluded (capital-allocation exits are firm-specific),
+        # as are ENTRY_CONSTRAINT reviews (winners appreciating out of the entry
+        # screen are not distress). Keyed on action_basis via the canonical
+        # predicate so permanent reviews still count as breadth evidence.
         event_sells = [
-            item
-            for item in reconciliation_items
-            if item.action == "SELL"
-            and item.sell_type in ("HARD_REJECT", "SOFT_REJECT", "STOP_BREACH")
+            item for item in reconciliation_items if is_macro_event_evidence(item)
         ]
         total_held = sum(
             1 for item in reconciliation_items if item.ibkr_position is not None
@@ -243,6 +301,42 @@ def compute_portfolio_health(
                         trigger = "cumulative"
                         peak_count = len(event_sells)
                         peak_anchor = max(all_dates)
+
+                if correlated_event:
+                    # Model-shift vs market-event discriminator: a real macro
+                    # event pushes prices DOWN and verdicts follow. When the
+                    # majority of verdict-flip evidence trades at/above its
+                    # analysis entry, the model got more bearish while the
+                    # market did not — analyzer-side re-rating, not distress.
+                    # A genuine selloff still fires via the drawdown-breadth
+                    # trigger below, which is inherently price-down.
+                    priced = [
+                        item
+                        for item in event_sells
+                        if _entry_and_current(item) != (None, None)
+                    ]
+                    up_count = sum(1 for item in priced if not _below_entry(item))
+                    if priced and up_count / len(priced) > 0.5:
+                        flags.append(
+                            f"MODEL_REGIME_SHIFT: {up_count} of {len(priced)}"
+                            " verdict-flip positions trade at/above their"
+                            " analysis entry — flips are analyzer-side"
+                            " (re-rating), not market distress. Audit recent"
+                            " prompt/model/threshold changes before acting;"
+                            " macro SELL demotions and dip-buying are NOT"
+                            " enabled."
+                        )
+                        logger.info(
+                            "model_regime_shift_detected",
+                            trigger=trigger,
+                            evidence_count=len(event_sells),
+                            priced_count=len(priced),
+                            at_or_above_entry=up_count,
+                        )
+                        correlated_event = False
+                        trigger = ""
+                        peak_count = 0
+                        peak_anchor = None
 
         if not correlated_event and total_held > 0:
             # Drawdown breadth: refresh-schedule-independent price evidence —
@@ -350,9 +444,9 @@ def compute_portfolio_health(
             flags.append(
                 f"CORRELATED_SELL_EVENT: {peak_count} positions {evidence}"
                 f" ({peak_count / total_held:.0%} of held"
-                f" positions) — probable macro event [{trigger}]. Execute"
-                f" stop-breach SELLs on fundamentally weak positions only;"
-                f" review others before acting."
+                f" positions) — probable macro event [{trigger}]. Do not sell"
+                f" into a correlated drop: exit only on confirmed fundamental"
+                f" failure; review everything else."
             )
             demoted = _apply_macro_demotions(
                 reconciliation_items,
@@ -360,9 +454,9 @@ def compute_portfolio_health(
                     "  [MACRO_WATCH: demoted from SELL — correlated" " event detected]"
                 ),
                 stop_tag_template=(
-                    "  [MACRO_STOP: stop breach during correlated event"
+                    "  [MACRO_PRICE: price-drop review during correlated event"
                     " — fundamentals intact (health {health:.0f}%, growth"
-                    " {growth:.0f}%); review before executing]"
+                    " {growth:.0f}%); no sale without fundamental failure]"
                 ),
             )
             logger.info(
@@ -391,9 +485,9 @@ def compute_portfolio_health(
                     f" until {expiry} — demoted from SELL]"
                 ),
                 stop_tag_template=(
-                    f"  [MACRO_STOP: stop breach during active {event_type}"
+                    f"  [MACRO_PRICE: price-drop review during active {event_type}"
                     " event — fundamentals intact (health {health:.0f}%,"
-                    " growth {growth:.0f}%); review before executing]"
+                    " growth {growth:.0f}%); no sale without fundamental failure]"
                 ),
             )
             if demoted:
@@ -422,8 +516,8 @@ def compute_portfolio_health(
             )
             flags.append(
                 f"MACRO_EVENT_ONGOING: {event_type} event onset ~{days}d ago — brief"
-                f" macro override (≤{macro_override_max_age_days}d) has lapsed; SELL"
-                " recommendations now flow normally on re-priced verdicts, and"
+                f" macro override (≤{macro_override_max_age_days}d) has lapsed;"
+                " confirmed fundamental exits can flow normally, and"
                 " buy-the-dip is suppressed (no transient mean-reversion assumed for"
                 " a sustained event)."
             )

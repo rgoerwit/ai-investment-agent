@@ -1,0 +1,108 @@
+=== IBKR Portfolio Reconciliation  2026-07-17 12:00 ===
+
+  Account:          U-GOLDEN
+  Net liquidation:  $   100,000
+  Cash (total):     $    15,000   (15.0%)  includes $3,000 of unsettled sale proceeds (not yet spendable)
+  Settled cash:     $    12,000   (12.0%)  fully settled
+  Buffer reserve:   $     5,000   (5.0%)  cash buffer — not deployed into new buys
+  Available:        $     7,000           deployable into new buys (settled − buffer)
+
+══════════════════════════════════════════════════════
+  SCREENING FRESHNESS  (last completed broad market sweep)
+══════════════════════════════════════════════════════
+
+  No broad-screen completion recorded.
+  → Run: ./scripts/run_pipeline.sh
+
+══════════════════════════════════════════════════════
+  ANALYSIS FRESHNESS  (what is stale, what is queued, what happens next)
+══════════════════════════════════════════════════════
+
+  Needs review before action:
+    7203         review required  ·  7d old  ·  expires 2026-07-24  →  poetry run python -m src.main --ticker 7203.T
+
+  Already in refresh queue:
+    None
+
+  Due soon:
+    9432         expires 2026-07-24  ·  7d remaining  →  poetry run python -m src.main --ticker 9432.T
+
+  Refresh activity this run:
+    Policy: off
+    No refresh actions were needed.
+
+  User action: run poetry run python scripts/portfolio_manager.py --recommend --refresh-policy blocking
+
+══════════════════════════════════════════════════════
+  POSITION REVIEWS  (tax, macro, or intact-thesis review before acting)
+══════════════════════════════════════════════════════
+
+⚠ REVIEW  7203.T        [PRICE-DROP REVIEW]
+             reason:    Stop breached: price 1800.00 < stop 1850.00 — sale downgraded: price movement is a
+                        review trigger, not sale authority
+             analysis:  2026-07-10  ·  Health:72  Growth:64  ·  Risk zone:MODERATE  ·  BUY (High)
+             est. loss: -JPY 20,000  (-10.0% vs IBKR cost basis JPY 2,000.00)
+             holding:   100 shares  ·  last JPY 1,800.00  ·  position value ~$1,200 USD
+
+══════════════════════════════════════════════════════
+  ADDS  (increase underweight positions)
+══════════════════════════════════════════════════════
+
+△ ADD     6758.T        10 shares  @ JPY 3,500.00  LMT  Underweight high-conviction position
+             [upping position — currently hold 40 shares @ avg JPY 2,000.00]
+             Cost: ~$240 USD  ·  use already-settled cash ($12,000 available)
+
+══════════════════════════════════════════════════════
+  WATCHLIST ADDITION REVIEW  (no additions recommended from current state)
+══════════════════════════════════════════════════════
+
+  Current watchlist size: 1  ·  target: 6  ·  open target slots now: 5
+
+  ADDITIONS RECOMMENDED NOW: None
+
+  KEEPING ACTIVE (1): 9984 (9984.T)
+
+  [Update IBKR watchlist to]: 9984
+
+══════════════════════════════════════════════════════
+  HOLDS  (no action)
+══════════════════════════════════════════════════════
+
+  HOLD    9432.T        0.9%  JPY  entry   2,000.00 →     160.00  (-92.0%)  H:72 G:64
+             return:    FX decomposition withheld: broker values imply an implausible +1150.0% residual;
+                        verify value units or entry FX
+
+══════════════════════════════════════════════════════
+  CONCENTRATION
+══════════════════════════════════════════════════════
+
+  Sector:
+    Industrials             24.0%  ███████████░░░
+    Information Technology  18.0%  ████████░░░░░░
+
+  Exchange:
+    T     (Japan        )  31.0%  ███████████░░░
+    US    (United States)  27.0%  █████████░░░░░
+
+══════════════════════════════════════════════════════
+  CASH SUMMARY
+══════════════════════════════════════════════════════
+
+  Settled cash:                                $ 12,000
+  Cash buffer (held back, not for new buys):  -$  5,000
+  Deployable into new buys:                    $  7,000
+  ADD  6758.T  (10 sh):                       - $   240
+  BUY  9984.T  (20 sh):                       - $ 1,200
+  ────────────────────────────────────────────────
+  Settled cash after recommended buys:         $ 10,560
+
+══════════════════════════════════════════════════════
+  ACTION PLAN  (execution orders · settlement · refresh follow-through)
+══════════════════════════════════════════════════════
+
+  TODAY (2026-07-17):
+    → ADD  6758.T  10 shares  @ JPY 3,500.00  (~$240)  [up position — 40 sh]  — use already-settled cash
+    → BUY  9984.T  20 shares  @ JPY 9,000.00  (~$1,200)  [watchlist — new position]  — use already-settled cash
+
+  Plan turnover:  executable sells ~$0 (0.0% of NAV)  ·  buys ~$1,440 (1.4% of NAV)
+  Summary:  1 ADD  ·  1 HOLD  ·  1 REVIEW  ·  1 WATCHLIST_KEEP

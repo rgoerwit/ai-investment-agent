@@ -23,6 +23,7 @@ from src.ibkr.portfolio_defaults import (
     DEFAULT_DRIFT_PCT,
     DEFAULT_EXCHANGE_LIMIT_PCT,
     DEFAULT_MAX_AGE_DAYS,
+    DEFAULT_MIN_ACTIONABLE_POSITION_USD,
     DEFAULT_OVERWEIGHT_PCT,
     DEFAULT_SECTOR_LIMIT_PCT,
     DEFAULT_UNDERWEIGHT_PCT,
@@ -115,13 +116,20 @@ def _populate_portfolio_weights(
     alpha_base_lookup: dict[str, AnalysisRecord],
 ) -> tuple[dict[str, float], dict[str, float]]:
     """Populate sector/exchange concentration weights on the portfolio."""
-    from src.ibkr.reconciliation_rules import _exchange_from_position
+    from src.ibkr.reconciliation_rules import (
+        _exchange_from_position,
+        base_match_allowed,
+    )
 
     sector_weights: dict[str, float] = {}
     exchange_weights: dict[str, float] = {}
-    total_position_value = sum(position.market_value_usd for position in positions)
+    currency_weights: dict[str, float] = {}
+    valid_positions = [position for position in positions if position.valuation_valid]
+    total_position_value = sum(
+        position.market_value_usd for position in valid_positions
+    )
     if total_position_value > 0:
-        for pos in positions:
+        for pos in valid_positions:
             current_ticker = pos.ticker.yf
             analysis = analyses.get(current_ticker)
             if (
@@ -130,17 +138,26 @@ def _populate_portfolio_weights(
                 and not pos.ticker.ibkr.isdigit()
             ):
                 best = alpha_base_lookup.get(pos.ticker.ibkr.upper())
-                if best and "." in best.ticker:
+                if (
+                    best
+                    and "." in best.ticker
+                    # Currency must agree — weight attribution must not book a
+                    # SMART/EUR position under a same-base foreign analysis.
+                    and base_match_allowed(pos, best)
+                ):
                     current_ticker = best.ticker
                     analysis = best
             sector = normalize_sector_label(analysis.sector if analysis else None)
             exchange = _exchange_from_position(pos)
+            currency = (pos.currency or "USD").upper()
             weight = pos.market_value_usd / total_position_value * 100
             sector_weights[sector] = sector_weights.get(sector, 0.0) + weight
             exchange_weights[exchange] = exchange_weights.get(exchange, 0.0) + weight
+            currency_weights[currency] = currency_weights.get(currency, 0.0) + weight
 
     portfolio.sector_weights = sector_weights
     portfolio.exchange_weights = exchange_weights
+    portfolio.currency_weights = currency_weights
     return sector_weights, exchange_weights
 
 
@@ -156,6 +173,7 @@ def reconcile(
     exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT,
     watchlist_tickers: set[str] | None = None,
     diagnostics: ReconciliationDiagnostics | None = None,
+    min_actionable_position_usd: float = DEFAULT_MIN_ACTIONABLE_POSITION_USD,
 ) -> list[ReconciliationItem]:
     """
     Compare IBKR positions against evaluator recommendations.
@@ -188,6 +206,7 @@ def reconcile(
         sector_weights=sector_weights,
         exchange_weights=exchange_weights,
         remaining_cash=remaining_cash,
+        min_actionable_position_usd=min_actionable_position_usd,
     )
 
     watchlist_items, held_tickers, remaining_cash = evaluate_watchlist(

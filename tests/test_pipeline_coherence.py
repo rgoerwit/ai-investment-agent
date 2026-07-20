@@ -40,15 +40,16 @@ def _isolate_results_dir(tmp_path, monkeypatch):
 class TestPipelineCoherence:
     """reconcile → compute_health → format_report with realistic multi-sell scenarios."""
 
-    def test_panic_day_full_pipeline_demotes_soft_rejects(self):
-        """8 SOFT_REJECTs + 1 STOP_BREACH (strong) + 1 HARD_REJECT + 2 HOLDs.
+    def test_panic_day_full_pipeline_reviews_soft_rejects(self):
+        """8 SOFT_REJECTs (price-down) + 1 STOP_BREACH (strong) + 1 HARD_REJECT + 2 HOLDs.
 
-        After the full pipeline:
-        - CORRELATED_SELL_EVENT fires (9 verdict-driven SELLs / 12 total = 75%)
-        - All SOFT_REJECT items are demoted to REVIEW
-        - MACRO ALERT banner appears in the report
-        - SELL-RELATED REVIEWS section appears with explicit sell-type labels
-        - Summary counts REVIEW, not SELL, for the 8 demoted items
+        After the full pipeline (July 2026 disposition layer):
+        - SOFT_REJECT items are REVIEW at source (fundamentals-intact rejections
+          never become unattended SELLs) with a typed basis
+        - CORRELATED_SELL_EVENT still fires — basis-aware evidence counts the
+          price-down reviews, so permanent reviews don't erase event breadth
+        - MACRO ALERT banner appears; the strong stop-breach is demoted
+        - POSITION REVIEWS section appears with basis labels
         """
         positions, analyses, portfolio = _make_multi_sell_scenario(
             n_soft_sells=8, n_stop_breaches=1, n_hard_rejects=1, n_holds=2
@@ -61,22 +62,24 @@ class TestPipelineCoherence:
 
         # Macro banner must appear
         assert "MACRO ALERT" in report
-        assert "SELL-RELATED REVIEWS" in report
-        assert "[STOP BREACH]" in report
-        assert "[SOFT REJECTION]" in report
-        # All SOFT_REJECT items demoted in the items list
-        soft_still_sell = [
-            i for i in items if i.action == "SELL" and i.sell_type == "SOFT_REJECT"
-        ]
-        assert soft_still_sell == [], "SOFT_REJECT SELLs should have been demoted"
+        assert "POSITION REVIEWS" in report
+        assert "[PRICE-DROP REVIEW]" in report
+        assert "[THESIS REASSESSMENT]" in report
+        # SOFT_REJECT items are REVIEW at source, never SELL
+        soft = [i for i in items if i.sell_type == "SOFT_REJECT"]
+        assert len(soft) == 8
+        assert all(i.action == "REVIEW" for i in soft)
+        assert all(i.action_basis == "THESIS_REASSESSMENT" for i in soft)
         # Stop-breach item demoted to REVIEW (health=70, growth=65 → strong)
         stop_reviews = [
             i for i in items if i.sell_type == "STOP_BREACH" and i.action == "REVIEW"
         ]
         assert len(stop_reviews) == 1
 
-    def test_panic_day_weak_stop_breach_stays_sell(self):
-        """STOP_BREACH item with weak fundamentals stays SELL even during correlated event."""
+    def test_panic_day_weak_stop_breach_is_review_at_source(self):
+        """A price break carries no sell authority even with weak fundamentals
+        (July 2026 retail alignment) — a weak-score reject exits only via the
+        confirmed-thesis-failure path, never off a price level on panic day."""
         positions, analyses, portfolio = _make_multi_sell_scenario(
             n_soft_sells=8, n_stop_breaches=1, n_hard_rejects=0, n_holds=2
         )
@@ -92,16 +95,22 @@ class TestPipelineCoherence:
         report = format_report(items, portfolio, portfolio_health_flags=health_flags)
 
         assert "MACRO ALERT" in report
-        # Weak stop-breach stays in the mechanical SELL section
-        assert "SELL RECOMMENDATIONS" in report
-        assert "[STOP BREACH]" in report
-        stop_sells = [
-            i for i in items if i.sell_type == "STOP_BREACH" and i.action == "SELL"
-        ]
-        assert len(stop_sells) == 1
+        # No mechanical SELL section — the price break is a labeled review.
+        assert "SELL RECOMMENDATIONS" not in report
+        assert "[PRICE-DROP REVIEW]" in report
+        stop_items = [i for i in items if i.sell_type == "STOP_BREACH"]
+        assert len(stop_items) == 1
+        assert stop_items[0].action == "REVIEW"
+        assert stop_items[0].urgency == "HIGH"
 
-    def test_non_panic_day_soft_rejects_stay_as_sell(self):
-        """3 SOFT_REJECTs + 17 HOLDs = 15% → below 25% threshold → no demotion."""
+    def test_non_panic_day_soft_rejects_are_reviews_without_macro_tag(self):
+        """3 SOFT_REJECTs + 17 HOLDs = 15% → below 25% threshold → no event.
+
+        The rejections are REVIEW at source regardless (disposition layer) —
+        the macro machinery adds nothing on a quiet day, so no MACRO tags and
+        no banner. The sell-related review section DOES render (it is now the
+        standing home of thesis reviews, not a macro-only artifact).
+        """
         positions, analyses, portfolio = _make_multi_sell_scenario(
             n_soft_sells=3, n_stop_breaches=0, n_hard_rejects=0, n_holds=17
         )
@@ -109,13 +118,13 @@ class TestPipelineCoherence:
         health_flags = compute_portfolio_health(
             positions, analyses, portfolio, reconciliation_items=items
         )
-        soft_sells = [
-            i for i in items if i.sell_type == "SOFT_REJECT" and i.action == "SELL"
-        ]
-        assert len(soft_sells) == 3
-        # No correlated event → no sell-related review section in report
+        assert not any("CORRELATED_SELL_EVENT" in f for f in health_flags)
+        soft = [i for i in items if i.sell_type == "SOFT_REJECT"]
+        assert len(soft) == 3
+        assert all(i.action == "REVIEW" for i in soft)
+        assert all("MACRO_" not in i.reason for i in soft)
         report = format_report(items, portfolio, portfolio_health_flags=health_flags)
-        assert "SELL-RELATED REVIEWS" not in report
+        assert "MACRO ALERT" not in report
 
     def test_exactly_at_threshold_triggers(self):
         """5 SOFT_REJECTs + 15 HOLDs = 20 total → 5/20 = 25.0% → event fires."""

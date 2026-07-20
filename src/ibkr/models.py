@@ -51,6 +51,7 @@ The single source of truth for the FX conversion rate is
 `AnalysisRecord.fx_rate_to_usd` (saved at analysis time).  When it is
 missing, `src.ibkr.reconciliation_rules._resolve_fx()` applies a hardcoded
 fallback from `src.fx_normalization.FALLBACK_RATES_TO_USD`, logging a warning.
+If neither source provides a trustworthy non-USD rate, order sizing fails closed.
 
 ## GBX (British pence) note
 ----------------------------------------------------------------------
@@ -85,6 +86,10 @@ class NormalizedPosition(BaseModel):
     • unrealized_pnl_usd – running P&L in USD
     • currency           – ISO code for the LOCAL currency ("GBX" not "GBP" for .L)
 
+    The value-basis fields record whether the broker supplied a value in USD
+    or whether normalization converted it from local currency. Invalid or
+    unclassifiable values are zeroed and routed to a data-quality review.
+
     The `ticker` field carries symbol, exchange, and currency together.
     Backward-compatible properties (yf_ticker, symbol, exchange) are preserved.
     """
@@ -97,11 +102,22 @@ class NormalizedPosition(BaseModel):
     avg_cost_local: float = 0.0  # LOCAL currency — e.g. JPY, GBX, HKD
     market_value_usd: float = 0.0  # USD (FX-converted)
     unrealized_pnl_usd: float = 0.0  # USD (FX-converted)
+    fx_rate_to_usd: float | None = None
+    market_value_basis: Literal["BROKER_USD", "LOCAL_CONVERTED", "UNAVAILABLE"] = (
+        "BROKER_USD"
+    )
+    unrealized_pnl_basis: Literal["BROKER_USD", "LOCAL_CONVERTED", "UNAVAILABLE"] = (
+        "BROKER_USD"
+    )
+    valuation_valid: bool = True
+    valuation_issue: str | None = None
     currency: str = "USD"  # ISO code for the LOCAL currency above
     current_price_local: float = 0.0  # LOCAL currency
     acquired_date: str | None = None  # YYYY-MM-DD if lot/history data is available
     holding_period_days: int | None = None
     tax_term: Literal["SHORT_TERM", "LONG_TERM", "UNKNOWN"] = "UNKNOWN"
+    ticker_identity_verified: bool = False
+    ticker_resolution_source: str = "unresolved"
 
     @field_validator("ticker", mode="before")
     @classmethod
@@ -122,6 +138,69 @@ class NormalizedPosition(BaseModel):
     @property
     def exchange(self) -> str:
         return self.ticker.exchange
+
+
+# Why a held position is being acted on. A portfolio action requires portfolio
+# evidence: a stock-level rejection may trigger refresh, review, replacement
+# analysis, or an exit — but it must not decide among those alone.
+#
+#   MANDATORY_EXIT             – compliance/operator-declared restriction (empty
+#                                by default today; reserved for explicit policy)
+#   STOP_LOSS                  – price broke the analysis-time review level.
+#                                Review-only since July 2026: raises urgency and
+#                                counts as macro-event evidence, but carries no
+#                                sell authority (a sale needs fundamental
+#                                failure evidence, never a price level alone)
+#   CONFIRMED_THESIS_FAILURE   – reject verdict confirmed by a prior full-mode
+#                                reject with minimum spacing (the forcing function
+#                                that prevents deadwood accumulating forever)
+#   THESIS_REASSESSMENT        – single unconfirmed reject — review + refresh
+#   ENTRY_CONSTRAINT           – analyzer would not initiate at this price, but
+#                                fundamentals are intact ("not cheap enough to
+#                                buy" is not evidence to exit)
+#   SPECIAL_SITUATION_REVIEW   – active M&A tender; sell/tender/hold depends on
+#                                deal mechanics and premium, not the verdict
+#   DATA_QUALITY               – evidence indeterminate (data vacuum, unreliable
+#                                gate arithmetic) — never punish the stock for
+#                                the model's uncertainty
+#   CAPITAL_ALLOCATION         – profit-take discipline (advisory review only —
+#                                selling an intact winner is the operator's
+#                                capital-gains decision)
+#   OVERWEIGHT                 – position drifted above its target size; trim
+#                                math surfaced as advisory information only
+#   DE_MINIMIS                 – position too small to be worth an action
+ActionBasis = Literal[
+    "MANDATORY_EXIT",
+    "STOP_LOSS",
+    "CONFIRMED_THESIS_FAILURE",
+    "THESIS_REASSESSMENT",
+    "ENTRY_CONSTRAINT",
+    "SPECIAL_SITUATION_REVIEW",
+    "DATA_QUALITY",
+    "CAPITAL_ALLOCATION",
+    "OVERWEIGHT",
+    "DE_MINIMIS",
+]
+
+
+class PortfolioEvidence(BaseModel):
+    """Decision-layer evidence loaded from the persisted analysis artifact.
+
+    Assembled by the analysis index from already-saved fields (run_summary
+    markers, root red_flags) — never reparsed from prose at reconcile time.
+    The three flag families are deliberately separate: buy-blocking evidence
+    means the gate arithmetic is indeterminate (a REVIEW signal), compliance
+    flags carry per-position burdens independent of dollar size (PFIC Form
+    8621), and mandatory-exit restrictions are the only flags that force a
+    sale. ``complete=False`` marks legacy artifacts that predate the
+    persisted markers — classify conservatively, never more favorably.
+    """
+
+    complete: bool = False
+    dni_review_candidate: bool = False  # quality-gate-passing DNI marker
+    buy_blocking_flag_types: tuple[str, ...] = ()  # blocks_buy red flags
+    compliance_flag_types: tuple[str, ...] = ()  # PFIC_/VIE_/CMIC_ class
+    mandatory_exit_flag_types: tuple[str, ...] = ()  # reserved; empty today
 
 
 class TradeBlockData(BaseModel):
@@ -181,7 +260,11 @@ class AnalysisRecord(BaseModel):
     conviction: str = ""
     sector: str = ""  # GICS sector (e.g. "Industrials"), if available in snapshot
     exchange: str = ""  # Exchange suffix (e.g. "HK", "T"), inferred from ticker
-    is_quick_mode: bool = False  # True if analysis was run with --quick (less thorough)
+    # True if run with --quick (screening tier); None = mode unknown (legacy
+    # artifact predating the snapshot field). Unknown carries no sell
+    # authority in the confirmation gate; quick-BUY gates use truthiness, so
+    # None behaves like full mode there (unknown must not block a BUY review).
+    is_quick_mode: bool | None = False
     capital_flag_types: tuple[str, ...] = ()
     # PM final risk tally — best-effort: read from prediction_snapshot first, else
     # parsed from the PM decision text (None when neither is available). Consumed
@@ -192,12 +275,19 @@ class AnalysisRecord(BaseModel):
     # moat/capital-efficiency bonus-suppression markers). Consumed by the BUY
     # stability gate; intentionally distinct from idle-cash `capital_flag_types`.
     quality_flag_types: tuple[str, ...] = ()
+    # Bear Researcher thesis-break triggers (fenced KILL_CRITERIA block in the
+    # saved bear history; ≤3 entries). These are the fundamental exit
+    # conditions surfaced to the operator where downside price levels once led —
+    # empty for legacy artifacts without the block.
+    kill_criteria: tuple[str, ...] = ()
     macro_regime: dict[str, Any] = Field(default_factory=dict)
     data_quality: dict[str, Any] = Field(default_factory=dict)
     # Special-situation routing (Senior promotes from Foreign Language M&A EVENT
     # section). Empty string when no analysis ever set it or the analysis predates
     # the field; otherwise one of ACTIVE_TENDER / RUMORED / NONE.
     m_and_a_status: str = ""
+    # Decision-layer evidence from persisted markers/flags (see PortfolioEvidence).
+    evidence: PortfolioEvidence = Field(default_factory=PortfolioEvidence)
 
     @property
     def age_days(self) -> int:
@@ -239,11 +329,17 @@ class ReconciliationItem(BaseModel):
     suggested_price: float | None = None  # LOCAL currency (see class docstring)
     suggested_order_type: str = "LMT"  # LMT or MKT
     cash_impact_usd: float = 0.0  # USD (negative = cost, positive = proceeds)
+    # A BUY retained for watchlist ranking even though live cash was exhausted.
+    # It is advisory only: it must never create an order or affect cash/turnover.
+    is_cash_blocked: bool = False
     settlement_date: str | None = None  # for sells/trims: "YYYY-MM-DD"
     is_watchlist: bool = False  # True when sourced from IBKR watchlist (zero holdings)
     sell_type: str | None = (
         None  # STOP_BREACH | HARD_REJECT | SOFT_REJECT | PROFIT_TAKE | None
     )
+    # Typed decision basis (additive — sell_type stays the presentation/grouping
+    # token; action_basis is the decision-layer field macro detection keys on).
+    action_basis: ActionBasis | None = None
     cost_basis_return_pct: float | None = None
     profit_take_reasons: tuple[str, ...] = ()
 
@@ -278,3 +374,4 @@ class PortfolioSummary(BaseModel):
     # Concentration weights (% of portfolio value) — populated by reconcile()
     sector_weights: dict[str, float] = Field(default_factory=dict)
     exchange_weights: dict[str, float] = Field(default_factory=dict)
+    currency_weights: dict[str, float] = Field(default_factory=dict)

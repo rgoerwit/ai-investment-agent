@@ -911,7 +911,7 @@ ANALYSIS ({comparison.get('analysis_date', 'unknown')}):
 Ticker: {comparison.get('ticker')} | Sector: {comparison.get('sector', 'Unknown')} | Exchange: {comparison.get('exchange', 'Unknown')} | Currency: {comparison.get('currency', 'USD')}
 Verdict: {comparison.get('verdict')} (Position: {comparison.get('position_size', 'N/A')}%) | Zone: {comparison.get('zone', 'N/A')}
 Health: {comparison.get('health_adj', 'N/A')} | Growth: {comparison.get('growth_adj', 'N/A')} | P/E: {comparison.get('pe_ratio', 'N/A')} | PEG: {comparison.get('peg_ratio', 'N/A')}
-Targets: Entry {comparison.get('entry_price') or 'N/A'} | T1 {comparison.get('target_1_price') or 'N/A'} | T2 {comparison.get('target_2_price') or 'N/A'} | Stop {comparison.get('stop_price') or 'N/A'} | Horizon: {comparison.get('investment_horizon') or 'N/A'}
+Valuation references: Fair entry {comparison.get('entry_price') or 'N/A'} | Base {comparison.get('target_1_price') or 'N/A'} | Stretch {comparison.get('target_2_price') or 'N/A'} | Downside review {comparison.get('stop_price') or 'N/A'} | Horizon: {comparison.get('investment_horizon') or 'N/A'}
 Key bear risks: {comparison.get('bear_risks_excerpt', 'N/A')[:300]}
 
 OUTCOME ({comparison.get('days_elapsed', 0)} days later):

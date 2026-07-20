@@ -10,9 +10,14 @@ overclaim without escalating the risk tally.
 
 from __future__ import annotations
 
+from datetime import date
+
 from src.validators.financial_rules import (
+    OcfObservation,
     detect_ocf_corroboration_flag,
     extract_auditor_ocf,
+    extract_auditor_ocf_observation,
+    extract_datablock_ocf_observation,
     is_ocf_period_mismatch_resolved,
     parse_ocf_amount,
     reconcile_ocf_period_mismatch_flags,
@@ -88,6 +93,121 @@ class TestDetectOcfCorroborationFlag:
     def test_custom_threshold(self):
         # 1.148B vs 971M is ~18%; a 25% threshold suppresses it.
         assert detect_ocf_corroboration_flag(1.148e9, 971e6, threshold=0.25) is None
+
+    def test_current_ttm_is_not_compared_with_prior_audited_fy(self):
+        headline = OcfObservation(
+            amount=219.9e6,
+            period="TTM",
+            period_end=date(2026, 3, 31),
+            currency="SGD",
+            scope="CONSOLIDATED",
+            source="DATA_BLOCK",
+        )
+        audited = OcfObservation(
+            amount=157.781e6,
+            period="FY",
+            period_end=date(2025, 3, 31),
+            currency="SGD",
+            scope="CONSOLIDATED",
+            audit_status="AUDITED",
+            source="FORENSIC_AUDITOR",
+        )
+        flag = detect_ocf_corroboration_flag(headline, audited, ticker="AGS.SI")
+        assert flag is not None
+        assert flag["type"] == "OCF_PERIOD_NOT_COMPARABLE"
+        assert flag["risk_penalty"] == 0.0
+        assert "No discrepancy inferred" in flag["detail"]
+
+    def test_same_period_identity_can_raise_discrepancy(self):
+        identity = {
+            "period": "FY",
+            "period_start": date(2025, 4, 1),
+            "period_end": date(2026, 3, 31),
+            "currency": "SGD",
+            "scope": "CONSOLIDATED",
+        }
+        flag = detect_ocf_corroboration_flag(
+            OcfObservation(amount=219.9e6, **identity),
+            OcfObservation(amount=157.781e6, **identity),
+        )
+        assert flag is not None
+        assert flag["type"] == "OCF_FILING_VALUE_UNCORROBORATED"
+
+    def test_missing_period_end_is_not_comparable(self):
+        flag = detect_ocf_corroboration_flag(
+            OcfObservation(
+                amount=120e6,
+                period="FY",
+                currency="SGD",
+                scope="CONSOLIDATED",
+            ),
+            OcfObservation(
+                amount=80e6,
+                period="FY",
+                currency="SGD",
+                scope="CONSOLIDATED",
+            ),
+        )
+        assert flag is not None
+        assert flag["type"] == "OCF_PERIOD_NOT_COMPARABLE"
+        assert "PERIOD_UNVERIFIED" in flag["detail"]
+
+    def test_stub_period_start_mismatch_is_not_comparable(self):
+        flag = detect_ocf_corroboration_flag(
+            OcfObservation(
+                amount=120e6,
+                period="FY",
+                period_start=date(2025, 1, 1),
+                period_end=date(2025, 9, 30),
+                currency="SGD",
+                scope="CONSOLIDATED",
+            ),
+            OcfObservation(
+                amount=80e6,
+                period="FY",
+                period_start=date(2024, 10, 1),
+                period_end=date(2025, 9, 30),
+                currency="SGD",
+                scope="CONSOLIDATED",
+            ),
+        )
+        assert flag is not None
+        assert "PERIOD_START_MISMATCH" in flag["detail"]
+
+
+class TestExtractOcfObservations:
+    def test_extracts_datablock_period_scope_currency_and_end_date(self):
+        report = """
+### --- START DATA_BLOCK ---
+LATEST_QUARTER_DATE: 2026-03-31
+OPERATING_CASH_FLOW: S$219.9M
+OPERATING_CASH_FLOW_PERIOD: TTM
+METRIC_SCOPE_OCF: CONSOLIDATED
+### --- END DATA_BLOCK ---
+"""
+        observation = extract_datablock_ocf_observation(report)
+        assert observation == OcfObservation(
+            amount=219.9e6,
+            period="TTM",
+            period_end=date(2026, 3, 31),
+            currency="SGD",
+            scope="CONSOLIDATED",
+            source="DATA_BLOCK",
+        )
+
+    def test_extracts_audited_identity_without_calendar_year_inference(self):
+        report = """
+Net cash from operating activities: SGD 157.781 million
+META: REPORT_DATE=2025-03-31 | PERIOD=FY | CURRENCY=SGD |
+SCOPE=CONSOLIDATED | AUDIT_STATUS=AUDITED |
+AUDITOR_SIGNATURE_DATE=2025-06-20
+"""
+        observation = extract_auditor_ocf_observation(report)
+        assert observation is not None
+        assert observation.period == "FY"
+        assert observation.period_end == date(2025, 3, 31)
+        assert observation.audit_status == "AUDITED"
+        assert observation.auditor_signature_date == date(2025, 6, 20)
 
 
 _APR_DATA_BLOCK = """

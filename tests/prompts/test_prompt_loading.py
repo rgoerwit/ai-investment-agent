@@ -658,3 +658,19 @@ class TestCatalystGuardrails:
         assert "Consultant" in sm
         assert "APAC" in sm
         assert "no-catalyst" in sm.lower()
+
+
+class TestAuditorPeriodIdentity:
+    def test_dual_track_and_non_calendar_fiscal_rules_are_explicit(self):
+        sm = json.loads(Path("prompts/auditor.json").read_text())["system_message"]
+
+        for phrase in (
+            "CURRENT_STATEMENTS",
+            "AUDITED_BASELINE",
+            "never from calendar-year assumptions or an FY label alone",
+            "52/53-week years",
+            "stub periods",
+            "AUDITOR_SIGNATURE_DATE",
+            "do not compare the figures",
+        ):
+            assert phrase in sm

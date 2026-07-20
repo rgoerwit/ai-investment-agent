@@ -92,6 +92,38 @@ class TestTraderNodeInputs:
         prompt = await _captured_prompt(create_trader_node(_mock_llm(), None), state)
         assert "VALUATION PARAMETERS" not in prompt
 
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_do_not_initiate_has_no_numeric_downside_level(self, mock_get_prompt):
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="trader prompt", agent_name="Trader"
+        )
+        response = SimpleNamespace(
+            content=(
+                "TRADE_BLOCK:\n"
+                "ACTION: DO_NOT_INITIATE\n"
+                "SIZE: 0.0%\n"
+                "CONVICTION: Low\n"
+                "ENTRY: N/A\n"
+                "STOP: 2.10 (downside review level)\n"
+                "TARGET_1: N/A\n"
+                "TARGET_2: N/A\n"
+                "HORIZON: 24 months\n"
+                "SPECIAL: patient execution\n"
+            )
+        )
+        with patch(
+            "src.agents.decision_nodes.agent_runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(return_value=response),
+        ):
+            result = await create_trader_node(_mock_llm(), None)(
+                {"company_of_interest": "AGS.SI"}, {}
+            )
+
+        plan = result["trader_investment_plan"]
+        assert "STOP: N/A (no position; use thesis-break conditions)" in plan
+        assert "STOP: 2.10" not in plan
+
 
 class TestRiskNodeInputs:
     @pytest.mark.asyncio
@@ -112,7 +144,7 @@ class TestRiskNodeInputs:
         node = create_risk_debater_node(_mock_llm(), "risky_analyst")
         prompt = await _captured_prompt(node, state)
         assert STUB not in prompt
-        assert "TRADER PLAN: N/A" in prompt
+        assert "POSITION PLANNER OUTPUT: N/A" in prompt
         assert "N/A (consultant disabled or unavailable)" in prompt
 
     @pytest.mark.asyncio
@@ -133,7 +165,7 @@ class TestRiskNodeInputs:
         node = create_risk_debater_node(_mock_llm(), "risky_analyst")
         prompt = await _captured_prompt(node, state)
         assert "CONSULTANT BODY" in prompt
-        assert "TRADER PLAN: TRADE PLAN BODY" in prompt
+        assert "POSITION PLANNER OUTPUT: TRADE PLAN BODY" in prompt
 
 
 class TestResearchBundleInputs:

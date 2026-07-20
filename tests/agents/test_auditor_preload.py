@@ -299,9 +299,9 @@ class TestAuditorNodeWithPreload:
 
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")
-    async def test_loop_caps_at_three_tool_rounds(self, mock_get_prompt):
+    async def test_loop_caps_at_configured_tool_rounds(self, mock_get_prompt):
         """Economic backstop: a model that keeps emitting tool calls gets at
-        most 3 tool rounds (4 LLM calls) before the loop forces synthesis."""
+        most 2 default tool rounds (3 LLM calls), while per-tool caps still apply."""
         mock_get_prompt.return_value = self._prompt()
         tools = [SimpleNamespace(name="get_news", ainvoke=AsyncMock())]
 
@@ -344,5 +344,5 @@ class TestAuditorNodeWithPreload:
                 {},
             )
 
-        assert invoke_mock.await_count == 4
-        assert service.execute.await_count == 3
+        assert invoke_mock.await_count == 3
+        assert service.execute.await_count == 1

@@ -914,7 +914,9 @@ class TestEndToEndInformationFlow:
                 assert (
                     "EXTERNAL CONSULTANT REVIEW" in pm_context
                 ), "Consultant section missing"
-                assert "TRADER PROPOSAL" in pm_context, "Trader section missing"
+                assert (
+                    "POSITION PLANNER PROPOSAL" in pm_context
+                ), "Position Planner section missing"
                 assert "RISK TEAM DEBATE" in pm_context, "Risk section missing"
 
     @pytest.mark.asyncio

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.ibkr.models import ReconciliationItem
 from src.ibkr.portfolio_presentation import (
     SELL_RECOMMENDATIONS_TITLE,
@@ -41,7 +43,7 @@ def test_build_action_summary_counts_separates_buys_from_candidates(sample_bundl
     assert counts["MACRO_WATCH"] == 1
 
 
-def test_profit_take_items_have_distinct_sell_and_review_buckets():
+def test_legacy_profit_take_sell_is_downgraded_to_review():
     sell = ReconciliationItem(
         ticker=Ticker.from_yf("7203.T"),
         action="SELL",
@@ -60,10 +62,71 @@ def test_profit_take_items_have_distinct_sell_and_review_buckets():
     groups = group_portfolio_actions([sell, review])
     counts = build_action_summary_counts(groups)
 
-    assert groups.profit_take_sells == (sell,)
-    assert groups.profit_take_reviews == (review,)
-    assert counts["SELL"] == 1
-    assert counts["REVIEW"] == 1
+    assert groups.profit_take_sells == ()
+    assert [item.ticker.yf for item in groups.profit_take_reviews] == [
+        "7203.T",
+        "6758.T",
+    ]
+    assert "SELL" not in counts
+    assert counts["REVIEW"] == 2
+
+
+def test_inferred_listing_cannot_survive_presentation_as_executable_sell(
+    sample_bundle,
+):
+    item = sample_bundle.items[0]
+    item.ibkr_position = item.ibkr_position.model_copy(
+        update={
+            "ticker_identity_verified": False,
+            "ticker_resolution_source": "yfinance_search",
+        }
+    )
+
+    groups = group_portfolio_actions([item])
+
+    assert groups.hard_sells == ()
+    assert len(groups.reviews) == 1
+    assert groups.reviews[0].action == "REVIEW"
+    assert groups.reviews[0].suggested_quantity is None
+    assert "sale downgraded" in groups.reviews[0].reason
+    assert "listing mapping is unverified" in groups.reviews[0].reason
+
+
+@pytest.mark.parametrize(
+    ("action", "sell_type", "expected_basis"),
+    [
+        ("SELL", "STOP_BREACH", "STOP_LOSS"),
+        ("SELL", "HARD_REJECT", "THESIS_REASSESSMENT"),
+        ("TRIM", None, "OVERWEIGHT"),
+    ],
+)
+def test_legacy_position_reductions_are_non_executable(
+    action, sell_type, expected_basis
+):
+    item = ReconciliationItem(
+        ticker=Ticker.from_yf("7203.T"),
+        action=action,
+        reason="Legacy action",
+        urgency="HIGH",
+        sell_type=sell_type,
+        suggested_quantity=100,
+        suggested_price=1900,
+        cash_impact_usd=1200,
+        settlement_date="2026-07-20",
+    )
+
+    groups = group_portfolio_actions([item])
+    surfaced = (
+        groups.macro_stop_reviews or groups.profit_take_reviews or groups.reviews
+    )[0]
+
+    assert surfaced.action == "REVIEW"
+    assert surfaced.action_basis == expected_basis
+    assert surfaced.suggested_quantity is None
+    assert surfaced.cash_impact_usd == 0
+    assert groups.stop_sells == ()
+    assert groups.hard_sells == ()
+    assert groups.trims == ()
 
 
 def test_screen_reject_review_routes_to_generic_reviews():
@@ -91,7 +154,7 @@ def test_aggregate_sector_weights_normalizes_equivalent_labels():
 
 
 def test_get_sell_type_label_uses_shared_backend_labels():
-    assert get_sell_type_label("STOP_BREACH") == "STOP BREACH"
+    assert get_sell_type_label("STOP_BREACH") == "PRICE-DROP REVIEW"
     assert get_sell_type_label("HARD_REJECT") == "FUNDAMENTAL FAILURE"
     assert get_sell_type_label("SOFT_REJECT") == "SOFT REJECTION"
     assert get_sell_type_label("SCREEN_REJECT") == "SCREEN REVIEW"
@@ -155,3 +218,142 @@ class TestMacroDemotedItemBuckets:
         assert summary.conditional_proceeds_usd == 1234.0
         # And NOT in confirmed pending inflows
         assert summary.pending_inflows_total_usd == 0.0
+
+
+class TestFxReturnSplit:
+    """Local-price vs FX decomposition — observed values only, never fabricated."""
+
+    @staticmethod
+    def _pos(**overrides):
+        from src.ibkr.models import NormalizedPosition
+        from src.ibkr.ticker import Ticker
+
+        defaults = {
+            "conid": 1,
+            "ticker": Ticker.from_yf("HERDEZ.MX", currency="MXN"),
+            "quantity": 100,
+            "avg_cost_local": 100.0,
+            "current_price_local": 105.5,  # local-price +5.5%
+            "currency": "MXN",
+            "market_value_usd": 800.0,
+            "unrealized_pnl_usd": -205.0,  # USD cost basis 1005 → -20.4%
+        }
+        defaults.update(overrides)
+        return NormalizedPosition(**defaults)
+
+    def test_herdez_style_local_gain_usd_loss(self):
+        from src.ibkr.portfolio_presentation import fx_return_split
+
+        split = fx_return_split(self._pos())
+        assert split is not None
+        local_pct, fx_pct, usd_pct = split
+        assert local_pct == pytest.approx(5.5, abs=0.01)
+        assert usd_pct == pytest.approx(-20.4, abs=0.1)
+        # Multiplicative reconciliation: (1+usd) == (1+local) × (1+fx)
+        assert (1 + usd_pct / 100) == pytest.approx(
+            (1 + local_pct / 100) * (1 + fx_pct / 100)
+        )
+        assert fx_pct < 0  # FX drag
+
+    def test_usd_position_has_no_split(self):
+        from src.ibkr.models import NormalizedPosition
+        from src.ibkr.portfolio_presentation import fx_return_split
+        from src.ibkr.ticker import Ticker
+
+        pos = NormalizedPosition(
+            conid=2,
+            ticker=Ticker.from_yf("AAPL"),
+            quantity=10,
+            avg_cost_local=100.0,
+            current_price_local=110.0,
+            currency="USD",
+            market_value_usd=1100.0,
+            unrealized_pnl_usd=100.0,
+        )
+        assert fx_return_split(pos) is None
+
+    def test_zero_pnl_is_a_valid_observation(self):
+        from src.ibkr.portfolio_presentation import fx_return_split
+
+        split = fx_return_split(
+            self._pos(market_value_usd=1005.0, unrealized_pnl_usd=0.0)
+        )
+        assert split is not None
+        assert split[2] == pytest.approx(0.0)
+
+    def test_real_large_return_is_not_misclassified_as_unit_mismatch(self):
+        from src.ibkr.portfolio_presentation import fx_return_split
+
+        split = fx_return_split(
+            self._pos(
+                current_price_local=200.0,
+                market_value_usd=1600.0,
+                unrealized_pnl_usd=595.0,
+            )
+        )
+        assert split is not None
+        assert split[0] == pytest.approx(100.0)
+
+    def test_degenerate_or_extreme_ratio_inputs_yield_none(self):
+        from src.ibkr.portfolio_presentation import fx_return_split
+
+        assert fx_return_split(None) is None
+        assert fx_return_split(self._pos(avg_cost_local=0.0)) is None
+        # A 100x local-price ratio is a likely pence/pounds or feed mismatch.
+        assert fx_return_split(self._pos(current_price_local=10000.0)) is None
+
+    def test_local_converted_pnl_does_not_fabricate_historical_fx(self):
+        from src.ibkr.portfolio_presentation import fx_return_split
+
+        assert (
+            fx_return_split(self._pos(unrealized_pnl_basis="LOCAL_CONVERTED")) is None
+        )
+
+    def test_implausible_residual_is_withheld_with_diagnostic(self):
+        from src.ibkr.portfolio_presentation import fx_return_split_diagnostic
+
+        split, issue = fx_return_split_diagnostic(
+            self._pos(
+                current_price_local=98.5,
+                market_value_usd=312.0,
+                unrealized_pnl_usd=-688.0,
+            )
+        )
+
+        assert split is None
+        assert issue is not None
+        assert "implausible" in issue
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_inputs_are_withheld_with_diagnostic(self, value):
+        from src.ibkr.portfolio_presentation import fx_return_split_diagnostic
+
+        split, issue = fx_return_split_diagnostic(self._pos(unrealized_pnl_usd=value))
+
+        assert split is None
+        assert issue is not None
+        assert "non-finite" in issue
+
+    def test_fx_residual_plausibility_boundary_is_explicit(self):
+        from src.ibkr.portfolio_presentation import fx_return_split_diagnostic
+
+        at_boundary, boundary_issue = fx_return_split_diagnostic(
+            self._pos(
+                current_price_local=100.0,
+                market_value_usd=1500.0,
+                unrealized_pnl_usd=500.0,
+            )
+        )
+        above_boundary, above_issue = fx_return_split_diagnostic(
+            self._pos(
+                current_price_local=100.0,
+                market_value_usd=1501.0,
+                unrealized_pnl_usd=501.0,
+            )
+        )
+
+        assert at_boundary is not None
+        assert at_boundary[1] == pytest.approx(50.0)
+        assert boundary_issue is None
+        assert above_boundary is None
+        assert above_issue is not None

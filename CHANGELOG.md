@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.13.0] - 2026-07-19
+
+### Added
+
+- **Concentration-aware watchlists** — IBKR recommendations now select BUY-ready watchlist entries and dip adds within configurable exchange and sector limits, account for cash and working orders, protect existing holdings, and keep a safe non-empty watchlist floor.
+- **Business-quality decision context** — Investment memos surface code-derived ROIC quality and moat signals, while gate-passing `DO_NOT_INITIATE` outcomes are explicitly marked for review.
+- **Bounded forensic evidence** — The Auditor can use approved official disclosures in HTML/text or bounded PDF form, with deterministic freshness, period/scope, currency, and auditor-opinion gates plus shared budget telemetry.
+
+### Changed
+
+- **Safer held-position decisions** — Verdict rejects no longer become automatic sells; exits are confirmation-gated, while entry-constraint and price-weakness cases are routed to review or monitoring to reduce churn.
+- **Unified portfolio workflow** — CLI reconciliation and the Flask dashboard now share an action plan and consistent treatment of watchlists, concentration breaches, cash, turnover, freshness, live-order failures, and degraded broker state.
+- **Valuation and market-data handling** — Added GPT-5.6 model/pricing support and strengthened multi-exchange position identity, FX normalization, local-price valuation, and portfolio reporting.
+
+### Fixed
+
+- **Forensic and accounting reliability** — Current and audited evidence are kept separate and compared only when periods, scopes, and currencies align; bounded retrieval and explicit insufficiency states prevent unsupported evidence from being treated as clean.
+- **Portfolio/report consistency** — Watchlist candidate accounting, action sections, dashboard drilldowns, concentration explanations, and freshness/degraded-state warnings now use the same underlying decisions.
+
 ## [3.12.0] - 2026-07-12
 
 ### Added

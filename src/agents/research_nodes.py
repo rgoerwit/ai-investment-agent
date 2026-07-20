@@ -19,6 +19,7 @@ from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .evidence_constraints import downstream_evidence_constraints
 from .governance_prompt import governance_block
 from .output_limits import cap_state_value
 from .output_validation import (
@@ -57,11 +58,12 @@ You are operating in STRICT mode. Apply this lens when synthesizing analyst inpu
 1. **Evidence over narrative**: Weight your synthesis toward concrete, documented facts
    (filed cash flows, signed contracts, observable margin trends) over projections or
    "could benefit from" language. If the bull case relies primarily on potential rather
-   than demonstrated momentum, frame your synthesis toward DO_NOT_INITIATE.
+   than demonstrated operating traction, frame your synthesis toward DO_NOT_INITIATE.
 
-2. **Near-term catalyst requirement**: A BUY recommendation requires at least one
-   high-probability catalyst already in motion (≤12 months). "Eventual" or "possible"
-   catalysts do not qualify in strict mode.
+2. **Value-realization evidence**: A BUY recommendation requires at least one verifiable
+   path for undervaluation to close or fundamentals to compound. That path may take
+   multiple years; a near-term catalyst is not required. Unsupported "eventual" or
+   "possible" catalysts do not qualify in strict mode.
 
 3. **Data vacuum discipline**: If the combined analyst reports show significant data gaps
    (missing OCF, unknown ownership structure, no analyst coverage data), flag them
@@ -436,7 +438,8 @@ def create_research_manager_node(
                     **summarize_exception(exc, operation="lessons_injection_failed"),
                 )
 
-        prompt = f"{system_msg}{governance_block(state)}{lessons_block}\n\n{all_reports}\n\nProvide Investment Plan."
+        evidence_constraints = downstream_evidence_constraints(state)
+        prompt = f"{system_msg}{governance_block(state)}{evidence_constraints}{lessons_block}\n\n{all_reports}\n\nProvide Investment Plan."
 
         try:
             response = await agent_runtime.invoke_with_rate_limit_handling(

@@ -4,6 +4,7 @@ from tests.ibkr.reconciler_cases import (
     TestComputePortfolioHealth,
     TestCorrelatedSellDetection,
     TestCorrelatedSellDetectionWindow,
+    TestGeographyConcentration,
     TestMacroDetectorBoundaries,
     TestMacroDetectorInputRobustness,
     TestMacroEventTriggersJune2026,

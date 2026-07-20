@@ -247,6 +247,32 @@ def has_parseable_fenced_block(report: str | None, block_name: str) -> bool:
     )
 
 
+_KILL_CRITERIA_TRIGGER = re.compile(r"TRIGGER_\d+\s*:\s*(.+)")
+
+
+def extract_kill_criteria(bear_text: str | None) -> list[str]:
+    """Pull TRIGGER_N entries from the fenced KILL_CRITERIA block emitted by Bear Researcher.
+
+    Returns at most 3 trimmed triggers. Returns an empty list if the block is
+    missing, malformed, or contains no usable lines. Lives here (not in
+    src.agents.support, which re-exports it) so the agents-free IBKR analysis
+    index can persist thesis-break triggers onto AnalysisRecord.
+    """
+    if not bear_text:
+        return []
+    block = extract_last_fenced_block(bear_text, "KILL_CRITERIA")
+    if block is None:
+        return []
+    triggers: list[str] = []
+    for line in block.splitlines():
+        m = _KILL_CRITERIA_TRIGGER.search(line)
+        if m:
+            value = m.group(1).strip()
+            if value:
+                triggers.append(value)
+    return triggers[:3]
+
+
 def extract_last_data_block(
     report: str | None, *, include_markers: bool = False
 ) -> str | None:

@@ -12,6 +12,7 @@ from src.ibkr.ticker_mapper import (
     ibkr_symbol_to_yf,
     parse_trade_block_price,
     resolve_conid,
+    resolve_ibkr_ticker,
     resolve_yf_ticker_from_position,
     yf_to_ibkr_format,
 )
@@ -42,6 +43,24 @@ class TestIbkrSymbolToYf:
 
     def test_amsterdam(self):
         assert ibkr_symbol_to_yf("ASML", "AEB") == "ASML.AS"
+
+    def test_static_exchange_mapping_is_verified(self):
+        resolution = resolve_ibkr_ticker("AGS", "EBR", "EUR")
+
+        assert resolution.yf_ticker == "AGS.BR"
+        assert resolution.source == "exchange_map"
+        assert resolution.exchange_verified is True
+
+    def test_smart_non_usd_search_preserves_inferred_provenance(self):
+        with patch(
+            "src.ibkr.ticker_mapper._yf_search_ticker",
+            return_value="AGS.BR",
+        ):
+            resolution = resolve_ibkr_ticker("AGS", "SMART", "EUR")
+
+        assert resolution.yf_ticker == "AGS.BR"
+        assert resolution.source == "yfinance_search"
+        assert resolution.exchange_verified is False
 
     def test_london(self):
         assert ibkr_symbol_to_yf("HSBA", "LSE") == "HSBA.L"

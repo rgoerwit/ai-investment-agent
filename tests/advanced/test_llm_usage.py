@@ -79,6 +79,27 @@ def test_extract_token_usage_breakdown_without_reasoning_detail():
     assert usage.total_tokens == 300
 
 
+def test_extract_flex_prefixed_cache_and_reasoning_details():
+    response = Mock()
+    response.usage_metadata = {
+        "input_tokens": 100,
+        "output_tokens": 200,
+        "input_token_details": {
+            "flex_cache_read": 60,
+            "flex_cache_creation": 20,
+        },
+        "output_token_details": {"flex_reasoning": 150},
+    }
+    response.response_metadata = {}
+
+    usage = extract_token_usage_breakdown(response)
+
+    assert usage.cached_input_tokens == 60
+    assert usage.cache_write_input_tokens == 20
+    assert usage.thinking_tokens == 150
+    assert usage.visible_output_tokens == 50
+
+
 def test_extract_token_usage_breakdown_handles_malformed_metadata():
     response = Mock()
     response.usage_metadata = {"input_tokens": "abc", "output_tokens": None}

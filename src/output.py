@@ -92,7 +92,7 @@ def display_memory_statistics(
             ("Bull Researcher", f"{safe_ticker}_bull_memory"),
             ("Bear Researcher", f"{safe_ticker}_bear_memory"),
             ("Research Manager", f"{safe_ticker}_invest_judge_memory"),
-            ("Trader", f"{safe_ticker}_trader_memory"),
+            ("Position Planner", f"{safe_ticker}_trader_memory"),
             ("Portfolio Manager", f"{safe_ticker}_risk_manager_memory"),
         ]
 
@@ -205,7 +205,7 @@ def display_results(
     if "final_trade_decision" in result and result["final_trade_decision"]:
         decision_panel = Panel(
             result["final_trade_decision"],
-            title="Final Trading Decision",
+            title="Final Position Decision",
             border_style="green",
             padding=(1, 2),
         )
@@ -220,7 +220,7 @@ def display_results(
         ("foreign_language_report", "Foreign Language Analysis"),
         ("fundamentals_report", "Fundamentals Analysis"),
         ("investment_plan", "Investment Plan"),
-        ("trader_investment_plan", "Trading Proposal"),
+        ("trader_investment_plan", "Position Plan"),
     ]
 
     for field_name, display_name in report_fields:

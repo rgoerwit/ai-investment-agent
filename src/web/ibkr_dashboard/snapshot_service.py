@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -52,6 +53,9 @@ class DashboardSnapshotService:
         self._last_error: str | None = None
         self._results_mtime_ns: int | None = None
         self._loading = False
+        self._loading_started_monotonic: float | None = None
+        self._load_id = 0
+        self._active_load_id: int | None = None
         self._preferences_version = 0
         self._load_done = threading.Event()
         self._load_done.set()
@@ -92,6 +96,7 @@ class DashboardSnapshotService:
     ) -> tuple[PortfolioRecommendationBundle | None, SnapshotMetadata]:
         with self._lock:
             self._invalidate_if_stale_locked()
+            self._expire_loading_if_timed_out_locked()
 
             if self._loading:
                 if self._bundle is not None:
@@ -164,18 +169,22 @@ class DashboardSnapshotService:
         return await service.build_bundle(request)
 
     def _start_background_load_locked(self) -> None:
+        self._load_id += 1
+        load_id = self._load_id
+        self._active_load_id = load_id
         self._loading = True
+        self._loading_started_monotonic = time.monotonic()
         self._last_error = None
         self._load_done.clear()
         load_version = self._preferences_version
         thread = threading.Thread(
             target=self._load_in_background,
-            args=(load_version,),
+            args=(load_version, load_id),
             daemon=True,
         )
         thread.start()
 
-    def _load_in_background(self, load_version: int) -> None:
+    def _load_in_background(self, load_version: int, load_id: int) -> None:
         bundle: PortfolioRecommendationBundle | None = None
         error_message: str | None = None
         results_mtime_ns: int | None = None
@@ -199,16 +208,38 @@ class DashboardSnapshotService:
             )
         finally:
             with self._lock:
-                stale_load = load_version != self._preferences_version
-                if not stale_load and bundle is not None:
-                    self._bundle = bundle
-                    self._fetched_at = datetime.now(UTC)
-                    self._results_mtime_ns = results_mtime_ns
-                    self._last_error = None
-                elif not stale_load and error_message is not None:
-                    self._last_error = error_message
-                self._loading = False
-                self._load_done.set()
+                if load_id == self._active_load_id:
+                    stale_load = load_version != self._preferences_version
+                    if not stale_load and bundle is not None:
+                        self._bundle = bundle
+                        self._fetched_at = datetime.now(UTC)
+                        self._results_mtime_ns = results_mtime_ns
+                        self._last_error = None
+                    elif not stale_load and error_message is not None:
+                        self._last_error = error_message
+                    self._loading = False
+                    self._loading_started_monotonic = None
+                    self._active_load_id = None
+                    self._load_done.set()
+
+    def _expire_loading_if_timed_out_locked(self) -> None:
+        if not self._loading or self._loading_started_monotonic is None:
+            return
+        timeout = self._settings.snapshot_timeout_seconds
+        if timeout <= 0:
+            return
+        elapsed = time.monotonic() - self._loading_started_monotonic
+        if elapsed <= timeout:
+            return
+        self._loading = False
+        self._loading_started_monotonic = None
+        self._active_load_id = None
+        self._last_error = (
+            "Dashboard snapshot load exceeded "
+            f"{timeout}s; use Reload Data to retry, or switch to read-only mode "
+            "if live IBKR is unavailable."
+        )
+        self._load_done.set()
 
     def _invalidate_if_stale_locked(self) -> None:
         if self._loading or self._bundle is None:

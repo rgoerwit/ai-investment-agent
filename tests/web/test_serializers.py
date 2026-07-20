@@ -3,16 +3,20 @@ from __future__ import annotations
 from src.ibkr.models import (
     AnalysisRecord,
     NormalizedPosition,
+    PortfolioSummary,
     ReconciliationItem,
     TradeBlockData,
 )
 from src.ibkr.portfolio_presentation import build_cash_summary, build_live_order_note
+from src.ibkr.recommendation_service import PortfolioRecommendationBundle
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
 from src.ibkr.ticker import Ticker
 from src.web.ibkr_dashboard.serializers import (
+    _serialize_position,
     serialize_dashboard_snapshot,
     serialize_equity_drilldown,
 )
+from tests.factories.ibkr import make_analysis, make_position
 
 
 def test_serialize_dashboard_snapshot_shapes_payload(sample_bundle):
@@ -139,8 +143,10 @@ def test_serialize_dashboard_snapshot_includes_profit_take_fields(sample_bundle)
     )
 
     payload = serialize_dashboard_snapshot(sample_bundle)
-    row = payload["actions"]["sell_profit_take"][0]
+    assert payload["actions"]["sell_profit_take"] == []
+    row = payload["actions"]["review_profit_take"][0]
 
+    assert row["action"] == "REVIEW"
     assert row["sell_type"] == "PROFIT_TAKE"
     assert row["cost_basis_return_pct"] == 42.5
     assert row["profit_take_reasons"] == ["capital_idle_cash_severe"]
@@ -167,6 +173,101 @@ def test_serialize_dashboard_snapshot_includes_currency_repair_metadata(sample_b
     assert analysis["currency_repair_reason"] == "legacy_snapshot_usd_default"
 
 
+def test_serialize_dashboard_snapshot_exposes_ticker_resolution_provenance(
+    sample_bundle,
+):
+    sample_bundle.items[0].ibkr_position = sample_bundle.items[
+        0
+    ].ibkr_position.model_copy(
+        update={
+            "ticker_identity_verified": False,
+            "ticker_resolution_source": "yfinance_search",
+        }
+    )
+
+    payload = serialize_dashboard_snapshot(sample_bundle)
+    row = payload["actions"]["review"][0]
+    position = row["position"]
+
+    assert row["action"] == "REVIEW"
+    assert position["ticker_identity_verified"] is False
+    assert position["ticker_resolution_source"] == "yfinance_search"
+    assert position["market_value_basis"] == "BROKER_USD"
+    assert position["unrealized_pnl_basis"] == "BROKER_USD"
+    assert position["valuation_valid"] is True
+    assert position["valuation_issue"] is None
+    assert "fx_return_issue" in position
+
+
+def test_serialize_position_exposes_valid_implied_fx_split():
+    position = NormalizedPosition(
+        conid=1,
+        ticker=Ticker.from_yf("HERDEZ.MX", currency="MXN"),
+        quantity=100,
+        avg_cost_local=100.0,
+        current_price_local=105.5,
+        currency="MXN",
+        market_value_usd=800.0,
+        unrealized_pnl_usd=-205.0,
+        market_value_basis="BROKER_USD",
+        unrealized_pnl_basis="BROKER_USD",
+    )
+
+    payload = _serialize_position(position)
+
+    assert payload is not None
+    assert payload["local_return_pct"] == 5.5
+    assert payload["fx_effect_pct"] is not None
+    assert payload["usd_return_pct"] is not None
+    assert payload["fx_return_issue"] is None
+
+
+def test_serialize_position_withholds_split_for_local_converted_pnl():
+    position = NormalizedPosition(
+        conid=1,
+        ticker=Ticker.from_yf("7203.T", currency="JPY"),
+        quantity=100,
+        avg_cost_local=2_000.0,
+        current_price_local=2_100.0,
+        currency="JPY",
+        market_value_usd=1_407.0,
+        unrealized_pnl_usd=67.0,
+        market_value_basis="LOCAL_CONVERTED",
+        unrealized_pnl_basis="LOCAL_CONVERTED",
+    )
+
+    payload = _serialize_position(position)
+
+    assert payload is not None
+    assert payload["local_return_pct"] is None
+    assert payload["fx_effect_pct"] is None
+    assert payload["usd_return_pct"] is None
+    assert payload["fx_return_issue"] is None
+
+
+def test_serialize_invalid_position_exposes_issue_and_no_returns():
+    position = NormalizedPosition(
+        conid=1,
+        ticker=Ticker.from_yf("7203.T", currency="JPY"),
+        quantity=100,
+        currency="JPY",
+        market_value_basis="UNAVAILABLE",
+        unrealized_pnl_basis="UNAVAILABLE",
+        valuation_valid=False,
+        valuation_issue="Broker value units could not be verified",
+    )
+
+    payload = _serialize_position(position)
+
+    assert payload is not None
+    assert payload["valuation_valid"] is False
+    assert payload["valuation_issue"] == "Broker value units could not be verified"
+    assert payload["local_return_pct"] is None
+    assert payload["fx_effect_pct"] is None
+    assert payload["usd_return_pct"] is None
+    assert payload["fx_return_issue"] == "Broker value units could not be verified"
+
+
 def test_serialize_equity_drilldown_includes_structured_and_markdown(sample_bundle):
     item = next(item for item in sample_bundle.items if item.ticker.yf == "MEGP.L")
     payload = serialize_equity_drilldown(
@@ -184,3 +285,224 @@ def test_serialize_equity_drilldown_includes_structured_and_markdown(sample_bund
     assert "file_path" not in payload["analysis"]
     assert payload["note"] is None
     assert payload["live_order_note"] is None
+
+
+# ── Concentration parity: dashboard payload mirrors the CLI optimizer ─────────
+
+
+def _watch_buy(ticker: str, conviction: str = "Medium") -> ReconciliationItem:
+    analysis = make_analysis(ticker=ticker, conviction=conviction, size_pct=4.0)
+    return ReconciliationItem(
+        ticker=ticker,
+        action="BUY",
+        urgency="MEDIUM",
+        reason=f"Watchlist BUY — {conviction} conviction",
+        analysis=analysis,
+        suggested_quantity=100,
+        suggested_price=100.0,
+        cash_impact_usd=-1752.0,
+        is_watchlist=True,
+    )
+
+
+def _offwatch_buy(ticker: str) -> ReconciliationItem:
+    analysis = make_analysis(ticker=ticker, conviction="High", size_pct=4.0)
+    return ReconciliationItem(
+        ticker=ticker,
+        action="BUY",
+        urgency="MEDIUM",
+        reason="New BUY — High conviction",
+        analysis=analysis,
+        suggested_quantity=100,
+        suggested_price=100.0,
+        cash_impact_usd=-1500.0,
+        is_watchlist=False,
+    )
+
+
+def _dip_hold(ticker: str) -> ReconciliationItem:
+    analysis = make_analysis(
+        ticker=ticker,
+        verdict="BUY",
+        health_adj=60.0,
+        growth_adj=60.0,
+        entry_price=2100.0,
+        stop_price=1700.0,
+        target_1=2600.0,
+        current_price=1800.0,
+    )
+    return ReconciliationItem(
+        ticker=ticker,
+        action="HOLD",
+        urgency="LOW",
+        reason="Held — dip",
+        ibkr_position=make_position(ticker=ticker, current_price=1800.0),
+        analysis=analysis,
+    )
+
+
+def _concentration_bundle(**overrides) -> PortfolioRecommendationBundle:
+    """T exchange already over the 40% limit: the on-watch T buy is screened,
+    the off-watch T buy is withheld, and the sub-★★★ T dip is dropped."""
+    portfolio = PortfolioSummary(
+        portfolio_value_usd=100000,
+        cash_balance_usd=15000,
+        settled_cash_usd=10000,
+        available_cash_usd=8000,
+        position_count=1,
+        exchange_weights={"T": 45.0},
+    )
+    values: dict = {
+        "portfolio": portfolio,
+        "items": [
+            _watch_buy("7203.T"),
+            _watch_buy("MEGP.L"),
+            _offwatch_buy("9984.T"),
+            _dip_hold("6758.T"),
+        ],
+        "watchlist_tickers": {"7203.T", "MEGP.L"},
+        "watchlist_total": 2,
+    }
+    values.update(overrides)
+    return PortfolioRecommendationBundle(**values)
+
+
+def test_dashboard_hides_concentration_screened_watchlist_buy():
+    payload = serialize_dashboard_snapshot(_concentration_bundle())
+    actions = payload["actions"]
+
+    buy_tickers = [row["ticker_yf"] for row in actions["watchlist_buy"]]
+    assert buy_tickers == ["MEGP.L"]
+    removes = {row["ticker_yf"]: row for row in actions["watchlist_remove"]}
+    assert removes["7203.T"]["removal_reason"] == "concentration_displaced"
+    assert "overweight exchange T" in removes["7203.T"]["concentration"]
+    # Header chips and cash agree with the filtered lists (no split-brain).
+    assert payload["overview"]["new_buys"] == 1
+    assert payload["summary_counts"]["buys"] == 1
+    assert payload["cash_summary"]["recommended_buy_cost_usd"] == 1752.0
+
+
+def test_dashboard_exposes_nonempty_watchlist_floor_retention():
+    items = [
+        _watch_buy(ticker, conviction="High")
+        for ticker in ("3393.T", "1926.T", "3762.T")
+    ]
+    for item, score in zip(items, (100.0, 110.0, 105.0), strict=True):
+        item.analysis.health_adj = score / 2
+        item.analysis.growth_adj = score / 2
+    bundle = _concentration_bundle(
+        items=items,
+        watchlist_tickers={item.ticker.yf for item in items},
+        watchlist_total=len(items),
+    )
+
+    actions = serialize_dashboard_snapshot(bundle)["actions"]
+
+    retained = actions["watchlist_floor_retained"]
+    assert [row["ticker_yf"] for row in retained] == ["1926.T"]
+    assert retained[0]["retention_reason"] == "concentration_displaced"
+    assert retained[0]["breaches"][0]["dimension"] == "exchange"
+    assert [row["ticker_yf"] for row in actions["watchlist_remove"]] == [
+        "3762.T",
+        "3393.T",
+    ]
+
+
+def test_dashboard_withholds_offwatch_and_screens_dip():
+    payload = serialize_dashboard_snapshot(_concentration_bundle())
+    actions = payload["actions"]
+
+    assert [row["ticker_yf"] for row in actions["watchlist_withheld"]] == ["9984.T"]
+    assert "overweight exchange T" in actions["watchlist_withheld"][0]["concentration"]
+    assert "9984.T" not in [row["ticker_yf"] for row in actions["watchlist_candidate"]]
+    assert "6758.T" not in [row["ticker_yf"] for row in actions["dip_watch"]]
+    assert payload["summary_counts"]["watchlist_withheld"] == 1
+
+
+def test_dashboard_keeps_medium_offwatch_buy_visible_but_non_actionable():
+    candidate = _offwatch_buy("9984.T")
+    assert candidate.analysis is not None
+    candidate.analysis.conviction = "Medium"
+    candidate.analysis.trade_block.conviction = "Medium"
+    bundle = _concentration_bundle(
+        items=[candidate],
+        watchlist_tickers=set(),
+        watchlist_total=0,
+    )
+    bundle.portfolio.exchange_weights = {}
+
+    actions = serialize_dashboard_snapshot(bundle)["actions"]
+
+    assert actions["watchlist_candidate"] == []
+    assert [row["ticker_yf"] for row in actions["watchlist_below_conviction"]] == [
+        "9984.T"
+    ]
+
+
+def test_dashboard_screen_inactive_without_weights():
+    bundle = _concentration_bundle()
+    bundle.portfolio.exchange_weights = {}
+    payload = serialize_dashboard_snapshot(bundle)
+    actions = payload["actions"]
+
+    assert sorted(row["ticker_yf"] for row in actions["watchlist_buy"]) == [
+        "7203.T",
+        "MEGP.L",
+    ]
+    assert [row["ticker_yf"] for row in actions["watchlist_candidate"]] == ["9984.T"]
+    assert "6758.T" in [row["ticker_yf"] for row in actions["dip_watch"]]
+    assert actions["watchlist_remove"] == []
+    assert actions["watchlist_withheld"] == []
+
+
+def test_dashboard_unavailable_watchlist_is_additions_only():
+    bundle = _concentration_bundle(watchlist_unavailable=True)
+    payload = serialize_dashboard_snapshot(bundle)
+    actions = payload["actions"]
+
+    assert actions["watchlist_buy"] == []  # no keep authority
+    assert actions["watchlist_remove"] == []  # no removal claims
+    assert payload["overview"]["new_buys"] == 0
+
+
+def test_dashboard_custom_bundle_limits_honored():
+    bundle = _concentration_bundle(exchange_limit_pct=60.0)
+    payload = serialize_dashboard_snapshot(bundle)
+    actions = payload["actions"]
+
+    assert "7203.T" in [row["ticker_yf"] for row in actions["watchlist_buy"]]
+    assert actions["watchlist_remove"] == []
+    assert actions["watchlist_withheld"] == []
+    assert "6758.T" in [row["ticker_yf"] for row in actions["dip_watch"]]
+
+
+def test_dashboard_emits_structured_breaches_alongside_string():
+    payload = serialize_dashboard_snapshot(_concentration_bundle())
+    actions = payload["actions"]
+
+    withheld = actions["watchlist_withheld"][0]
+    assert isinstance(withheld["breaches"], list) and withheld["breaches"]
+    breach = withheld["breaches"][0]
+    assert set(breach) == {"dimension", "key", "projected_pct", "limit_pct"}
+    assert breach["dimension"] == "exchange"
+    assert breach["key"] == "T"
+    assert breach["limit_pct"] == 40.0
+
+    removed = {row["ticker_yf"]: row for row in actions["watchlist_remove"]}
+    assert removed["7203.T"]["breaches"][0]["dimension"] == "exchange"
+
+
+def test_dashboard_snapshot_includes_concentration_limits(sample_bundle):
+    payload = serialize_dashboard_snapshot(sample_bundle)
+
+    assert payload["concentration_limits"] == {
+        "sector": sample_bundle.sector_limit_pct,
+        "exchange": sample_bundle.exchange_limit_pct,
+    }
+
+
+def test_dashboard_snapshot_passes_through_errors(sample_bundle):
+    sample_bundle.errors["live_orders"] = "IBKR session not authenticated"
+    payload = serialize_dashboard_snapshot(sample_bundle)
+
+    assert payload["errors"]["live_orders"] == "IBKR session not authenticated"

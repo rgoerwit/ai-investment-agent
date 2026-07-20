@@ -76,6 +76,7 @@ class InvestmentMemo:
     kill_criteria: list[str] = field(default_factory=list)
     confidence: str = "Confidence signals unavailable."
     source_confidence: list[SourceRow] = field(default_factory=list)
+    business_quality: str | None = None
 
 
 def extract_pm_verdict(pm_text: str) -> str:
@@ -353,6 +354,40 @@ def _is_material_risk_flag(flag: dict) -> bool:
     return False
 
 
+# Positive moat signals only. Deliberately NOT a startswith("MOAT_") match:
+# MOAT_BONUS_SUPPRESSED_PEAK_TRANSIENT shares the prefix but is a suppression
+# flag and must not render as a moat.
+_MOAT_FLAG_TYPES = frozenset(
+    {"MOAT_DURABLE_ADVANTAGE", "MOAT_PRICING_POWER", "MOAT_EARNINGS_QUALITY"}
+)
+
+
+def business_quality_line(
+    fundamentals: str, red_flags: list[dict] | None
+) -> str | None:
+    """One-line quality summary composed from signals the pipeline already emits.
+
+    Code-derived (ROIC_QUALITY DATA_BLOCK field + moat flags) so it cannot
+    hallucinate; returns None when neither signal is present so the memo line
+    is omitted rather than rendered empty.
+    """
+    roic = extract_data_block_field(fundamentals, "ROIC_QUALITY")
+    # "N/A" is a valid token in the field's grammar — treat as absent.
+    if roic and roic.strip().upper() == "N/A":
+        roic = None
+    moats = [
+        str(flag.get("type")).removeprefix("MOAT_")
+        for flag in red_flags or []
+        if isinstance(flag, dict) and flag.get("type") in _MOAT_FLAG_TYPES
+    ]
+    if not roic and not moats:
+        return None
+    parts = [f"ROIC quality: {roic}"] if roic else []
+    if moats:
+        parts.append("moat: " + ", ".join(m.replace("_", " ").lower() for m in moats))
+    return "; ".join(parts)
+
+
 def summarize_confidence(state: dict) -> str:
     """One-sentence summary of which optional cross-checks ran."""
     run_summary = state.get("run_summary") or {}
@@ -411,6 +446,7 @@ def build_memo(state: dict) -> InvestmentMemo:
         kill_criteria=extract_kill_criteria(bear_text),
         confidence=summarize_confidence(state),
         source_confidence=build_source_confidence_rows(state),
+        business_quality=business_quality_line(fundamentals, red_flags),
     )
 
 
@@ -446,6 +482,9 @@ def render_memo_markdown(memo: InvestmentMemo) -> str:
         parts.append("**Key numbers.**\n\n")
         parts.extend(f"- {row}\n" for row in memo.key_numbers)
         parts.append("\n")
+
+    if memo.business_quality:
+        parts.append(f"**Business quality.** {memo.business_quality}\n\n")
 
     parts.append(f"**Valuation.** {memo.valuation}\n\n")
 

@@ -347,13 +347,13 @@ class TestUndiscoveredCoverageGuard:
             assert "5 analysts" not in sm
 
 
-class TestPmExecutionPrecedence:
-    """PM final execution parameters must be declared binding over upstream stops."""
+class TestPmPositionPrecedence:
+    """PM position parameters must be binding over upstream reference levels."""
 
     def test_version_valid(self):
         assert _version_ok(get_prompt("portfolio_manager").version)
 
     def test_precedence_rule_present(self):
         sm = get_prompt("portfolio_manager").system_message
-        assert "these FINAL EXECUTION PARAMETERS are binding" in sm
+        assert "these FINAL POSITION PARAMETERS supersede" in sm
         assert "supersede" in sm

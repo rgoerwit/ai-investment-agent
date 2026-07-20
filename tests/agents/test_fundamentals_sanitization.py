@@ -1392,3 +1392,37 @@ class TestScoreBreakdownHardening:
         updated, _, suspect = reconcile_score_consistency(body)
         assert suspect
         assert "FCF_POSITIVE=1 but FREE_CASH_FLOW is negative" in updated
+
+
+def test_ags_narrative_conflict_gets_authoritative_warning_without_rewrite() -> None:
+    content = """### Financial Health Sheet
+- **NetDebt/EBITDA:** -0.90 (Net Cash Position) -> 1 pts
+
+### --- START DATA_BLOCK ---
+NET_DEBT_EBITDA: 0.23
+CASH_TO_ASSETS: 22.4%
+SHAREHOLDER_RETURN_EXECUTION: ANNOUNCED_ONLY
+### --- END DATA_BLOCK ---
+"""
+
+    sanitized = _sanitize_fundamentals_output(content, "", "AGS.SI")
+
+    assert "AUTHORITATIVE_METRIC_CORRECTION" in sanitized
+    assert "preceding labeled narrative=-0.90" in sanitized
+    assert "authoritative DATA_BLOCK=0.23" in sanitized
+    assert "NetDebt/EBITDA:** -0.90" in sanitized
+    assert sanitized.index("AUTHORITATIVE_METRIC_CORRECTION") < sanitized.index(
+        "START DATA_BLOCK"
+    )
+
+
+def test_authoritative_warning_is_idempotent() -> None:
+    content = """Net Debt/EBITDA: -0.90
+### --- START DATA_BLOCK ---
+NET_DEBT_EBITDA: 0.23
+### --- END DATA_BLOCK ---
+"""
+    once = _sanitize_fundamentals_output(content, "", "AGS.SI")
+    twice = _sanitize_fundamentals_output(once, "", "AGS.SI")
+
+    assert twice.count("AUTHORITATIVE_METRIC_CORRECTION") == 1

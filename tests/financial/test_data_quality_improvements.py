@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import pytest
+from packaging.version import Version
 
 from src.data.fetcher import SmartMarketDataFetcher
 
@@ -158,22 +159,22 @@ class TestPromptContentUpdates:
         # News analyst
         with open(prompts_dir / "news_analyst.json") as f:
             news = json.load(f)
-        assert (
-            news["version"] >= "4.8"
+        assert Version(news["version"]) >= Version(
+            "4.8"
         ), f"News analyst version should be >= 4.8, got {news['version']}"
 
         # Fundamentals analyst
         with open(prompts_dir / "fundamentals_analyst.json") as f:
             fund = json.load(f)
-        assert (
-            fund["version"] >= "8.2"
+        assert Version(fund["version"]) >= Version(
+            "8.2"
         ), f"Fundamentals analyst version should be >= 8.2, got {fund['version']}"
 
         # Junior analyst
         with open(prompts_dir / "junior_fundamentals_analyst.json") as f:
             junior = json.load(f)
-        assert (
-            junior["version"] >= "1.2"
+        assert Version(junior["version"]) >= Version(
+            "1.2"
         ), f"Junior analyst version should be >= 1.2, got {junior['version']}"
 
 

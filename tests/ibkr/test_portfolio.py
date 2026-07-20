@@ -41,6 +41,11 @@ class TestNormalizePositions:
         assert p.avg_cost_local == 2000.0
         assert p.current_price_local == 2100.0
         assert p.currency == "JPY"
+        assert p.market_value_usd == pytest.approx(1400.0)
+        assert p.unrealized_pnl_usd == pytest.approx(67.0)
+        assert p.market_value_basis == "BROKER_USD"
+        assert p.unrealized_pnl_basis == "BROKER_USD"
+        assert p.valuation_valid is True
 
     def test_hk_zero_padding(self):
         raw = [
@@ -130,6 +135,7 @@ class TestNormalizePositions:
                 "listingExchange": "TSEJ",
                 "position": 100,
                 "mktValue": 210_000.0,  # ¥210,000
+                "mktPrice": 2_100.0,
                 "currency": "JPY",
             }
         ]
@@ -152,8 +158,8 @@ class TestNormalizePositions:
         positions = normalize_positions(raw)
         assert positions[0].market_value_usd == pytest.approx(1800.0)
 
-    def test_unknown_currency_falls_back_to_1x(self):
-        """Unknown currency code is treated as 1.0 (no conversion)."""
+    def test_unknown_currency_fails_closed(self):
+        """Unknown non-USD currencies must not silently use an identity rate."""
         raw = [
             {
                 "conid": 3,
@@ -165,7 +171,164 @@ class TestNormalizePositions:
             }
         ]
         positions = normalize_positions(raw)
-        assert positions[0].market_value_usd == pytest.approx(500.0)
+        assert positions[0].market_value_usd == 0.0
+        assert positions[0].unrealized_pnl_usd == 0.0
+        assert positions[0].valuation_valid is False
+        assert "ZZZ" in (positions[0].valuation_issue or "")
+
+    @pytest.mark.parametrize(
+        ("ticker", "exchange", "currency", "fx_rate"),
+        [
+            ("7203", "TSEJ", "JPY", 0.0067),
+            ("001060", "KRX", "KRW", 0.00075),
+            ("3005", "TWSE", "TWD", 0.032),
+        ],
+    )
+    def test_asian_local_values_are_converted_once(
+        self,
+        ticker,
+        exchange,
+        currency,
+        fx_rate,
+    ):
+        raw = [
+            {
+                "conid": 10,
+                "contractDesc": ticker,
+                "listingExchange": exchange,
+                "position": 100,
+                "avgCost": 100.0,
+                "mktPrice": 90.0,
+                "mktValue": 9_000.0,
+                "unrealizedPnl": -1_000.0,
+                "currency": currency,
+            }
+        ]
+
+        position = normalize_positions(raw)[0]
+
+        assert position.market_value_usd == pytest.approx(9_000.0 * fx_rate)
+        assert position.unrealized_pnl_usd == pytest.approx(-1_000.0 * fx_rate)
+        assert position.market_value_basis == "LOCAL_CONVERTED"
+        assert position.unrealized_pnl_basis == "LOCAL_CONVERTED"
+        assert position.valuation_valid is True
+
+    def test_jpy_values_already_in_usd_are_not_double_converted(self):
+        raw = [
+            {
+                "conid": 11,
+                "contractDesc": "7203",
+                "listingExchange": "TSEJ",
+                "position": 100,
+                "avgCost": 100.0,
+                "mktPrice": 90.0,
+                "mktValue": 60.3,
+                "unrealizedPnl": -6.7,
+                "currency": "JPY",
+            }
+        ]
+
+        position = normalize_positions(raw)[0]
+
+        assert position.market_value_usd == pytest.approx(60.3)
+        assert position.unrealized_pnl_usd == pytest.approx(-6.7)
+        assert position.market_value_basis == "BROKER_USD"
+        assert position.unrealized_pnl_basis == "BROKER_USD"
+
+    def test_inconsistent_broker_units_are_quarantined(self):
+        raw = [
+            {
+                "conid": 12,
+                "contractDesc": "7203",
+                "listingExchange": "TSEJ",
+                "position": 100,
+                "avgCost": 100.0,
+                "mktPrice": 90.0,
+                "mktValue": 500.0,
+                "unrealizedPnl": -1_000.0,
+                "currency": "JPY",
+            }
+        ]
+
+        position = normalize_positions(raw)[0]
+
+        assert position.valuation_valid is False
+        assert position.market_value_usd == 0.0
+        assert "market value" in (position.valuation_issue or "")
+
+    @pytest.mark.parametrize(
+        ("field", "bad_value", "issue_field"),
+        [
+            ("position", "not-a-number", "quantity"),
+            ("mktValue", {}, "market_value"),
+            ("mktPrice", True, "current_price"),
+            ("avgCost", "broken", "avg_cost"),
+            ("unrealizedPnl", [], "unrealized_pnl"),
+            pytest.param(
+                "mktValue",
+                10**10_000,
+                "market_value",
+                id="overflowing-market-value",
+            ),
+        ],
+    )
+    def test_malformed_numeric_field_quarantines_row_without_aborting_snapshot(
+        self,
+        field,
+        bad_value,
+        issue_field,
+    ):
+        malformed = {
+            "conid": 12,
+            "contractDesc": "7203",
+            "listingExchange": "TSEJ",
+            "position": 100,
+            "avgCost": 100.0,
+            "mktPrice": 90.0,
+            "mktValue": 9_000.0,
+            "unrealizedPnl": -1_000.0,
+            "currency": "JPY",
+        }
+        malformed[field] = bad_value
+        valid = {
+            "conid": 13,
+            "contractDesc": "AAPL",
+            "listingExchange": "SMART",
+            "position": 10,
+            "avgCost": 175.0,
+            "mktPrice": 180.0,
+            "mktValue": 1_800.0,
+            "unrealizedPnl": 50.0,
+            "currency": "USD",
+        }
+
+        positions = normalize_positions([malformed, valid])
+
+        assert len(positions) == 2
+        assert positions[0].valuation_valid is False
+        assert positions[0].market_value_usd == 0.0
+        assert issue_field in (positions[0].valuation_issue or "")
+        assert positions[1].valuation_valid is True
+
+    def test_non_usd_value_without_current_price_is_quarantined(self):
+        raw = [
+            {
+                "conid": 14,
+                "contractDesc": "7203",
+                "listingExchange": "TSEJ",
+                "position": 100,
+                "avgCost": 100.0,
+                "mktValue": 9_000.0,
+                "unrealizedPnl": -1_000.0,
+                "currency": "JPY",
+            }
+        ]
+
+        position = normalize_positions(raw)[0]
+
+        assert position.valuation_valid is False
+        assert position.market_value_usd == 0.0
+        assert "market value" in (position.valuation_issue or "")
 
     def test_lse_price_converted_gbp_to_gbx(self):
         """IBKR reports .L prices in GBP; normalize_positions multiplies by 100 → GBX
@@ -231,6 +394,8 @@ class TestNormalizePositions:
             "FX lookups use the correct pence rate (0.0127) not the pound rate (1.27)"
         )
         assert p.current_price_local == pytest.approx(894.0)
+        assert p.fx_rate_to_usd == pytest.approx(0.0127)
+        assert p.market_value_basis == "LOCAL_CONVERTED"
         # market_value_usd computed from GBP mktValue before ×100 — must NOT be affected
         assert p.market_value_usd == pytest.approx(894.0 * 1.27, rel=0.05)
 
@@ -316,7 +481,37 @@ class TestNormalizePositions:
         positions = normalize_positions(raw, client=client)
 
         assert positions[0].yf_ticker == "AAPL"
+        assert positions[0].ticker_identity_verified is True
         client.get_contract_info.assert_not_called()
+
+    def test_smart_eur_search_result_remains_unverified(self):
+        client = _contract_info_client(
+            {"symbol": "AGS", "primaryExch": "SMART", "currency": "EUR"}
+        )
+        raw = [
+            {
+                "conid": 123,
+                "contractDesc": "AGS",
+                "listingExchange": "SMART",
+                "position": 100,
+                "mktValue": 1000,
+                "currency": "EUR",
+            }
+        ]
+
+        with (
+            patch("src.ibkr.portfolio.cache_conid_mapping") as cache_mapping,
+            patch(
+                "src.ibkr.ticker_mapper._yf_search_ticker",
+                return_value="AGS.BR",
+            ),
+        ):
+            positions = normalize_positions(raw, client=client)
+
+        assert positions[0].yf_ticker == "AGS.BR"
+        assert positions[0].ticker_identity_verified is False
+        assert positions[0].ticker_resolution_source == "yfinance_search"
+        cache_mapping.assert_not_called()
 
     def test_korean_multi_exchange_currency_forces_live_resolution(self):
         client = _contract_info_client(
@@ -378,6 +573,8 @@ class TestNormalizePositions:
             positions = normalize_positions(raw, client=client)
 
         assert positions[0].yf_ticker == "1264.TWO"
+        assert positions[0].ticker_identity_verified is True
+        assert positions[0].ticker_resolution_source == "exchange_map"
         client.get_contract_info.assert_called_once_with(1264, compete=False)
         client.get_security_definition.assert_called_once_with(1264)
 

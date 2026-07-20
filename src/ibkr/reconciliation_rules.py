@@ -2,41 +2,67 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal
+from datetime import date
+from typing import TYPE_CHECKING, Literal
 
 import structlog
 
 from src.exchange_metadata import IBKR_TO_YFINANCE
 from src.fx_normalization import get_fx_rate_fallback
-from src.ibkr.models import AnalysisRecord, NormalizedPosition
-from src.ibkr.portfolio_defaults import DEFAULT_DRIFT_PCT, DEFAULT_MAX_AGE_DAYS
+from src.ibkr.models import ActionBasis, AnalysisRecord, NormalizedPosition
+from src.ibkr.portfolio_defaults import (
+    DEFAULT_DRIFT_PCT,
+    DEFAULT_MAX_AGE_DAYS,
+    DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS,
+)
+
+if TYPE_CHECKING:
+    from src.ibkr.buy_stability import PriorVerdict
 
 logger = structlog.get_logger(__name__)
 
 
-def _resolve_fx(analysis: AnalysisRecord) -> float:
-    """Return FX rate (local → USD) for an analysis, with fallback chain."""
+def _resolve_fx(analysis: AnalysisRecord) -> float | None:
+    """Return a local-to-USD rate, or None when conversion cannot be trusted."""
     currency = (analysis.currency or "USD").strip().upper()
     saved = analysis.fx_rate_to_usd
 
-    if saved is not None:
-        if saved == 1.0 and currency not in ("USD", ""):
-            fallback = get_fx_rate_fallback(currency)
-            if fallback is not None:
-                logger.warning(
-                    "fx_rate_saved_1_overridden",
-                    ticker=analysis.ticker,
-                    currency=currency,
-                    fallback_rate=fallback,
-                    msg="Saved fx_rate=1.0 for non-USD currency replaced with fallback "
-                    "(legacy snapshot; re-run analysis to persist correct rate)",
-                )
-                return fallback
-        return saved
-
     if currency in ("USD", ""):
         return 1.0
+
+    if saved is not None:
+        fallback = get_fx_rate_fallback(currency)
+        saved_is_sentinel = saved == 1.0
+        saved_is_invalid = not math.isfinite(saved) or saved <= 0
+        saved_is_unit_mismatch = (
+            fallback is not None
+            and not saved_is_invalid
+            and (saved / fallback > 10.0 or saved / fallback < 0.1)
+        )
+        if not (saved_is_sentinel or saved_is_invalid or saved_is_unit_mismatch):
+            return saved
+        if fallback is not None:
+            logger.warning(
+                "fx_rate_saved_invalid_overridden",
+                ticker=analysis.ticker,
+                currency=currency,
+                saved_rate=saved,
+                fallback_rate=fallback,
+                reason="Saved non-USD FX rate is a sentinel, invalid, or unit mismatch",
+            )
+            return fallback
+        logger.error(
+            "fx_rate_saved_invalid",
+            ticker=analysis.ticker,
+            currency=currency,
+            saved_rate=saved,
+            reason="Saved non-USD FX rate cannot be trusted and no fallback exists",
+        )
+        return None
+
     rate = get_fx_rate_fallback(currency)
     if rate is not None:
         logger.warning(
@@ -51,12 +77,59 @@ def _resolve_fx(analysis: AnalysisRecord) -> float:
         "fx_rate_unknown",
         ticker=analysis.ticker,
         currency=currency,
-        msg="No FX rate available; cost/quantity will be wrong — re-run analysis to fix",
+        reason="No FX rate available; order sizing is disabled until the rate is fixed",
     )
-    return 1.0
+    return None
 
 
 _MIN_ORDER_USD: float = 200.0
+
+_CURRENCY_EQUIVALENTS = {"GBX": "GBP", "GBP": "GBX"}  # same economy, unit scaled
+
+
+def base_match_allowed(pos: NormalizedPosition, analysis: AnalysisRecord) -> bool:
+    """Whether a base-symbol fallback match is safe for this position.
+
+    A position may borrow the single base-matched analysis only when the
+    analysis currency agrees — otherwise it is a different listing entirely
+    (the AGS.BR-shows-AGS.SI bug). This applies to suffix-less positions too:
+    a Brussels AGS that IBKR reports as SMART/EUR must not adopt an SGD
+    ``AGS.SI`` analysis just because no ``.BR`` analysis exists to poison the
+    base. Unknown currency on either side fails closed: losing an analysis
+    match is safer than attaching another issuer's research to a live holding.
+    """
+    a_ccy = (getattr(analysis, "currency", "") or "").upper()
+    p_ccy = (pos.currency or "").upper()
+    if not a_ccy or not p_ccy:
+        return False
+    return a_ccy == p_ccy or _CURRENCY_EQUIVALENTS.get(a_ccy) == p_ccy
+
+
+def analysis_identity_verified(
+    pos: NormalizedPosition, analysis: AnalysisRecord
+) -> bool:
+    """Return whether a held position is safely linked to its analysis.
+
+    A conid proves which IBKR contract is held; an exact, exchange-qualified
+    yfinance key proves which saved analysis is attached. SMART plus a non-USD
+    currency is only a currency-derived suffix guess and therefore cannot
+    authorize a sale. US SMART/USD positions are the intentional suffix-less
+    exception.
+    """
+    if (
+        pos.conid <= 0
+        or not pos.ticker_identity_verified
+        or analysis.ticker.upper() != pos.ticker.yf.upper()
+    ):
+        return False
+    if not base_match_allowed(pos, analysis):
+        return False
+    exchange = (pos.ticker.exchange or "").upper()
+    currency = (pos.currency or pos.ticker.currency or "").upper()
+    if exchange in {"", "SMART"}:
+        return currency in {"", "USD"} and not pos.ticker.has_suffix
+    return pos.ticker.exchange_resolved
+
 
 _EXCHANGE_LONG_NAMES: dict[str, str] = {
     "HK": "Hong Kong",
@@ -163,13 +236,20 @@ _REJECT_VERDICTS = frozenset({"DO_NOT_INITIATE", "SELL", "REJECT"})
 SCREEN_REVIEW_DNI_ZONES = frozenset({"LOW", "MODERATE"})
 _PROFIT_TAKE_MIN_GAIN_PCT = 25.0
 _PROFIT_TAKE_RISK_LARGE_GAIN_PCT = 50.0
-_PROFIT_TAKE_UNKNOWN_TAX_SEVERE_GAIN_PCT = 60.0
 _CAPITAL_IDLE_CASH_RISK = "CAPITAL_IDLE_CASH_RISK"
 _CAPITAL_IDLE_CASH_SEVERE = "CAPITAL_IDLE_CASH_SEVERE"
 
 
 @dataclass(frozen=True)
 class ProfitTakeDecision:
+    """Advisory profit-take classification — ``action`` is always "REVIEW".
+
+    The Literal retains "SELL" only for legacy artifact compatibility;
+    classify_profit_take stopped granting executable sell authority in the
+    July 2026 retail alignment (selling an intact winner is a capital-gains
+    decision the operator makes, not the reconciler).
+    """
+
     qualifies: bool
     action: Literal["SELL", "REVIEW"] | None = None
     reasons: tuple[str, ...] = ()
@@ -221,11 +301,15 @@ def check_staleness(
     return False, ""
 
 
-def check_stop_breach(
+def check_review_level_breach(
     analysis: AnalysisRecord,
     current_price_local: float,
 ) -> bool:
-    """Check if current price has breached the stop-loss level."""
+    """Check whether price crossed the legacy downside review level.
+
+    This is a refresh/urgency signal only. It never grants sell authority.
+    ``stop_price`` remains the persisted field name for old TRADE_BLOCK data.
+    """
     stop = analysis.stop_price
     if stop and current_price_local > 0:
         ratio = stop / current_price_local
@@ -236,22 +320,33 @@ def check_stop_breach(
                 stop=stop,
                 current_price=current_price_local,
                 ratio=f"{ratio:.1f}x",
-                hint="Possible currency-unit mismatch or stale stop from different analysis",
+                hint=(
+                    "Possible currency-unit mismatch or stale downside level "
+                    "from a different analysis"
+                ),
             )
             return False
         return current_price_local < stop
     return False
 
 
-def check_target_hit(
+# Backward-compatible name for existing callers and saved-contract tests.
+check_stop_breach = check_review_level_breach
+
+
+def check_base_case_reference_reached(
     analysis: AnalysisRecord,
     current_price_local: float,
 ) -> bool:
-    """Check if current price has hit or exceeded TARGET_1."""
+    """Check whether price reached the legacy base-case valuation reference."""
     target = analysis.target_1_price
     if target and current_price_local > 0:
         return current_price_local >= target
     return False
+
+
+# Backward-compatible name for existing callers and saved-contract tests.
+check_target_hit = check_base_case_reference_reached
 
 
 def _cost_basis_return_pct(position: NormalizedPosition) -> float | None:
@@ -271,7 +366,7 @@ def classify_profit_take(
     position: NormalizedPosition,
     target_hit: bool,
 ) -> ProfitTakeDecision:
-    """Classify capital-allocation-driven profit-taking candidates."""
+    """Classify advisory capital-allocation reviews for appreciated holdings."""
     health_ok = (analysis.health_adj or 0.0) >= 50.0
     growth_ok = (analysis.growth_adj or 0.0) >= 50.0
     if not (health_ok and growth_ok):
@@ -297,27 +392,20 @@ def classify_profit_take(
     if not reasons:
         return ProfitTakeDecision(False, cost_basis_return_pct=gain_pct)
 
+    # Profit-taking is ALWAYS advisory (July 2026, retail alignment): selling an
+    # intact winner is a capital-gains event and a portfolio choice, not a
+    # thesis conclusion — the system surfaces the case (gain, idle-cash flags,
+    # tax context) and the operator decides. tax_term is annotated, never used
+    # to grant sell authority: IBKR lot data is not ingested, so the field is
+    # effectively UNKNOWN in practice and must not pretend precision.
     tax_term = position.tax_term
-    action: Literal["SELL", "REVIEW"]
-    if tax_term == "LONG_TERM" or (
-        tax_term == "UNKNOWN"
-        and severe_idle_cash
-        and gain_pct >= _PROFIT_TAKE_UNKNOWN_TAX_SEVERE_GAIN_PCT
-    ):
-        action = "SELL"
-    else:
-        action = "REVIEW"
     if tax_term == "SHORT_TERM":
         reasons.append("short_term_tax")
     elif tax_term == "UNKNOWN":
-        reasons.append(
-            "unknown_tax_term_severity_override"
-            if action == "SELL"
-            else "unknown_tax_term"
-        )
+        reasons.append("unknown_tax_term")
     return ProfitTakeDecision(
         True,
-        action=action,
+        action="REVIEW",
         reasons=tuple(reasons),
         cost_basis_return_pct=gain_pct,
     )
@@ -337,7 +425,7 @@ def _settlement_date(business_days: int) -> str:
 
 
 def _classify_sell_type(analysis: AnalysisRecord | None, stop_breached: bool) -> str:
-    """Classify why a position is being sold."""
+    """Classify a legacy sell/review reason for compatibility and grouping."""
     if stop_breached:
         return "STOP_BREACH"
     if analysis is None:
@@ -349,3 +437,185 @@ def _classify_sell_type(analysis: AnalysisRecord | None, stop_breached: bool) ->
     health_ok = (analysis.health_adj or 0.0) >= 50.0
     growth_ok = (analysis.growth_adj or 0.0) >= 50.0
     return "SOFT_REJECT" if (health_ok and growth_ok) else "HARD_REJECT"
+
+
+# A legacy downside level this close to price sits inside routine daily noise.
+REVIEW_LEVEL_NOISE_BAND_PCT = 5.0
+
+
+def review_level_note(
+    analysis: AnalysisRecord | None, current_price_local: float | None
+) -> str | None:
+    """Flag a legacy downside level too close to price to be decision-useful.
+
+    The level does not ratchet after gains and never acts as a sale trigger;
+    raising it mechanically would recreate trailing-stop behavior.
+    """
+    if analysis is None or not analysis.stop_price or not current_price_local:
+        return None
+    if not 0 < analysis.stop_price < current_price_local:
+        return None
+    stop_gap_pct = (
+        (current_price_local - analysis.stop_price) / current_price_local * 100
+    )
+    if stop_gap_pct < REVIEW_LEVEL_NOISE_BAND_PCT:
+        return (
+            f"⚠ review level within {stop_gap_pct:.1f}% of price — inside daily "
+            "noise; treat it as context, not an action trigger"
+        )
+    return None
+
+
+# Backward-compatible alias; new code uses the retail-framed name above.
+stop_staleness_note = review_level_note
+
+
+@dataclass(frozen=True)
+class HeldDisposition:
+    """The portfolio-level disposition of a held position with a reject verdict."""
+
+    action: Literal["SELL", "REVIEW"]
+    basis: ActionBasis
+    executable: bool = False
+    detail: str = ""
+
+
+def _gate_scores_intact(analysis: AnalysisRecord) -> bool:
+    """Both thesis gate scores at/above the 50% hard gates.
+
+    Deliberately narrow: this tests only health_adj/growth_adj, not general
+    quality — an intact-score reject loses automatic sale authority. Mandatory
+    restrictions retain sale authority; downside-price breaches, tender
+    mechanics, and data-quality concerns remain review-only.
+    """
+    return (analysis.health_adj or 0.0) >= 50.0 and (analysis.growth_adj or 0.0) >= 50.0
+
+
+def reject_confirmed(
+    analysis: AnalysisRecord,
+    prior_history: Sequence[PriorVerdict],
+    *,
+    min_spacing_days: int = DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS,
+) -> bool:
+    """Whether a held-position reject verdict is confirmed by prior history.
+
+    Confirmation requires provably full-mode analyses on BOTH sides: the
+    current analysis must be full-mode (a screening-tier verdict never
+    executes a sell), and the most recent *provably full-mode* prior must also
+    reject, at least ``min_spacing_days`` before the current analysis — one
+    bad data day re-analyzed twice must not self-confirm. Mode-unknown
+    records (``is_quick_mode is None``, legacy artifacts) carry no sell
+    authority on either side. An intervening full-mode non-reject breaks
+    confirmation (the thesis recovered in between).
+    """
+    if analysis.is_quick_mode is not False:
+        return False
+    fulls = [
+        record
+        for record in prior_history
+        if record.is_quick_mode is False and record.verdict
+    ]
+    if not fulls:
+        return False
+    latest = max(fulls, key=lambda record: record.analysis_dt)
+    if _normalize_verdict(latest.verdict) not in _REJECT_VERDICTS:
+        return False
+    try:
+        current_date = date.fromisoformat(analysis.analysis_date)
+    except (ValueError, TypeError):
+        return False
+    return (current_date - latest.analysis_dt.date()).days >= min_spacing_days
+
+
+def classify_disposition(
+    analysis: AnalysisRecord,
+    *,
+    current_price_local: float,
+    prior_history: Sequence[PriorVerdict],
+    min_spacing_days: int = DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS,
+) -> HeldDisposition:
+    """Classify the portfolio disposition of a held position whose verdict rejects.
+
+    A portfolio action requires portfolio evidence: a stock-level rejection may
+    trigger refresh, review, replacement analysis, or an exit, but it must not
+    decide among those alone. A legacy downside-level breach may raise urgency
+    in the caller but has no sell authority. This function decides SELL vs
+    REVIEW for reject verdicts, most-structural evidence first.
+    """
+    evidence = analysis.evidence
+
+    if evidence.mandatory_exit_flag_types:
+        return HeldDisposition(
+            "SELL",
+            "MANDATORY_EXIT",
+            executable=True,
+            detail=f"Restriction: {', '.join(evidence.mandatory_exit_flag_types)}",
+        )
+
+    # An active tender is a deal-mechanics decision (tender vs market sale vs
+    # hold for a bump), not a verdict consequence. Deliberate widening vs the
+    # legacy path, which auto-sold these inside the reject branch.
+    if analysis.m_and_a_status == "ACTIVE_TENDER":
+        return HeldDisposition(
+            "REVIEW",
+            "SPECIAL_SITUATION_REVIEW",
+            detail="Active tender — decide on deal premium/mechanics, not verdict",
+        )
+
+    # Buy-blocking flags mean the gate arithmetic is indeterminate — the reject
+    # cannot be trusted in either direction. Review, never exit, on model doubt.
+    if evidence.buy_blocking_flag_types:
+        return HeldDisposition(
+            "REVIEW",
+            "DATA_QUALITY",
+            detail=(
+                "Gate scores unreliable "
+                f"({', '.join(evidence.buy_blocking_flag_types)}) — "
+                "re-run before acting"
+            ),
+        )
+
+    # Intact gate scores strip the verdict of automatic SELL authority — the
+    # check deliberately precedes confirmation, otherwise every persistent
+    # entry-screen rejection of a winner would escalate to SELL on its next
+    # refresh ≥ min_spacing_days later (the 2026-07-14 nine-sell day). Exits
+    # for this class require a future fundamental failure or mandatory
+    # restriction — never price levels or repeated entry-screen rejects alone.
+    if _gate_scores_intact(analysis):
+        entry = analysis.entry_price or analysis.current_price
+        appreciated = bool(
+            entry and current_price_local > 0 and current_price_local >= entry
+        )
+        if appreciated or evidence.dni_review_candidate:
+            # "Wouldn't initiate at this price" at/above entry is the GARP
+            # screen rejecting its own winner, not exit evidence.
+            return HeldDisposition(
+                "REVIEW",
+                "ENTRY_CONSTRAINT",
+                detail=(
+                    "Fundamentals intact; verdict reflects entry screen, "
+                    "not thesis failure"
+                ),
+            )
+        return HeldDisposition(
+            "REVIEW",
+            "THESIS_REASSESSMENT",
+            detail=(
+                "Gate scores intact — price weakness alone is not exit "
+                "evidence; watch fundamentals, not price"
+            ),
+        )
+
+    if reject_confirmed(analysis, prior_history, min_spacing_days=min_spacing_days):
+        return HeldDisposition(
+            "SELL",
+            "CONFIRMED_THESIS_FAILURE",
+            executable=True,
+            detail="Reject confirmed by prior full-mode analysis",
+        )
+
+    return HeldDisposition(
+        "REVIEW",
+        "THESIS_REASSESSMENT",
+        detail="Unconfirmed reject — refresh analysis before exiting",
+    )

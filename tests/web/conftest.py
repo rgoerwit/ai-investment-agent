@@ -40,6 +40,7 @@ def sample_bundle(tmp_path: Path) -> PortfolioRecommendationBundle:
         cash_impact_usd=1300.0,
         settlement_date="2026-03-31",
         sell_type="HARD_REJECT",
+        action_basis="CONFIRMED_THESIS_FAILURE",
     )
     review = ReconciliationItem(
         ticker="5285.T",
@@ -87,7 +88,7 @@ def sample_bundle(tmp_path: Path) -> PortfolioRecommendationBundle:
         action="BUY",
         urgency="MEDIUM",
         reason="Plain buy candidate",
-        analysis=make_analysis(ticker="BMW.DE", verdict="BUY"),
+        analysis=make_analysis(ticker="BMW.DE", verdict="BUY", conviction="High"),
     )
     freshness = AnalysisFreshnessSummary(
         blocking_now=[

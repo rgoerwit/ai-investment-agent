@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import structlog
@@ -140,6 +142,91 @@ _OCF_UNRESOLVED_RE = re.compile(
     r"data\s+conflict\s+remains|not\s+reconciled)\b",
     re.IGNORECASE,
 )
+_OCF_META_FIELD_RE = re.compile(
+    r"(?i)\b(REPORT_DATE|PERIOD_END|PERIOD_START|PERIOD|CURRENCY|SCOPE|"
+    r"AUDITOR_SIGNATURE_DATE|AUDIT_STATUS)\s*[:=]\s*([^|\n]+)"
+)
+_OCF_CURRENCY_RE = re.compile(
+    r"(?i)(?:\b(?:currency\s*[:=]\s*)?(USD|SGD|PLN|JPY|KRW|CNY|HKD|"
+    r"EUR|GBP|AUD|CAD|TWD|INR)\b|S\$)"
+)
+
+
+@dataclass(frozen=True)
+class OcfObservation:
+    """One OCF value with the identity needed for a valid comparison."""
+
+    amount: float
+    period: str | None = None
+    period_start: date | None = None
+    period_end: date | None = None
+    report_date: date | None = None
+    currency: str | None = None
+    scope: str | None = None
+    audit_status: str | None = None
+    auditor_signature_date: date | None = None
+    source: str = "unknown"
+
+
+def _parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", value)
+    if not match:
+        return None
+    try:
+        return date.fromisoformat(match.group(1))
+    except ValueError:
+        return None
+
+
+def _normalize_ocf_period(value: str | None) -> str | None:
+    normalized = re.sub(r"\s+", "", str(value or "")).upper()
+    if not normalized or normalized in {"N/A", "NA", "UNKNOWN"}:
+        return None
+    if normalized.startswith("TTM"):
+        return "TTM"
+    match = re.fullmatch(r"FY(\d{4})", normalized)
+    if match:
+        return f"FY{match.group(1)}"
+    if normalized in {"FY", "ANNUAL", "YEAR"}:
+        return "FY"
+    if re.fullmatch(r"H[12]", normalized):
+        return normalized
+    if re.fullmatch(r"Q[1-4]", normalized):
+        return normalized
+    return normalized
+
+
+def _extract_ocf_currency(text: str | None) -> str | None:
+    match = _OCF_CURRENCY_RE.search(text or "")
+    if not match:
+        return None
+    return "SGD" if match.group(0).upper() == "S$" else match.group(1).upper()
+
+
+def extract_datablock_ocf_observation(
+    fundamentals_report: str | None,
+) -> OcfObservation | None:
+    """Extract current OCF plus period/scope identity from the DATA_BLOCK."""
+    amount_text = extract_data_block_field(fundamentals_report, "OPERATING_CASH_FLOW")
+    amount = parse_ocf_amount(amount_text)
+    if not amount:
+        return None
+    return OcfObservation(
+        amount=amount,
+        period=_normalize_ocf_period(
+            extract_data_block_field(fundamentals_report, "OPERATING_CASH_FLOW_PERIOD")
+        ),
+        period_end=_parse_iso_date(
+            extract_data_block_field(fundamentals_report, "LATEST_QUARTER_DATE")
+        ),
+        currency=_extract_ocf_currency(amount_text),
+        scope=(
+            extract_data_block_field(fundamentals_report, "METRIC_SCOPE_OCF") or None
+        ),
+        source="DATA_BLOCK",
+    )
 
 
 def parse_ocf_amount(text: str | None) -> float | None:
@@ -181,9 +268,90 @@ def extract_auditor_ocf(report: str | None) -> float | None:
     return None
 
 
+def extract_auditor_ocf_observation(report: str | None) -> OcfObservation | None:
+    """Extract OCF with the Auditor's explicit report identity metadata."""
+    amount = extract_auditor_ocf(report)
+    if not report or not amount:
+        return None
+
+    metadata = {
+        match.group(1).upper(): match.group(2).strip()
+        for match in _OCF_META_FIELD_RE.finditer(report)
+    }
+    report_date = _parse_iso_date(metadata.get("REPORT_DATE"))
+    period_end = _parse_iso_date(metadata.get("PERIOD_END")) or report_date
+    period = _normalize_ocf_period(metadata.get("PERIOD"))
+
+    scope = metadata.get("SCOPE")
+    if not scope and re.search(r"\bconsolidated\b", report, re.IGNORECASE):
+        scope = "CONSOLIDATED"
+
+    return OcfObservation(
+        amount=amount,
+        period=period,
+        period_start=_parse_iso_date(metadata.get("PERIOD_START")),
+        period_end=period_end,
+        report_date=report_date,
+        currency=_extract_ocf_currency(metadata.get("CURRENCY") or report),
+        scope=scope,
+        audit_status=metadata.get("AUDIT_STATUS"),
+        auditor_signature_date=_parse_iso_date(metadata.get("AUDITOR_SIGNATURE_DATE")),
+        source="FORENSIC_AUDITOR",
+    )
+
+
+def _ocf_comparison_blocker(
+    headline: OcfObservation, forensic: OcfObservation
+) -> str | None:
+    headline_period = _normalize_ocf_period(headline.period)
+    forensic_period = _normalize_ocf_period(forensic.period)
+    if headline_period and forensic_period and headline_period != forensic_period:
+        return f"PERIOD_MISMATCH ({headline_period} vs {forensic_period})"
+    if (
+        headline.period_end
+        and forensic.period_end
+        and (headline.period_end != forensic.period_end)
+    ):
+        return (
+            "PERIOD_END_MISMATCH "
+            f"({headline.period_end.isoformat()} vs {forensic.period_end.isoformat()})"
+        )
+    if bool(headline.period_end) != bool(forensic.period_end):
+        return "PERIOD_END_UNVERIFIED"
+    if (
+        headline.period_start
+        and forensic.period_start
+        and (headline.period_start != forensic.period_start)
+    ):
+        return (
+            "PERIOD_START_MISMATCH "
+            f"({headline.period_start.isoformat()} vs "
+            f"{forensic.period_start.isoformat()})"
+        )
+    if (
+        headline.currency
+        and forensic.currency
+        and headline.currency.upper() != forensic.currency.upper()
+    ):
+        return f"CURRENCY_MISMATCH ({headline.currency} vs {forensic.currency})"
+    if not headline.currency or not forensic.currency:
+        return "CURRENCY_UNVERIFIED"
+    if (
+        headline.scope
+        and forensic.scope
+        and headline.scope.upper() != forensic.scope.upper()
+    ):
+        return f"SCOPE_MISMATCH ({headline.scope} vs {forensic.scope})"
+    if not headline.scope or not forensic.scope:
+        return "SCOPE_UNVERIFIED"
+    if not headline_period or not forensic_period or not headline.period_end:
+        return "PERIOD_UNVERIFIED"
+    return None
+
+
 def detect_ocf_corroboration_flag(
-    datablock_ocf: float | None,
-    auditor_ocf: float | None,
+    datablock_ocf: float | OcfObservation | None,
+    auditor_ocf: float | OcfObservation | None,
     ticker: str = "UNKNOWN",
     threshold: float = 0.15,
 ) -> dict[str, Any] | None:
@@ -197,15 +365,56 @@ def detect_ocf_corroboration_flag(
     already carries the penalty); this flag exists to block the overclaim and
     surface the conflict, not to escalate the tally.
     """
-    if not datablock_ocf or not auditor_ocf or datablock_ocf <= 0 or auditor_ocf <= 0:
+    if not datablock_ocf or not auditor_ocf:
         return None
-    divergence = abs(datablock_ocf - auditor_ocf) / min(datablock_ocf, auditor_ocf)
+    if isinstance(datablock_ocf, OcfObservation) and isinstance(
+        auditor_ocf, OcfObservation
+    ):
+        blocker = _ocf_comparison_blocker(datablock_ocf, auditor_ocf)
+        if blocker:
+            logger.info(
+                "ocf_corroboration_not_comparable",
+                ticker=ticker,
+                reason=blocker,
+                headline_period=datablock_ocf.period,
+                forensic_period=auditor_ocf.period,
+            )
+            return {
+                "type": "OCF_PERIOD_NOT_COMPARABLE",
+                "severity": "INFO",
+                "detail": (
+                    "Headline and forensic OCF are not directly comparable: "
+                    f"{blocker}. No discrepancy inferred."
+                ),
+                "action": "NOTE",
+                "risk_penalty": 0.0,
+                "rationale": (
+                    "OCF corroboration requires aligned reporting period, date, "
+                    "currency, and scope. Historical audited evidence may verify "
+                    "audit quality but cannot contradict a current-period cash-flow value."
+                ),
+            }
+        datablock_amount = datablock_ocf.amount
+        auditor_amount = auditor_ocf.amount
+    elif isinstance(datablock_ocf, OcfObservation) or isinstance(
+        auditor_ocf, OcfObservation
+    ):
+        return None
+    else:
+        datablock_amount = datablock_ocf
+        auditor_amount = auditor_ocf
+
+    if datablock_amount <= 0 or auditor_amount <= 0:
+        return None
+    divergence = abs(datablock_amount - auditor_amount) / min(
+        datablock_amount, auditor_amount
+    )
     if divergence <= threshold:
         return None
-    headline_high = datablock_ocf > auditor_ocf
+    headline_high = datablock_amount > auditor_amount
     detail = (
-        f"Headline OCF {datablock_ocf:,.0f} diverges {divergence * 100:.0f}% from the "
-        f"forensic auditor's independent OCF {auditor_ocf:,.0f}"
+        f"Headline OCF {datablock_amount:,.0f} diverges {divergence * 100:.0f}% from the "
+        f"forensic auditor's independent OCF {auditor_amount:,.0f}"
     )
     if headline_high:
         detail += (
@@ -217,8 +426,8 @@ def detect_ocf_corroboration_flag(
     logger.debug(
         "red_flag_ocf_filing_value_uncorroborated",
         ticker=ticker,
-        datablock_ocf=datablock_ocf,
-        auditor_ocf=auditor_ocf,
+        datablock_ocf=datablock_amount,
+        auditor_ocf=auditor_amount,
         divergence_pct=round(divergence * 100, 1),
     )
     return {

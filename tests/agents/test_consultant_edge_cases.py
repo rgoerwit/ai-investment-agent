@@ -6,7 +6,9 @@ to ensure the consultant doesn't break existing functionality under stress.
 """
 
 import asyncio
+import json
 import time
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -80,6 +82,73 @@ class TestDataFormatEdgeCases:
         assert invoked == ["active", "fallback"]
         assert result.content == "FINAL CONSULTANT VERDICT: CONDITIONAL APPROVAL"
         assert "function_call" not in result.content
+
+    @pytest.mark.asyncio
+    async def test_subscription_coverage_gap_does_not_count_as_tool_failure(self):
+        from src.agents.consultant_tool_loop import (
+            ConsultantToolLoopPolicy,
+            run_bounded_consultant_loop,
+        )
+
+        responses = iter(
+            (
+                SimpleNamespace(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "spot_check_metric_mcp_fmp",
+                            "args": {"ticker": "AGS.SI", "metric": "operatingCashflow"},
+                            "id": "mcp-1",
+                        }
+                    ],
+                ),
+                SimpleNamespace(
+                    content="FINAL CONSULTANT VERDICT: CONDITIONAL APPROVAL",
+                    tool_calls=[],
+                ),
+            )
+        )
+
+        async def fake_invoke(_llm, _messages):
+            return next(responses)
+
+        class CoverageGapTool:
+            async def ainvoke(self, _args):
+                return json.dumps(
+                    {
+                        "error": "HTTP 402 Payment Required",
+                        "failure_kind": "coverage_gap",
+                        "provider": "fmp",
+                        "skipped": True,
+                        "coverage_gap": True,
+                    }
+                )
+
+        class PassthroughService:
+            async def execute(self, invocation, runner):
+                return SimpleNamespace(value=await runner(invocation.args))
+
+        result = await run_bounded_consultant_loop(
+            active_llm="active",
+            fallback_llm="fallback",
+            messages=[],
+            tools_by_name={"spot_check_metric_mcp_fmp": CoverageGapTool()},
+            policy=ConsultantToolLoopPolicy(
+                max_tool_iterations=1,
+                max_tool_calls_per_turn=4,
+                deadline=time.monotonic() + 60,
+                total_timeout=60,
+            ),
+            invoke_with_deadline=fake_invoke,
+            tool_service_getter=lambda: PassthroughService(),
+            agent_name="External Consultant",
+            agent_key="consultant",
+            ticker="AGS.SI",
+        )
+
+        assert result.had_tool_errors is False
+        assert result.tool_failure_count == 0
+        assert result.tool_call_count == 1
 
     def test_auditor_output_is_canonicalized_to_raw_verdict_field(self):
         content = (

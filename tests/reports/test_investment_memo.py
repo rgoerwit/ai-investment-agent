@@ -8,6 +8,7 @@ from src.agents.support import format_red_flag_section
 from src.reporting.memo import (
     InvestmentMemo,
     build_memo,
+    business_quality_line,
     extract_key_metrics,
     extract_legacy_target_range,
     extract_pm_risks,
@@ -595,3 +596,72 @@ def test_report_generator_emits_memo_above_executive_summary() -> None:
     assert memo_pos >= 0, "Memo section missing"
     assert exec_pos >= 0, "Executive Summary section missing"
     assert memo_pos < exec_pos, "Memo must precede Executive Summary"
+
+
+# ---------- business_quality_line ----------
+
+
+_ROIC_QUALITY_BLOCK = """### --- START DATA_BLOCK ---
+ROIC_QUALITY: STRONG
+### --- END DATA_BLOCK ---
+"""
+
+
+class TestBusinessQualityLine:
+    def test_roic_and_moats_compose(self) -> None:
+        flags = [
+            {"type": "MOAT_DURABLE_ADVANTAGE", "risk_penalty": 0.0},
+            {"type": "MOAT_PRICING_POWER", "risk_penalty": 0.0},
+        ]
+        line = business_quality_line(_ROIC_QUALITY_BLOCK, flags)
+        assert line == "ROIC quality: STRONG; moat: durable advantage, pricing power"
+
+    def test_roic_only(self) -> None:
+        assert business_quality_line(_ROIC_QUALITY_BLOCK, []) == "ROIC quality: STRONG"
+
+    def test_moats_only(self) -> None:
+        block = "### --- START DATA_BLOCK ---\nSECTOR: Industrials\n### --- END DATA_BLOCK ---"
+        line = business_quality_line(block, [{"type": "MOAT_EARNINGS_QUALITY"}])
+        assert line == "moat: earnings quality"
+
+    def test_no_signals_returns_none(self) -> None:
+        block = "### --- START DATA_BLOCK ---\nSECTOR: Industrials\n### --- END DATA_BLOCK ---"
+        assert business_quality_line(block, []) is None
+        assert business_quality_line(block, None) is None
+        assert business_quality_line("", []) is None
+
+    def test_na_roic_treated_as_absent(self) -> None:
+        # "N/A" is a valid ROIC_QUALITY token — must not render as a quality signal.
+        block = "### --- START DATA_BLOCK ---\nROIC_QUALITY: N/A\n### --- END DATA_BLOCK ---"
+        assert business_quality_line(block, []) is None
+
+    def test_suppression_flag_is_not_a_moat(self) -> None:
+        # MOAT_BONUS_SUPPRESSED_PEAK_TRANSIENT shares the MOAT_ prefix but is a
+        # suppression signal — the explicit set must exclude it.
+        block = "### --- START DATA_BLOCK ---\nSECTOR: Industrials\n### --- END DATA_BLOCK ---"
+        flags = [{"type": "MOAT_BONUS_SUPPRESSED_PEAK_TRANSIENT", "risk_penalty": 0.0}]
+        assert business_quality_line(block, flags) is None
+
+    def test_render_includes_line_when_present(self) -> None:
+        memo = InvestmentMemo(
+            decision="BUY",
+            one_line_thesis="A thesis.",
+            business_quality="ROIC quality: STRONG; moat: pricing power",
+        )
+        md = render_memo_markdown(memo)
+        assert "**Business quality.** ROIC quality: STRONG; moat: pricing power" in md
+        # Sits between Key numbers slot and Valuation.
+        assert md.index("**Business quality.**") < md.index("**Valuation.**")
+
+    def test_render_omits_line_when_absent(self) -> None:
+        memo = InvestmentMemo(decision="BUY", one_line_thesis="A thesis.")
+        assert "**Business quality.**" not in render_memo_markdown(memo)
+
+    def test_build_memo_populates_business_quality(self) -> None:
+        state = {
+            "final_trade_decision": _PM_OUTPUT_BUY,
+            "fundamentals_report": _ROIC_QUALITY_BLOCK,
+            "red_flags": [{"type": "MOAT_DURABLE_ADVANTAGE", "risk_penalty": 0.0}],
+        }
+        memo = build_memo(state)
+        assert memo.business_quality == "ROIC quality: STRONG; moat: durable advantage"

@@ -73,6 +73,17 @@ def _has_complete_structured_block(
 
 def _ends_with_known_structured_terminator(text: str, agent: str | None) -> bool:
     raw_data_end = "=== END RAW DATA ==="
+    if agent == "news_analyst":
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if len(lines) >= 2:
+            return bool(
+                re.fullmatch(r"Date:\s*\d{4}-\d{2}-\d{2}", lines[-2])
+                and re.fullmatch(
+                    r"Asset:\s*[A-Z0-9][A-Z0-9._\-]{0,31}",
+                    lines[-1],
+                    flags=re.IGNORECASE,
+                )
+            )
     if agent is not None and agent != "junior_fundamentals_analyst":
         return False
     return text.rstrip().endswith(raw_data_end)

@@ -56,6 +56,23 @@ class Toolkit:
 
         return [search_foreign_sources, get_official_filings]
 
+    def get_auditor_tools(self):
+        """Bounded retrieval and deterministic calculations for the Auditor."""
+        from src.tools.forensic import (
+            calculate_forensic_ratios,
+            validate_forensic_evidence,
+        )
+        from src.tools.official_documents import get_official_document
+
+        return [
+            *self.get_foreign_language_tools(),
+            *self.get_junior_fundamental_tools(),
+            *self.get_news_tools(),
+            get_official_document,
+            validate_forensic_evidence,
+            calculate_forensic_ratios,
+        ]
+
     def get_legal_tools(self):
         """Tools for Legal Counsel (PFIC/VIE detection for US investors)."""
         from src.tools.legal import search_legal_tax_disclosures

@@ -208,6 +208,7 @@ class AgentState(TypedDict, total=False):
     legal_report: Annotated[str, take_last]
     fundamentals_report: Annotated[str, take_last]
     auditor_report: Annotated[str, take_last]
+    auditor_budget: Annotated[dict[str, Any], take_last]
     value_trap_report: Annotated[str, take_last]
     investment_debate_state: Annotated[InvestDebateState, merge_invest_debate_state]
     investment_plan: Annotated[str, take_last]

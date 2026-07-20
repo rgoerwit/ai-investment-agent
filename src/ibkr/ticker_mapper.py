@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 
@@ -32,6 +33,23 @@ CACHE_FILE = Path("scratch/conid_map.json")
 CACHE_TTL_SECONDS = 30 * 24 * 3600  # 30 days
 
 _cache: dict[str, dict[str, Any]] | None = None  # Loaded once per process
+
+TickerResolutionSource = Literal[
+    "exchange_map",
+    "operator_override",
+    "currency_fallback",
+    "yfinance_search",
+    "unresolved",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class TickerResolution:
+    """A yfinance mapping plus the provenance needed for order safety."""
+
+    yf_ticker: str
+    source: TickerResolutionSource
+    exchange_verified: bool
 
 
 def _get_cache() -> dict:
@@ -98,14 +116,43 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
     Returns:
         yfinance ticker string (e.g., "0005.HK", "7203.T", "ASML.AS")
     """
+    return resolve_ibkr_ticker(symbol, exchange, currency).yf_ticker
+
+
+def resolve_ibkr_ticker(
+    symbol: str,
+    exchange: str,
+    currency: str = "",
+) -> TickerResolution:
+    """Resolve an IBKR symbol while retaining how trustworthy the exchange is.
+
+    Static IBKR exchange mappings and explicit operator overrides are safe for
+    order authorization. Currency-derived suffixes and yfinance search results
+    are useful for research lookup, but remain inferred because same-symbol,
+    same-currency listings can exist on multiple venues.
+    """
     exchange_code = exchange.upper() if exchange else ""
     currency_code = currency.upper() if currency else ""
     suffix = IBKR_TO_YFINANCE.get(exchange_code)
+    smart_non_usd = (
+        suffix == ""
+        and exchange_code in ("", "SMART")
+        and currency_code not in ("", "USD")
+    )
+
+    if suffix is not None and not smart_non_usd:
+        from src.ticker_corrections import apply_operator_override
+
+        candidate = f"{_pad_numeric_symbol_for_suffix(symbol, suffix)}{suffix}"
+        overridden, was_overridden = apply_operator_override(candidate)
+        return TickerResolution(
+            yf_ticker=overridden,
+            source="operator_override" if was_overridden else "exchange_map",
+            exchange_verified=True,
+        )
 
     # Fallback: derive suffix from unambiguous currency when exchange is unknown
-    if suffix is None or (
-        suffix == "" and exchange_code in ("", "SMART") and currency_code != "USD"
-    ):
+    if suffix is None or smart_non_usd:
         suffix = _CURRENCY_TO_SUFFIX.get(currency_code, "")
         if suffix:
             logger.debug(
@@ -120,8 +167,12 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
         from src.ticker_corrections import apply_operator_override
 
         candidate = f"{_pad_numeric_symbol_for_suffix(symbol, suffix)}{suffix}"
-        overridden, _ = apply_operator_override(candidate)
-        return overridden
+        overridden, was_overridden = apply_operator_override(candidate)
+        return TickerResolution(
+            yf_ticker=overridden,
+            source="operator_override" if was_overridden else "currency_fallback",
+            exchange_verified=was_overridden,
+        )
 
     # Returning bare symbol — try yfinance search as a last resort.
     #
@@ -144,7 +195,14 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
     ):
         yf_ticker = _yf_search_ticker(symbol, exchange, currency)
         if yf_ticker:
-            return yf_ticker
+            from src.ticker_corrections import apply_operator_override
+
+            overridden, was_overridden = apply_operator_override(yf_ticker)
+            return TickerResolution(
+                yf_ticker=overridden,
+                source="operator_override" if was_overridden else "yfinance_search",
+                exchange_verified=was_overridden,
+            )
         if exchange not in ("SMART",):
             logger.warning(
                 "ibkr_exchange_unmapped",
@@ -153,7 +211,11 @@ def ibkr_symbol_to_yf(symbol: str, exchange: str, currency: str = "") -> str:
                 currency=currency,
                 note="No yfinance suffix found; position will use bare ticker (may be incorrect for non-US stocks)",
             )
-    return symbol
+    return TickerResolution(
+        yf_ticker=symbol,
+        source="unresolved",
+        exchange_verified=False,
+    )
 
 
 def _yf_search_ticker(symbol: str, exchange: str, currency: str) -> str:

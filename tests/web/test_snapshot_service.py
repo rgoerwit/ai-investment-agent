@@ -86,6 +86,47 @@ def test_inflight_load_is_started_once(
     assert service.wait_until_idle(1.0)
 
 
+def test_inflight_load_times_out_and_late_result_is_ignored(
+    tmp_path: Path,
+    sample_bundle,
+    monkeypatch,
+):
+    service = DashboardSnapshotService(
+        DashboardSettings(
+            results_dir=tmp_path / "results",
+            runtime_dir=tmp_path / "runtime",
+            snapshot_timeout_seconds=1,
+        )
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    async def slow_load():
+        started.set()
+        release.wait(1.0)
+        return sample_bundle
+
+    monkeypatch.setattr(service, "_load_snapshot", slow_load)
+
+    bundle, meta = service.load_snapshot_sync()
+    assert bundle is None
+    assert meta.status == "loading"
+    assert started.wait(1.0)
+
+    with service._lock:
+        service._loading_started_monotonic = time.monotonic() - 2.0
+
+    bundle, meta = service.load_snapshot_sync()
+    assert bundle is None
+    assert meta.status == "error"
+    assert "exceeded 1s" in (meta.last_error or "")
+    assert service.wait_until_idle(0.1)
+
+    release.set()
+    time.sleep(0.05)
+    assert service.get_cached_snapshot() is None
+
+
 def test_failed_refresh_preserves_cached_bundle(
     tmp_path: Path,
     sample_bundle,

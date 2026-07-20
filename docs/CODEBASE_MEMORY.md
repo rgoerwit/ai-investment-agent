@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-05-24
+Last updated: 2026-07-19
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
@@ -82,6 +82,21 @@ For runtime/control-plane state design, use `docs/RUNTIME_MODEL.md` as the canon
 `src/tools/` holds the domain tool implementations.
 `src/toolkit.py` is deleted.
 Package roots such as `src/__init__.py`, `src/tooling/__init__.py`, and `src/tools/__init__.py` are intentionally inert; do not assume convenience re-exports.
+
+The forensic Auditor uses `src/forensic_budget.py` as its single budget policy,
+`src/tools/official_documents.py` for approved-host HTML/text/PDF evidence, and
+`src/tools/forensic.py` for deterministic completeness gates and ratios. PDF
+extraction is intentionally bounded and text-only: `pypdf` falls back to
+`pdftotext`; approved exchange domains are built in, while direct issuer/IR
+document hosts require the operator's `AUDITOR_OFFICIAL_DOCUMENT_HOSTS`
+allowlist. OCR and general-purpose issuer-site crawling remain out of scope.
+
+The Auditor maintains separate `CURRENT_STATEMENTS` and `AUDITED_BASELINE`
+tracks. A signed audit opinion may establish the latest audited baseline even
+when fresher interim/current statements exist, but figures are compared only
+when period type/end, currency, and consolidation scope align. Fiscal-year
+labels are never inferred from calendar years. Saved artifacts include the
+actual Auditor budget ledger and attribution lists only models that made calls.
 
 `src/tooling/` owns cross-cutting tool execution, audit hooks, argument policy, and untrusted-content inspection.
 

@@ -118,6 +118,60 @@ async def test_apac_llm_failure_degrades_to_failure_artifact(monkeypatch):
     assert status["ok"] is False
 
 
+@pytest.mark.asyncio
+async def test_glm_1301_retries_once_without_thinking(monkeypatch):
+    invoke = AsyncMock(
+        side_effect=[
+            RuntimeError("Error code 400: {'code': '1301', 'message': '敏感内容'}"),
+            AIMessage(content=APAC_NO_MATERIAL_SENTINEL),
+        ]
+    )
+    monkeypatch.setattr(
+        "src.agents.apac_specialist_node.agent_runtime.invoke_with_rate_limit_handling",
+        invoke,
+    )
+    node = create_apac_specialist_node(
+        Mock(name="thinking"), fallback_llm=Mock(name="direct")
+    )
+
+    out = await node({"company_of_interest": "AGS.SI"}, {"configurable": {}})
+
+    assert invoke.await_count == 2
+    assert invoke.await_args_list[1].kwargs["max_attempts"] == 1
+    assert out[APAC_REPORT_FIELD] == APAC_NO_MATERIAL_SENTINEL
+
+
+@pytest.mark.asyncio
+async def test_non_1301_policy_error_does_not_retry(monkeypatch):
+    invoke = AsyncMock(side_effect=RuntimeError("Error code 400: invalid parameter"))
+    monkeypatch.setattr(
+        "src.agents.apac_specialist_node.agent_runtime.invoke_with_rate_limit_handling",
+        invoke,
+    )
+    node = create_apac_specialist_node(Mock(), fallback_llm=Mock())
+
+    out = await node({"company_of_interest": "AGS.SI"}, {"configurable": {}})
+
+    assert invoke.await_count == 1
+    assert out[APAC_REPORT_FIELD] == APAC_UNAVAILABLE_SENTINEL
+
+
+@pytest.mark.asyncio
+async def test_second_glm_1301_failure_is_not_retried_again(monkeypatch):
+    error = RuntimeError("Error code 400: {'code': '1301', 'message': '敏感内容'}")
+    invoke = AsyncMock(side_effect=[error, error])
+    monkeypatch.setattr(
+        "src.agents.apac_specialist_node.agent_runtime.invoke_with_rate_limit_handling",
+        invoke,
+    )
+    node = create_apac_specialist_node(Mock(), fallback_llm=Mock())
+
+    out = await node({"company_of_interest": "AGS.SI"}, {"configurable": {}})
+
+    assert invoke.await_count == 2
+    assert out[APAC_REPORT_FIELD] == APAC_UNAVAILABLE_SENTINEL
+
+
 def test_specialist_prompt_loads_with_required_terms():
     from src.prompts import get_prompt
 
@@ -200,3 +254,27 @@ def test_apac_llm_factory_passes_deepseek_kwargs(monkeypatch):
     assert captured["reasoning_effort"] == "max"
     assert captured["extra_body"] == {"thinking": {"type": "enabled"}}
     assert "temperature" not in captured
+
+
+def test_apac_direct_retry_factory_disables_thinking_and_sdk_retries(monkeypatch):
+    from src import llms
+
+    captured = {}
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake_module = ModuleType("langchain_openai")
+    fake_module.ChatOpenAI = FakeChatOpenAI
+    monkeypatch.setitem(sys.modules, "langchain_openai", fake_module)
+    monkeypatch.setattr(llms.config, "enable_apac_specialist", True)
+    monkeypatch.setattr(
+        type(llms.config), "get_apac_specialist_api_key", lambda self: "sk-test"
+    )
+
+    llms.create_apac_specialist_llm(thinking_enabled=False)
+
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert captured["max_retries"] == 0
+    assert "reasoning_effort" not in captured

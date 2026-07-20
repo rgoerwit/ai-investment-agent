@@ -93,13 +93,91 @@ class TestAssessBuyStability:
 class TestLoadRecentSameTickerVerdicts:
     _NOW = datetime(2026, 6, 19, 12, 0, 0)
 
-    def _write(self, d, name, decision_text=None, *, raw=None):
+    def _write(self, d, name, decision_text=None, *, raw=None, quick_mode=None):
         path = d / name
         if raw is not None:
             path.write_text(raw)
         else:
-            path.write_text(json.dumps({"final_decision": {"decision": decision_text}}))
+            payload = {"final_decision": {"decision": decision_text}}
+            if quick_mode is not None:
+                payload["run_summary"] = {"quick_mode": quick_mode}
+            path.write_text(json.dumps(payload))
         return str(path)
+
+    def test_history_records_carry_date_and_mode(self, tmp_path):
+        """The SELL confirmation gate needs dated, mode-aware records —
+        verdict strings alone cannot enforce spacing or exclude quick runs."""
+        from src.ibkr.buy_stability import load_recent_same_ticker_history
+
+        self._write(
+            tmp_path,
+            "TEST.T_20260617_100000_analysis.json",
+            _pm_block("SELL"),
+            quick_mode=True,
+        )
+        self._write(
+            tmp_path,
+            "TEST.T_20260618_100000_analysis.json",
+            _pm_block("BUY"),
+            quick_mode=False,
+        )
+        history = load_recent_same_ticker_history(
+            "TEST.T",
+            lookback_days=7,
+            results_dir=str(tmp_path),
+            now=self._NOW,
+        )
+        assert [(r.verdict, r.is_quick_mode) for r in history] == [
+            ("SELL", True),
+            ("BUY", False),
+        ]
+        # Ascending timestamp order, real datetimes
+        assert history[0].analysis_dt < history[1].analysis_dt
+        assert history[0].analysis_dt == datetime(2026, 6, 17, 10, 0, 0)
+
+    def test_history_missing_run_summary_is_mode_unknown(self, tmp_path):
+        """Absent/empty run_summary → mode unknown (None), never full-mode.
+
+        Unknown mode carries no sell-confirmation authority; the legacy False
+        default let pre-run_summary artifacts confirm executable sells."""
+        from src.ibkr.buy_stability import load_recent_same_ticker_history
+
+        self._write(tmp_path, "TEST.T_20260618_100000_analysis.json", _pm_block("SELL"))
+        history = load_recent_same_ticker_history(
+            "TEST.T", lookback_days=7, results_dir=str(tmp_path), now=self._NOW
+        )
+        assert len(history) == 1
+        assert history[0].is_quick_mode is None
+
+    def test_history_non_dict_run_summary_kept_as_mode_unknown(self, tmp_path):
+        """A truthy non-dict run_summary must degrade to mode-unknown, not
+        raise AttributeError and silently drop the verdict record."""
+        from src.ibkr.buy_stability import load_recent_same_ticker_history
+
+        self._write(
+            tmp_path,
+            "TEST.T_20260618_100000_analysis.json",
+            raw=json.dumps(
+                {
+                    "final_decision": {"decision": _pm_block("SELL")},
+                    "run_summary": "corrupted-string-not-a-dict",
+                }
+            ),
+        )
+        history = load_recent_same_ticker_history(
+            "TEST.T", lookback_days=7, results_dir=str(tmp_path), now=self._NOW
+        )
+        assert len(history) == 1
+        assert history[0].is_quick_mode is None
+        assert history[0].verdict == "SELL"
+
+    def test_verdict_wrapper_stays_compatible(self, tmp_path):
+        """The BUY-gate view is a thin projection of the history records."""
+        self._write(tmp_path, "TEST.T_20260618_100000_analysis.json", _pm_block("HOLD"))
+        verdicts = load_recent_same_ticker_verdicts(
+            "TEST.T", lookback_days=7, results_dir=str(tmp_path), now=self._NOW
+        )
+        assert verdicts == ["HOLD"]
 
     def test_returns_in_window_excludes_current_and_stale(self, tmp_path):
         self._write(tmp_path, "TEST.T_20260617_100000_analysis.json", _pm_block("BUY"))

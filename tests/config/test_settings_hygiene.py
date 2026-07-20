@@ -366,6 +366,38 @@ def test_env_only_setting_has_no_portfolio_cli_flag(monkeypatch):
     assert not hasattr(args, "gemini_rpm_limit")  # no CLI surface on this parser
 
 
+def test_gpt56_model_ids_load_from_dotenv(tmp_path, monkeypatch):
+    dotenv_path = tmp_path / "gpt56.env"
+    dotenv_path.write_text(
+        "\n".join(
+            (
+                "CONSULTANT_MODEL=gpt-5.6-terra",
+                "CONSULTANT_QUICK_MODEL=gpt-5.6-luna",
+                "AUDITOR_MODEL=gpt-5.6-sol",
+                "AUDITOR_QUICK_MODEL=gpt-5.6-luna",
+                "EDITOR_MODEL=gpt-5.6-terra",
+            )
+        ),
+        encoding="utf-8",
+    )
+    for env_name in (
+        "CONSULTANT_MODEL",
+        "CONSULTANT_QUICK_MODEL",
+        "AUDITOR_MODEL",
+        "AUDITOR_QUICK_MODEL",
+        "EDITOR_MODEL",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+
+    settings = Settings(_env_file=dotenv_path)
+
+    assert settings.consultant_model == "gpt-5.6-terra"
+    assert settings.consultant_quick_model == "gpt-5.6-luna"
+    assert settings.auditor_model == "gpt-5.6-sol"
+    assert settings.auditor_quick_model == "gpt-5.6-luna"
+    assert settings.editor_model == "gpt-5.6-terra"
+
+
 def test_shell_env_beats_dotenv_beats_default():
     """The middle of the chain: shell env > .env file > hardcoded default."""
     with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as f:

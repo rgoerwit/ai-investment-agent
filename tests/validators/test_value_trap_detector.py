@@ -401,6 +401,62 @@ ACTIVIST_PRESENT: NO
         assert high_risk_flag["severity"] == "WARNING"
         assert high_risk_flag["risk_penalty"] == 1.0
 
+    def test_conflicted_governance_inputs_quarantine_raw_score(self):
+        """AGS regression: rejected 83%/conglomerate inputs cannot hard-fail."""
+        from src.validators.red_flag_detector import RedFlagDetector
+
+        report = """
+SCORE: 35
+VERDICT: TRAP
+MAJORITY_HOLDER: Family/insiders approximately 83%
+KEY_RISKS:
+- Conglomerate discount and no near-term catalyst
+ACTIVIST_PRESENT: NO
+CATALYSTS:
+  INDEX_CANDIDATE: NONE
+"""
+        card = {
+            "entity_role": "STANDALONE",
+            "controlling_shareholder": {"name": "TYC", "pct": 52.71},
+            "related_listed": [],
+        }
+        flags = RedFlagDetector.detect_value_trap_flags(
+            report, "AGS.SI", governance_card=card
+        )
+        types = {flag["type"] for flag in flags}
+        assert "VALUE_TRAP_DATA_CONFLICT" in types
+        assert "VALUE_TRAP_HIGH_RISK" not in types
+        assert "VALUE_TRAP_VERDICT" not in types
+        assert "NO_CATALYST_DETECTED" in types
+        conflict = next(
+            flag for flag in flags if flag["type"] == "VALUE_TRAP_DATA_CONFLICT"
+        )
+        assert conflict["risk_penalty"] == 0.5
+        assert "83% vs 52.71%" in conflict["detail"]
+
+    def test_matching_governance_evidence_preserves_score_authority(self):
+        from src.validators.red_flag_detector import RedFlagDetector
+
+        report = """
+SCORE: 35
+VERDICT: TRAP
+MAJORITY_HOLDER: TYC controls 52.71%
+ACTIVIST_PRESENT: YES
+"""
+        card = {
+            "entity_role": "STANDALONE",
+            "controlling_shareholder": {"name": "TYC", "pct": 52.71},
+            "related_listed": [],
+        }
+        types = {
+            flag["type"]
+            for flag in RedFlagDetector.detect_value_trap_flags(
+                report, "AGS.SI", governance_card=card
+            )
+        }
+        assert "VALUE_TRAP_DATA_CONFLICT" not in types
+        assert "VALUE_TRAP_HIGH_RISK" in types
+
     def test_moderate_risk_trap_flag(self):
         """Test MODERATE_RISK flag for score 40-60."""
         from src.validators.red_flag_detector import RedFlagDetector

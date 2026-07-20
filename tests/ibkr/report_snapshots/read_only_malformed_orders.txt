@@ -1,0 +1,38 @@
+=== IBKR Portfolio Reconciliation  2026-07-17 12:00 ===
+
+⚠ READ-ONLY — no IBKR connection; holdings, watchlist, and cash were NOT loaded.
+  BUYs below come from saved analyses; whether you already own/watch them is UNKNOWN.
+
+⚠ LIVE ORDERS UNAVAILABLE — open-order dedup is disabled; an order you already have working
+  may be re-suggested. Verify in IBKR before placing orders.
+
+  Account:          not loaded (read-only)
+  Net liquidation:  not loaded
+  Cash (total):     not loaded
+  Settled cash:     not loaded
+  Available:        not loaded
+
+══════════════════════════════════════════════════════
+  SCREENING FRESHNESS  (last completed broad market sweep)
+══════════════════════════════════════════════════════
+
+  No broad-screen completion recorded.
+  → Run: ./scripts/run_pipeline.sh
+
+══════════════════════════════════════════════════════
+  WATCHLIST ADDITION REVIEW  (no watchlist loaded; additions evaluated without membership changes)
+══════════════════════════════════════════════════════
+
+  ADDITIONS RECOMMENDED NOW: None
+
+  ✓ 1 BUY order already in flight (WDO (WDO.TO)) — excluded from changes
+  LIVE ORDER STATUS:
+    WDO (WDO.TO)  [ORDER ALREADY SUBMITTED: BUY ? LMT () — do not re-enter]
+
+══════════════════════════════════════════════════════
+  CASH SUMMARY
+══════════════════════════════════════════════════════
+
+  Settled cash:                                $      0
+  Deployable into new buys:                    $      0
+  Summary:  empty

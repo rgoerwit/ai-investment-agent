@@ -45,6 +45,81 @@ def test_build_analysis_record_populates_risk_tally_and_quality_flags():
     assert "CYCLICAL_PEAK_WARNING" in record.quality_flag_types
 
 
+class TestPortfolioEvidenceExtraction:
+    """Evidence is loaded from persisted run_summary markers + root red_flags —
+    never reparsed from prose. Legacy/malformed artifacts degrade to
+    complete=False (conservative disposition), never crash indexing."""
+
+    _BASE = {
+        "prediction_snapshot": {
+            "ticker": "TEST.T",
+            "analysis_date": "2026-07-01",
+            "verdict": "DO_NOT_INITIATE",
+            "currency": "JPY",
+            "health_adj": 70.0,
+        },
+        "investment_analysis": {"trader_plan": ""},
+    }
+
+    @staticmethod
+    def _record(extra):
+        return _build_analysis_record_from_data(
+            Path("TEST.T_20260701_000000_analysis.json"),
+            {**TestPortfolioEvidenceExtraction._BASE, **extra},
+        )
+
+    def test_marker_and_flags_populate_evidence(self):
+        record = self._record(
+            {
+                "run_summary": {"verdict_dni_review_candidate": True},
+                "red_flags": [
+                    {"type": "GROWTH_SCORE_UNRELIABLE", "blocks_buy": True},
+                    {"type": "PFIC_PROBABLE", "risk_penalty": 1.0},
+                    {"type": "MOAT_DURABLE_ADVANTAGE", "risk_penalty": -1.0},
+                ],
+            }
+        )
+        assert record.evidence.complete is True
+        assert record.evidence.dni_review_candidate is True
+        assert record.evidence.buy_blocking_flag_types == ("GROWTH_SCORE_UNRELIABLE",)
+        assert record.evidence.compliance_flag_types == ("PFIC_PROBABLE",)
+        assert record.evidence.mandatory_exit_flag_types == ()
+
+    def test_marker_false_still_counts_as_complete(self):
+        """Key presence (not truthiness) distinguishes marker-aware artifacts."""
+        record = self._record(
+            {
+                "run_summary": {"verdict_dni_review_candidate": False},
+                "red_flags": [],
+            }
+        )
+        assert record.evidence.complete is True
+        assert record.evidence.dni_review_candidate is False
+
+    def test_legacy_artifact_is_evidence_incomplete(self):
+        record = self._record({"run_summary": {"quick_mode": False}})
+        assert record.evidence.complete is False
+
+    def test_malformed_red_flags_degrade_without_crash(self):
+        record = self._record(
+            {
+                "run_summary": {"verdict_dni_review_candidate": True},
+                "red_flags": "not-a-list",
+            }
+        )
+        assert record.evidence.complete is False
+        assert record.evidence.buy_blocking_flag_types == ()
+
+    def test_non_dict_flag_entries_are_skipped(self):
+        record = self._record(
+            {
+                "run_summary": {"verdict_dni_review_candidate": False},
+                "red_flags": [None, "junk", {"blocks_buy": True}],  # typeless
+            }
+        )
+        assert record.evidence.buy_blocking_flag_types == ()
+
+
 def test_build_analysis_record_parses_risk_tally_from_decision_fallback():
     # Snapshot missing risk_tally + verdict → fallback parses from the PM decision.
     record = _build_analysis_record_from_data(
@@ -531,3 +606,56 @@ class TestTickerKeySanitizer:
             {"ticker": "GUD.AX:", "analysis_date": "2026-01-10", "file_path": "x"}
         )
         assert record.ticker == "GUD.AX"
+
+
+class TestKillCriteriaExtraction:
+    """Thesis-break triggers load from the saved bear history (v8)."""
+
+    _BEAR = (
+        "The bear case rests on leverage.\n"
+        "### --- START KILL_CRITERIA ---\n"
+        "TRIGGER_1: D/E ratio exceeds 1.8 for two consecutive quarters\n"
+        "TRIGGER_2: Two consecutive years of negative free cash flow\n"
+        "### --- END KILL_CRITERIA ---\n"
+    )
+
+    @staticmethod
+    def _record(investment_analysis):
+        return _build_analysis_record_from_data(
+            Path("TEST.T_20260701_000000_analysis.json"),
+            {
+                "prediction_snapshot": {
+                    "ticker": "TEST.T",
+                    "analysis_date": "2026-07-01",
+                    "verdict": "BUY",
+                    "currency": "JPY",
+                    "health_adj": 70.0,
+                },
+                "investment_analysis": investment_analysis,
+            },
+        )
+
+    def test_kill_criteria_loaded_from_bear_history(self):
+        record = self._record(
+            {
+                "trader_plan": "",
+                "investment_debate": {"bear_history": self._BEAR},
+            }
+        )
+        assert record is not None
+        assert record.kill_criteria == (
+            "D/E ratio exceeds 1.8 for two consecutive quarters",
+            "Two consecutive years of negative free cash flow",
+        )
+
+    def test_legacy_artifact_without_debate_yields_empty(self):
+        record = self._record({"trader_plan": ""})
+        assert record is not None
+        assert record.kill_criteria == ()
+
+    def test_malformed_debate_shape_yields_empty(self):
+        record = self._record(
+            {"trader_plan": "", "investment_debate": {"bear_history": None}}
+        )
+        assert record is not None
+        assert record.kill_criteria == ()

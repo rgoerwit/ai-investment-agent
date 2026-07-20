@@ -100,7 +100,7 @@ Evaluate CURRENT against BASELINE for a trade decision artifact.
 
 PASS when:
 - action remains parseable
-- entry/stop/target are coherent
+- fair-entry, downside-review, and valuation-reference levels are coherent
 - if action changed, the changed premise is explicitly stated
 
 SOFT_FAIL when:
@@ -109,7 +109,7 @@ SOFT_FAIL when:
 
 HARD_FAIL when:
 - action is missing or unusable
-- entry/stop/target relationship is incoherent
+- valuation-reference and downside-review relationships are incoherent
 - action changed with no explicit changed premise
 
 Respond as JSON with keys: verdict, score, signals.""",
@@ -192,7 +192,7 @@ _CHECKLIST_RUBRICS: dict[str, tuple[tuple[str, str], ...]] = {
     "trade_decision": (
         (
             "levels_coherent",
-            "The entry/stop/target relationship is internally coherent.",
+            "Fair-entry, downside-review, and valuation-reference levels are internally coherent.",
         ),
         (
             "action_change_justified",

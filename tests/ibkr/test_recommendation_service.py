@@ -46,6 +46,73 @@ def _make_request(**overrides) -> PortfolioRecommendationRequest:
 
 
 @pytest.mark.asyncio
+async def test_bundle_carries_reconcile_time_limits_and_availability():
+    """The bundle stamps the request's concentration limits and first-class
+    watchlist availability so downstream consumers (CLI report, dashboard
+    serializer) provably use the values reconciliation used."""
+    service = PortfolioRecommendationService(
+        load_analyses_fn=lambda path: {"7203.T": _make_analysis(ticker="7203.T")},
+        reconcile_fn=lambda **kwargs: [],
+        compute_portfolio_health_fn=lambda **kwargs: [],
+    )
+
+    bundle = await service.build_bundle(
+        _make_request(read_only=True, exchange_limit_pct=33.0, sector_limit_pct=22.0)
+    )
+
+    assert bundle.exchange_limit_pct == 33.0
+    assert bundle.sector_limit_pct == 22.0
+    assert bundle.watchlist_unavailable is False
+
+
+@pytest.mark.asyncio
+async def test_bundle_watchlist_unavailable_from_snapshot():
+    snapshot = PortfolioSnapshot(
+        positions=[],
+        portfolio=PortfolioSummary(),
+        watchlist=WatchlistSnapshot(
+            tickers=set(),
+            found=False,
+            unavailable=True,
+            explicitly_requested=True,
+            loaded_name="watchlist-2026",
+        ),
+        errors={"watchlist": "watchlist_fetch failed: IBKRAuthError"},
+    )
+    service = PortfolioRecommendationService(
+        portfolio_data_service=FakePortfolioDataService(snapshot),
+        load_analyses_fn=lambda path: {"7203.T": _make_analysis(ticker="7203.T")},
+        reconcile_fn=lambda **kwargs: [],
+        compute_portfolio_health_fn=lambda **kwargs: [],
+    )
+
+    bundle = await service.build_bundle(_make_request())
+
+    assert bundle.watchlist_unavailable is True
+
+
+@pytest.mark.asyncio
+async def test_health_check_receives_configured_exchange_limit():
+    """The request's --exchange-limit reaches compute_portfolio_health, so the
+    GEOGRAPHY_CONCENTRATION flag and the selection screen share one limit."""
+    health_kwargs: list[dict] = []
+
+    def fake_health(**kwargs):
+        health_kwargs.append(kwargs)
+        return []
+
+    service = PortfolioRecommendationService(
+        load_analyses_fn=lambda path: {"7203.T": _make_analysis(ticker="7203.T")},
+        reconcile_fn=lambda **kwargs: [],
+        compute_portfolio_health_fn=fake_health,
+    )
+
+    await service.build_bundle(_make_request(read_only=True, exchange_limit_pct=33.0))
+
+    assert [kwargs["exchange_limit_pct"] for kwargs in health_kwargs] == [33.0]
+
+
+@pytest.mark.asyncio
 async def test_build_bundle_read_only_skips_portfolio_fetch():
     service = PortfolioRecommendationService(
         load_analyses_fn=lambda path: {"7203.T": _make_analysis(ticker="7203.T")},
@@ -98,8 +165,16 @@ async def test_build_bundle_preserves_cash_blocked_watchlist_candidate_count():
     portfolio_service = FakePortfolioDataService(snapshot)
 
     def fake_reconcile(**kwargs):
-        kwargs["diagnostics"].cash_blocked_offwatch_buy_count = 3
-        return []
+        return [
+            ReconciliationItem(
+                ticker=f"CASH{i}.T",
+                action="BUY",
+                reason="Cash blocked",
+                urgency="MEDIUM",
+                is_cash_blocked=True,
+            )
+            for i in range(3)
+        ]
 
     service = PortfolioRecommendationService(
         portfolio_data_service=portfolio_service,

@@ -9,21 +9,50 @@ from src.ibkr.models import (
     NormalizedPosition,
     ReconciliationItem,
 )
+from src.ibkr.order_presentation import build_live_order_note
+from src.ibkr.portfolio_action_plan import (
+    PortfolioActionPlan,
+    build_action_plan_counts,
+    build_portfolio_action_plan,
+    has_active_macro_event,
+)
 from src.ibkr.portfolio_presentation import (
     PortfolioActionGroups,
     build_action_display_sections,
     build_action_summary_counts,
     build_cash_summary,
     build_freshness_overview,
-    build_live_order_note,
-    build_portfolio_overview,
+    fx_return_split_diagnostic,
     get_sell_type_label,
-    group_portfolio_actions,
+    retail_safe_action,
 )
 from src.ibkr.recommendation_service import PortfolioRecommendationBundle
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
+from src.ibkr.watchlist_optimization import (
+    ConcentrationNote,
+    WatchlistMove,
+    concentration_breach_summary,
+)
 from src.sector_normalization import aggregate_sector_weights
 from src.web.ibkr_dashboard.drilldown_service import build_structured_sections
+
+
+def _build_dashboard_action_view(
+    bundle: PortfolioRecommendationBundle,
+) -> PortfolioActionPlan:
+    return build_portfolio_action_plan(
+        bundle.items,
+        bundle.portfolio,
+        watchlist_tickers=bundle.watchlist_tickers,
+        watchlist_supplied=(
+            bundle.watchlist_total is not None and not bundle.watchlist_unavailable
+        ),
+        watchlist_unavailable=bundle.watchlist_unavailable,
+        live_orders=bundle.live_orders,
+        macro_event_active=has_active_macro_event(bundle.health_flags),
+        exchange_limit_pct=bundle.exchange_limit_pct,
+        sector_limit_pct=bundle.sector_limit_pct,
+    )
 
 
 def serialize_dashboard_snapshot(
@@ -37,6 +66,8 @@ def serialize_dashboard_snapshot(
     macro_alert: dict[str, Any] | None = None,
     read_only: bool = False,
 ) -> dict[str, Any]:
+    view = _build_dashboard_action_view(bundle)
+    cash_summary = _serialize_cash_summary(bundle, view)
     return {
         "status": status,
         "as_of": fetched_at or datetime.now(UTC).isoformat(),
@@ -45,7 +76,7 @@ def serialize_dashboard_snapshot(
         "load_error": load_error,
         "read_only": read_only,
         "portfolio": _serialize_portfolio(bundle),
-        "overview": _serialize_overview(bundle),
+        "overview": _serialize_overview(bundle, view),
         "macro_alert": macro_alert,
         "screening_freshness": _serialize_screening_freshness(
             bundle.screening_freshness
@@ -53,15 +84,14 @@ def serialize_dashboard_snapshot(
         "freshness": _serialize_freshness(bundle),
         "freshness_overview": _serialize_freshness_overview(bundle),
         "actions": _serialize_actions(
-            bundle.items,
-            bundle.health_flags,
-            watchlist_tickers=bundle.watchlist_tickers,
+            view,
             live_orders=bundle.live_orders,
         ),
         "watchlist": {
             "name": bundle.watchlist_name,
             "total": bundle.watchlist_total,
             "tickers": sorted(bundle.watchlist_tickers),
+            "status": _watchlist_status(bundle),
         },
         "orders": bundle.live_orders,
         "health_flags": list(bundle.health_flags),
@@ -70,13 +100,38 @@ def serialize_dashboard_snapshot(
             for item in bundle.items
             if item.ibkr_position
         ],
-        "summary_counts": _summary_counts(
-            bundle.items,
-            watchlist_tickers=bundle.watchlist_tickers,
-        ),
-        "cash_summary": _serialize_cash_summary(bundle),
-        "cash_timeline": _serialize_cash_timeline(bundle),
+        "summary_counts": _summary_counts(bundle.items, view),
+        "cash_summary": cash_summary,
+        "cash_timeline": list(cash_summary["pending_inflows"]),
+        # Limits let the concentration cards render "limit 40%" and warn near cap.
+        "concentration_limits": {
+            "sector": bundle.sector_limit_pct,
+            "exchange": bundle.exchange_limit_pct,
+        },
+        # Non-fatal data-source failures (e.g. {"live_orders": "..."}) so the UI
+        # can distinguish "no live orders" from "live orders could not load".
+        "errors": dict(bundle.errors),
     }
+
+
+def _serialize_breaches(note: ConcentrationNote) -> list[dict[str, Any]]:
+    return [
+        {
+            "dimension": breach.dimension,
+            "key": breach.key,
+            "projected_pct": breach.projected_pct,
+            "limit_pct": breach.limit_pct,
+        }
+        for breach in note.breaches
+    ]
+
+
+def _watchlist_status(bundle: PortfolioRecommendationBundle) -> str:
+    if bundle.watchlist_unavailable:
+        return "unavailable"
+    if bundle.watchlist_total is None:
+        return "not_loaded"
+    return "loaded"
 
 
 def serialize_equity_drilldown(
@@ -108,12 +163,14 @@ def serialize_item(
     *,
     live_orders: list[dict] | None = None,
 ) -> dict[str, Any]:
+    item = retail_safe_action(item)
     return {
         "ticker_yf": item.ticker.yf,
         "ticker_ibkr": item.ticker.ibkr,
         "action": item.action,
         "sell_type": item.sell_type,
         "sell_type_label": get_sell_type_label(item.sell_type),
+        "action_basis": item.action_basis,
         "reason": item.reason,
         "urgency": item.urgency,
         "is_watchlist": item.is_watchlist,
@@ -209,34 +266,51 @@ def _serialize_freshness_overview(
     }
 
 
-def _serialize_overview(bundle: PortfolioRecommendationBundle) -> dict[str, Any]:
-    overview = build_portfolio_overview(
-        bundle.items,
-        bundle.portfolio,
-        watchlist_tickers=bundle.watchlist_tickers,
-    )
+def _serialize_overview(
+    bundle: PortfolioRecommendationBundle,
+    view: PortfolioActionPlan,
+) -> dict[str, Any]:
+    counts = build_action_summary_counts(view.groups)
+    # Buy/candidate chips come from the optimizer view, not the raw groups —
+    # the header must agree with the filtered action lists below it.
+    new_buys = len(view.optimization.keep)
+    candidates = len(view.optimization.add)
     return {
-        "sells": overview.sell_count,
-        "reviews": overview.review_count,
-        "holds": overview.hold_count,
-        "macro_watch": overview.macro_watch_count,
-        "new_buys": overview.new_buy_count,
-        "candidates": overview.candidate_count,
-        "total_items": overview.total_items,
-        "position_count": overview.position_count,
-        "has_live_positions": overview.has_live_positions,
-        "is_candidate_heavy": overview.is_candidate_heavy,
+        "sells": counts.get("SELL", 0),
+        "reviews": counts.get("REVIEW", 0),
+        "holds": counts.get("HOLD", 0),
+        "macro_watch": counts.get("MACRO_WATCH", 0),
+        "new_buys": new_buys,
+        "candidates": candidates,
+        "total_items": len(bundle.items),
+        "position_count": bundle.portfolio.position_count,
+        "has_live_positions": bundle.portfolio.position_count > 0,
+        "is_candidate_heavy": bundle.portfolio.position_count == 0
+        and (new_buys > 0 or candidates > 0),
     }
 
 
-def _serialize_actions(
-    items: list[ReconciliationItem],
-    health_flags: list[str],
+def _serialize_watchlist_move(
+    move: WatchlistMove,
     *,
-    watchlist_tickers: set[str] | None,
+    live_orders: list[dict] | None,
+    reason_key: str = "removal_reason",
+) -> dict[str, Any]:
+    row = serialize_item(move.item, live_orders=live_orders)
+    row[reason_key] = move.reason
+    if move.note is not None:
+        row["concentration"] = concentration_breach_summary(move.note)
+        row["breaches"] = _serialize_breaches(move.note)
+    return row
+
+
+def _serialize_actions(
+    view: PortfolioActionPlan,
+    *,
     live_orders: list[dict] | None,
 ) -> dict[str, Any]:
-    groups = group_portfolio_actions(items, watchlist_tickers=watchlist_tickers)
+    groups = view.groups
+    optimization = view.optimization
     dip_watch = [
         _serialize_dip_watch(candidate)
         for candidate in build_dip_watch_candidates(list(groups.dip_candidates))
@@ -279,27 +353,64 @@ def _serialize_actions(
             serialize_item(item, live_orders=live_orders) for item in groups.trims
         ],
         "dip_watch": dip_watch,
+        # Watchlist lists mirror the CLI's WATCHLIST ADDITION REVIEW section:
+        # selected keeps/adds, removals, the non-empty floor, and
+        # concentration-withheld off-watch names — never the raw groups.
         "watchlist_buy": [
-            serialize_item(item, live_orders=live_orders) for item in groups.new_buys
+            serialize_item(item, live_orders=live_orders) for item in optimization.keep
         ],
         "watchlist_candidate": [
-            serialize_item(item, live_orders=live_orders)
-            for item in groups.watchlist_candidates
+            serialize_item(item, live_orders=live_orders) for item in optimization.add
         ],
         "watchlist_monitor": [
-            serialize_item(item, live_orders=live_orders) for item in groups.holds_watch
+            serialize_item(item, live_orders=live_orders)
+            for item in optimization.monitors
         ],
         "watchlist_remove": [
-            serialize_item(item, live_orders=live_orders) for item in groups.removes
+            _serialize_watchlist_move(move, live_orders=live_orders)
+            for move in optimization.remove
+        ],
+        "watchlist_floor_retained": [
+            _serialize_watchlist_move(
+                move,
+                live_orders=live_orders,
+                reason_key="retention_reason",
+            )
+            for move in optimization.retained_for_watchlist_floor
+        ],
+        "watchlist_withheld": [
+            {
+                **serialize_item(note.item, live_orders=live_orders),
+                "concentration": concentration_breach_summary(note),
+                "breaches": _serialize_breaches(note),
+            }
+            for note in optimization.withheld_candidates
+        ],
+        "watchlist_capacity_limited": [
+            serialize_item(item, live_orders=live_orders)
+            for item in optimization.capacity_limited_candidates
+        ],
+        "watchlist_below_conviction": [
+            serialize_item(item, live_orders=live_orders)
+            for item in optimization.excluded_low_conviction
+        ],
+        "watchlist_in_flight": [
+            {
+                **serialize_item(item, live_orders=live_orders),
+                "watchlist_membership": (
+                    "not_on_loaded_watchlist"
+                    if optimization.watchlist_supplied
+                    else "unknown"
+                ),
+            }
+            for item in view.in_flight_buys
         ],
         "action_sections": _serialize_action_sections(
             groups,
             dip_watch=tuple(dip_watch),
             live_orders=live_orders,
         ),
-        "macro_event_detected": any(
-            "CORRELATED_SELL_EVENT" in flag for flag in health_flags
-        ),
+        "macro_event_detected": view.macro_event_active,
     }
 
 
@@ -341,7 +452,7 @@ def _serialize_dip_watch(candidate: DipWatchCandidate) -> dict[str, Any]:
         "score": candidate.score,
         "stars": candidate.stars,
         "dip_pct": candidate.dip_pct,
-        "risk_reward": candidate.risk_reward,
+        "upside_pct": candidate.upside_pct,
         "held_quantity": candidate.held_quantity,
         "health_adj": candidate.health_adj,
         "growth_adj": candidate.growth_adj,
@@ -356,15 +467,30 @@ def _serialize_dip_watch(candidate: DipWatchCandidate) -> dict[str, Any]:
 def _serialize_position(position: NormalizedPosition | None) -> dict[str, Any] | None:
     if position is None:
         return None
+    split, fx_return_issue = fx_return_split_diagnostic(position)
+    local_pct, fx_pct, usd_pct = split if split is not None else (None, None, None)
     return {
         "ticker_yf": position.ticker.yf,
         "ticker_ibkr": position.ticker.ibkr,
+        "ticker_identity_verified": position.ticker_identity_verified,
+        "ticker_resolution_source": position.ticker_resolution_source,
         "quantity": position.quantity,
         "avg_cost_local": position.avg_cost_local,
         "current_price_local": position.current_price_local,
         "currency": position.currency,
         "market_value_usd": position.market_value_usd,
         "unrealized_pnl_usd": position.unrealized_pnl_usd,
+        "fx_rate_to_usd": position.fx_rate_to_usd,
+        "market_value_basis": position.market_value_basis,
+        "unrealized_pnl_basis": position.unrealized_pnl_basis,
+        "valuation_valid": position.valuation_valid,
+        "valuation_issue": position.valuation_issue,
+        # Local-price vs implied FX/basis decomposition (multiplicative
+        # residual; None when unavailable).
+        "local_return_pct": local_pct,
+        "fx_effect_pct": fx_pct,
+        "usd_return_pct": usd_pct,
+        "fx_return_issue": fx_return_issue,
         "acquired_date": position.acquired_date,
         "holding_period_days": position.holding_period_days,
         "tax_term": position.tax_term,
@@ -397,6 +523,9 @@ def _serialize_analysis(analysis: AnalysisRecord | None) -> dict[str, Any] | Non
         "exchange": analysis.exchange,
         "is_quick_mode": analysis.is_quick_mode,
         "capital_flag_types": list(analysis.capital_flag_types),
+        # Fundamental thesis-break triggers (bear KILL_CRITERIA) — the exit
+        # conditions the dashboard shows ahead of legacy downside-price context.
+        "kill_criteria": list(analysis.kill_criteria),
         "trade_block": {
             "action": analysis.trade_block.action,
             "size_pct": analysis.trade_block.size_pct,
@@ -437,25 +566,20 @@ def _serialize_freshness_row(row: Any) -> dict[str, Any]:
 
 def _summary_counts(
     items: list[ReconciliationItem],
-    *,
-    watchlist_tickers: set[str] | None,
+    view: PortfolioActionPlan,
 ) -> dict[str, int]:
-    groups = group_portfolio_actions(items, watchlist_tickers=watchlist_tickers)
-    counts = build_action_summary_counts(groups)
-    return {
-        "buys": counts.get("BUY", 0),
-        "candidates": counts.get("CANDIDATES", 0),
-        "sells": counts.get("SELL", 0),
-        "reviews": counts.get("REVIEW", 0),
-        "holds": counts.get("HOLD", 0),
-        "macro_watch": counts.get("MACRO_WATCH", 0),
-        "watchlist": sum(1 for item in items if item.is_watchlist),
-        "total": len(items),
-    }
+    return build_action_plan_counts(view, items)
 
 
-def _serialize_cash_summary(bundle: PortfolioRecommendationBundle) -> dict[str, Any]:
-    summary = build_cash_summary(bundle.items, bundle.portfolio)
+def _serialize_cash_summary(
+    bundle: PortfolioRecommendationBundle,
+    view: PortfolioActionPlan,
+) -> dict[str, Any]:
+    summary = build_cash_summary(
+        bundle.items,
+        bundle.portfolio,
+        executable_buy_ids=view.executable_buy_ids,
+    )
     return {
         "total_cash_usd": summary.total_cash_usd,
         "settled_cash_usd": summary.settled_cash_usd,
@@ -480,9 +604,3 @@ def _serialize_cash_summary(bundle: PortfolioRecommendationBundle) -> dict[str, 
             for row in summary.pending_inflows
         ],
     }
-
-
-def _serialize_cash_timeline(
-    bundle: PortfolioRecommendationBundle,
-) -> list[dict[str, Any]]:
-    return list(_serialize_cash_summary(bundle)["pending_inflows"])

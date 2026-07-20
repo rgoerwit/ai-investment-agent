@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import re
 
+from src.ibkr.concentration import (
+    canonical_exchange_bucket,
+    canonical_sector_bucket,
+    format_concentration_warnings,
+    project_concentration_breaches,
+)
 from src.ibkr.models import AnalysisRecord, PortfolioSummary, ReconciliationItem
 from src.ibkr.order_builder import calculate_quantity
 from src.ibkr.reconciliation_rules import (
     _MIN_ORDER_USD,
     _REJECT_VERDICTS,
-    _exchange_from_ticker,
     _normalize_verdict,
     _resolve_fx,
     check_staleness,
@@ -145,6 +150,22 @@ def evaluate_watchlist(
                     analysis.position_size or 0
                 )
                 fx_rate = _resolve_fx(analysis)
+                if fx_rate is None:
+                    items.append(
+                        ReconciliationItem(
+                            ticker=Ticker.from_yf(ticker),
+                            action="REVIEW",
+                            reason=(
+                                "Watchlist BUY blocked — no trustworthy local-to-USD "
+                                "FX rate is available"
+                            ),
+                            urgency="HIGH",
+                            analysis=analysis,
+                            action_basis="DATA_QUALITY",
+                            is_watchlist=True,
+                        )
+                    )
+                    continue
                 buy_qty = calculate_quantity(
                     available_cash_usd=remaining_cash,
                     entry_price_local=entry_price or 0.0,
@@ -160,22 +181,22 @@ def evaluate_watchlist(
                     remaining_cash -= buy_cost_usd
                     buy_reason = f"Watchlist BUY ({analysis.analysis_date}) — {conviction} conviction, target {size_pct:.1f}%"
                     if portfolio.portfolio_value_usd > 0:
-                        exch = analysis.exchange or _exchange_from_ticker(ticker)
-                        sect = analysis.sector or "Unknown"
                         projected_weight = (
                             buy_cost_usd / portfolio.portfolio_value_usd * 100
                         )
-                        proj_exch = exchange_weights.get(exch, 0.0) + projected_weight
-                        proj_sect = sector_weights.get(sect, 0.0) + projected_weight
-                        conc_warns = []
-                        if proj_exch > exchange_limit_pct:
-                            conc_warns.append(
-                                f"⚠ {exch} → {proj_exch:.0f}% (limit {exchange_limit_pct:.0f}%)"
-                            )
-                        if proj_sect > sector_limit_pct:
-                            conc_warns.append(
-                                f"⚠ {sect} sector → {proj_sect:.0f}% (limit {sector_limit_pct:.0f}%)"
-                            )
+                        breaches = project_concentration_breaches(
+                            exchange_key=canonical_exchange_bucket(
+                                ticker,
+                                analysis_exchange=analysis.exchange,
+                            ),
+                            sector_key=canonical_sector_bucket(analysis.sector),
+                            candidate_pct=projected_weight,
+                            exchange_weights=exchange_weights,
+                            sector_weights=sector_weights,
+                            exchange_limit_pct=exchange_limit_pct,
+                            sector_limit_pct=sector_limit_pct,
+                        )
+                        conc_warns = format_concentration_warnings(breaches)
                         if conc_warns:
                             buy_reason += "  " + "; ".join(conc_warns)
                     items.append(

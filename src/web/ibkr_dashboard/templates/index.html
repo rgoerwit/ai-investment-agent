@@ -23,6 +23,7 @@
 
     <section id="macro-alert" class="macro-alert hidden"></section>
     <section id="mode-alert" class="macro-alert hidden"></section>
+    <section id="reload-alert" class="macro-alert hidden"></section>
 
     <nav class="tabs" aria-label="Dashboard tabs">
       <button class="tab active" data-tab="overview">Overview</button>
@@ -50,6 +51,19 @@
       </aside>
     </main>
 
-    <script src="{{ url_for('static', filename='dashboard.js', v=dashboard_js_version) }}"></script>
+    <section id="report-viewer" class="report-viewer hidden" aria-hidden="true">
+      <div class="report-viewer-backdrop" data-report-close="true"></div>
+      <article class="report-viewer-panel" role="dialog" aria-modal="true" aria-labelledby="report-viewer-title">
+        <header class="report-viewer-header">
+          <h2 id="report-viewer-title">Report</h2>
+          <button id="report-viewer-close" type="button">Close</button>
+        </header>
+        <div id="report-viewer-body" class="markdown-body report-viewer-body"></div>
+      </article>
+    </section>
+
+    {% for script in dashboard_scripts %}
+    <script src="{{ url_for('static', filename=script, v=dashboard_js_version) }}"></script>
+    {% endfor %}
   </body>
 </html>

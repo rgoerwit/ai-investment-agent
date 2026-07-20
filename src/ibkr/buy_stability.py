@@ -42,9 +42,28 @@ _FILENAME_DATE_RE = re.compile(r"_(\d{8})_(\d{6})_analysis\.json$")
 __all__ = [
     "PEAK_OR_TRANSIENT_FLAGS",
     "BuyStabilityConfig",
+    "PriorVerdict",
     "assess_buy_stability",
+    "load_recent_same_ticker_history",
     "load_recent_same_ticker_verdicts",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class PriorVerdict:
+    """One prior same-ticker analysis outcome, dated and mode-aware.
+
+    Consumed by the BUY stability gate (verdict strings) and the held-position
+    SELL confirmation gate (which additionally needs the analysis timestamp and
+    quick/full mode to enforce spacing and exclude screening-tier runs).
+    """
+
+    verdict: str
+    analysis_dt: datetime
+    # True = --quick screening run; None = mode unknown (run_summary absent,
+    # empty, or malformed). Only a provable False confirms a held-position sell.
+    is_quick_mode: bool | None
+    file_path: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,19 +142,20 @@ def _as_flag_set(active_flags: object) -> set[str]:
         return set()
 
 
-def load_recent_same_ticker_verdicts(
+def load_recent_same_ticker_history(
     ticker: str,
     *,
     lookback_days: int,
     results_dir: str,
     now: datetime | None = None,
     exclude_path: str | None = None,
-) -> list[str]:
-    """Return canonical verdicts for same-ticker analyses within the lookback.
+) -> list[PriorVerdict]:
+    """Return dated, mode-aware verdict records for same-ticker analyses.
 
     Scans ``{results_dir}/{ticker}_YYYYMMDD_HHMMSS_analysis.json``. Malformed or
     unreadable files are skipped (logged at debug), never raised. The current
-    analysis (``exclude_path``) is excluded so a BUY is not compared to itself.
+    analysis (``exclude_path``) is excluded so a run is not compared to itself.
+    Records are returned in ascending timestamp order.
 
     Prior verdicts are parsed with the same neutral final-decision parser the
     IBKR analysis index uses to produce ``AnalysisRecord.verdict``, so the gate's
@@ -147,7 +167,7 @@ def load_recent_same_ticker_verdicts(
     cutoff = now - timedelta(days=lookback_days)
     exclude_abs = os.path.abspath(exclude_path) if exclude_path else None
 
-    verdicts: list[str] = []
+    history: list[PriorVerdict] = []
     pattern = os.path.join(results_dir, f"{ticker}_*_analysis.json")
     for path in sorted(glob.glob(pattern)):
         if exclude_abs and os.path.abspath(path) == exclude_abs:
@@ -168,6 +188,13 @@ def load_recent_same_ticker_verdicts(
             verdict = canonicalize_pm_verdict(
                 parse_final_decision_scores(str(decision)).get("verdict")
             )
+            # A truthy non-dict run_summary must degrade to mode-unknown, not
+            # raise AttributeError and silently drop the whole verdict record.
+            raw_run_summary = data.get("run_summary")
+            run_summary = raw_run_summary if isinstance(raw_run_summary, dict) else {}
+            is_quick: bool | None = (
+                bool(run_summary["quick_mode"]) if "quick_mode" in run_summary else None
+            )
         except (OSError, json.JSONDecodeError, ValueError, AttributeError) as exc:
             # debug-level raw error= is permitted by the logging standard; log
             # only the filename, not the full local path.
@@ -178,5 +205,33 @@ def load_recent_same_ticker_verdicts(
             )
             continue
         if verdict and verdict != "UNPARSEABLE":
-            verdicts.append(verdict)
-    return verdicts
+            history.append(
+                PriorVerdict(
+                    verdict=verdict,
+                    analysis_dt=dt,
+                    is_quick_mode=is_quick,
+                    file_path=path,
+                )
+            )
+    return history
+
+
+def load_recent_same_ticker_verdicts(
+    ticker: str,
+    *,
+    lookback_days: int,
+    results_dir: str,
+    now: datetime | None = None,
+    exclude_path: str | None = None,
+) -> list[str]:
+    """Return canonical verdicts within the lookback (BUY-gate compatibility view)."""
+    return [
+        record.verdict
+        for record in load_recent_same_ticker_history(
+            ticker,
+            lookback_days=lookback_days,
+            results_dir=results_dir,
+            now=now,
+            exclude_path=exclude_path,
+        )
+    ]

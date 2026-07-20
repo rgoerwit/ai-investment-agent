@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+from collections.abc import Set
 from dataclasses import dataclass
 
 from src.ibkr.dip_watch import (
@@ -7,13 +9,152 @@ from src.ibkr.dip_watch import (
     select_dip_watch_candidates,
 )
 from src.ibkr.models import PortfolioSummary, ReconciliationItem
+from src.ibkr.order_presentation import (
+    LiveOrderMatch as LiveOrderMatch,
+)
+from src.ibkr.order_presentation import (
+    base_ticker as base_ticker,
+)
+from src.ibkr.order_presentation import (
+    base_ticker_value as base_ticker_value,
+)
+from src.ibkr.order_presentation import (
+    build_live_order_note as build_live_order_note,
+)
+from src.ibkr.order_presentation import (
+    find_live_order as find_live_order,
+)
+from src.ibkr.portfolio_defaults import (
+    DEFAULT_EXCHANGE_LIMIT_PCT,
+    DEFAULT_SECTOR_LIMIT_PCT,
+)
+from src.ibkr.reconciliation_rules import analysis_identity_verified
 from src.ibkr.refresh_service import AnalysisFreshnessSummary, RefreshActivity
+from src.ibkr.watchlist_optimization import (
+    CONCENTRATION_INCUMBENT_MIN_SCORE as CONCENTRATION_INCUMBENT_MIN_SCORE,
+)
+from src.ibkr.watchlist_optimization import (
+    ConcentrationNote as ConcentrationNote,
+)
+from src.ibkr.watchlist_optimization import (
+    WatchlistMove as WatchlistMove,
+)
+from src.ibkr.watchlist_optimization import (
+    WatchlistOptCase as WatchlistOptCase,
+)
+from src.ibkr.watchlist_optimization import (
+    WatchlistOptimization as WatchlistOptimization,
+)
+from src.ibkr.watchlist_optimization import (
+    build_watchlist_optimization_summary as build_watchlist_optimization_summary,
+)
+from src.ibkr.watchlist_optimization import (
+    concentration_breach_summary as concentration_breach_summary,
+)
+from src.ibkr.watchlist_optimization import (
+    is_executable_buy as is_executable_buy,
+)
+from src.ibkr.watchlist_optimization import (
+    resolve_watchlist_optimization as resolve_watchlist_optimization,
+)
+from src.ibkr.watchlist_optimization import (
+    selected_watchlist_buy_ids as selected_watchlist_buy_ids,
+)
+from src.ibkr.watchlist_optimization import (
+    watchlist_candidate_conviction as watchlist_candidate_conviction,
+)
+from src.ibkr.watchlist_optimization import (
+    watchlist_candidate_score as watchlist_candidate_score,
+)
 
 _DEFAULT_DIP_WATCH_LIMIT = 7
+
+
+def cost_basis_unit_mismatch(position) -> bool:
+    """Return whether local cost/current prices have a likely 100x unit mismatch."""
+    if (
+        position is None
+        or position.avg_cost_local <= 0
+        or position.current_price_local <= 0
+    ):
+        return False
+    ratio = position.current_price_local / position.avg_cost_local
+    return ratio > 50.0 or ratio < 0.02
+
+
+_MAX_PLAUSIBLE_FX_EFFECT_PCT = 50.0
+
+
+def fx_return_split_diagnostic(
+    position,
+) -> tuple[tuple[float, float, float] | None, str | None]:
+    """Decompose a position's return into (local_pct, fx_pct, usd_pct).
+
+    Local-price return is IBKR local cost basis → current local price (it
+    includes valuation and sentiment, so it is labeled "local-price", never
+    "business"). USD return derives from observed IBKR USD P&L; the implied
+    FX/basis effect is the multiplicative residual:
+    (1+usd) = (1+local) × (1+fx). Returns None
+    for USD positions or when any observed input is missing/degenerate —
+    honest absence beats a fabricated split. The decomposition is available
+    only when IBKR supplied P&L in USD; P&L converted from local currency at
+    today's rate contains no historical entry-FX information.
+    """
+    if position is None:
+        return None, None
+    if not getattr(position, "valuation_valid", True):
+        return None, (
+            getattr(position, "valuation_issue", None)
+            or "Position valuation is unavailable pending a data-quality review"
+        )
+    currency = (position.currency or "USD").upper()
+    if currency in ("USD", ""):
+        return None, None
+    if getattr(position, "unrealized_pnl_basis", "BROKER_USD") != "BROKER_USD":
+        return None, None
+    numeric_inputs = (
+        position.avg_cost_local,
+        position.current_price_local,
+        position.market_value_usd,
+        position.unrealized_pnl_usd,
+    )
+    if not all(math.isfinite(value) for value in numeric_inputs):
+        return None, "FX decomposition withheld: position contains non-finite values"
+    if (
+        position.avg_cost_local <= 0
+        or position.current_price_local <= 0
+        or position.market_value_usd == 0
+        or cost_basis_unit_mismatch(position)
+    ):
+        return None, None
+    local_ret = (
+        position.current_price_local - position.avg_cost_local
+    ) / position.avg_cost_local
+    usd_cost_basis = position.market_value_usd - position.unrealized_pnl_usd
+    if usd_cost_basis <= 0:
+        return None, None
+    usd_ret = position.unrealized_pnl_usd / usd_cost_basis
+    fx_ret = (1.0 + usd_ret) / (1.0 + local_ret) - 1.0
+    split = (local_ret * 100.0, fx_ret * 100.0, usd_ret * 100.0)
+    if abs(split[1]) > _MAX_PLAUSIBLE_FX_EFFECT_PCT:
+        return None, (
+            "FX decomposition withheld: broker values imply an implausible "
+            f"{split[1]:+.1f}% residual; verify value units or entry FX"
+        )
+    return split, None
+
+
+def fx_return_split(position) -> tuple[float, float, float] | None:
+    """Backward-compatible split-only view of :func:`fx_return_split_diagnostic`."""
+    return fx_return_split_diagnostic(position)[0]
+
+
 SELL_RECOMMENDATIONS_TITLE = "SELL RECOMMENDATIONS"
-SELL_RELATED_REVIEWS_TITLE = "SELL-RELATED REVIEWS"
+SELL_RELATED_REVIEWS_TITLE = "POSITION REVIEWS"
 SELL_TYPE_LABELS: dict[str | None, str] = {
-    "STOP_BREACH": "STOP BREACH",
+    # Retail framing (July 2026): a price break is a review trigger, not an
+    # order class — the label must not read as a standing sell instruction.
+    "STOP_BREACH": "PRICE-DROP REVIEW",
     "HARD_REJECT": "FUNDAMENTAL FAILURE",
     "SOFT_REJECT": "SOFT REJECTION",
     "SCREEN_REJECT": "SCREEN REVIEW",
@@ -21,6 +162,21 @@ SELL_TYPE_LABELS: dict[str | None, str] = {
     "SPECIAL_SITUATION_EXIT": "M&A EXIT",
     "PROFIT_TAKE": "PROFIT TAKE",
     None: "SELL",
+}
+
+# Decision-basis labels — preferred over sell_type when a basis is stamped,
+# so a confirmation-gated exit reads as what it is, not a generic "failure".
+ACTION_BASIS_LABELS: dict[str, str] = {
+    "MANDATORY_EXIT": "MANDATORY EXIT",
+    "STOP_LOSS": "PRICE-DROP REVIEW",
+    "CONFIRMED_THESIS_FAILURE": "CONFIRMED THESIS FAILURE",
+    "THESIS_REASSESSMENT": "THESIS REASSESSMENT",
+    "ENTRY_CONSTRAINT": "ENTRY CONSTRAINT",
+    "SPECIAL_SITUATION_REVIEW": "M&A TENDER REVIEW",
+    "DATA_QUALITY": "DATA REVIEW",
+    "CAPITAL_ALLOCATION": "CAPITAL ALLOCATION REVIEW",
+    "OVERWEIGHT": "OVERWEIGHT",
+    "DE_MINIMIS": "DE MINIMIS",
 }
 
 
@@ -65,7 +221,7 @@ class CashSummaryView:
     settled_cash_after_recommended_buys_usd: float
     pending_inflows: tuple[CashTimelineEntry, ...]
     pending_inflows_total_usd: float
-    conditional_proceeds_usd: float  # soft-sell proceeds (review before acting)
+    conditional_proceeds_usd: float
     next_settlement_date: str | None
 
 
@@ -98,16 +254,6 @@ class PortfolioOverviewView:
 
 
 @dataclass(frozen=True)
-class LiveOrderMatch:
-    order: dict
-    side: str
-    quantity: int | None
-    price: float | str | None
-    order_type: str
-    status: str
-
-
-@dataclass(frozen=True)
 class ActionDisplaySection:
     key: str
     title: str
@@ -120,13 +266,119 @@ def get_sell_type_label(sell_type: str | None) -> str:
     return SELL_TYPE_LABELS.get(sell_type, "SELL")
 
 
+def get_action_label(item: ReconciliationItem) -> str:
+    """Return the display label for an item, preferring its decision basis."""
+    basis = getattr(item, "action_basis", None)
+    if basis and basis in ACTION_BASIS_LABELS:
+        return ACTION_BASIS_LABELS[basis]
+    return get_sell_type_label(item.sell_type)
+
+
+_EXECUTABLE_SELL_BASES = frozenset({"MANDATORY_EXIT", "CONFIRMED_THESIS_FAILURE"})
+
+
+def _sell_identity_verified(item: ReconciliationItem) -> bool:
+    position = item.ibkr_position
+    return bool(
+        position is not None
+        and position.conid > 0
+        and position.ticker_identity_verified
+        and (
+            item.action_basis == "MANDATORY_EXIT"
+            or (
+                item.analysis is not None
+                and analysis_identity_verified(position, item.analysis)
+            )
+        )
+    )
+
+
+def is_executable_sell(item: ReconciliationItem) -> bool:
+    """Return whether an item is a decision-safe sale under retail policy."""
+    return bool(
+        item.action == "SELL"
+        and item.action_basis in _EXECUTABLE_SELL_BASES
+        and _sell_identity_verified(item)
+        and item.suggested_quantity is not None
+        and item.suggested_quantity > 0
+        and item.cash_impact_usd > 0
+    )
+
+
+def retail_safe_action(item: ReconciliationItem) -> ReconciliationItem:
+    """Downgrade legacy sale/trim records that lack current retail authority.
+
+    Saved bundles can predate the confirmation, identity, and tax-aware policy.
+    Normalizing at the shared presentation boundary prevents those records from
+    becoming executable again in either the CLI or dashboard.
+    """
+    if item.action == "SELL" and not is_executable_sell(item):
+        if item.sell_type == "STOP_BREACH":
+            basis = "STOP_LOSS"
+            explanation = "price movement is a review trigger, not sale authority"
+        elif item.sell_type == "PROFIT_TAKE":
+            basis = "CAPITAL_ALLOCATION"
+            explanation = "selling an intact winner requires tax-lot review"
+        else:
+            basis = item.action_basis or "THESIS_REASSESSMENT"
+            if (
+                item.action_basis in _EXECUTABLE_SELL_BASES
+                and not _sell_identity_verified(item)
+            ):
+                explanation = "security identity or listing mapping is unverified"
+            elif item.action_basis in _EXECUTABLE_SELL_BASES:
+                explanation = "executable quantity or proceeds are incomplete"
+            else:
+                explanation = (
+                    "sale lacks confirmed thesis-failure or mandatory-exit evidence"
+                )
+        return item.model_copy(
+            update={
+                "action": "REVIEW",
+                "action_basis": basis,
+                "reason": f"{item.reason} — sale downgraded: {explanation}",
+                "urgency": "HIGH" if item.sell_type == "STOP_BREACH" else "MEDIUM",
+                "suggested_quantity": None,
+                "suggested_price": None,
+                "cash_impact_usd": 0.0,
+                "settlement_date": None,
+            }
+        )
+    if item.action == "TRIM":
+        return item.model_copy(
+            update={
+                "action": "REVIEW",
+                "action_basis": "OVERWEIGHT",
+                "reason": (
+                    f"{item.reason} — legacy trim downgraded: verify tax lots and "
+                    "after-friction benefit before changing an intact position"
+                ),
+                "urgency": "LOW",
+                "suggested_quantity": None,
+                "suggested_price": None,
+                "cash_impact_usd": 0.0,
+                "settlement_date": None,
+            }
+        )
+    return item
+
+
 def group_portfolio_actions(
     items: list[ReconciliationItem],
     *,
     watchlist_tickers: set[str] | None = None,
     dip_watch_limit: int = _DEFAULT_DIP_WATCH_LIMIT,
     macro_event_active: bool = False,
+    exchange_weights: dict[str, float] | None = None,
+    sector_weights: dict[str, float] | None = None,
+    exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT,
+    sector_limit_pct: float = DEFAULT_SECTOR_LIMIT_PCT,
 ) -> PortfolioActionGroups:
+    items = [retail_safe_action(item) for item in items]
+
+    def is_macro_review(item: ReconciliationItem) -> bool:
+        return "[MACRO_" in item.reason
+
     stop_sells = tuple(
         item
         for item in items
@@ -155,7 +407,9 @@ def group_portfolio_actions(
     macro_reviews = tuple(
         item
         for item in items
-        if item.action == "REVIEW" and item.sell_type == "SOFT_REJECT"
+        if item.action == "REVIEW"
+        and item.sell_type == "SOFT_REJECT"
+        and is_macro_review(item)
     )
     macro_stop_reviews = tuple(
         item
@@ -187,7 +441,8 @@ def group_portfolio_actions(
         item
         for item in items
         if item.action == "REVIEW"
-        and item.sell_type not in ("SOFT_REJECT", "STOP_BREACH", "PROFIT_TAKE")
+        and item.sell_type not in ("STOP_BREACH", "PROFIT_TAKE")
+        and not (item.sell_type == "SOFT_REJECT" and is_macro_review(item))
     )
 
     action_bases = frozenset(
@@ -210,6 +465,10 @@ def group_portfolio_actions(
             collect_dip_watch_source_items(items),
             macro_event_active=macro_event_active,
             limit=dip_watch_limit,
+            exchange_weights=exchange_weights,
+            sector_weights=sector_weights,
+            exchange_limit_pct=exchange_limit_pct,
+            sector_limit_pct=sector_limit_pct,
         )
     )
 
@@ -363,11 +622,11 @@ def build_action_display_sections(
 def build_cash_timeline(
     items: list[ReconciliationItem],
 ) -> tuple[CashTimelineEntry, ...]:
-    """Build confirmed pending inflows from sells/trims.
+    """Build pending inflows from confirmed fundamental/mandatory exits only.
 
-    SOFT_REJECT sells are excluded — they are "review before acting" and
-    should not be counted as confirmed liquidity.  Their individual proceeds
-    are still shown in the soft-sell display section.
+    Price reviews, profit-taking reviews, legacy trims, and soft rejections do
+    not fund new purchases. They are tax- and friction-sensitive operator
+    choices, not executable cash.
     """
     rows = [
         CashTimelineEntry(
@@ -379,47 +638,77 @@ def build_cash_timeline(
             settlement_date=item.settlement_date,
         )
         for item in items
-        if item.action in {"SELL", "TRIM"}
-        and item.sell_type != "SOFT_REJECT"
-        and item.cash_impact_usd > 0
-        and item.settlement_date
+        if is_executable_sell(item) and item.settlement_date
     ]
     rows.sort(key=lambda row: (row.settlement_date or "", row.ticker_yf))
     return tuple(rows)
 
 
 def _soft_sell_proceeds_usd(items: list[ReconciliationItem]) -> float:
-    """Total USD proceeds from SOFT_REJECT sells (conditional, not confirmed).
+    """Total USD *potential exit value* of SOFT_REJECT items — never funds.
 
-    Includes macro-demoted items (action REVIEW, sell_type SOFT_REJECT): the
-    operator still sees their potential proceeds in the conditional bucket —
-    that is what "soft-sell reviews" means in the report.
+    SELL items contribute their estimated proceeds (`cash_impact_usd`).
+    REVIEW items carry no order fields by contract (a review is not an
+    order), so their potential exit value derives from the held position's
+    market value. This is the conditional bucket ("soft-sell reviews") —
+    strictly informational, excluded from pending/executable cash by
+    `build_cash_timeline`'s SELL/TRIM filter.
     """
-    return sum(
-        item.cash_impact_usd
-        for item in items
-        if item.action in ("SELL", "REVIEW")
-        and item.sell_type == "SOFT_REJECT"
-        and item.cash_impact_usd > 0
-    )
+    total = 0.0
+    for item in items:
+        if item.sell_type != "SOFT_REJECT":
+            continue
+        if item.action == "SELL" and item.cash_impact_usd > 0:
+            total += item.cash_impact_usd
+        elif item.action == "REVIEW":
+            if item.cash_impact_usd > 0:
+                total += item.cash_impact_usd
+            elif item.ibkr_position and item.ibkr_position.market_value_usd > 0:
+                total += item.ibkr_position.market_value_usd
+    return total
 
 
 def build_cash_summary(
     items: list[ReconciliationItem],
     portfolio: PortfolioSummary,
+    *,
+    watchlist_optimization: WatchlistOptimization | None = None,
+    executable_buy_ids: Set[str] | None = None,
 ) -> CashSummaryView:
     settled_cash = portfolio.settled_cash_usd
     available_cash = portfolio.available_cash_usd
     total_cash = portfolio.cash_balance_usd
     buffer_reserve = max(settled_cash - available_cash, 0.0)
     unsettled_cash = max(total_cash - settled_cash, 0.0)
-    recommended_buy_cost = sum(
-        abs(item.cash_impact_usd)
-        for item in items
-        if item.action in {"ADD", "BUY"}
-        and item.cash_impact_usd < 0
-        and (item.action != "BUY" or item.is_watchlist)
-    )
+    if watchlist_optimization is not None and executable_buy_ids is not None:
+        raise ValueError("pass watchlist_optimization or executable_buy_ids, not both")
+    if executable_buy_ids is not None:
+        recommended_buy_cost = sum(
+            abs(item.cash_impact_usd)
+            for item in items
+            if is_executable_buy(item, executable_buy_ids) and item.cash_impact_usd < 0
+        )
+    elif watchlist_optimization is not None:
+        # Optimizer-aware: only buys that survived merit+concentration
+        # selection reserve cash (screened/displaced watchlist BUYs still
+        # carry a negative cash_impact_usd and must not count).
+        selected_ids = selected_watchlist_buy_ids(watchlist_optimization)
+        recommended_buy_cost = sum(
+            abs(item.cash_impact_usd)
+            for item in items
+            if is_executable_buy(item, selected_ids) and item.cash_impact_usd < 0
+        )
+    else:
+        # Legacy: every sized watchlist BUY. Kept for callers without an
+        # optimization in hand; can overstate when the optimizer would
+        # screen or displace names.
+        recommended_buy_cost = sum(
+            abs(item.cash_impact_usd)
+            for item in items
+            if item.action in {"ADD", "BUY"}
+            and item.cash_impact_usd < 0
+            and (item.action != "BUY" or item.is_watchlist)
+        )
     pending_inflows = build_cash_timeline(items)
     return CashSummaryView(
         total_cash_usd=total_cash,
@@ -483,97 +772,3 @@ def build_portfolio_overview(
         is_candidate_heavy=position_count == 0
         and (candidate_count > 0 or new_buy_count > 0),
     )
-
-
-def find_live_order(
-    item: ReconciliationItem,
-    live_orders: list[dict] | None,
-) -> LiveOrderMatch | None:
-    if not live_orders:
-        return None
-
-    pos = item.ibkr_position
-    conid = pos.conid if pos else None
-    yf_base = item.ticker.ibkr.upper()
-    hk_padded = item.ticker.yf.split(".")[0].upper()
-    symbol_candidates: set[str] = {yf_base, hk_padded}
-    if pos and pos.symbol:
-        symbol_candidates.add(pos.symbol.upper())
-
-    for order in live_orders:
-        matched = False
-        order_conid = order.get("conid")
-        order_symbol = (order.get("ticker") or order.get("symbol") or "").upper()
-        if conid and order_conid is not None:
-            try:
-                matched = int(order_conid) == int(conid)
-            except (TypeError, ValueError):
-                matched = False
-        if not matched and order_symbol in symbol_candidates:
-            matched = True
-        if not matched:
-            continue
-
-        raw_quantity = order.get("remainingSize") or order.get("totalSize")
-        quantity: int | None
-        try:
-            quantity = int(raw_quantity) if raw_quantity is not None else None
-        except (TypeError, ValueError):
-            quantity = None
-        side = "SELL" if str(order.get("side", "")).upper() in {"S", "SELL"} else "BUY"
-        return LiveOrderMatch(
-            order=order,
-            side=side,
-            quantity=quantity,
-            price=order.get("price") or order.get("auxPrice"),
-            order_type=str(order.get("orderType") or "LMT"),
-            status=str(order.get("status") or ""),
-        )
-    return None
-
-
-def build_live_order_note(
-    item: ReconciliationItem,
-    live_orders: list[dict] | None,
-) -> str | None:
-    match = find_live_order(item, live_orders)
-    if match is None:
-        return None
-
-    if isinstance(match.price, int | float):
-        price_str = f" @ {float(match.price):.2f}"
-    elif match.price:
-        price_str = f" @ {match.price}"
-    else:
-        price_str = ""
-
-    rec_side = "SELL" if item.action in {"SELL", "TRIM"} else "BUY"
-    display_qty = match.quantity if match.quantity is not None else "?"
-    if match.side == rec_side:
-        rec_qty = item.suggested_quantity
-        if (
-            match.quantity is not None
-            and rec_qty is not None
-            and match.quantity < rec_qty
-        ):
-            need = rec_qty - match.quantity
-            return (
-                f"[PARTIAL ORDER: {match.quantity} of {rec_qty} shares already submitted"
-                f" — enter {need} more]"
-            )
-        return (
-            f"[ORDER ALREADY SUBMITTED: {match.side} {display_qty}{price_str}"
-            f" {match.order_type} ({match.status}) — do not re-enter]"
-        )
-    return (
-        f"[CONFLICT: live {match.side} order {display_qty}{price_str}"
-        f" {match.order_type} ({match.status}) while recommending {rec_side}]"
-    )
-
-
-def base_ticker(item: ReconciliationItem) -> str:
-    return base_ticker_value(item.ticker.yf)
-
-
-def base_ticker_value(ticker: str) -> str:
-    return ticker.split(".")[0].upper()

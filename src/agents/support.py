@@ -13,7 +13,6 @@ from src.data_block_utils import (
     BLOCK_SHAPES,
     BlockShape,
     extract_data_block_field,
-    extract_last_fenced_block,
     fenced_block_pattern,
     has_parseable_data_block,
     normalize_structured_block_boundaries,
@@ -897,28 +896,12 @@ def _extract_sector_country(raw_data: str) -> tuple:
     return sector, country
 
 
-_KILL_CRITERIA_TRIGGER = re.compile(r"TRIGGER_\d+\s*:\s*(.+)")
-
-
-def extract_kill_criteria(bear_text: str | None) -> list[str]:
-    """Pull TRIGGER_N entries from the fenced KILL_CRITERIA block emitted by Bear Researcher.
-
-    Returns at most 3 trimmed triggers. Returns an empty list if the block is
-    missing, malformed, or contains no usable lines.
-    """
-    if not bear_text:
-        return []
-    block = extract_last_fenced_block(bear_text, "KILL_CRITERIA")
-    if block is None:
-        return []
-    triggers: list[str] = []
-    for line in block.splitlines():
-        m = _KILL_CRITERIA_TRIGGER.search(line)
-        if m:
-            value = m.group(1).strip()
-            if value:
-                triggers.append(value)
-    return triggers[:3]
+# extract_kill_criteria moved to src/data_block_utils.py (July 2026) so the
+# agents-free IBKR analysis index can persist thesis-break triggers onto
+# AnalysisRecord; re-exported here for the existing agent/report consumers.
+from src.data_block_utils import (  # noqa: E402
+    extract_kill_criteria as extract_kill_criteria,
+)
 
 
 def get_bear_history(source: dict | Any) -> str:

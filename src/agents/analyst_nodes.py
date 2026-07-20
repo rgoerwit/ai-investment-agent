@@ -34,6 +34,7 @@ from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .evidence_constraints import AUTHORITATIVE_CORRECTION_MARKER
 from .fundamentals_reconciler import (
     HORIZON_FIELD_RAW_KEYS,
     append_analyst_coverage_data_quality_note,
@@ -96,6 +97,81 @@ _UNSPONSORED_ADR_MARKERS = (
     "unsponsored adr program",
     "multi unsponsored",
 )
+
+_NARRATIVE_METRIC_PATTERNS: dict[str, re.Pattern[str]] = {
+    "NET_DEBT_EBITDA": re.compile(
+        r"(?im)^\s*(?:[-*]\s*)?\*{0,2}(?:net\s*debt\s*/\s*ebitda|netdebt/ebitda)"
+        r"\*{0,2}\s*:\s*\*{0,2}\s*(-?\d+(?:\.\d+)?)"
+    ),
+    "CASH_TO_ASSETS": re.compile(
+        r"(?im)^\s*(?:[-*]\s*)?\*{0,2}cash\s*(?:to|/)\s*assets\*{0,2}\s*:\s*"
+        r"\*{0,2}\s*(-?\d+(?:\.\d+)?)\s*(%)?"
+    ),
+    "DE_RATIO": re.compile(
+        r"(?im)^\s*(?:[-*]\s*)?\*{0,2}(?:debt\s*(?:to|/)\s*equity|d/e)"
+        r"\*{0,2}\s*:\s*\*{0,2}\s*(-?\d+(?:\.\d+)?)\s*(%)?"
+    ),
+}
+
+
+def _parse_metric_number(raw: str, *, percent: bool = False) -> float | None:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value / 100 if percent else value
+
+
+def _authoritative_metric_warning(
+    narrative: str,
+    updated_body: str,
+) -> str:
+    """Build a warning for exact, labeled narrative/DATA_BLOCK conflicts.
+
+    Only narrowly formatted metric labels are inspected. Natural-language prose
+    is never rewritten, avoiding accidental period or scope substitutions.
+    """
+    if AUTHORITATIVE_CORRECTION_MARKER in narrative:
+        return ""
+
+    conflicts: list[str] = []
+    for field, pattern in _NARRATIVE_METRIC_PATTERNS.items():
+        narrative_match = pattern.search(narrative)
+        authoritative_raw = extract_block_text_value(updated_body, field)
+        authoritative_match = re.search(r"-?\d+(?:\.\d+)?", authoritative_raw)
+        if not narrative_match or not authoritative_match:
+            continue
+        narrative_value = _parse_metric_number(
+            narrative_match.group(1),
+            percent=bool(
+                narrative_match.lastindex
+                and narrative_match.lastindex > 1
+                and narrative_match.group(2)
+            ),
+        )
+        authoritative_value = _parse_metric_number(
+            authoritative_match.group(0), percent="%" in authoritative_raw
+        )
+        if narrative_value is None or authoritative_value is None:
+            continue
+        tolerance = max(0.02, abs(authoritative_value) * 0.05)
+        if abs(narrative_value - authoritative_value) <= tolerance:
+            continue
+        conflicts.append(
+            f"- {field}: preceding labeled narrative={narrative_match.group(1)}"
+            f"{'%' if narrative_match.lastindex and narrative_match.lastindex > 1 and narrative_match.group(2) else ''}; "
+            f"authoritative DATA_BLOCK={authoritative_raw}."
+        )
+
+    if not conflicts:
+        return ""
+    return (
+        f"> **{AUTHORITATIVE_CORRECTION_MARKER}:** The labeled narrative values "
+        "below conflict with reconciled structured inputs. The DATA_BLOCK values "
+        "are authoritative for downstream scoring; the earlier values are superseded.\n"
+        + "\n".join(f"> {line}" for line in conflicts)
+        + "\n\n"
+    )
 
 
 def _extract_valuation_context(report: str | None) -> str:
@@ -310,8 +386,7 @@ def _sanitize_fundamentals_output(
                 "ADR_TYPE": "UNSPONSORED",
                 "ADR_THESIS_IMPACT": "EMERGING_INTEREST",
                 "ADR_DATA_QUALITY_NOTE": (
-                    "OTC ADR sponsorship corrected from explicit unsponsored "
-                    "evidence."
+                    "OTC ADR sponsorship corrected from explicit unsponsored evidence."
                 ),
             }
             logger.warning("adr_sponsorship_corrected_to_unsponsored", ticker=ticker)
@@ -335,19 +410,21 @@ def _sanitize_fundamentals_output(
                     value,
                 )
 
-    if updated_body == block_body:
-        return content
-
     # WARNING only when a corrective fix was applied; routine additive annotation
     # (which changes the block on nearly every run) logs at INFO.
     log = logger.warning if corrective else logger.info
     log("fundamentals_datablock_sanitized", ticker=ticker, corrective=corrective)
-    updated_block = build_fenced_block("DATA_BLOCK", updated_body.rstrip())
     block_index = content.rfind(block_with_markers)
     if block_index < 0:
         return content
+    narrative = content[:block_index]
+    warning = _authoritative_metric_warning(narrative, updated_body)
+    if updated_body == block_body and not warning:
+        return content
+    updated_block = build_fenced_block("DATA_BLOCK", updated_body.rstrip())
     return (
-        content[:block_index]
+        narrative
+        + warning
         + updated_block
         + content[block_index + len(block_with_markers) :]
     )

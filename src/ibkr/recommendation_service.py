@@ -15,8 +15,10 @@ from src.ibkr.models import (
 )
 from src.ibkr.portfolio_data_service import IbkrPortfolioDataService, PortfolioSnapshot
 from src.ibkr.portfolio_defaults import (
+    DEFAULT_EXCHANGE_LIMIT_PCT,
     DEFAULT_OVERWEIGHT_PCT,
     DEFAULT_REFRESH_LIMIT,
+    DEFAULT_SECTOR_LIMIT_PCT,
     DEFAULT_UNDERWEIGHT_PCT,
 )
 from src.ibkr.portfolio_health import compute_portfolio_health
@@ -99,6 +101,14 @@ class PortfolioRecommendationBundle:
     screening_freshness: ScreeningFreshnessSummary = field(
         default_factory=lambda: ScreeningFreshnessSummary(status="missing")
     )
+    # Reconcile-time concentration limits (from the request) so every consumer
+    # (CLI report, dashboard serializer) provably uses the limits reconciliation
+    # used — no re-plumbing of settings/args through presentation layers.
+    exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT
+    sector_limit_pct: float = DEFAULT_SECTOR_LIMIT_PCT
+    # First-class watchlist availability (from WatchlistSnapshot.unavailable) —
+    # consumers must not string-match bundle.errors keys for this.
+    watchlist_unavailable: bool = False
 
 
 class PortfolioRecommendationService:
@@ -142,6 +152,7 @@ class PortfolioRecommendationService:
         watchlist_tickers: set[str] = set()
         watchlist_name: str | None = None
         watchlist_total: int | None = None
+        watchlist_unavailable = False
         live_orders: list[dict] = []
         errors: dict[str, str] = {}
 
@@ -164,6 +175,7 @@ class PortfolioRecommendationService:
             watchlist_tickers = snapshot.watchlist.tickers
             watchlist_name = snapshot.watchlist.loaded_name
             watchlist_total = snapshot.watchlist.total
+            watchlist_unavailable = snapshot.watchlist.unavailable
             live_orders = snapshot.live_orders
             errors = dict(snapshot.errors)
 
@@ -235,6 +247,9 @@ class PortfolioRecommendationService:
             freshness_summary=freshness_summary,
             refresh_activity=refresh_activity,
             screening_freshness=load_screening_freshness(request.results_dir),
+            exchange_limit_pct=request.exchange_limit_pct,
+            sector_limit_pct=request.sector_limit_pct,
+            watchlist_unavailable=watchlist_unavailable,
         )
 
     @staticmethod
@@ -283,14 +298,25 @@ class PortfolioRecommendationService:
             max_age_days=request.max_age_days,
             reconciliation_items=items,
             active_macro_events=_load_active_macro_events(),
+            exchange_limit_pct=request.exchange_limit_pct,
         )
         freshness_summary = self._refresh_service.classify(
             items,
             max_age_days=request.max_age_days,
         )
+        # The report count is derived from retained items, not a parallel
+        # diagnostic side channel, so it cannot disagree with the merit pool.
+        cash_blocked_candidates = sum(
+            1
+            for item in items
+            if item.action == "BUY"
+            and not item.is_watchlist
+            and item.ibkr_position is None
+            and item.is_cash_blocked
+        )
         return (
             items,
             health_flags,
             freshness_summary,
-            diagnostics.cash_blocked_offwatch_buy_count,
+            cash_blocked_candidates,
         )
