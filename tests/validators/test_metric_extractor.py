@@ -75,6 +75,46 @@ class TestNewDataBlockFields:
         assert m["facility_buildout_status"] is None
 
 
+class TestManagementGuidanceFields:
+    def test_material_tax_driver_is_extracted(self):
+        m = extract_metrics(
+            _block(
+                "GUIDANCE_COVERAGE_STATUS: FOUND",
+                "GUIDANCE_SOURCE_DATE: 2026-05-08",
+                "GUIDANCE_SOURCE_URL: https://finance.logmi.jp/articles/384869",
+                "GUIDANCE_PERIOD: FY3/27",
+                "GUIDANCE_REVENUE: ¥110.0B",
+                "GUIDANCE_OPERATING_PROFIT: ¥12.3B (+5%)",
+                "GUIDANCE_ORDINARY_OR_PRETAX_PROFIT: ¥12.5B",
+                "GUIDANCE_NET_INCOME: ¥9.0B (-4%)",
+                "OPERATING_VS_NET_DIRECTION: OP_UP_NET_DOWN",
+                "MATERIAL_NONOPERATING_DRIVER: YES",
+                "DRIVER_TYPE: TAX_CREDIT",
+                "DRIVER_PERSISTENCE: EXPIRING",
+                "DRIVER_MATERIALITY: MATERIAL",
+                "DRIVER_AFFECTED_PERIOD: FY3/26",
+                "EARNINGS_BASELINE_STATUS: TEMPORARILY_BOOSTED",
+                "NORMALIZED_EARNINGS_AVAILABLE: NO",
+            )
+        )
+
+        assert m["guidance_coverage_status"] == "FOUND"
+        assert m["guidance_source_url"] == "https://finance.logmi.jp/articles/384869"
+        assert m["guidance_period"] == "FY3/27"
+        assert m["operating_vs_net_direction"] == "OP_UP_NET_DOWN"
+        assert m["driver_type"] == "TAX_CREDIT"
+        assert m["driver_persistence"] == "EXPIRING"
+        assert m["earnings_baseline_status"] == "TEMPORARILY_BOOSTED"
+        assert m["normalized_earnings_available"] == "NO"
+
+    def test_absent_guidance_fields_remain_none_for_legacy_reports(self):
+        m = extract_metrics(_block("NET_MARGIN: 4.9%"))
+
+        assert m["guidance_coverage_status"] is None
+        assert m["driver_type"] is None
+        assert m["earnings_baseline_status"] is None
+
+
 class TestTrailingPeriodNumbers:
     """A DATA_BLOCK value followed by a sentence period (`D/E: 0.30.`) must not
     crash the parser. Regression for the 102260.KS / 1818.HK pipeline FAILs where

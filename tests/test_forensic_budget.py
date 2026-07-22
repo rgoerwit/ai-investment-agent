@@ -45,3 +45,53 @@ def test_llm_budget_includes_repairs_and_escalations() -> None:
     assert ledger.consume_llm() is None
     assert ledger.consume_llm() is None
     assert ledger.consume_llm() == "LLM_CALL_BUDGET_EXHAUSTED"
+
+
+def test_loop_control_telemetry_records_forced_synthesis_and_failure() -> None:
+    ledger = AuditorBudgetLedger(_policy())
+    ledger.cap_evidence("filing")
+    ledger.record_tool_round(["get_official_document"])
+    ledger.record_tool_failure("get_official_document")
+    ledger.record_forced_synthesis()
+    ledger.record_repair_input("malformed draft")
+
+    telemetry = ledger.telemetry()
+
+    assert telemetry["tool_rounds_used"] == 1
+    assert telemetry["forced_synthesis_used"] is True
+    assert telemetry["stop_reason"] == "TOOL_ROUND_LIMIT"
+    assert telemetry["final_tool_names"] == ["get_official_document"]
+    assert telemetry["failed_tools"] == ["get_official_document"]
+    assert telemetry["synthesis_evidence_chars"] == len("filing")
+    assert telemetry["repair_input_chars"] == len("malformed draft")
+
+
+def test_typed_insufficient_tool_result_is_recorded_separately() -> None:
+    ledger = AuditorBudgetLedger(_policy())
+
+    ledger.record_tool_result(
+        "get_official_document",
+        "STATUS: INSUFFICIENT_DATA\nREASON: UNAPPROVED_DOCUMENT_HOST",
+    )
+
+    assert ledger.insufficient_tools == ["get_official_document"]
+    assert ledger.failed_tools == []
+
+
+def test_blocked_and_failed_tool_results_are_distinct() -> None:
+    ledger = AuditorBudgetLedger(_policy())
+
+    ledger.record_tool_result("get_official_document", "TOOL_BLOCKED: policy")
+    ledger.record_tool_result("get_news", "TOOL_ERROR: TimeoutError")
+
+    assert ledger.blocked_tools == ["get_official_document"]
+    assert ledger.failed_tools == ["get_news"]
+    assert ledger.insufficient_tools == []
+
+
+def test_successful_tool_result_is_not_recorded_as_failure() -> None:
+    ledger = AuditorBudgetLedger(_policy())
+
+    ledger.record_tool_result("get_official_document", "STATUS: FOUND\nRevenue: 10")
+
+    assert ledger.failed_tools == []

@@ -19,7 +19,11 @@ from src.tools.news import (
 )
 from src.tools.ownership import get_ownership_structure
 from src.tools.registry import Toolkit, toolkit
-from src.tools.research import get_official_filings, search_foreign_sources
+from src.tools.research import (
+    extract_guidance_sources,
+    get_official_filings,
+    search_foreign_sources,
+)
 
 
 def test_public_tool_exports_support_ainvoke():
@@ -28,6 +32,7 @@ def test_public_tool_exports_support_ainvoke():
         get_fundamental_analysis,
         get_macroeconomic_news,
         get_news,
+        extract_guidance_sources,
         get_official_filings,
         get_ownership_structure,
         get_social_media_sentiment,
@@ -55,7 +60,11 @@ def test_toolkit_group_accessors_return_expected_tools():
     }
 
     foreign_tool_names = {tool.name for tool in toolkit.get_foreign_language_tools()}
-    assert foreign_tool_names == {"search_foreign_sources", "get_official_filings"}
+    assert foreign_tool_names == {
+        "search_foreign_sources",
+        "extract_guidance_sources",
+        "get_official_filings",
+    }
 
     legal_tool_names = {tool.name for tool in toolkit.get_legal_tools()}
     assert legal_tool_names == {"search_legal_tax_disclosures"}

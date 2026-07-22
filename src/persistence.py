@@ -578,6 +578,10 @@ def save_results_to_file(
         "entity_governance_card": result.get("entity_governance_card") or None,
         "auditor_budget": result.get("auditor_budget") or None,
         "source_artifacts": {
+            "management_guidance_evidence": _persisted_source_artifact(
+                result.get("management_guidance_evidence"),
+                "management_guidance_evidence",
+            ),
             "raw_fundamentals_data": _persisted_source_artifact(
                 result.get("raw_fundamentals_data"),
                 "raw_fundamentals_data",

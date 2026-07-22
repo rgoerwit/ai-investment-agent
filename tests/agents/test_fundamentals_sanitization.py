@@ -1416,6 +1416,81 @@ SHAREHOLDER_RETURN_EXECUTION: ANNOUNCED_ONLY
     )
 
 
+def test_guidance_promotion_withholds_eps_growth_for_temporary_tax_credit() -> None:
+    content = """### --- START DATA_BLOCK ---
+GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=1; ROA_ROE_IMPROVING=1; GROSS_MARGIN=1; GLOBAL_EXPANSION=0; R_AND_D_CAPEX_BACKLOG=0
+RAW_GROWTH_SCORE: 4/6
+ADJUSTED_GROWTH_SCORE: 66.7% (based on 6 available points)
+### --- END DATA_BLOCK ---
+"""
+    foreign_data = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_DATE: 2026-05-08
+SOURCE_URL: https://finance.logmi.jp/articles/384869
+GUIDANCE_PERIOD: FY3/27
+REVENUE_GUIDANCE: JPY110.0bn
+OPERATING_PROFIT_GUIDANCE: JPY12.3bn
+ORDINARY_OR_PRETAX_PROFIT_GUIDANCE: JPY12.5bn
+NET_INCOME_GUIDANCE: JPY9.0bn
+NET_INCOME_YOY: -4%
+OPERATING_VS_NET_DIRECTION: OP_UP_NET_DOWN
+MATERIAL_NONOPERATING_DRIVER: YES
+DRIVER_TYPE: TAX_CREDIT
+DRIVER_PERSISTENCE: EXPIRING
+DRIVER_MATERIALITY: MATERIAL
+DRIVER_AFFECTED_PERIOD: FY3/26
+EARNINGS_BASELINE_STATUS: TEMPORARILY_BOOSTED
+NORMALIZED_EARNINGS_AVAILABLE: NO
+GUIDANCE_BRIDGE_STATUS: RECONCILED
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+
+    sanitized = _sanitize_fundamentals_output(
+        content,
+        "",
+        "6745.T",
+        foreign_data=foreign_data,
+    )
+
+    assert "GUIDANCE_SOURCE_URL: https://finance.logmi.jp/articles/384869" in sanitized
+    assert "DRIVER_TYPE: TAX_CREDIT" in sanitized
+    assert "GUIDANCE_BRIDGE_STATUS: RECONCILED" in sanitized
+    assert "EPS_GROWTH=0" in sanitized
+    assert "RAW_GROWTH_SCORE: 3/6" in sanitized
+    assert "ADJUSTED_GROWTH_SCORE: 50.0%" in sanitized
+    assert "EPS_GROWTH_BASELINE_ADJUSTMENT: WITHHELD" in sanitized
+
+    normalized_claim = _sanitize_fundamentals_output(
+        content,
+        "",
+        "6745.T",
+        foreign_data=foreign_data.replace(
+            "NORMALIZED_EARNINGS_AVAILABLE: NO",
+            "NORMALIZED_EARNINGS_AVAILABLE: YES",
+        ),
+    )
+    assert "EPS_GROWTH=0" in normalized_claim
+    assert "no code-reconciled normalized growth rate is available" in normalized_claim
+
+
+def test_durable_normalized_baseline_preserves_eps_growth_credit() -> None:
+    content = """### --- START DATA_BLOCK ---
+GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=1; ROA_ROE_IMPROVING=1; GROSS_MARGIN=1; GLOBAL_EXPANSION=0; R_AND_D_CAPEX_BACKLOG=0
+RAW_GROWTH_SCORE: 4/6
+ADJUSTED_GROWTH_SCORE: 66.7% (based on 6 available points)
+EARNINGS_BASELINE_STATUS: DURABLE
+NORMALIZED_EARNINGS_AVAILABLE: YES
+GUIDANCE_BRIDGE_STATUS: NOT_APPLICABLE
+### --- END DATA_BLOCK ---
+"""
+
+    sanitized = _sanitize_fundamentals_output(content, "", "CONTROL.T")
+
+    assert "EPS_GROWTH=1" in sanitized
+    assert "RAW_GROWTH_SCORE: 4/6" in sanitized
+    assert "EPS_GROWTH_BASELINE_ADJUSTMENT" not in sanitized
+
+
 def test_authoritative_warning_is_idempotent() -> None:
     content = """Net Debt/EBITDA: -0.90
 ### --- START DATA_BLOCK ---

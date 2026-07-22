@@ -204,6 +204,7 @@ class AgentState(TypedDict, total=False):
     sentiment_report: Annotated[str, take_last]
     news_report: Annotated[str, take_last]
     raw_fundamentals_data: Annotated[str, take_last]
+    management_guidance_evidence: Annotated[str, take_last]
     foreign_language_report: Annotated[str, take_last]
     legal_report: Annotated[str, take_last]
     fundamentals_report: Annotated[str, take_last]

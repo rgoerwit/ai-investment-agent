@@ -98,6 +98,26 @@ when period type/end, currency, and consolidation scope align. Fiscal-year
 labels are never inferred from calendar years. Saved artifacts include the
 actual Auditor budget ledger and attribution lists only models that made calls.
 
+Management-guidance baseline evidence is owned by
+`src/agents/management_guidance.py`. Before the Foreign Language Analyst runs,
+it searches the latest results package and earnings bridge, checks the statutory
+filing API, and in full mode extracts query-relevant passages from discovered
+sources. Exchange-aware searches include the active fiscal period where the
+exchange convention supports it and local filing vocabulary otherwise. An exact
+ticker-matched result title can supply a bounded local listing name in any script
+for the bridge search, with the previously resolved name retained only as fallback.
+Search provenance is code-owned, then promoted deterministically into Senior
+Fundamentals so temporary tax/regulatory benefits can affect scoring and BUY
+eligibility even when no extraordinary-expense line appears. A results URL
+without operating- and net-income guidance is treated as an unresolved baseline,
+not evidence of durable earnings. `src/guidance_vocabulary.py` owns the
+jurisdiction-specific search and excerpt vocabulary; the generic search formatter
+accepts explicit priority terms and has no embedded finance-language bias.
+`src/earnings_baseline.py` owns the pure status sets and scoring predicates. If
+the Foreign Language Analyst returns useful research but omits or malforms only
+the guidance block, code appends a conservative unresolved/search-failed block;
+empty or unusable agent output still fails closed.
+
 `src/tooling/` owns cross-cutting tool execution, audit hooks, argument policy, and untrusted-content inspection.
 
 `src/runtime_diagnostics.py` owns artifact completion/validity and publishability checks.

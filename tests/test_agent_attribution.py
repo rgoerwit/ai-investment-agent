@@ -51,6 +51,7 @@ def _baseline_result(extra: dict[str, Any] | None = None) -> dict[str, Any]:
         "fundamentals_report": "fundamentals text",
         "apac_regional_report": "apac text",
         "raw_fundamentals_data": "junior raw json",
+        "management_guidance_evidence": "guidance preflight text",
         "foreign_language_report": "foreign text",
         "legal_report": "legal text",
         "value_trap_report": "value trap text",
@@ -177,6 +178,7 @@ def test_saved_json_uses_null_for_missing_governance_card(tmp_path: Path) -> Non
 def test_saved_json_persists_pm_source_artifacts(tmp_path: Path) -> None:
     saved = _save(tmp_path, _baseline_result())
     assert saved["source_artifacts"] == {
+        "management_guidance_evidence": "guidance preflight text",
         "raw_fundamentals_data": "junior raw json",
         "foreign_language_report": "foreign text",
         "legal_report": "legal text",

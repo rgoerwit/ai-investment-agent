@@ -52,9 +52,17 @@ class Toolkit:
 
     def get_foreign_language_tools(self):
         """Tools for Foreign Language Analyst (supplemental data from native sources)."""
-        from src.tools.research import get_official_filings, search_foreign_sources
+        from src.tools.research import (
+            extract_guidance_sources,
+            get_official_filings,
+            search_foreign_sources,
+        )
 
-        return [search_foreign_sources, get_official_filings]
+        return [
+            search_foreign_sources,
+            extract_guidance_sources,
+            get_official_filings,
+        ]
 
     def get_auditor_tools(self):
         """Bounded retrieval and deterministic calculations for the Auditor."""

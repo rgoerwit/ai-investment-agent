@@ -710,7 +710,12 @@ def _log_risk_tally_reconciliation(
 
 
 # Pre-screen flags whose unresolved presence forbids a Zone-2 BUY override (prompt rule).
-_OVERRIDE_BLOCKING_FLAGS = {"GROWTH_QUALITY_UNPROVEN", "TRANSIENT_STRENGTH_DISTORTION"}
+_OVERRIDE_BLOCKING_FLAGS = {
+    "GROWTH_QUALITY_UNPROVEN",
+    "MANAGEMENT_GUIDANCE_EVIDENCE_GAP",
+    "NORMALIZED_EARNINGS_REQUIRED",
+    "TRANSIENT_STRENGTH_DISTORTION",
+}
 
 
 def _log_pm_discipline_checks(

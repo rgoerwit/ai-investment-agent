@@ -109,6 +109,24 @@ def extract_metrics(
         "capacity_utilization": None,
         "facility_buildout_status": None,
         "capital_plan_status": None,
+        "guidance_coverage_status": None,
+        "guidance_source_date": None,
+        "guidance_source_url": None,
+        "guidance_period": None,
+        "guidance_revenue": None,
+        "guidance_operating_profit": None,
+        "guidance_ordinary_or_pretax_profit": None,
+        "guidance_net_income": None,
+        "guidance_net_income_yoy": None,
+        "operating_vs_net_direction": None,
+        "material_nonoperating_driver": None,
+        "driver_type": None,
+        "driver_persistence": None,
+        "driver_materiality": None,
+        "driver_affected_period": None,
+        "earnings_baseline_status": None,
+        "normalized_earnings_available": None,
+        "guidance_bridge_status": None,
         "sector": None,
         "industry": None,
         "_raw_report": fundamentals_report,
@@ -452,6 +470,39 @@ def extract_metrics(
         value = plan_status_match.group(1).upper()
         if value != "N/A":
             metrics["capital_plan_status"] = value
+
+    guidance_fields = {
+        "GUIDANCE_COVERAGE_STATUS": "guidance_coverage_status",
+        "GUIDANCE_SOURCE_DATE": "guidance_source_date",
+        "GUIDANCE_SOURCE_URL": "guidance_source_url",
+        "GUIDANCE_PERIOD": "guidance_period",
+        "GUIDANCE_REVENUE": "guidance_revenue",
+        "GUIDANCE_OPERATING_PROFIT": "guidance_operating_profit",
+        "GUIDANCE_ORDINARY_OR_PRETAX_PROFIT": ("guidance_ordinary_or_pretax_profit"),
+        "GUIDANCE_NET_INCOME": "guidance_net_income",
+        "GUIDANCE_NET_INCOME_YOY": "guidance_net_income_yoy",
+        "OPERATING_VS_NET_DIRECTION": "operating_vs_net_direction",
+        "MATERIAL_NONOPERATING_DRIVER": "material_nonoperating_driver",
+        "DRIVER_TYPE": "driver_type",
+        "DRIVER_PERSISTENCE": "driver_persistence",
+        "DRIVER_MATERIALITY": "driver_materiality",
+        "DRIVER_AFFECTED_PERIOD": "driver_affected_period",
+        "EARNINGS_BASELINE_STATUS": "earnings_baseline_status",
+        "NORMALIZED_EARNINGS_AVAILABLE": "normalized_earnings_available",
+        "GUIDANCE_BRIDGE_STATUS": "guidance_bridge_status",
+    }
+    for field_name, metric_name in guidance_fields.items():
+        match = re.search(
+            rf"^{re.escape(field_name)}:\s*([^\n]+)",
+            data_block,
+            re.IGNORECASE | re.MULTILINE,
+        )
+        if match:
+            value = match.group(1).strip()
+            if value.upper() not in {"N/A", "NA", "NONE", ""}:
+                metrics[metric_name] = (
+                    value.upper() if "_URL" not in field_name else value
+                )
 
     sector_match = re.search(r"SECTOR:\s*(.+?)(?:\n|$)", data_block)
     if sector_match:

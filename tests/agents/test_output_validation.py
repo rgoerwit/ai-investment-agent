@@ -17,6 +17,11 @@ def test_validate_required_output_accepts_parseable_data_block():
 ### --- START DATA_BLOCK ---
 RAW_HEALTH_SCORE: 7/12
 ADJUSTED_HEALTH_SCORE: 58%
+GUIDANCE_COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+NORMALIZED_EARNINGS_AVAILABLE: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: NOT_APPLICABLE
 ### --- END DATA_BLOCK ---
 """
 
@@ -24,6 +29,103 @@ ADJUSTED_HEALTH_SCORE: 58%
 
     assert validation["ok"] is True
     assert validation["missing"] == []
+
+
+def test_fundamentals_validation_rejects_silently_dropped_guidance_fields():
+    content = """
+### --- START DATA_BLOCK ---
+RAW_HEALTH_SCORE: 7/12
+ADJUSTED_HEALTH_SCORE: 58%
+### --- END DATA_BLOCK ---
+"""
+
+    validation = validate_required_output("fundamentals_analyst", content)
+
+    assert validation["ok"] is False
+    assert "promoted_management_guidance" in validation["missing"]
+
+
+def test_foreign_language_validation_accepts_sourced_guidance_block():
+    content = """
+### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_DATE: 2026-05-08
+SOURCE_URL: https://example.com/results
+SEARCHES_COMPLETED: results release, presentation, transcript, filing
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+OPERATING_VS_NET_DIRECTION: OP_UP_NET_DOWN
+MATERIAL_NONOPERATING_DRIVER: YES
+DRIVER_TYPE: TAX_CREDIT
+DRIVER_PERSISTENCE: EXPIRING
+EARNINGS_BASELINE_STATUS: TEMPORARILY_BOOSTED
+GUIDANCE_BRIDGE_STATUS: RECONCILED
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+
+    validation = validate_required_output("foreign_language_analyst", content)
+
+    assert validation["ok"] is True
+
+
+def test_foreign_language_validation_requires_explicit_negative_search_coverage():
+    content = """
+### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+SOURCE_DATE: N/A
+SOURCE_URL: N/A
+SEARCHES_COMPLETED: N/A
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+
+    validation = validate_required_output("foreign_language_analyst", content)
+
+    assert validation["ok"] is False
+    assert validation["missing"] == ["management_guidance_block"]
+    assert should_fail_closed(
+        "foreign_language_analyst",
+        validation=validation,
+        truncated=False,
+        content=content,
+    )
+
+
+def test_foreign_language_validation_accepts_targeted_unresolved_status():
+    content = """
+### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: UNRESOLVED_AFTER_TARGETED_SEARCH
+SEARCHES_COMPLETED: results_package=COMPLETED; earnings_bridge=INSUFFICIENT_DATA
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+EARNINGS_BASELINE_STATUS: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: UNRESOLVED
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+
+    validation = validate_required_output("foreign_language_analyst", content)
+
+    assert validation["ok"] is True
+
+
+def test_foreign_language_validation_rejects_false_durable_divergence():
+    content = """
+### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_DATE: 2026-05-08
+SOURCE_URL: https://example.com/results
+SEARCHES_COMPLETED: results_package=COMPLETED; earnings_bridge=COMPLETED
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+OPERATING_VS_NET_DIRECTION: OP_UP_NET_DOWN
+MATERIAL_NONOPERATING_DRIVER: NO
+DRIVER_TYPE: NONE
+DRIVER_PERSISTENCE: N/A
+EARNINGS_BASELINE_STATUS: DURABLE
+GUIDANCE_BRIDGE_STATUS: UNRESOLVED
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+
+    validation = validate_required_output("foreign_language_analyst", content)
+
+    assert validation["ok"] is False
 
 
 def test_validate_required_output_detects_missing_pm_sections():

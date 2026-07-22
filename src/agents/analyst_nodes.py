@@ -41,6 +41,12 @@ from .fundamentals_reconciler import (
     extract_raw_metrics_payload,
     reconcile_high_risk_fields,
     reconcile_score_consistency,
+    withhold_eps_growth_for_unusable_baseline,
+)
+from .management_guidance import (
+    _preload_management_guidance_evidence,
+    normalize_management_guidance_output,
+    promote_management_guidance,
 )
 from .output_limits import cap_state_value
 from .output_validation import (
@@ -62,9 +68,31 @@ Use exactly these fenced markers:
 {end_marker}
 Inside DATA_BLOCK, use plain KEY: VALUE lines only.
 Do NOT use markdown tables inside DATA_BLOCK.
+Promote the Foreign Language Analyst MANAGEMENT_GUIDANCE result into DATA_BLOCK.
+At minimum emit GUIDANCE_COVERAGE_STATUS, MATERIAL_NONOPERATING_DRIVER,
+EARNINGS_BASELINE_STATUS, and NORMALIZED_EARNINGS_AVAILABLE. If coverage is FOUND,
+also emit GUIDANCE_SOURCE_URL and OPERATING_VS_NET_DIRECTION. Use explicit UNKNOWN/N/A
+values when evidence is absent; never omit these fields.
 """.format(
     start_marker=fenced_start("DATA_BLOCK"),
     end_marker=fenced_end("DATA_BLOCK"),
+)
+
+_FOREIGN_LANGUAGE_GUIDANCE_RETRY_SUFFIX = """
+CRITICAL EVIDENCE CORRECTION:
+Your first response omitted or malformed the mandatory MANAGEMENT_GUIDANCE block.
+Run targeted searches of the latest results release, presentation, transcript, and
+statutory filing for management's forward guidance and material tax, subsidy,
+regulatory, accounting, or other non-operating earnings drivers. Then emit exactly
+one parseable block using these markers:
+{start_marker}
+...
+{end_marker}
+If guidance is not disclosed or a search fails, record that explicit coverage status
+and list SEARCHES_COMPLETED. Do not silently omit the block.
+""".format(
+    start_marker=fenced_start("MANAGEMENT_GUIDANCE"),
+    end_marker=fenced_end("MANAGEMENT_GUIDANCE"),
 )
 
 _QUARANTINED_FORWARD_KEYS = ("PE_RATIO_FORWARD", "PEG_RATIO")
@@ -296,6 +324,23 @@ def _sanitize_fundamentals_output(
     if has_structured_payload:
         updated_body = reconcile_high_risk_fields(updated_body, payload)
 
+    updated_body, guidance_promoted = promote_management_guidance(
+        updated_body,
+        foreign_data,
+    )
+    if guidance_promoted:
+        logger.info("management_guidance_promoted", ticker=ticker)
+
+    updated_body, eps_growth_withheld = withhold_eps_growth_for_unusable_baseline(
+        updated_body
+    )
+    if eps_growth_withheld:
+        corrective = True
+        logger.warning(
+            "eps_growth_credit_withheld_for_unusable_baseline",
+            ticker=ticker,
+        )
+
     updated_body, score_corrected, score_suspect = reconcile_score_consistency(
         updated_body
     )
@@ -437,8 +482,15 @@ def _normalize_structured_output(
     *,
     raw_data: str = "",
     foreign_data: str = "",
+    management_guidance_evidence: str = "",
 ) -> str:
     """Apply narrow deterministic output repairs for known model-format drift."""
+    if agent_key == "foreign_language_analyst":
+        return normalize_management_guidance_output(
+            content,
+            management_guidance_evidence,
+        )
+
     if agent_key != "fundamentals_analyst":
         return content
 
@@ -480,14 +532,29 @@ def _should_retry_output(content: str, agent_key: str) -> bool:
     if support._is_output_insufficient(content, agent_key):
         return True
 
-    return agent_key == "fundamentals_analyst" and not has_parseable_data_block(content)
+    if agent_key == "fundamentals_analyst":
+        return not validate_required_output(agent_key, content)["ok"]
+    if agent_key == "foreign_language_analyst":
+        return not validate_required_output(agent_key, content)["ok"]
+    return False
 
 
 def _build_retry_invocation_messages(
     invocation_messages: list[Any], agent_key: str, content: str
 ) -> list[Any]:
-    """Add a short corrective suffix for fundamentals format retries only."""
-    if agent_key != "fundamentals_analyst" or has_parseable_data_block(content):
+    """Add the owning agent's structured-output correction for a retry."""
+    if agent_key == "foreign_language_analyst":
+        if validate_required_output(agent_key, content)["ok"]:
+            return invocation_messages
+        return [
+            *invocation_messages,
+            HumanMessage(content=_FOREIGN_LANGUAGE_GUIDANCE_RETRY_SUFFIX.strip()),
+        ]
+
+    if (
+        agent_key != "fundamentals_analyst"
+        or validate_required_output(agent_key, content)["ok"]
+    ):
         return invocation_messages
 
     return [
@@ -679,6 +746,29 @@ def create_analyst_node(
             extra_context = ""
             trusted_context_instructions = ""
             macro_context_injected_into_news = False
+            management_guidance_evidence = ""
+
+            if agent_key == "foreign_language_analyst":
+                management_guidance_evidence = state.get(
+                    "management_guidance_evidence", ""
+                )
+                if not management_guidance_evidence:
+                    management_guidance_evidence = (
+                        await _preload_management_guidance_evidence(
+                            ticker,
+                            company_name,
+                            enable_extraction=not get_runtime_config(
+                                settings_config
+                            ).quick_mode_active,
+                        )
+                    )
+                trusted_context_instructions += (
+                    "\nA code-owned management-guidance preflight is supplied below. "
+                    "Use it before optional follow-up searches. SEARCHES_COMPLETED "
+                    "must reflect its recorded outcomes plus any tool calls you "
+                    "actually make; never infer source-class coverage.\n"
+                )
+                extra_context += f"\n\n{management_guidance_evidence}\n"
 
             if agent_key == "junior_fundamentals_analyst":
                 news_report = state.get("news_report", "")
@@ -832,6 +922,8 @@ def create_analyst_node(
                 new_state["macro_context_injected_into_news"] = (
                     macro_context_injected_into_news
                 )
+            if agent_key == "foreign_language_analyst":
+                new_state["management_guidance_evidence"] = management_guidance_evidence
 
             tool_calls = getattr(response, "tool_calls", None)
             has_tool_calls = isinstance(tool_calls, list) and len(tool_calls) > 0
@@ -856,6 +948,7 @@ def create_analyst_node(
                 foreign_data=foreign_data
                 if agent_key == "fundamentals_analyst"
                 else "",
+                management_guidance_evidence=management_guidance_evidence,
             )
 
             if (
@@ -923,6 +1016,7 @@ def create_analyst_node(
                         foreign_data=foreign_data
                         if agent_key == "fundamentals_analyst"
                         else "",
+                        management_guidance_evidence=management_guidance_evidence,
                     )
                     retry_tool_calls = getattr(retry_response, "tool_calls", None)
                     retry_has_tool_calls = (

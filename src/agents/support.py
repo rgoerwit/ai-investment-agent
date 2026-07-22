@@ -524,12 +524,13 @@ def extract_value_trap_verdict(value_trap_report: str) -> str:
     )
 
 
-# Tranche-1–4 fenced blocks the summarizer must preserve when truncation
-# fires. These carry load-bearing structured data for downstream consumers
+# Load-bearing fenced blocks the summarizer must preserve when truncation
+# fires. These carry structured evidence and decisions for downstream consumers
 # (PM rationale, memo, quality judge, chart overlay) and are emitted at the
 # tail of long agent outputs — exactly where a naive head-truncate drops them.
 _PRESERVED_BLOCKS: tuple[str, ...] = (
     "DATA_BLOCK",
+    "MANAGEMENT_GUIDANCE",
     "PM_BLOCK",
     "VALUE_TRAP_BLOCK",
     "KILL_CRITERIA",
@@ -568,7 +569,7 @@ def _append_unique_preserved(blocks: list[str], seen: set[str], value: str) -> N
 def summarize_for_pm(report: str, report_type: str, max_chars: int = 3000) -> str:
     """Summarize verbose reports while preserving structured blocks.
 
-    Critical blocks (DATA_BLOCK, PM_BLOCK, the Tranche-1–4 fenced blocks, and
+    Critical blocks (including DATA_BLOCK, MANAGEMENT_GUIDANCE, PM_BLOCK, and
     the VARIANT PERCEPTION section) are always re-appended after truncation,
     even when they sit at the tail of the report. Blocks already present
     inside the retained head window are not re-injected.

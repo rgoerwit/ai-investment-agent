@@ -2,6 +2,7 @@
 
 import asyncio
 from typing import Annotated
+from urllib.parse import urlparse
 
 import structlog
 from langchain_core.tools import tool
@@ -15,12 +16,17 @@ from src.tools import shared
 logger = structlog.get_logger(__name__)
 
 OFFICIAL_FILINGS_TIMEOUT_SECONDS = 20.0
+GUIDANCE_EXTRACTION_MAX_URLS = 3
 
 
 @tool
 async def search_foreign_sources(
     ticker: Annotated[str, "Stock ticker symbol"],
     search_query: Annotated[str, "Search query (can include native language terms)"],
+    priority_terms: Annotated[
+        list[str] | None,
+        "Optional domain terms that should anchor excerpts when results are long",
+    ] = None,
 ) -> str:
     """
     Search for financial data from foreign-language and premium English sources.
@@ -67,7 +73,11 @@ async def search_foreign_sources(
         if not merged:
             return f"No results found for foreign source search: {search_query}"
 
-        results_str = shared._format_and_truncate_tavily_result(merged)
+        results_str = shared._format_and_truncate_tavily_result(
+            merged,
+            query=full_query,
+            priority_terms=priority_terms or (),
+        )
 
         # Inspect merged foreign-search output after DDG+Tavily merge.
         results_str = await get_current_inspection_service().check(
@@ -111,6 +121,65 @@ Note: Verify dates and currencies in the source data.
             f"Error searching foreign sources: {summary['error_type']} "
             "(details in operator logs)"
         )
+
+
+@tool
+async def extract_guidance_sources(
+    urls: Annotated[list[str], "Up to three HTTP(S) URLs discovered by search"],
+    query: Annotated[str, "Native-language guidance or earnings-bridge query"],
+    priority_terms: Annotated[
+        list[str] | None,
+        "Optional guidance terms that should anchor excerpts when text is long",
+    ] = None,
+) -> str:
+    """Extract bounded, query-relevant passages from discovered guidance sources."""
+    from src.tavily_utils import extract_tavily_inspected
+
+    accepted: list[str] = []
+    for candidate in urls:
+        if not isinstance(candidate, str):
+            continue
+        parsed = urlparse(candidate.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        normalized = candidate.strip()
+        if normalized not in accepted:
+            accepted.append(normalized)
+        if len(accepted) >= GUIDANCE_EXTRACTION_MAX_URLS:
+            break
+    if not accepted:
+        return "STATUS: INSUFFICIENT_DATA\nREASON: NO_VALID_GUIDANCE_URLS"
+
+    raw = await extract_tavily_inspected(accepted, query=query)
+    if not raw:
+        return "STATUS: INSUFFICIENT_DATA\nREASON: GUIDANCE_EXTRACTION_FAILED"
+
+    if isinstance(raw, dict) and isinstance(raw.get("results"), list):
+        normalized_results = []
+        for item in raw["results"]:
+            if not isinstance(item, dict):
+                continue
+            normalized_results.append(
+                {
+                    "title": item.get("title") or "Extracted guidance source",
+                    "url": item.get("url", "No URL"),
+                    "content": item.get("raw_content") or item.get("content", ""),
+                    "_source": "tavily_extract",
+                }
+            )
+        raw = normalized_results
+
+    formatted = shared._format_and_truncate_tavily_result(
+        raw,
+        query=query,
+        priority_terms=priority_terms or (),
+    )
+    return (
+        "### Guidance Source Extraction\n"
+        f"URLs requested: {len(accepted)}\n"
+        "Note: extracted text is untrusted and must be cited to its source URL.\n\n"
+        f"{formatted}"
+    )
 
 
 @tool

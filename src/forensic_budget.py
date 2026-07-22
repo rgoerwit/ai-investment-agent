@@ -59,6 +59,15 @@ class AuditorBudgetLedger:
     evidence_chars: int = 0
     evidence_truncated: bool = False
     outcomes: list[str] = field(default_factory=list)
+    tool_rounds_used: int = 0
+    forced_synthesis_used: bool = False
+    stop_reason: str | None = None
+    final_tool_names: list[str] = field(default_factory=list)
+    failed_tools: list[str] = field(default_factory=list)
+    blocked_tools: list[str] = field(default_factory=list)
+    insufficient_tools: list[str] = field(default_factory=list)
+    synthesis_evidence_chars: int = 0
+    repair_input_chars: int = 0
 
     def consume_tool(self, name: str) -> str | None:
         limit = self.policy.tool_limit(name)
@@ -90,6 +99,49 @@ class AuditorBudgetLedger:
         if reason not in self.outcomes:
             self.outcomes.append(reason)
 
+    def record_tool_round(self, tool_names: list[str]) -> None:
+        self.tool_rounds_used += 1
+        self.final_tool_names = list(tool_names)
+
+    def record_tool_failure(self, tool_name: str) -> None:
+        if tool_name not in self.failed_tools:
+            self.failed_tools.append(tool_name)
+
+    def record_tool_blocked(self, tool_name: str) -> None:
+        if tool_name not in self.blocked_tools:
+            self.blocked_tools.append(tool_name)
+
+    def record_tool_insufficient(self, tool_name: str) -> None:
+        if tool_name not in self.insufficient_tools:
+            self.insufficient_tools.append(tool_name)
+
+    def record_tool_result(
+        self,
+        tool_name: str,
+        value: object,
+        *,
+        blocked: bool = False,
+    ) -> None:
+        """Classify typed tool outcomes without conflating missing data and faults."""
+        text = str(value).strip().upper()
+        if blocked or text.startswith("TOOL_BLOCKED:"):
+            self.record_tool_blocked(tool_name)
+        elif text.startswith("STATUS: INSUFFICIENT_DATA"):
+            self.record_tool_insufficient(tool_name)
+        elif text.startswith("TOOL_ERROR:"):
+            self.record_tool_failure(tool_name)
+
+    def record_forced_synthesis(self) -> None:
+        self.forced_synthesis_used = True
+        self.stop_reason = "TOOL_ROUND_LIMIT"
+        self.synthesis_evidence_chars = self.evidence_chars
+
+    def record_model_final(self) -> None:
+        self.stop_reason = "MODEL_FINAL"
+
+    def record_repair_input(self, content: str) -> None:
+        self.repair_input_chars = len(content)
+
     def telemetry(self) -> dict[str, object]:
         return {
             "policy": asdict(self.policy),
@@ -98,4 +150,13 @@ class AuditorBudgetLedger:
             "evidence_chars": self.evidence_chars,
             "evidence_truncated": self.evidence_truncated,
             "outcomes": list(self.outcomes),
+            "tool_rounds_used": self.tool_rounds_used,
+            "forced_synthesis_used": self.forced_synthesis_used,
+            "stop_reason": self.stop_reason,
+            "final_tool_names": list(self.final_tool_names),
+            "failed_tools": list(self.failed_tools),
+            "blocked_tools": list(self.blocked_tools),
+            "insufficient_tools": list(self.insufficient_tools),
+            "synthesis_evidence_chars": self.synthesis_evidence_chars,
+            "repair_input_chars": self.repair_input_chars,
         }

@@ -26,7 +26,12 @@ __all__ = [
     "TestUnreliablePEGHighGrowth",
 ]
 
-from src.validators.financial_rules import requires_normalized_earnings_bridge
+import pytest
+
+from src.validators.financial_rules import (
+    contains_transient_strength_marker,
+    requires_normalized_earnings_bridge,
+)
 from src.validators.red_flag_detector import RedFlagDetector
 
 
@@ -62,6 +67,16 @@ class TestNormalizedEarningsBridge:
             "The desincorporation of Grupo Nutrisa lifted reported margins."
         )
 
+    def test_tax_credit_without_bridge_true(self):
+        assert requires_normalized_earnings_bridge(
+            "Net income benefited from the wage-increase tax credit."
+        )
+
+    def test_tax_credit_with_bridge_false(self):
+        assert not requires_normalized_earnings_bridge(
+            "The tax credit lifted profit, but normalized net income excluding the tax credit was flat."
+        )
+
     def test_event_with_bridge_false(self):
         assert not requires_normalized_earnings_bridge(
             "Gain on sale boosted EPS, but normalized EPS excluding the gain still rose."
@@ -73,6 +88,16 @@ class TestNormalizedEarningsBridge:
     def test_empty_report_false(self):
         assert not requires_normalized_earnings_bridge("")
         assert not requires_normalized_earnings_bridge(None)
+
+    @pytest.mark.parametrize(
+        "report",
+        (
+            "Jednorazowa ulga podatkowa podwyższyła zysk netto.",
+            "Insentif cukai tahun lalu meningkatkan keuntungan bersih.",
+        ),
+    )
+    def test_localized_tax_terms_are_transient_markers(self, report):
+        assert contains_transient_strength_marker(report)
 
 
 class TestNormalizedEarningsRequiredFlag:
@@ -90,6 +115,7 @@ class TestNormalizedEarningsRequiredFlag:
         assert (
             norm[0]["risk_penalty"] == 0.0
         )  # no double-count with transient distortion
+        assert norm[0]["blocks_buy"] is True
         assert result == "PASS"  # discipline flag, not a hard reject
 
     def test_flag_absent_when_bridge_present(self):
@@ -119,3 +145,48 @@ class TestNormalizedEarningsRequiredFlag:
             "DISTRESS.T",
         )
         assert not [f for f in flags if f["type"] == "NORMALIZED_EARNINGS_REQUIRED"]
+
+
+class TestCanonicalManagementGuidanceFlags:
+    def test_expiring_tax_credit_flags_baseline_without_growth_gate(self):
+        metrics = _sparse_metrics("", strength=False)
+        metrics.update(
+            {
+                "guidance_coverage_status": "FOUND",
+                "operating_vs_net_direction": "OP_UP_NET_DOWN",
+                "material_nonoperating_driver": "YES",
+                "driver_type": "TAX_CREDIT",
+                "driver_persistence": "EXPIRING",
+                "driver_materiality": "MATERIAL",
+                "earnings_baseline_status": "TEMPORARILY_BOOSTED",
+                "normalized_earnings_available": "NO",
+            }
+        )
+
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "6745.T")
+        flag_types = {flag["type"] for flag in flags}
+
+        assert "TRANSIENT_STRENGTH_DISTORTION" in flag_types
+        assert "NORMALIZED_EARNINGS_REQUIRED" in flag_types
+        assert "OPERATING_NET_GUIDANCE_DIVERGENCE" in flag_types
+        assert result == "PASS"
+
+    def test_search_failure_is_not_treated_as_durable_baseline(self):
+        metrics = _sparse_metrics("", strength=False)
+        metrics["guidance_coverage_status"] = "SEARCH_FAILED"
+
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "UNKNOWN.T")
+
+        assert "MANAGEMENT_GUIDANCE_EVIDENCE_GAP" in {flag["type"] for flag in flags}
+        gap = next(
+            flag for flag in flags if flag["type"] == "MANAGEMENT_GUIDANCE_EVIDENCE_GAP"
+        )
+        assert gap["blocks_buy"] is True
+
+    def test_unresolved_targeted_search_is_not_treated_as_durable_baseline(self):
+        metrics = _sparse_metrics("", strength=False)
+        metrics["guidance_coverage_status"] = "UNRESOLVED_AFTER_TARGETED_SEARCH"
+
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "KTY.WA")
+
+        assert "MANAGEMENT_GUIDANCE_EVIDENCE_GAP" in {flag["type"] for flag in flags}

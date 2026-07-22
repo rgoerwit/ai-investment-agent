@@ -171,6 +171,62 @@ async def search_tavily_inspected(
     return await _inspect_tavily_result(raw, query)
 
 
+async def extract_tavily_inspected(
+    urls: list[str],
+    *,
+    query: str,
+    timeout: float = TAVILY_TIMEOUT_SECONDS,
+) -> Any:
+    """Extract query-relevant chunks from a bounded list of discovered URLs."""
+    api_key = config.get_tavily_api_key()
+    if not api_key or not urls:
+        return None
+    try:
+        from langchain_tavily import TavilyExtract
+        from langchain_tavily._utilities import TavilyExtractAPIWrapper
+        from pydantic import SecretStr
+    except ImportError:
+        logger.warning(
+            "tavily_not_installed",
+            hint="Run 'poetry add langchain-tavily' to enable Tavily extraction",
+        )
+        return None
+
+    tool = TavilyExtract(
+        apiwrapper=TavilyExtractAPIWrapper(tavily_api_key=SecretStr(api_key)),
+        extract_depth="advanced",
+        query=query,
+        chunks_per_source=3,
+        include_images=False,
+        format="text",
+        include_usage=False,
+    )
+    from src.async_utils import run_with_hard_timeout
+
+    try:
+        raw = await run_with_hard_timeout(
+            tool.ainvoke({"urls": urls[:3]}),
+            timeout=timeout,
+            label=f"tavily:extract:{query[:60]}",
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "tavily_extract_timeout",
+            url_count=len(urls[:3]),
+            timeout_seconds=timeout,
+        )
+        return None
+    except Exception as exc:
+        logger.warning(
+            "tavily_extract_error",
+            url_count=len(urls[:3]),
+            **summarize_exception(exc, operation="tavily_extract_error"),
+        )
+        return None
+
+    return await _inspect_tavily_result(raw, query)
+
+
 def search_tavily_sync_inspected(
     query: str,
     *,

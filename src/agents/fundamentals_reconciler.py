@@ -12,6 +12,7 @@ from src.data_block_utils import (
     has_non_na_block_field_value,
     replace_or_append_block_line,
 )
+from src.earnings_baseline import requires_eps_growth_withholding
 from src.sector_normalization import normalize_sector_label
 from src.thesis_constants import (
     FINANCIALS_HEALTH_REMOVED_POINTS,
@@ -528,6 +529,51 @@ def parse_score_breakdown(text: str, kind: str = "HEALTH") -> dict[str, str] | N
             return None  # duplicate key
         awards[key] = token
     return awards or None
+
+
+def withhold_eps_growth_for_unusable_baseline(body: str) -> tuple[str, bool]:
+    """Remove sustained EPS-growth credit when the earnings baseline is unsafe."""
+    baseline = extract_block_text_value(body, "EARNINGS_BASELINE_STATUS").upper()
+    bridge_status = extract_block_text_value(body, "GUIDANCE_BRIDGE_STATUS").upper()
+    if not requires_eps_growth_withholding(baseline, bridge_status):
+        return body, False
+
+    breakdown_text = extract_block_text_value(body, "GROWTH_SCORE_BREAKDOWN")
+    awards = parse_score_breakdown(breakdown_text, "GROWTH")
+    if awards is None or set(awards) != set(GROWTH_SCORE_CRITERIA):
+        return body, False
+    if awards.get("EPS_GROWTH") == "0":
+        return body, False
+
+    awards["EPS_GROWTH"] = "0"
+    numeric = {
+        key: float(token)
+        for key, token in awards.items()
+        if token not in {"N/A", "REMOVED"}
+    }
+    earned = sum(numeric.values())
+    available = sum(GROWTH_SCORE_CRITERIA[key] for key in numeric)
+    if available <= 0:
+        return body, False
+
+    serialized = "; ".join(f"{key}={awards[key]}" for key in GROWTH_SCORE_CRITERIA)
+    updated = replace_or_append_block_line(body, "GROWTH_SCORE_BREAKDOWN", serialized)
+    updated = replace_or_append_block_line(
+        updated,
+        "RAW_GROWTH_SCORE",
+        f"{earned:g}/{GROWTH_RUBRIC_POINTS:g}",
+    )
+    updated = replace_or_append_block_line(
+        updated,
+        "ADJUSTED_GROWTH_SCORE",
+        f"{earned / available * 100.0:.1f}% (based on {available:g} available points)",
+    )
+    updated = replace_or_append_block_line(
+        updated,
+        "EPS_GROWTH_BASELINE_ADJUSTMENT",
+        "WITHHELD — trailing earnings baseline is not durable and no code-reconciled normalized growth rate is available",
+    )
+    return updated, True
 
 
 def _is_negative_amount(text: str) -> bool:

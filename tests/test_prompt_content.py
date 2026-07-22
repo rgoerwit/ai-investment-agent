@@ -85,6 +85,27 @@ class TestFundamentalsPromptContent:
         assert "GROWTH_QUALITY_UNPROVEN" in msg
         assert "Cap Revenue Growth scoring component at 0.5 pts" in msg
 
+    def test_fundamentals_prompt_requires_guidance_baseline_promotion(self):
+        msg = get_prompt("fundamentals_analyst").system_message
+        for field in (
+            "GUIDANCE_COVERAGE_STATUS",
+            "OPERATING_VS_NET_DIRECTION",
+            "DRIVER_PERSISTENCE",
+            "EARNINGS_BASELINE_STATUS",
+            "NORMALIZED_EARNINGS_AVAILABLE",
+        ):
+            assert field in msg
+        assert "do not award the EPS_GROWTH point" in msg
+
+
+class TestForeignLanguageGuidancePromptContent:
+    def test_latest_results_and_tax_baseline_search_is_mandatory(self):
+        msg = get_prompt("foreign_language_analyst").system_message
+        assert "Search K: Management Guidance & Earnings Baseline (MANDATORY)" in msg
+        assert "賃上げ促進税制" in msg
+        assert "MANAGEMENT_GUIDANCE" in msg
+        assert "NOT_DISCLOSED_AFTER_TARGETED_SEARCH" in msg
+
 
 class TestPortfolioManagerPromptContent:
     """Guard PM handling of consultant no-coverage cases."""
@@ -134,6 +155,8 @@ class TestPortfolioManagerPromptContent:
         msg = get_prompt("portfolio_manager").system_message
         assert "Distortion-before-catalyst" in msg
         assert "NORMALIZED_EARNINGS_REQUIRED" in msg
+        assert "tax credit/incentive" in msg
+        assert "MANAGEMENT_GUIDANCE_EVIDENCE_GAP" in msg
 
     def test_portfolio_manager_prompt_blocks_buy_on_material_unverified_signal(self):
         """A large unverified operating decline must block BUY pending verification (not auto-SELL)."""

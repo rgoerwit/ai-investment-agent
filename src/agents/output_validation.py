@@ -7,9 +7,16 @@ from typing import Any
 import structlog
 
 from src.data_block_utils import (
+    extract_block_field,
     has_parseable_data_block,
     has_parseable_fenced_block,
     unfenced_label,
+)
+from src.earnings_baseline import (
+    EARNINGS_BASELINE_STATUSES,
+    GUIDANCE_BRIDGE_STATUSES,
+    GUIDANCE_COVERAGE_STATUSES,
+    canonical_enum,
 )
 from src.llm_usage import extract_token_usage_breakdown
 
@@ -18,6 +25,127 @@ logger = structlog.get_logger(__name__)
 _FORENSIC_VERDICT_PATTERN = re.compile(
     r"(?im)^\s*(?:\*\*)?\s*verdict\s*(?:\*\*)?\s*:\s*\S+"
 )
+
+
+def _has_valid_management_guidance_block(content: str) -> bool:
+    """Validate the minimum evidence contract for forward-guidance research."""
+    if not has_parseable_fenced_block(content, "MANAGEMENT_GUIDANCE"):
+        return False
+
+    coverage_status = canonical_enum(
+        extract_block_field(content, "MANAGEMENT_GUIDANCE", "COVERAGE_STATUS")
+    )
+    if coverage_status not in GUIDANCE_COVERAGE_STATUSES:
+        return False
+
+    searches_completed = extract_block_field(
+        content, "MANAGEMENT_GUIDANCE", "SEARCHES_COMPLETED"
+    )
+    search_provenance = extract_block_field(
+        content, "MANAGEMENT_GUIDANCE", "SEARCH_PROVENANCE"
+    )
+    if search_provenance != "CODE_OWNED_PREFLIGHT":
+        return False
+
+    if coverage_status == "FOUND":
+        source_date = extract_block_field(content, "MANAGEMENT_GUIDANCE", "SOURCE_DATE")
+        source_url = extract_block_field(content, "MANAGEMENT_GUIDANCE", "SOURCE_URL")
+        direction = canonical_enum(
+            extract_block_field(
+                content, "MANAGEMENT_GUIDANCE", "OPERATING_VS_NET_DIRECTION"
+            )
+        )
+        material_driver = canonical_enum(
+            extract_block_field(
+                content, "MANAGEMENT_GUIDANCE", "MATERIAL_NONOPERATING_DRIVER"
+            )
+        )
+        driver_type = canonical_enum(
+            extract_block_field(content, "MANAGEMENT_GUIDANCE", "DRIVER_TYPE")
+        )
+        persistence = canonical_enum(
+            extract_block_field(content, "MANAGEMENT_GUIDANCE", "DRIVER_PERSISTENCE")
+        )
+        baseline_status = canonical_enum(
+            extract_block_field(
+                content, "MANAGEMENT_GUIDANCE", "EARNINGS_BASELINE_STATUS"
+            )
+        )
+        bridge_status = canonical_enum(
+            extract_block_field(
+                content, "MANAGEMENT_GUIDANCE", "GUIDANCE_BRIDGE_STATUS"
+            )
+        )
+        if not (
+            source_date
+            and source_url
+            and re.fullmatch(r"https?://\S+", source_url, re.IGNORECASE)
+            and direction
+            and bridge_status in GUIDANCE_BRIDGE_STATUSES
+        ):
+            return False
+        if material_driver == "YES" and driver_type in {None, "NONE", "UNKNOWN"}:
+            return False
+        if direction == "OP_UP_NET_DOWN":
+            if bridge_status == "RECONCILED" and (
+                material_driver != "YES" or driver_type in {None, "NONE", "UNKNOWN"}
+            ):
+                return False
+            if bridge_status == "UNRESOLVED" and baseline_status == "DURABLE":
+                return False
+        if (
+            driver_type == "TAX_CREDIT"
+            and persistence in {"ONE_TIME", "EXPIRING"}
+            and baseline_status == "DURABLE"
+        ):
+            return False
+        return True
+
+    return bool(searches_completed and searches_completed.upper() not in {"N/A", "NA"})
+
+
+def _has_promoted_management_guidance(content: str) -> bool:
+    """Require Senior Fundamentals to preserve the evidence/baseline outcome."""
+    coverage_status = canonical_enum(
+        extract_block_field(content, "DATA_BLOCK", "GUIDANCE_COVERAGE_STATUS")
+    )
+    material_driver = canonical_enum(
+        extract_block_field(content, "DATA_BLOCK", "MATERIAL_NONOPERATING_DRIVER")
+    )
+    baseline_status = canonical_enum(
+        extract_block_field(content, "DATA_BLOCK", "EARNINGS_BASELINE_STATUS")
+    )
+    normalized_available = canonical_enum(
+        extract_block_field(content, "DATA_BLOCK", "NORMALIZED_EARNINGS_AVAILABLE")
+    )
+    bridge_status = canonical_enum(
+        extract_block_field(content, "DATA_BLOCK", "GUIDANCE_BRIDGE_STATUS")
+    )
+    if (
+        coverage_status not in GUIDANCE_COVERAGE_STATUSES
+        or material_driver not in {"YES", "NO", "UNKNOWN"}
+        or baseline_status not in EARNINGS_BASELINE_STATUSES
+        or normalized_available not in {"YES", "NO", "UNKNOWN", "N/A"}
+        or bridge_status not in GUIDANCE_BRIDGE_STATUSES
+    ):
+        return False
+
+    if coverage_status != "FOUND":
+        return True
+
+    source_url = extract_block_field(content, "DATA_BLOCK", "GUIDANCE_SOURCE_URL")
+    direction = canonical_enum(
+        extract_block_field(content, "DATA_BLOCK", "OPERATING_VS_NET_DIRECTION")
+    )
+    if not (
+        source_url
+        and re.fullmatch(r"https?://\S+", source_url, re.IGNORECASE)
+        and direction
+    ):
+        return False
+    if direction == "OP_UP_NET_DOWN" and bridge_status == "UNRESOLVED":
+        return baseline_status != "DURABLE"
+    return True
 
 
 def _coerce_optional_int(value: Any) -> int | None:
@@ -77,8 +205,20 @@ def _has_forensic_verdict(content: str) -> bool:
 def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
     checks: list[tuple[str, bool]] = []
 
-    if agent_key == "fundamentals_analyst":
-        checks.append(("parseable_data_block", has_parseable_data_block(content)))
+    if agent_key == "foreign_language_analyst":
+        checks.append(
+            ("management_guidance_block", _has_valid_management_guidance_block(content))
+        )
+    elif agent_key == "fundamentals_analyst":
+        checks.extend(
+            [
+                ("parseable_data_block", has_parseable_data_block(content)),
+                (
+                    "promoted_management_guidance",
+                    _has_promoted_management_guidance(content),
+                ),
+            ]
+        )
     elif agent_key == "portfolio_manager":
         checks.extend(
             [
@@ -146,7 +286,11 @@ def should_fail_closed(
     if validation["ok"]:
         return False
 
-    if agent_key in {"portfolio_manager", "fundamentals_analyst"}:
+    if agent_key in {
+        "portfolio_manager",
+        "fundamentals_analyst",
+        "foreign_language_analyst",
+    }:
         return True
 
     if agent_key == "global_forensic_auditor":

@@ -1,0 +1,14 @@
+[
+  {
+    "source_artifact": "results/6745.T_20260719_194421_analysis.json",
+    "quick_mode": false,
+    "evidence_chars": 28741,
+    "auditor_report_excerpt": "The forensic auditor output required to prepare a compliant final report was not provided."
+  },
+  {
+    "source_artifact": "results/AGS.SI_20260719_180731_analysis.json",
+    "quick_mode": false,
+    "evidence_chars": 35000,
+    "auditor_report_excerpt": "Forensic auditor output was not provided."
+  }
+]

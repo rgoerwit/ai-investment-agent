@@ -657,25 +657,22 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
         max_tool_iterations = 4
 
         try:
+            llm_with_tools = llm.bind_tools(tools) if tools else llm
             messages: list = [
                 SystemMessage(content=agent_prompt.system_message),
                 HumanMessage(content=human_msg),
             ]
             response_str = ""
 
-            for iteration in range(max_tool_iterations + 1):
+            for iteration in range(max_tool_iterations):
                 response = await _invoke_agent_loop_llm(
-                    llm,
+                    llm_with_tools,
                     messages,
                     context=agent_prompt.agent_name,
                 )
                 tool_calls = getattr(response, "tool_calls", None)
 
-                if (
-                    not isinstance(tool_calls, list)
-                    or not tool_calls
-                    or iteration == max_tool_iterations
-                ):
+                if not isinstance(tool_calls, list) or not tool_calls:
                     response_str = message_utils.extract_string_content(
                         getattr(response, "content", "")
                     )
@@ -712,7 +709,7 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                                     tool_err, operation="legal_counsel_tool_failed"
                                 ),
                             )
-                            tool_output = f"TOOL_ERROR: {tool_err}"
+                            tool_output = f"TOOL_ERROR: {type(tool_err).__name__}"
                     else:
                         tool_output = f"Unknown tool: {tool_call['name']}"
                     messages.append(
@@ -724,6 +721,25 @@ Call the search_legal_tax_disclosures tool with these parameters, then provide y
                     ticker=ticker,
                     iteration=iteration + 1,
                     tools_called=[tc["name"] for tc in tool_calls],
+                )
+
+            if not response_str:
+                messages.append(
+                    HumanMessage(
+                        content=(
+                            "The tool budget is closed. Using all tool evidence and "
+                            "tool errors above, return the final required JSON "
+                            "assessment now. Do not request tools."
+                        )
+                    )
+                )
+                final_response = await _invoke_agent_loop_llm(
+                    llm,
+                    messages,
+                    context=f"{agent_prompt.agent_name}_final_synthesis",
+                )
+                response_str = message_utils.extract_string_content(
+                    getattr(final_response, "content", "")
                 )
 
             try:
@@ -980,12 +996,16 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                     result_msgs.append(msg)
             return result_msgs
 
-        async def _run_auditor_loop(active_llm, agent_prompt_sys: str) -> str:
+        async def _run_auditor_loop(
+            active_llm,
+            final_llm,
+            agent_prompt_sys: str,
+        ) -> str:
             messages: list = [
                 SystemMessage(content=agent_prompt_sys),
                 HumanMessage(content=human_msg),
             ]
-            for iteration in range(max_tool_iterations + 1):
+            for iteration in range(max_tool_iterations):
                 budget_reason = ledger.consume_llm()
                 if budget_reason:
                     return _budget_exhausted_report(budget_reason, ticker)
@@ -997,11 +1017,8 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                 )
                 tool_calls = getattr(response, "tool_calls", None)
 
-                if (
-                    not isinstance(tool_calls, list)
-                    or not tool_calls
-                    or iteration == max_tool_iterations
-                ):
+                if not isinstance(tool_calls, list) or not tool_calls:
+                    ledger.record_model_final()
                     return message_utils.extract_string_content(
                         getattr(response, "content", "")
                     )
@@ -1015,6 +1032,7 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                     if tool_fn:
                         budget_reason = ledger.consume_tool(tool_call["name"])
                         if budget_reason:
+                            ledger.record_tool_insufficient(tool_call["name"])
                             return ToolMessage(
                                 content=f"STATUS: INSUFFICIENT_DATA\nREASON: {budget_reason}",
                                 tool_call_id=tool_call_id,
@@ -1035,9 +1053,15 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                                 ),
                                 runner=_run_auditor_tool,
                             )
+                            ledger.record_tool_result(
+                                tool_call["name"],
+                                tool_result.value,
+                                blocked=tool_result.blocked,
+                            )
                             tool_output = ledger.cap_evidence(str(tool_result.value))
                             evidence_fragments.append(tool_output)
                         except Exception as tool_err:
+                            ledger.record_tool_failure(tool_call["name"])
                             logger.warning(
                                 "auditor_tool_failed",
                                 ticker=ticker,
@@ -1046,8 +1070,9 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                                     tool_err, operation="auditor_tool_failed"
                                 ),
                             )
-                            tool_output = f"TOOL_ERROR: {tool_err}"
+                            tool_output = f"TOOL_ERROR: {type(tool_err).__name__}"
                     else:
+                        ledger.record_tool_failure(tool_call["name"])
                         tool_output = f"Unknown tool: {tool_call['name']}"
                     return ToolMessage(content=tool_output, tool_call_id=tool_call_id)
 
@@ -1057,6 +1082,7 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                 messages.extend(
                     await asyncio.gather(*[_exec_one(tc) for tc in tool_calls])
                 )
+                ledger.record_tool_round([tc["name"] for tc in tool_calls])
 
                 logger.debug(
                     "auditor_tool_iteration",
@@ -1064,7 +1090,36 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                     iteration=iteration + 1,
                     tools_called=[tc["name"] for tc in tool_calls],
                 )
-            return ""
+
+            budget_reason = ledger.consume_llm()
+            if budget_reason:
+                return _budget_exhausted_report(budget_reason, ticker)
+            ledger.record_forced_synthesis()
+            messages.append(
+                HumanMessage(
+                    content=(
+                        "The tool budget is closed. Using every tool result and tool "
+                        "error above, produce the final required forensic report now. "
+                        "Do not request tools. End with FORENSIC_DATA_BLOCK containing "
+                        "non-empty STATUS and VERDICT fields."
+                    )
+                )
+            )
+            final_response = await _invoke_agent_loop_llm(
+                final_llm,
+                _truncate_messages_for_llm(messages),
+                context=f"{agent_prompt.agent_name}_final_synthesis",
+            )
+            content = message_utils.extract_string_content(
+                getattr(final_response, "content", "")
+            )
+            if content.strip():
+                return content
+            ledger.record_outcome("FINAL_SYNTHESIS_EMPTY")
+            return _budget_exhausted_report(
+                "FINAL_SYNTHESIS_EMPTY_AFTER_EVIDENCE",
+                ticker,
+            )
 
         logger.debug("auditor_start", ticker=ticker)
 
@@ -1078,7 +1133,9 @@ Perform a forensic audit using your tools.{snapshot_block}"""
             # repair path, which must operate on the base model, not the binding.
             llm_with_tools = llm.bind_tools(tools) if tools else llm
             response_str = await _run_auditor_loop(
-                llm_with_tools, agent_prompt.system_message
+                llm_with_tools,
+                llm,
+                agent_prompt.system_message,
             )
             response_str = canonicalize_forensic_auditor_output(response_str)
 
@@ -1124,6 +1181,7 @@ Perform a forensic audit using your tools.{snapshot_block}"""
             )
 
             if not validation["ok"]:
+                ledger.record_repair_input(response_str)
                 if ledger.consume_llm():
                     ledger.record_outcome("LLM_REPAIR_NOT_BUDGETED")
                 else:
@@ -1249,8 +1307,13 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                 )
                 try:
                     fallback_llm = _create_openai_responses_fallback_llm(llm)
+                    fallback_llm_with_tools = (
+                        fallback_llm.bind_tools(tools) if tools else fallback_llm
+                    )
                     response_str = await _run_auditor_loop(
-                        fallback_llm, agent_prompt.system_message
+                        fallback_llm_with_tools,
+                        fallback_llm,
+                        agent_prompt.system_message,
                     )
                     response_str = canonicalize_forensic_auditor_output(response_str)
                     logger.debug(

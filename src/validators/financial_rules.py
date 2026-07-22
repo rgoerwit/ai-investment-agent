@@ -10,6 +10,8 @@ from typing import Any
 import structlog
 
 from src.data_block_utils import extract_data_block_field
+from src.earnings_baseline import is_material_baseline_distortion
+from src.guidance_vocabulary import all_transient_tax_terms
 from src.thesis_constants import PE_MAX, PE_VS_SECTOR_RICH
 from src.validators.sector_classifier import (
     CAPITAL_INTENSIVE_SECTORS,
@@ -18,6 +20,10 @@ from src.validators.sector_classifier import (
 )
 
 logger = structlog.get_logger(__name__)
+
+_LOCALIZED_TRANSIENT_TAX_RE = "|".join(
+    re.escape(term) for term in all_transient_tax_terms()
+)
 
 _TRANSIENT_STRENGTH_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
@@ -45,7 +51,38 @@ _TRANSIENT_STRENGTH_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "regulatory windfall or subsidy",
         re.compile(
-            r"\b(?:regulatory windfall|government subsidy|subsidy windfall)\b",
+            r"\b(?:regulatory (?:windfall|relief)|government (?:subsidy|grant)|"
+            r"subsidy(?: windfall)?|subsidies|grant income)\b|"
+            r"(?:補助金|보조금|政府補助|政府补助)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "tax credit, incentive, or regime benefit",
+        re.compile(
+            r"\b(?:tax credit|tax incentive|tax benefit|investment tax credit|"
+            r"wage[- ]increase tax credit|tax holiday|preferential tax|"
+            r"effective tax rate (?:benefit|reduction)|loss carryforward)\b|"
+            rf"(?:{_LOCALIZED_TRANSIENT_TAX_RE}|繰越欠損金|결손금)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "deferred-tax or tax-rate adjustment",
+        re.compile(
+            r"\b(?:deferred tax (?:asset|benefit|release|write[- ]?down)|"
+            r"valuation allowance release|tax rate change|tax reform)\b|"
+            r"(?:繰延税金資産|法人税等調整額|評価性引当額|"
+            r"이연법인세|법인세비용|遞延所得稅|递延所得税)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "accounting or regulatory change",
+        re.compile(
+            r"\b(?:accounting (?:change|standard|transition)|regulatory charge|"
+            r"regime change|special charge|special gain)\b|"
+            r"(?:会計基準変更|規制変更|회계기준 변경|규제 변경|監管變更|监管变更)",
             re.IGNORECASE,
         ),
     ),
@@ -64,9 +101,11 @@ _TRANSIENT_STRENGTH_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 # as a catalyst rather than a distortion.
 _NORMALIZED_EARNINGS_BRIDGE_RE = re.compile(
     r"\b(?:normaliz\w+\s+(?:eps|earnings|revenue|margin|ocf|net income|profit)|"
-    r"ex[- ]one[- ]time|excluding the (?:gain|disposal|sale|settlement|deconsolidation)|"
-    r"adjusted for the (?:gain|disposal|sale|deconsolidation|divestiture)|"
-    r"underlying (?:earnings|eps|profit)|organic (?:revenue|growth)|"
+    r"ex[- ]one[- ]time|excluding the (?:gain|disposal|sale|settlement|"
+    r"deconsolidation|tax (?:credit|benefit)|subsidy|grant)|"
+    r"adjusted for the (?:gain|disposal|sale|deconsolidation|divestiture|"
+    r"tax (?:credit|benefit)|subsidy|grant)|"
+    r"underlying (?:earnings|eps|profit|net income)|organic (?:revenue|growth)|"
     r"like[- ]for[- ]like|recurring (?:earnings|revenue|profit))\b",
     re.IGNORECASE,
 )
@@ -76,7 +115,7 @@ def requires_normalized_earnings_bridge(report: str | None) -> bool:
     """True if a one-time event is present but no normalized-earnings bridge is.
 
     Distortion-before-catalyst discipline: a disposal, deconsolidation,
-    acquisition-accounting benefit, settlement, or subsidy must be reconciled
+    acquisition-accounting benefit, settlement, tax/regime benefit, or subsidy must be reconciled
     to normalized (ex-one-time) revenue/margin/EPS/OCF before it may be treated
     as a catalyst. Reuses the canonical one-time-event pattern set.
     """
@@ -92,7 +131,8 @@ def contains_transient_strength_marker(report: str | None) -> bool:
 
     Shared, public entry point over ``_TRANSIENT_STRENGTH_PATTERNS`` (asset
     sale, M&A-led consolidation, settlement, restructuring/one-time gain,
-    subsidy windfall) so other validators can reuse the canonical pattern set
+    subsidy, tax/regime benefit, and accounting/regulatory change) so other
+    validators can reuse the canonical pattern set
     without re-authoring it.
     """
     if not report:
@@ -947,7 +987,22 @@ def detect_red_flags(
         and metrics.get("adjusted_health_score") is not None
         and metrics.get("adjusted_health_score", 0) >= 60.0
     )
-    if transient_strength_labels and has_current_strength:
+    driver_type = metrics.get("driver_type")
+    driver_materiality = metrics.get("driver_materiality")
+    baseline_status = metrics.get("earnings_baseline_status")
+    normalized_earnings_available = metrics.get("normalized_earnings_available")
+    canonical_distortion = (
+        metrics.get("material_nonoperating_driver") == "YES"
+        and driver_type not in {None, "NONE"}
+        and driver_materiality != "IMMATERIAL"
+        and is_material_baseline_distortion(baseline_status)
+    )
+    if canonical_distortion and driver_type:
+        canonical_label = driver_type.lower().replace("_", " ")
+        if canonical_label not in transient_strength_labels:
+            transient_strength_labels.insert(0, canonical_label)
+
+    if transient_strength_labels and (has_current_strength or canonical_distortion):
         detail_parts: list[str] = []
         if revenue_growth_ttm is not None and revenue_growth_ttm >= 15.0:
             detail_parts.append(f"revenue growth {revenue_growth_ttm:.1f}%")
@@ -958,6 +1013,10 @@ def detect_red_flags(
             and ocf_current > 0
         ):
             detail_parts.append("positive net income and OCF")
+        if canonical_distortion:
+            detail_parts.append(
+                f"management guidance marks the earnings baseline {baseline_status.lower()}"
+            )
         red_flags.append(
             {
                 "type": "TRANSIENT_STRENGTH_DISTORTION",
@@ -975,21 +1034,64 @@ def detect_red_flags(
             revenue_growth_ttm=revenue_growth_ttm,
         )
 
-    # Fire only when a one-time item coincides with reported strength — that is
-    # the catalyst-framing risk. Distressed companies merely discussing e.g.
-    # "asset sale options" have no strength to normalize, so they are excluded.
-    if has_current_strength and requires_normalized_earnings_bridge(raw_report):
+    # Narrative-only signals still require current strength, avoiding false
+    # positives for distressed companies merely discussing possible asset sales.
+    # A canonical management-guidance distortion is direct enough to stand alone.
+    normalized_bridge_missing = (
+        (has_current_strength and requires_normalized_earnings_bridge(raw_report))
+        or (
+            canonical_distortion and normalized_earnings_available not in {"YES", "N/A"}
+        )
+        or (
+            metrics.get("guidance_bridge_status") == "UNRESOLVED"
+            and normalized_earnings_available != "YES"
+        )
+    )
+    if normalized_bridge_missing:
         red_flags.append(
             {
                 "type": "NORMALIZED_EARNINGS_REQUIRED",
                 "severity": "WARNING",
-                "detail": "One-time event (disposal/deconsolidation/M&A/settlement/subsidy) credited alongside current strength without a normalized-earnings bridge.",
+                "detail": "A material tax, subsidy, regulatory, accounting, M&A, disposal, or other non-operating driver affects the reported earnings baseline without a normalized-earnings bridge.",
                 "action": "REVIEW",
                 "risk_penalty": 0.0,
+                "blocks_buy": True,
                 "rationale": "Distortion-before-catalyst discipline: classify the one-time item as an earnings/cash-flow distortion first. It may be credited as a catalyst only after normalized (ex-one-time) revenue, margin, EPS, and OCF are reconciled. Cap/withhold BUY until then; carries 0.0 tally weight to avoid double-counting TRANSIENT_STRENGTH_DISTORTION.",
             }
         )
         logger.debug("red_flag_normalized_earnings_required", ticker=ticker)
+
+    if metrics.get("operating_vs_net_direction") == "OP_UP_NET_DOWN":
+        bridge_unresolved = metrics.get("guidance_bridge_status") == "UNRESOLVED"
+        red_flags.append(
+            {
+                "type": "OPERATING_NET_GUIDANCE_DIVERGENCE",
+                "severity": "WARNING",
+                "detail": "Management guides operating profit up while net income declines; the bottom-line bridge must be reflected in baseline earnings.",
+                "action": "REVIEW",
+                "risk_penalty": 0.0,
+                "blocks_buy": bridge_unresolved,
+                "rationale": "Operating momentum and shareholder earnings are moving in different directions. Do not extrapolate trailing net income or operating-profit growth without reconciling tax and non-operating drivers.",
+            }
+        )
+        logger.debug("red_flag_operating_net_guidance_divergence", ticker=ticker)
+
+    if metrics.get("guidance_coverage_status") in {
+        "SEARCH_FAILED",
+        "UNRESOLVED_AFTER_TARGETED_SEARCH",
+    }:
+        red_flags.append(
+            {
+                "type": "MANAGEMENT_GUIDANCE_EVIDENCE_GAP",
+                "severity": "WARNING",
+                "detail": "The targeted management-guidance search failed, so trailing earnings durability is unverified.",
+                "action": "REVIEW",
+                "risk_penalty": 0.0,
+                "blocks_buy": True,
+                "rationale": "A failed evidence search is not evidence that trailing earnings are a durable baseline. Obtain the latest results package before relying on growth or valuation multiples.",
+            }
+        )
+        logger.debug("red_flag_management_guidance_evidence_gap", ticker=ticker)
 
     ocf = metrics.get("ocf")
     ni_for_ocf = metrics.get("net_income")

@@ -301,6 +301,23 @@ def test_material_unverified_signal_also_blocks_buy():
     assert extract_pm_block(out).verdict == "HOLD"
 
 
+def test_missing_normalized_earnings_bridge_blocks_buy():
+    out, demoted = maybe_demote_buy_on_blocking_flags(
+        _buy_output(),
+        red_flags=[
+            {
+                "type": "NORMALIZED_EARNINGS_REQUIRED",
+                "risk_penalty": 0.0,
+                "blocks_buy": True,
+            }
+        ],
+        ticker="6745.T",
+    )
+
+    assert demoted
+    assert extract_pm_block(out).verdict == "HOLD"
+
+
 def test_boolean_true_required_for_blocks_buy():
     """Truthy-but-not-True values (e.g. a stray string) must not demote."""
     out, demoted = maybe_demote_buy_on_blocking_flags(
