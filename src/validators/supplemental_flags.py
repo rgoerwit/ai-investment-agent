@@ -338,6 +338,142 @@ def detect_legal_flags(
             severity=severity,
         )
 
+    capital = legal_risks.get("capital_structure")
+    if isinstance(capital, dict):
+        classification = str(capital.get("classification", "UNRESOLVED")).upper()
+        coverage = str(capital.get("coverage_status", "UNRESOLVED")).upper()
+        exposure_type = str(capital.get("exposure_type", "UNKNOWN")).upper()
+        amount = str(capital.get("amount", "N/A"))
+        basis = str(capital.get("amount_basis", "UNKNOWN"))
+        entity = str(capital.get("entity", "N/A"))
+        source_url = str(capital.get("source_url", "N/A"))
+        evidence = _truncate_at_boundary(
+            str(capital.get("evidence", "No evidence provided")), limit=220
+        )
+        scale = capital.get("scale_assessment")
+        scale = scale if isinstance(scale, dict) else {}
+        scale_measurable = scale.get("status") == "MEASURABLE"
+        decision_material = scale.get("decision_material") is True
+        scale_detail = ""
+        if scale_measurable:
+            debt_pct = scale.get("exposure_to_debt_pct")
+            debt_text = (
+                f"{debt_pct:.1f}% of debt"
+                if isinstance(debt_pct, int | float)
+                else "debt comparison N/A"
+            )
+            revenue_pct = scale.get("exposure_to_revenue_pct")
+            revenue_text = (
+                f", {revenue_pct:.1f}% of revenue"
+                if isinstance(revenue_pct, int | float)
+                else ""
+            )
+            scale_detail = (
+                f" Scale: {debt_text}, "
+                f"{scale.get('exposure_to_equity_pct', 0):.1f}% of equity"
+                f"{revenue_text}; pro-forma D/E "
+                f"{scale.get('reported_de_pct', 0):.1f}% → "
+                f"{scale.get('adjusted_de_pct', 0):.1f}%."
+            )
+        exposure_detail = (
+            f"{exposure_type} for {entity}; exposure {amount} ({basis}). "
+            f"Evidence: {evidence} Source: {source_url}{scale_detail}"
+        )
+
+        minor_structural_exposure = (
+            classification in {"BLOCK_BUY", "UNRESOLVED"}
+            and exposure_type not in {"NONE", "UNKNOWN"}
+            and scale_measurable
+            and not decision_material
+        )
+        if minor_structural_exposure:
+            warnings.append(
+                {
+                    "type": "OFF_BALANCE_SHEET_RECOURSE_MINOR",
+                    "severity": "WARNING",
+                    "detail": exposure_detail,
+                    "action": "RISK_PENALTY",
+                    "risk_penalty": 0.25,
+                    "blocks_buy": False,
+                    "rationale": (
+                        "The structure is suspicious and should remain visible, but "
+                        "the same-currency exposure is below the debt, equity, and "
+                        "revenue materiality tripwires and does not push D/E across "
+                        "the sector red-zone threshold."
+                    ),
+                }
+            )
+        elif classification == "QUALIFY_RATIOS":
+            warnings.append(
+                {
+                    "type": "DEBT_LIKE_COMMITMENT",
+                    "severity": "WARNING",
+                    "detail": exposure_detail,
+                    "action": "REVIEW",
+                    "risk_penalty": 0.0,
+                    "blocks_buy": False,
+                    "rationale": (
+                        "Reported leverage may omit a material economic commitment, "
+                        "but the evidence does not establish parent recourse or "
+                        "improper non-consolidation. Qualify ratios without treating "
+                        "the commitment as hidden debt."
+                    ),
+                }
+            )
+        elif classification == "BLOCK_BUY":
+            warnings.append(
+                {
+                    "type": "OFF_BALANCE_SHEET_RECOURSE",
+                    "severity": "HIGH",
+                    "detail": exposure_detail,
+                    "action": "REVIEW",
+                    "risk_penalty": 0.0,
+                    "blocks_buy": True,
+                    "rationale": (
+                        "Material unrecognized exposure includes parent recourse, "
+                        "continuing involvement, or a consolidation/control concern. "
+                        "Initiation requires source-level resolution."
+                    ),
+                }
+            )
+        elif (
+            classification == "UNRESOLVED"
+            and coverage == "FOUND"
+            and exposure_type not in {"NONE", "UNKNOWN"}
+        ):
+            warnings.append(
+                {
+                    "type": "CAPITAL_STRUCTURE_UNRESOLVED",
+                    "severity": "HIGH",
+                    "detail": exposure_detail,
+                    "action": "REVIEW",
+                    "risk_penalty": 0.0,
+                    "blocks_buy": True,
+                    "rationale": (
+                        "A potentially material debt-like exposure was found, but "
+                        "recourse, accounting scope, or amount could not be resolved."
+                    ),
+                }
+            )
+        elif classification == "UNRESOLVED" and coverage == "SEARCH_FAILED":
+            warnings.append(
+                {
+                    "type": "CAPITAL_STRUCTURE_EVIDENCE_GAP",
+                    "severity": "WARNING",
+                    "detail": (
+                        "Targeted filing and disclosure retrieval failed; off-balance-"
+                        "sheet exposure was not assessed."
+                    ),
+                    "action": "REVIEW",
+                    "risk_penalty": 0.0,
+                    "blocks_buy": False,
+                    "rationale": (
+                        "A retrieval failure is a coverage limitation, not evidence of "
+                        "hidden debt. Preserve the limitation without blanket rejection."
+                    ),
+                }
+            )
+
     return warnings
 
 

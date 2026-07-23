@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 import time
 from datetime import date
-from typing import Any
 
 import structlog
 
@@ -19,8 +17,9 @@ from src.data_block_utils import (
     replace_or_append_block_line,
 )
 from src.earnings_baseline import GUIDANCE_COVERAGE_STATUSES
-from src.error_safety import summarize_exception
 from src.guidance_vocabulary import guidance_locale_policy
+
+from .evidence_preflight import run_preflight_calls
 
 logger = structlog.get_logger(__name__)
 
@@ -163,8 +162,6 @@ async def _preload_management_guidance_evidence(
     enable_extraction: bool = True,
 ) -> str:
     """Run mandatory guidance searches once through the normal tool hook chain."""
-    from src.runtime_services import get_current_tool_service
-    from src.tooling.runtime import ToolInvocation
     from src.tools.research import (
         extract_guidance_sources,
         get_official_filings,
@@ -172,69 +169,27 @@ async def _preload_management_guidance_evidence(
     )
 
     started_at = time.monotonic()
-    call_durations_ms: dict[str, int] = {}
-
-    async def _execute(
-        *,
-        label: str,
-        tool: Any,
-        args: dict[str, Any],
-    ) -> tuple[str, str]:
-        call_started_at = time.monotonic()
-
-        async def _runner(call_args: dict[str, Any]) -> Any:
-            return await tool.ainvoke(call_args)
-
-        try:
-            result = await get_current_tool_service().execute(
-                ToolInvocation(
-                    name=tool.name,
-                    args=args,
-                    source="toolnode",
-                    agent_key="foreign_language_analyst",
-                ),
-                runner=_runner,
-            )
-            value = str(result.value)
-            if result.blocked:
-                status = "BLOCKED"
-            elif value.strip().upper().startswith("STATUS: INSUFFICIENT_DATA"):
-                status = "INSUFFICIENT_DATA"
-            else:
-                status = "COMPLETED"
-            return label, f"STATUS: {status}\n{value}"
-        except Exception as exc:
-            logger.warning(
-                "management_guidance_preflight_call_failed",
-                ticker=ticker,
-                query_label=label,
-                **summarize_exception(
-                    exc, operation="management_guidance_preflight_call_failed"
-                ),
-            )
-            return label, f"STATUS: FAILED ({type(exc).__name__})"
-        finally:
-            call_durations_ms[label] = round(
-                (time.monotonic() - call_started_at) * 1000
-            )
 
     queries = dict(_management_guidance_queries(ticker, company_name))
     priority_terms = list(guidance_locale_policy(ticker).excerpt_priority_terms)
-    initial_outcomes = await asyncio.gather(
-        _execute(
-            label="results_package",
-            tool=search_foreign_sources,
-            args={
-                "ticker": ticker,
-                "search_query": queries["results_package"],
-                "priority_terms": priority_terms,
-            },
-        ),
-        _execute(
-            label="statutory_filing_api",
-            tool=get_official_filings,
-            args={"ticker": ticker},
-        ),
+    initial_outcomes, call_durations_ms = await run_preflight_calls(
+        [
+            (
+                "results_package",
+                search_foreign_sources,
+                {
+                    "ticker": ticker,
+                    "search_query": queries["results_package"],
+                    "priority_terms": priority_terms,
+                },
+            ),
+            ("statutory_filing_api", get_official_filings, {"ticker": ticker}),
+        ],
+        agent_key="foreign_language_analyst",
+        source="toolnode",
+        ticker=ticker,
+        failure_event="management_guidance_preflight_call_failed",
+        logger=logger,
     )
     results_payload = initial_outcomes[0][1]
     local_issuer_name = _discover_local_issuer_name(results_payload, ticker)
@@ -243,16 +198,26 @@ async def _preload_management_guidance_evidence(
         bridge_query = dict(_management_guidance_queries(ticker, local_issuer_name))[
             "earnings_bridge"
         ]
-    bridge_outcome = await _execute(
-        label="earnings_bridge",
-        tool=search_foreign_sources,
-        args={
-            "ticker": ticker,
-            "search_query": bridge_query,
-            "priority_terms": priority_terms,
-        },
+    bridge_outcomes, bridge_durations = await run_preflight_calls(
+        [
+            (
+                "earnings_bridge",
+                search_foreign_sources,
+                {
+                    "ticker": ticker,
+                    "search_query": bridge_query,
+                    "priority_terms": priority_terms,
+                },
+            )
+        ],
+        agent_key="foreign_language_analyst",
+        source="toolnode",
+        ticker=ticker,
+        failure_event="management_guidance_preflight_call_failed",
+        logger=logger,
     )
-    outcomes = [initial_outcomes[0], bridge_outcome, initial_outcomes[1]]
+    call_durations_ms.update(bridge_durations)
+    outcomes = [initial_outcomes[0], bridge_outcomes[0], initial_outcomes[1]]
     bridge_payload = next(
         (payload for label, payload in outcomes if label == "earnings_bridge"),
         "",
@@ -261,17 +226,26 @@ async def _preload_management_guidance_evidence(
         dict.fromkeys(re.findall(r"https?://[^\s<]+", bridge_payload))
     )[:3]
     if enable_extraction and candidate_urls:
-        outcomes.append(
-            await _execute(
-                label="guidance_extract",
-                tool=extract_guidance_sources,
-                args={
-                    "urls": candidate_urls,
-                    "query": bridge_query,
-                    "priority_terms": priority_terms,
-                },
-            )
+        extraction_outcomes, extraction_durations = await run_preflight_calls(
+            [
+                (
+                    "guidance_extract",
+                    extract_guidance_sources,
+                    {
+                        "urls": candidate_urls,
+                        "query": bridge_query,
+                        "priority_terms": priority_terms,
+                    },
+                )
+            ],
+            agent_key="foreign_language_analyst",
+            source="toolnode",
+            ticker=ticker,
+            failure_event="management_guidance_preflight_call_failed",
+            logger=logger,
         )
+        outcomes.extend(extraction_outcomes)
+        call_durations_ms.update(extraction_durations)
     else:
         reason = "QUICK_MODE" if not enable_extraction else "NO_CANDIDATE_URLS"
         outcomes.append(("guidance_extract", f"STATUS: SKIPPED ({reason})"))

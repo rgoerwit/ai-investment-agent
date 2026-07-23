@@ -236,6 +236,24 @@ class TestLegalRiskExtraction:
 
         assert risks["cmic_status"] == "FLAGGED"
 
+    def test_extract_nested_capital_structure(self):
+        capital = {
+            "coverage_status": "FOUND",
+            "exposure_type": "GUARANTEE_BACKSTOP",
+            "classification": "BLOCK_BUY",
+        }
+        legal_report = json.dumps(
+            {
+                "pfic_status": "N/A",
+                "vie_structure": "N/A",
+                "capital_structure": capital,
+            }
+        )
+
+        risks = RedFlagDetector.extract_legal_risks(legal_report)
+
+        assert risks["capital_structure"] == capital
+
 
 class TestLegalFlagDetection:
     """Test detection of legal/tax warning flags."""
@@ -256,6 +274,107 @@ class TestLegalFlagDetection:
         assert warnings[0]["severity"] == "WARNING"
         assert warnings[0]["action"] == "RISK_PENALTY"
         assert warnings[0]["risk_penalty"] == 1.0
+
+    def test_ordinary_commitment_qualifies_ratios_without_blocking_buy(self):
+        legal_risks = {
+            "pfic_status": "CLEAN",
+            "vie_structure": "NO",
+            "capital_structure": {
+                "coverage_status": "FOUND",
+                "exposure_type": "LEASE_COMMITMENT",
+                "classification": "QUALIFY_RATIOS",
+                "entity": "Data Center A",
+                "amount": "USD 2.0 billion",
+                "amount_basis": "UNDISCOUNTED",
+                "source_url": "https://example.com/filing",
+                "evidence": "Uncommenced leases were disclosed.",
+            },
+        }
+
+        warnings = RedFlagDetector.detect_legal_flags(legal_risks, "TEST")
+
+        flag = next(flag for flag in warnings if flag["type"] == "DEBT_LIKE_COMMITMENT")
+        assert flag["risk_penalty"] == 0.0
+        assert flag["blocks_buy"] is False
+
+    def test_material_parent_recourse_blocks_buy(self):
+        legal_risks = {
+            "pfic_status": "CLEAN",
+            "vie_structure": "NO",
+            "capital_structure": {
+                "coverage_status": "FOUND",
+                "exposure_type": "GUARANTEE_BACKSTOP",
+                "classification": "BLOCK_BUY",
+                "entity": "Unconsolidated JV",
+                "amount": "USD 1.2 billion",
+                "amount_basis": "MAXIMUM_EXPOSURE",
+                "source_url": "https://example.com/filing",
+                "evidence": "Parent guarantees the JV borrowing.",
+            },
+        }
+
+        warnings = RedFlagDetector.detect_legal_flags(legal_risks, "TEST")
+
+        flag = next(
+            flag for flag in warnings if flag["type"] == "OFF_BALANCE_SHEET_RECOURSE"
+        )
+        assert flag["risk_penalty"] == 0.0
+        assert flag["blocks_buy"] is True
+
+    def test_retrieval_failure_is_visible_but_does_not_block_buy(self):
+        legal_risks = {
+            "pfic_status": "CLEAN",
+            "vie_structure": "NO",
+            "capital_structure": {
+                "coverage_status": "SEARCH_FAILED",
+                "exposure_type": "UNKNOWN",
+                "classification": "UNRESOLVED",
+            },
+        }
+
+        warnings = RedFlagDetector.detect_legal_flags(legal_risks, "TEST")
+
+        flag = next(
+            flag
+            for flag in warnings
+            if flag["type"] == "CAPITAL_STRUCTURE_EVIDENCE_GAP"
+        )
+        assert flag["blocks_buy"] is False
+
+    def test_zero_debt_scale_formats_as_minor_warning_without_error(self):
+        legal_risks = {
+            "pfic_status": "CLEAN",
+            "vie_structure": "NO",
+            "capital_structure": {
+                "coverage_status": "FOUND",
+                "exposure_type": "GUARANTEE_BACKSTOP",
+                "classification": "BLOCK_BUY",
+                "entity": "Small JV",
+                "amount": "USD 5 million",
+                "amount_basis": "MAXIMUM_EXPOSURE",
+                "source_url": "https://example.com/filing",
+                "evidence": "Parent guarantee disclosed.",
+                "scale_assessment": {
+                    "status": "MEASURABLE",
+                    "exposure_to_debt_pct": None,
+                    "exposure_to_equity_pct": 5.0,
+                    "exposure_to_revenue_pct": None,
+                    "reported_de_pct": 0.0,
+                    "adjusted_de_pct": 5.0,
+                    "decision_material": False,
+                },
+            },
+        }
+
+        warnings = RedFlagDetector.detect_legal_flags(legal_risks, "TEST")
+
+        flag = next(
+            flag
+            for flag in warnings
+            if flag["type"] == "OFF_BALANCE_SHEET_RECOURSE_MINOR"
+        )
+        assert flag["blocks_buy"] is False
+        assert "debt comparison N/A" in flag["detail"]
 
     def test_pfic_uncertain_flag(self):
         """Test PFIC_UNCERTAIN warning flag detection."""

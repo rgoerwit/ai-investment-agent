@@ -253,6 +253,7 @@ def extract_legal_risks(legal_report: str) -> dict[str, Any]:
         "cmic_status": None,
         "cmic_evidence": None,
         "other_regulatory_risks": [],
+        "capital_structure": None,
         "country": None,
         "sector": None,
     }
@@ -284,6 +285,10 @@ def extract_legal_risks(legal_report: str) -> dict[str, Any]:
         risks["cmic_status"] = data.get("cmic_status")
         risks["cmic_evidence"] = data.get("cmic_evidence")
         risks["other_regulatory_risks"] = data.get("other_regulatory_risks") or []
+        capital_structure = data.get("capital_structure")
+        risks["capital_structure"] = (
+            capital_structure if isinstance(capital_structure, dict) else None
+        )
         risks["country"] = data.get("country")
         risks["sector"] = data.get("sector")
         logger.debug(

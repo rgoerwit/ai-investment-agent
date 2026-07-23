@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -127,6 +128,43 @@ class TestArtifactFallbacks:
         assert status["ok"] is False
         assert risks["pfic_status"] == "UNCERTAIN"
         assert "Legal counsel unavailable" in risks["pfic_evidence"]
+
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_legal_preflight_failure_does_not_abort_legal_analysis(
+        self, mock_get_prompt
+    ):
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="legal prompt", agent_name="Legal Counsel"
+        )
+        response = SimpleNamespace(
+            content='{"pfic_status":"CLEAN","vie_structure":"N/A"}',
+            tool_calls=None,
+        )
+        mock_llm = SimpleNamespace(
+            ainvoke=AsyncMock(return_value=response),
+            model_name="gemini-3-flash-preview",
+        )
+
+        with patch(
+            "src.agents.consultant_nodes.preload_capital_structure_evidence",
+            new=AsyncMock(side_effect=RuntimeError("unexpected adapter failure")),
+        ):
+            result = await create_legal_counsel_node(mock_llm, [])(
+                {
+                    "company_of_interest": "TEST",
+                    "company_name": "Test Company",
+                    "company_name_resolved": True,
+                    "raw_fundamentals_data": "Sector: Industrials\nCountry: USA",
+                },
+                {},
+            )
+
+        status = result["artifact_statuses"]["legal_report"]
+        capital = json.loads(result["legal_report"])["capital_structure"]
+        assert status["ok"] is True
+        assert capital["coverage_status"] == "SEARCH_FAILED"
+        assert capital["classification"] == "UNRESOLVED"
 
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")

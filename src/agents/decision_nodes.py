@@ -308,6 +308,46 @@ def _insert_block_before_pm_block(pm_output: str, block_text: str) -> str:
     return f"{pm_output.rstrip()}\n\n{block_text.rstrip()}\n"
 
 
+_CAPITAL_STRUCTURE_FLAG_TYPES = frozenset(
+    {
+        "DEBT_LIKE_COMMITMENT",
+        "OFF_BALANCE_SHEET_RECOURSE",
+        "OFF_BALANCE_SHEET_RECOURSE_MINOR",
+        "CAPITAL_STRUCTURE_UNRESOLVED",
+        "CAPITAL_STRUCTURE_EVIDENCE_GAP",
+    }
+)
+
+
+def _ensure_capital_structure_resolution_block(
+    pm_output: str,
+    red_flags: list[dict[str, Any]],
+) -> str:
+    """Keep deterministic capital-structure qualifications in the final artifact."""
+    label = "CAPITAL STRUCTURE QUALIFICATION (DETERMINISTIC)"
+    if label in pm_output:
+        return pm_output
+    relevant = [
+        flag
+        for flag in red_flags
+        if str(flag.get("type", "")).upper() in _CAPITAL_STRUCTURE_FLAG_TYPES
+    ]
+    if not relevant:
+        return pm_output
+
+    lines = [f"### {label}"]
+    for flag in relevant:
+        lines.append(
+            f"- {flag.get('type', 'UNKNOWN')}: "
+            f"{flag.get('detail', 'No detail provided')}"
+        )
+    lines.append(
+        "Reported D/E remains unadjusted unless debt, equity, currency, period, "
+        "consolidation scope, valuation basis, and double-counting treatment align."
+    )
+    return _insert_block_before_pm_block(pm_output, "\n".join(lines))
+
+
 def _normalize_pm_block_contract(pm_output: str) -> str:
     """Reconcile PM sizing surfaces with the (final) PM_BLOCK verdict.
 
@@ -1257,6 +1297,10 @@ RISK TEAM DEBATE:
                 content_str,
                 state.get("auditor_report") or None,
             )
+            content_str = _ensure_capital_structure_resolution_block(
+                content_str,
+                red_flags,
+            )
 
             from src.utils import detect_truncation
 
@@ -1438,11 +1482,14 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
     async def financial_health_validator_node(
         state: AgentState, config: RunnableConfig
     ) -> dict[str, Any]:
+        from src.agents.capital_structure import assess_capital_structure_scale
+        from src.agents.fundamentals_reconciler import extract_raw_metrics_payload
         from src.config import config as settings_config
         from src.validators.entity_governance_card import (
             build_card,
             extract_merged_subset_from_raw,
         )
+        from src.validators.financial_rules import sector_leverage_thresholds
         from src.validators.red_flag_detector import RedFlagDetector
 
         ticker = state.get("company_of_interest", "UNKNOWN")
@@ -1545,6 +1592,21 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                     legal_report = message_utils.extract_string_content(legal_report)
 
                 legal_risks = RedFlagDetector.extract_legal_risks(legal_report)
+                capital_structure = legal_risks.get("capital_structure")
+                if isinstance(capital_structure, dict):
+                    leverage_threshold, _, _ = sector_leverage_thresholds(
+                        sector,
+                        strict_mode=strict_mode,
+                    )
+                    capital_structure["scale_assessment"] = (
+                        assess_capital_structure_scale(
+                            capital_structure,
+                            extract_raw_metrics_payload(
+                                state.get("raw_fundamentals_data", "")
+                            ),
+                            leverage_threshold=leverage_threshold,
+                        )
+                    )
                 legal_warnings = RedFlagDetector.detect_legal_flags(legal_risks, ticker)
 
                 if legal_warnings:

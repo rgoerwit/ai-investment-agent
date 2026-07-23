@@ -82,10 +82,17 @@ class Toolkit:
         ]
 
     def get_legal_tools(self):
-        """Tools for Legal Counsel (PFIC/VIE detection for US investors)."""
+        """Tools for Legal Counsel tax, structural, and disclosure review."""
         from src.tools.legal import search_legal_tax_disclosures
+        from src.tools.official_documents import get_official_document
+        from src.tools.research import get_official_filings, search_foreign_sources
 
-        return [search_legal_tax_disclosures]
+        return [
+            search_legal_tax_disclosures,
+            search_foreign_sources,
+            get_official_filings,
+            get_official_document,
+        ]
 
     def get_portfolio_tools(self):
         """Read-only IBKR/account tools for portfolio-aware workflows."""

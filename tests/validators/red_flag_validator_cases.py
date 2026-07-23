@@ -13,6 +13,8 @@ Red-flag criteria tested:
 Run with: pytest tests/test_red_flag_validator.py -v
 """
 
+import json
+
 import pytest
 
 from src.agents import create_financial_health_validator_node
@@ -3796,6 +3798,131 @@ PFIC_RISK: CLEAN
         state = self._make_state(self._CLEAN_DATA_BLOCK, self._VIE_LEGAL_JSON)
         result = await node(state, {})
         assert result["pre_screening_result"] == "PASS"
+
+    @pytest.mark.asyncio
+    async def test_off_balance_sheet_recourse_survives_validator(self):
+        """Material parent recourse reaches cumulative flags without LLM discretion."""
+        legal_report = json.dumps(
+            {
+                "pfic_status": "CLEAN",
+                "vie_structure": "NO",
+                "capital_structure": {
+                    "coverage_status": "FOUND",
+                    "exposure_type": "GUARANTEE_BACKSTOP",
+                    "entity": "Unconsolidated JV",
+                    "amount": "USD 1.2 billion",
+                    "amount_basis": "MAXIMUM_EXPOSURE",
+                    "balance_sheet_status": "UNRECOGNIZED",
+                    "parent_recourse": "FULL",
+                    "consolidation_risk": "NONE",
+                    "materiality": "MATERIAL",
+                    "source_url": "https://example.com/filing",
+                    "evidence": "Parent guarantees the JV borrowing.",
+                    "classification": "BLOCK_BUY",
+                },
+            }
+        )
+        node = create_financial_health_validator_node(strict_mode=False)
+
+        result = await node(self._make_state(self._CLEAN_DATA_BLOCK, legal_report), {})
+
+        flag = next(
+            flag
+            for flag in result["red_flags"]
+            if flag["type"] == "OFF_BALANCE_SHEET_RECOURSE"
+        )
+        assert result["pre_screening_result"] == "PASS"
+        assert flag["blocks_buy"] is True
+
+    @pytest.mark.asyncio
+    async def test_small_off_balance_sheet_recourse_is_proportional_warning(self):
+        legal_report = json.dumps(
+            {
+                "pfic_status": "CLEAN",
+                "vie_structure": "NO",
+                "capital_structure": {
+                    "coverage_status": "FOUND",
+                    "exposure_type": "GUARANTEE_BACKSTOP",
+                    "entity": "Small JV",
+                    "amount": "USD 5 million",
+                    "amount_basis": "MAXIMUM_EXPOSURE",
+                    "balance_sheet_status": "UNRECOGNIZED",
+                    "parent_recourse": "FULL",
+                    "consolidation_risk": "NONE",
+                    "materiality": "MATERIAL",
+                    "source_url": "https://example.com/filing",
+                    "evidence": "Parent guarantees a small JV borrowing.",
+                    "classification": "BLOCK_BUY",
+                },
+            }
+        )
+        state = self._make_state(self._CLEAN_DATA_BLOCK, legal_report)
+        state["raw_fundamentals_data"] = json.dumps(
+            {
+                "totalDebt": 100_000_000,
+                "debtToEquity": 0.8,
+                "revenue_TTM": 1_000_000_000,
+                "financialCurrency": "USD",
+            }
+        )
+
+        result = await create_financial_health_validator_node(strict_mode=False)(
+            state, {}
+        )
+
+        flag = next(
+            flag
+            for flag in result["red_flags"]
+            if flag["type"] == "OFF_BALANCE_SHEET_RECOURSE_MINOR"
+        )
+        assert result["pre_screening_result"] == "PASS"
+        assert flag["risk_penalty"] == 0.25
+        assert flag["blocks_buy"] is False
+        assert "5.0% of debt" in flag["detail"]
+        assert "4.0% of equity" in flag["detail"]
+
+    @pytest.mark.asyncio
+    async def test_unusable_scale_data_does_not_kill_analysis(self):
+        legal_report = json.dumps(
+            {
+                "pfic_status": "CLEAN",
+                "vie_structure": "NO",
+                "capital_structure": {
+                    "coverage_status": "FOUND",
+                    "exposure_type": "GUARANTEE_BACKSTOP",
+                    "entity": "Oddly Reported JV",
+                    "amount": "approximately five million dollars",
+                    "amount_basis": "UNKNOWN",
+                    "balance_sheet_status": "UNRECOGNIZED",
+                    "parent_recourse": "FULL",
+                    "consolidation_risk": "NONE",
+                    "materiality": "UNKNOWN",
+                    "source_url": "https://example.com/filing",
+                    "evidence": "A guarantee exists but its amount is ambiguous.",
+                    "classification": "BLOCK_BUY",
+                },
+            }
+        )
+        state = self._make_state(self._CLEAN_DATA_BLOCK, legal_report)
+        state["raw_fundamentals_data"] = json.dumps(
+            {
+                "totalDebt": 100_000_000,
+                "debtToEquity": 0.8,
+                "financialCurrency": "USD",
+            }
+        )
+
+        result = await create_financial_health_validator_node(strict_mode=False)(
+            state, {}
+        )
+
+        flag = next(
+            flag
+            for flag in result["red_flags"]
+            if flag["type"] == "OFF_BALANCE_SHEET_RECOURSE"
+        )
+        assert result["pre_screening_result"] == "PASS"
+        assert flag["blocks_buy"] is True
 
     @pytest.mark.asyncio
     async def test_clean_legal_passes_strict(self):

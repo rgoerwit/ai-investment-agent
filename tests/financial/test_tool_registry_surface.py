@@ -67,7 +67,12 @@ def test_toolkit_group_accessors_return_expected_tools():
     }
 
     legal_tool_names = {tool.name for tool in toolkit.get_legal_tools()}
-    assert legal_tool_names == {"search_legal_tax_disclosures"}
+    assert legal_tool_names == {
+        "search_legal_tax_disclosures",
+        "search_foreign_sources",
+        "get_official_filings",
+        "get_official_document",
+    }
 
 
 def test_get_macroeconomic_news_accepts_optional_region_param():

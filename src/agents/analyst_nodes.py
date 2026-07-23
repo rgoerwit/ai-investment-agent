@@ -34,6 +34,7 @@ from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .capital_structure import promote_capital_structure
 from .evidence_constraints import AUTHORITATIVE_CORRECTION_MARKER
 from .fundamentals_reconciler import (
     HORIZON_FIELD_RAW_KEYS,
@@ -299,6 +300,7 @@ def _sanitize_fundamentals_output(
     raw_data: str,
     ticker: str,
     foreign_data: str = "",
+    legal_data: str = "",
 ) -> str:
     # Score consistency is checked even without raw data (it is DATA_BLOCK-internal),
     # so only an unparseable block short-circuits; payload-dependent steps stay
@@ -330,6 +332,13 @@ def _sanitize_fundamentals_output(
     )
     if guidance_promoted:
         logger.info("management_guidance_promoted", ticker=ticker)
+
+    updated_body, capital_structure_promoted = promote_capital_structure(
+        updated_body,
+        legal_data,
+    )
+    if capital_structure_promoted:
+        logger.info("capital_structure_promoted", ticker=ticker)
 
     updated_body, eps_growth_withheld = withhold_eps_growth_for_unusable_baseline(
         updated_body
@@ -482,6 +491,7 @@ def _normalize_structured_output(
     *,
     raw_data: str = "",
     foreign_data: str = "",
+    legal_data: str = "",
     management_guidance_evidence: str = "",
 ) -> str:
     """Apply narrow deterministic output repairs for known model-format drift."""
@@ -523,6 +533,7 @@ def _normalize_structured_output(
         raw_data,
         ticker,
         foreign_data=foreign_data,
+        legal_data=legal_data,
     )
     return normalized
 
@@ -781,6 +792,7 @@ def create_analyst_node(
             if agent_key == "fundamentals_analyst":
                 raw_data = state.get("raw_fundamentals_data", "")
                 foreign_data = state.get("foreign_language_report", "")
+                legal_data = state.get("legal_report", "")
                 news_report = state.get("news_report", "")
 
                 if raw_data:
@@ -846,23 +858,23 @@ def create_analyst_node(
                         conflict_count=conflict_report.count("\n- "),
                     )
 
-                legal_report = state.get("legal_report", "")
-                if legal_report:
+                if legal_data:
                     trusted_context_instructions += (
                         "\nUse Legal Counsel output to inform PFIC_RISK in DATA_BLOCK. "
                         "If Legal Counsel found PFIC disclosure (pfic_status: PROBABLE), "
                         "set PFIC_RISK to MEDIUM or HIGH. If no disclosure was found in "
                         "a high-risk sector (pfic_status: UNCERTAIN), set PFIC_RISK to "
-                        "at least MEDIUM.\n"
+                        "at least MEDIUM. Preserve its capital-structure assessment and "
+                        "do not treat ordinary non-recourse commitments as hidden debt.\n"
                     )
                     extra_context += (
                         "\n\n### LEGAL/TAX RISK ASSESSMENT (From Legal Counsel)"
-                        f"{legal_report}\n"
+                        f"{legal_data}\n"
                     )
                     logger.debug(
                         "senior_fundamentals_has_legal_data",
                         ticker=ticker,
-                        legal_data_length=len(legal_report),
+                        legal_data_length=len(legal_data),
                     )
                 else:
                     logger.debug(
@@ -948,6 +960,7 @@ def create_analyst_node(
                 foreign_data=foreign_data
                 if agent_key == "fundamentals_analyst"
                 else "",
+                legal_data=legal_data if agent_key == "fundamentals_analyst" else "",
                 management_guidance_evidence=management_guidance_evidence,
             )
 
@@ -1014,6 +1027,9 @@ def create_analyst_node(
                         if agent_key == "fundamentals_analyst"
                         else "",
                         foreign_data=foreign_data
+                        if agent_key == "fundamentals_analyst"
+                        else "",
+                        legal_data=legal_data
                         if agent_key == "fundamentals_analyst"
                         else "",
                         management_guidance_evidence=management_guidance_evidence,

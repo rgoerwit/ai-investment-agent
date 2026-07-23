@@ -154,6 +154,21 @@ _OCF_MAGNITUDE: dict[str, float] = {
     "MILLION": 1e6,
     "K": 1e3,
 }
+
+
+def sector_leverage_thresholds(
+    sector: Sector,
+    *,
+    strict_mode: bool,
+) -> tuple[float | None, float | None, float | None]:
+    """Return D/E, interest-coverage, and coverage-D/E thresholds by sector."""
+    if sector in FINANCIALS_SECTORS:
+        return None, None, None
+    if sector in CAPITAL_INTENSIVE_SECTORS:
+        return (500, 1.8, 300) if strict_mode else (800, 1.5, 200)
+    return (300, 2.5, 150) if strict_mode else (500, 2.0, 100)
+
+
 _OCF_NUM_MAG_RE = re.compile(
     r"(\d[\d,]*\.?\d*)\s*(trillion|billion|million|bn|mm|mn|[tbmk])\b",
     re.IGNORECASE,
@@ -618,28 +633,9 @@ def detect_red_flags(
     """Apply sector-aware threshold-based red-flag detection logic."""
     red_flags: list[dict[str, Any]] = []
 
-    if sector in FINANCIALS_SECTORS:
-        leverage_threshold = None
-        coverage_threshold = None
-        coverage_de_threshold = None
-    elif sector in CAPITAL_INTENSIVE_SECTORS:
-        if strict_mode:
-            leverage_threshold = 500
-            coverage_threshold = 1.8
-            coverage_de_threshold = 300
-        else:
-            leverage_threshold = 800
-            coverage_threshold = 1.5
-            coverage_de_threshold = 200
-    else:
-        if strict_mode:
-            leverage_threshold = 300
-            coverage_threshold = 2.5
-            coverage_de_threshold = 150
-        else:
-            leverage_threshold = 500
-            coverage_threshold = 2.0
-            coverage_de_threshold = 100
+    leverage_threshold, coverage_threshold, coverage_de_threshold = (
+        sector_leverage_thresholds(sector, strict_mode=strict_mode)
+    )
 
     pe_ratio = metrics.get("pe_ratio")
     pe_vs_sector = metrics.get("pe_vs_sector")
@@ -904,7 +900,7 @@ def detect_red_flags(
         and roa_current / roa_5y_avg > 1.5
     ):
         peak_signals.append(
-            f"ROA {roa_current:.1f}% vs 5Y avg {roa_5y_avg:.1f}% ({roa_current/roa_5y_avg:.1f}x)"
+            f"ROA {roa_current:.1f}% vs 5Y avg {roa_5y_avg:.1f}% ({roa_current / roa_5y_avg:.1f}x)"
         )
     if peg_ratio is not None and peg_ratio < 0.2 and profitability_trend == "UNSTABLE":
         peak_signals.append(
