@@ -61,6 +61,36 @@ def _langchain_openai_available() -> bool:
 
 _THINKING_BUDGETS = {"low": 512, "medium": 4096, "high": 16384}
 
+# Ordered low → high so a "bump" is just the next element, clamped at the
+# ceiling. Keeps the one-notch-up mechanism generic (not tied to any specific
+# agent or baseline level): if a quick-tier agent's baseline ever changes, the
+# bump recomputes automatically.
+_THINKING_LEVEL_ORDER: tuple[Literal["low", "medium", "high"], ...] = (
+    "low",
+    "medium",
+    "high",
+)
+
+
+def bump_thinking_level(
+    level: Literal["low", "medium", "high"] | None,
+) -> Literal["low", "medium", "high"] | None:
+    """Return the next thinking level above ``level``, or ``level`` at the ceiling.
+
+    ``None`` (model does not support ``thinking_level``) passes through
+    unchanged, so a bump requested on a non-thinking model is a safe no-op.
+    """
+    if level is None:
+        return None
+    try:
+        idx = _THINKING_LEVEL_ORDER.index(level)
+    except ValueError:
+        return level
+    if idx + 1 < len(_THINKING_LEVEL_ORDER):
+        return _THINKING_LEVEL_ORDER[idx + 1]
+    return level
+
+
 # OpenAI GPT-5 reasoning capabilities documented for the model families this
 # repository can select.  GPT-5.1+ models no longer use the legacy
 # ``minimal`` setting; ``low`` is the portable quick-mode setting across the
@@ -871,6 +901,7 @@ def create_quick_thinking_llm(
     callbacks: list[BaseCallbackHandler] | None = None,
     max_output_tokens: int | None = None,
     service_tier: str | None = None,
+    thinking_level_bump: bool = False,
 ) -> BaseChatModel:
     """
     Create a quick thinking LLM.
@@ -879,6 +910,12 @@ def create_quick_thinking_llm(
     ``service_tier`` defaults to config (``GEMINI_SERVICE_TIER``); pass
     ``"standard"`` for latency-sensitive callers that must not queue on the
     flex tier (e.g. the LLM-judge content inspector).
+
+    ``thinking_level_bump`` raises the thinking level one notch above the
+    baseline (low → medium), clamped at the ceiling, for a quick-tier agent
+    whose task is genuine synthesis rather than extraction (e.g. the Value
+    Trap Detector distinguishing "announced" from "executed" corporate
+    actions). No-op on models that do not support ``thinking_level``.
     """
     runtime_config = get_runtime_config(config)
     model_name = model or runtime_config.quick_think_llm
@@ -894,6 +931,8 @@ def create_quick_thinking_llm(
     thinking_level: Literal["low", "medium", "high"] | None = None
     if _is_gemini_v3_or_greater(model_name) or _is_gemini_v2_5(model_name):
         thinking_level = "low"
+        if thinking_level_bump:
+            thinking_level = bump_thinking_level(thinking_level)
     elif model_name.startswith("gemini-"):
         # Gemini model but NOT 3+ (likely 2.x)
         logger.warning("quick_model_gemini_2x_warning", model=model_name)

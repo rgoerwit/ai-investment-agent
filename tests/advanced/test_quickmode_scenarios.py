@@ -304,3 +304,80 @@ def test_create_gemini_model_adds_default_reserve_for_gemini_3():
     assert llm._configured_max_output_tokens == 2048
     assert llm._configured_api_output_tokens == 4096
     assert llm._configured_reasoning_reserve_tokens == 2048
+
+
+# --- thinking_level_bump (one-notch-up mechanism) -------------------------
+
+NON_GEMINI_MODEL = "gpt-4o"
+
+
+def _bump_thinking_level(level):
+    from src.llms import bump_thinking_level
+
+    return bump_thinking_level(level)
+
+
+@pytest.mark.parametrize(
+    "level, expected",
+    [
+        ("low", "medium"),
+        ("medium", "high"),
+        ("high", "high"),  # ceiling clamp
+        (None, None),  # non-thinking model passthrough
+    ],
+)
+def test_bump_thinking_level_pure(level, expected):
+    """The bump helper is order-driven and clamps at the ceiling."""
+    assert _bump_thinking_level(level) == expected
+
+
+def test_quick_llm_bump_raises_low_to_medium_on_gemini_3_plus(
+    mock_create_gemini_model, mock_config
+):
+    """thinking_level_bump=True lifts the v3+ baseline low → medium."""
+    mock_config.quick_think_llm = GEMINI_3_PRO
+
+    _create_quick_thinking_llm(thinking_level_bump=True)
+
+    call_kwargs = mock_create_gemini_model.call_args.kwargs
+    assert call_kwargs.get("thinking_level") == "medium"
+
+
+def test_quick_llm_bump_raises_low_to_medium_on_gemini_2_5(
+    mock_create_gemini_model, mock_config
+):
+    """v2.5 budget-mapping path bumps the same string low → medium."""
+    mock_config.quick_think_llm = GEMINI_2_5_FLASH
+
+    _create_quick_thinking_llm(thinking_level_bump=True)
+
+    call_kwargs = mock_create_gemini_model.call_args.kwargs
+    assert call_kwargs.get("thinking_level") == "medium"
+
+
+def test_quick_llm_default_no_bump_stays_low(mock_create_gemini_model, mock_config):
+    """Existing callers (no bump arg) keep the byte-identical low baseline."""
+    mock_config.quick_think_llm = GEMINI_3_PRO
+
+    _create_quick_thinking_llm()
+
+    call_kwargs = mock_create_gemini_model.call_args.kwargs
+    assert call_kwargs.get("thinking_level") == "low"
+
+
+def test_quick_llm_bump_is_noop_on_non_thinking_model(
+    mock_create_gemini_model, mock_config, caplog
+):
+    """A bump on a model without thinking_level support is a silent no-op.
+
+    Uses a genuinely non-Gemini name so thinking_level is None and the
+    intentional Gemini-2.x warning path is not exercised.
+    """
+    mock_config.quick_think_llm = NON_GEMINI_MODEL
+
+    with caplog.at_level(logging.WARNING, logger="src.llms"):
+        _create_quick_thinking_llm(thinking_level_bump=True)
+
+    call_kwargs = mock_create_gemini_model.call_args.kwargs
+    assert call_kwargs.get("thinking_level") is None
+    assert "quick_model_gemini_2x_warning" not in caplog.text

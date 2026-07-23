@@ -782,6 +782,50 @@ class TestQuickModeGraphContracts:
         assert calls[0].get("thinking_enabled", True) is True
         assert calls[1]["thinking_enabled"] is False
 
+    def _count_thinking_bumps(self, monkeypatch, *, quick_mode):
+        """Build components with a recording quick-LLM stub; return bump count.
+
+        Every quick-thinking construction is captured; the count of calls
+        passing ``thinking_level_bump=True`` is the wiring assertion target.
+        """
+        from src.graph.components import build_graph_components
+
+        components = _stub_graph_component_dependencies(monkeypatch)
+        monkeypatch.setattr(components, "get_consultant_llm", lambda **kwargs: None)
+        monkeypatch.setattr(components, "_is_auditor_enabled", lambda: False)
+
+        bump_flags = []
+
+        def recording_quick_llm(**kwargs):
+            bump_flags.append(bool(kwargs.get("thinking_level_bump", False)))
+            return Mock()
+
+        monkeypatch.setattr(
+            components, "create_quick_thinking_llm", recording_quick_llm
+        )
+
+        build_graph_components(
+            max_debate_rounds=1 if quick_mode else 2,
+            enable_memory=False,
+            ticker="TEST",
+            cleanup_previous=False,
+            quick_mode=quick_mode,
+            strict_mode=False,
+            chart_format="png",
+            transparent_charts=False,
+            image_dir=None,
+            skip_charts=True,
+        )
+        return sum(bump_flags)
+
+    def test_only_value_trap_detector_bumps_thinking_in_full_mode(self, monkeypatch):
+        """Full mode: exactly one quick-tier agent (Value Trap Detector) is bumped."""
+        assert self._count_thinking_bumps(monkeypatch, quick_mode=False) == 1
+
+    def test_no_thinking_bump_in_quick_mode(self, monkeypatch):
+        """Quick mode: no quick-tier agent receives the bump (cheap screening)."""
+        assert self._count_thinking_bumps(monkeypatch, quick_mode=True) == 0
+
 
 class TestTradingContext:
     """Test TradingContext dataclass."""

@@ -456,6 +456,13 @@ def build_graph_components(
     value_trap_llm = create_quick_thinking_llm(
         callbacks=tracked_callbacks("Value Trap Detector"),
         max_output_tokens=output_budget("Value Trap Detector"),
+        # Full mode only: the Value Trap Detector interprets native-language
+        # filings and distinguishes announced vs. executed corporate actions —
+        # a synthesis task where a thinking-level notch reduces fabrication.
+        # Quick-mode batch sweeps (four-figure ticker counts) stay unbumped to
+        # keep screening cheap, matching the codebase's quick-mode degradation
+        # convention.
+        thinking_level_bump=not quick_mode,
     )
     value_trap_detector = create_analyst_node(
         value_trap_llm,
