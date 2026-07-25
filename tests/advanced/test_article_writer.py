@@ -310,6 +310,51 @@ class TestImageManifest:
             # Should NOT contain GitHub URL
             assert GITHUB_RAW_BASE not in manifest
 
+    def test_local_paths_are_relative_to_article_directory(self, tmp_path, monkeypatch):
+        """A nested article must not repeat its parent directory in image links."""
+        from src.article_writer import ArticleWriter
+
+        monkeypatch.chdir(tmp_path)
+        article_dir = Path("scratch")
+        images_dir = article_dir / "images"
+        images_dir.mkdir(parents=True)
+        (images_dir / "TEST_radar.png").touch()
+
+        writer = ArticleWriter.__new__(ArticleWriter)
+        writer.images_dir = images_dir
+        writer.use_github_urls = False
+
+        manifest = writer._format_image_manifest(
+            "TEST",
+            "2026-07-25",
+            article_dir=article_dir,
+        )
+
+        assert "URL: images/TEST_radar.png" in manifest
+        assert "URL: scratch/images/" not in manifest
+
+    def test_local_paths_support_image_directory_outside_article_tree(self, tmp_path):
+        """Custom image directories retain a portable relative link."""
+        from src.article_writer import ArticleWriter
+
+        article_dir = tmp_path / "reports"
+        images_dir = tmp_path / "charts"
+        article_dir.mkdir()
+        images_dir.mkdir()
+        (images_dir / "TEST_radar.png").touch()
+
+        writer = ArticleWriter.__new__(ArticleWriter)
+        writer.images_dir = images_dir
+        writer.use_github_urls = False
+
+        manifest = writer._format_image_manifest(
+            "TEST",
+            "2026-07-25",
+            article_dir=article_dir,
+        )
+
+        assert "URL: ../charts/TEST_radar.png" in manifest
+
     def test_handles_ticker_with_dots(self):
         """Test that tickers with dots (e.g., 0005.HK) are handled."""
         from src.article_writer import ArticleWriter
@@ -569,8 +614,10 @@ class TestArticleGeneration:
 
             images_dir = Path(tmpdir) / "images"
             images_dir.mkdir()
+            (images_dir / "TEST_radar.png").touch()
 
             prompts_dir = Path("prompts")
+            output_path = Path(tmpdir) / "article.md"
 
             writer = ArticleWriter(
                 prompts_dir=prompts_dir,
@@ -584,6 +631,7 @@ class TestArticleGeneration:
                 company_name="Test Company",
                 report_text="This is the source report.",
                 trade_date="2026-01-01",
+                output_path=output_path,
             )
 
             # Verify LLM was called
@@ -593,9 +641,11 @@ class TestArticleGeneration:
             call_args = mock_llm.invoke.call_args[0][0]
             user_msg = call_args[1].content
             assert "Sample voice content" in user_msg
+            assert "URL: images/TEST_radar.png" in user_msg
 
             # Verify article was returned
             assert "Test Article" in article
+            assert output_path.read_text() == article
 
     @patch("src.article_writer.create_writer_llm")
     def test_writer_injects_governance_card(self, mock_create_llm):

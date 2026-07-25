@@ -6,6 +6,7 @@ while matching the author's distinctive voice from writing samples.
 """
 
 import json
+import os
 import random
 import re
 import warnings
@@ -506,6 +507,7 @@ class ArticleWriter:
         ticker: str,
         trade_date: str,
         chart_paths: dict[str, str] | None = None,
+        article_dir: Path | None = None,
     ) -> str:
         """
         Create image manifest with URLs for available charts.
@@ -519,6 +521,8 @@ class ArticleWriter:
                 on DO_NOT_INITIATE/SELL) cannot resurface via a stale image
                 from a previous run of the same ticker. None/empty follows the
                 legacy disk glob (mirrors report_generator's convention).
+            article_dir: Parent directory of the article receiving local links.
+                When provided, chart URLs are relative to this directory.
 
         Returns:
             Formatted manifest with image descriptions and URLs
@@ -597,8 +601,13 @@ class ArticleWriter:
                     rel_path = Path("images") / img_path.name
                     url = f"{GITHUB_RAW_BASE}/{rel_path}"
             else:
-                # Use local path
-                url = str(img_path)
+                url = (
+                    Path(
+                        os.path.relpath(img_path.resolve(), article_dir.resolve())
+                    ).as_posix()
+                    if article_dir
+                    else str(img_path)
+                )
 
             manifest_lines.append(f"- **{chart_type}**: {description}")
             manifest_lines.append(f"  URL: {url}")
@@ -941,7 +950,10 @@ class ArticleWriter:
 
         # Format image manifest
         image_manifest = self._format_image_manifest(
-            ticker, trade_date, chart_paths=chart_paths
+            ticker,
+            trade_date,
+            chart_paths=chart_paths,
+            article_dir=Path(output_path).parent if output_path else None,
         )
 
         # Fetch fact-check context (single Tavily search, controlled size)
