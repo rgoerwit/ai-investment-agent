@@ -12,6 +12,7 @@ from src.agents.fundamentals_reconciler import (
     parse_score_breakdown,
     reconcile_score_consistency,
 )
+from tests.helpers.frozen_regressions import load_frozen_regression
 
 
 def test_sanitize_fundamentals_output_forces_missing_horizons_to_na() -> None:
@@ -44,6 +45,44 @@ GROWTH_TRAJECTORY: STABLE
     assert "EARNINGS_GROWTH_TTM: N/A" in sanitized
     assert "EARNINGS_GROWTH_MRQ: N/A" in sanitized
     assert "GROWTH_TRAJECTORY: N/A" in sanitized
+
+
+def test_6782_fy_growth_is_preserved_without_relabeling_it_ttm() -> None:
+    regression = load_frozen_regression("6782_TW_regression.json")
+
+    sanitized = _sanitize_fundamentals_output(
+        regression["fundamentals_output"],
+        json.dumps(regression["raw_metrics"]),
+        regression["ticker"],
+    )
+
+    assert "REVENUE_GROWTH_FY: 15.0%" in sanitized
+    assert "REVENUE_GROWTH_FY_SOURCE: ANNUAL_STATEMENTS" in sanitized
+    assert "EARNINGS_GROWTH_FY: 39.4%" in sanitized
+    assert "EARNINGS_GROWTH_FY_SOURCE: NET_INCOME_STATEMENT_PROXY" in sanitized
+    assert "REVENUE_GROWTH_TTM: N/A" in sanitized
+    assert "EARNINGS_GROWTH_TTM: N/A" in sanitized
+
+
+def test_static_sector_pe_reference_provenance_is_promoted() -> None:
+    content = """### --- START DATA_BLOCK ---
+SECTOR_MEDIAN_PE: 22
+PE_VS_SECTOR: 0.50
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "sectorMedianPE": 22,
+            "peVsSector": 0.50,
+            "sectorPeReferenceType": "STATIC_POLICY_REFERENCE",
+            "sectorPeReferenceAsOf": "N/A",
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "6782.TW")
+
+    assert "SECTOR_PE_REFERENCE_TYPE: STATIC_POLICY_REFERENCE" in sanitized
+    assert "SECTOR_PE_REFERENCE_AS_OF: N/A" in sanitized
 
 
 def test_sanitize_fundamentals_output_extracts_production_raw_payload() -> None:

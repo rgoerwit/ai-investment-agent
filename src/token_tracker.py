@@ -43,6 +43,7 @@ MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     "gpt-4o-mini": {"prompt": 0.15, "completion": 0.60},
     "gpt-4o": {"prompt": 2.50, "completion": 10.00},
     # --- Gemini 3.x (paid tier) ---
+    "gemini-3.6-flash": {"prompt": 1.50, "completion": 7.50},
     "gemini-3.5-flash": {"prompt": 1.50, "completion": 9.00},
     "gemini-3.1-flash-lite": {"prompt": 0.25, "completion": 1.50},
     # "gemini-3.1-pro" prefix also covers "-preview"

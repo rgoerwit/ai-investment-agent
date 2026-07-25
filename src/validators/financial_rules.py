@@ -29,7 +29,8 @@ _TRANSIENT_STRENGTH_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "acquisition-led consolidation",
         re.compile(
-            r"\b(?:acquisition[- ]driven|acquisition-led|m&a(?:[- ]driven)?|merger[- ]driven|inorganic growth|organic vs acquired|m&a illusion)\b",
+            r"\b(?:acquisition[- ]driven|acquisition-led|m&a[- ]driven|"
+            r"merger[- ]driven|inorganic growth|organic vs acquired|m&a illusion)\b",
             re.IGNORECASE,
         ),
     ),
@@ -995,10 +996,6 @@ def detect_red_flags(
     )
     if canonical_distortion and driver_type:
         canonical_label = driver_type.lower().replace("_", " ")
-        if canonical_label not in transient_strength_labels:
-            transient_strength_labels.insert(0, canonical_label)
-
-    if transient_strength_labels and (has_current_strength or canonical_distortion):
         detail_parts: list[str] = []
         if revenue_growth_ttm is not None and revenue_growth_ttm >= 15.0:
             detail_parts.append(f"revenue growth {revenue_growth_ttm:.1f}%")
@@ -1009,15 +1006,15 @@ def detect_red_flags(
             and ocf_current > 0
         ):
             detail_parts.append("positive net income and OCF")
-        if canonical_distortion:
-            detail_parts.append(
-                f"management guidance marks the earnings baseline {baseline_status.lower()}"
-            )
+        detail_parts.append(
+            f"management guidance marks the earnings baseline {baseline_status.lower()}"
+        )
         red_flags.append(
             {
                 "type": "TRANSIENT_STRENGTH_DISTORTION",
                 "severity": "WARNING",
-                "detail": f"Named transient driver detected ({', '.join(transient_strength_labels[:2])}) alongside {'; '.join(detail_parts)}",
+                "detail": f"Structured evidence identifies a material {canonical_label} driver"
+                + (f" alongside {'; '.join(detail_parts)}" if detail_parts else ""),
                 "action": "RISK_PENALTY",
                 "risk_penalty": 0.75,
                 "rationale": "Current-period strength may reflect a non-recurring driver rather than durable operating improvement. Do not treat this as proven baseline earning power.",
@@ -1026,23 +1023,44 @@ def detect_red_flags(
         logger.debug(
             "red_flag_transient_strength_distortion",
             ticker=ticker,
-            drivers=transient_strength_labels,
+            driver=driver_type,
             revenue_growth_ttm=revenue_growth_ttm,
         )
 
-    # Narrative-only signals still require current strength, avoiding false
-    # positives for distressed companies merely discussing possible asset sales.
-    # A canonical management-guidance distortion is direct enough to stand alone.
+    guidance_coverage_unresolved = metrics.get("guidance_coverage_status") in {
+        "SEARCH_FAILED",
+        "UNRESOLVED_AFTER_TARGETED_SEARCH",
+    }
+    guidance_bridge_unresolved = metrics.get("guidance_bridge_status") == "UNRESOLVED"
+    narrative_candidate = bool(transient_strength_labels) and has_current_strength
+    if (
+        narrative_candidate
+        and not canonical_distortion
+        and not guidance_coverage_unresolved
+        and not guidance_bridge_unresolved
+    ):
+        red_flags.append(
+            {
+                "type": "EARNINGS_DRIVER_EVIDENCE_GAP",
+                "severity": "WARNING",
+                "detail": "Narrative text suggests a possible non-recurring earnings driver, but structured evidence does not corroborate its type, materiality, or baseline effect.",
+                "action": "REVIEW",
+                "risk_penalty": 0.0,
+                "blocks_buy": True,
+                "rationale": "Treat narrative suspicion as an evidence gap, not as a verified causal diagnosis. Obtain source-backed guidance or a filing bridge before relying on reported growth.",
+            }
+        )
+        logger.debug(
+            "red_flag_earnings_driver_evidence_gap",
+            ticker=ticker,
+            candidate_count=len(transient_strength_labels),
+        )
+
+    # Authoritative bridge requirements come only from structured evidence. A
+    # narrative mention is a search/review trigger, not proof of a distortion.
     normalized_bridge_missing = (
-        (has_current_strength and requires_normalized_earnings_bridge(raw_report))
-        or (
-            canonical_distortion and normalized_earnings_available not in {"YES", "N/A"}
-        )
-        or (
-            metrics.get("guidance_bridge_status") == "UNRESOLVED"
-            and normalized_earnings_available != "YES"
-        )
-    )
+        canonical_distortion and normalized_earnings_available not in {"YES", "N/A"}
+    ) or (guidance_bridge_unresolved and normalized_earnings_available != "YES")
     if normalized_bridge_missing:
         red_flags.append(
             {

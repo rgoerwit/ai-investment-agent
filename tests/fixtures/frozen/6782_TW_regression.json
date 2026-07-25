@@ -1,0 +1,14 @@
+{
+  "ticker": "6782.TW",
+  "raw_metrics": {
+    "revenueGrowth": 0.150221699,
+    "earningsGrowth": 0.39373357,
+    "revenueGrowth_TTM": null,
+    "earningsGrowth_TTM": null,
+    "_revenueGrowth_source": "calculated_from_statements",
+    "_earningsGrowth_source": "calculated_from_statement_net_income_proxy"
+  },
+  "fundamentals_output": "### --- START DATA_BLOCK ---\nREVENUE_GROWTH_FY: N/A\nEARNINGS_GROWTH_FY: N/A\nREVENUE_GROWTH_TTM: 15.0%\nEARNINGS_GROWTH_TTM: 39.4%\n### --- END DATA_BLOCK ---\n",
+  "m_and_a_narrative": "M&A activity includes the acquisition of Mingdar and From-eyes.",
+  "value_trap_output": "### --- START VALUE_TRAP_BLOCK ---\nSCORE: 55\nVERDICT: CAUTIOUS\nTRAP_RISK: MEDIUM\nM&A_CONTEXT_EVIDENCE: CITED\nM&A_CONTEXT_SOURCE_URL: https://unsupported.example/from-eyes\nM&A_CONTEXT: Strategic acquisitions, e.g. From-eyes Co., drove growth.\n### --- END VALUE_TRAP_BLOCK ---"
+}

@@ -37,6 +37,8 @@ class ValuationParams:
     method: str | None = None
     sector: str | None = None
     sector_median_pe: float | None = None
+    sector_pe_reference_type: str = "UNKNOWN"
+    sector_pe_reference_as_of: str | None = None
     current_pe: float | None = None
     peg_ratio: float | None = None
     growth_score_pct: float | None = None
@@ -104,6 +106,16 @@ def _extract_params(valuation_params_report: str) -> ValuationParams:
         method=extract_str(r"METHOD:\s*(.+?)(?:\n|$)"),
         sector=extract_str(r"SECTOR:\s*(.+?)(?:\n|$)"),
         sector_median_pe=extract_float(r"SECTOR_MEDIAN_PE:\s*([\d,.]+|N/A)"),
+        sector_pe_reference_type=(
+            extract_str(
+                r"SECTOR_PE_REFERENCE_TYPE:\s*"
+                r"(STATIC_POLICY_REFERENCE|LIVE_MARKET_REFERENCE|UNKNOWN)"
+            )
+            or "UNKNOWN"
+        ).upper(),
+        sector_pe_reference_as_of=extract_str(
+            r"SECTOR_PE_REFERENCE_AS_OF:\s*(.+?)(?:\n|$)"
+        ),
         current_pe=extract_float(r"CURRENT_PE:\s*([\d,.]+|N/A)"),
         peg_ratio=extract_float(r"PEG_RATIO:\s*([\d,.]+|N/A)"),
         growth_score_pct=extract_float(r"GROWTH_SCORE_PCT:\s*([\d,.]+|N/A)"),
@@ -137,9 +149,18 @@ def _calculate_pe_normalization(params: ValuationParams) -> ValuationTargets:
     target_low = round(fair_value * 0.85, 2)
     target_high = round(fair_value * 1.15, 2)
 
+    static_reference = params.sector_pe_reference_type == "STATIC_POLICY_REFERENCE"
+    reference_label = (
+        "static policy sector reference"
+        if static_reference
+        else "live market sector reference"
+        if params.sector_pe_reference_type == "LIVE_MARKET_REFERENCE"
+        else "sector reference with unverified provenance"
+    )
     methodology = (
         f"P/E normalization: Current PE {params.current_pe:.1f} → "
-        f"Sector median PE {params.sector_median_pe:.1f} ({params.sector or 'General'})"
+        f"{reference_label} {params.sector_median_pe:.1f} "
+        f"({params.sector or 'General'})"
     )
 
     logger.debug(
@@ -156,7 +177,7 @@ def _calculate_pe_normalization(params: ValuationParams) -> ValuationTargets:
         low=target_low,
         high=target_high,
         methodology=methodology,
-        confidence=params.confidence,
+        confidence="LOW" if static_reference else params.confidence,
     )
 
 

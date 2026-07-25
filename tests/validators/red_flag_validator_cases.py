@@ -2256,8 +2256,8 @@ class TestCyclicalPeakDetection:
         growth_flags = [f for f in flags if f["type"] == "GROWTH_QUALITY_UNPROVEN"]
         assert len(growth_flags) == 0
 
-    def test_transient_strength_distortion_detects_named_one_time_driver(self):
-        """Named non-recurring drivers in fundamentals text should trigger warning."""
+    def test_narrative_one_time_driver_is_an_evidence_gap(self):
+        """Narrative suspicion must not be promoted to a verified distortion."""
         metrics = {
             "roa_current": 8.0,
             "roa_5y_avg": 7.5,
@@ -2283,12 +2283,14 @@ class TestCyclicalPeakDetection:
             ),
         }
         flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
-        transient_flags = [
-            f for f in flags if f["type"] == "TRANSIENT_STRENGTH_DISTORTION"
-        ]
-        assert len(transient_flags) == 1
-        assert transient_flags[0]["risk_penalty"] == 0.75
-        assert "legal settlement" in transient_flags[0]["detail"]
+        flag_types = {flag["type"] for flag in flags}
+        assert "EARNINGS_DRIVER_EVIDENCE_GAP" in flag_types
+        assert "TRANSIENT_STRENGTH_DISTORTION" not in flag_types
+        evidence_gap = next(
+            flag for flag in flags if flag["type"] == "EARNINGS_DRIVER_EVIDENCE_GAP"
+        )
+        assert evidence_gap["risk_penalty"] == 0.0
+        assert "legal settlement" not in evidence_gap["detail"]
 
 
 class TestOCFNIRatioCheck:

@@ -53,6 +53,8 @@ class TestCurrentModelPricing:
     @pytest.mark.parametrize(
         ("model", "expected"),
         [
+            ("gemini-3.6-flash", 1.50 + 7.50),
+            ("gemini-3.6-flash-002", 1.50 + 7.50),
             ("gemini-3.5-flash", 1.50 + 9.00),
             ("gemini-3.1-flash-lite", 0.25 + 1.50),
             ("gemini-3.1-pro-preview", 2.00 + 12.00),
@@ -74,9 +76,10 @@ class TestCurrentModelPricing:
         assert _usage(model).estimated_cost_usd == pytest.approx(expected)
 
     def test_no_current_model_hits_default_fallback(self):
-        # These are the models wired via config defaults / .env — each must
-        # prefix-match an explicit entry, never the default fallback.
+        # Configured and adoption-ready models must prefix-match an explicit
+        # entry, never the default fallback.
         for model in (
+            "gemini-3.6-flash",
             "gemini-3.5-flash",
             "gemini-3.1-flash-lite",
             "gemini-3.1-pro-preview",
@@ -157,6 +160,11 @@ class TestFlexTierPricing:
         standard = _usage("gpt-5.4").estimated_cost_usd
         flex = _usage("gpt-5.4", tier="flex").estimated_cost_usd
         assert flex == pytest.approx(standard * FLEX_TIER_MULTIPLIER)
+
+    def test_gemini_36_flex_halves_published_rates(self):
+        assert _usage(
+            "gemini-3.6-flash", tier="flex"
+        ).estimated_cost_usd == pytest.approx((1.50 + 7.50) * FLEX_TIER_MULTIPLIER)
 
     def test_fallback_to_standard_prices_full(self):
         # A flex-configured run whose call fell back reports its real tier

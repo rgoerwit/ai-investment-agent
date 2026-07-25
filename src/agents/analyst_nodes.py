@@ -57,6 +57,7 @@ from .output_validation import (
     validate_required_output,
 )
 from .state import AgentState
+from .value_trap_evidence import normalize_value_trap_m_and_a_evidence
 
 logger = structlog.get_logger(__name__)
 
@@ -493,12 +494,20 @@ def _normalize_structured_output(
     foreign_data: str = "",
     legal_data: str = "",
     management_guidance_evidence: str = "",
+    evidence_messages: list[BaseMessage] | None = None,
 ) -> str:
     """Apply narrow deterministic output repairs for known model-format drift."""
     if agent_key == "foreign_language_analyst":
         return normalize_management_guidance_output(
             content,
             management_guidance_evidence,
+        )
+
+    if agent_key == "value_trap_detector":
+        return normalize_value_trap_m_and_a_evidence(
+            content,
+            evidence_messages or [],
+            ticker=ticker,
         )
 
     if agent_key != "fundamentals_analyst":
@@ -962,6 +971,7 @@ def create_analyst_node(
                 else "",
                 legal_data=legal_data if agent_key == "fundamentals_analyst" else "",
                 management_guidance_evidence=management_guidance_evidence,
+                evidence_messages=filtered_messages,
             )
 
             if (
@@ -1033,6 +1043,7 @@ def create_analyst_node(
                         if agent_key == "fundamentals_analyst"
                         else "",
                         management_guidance_evidence=management_guidance_evidence,
+                        evidence_messages=filtered_messages,
                     )
                     retry_tool_calls = getattr(retry_response, "tool_calls", None)
                     retry_has_tool_calls = (

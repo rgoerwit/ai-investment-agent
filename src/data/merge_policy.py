@@ -92,6 +92,7 @@ SOURCE_QUALITY = {
     "tavily_extraction": 4,
     "proxy": 2,
 }
+PRESERVED_FIELD_PROVENANCE = frozenset({"revenueGrowth", "earningsGrowth"})
 FORWARD_PE_OUTLIER_THRESHOLD = 200.0
 FORWARD_PE_REFERENCE_MAX = 100.0
 FORWARD_PE_OUTLIER_RATIO = 5.0
@@ -211,6 +212,9 @@ def smart_merge_with_quality(
                 source_name, SOURCE_QUALITY.get(f"{source_name}_info", 5)
             )
             source_tag_key = f"_{key}_source"
+            field_provenance = source_data.get(source_tag_key, source_name)
+            if not isinstance(field_provenance, str):
+                field_provenance = source_name
             if (
                 source_tag_key in source_data
                 and source_data[source_tag_key] in SOURCE_QUALITY
@@ -265,6 +269,12 @@ def smart_merge_with_quality(
                     merged[key] = value
                     field_sources[key] = source_name
                     field_quality[key] = quality
+                    merged.pop(source_tag_key, None)
+                    if (
+                        key in PRESERVED_FIELD_PROVENANCE
+                        and field_provenance != source_name
+                    ):
+                        merged[source_tag_key] = field_provenance
                     continue
 
             if (
@@ -315,6 +325,12 @@ def smart_merge_with_quality(
                 merged[key] = value
                 field_sources[key] = source_name
                 field_quality[key] = quality
+                merged.pop(source_tag_key, None)
+                if (
+                    key in PRESERVED_FIELD_PROVENANCE
+                    and field_provenance != source_name
+                ):
+                    merged[source_tag_key] = field_provenance
 
     metadata = {
         "sources_used": list(sources_used),

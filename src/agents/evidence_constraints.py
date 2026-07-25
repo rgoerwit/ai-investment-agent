@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from src.data_block_utils import extract_block_field
 from src.runtime_diagnostics import get_valid_artifact_content
 from src.validators.supplemental_extractors import extract_capital_efficiency_signals
 
@@ -48,6 +49,19 @@ def downstream_evidence_constraints(state: Mapping[str, Any]) -> str:
             "Do not use that raw score/verdict as a hard fail. Use only independently "
             "verified control, capital-allocation, and catalyst facts plus the "
             "VALUE_TRAP_DATA_CONFLICT review penalty."
+        )
+
+    value_trap = get_valid_artifact_content(state, "value_trap_report") or ""
+    m_and_a_evidence = extract_block_field(
+        value_trap if isinstance(value_trap, str) else "",
+        "VALUE_TRAP_BLOCK",
+        "M&A_CONTEXT_EVIDENCE",
+    )
+    if value_trap and m_and_a_evidence != "CITED":
+        constraints.append(
+            "Value Trap M&A context is not source-verified. Do not name an "
+            "acquisition, infer acquisition-led growth, or score M&A quality from "
+            "that report unless M&A_CONTEXT_EVIDENCE is CITED."
         )
 
     constraints.append(

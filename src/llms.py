@@ -140,6 +140,57 @@ SAFETY_SETTINGS = {
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
 }
 
+_GEMINI_GENERATION_FIELD_KEYS = {
+    "candidate_count": frozenset({"candidate_count", "candidateCount"}),
+    "temperature": frozenset({"temperature"}),
+    "top_p": frozenset({"top_p", "topP"}),
+    "top_k": frozenset({"top_k", "topK"}),
+}
+
+
+def _normalized_gemini_model_id(model_name: str) -> str:
+    """Return a comparable Gemini model ID without path or numeric-version suffix."""
+    normalized = normalize_model_name(model_name).lower()
+    return re.sub(r"-\d{3}$", "", normalized)
+
+
+def _gemini_version(model_name: str) -> tuple[int, int] | None:
+    """Parse the major/minor Gemini version without inferring model capabilities."""
+    match = re.match(
+        r"gemini-(\d+)(?:\.(\d+))?",
+        _normalized_gemini_model_id(model_name),
+    )
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2) or 0)
+
+
+def _gemini_generation_fields_to_omit(model_name: str) -> frozenset[str]:
+    """Return generation fields Google says to omit for a Gemini model.
+
+    Gemini 3.x does not support ``candidate_count``. Google also recommends
+    removing ``temperature``, ``top_p``, and ``top_k`` from every Gemini 3.x
+    request because those models are optimized for their sampling defaults.
+    The sampling fields are deprecated and ignored beginning with Gemini 3.6
+    Flash and Gemini 3.5 Flash-Lite, and future model generations may reject
+    them.
+    """
+    version = _gemini_version(model_name)
+    if version is None or version[0] < 3:
+        return frozenset()
+    return frozenset(_GEMINI_GENERATION_FIELD_KEYS)
+
+
+def _without_gemini_generation_fields(
+    values: dict[str, Any],
+    omitted_fields: frozenset[str],
+) -> dict[str, Any]:
+    """Copy a request mapping without snake_case or API-alias forms of fields."""
+    omitted_keys = {
+        key for field in omitted_fields for key in _GEMINI_GENERATION_FIELD_KEYS[field]
+    }
+    return {key: value for key, value in values.items() if key not in omitted_keys}
+
 
 def _is_gemini_v3_or_greater(model_name: str) -> bool:
     """
@@ -489,9 +540,9 @@ def _stamp_service_tier(result: Any, tier: str) -> None:
 
 
 class _TieredChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
-    """ChatGoogleGenerativeAI with Gemini flex-tier support.
+    """ChatGoogleGenerativeAI with Gemini request compatibility and flex support.
 
-    langchain-google-genai 4.2.5 does not expose ``service_tier`` (see
+    langchain-google-genai 4.2.6 does not expose ``service_tier`` (see
     langchain-ai/langchain-google#1682), but its ``_prepare_request`` forwards
     unconsumed invoke kwargs into ``GenerateContentConfig``, which the
     installed google-genai SDK (>=1.75) accepts. We inject the tier there —
@@ -516,7 +567,39 @@ class _TieredChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
     service_tier: str | None = None
     flex_fallback_to_standard: bool = True
 
+    def _prepare_params(
+        self,
+        stop: list[str] | None,
+        generation_config: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Apply model-specific field omissions after generation config is merged."""
+        omitted_fields = _gemini_generation_fields_to_omit(self.model)
+        if omitted_fields:
+            kwargs = _without_gemini_generation_fields(kwargs, omitted_fields)
+            if generation_config is not None:
+                generation_config = _without_gemini_generation_fields(
+                    generation_config,
+                    omitted_fields,
+                )
+
+        params = super()._prepare_params(
+            stop,
+            generation_config=generation_config,
+            **kwargs,
+        )
+        if not omitted_fields:
+            return params
+
+        payload = params.model_dump(exclude_unset=True)
+        for field in omitted_fields:
+            payload.pop(field, None)
+        return type(params).model_validate(payload)
+
     def _prepare_request(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        omitted_fields = _gemini_generation_fields_to_omit(self.model)
+        if omitted_fields:
+            kwargs = _without_gemini_generation_fields(kwargs, omitted_fields)
         if (
             self.service_tier is not None
             and "service_tier" not in kwargs

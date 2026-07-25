@@ -17,6 +17,7 @@ from src.validators.supplemental_extractors import extract_capital_efficiency_si
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .evidence_constraints import downstream_evidence_constraints
 from .governance_prompt import rendered_governance_card
 from .output_limits import cap_state_value
 from .state import AgentState
@@ -82,6 +83,7 @@ def build_apac_specialist_payload(state: AgentState) -> dict[str, str]:
         "news_report": _clip(state.get("news_report"), 2000),
         "sentiment_report": _clip(state.get("sentiment_report"), 1200),
         "red_flags": _clip(state.get("red_flags"), 1800),
+        "evidence_constraints": _clip(downstream_evidence_constraints(state), 1800),
     }
 
 

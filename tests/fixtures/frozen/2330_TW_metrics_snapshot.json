@@ -66,5 +66,7 @@
   "roic_quality": "STRONG",
   "sector": "technology",
   "sector_median_pe": null,
+  "sector_pe_reference_as_of": null,
+  "sector_pe_reference_type": null,
   "segment_flag": null
 }

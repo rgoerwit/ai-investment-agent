@@ -97,6 +97,8 @@ def extract_metrics(
         "fcf_cagr_3y": None,
         "cycle_position": None,
         "revenue_growth_ttm": None,
+        "sector_pe_reference_type": None,
+        "sector_pe_reference_as_of": None,
         "revenue_backlog_coverage": None,
         "latest_quarter_date": None,
         "net_cash_to_market_cap": None,
@@ -169,6 +171,26 @@ def extract_metrics(
     pe_vs_sector_match = re.search(r"PE_VS_SECTOR:\s*(\d+(?:\.\d+)?)", data_block)
     if pe_vs_sector_match:
         metrics["pe_vs_sector"] = float(pe_vs_sector_match.group(1))
+
+    sector_pe_reference_type_match = re.search(
+        r"SECTOR_PE_REFERENCE_TYPE:\s*"
+        r"(STATIC_POLICY_REFERENCE|LIVE_MARKET_REFERENCE|UNKNOWN)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if sector_pe_reference_type_match:
+        metrics["sector_pe_reference_type"] = sector_pe_reference_type_match.group(
+            1
+        ).upper()
+    sector_pe_reference_as_of_match = re.search(
+        r"SECTOR_PE_REFERENCE_AS_OF:\s*(.+?)(?:\n|$)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if sector_pe_reference_as_of_match:
+        reference_as_of = sector_pe_reference_as_of_match.group(1).strip()
+        if reference_as_of.upper() not in {"N/A", "NA", "NONE", "UNKNOWN"}:
+            metrics["sector_pe_reference_as_of"] = reference_as_of
 
     pb_match = re.search(r"PB_RATIO:\s*(\d+(?:\.\d+)?)", data_block)
     if pb_match:

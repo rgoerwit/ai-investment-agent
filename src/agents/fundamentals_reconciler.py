@@ -30,12 +30,47 @@ from src.validators.pfic_constants import (
 )
 
 HORIZON_FIELD_RAW_KEYS = (
+    ("REVENUE_GROWTH_FY", "revenueGrowth"),
+    ("EARNINGS_GROWTH_FY", "earningsGrowth"),
     ("REVENUE_GROWTH_TTM", "revenueGrowth_TTM"),
     ("REVENUE_GROWTH_MRQ", "revenueGrowth_MRQ"),
     ("EARNINGS_GROWTH_TTM", "earningsGrowth_TTM"),
     ("EARNINGS_GROWTH_MRQ", "earningsGrowth_MRQ"),
     ("GROWTH_TRAJECTORY", "growth_trajectory"),
 )
+
+
+def _growth_source_label(
+    payload: dict[str, Any],
+    field: str,
+) -> str:
+    field_sources = payload.get("_field_sources")
+    if not isinstance(field_sources, dict):
+        field_sources = {}
+    source = str(
+        payload.get(f"_{field}_source") or field_sources.get(field) or ""
+    ).lower()
+    if field == "revenueGrowth":
+        if source == "calculated_from_statements":
+            return "ANNUAL_STATEMENTS"
+    else:
+        source_labels = {
+            "calculated_from_statement_diluted_eps": "DILUTED_EPS_STATEMENTS",
+            "calculated_from_statement_basic_eps": "BASIC_EPS_STATEMENTS",
+            "calculated_from_statement_net_income_proxy": (
+                "NET_INCOME_STATEMENT_PROXY"
+            ),
+        }
+        if source in source_labels:
+            return source_labels[source]
+
+    statement_overrides = payload.get("_statement_overrides")
+    if isinstance(statement_overrides, dict) and field in statement_overrides:
+        return "ANNUAL_STATEMENTS" if field == "revenueGrowth" else "STATEMENT_DERIVED"
+    if source:
+        return "AGGREGATOR"
+    return "UNKNOWN"
+
 
 _RAW_METRICS_MARKER = re.compile(
     r"###\s*TOOL\s*\d+:\s*get_financial_metrics",
@@ -184,6 +219,25 @@ def reconcile_high_risk_fields(
     changed_valuation = False
 
     for datablock_key, raw_key in (
+        ("REVENUE_GROWTH_FY", "revenueGrowth"),
+        ("EARNINGS_GROWTH_FY", "earningsGrowth"),
+    ):
+        value = as_float(payload.get(raw_key))
+        reconciled_value = (
+            format_percent_from_ratio(value) if value is not None else "N/A"
+        )
+        if extract_block_text_value(updated, datablock_key) != reconciled_value:
+            updated = replace_or_append_block_line(
+                updated, datablock_key, reconciled_value
+            )
+            changed_growth = True
+        updated = replace_or_append_block_line(
+            updated,
+            f"{datablock_key}_SOURCE",
+            _growth_source_label(payload, raw_key) if value is not None else "UNKNOWN",
+        )
+
+    for datablock_key, raw_key in (
         ("REVENUE_GROWTH_TTM", "revenueGrowth_TTM"),
         ("EARNINGS_GROWTH_TTM", "earningsGrowth_TTM"),
     ):
@@ -209,6 +263,25 @@ def reconcile_high_risk_fields(
         )
         changed_growth = changed_growth or changed
 
+    reference_type = str(payload.get("sectorPeReferenceType") or "UNKNOWN").upper()
+    if reference_type not in {
+        "STATIC_POLICY_REFERENCE",
+        "LIVE_MARKET_REFERENCE",
+        "UNKNOWN",
+    }:
+        reference_type = "UNKNOWN"
+    updated = replace_or_append_block_line(
+        updated,
+        "SECTOR_PE_REFERENCE_TYPE",
+        reference_type,
+    )
+    reference_as_of = payload.get("sectorPeReferenceAsOf")
+    updated = replace_or_append_block_line(
+        updated,
+        "SECTOR_PE_REFERENCE_AS_OF",
+        str(reference_as_of) if reference_as_of else "N/A",
+    )
+
     cycle_position = str(payload.get("cycle_position") or "").upper()
     if cycle_position in {"PEAK", "MID", "TROUGH"} and (
         extract_block_text_value(updated, "CYCLE_POSITION").upper() != cycle_position
@@ -217,6 +290,29 @@ def reconcile_high_risk_fields(
             updated, "CYCLE_POSITION", cycle_position
         )
         changed_growth = True
+
+    comparison_status = str(
+        payload.get("mrq_comparison_base_status") or "UNKNOWN"
+    ).upper()
+    if comparison_status not in {
+        "DEPRESSED",
+        "ELEVATED",
+        "NORMAL",
+        "NONPOSITIVE",
+        "UNKNOWN",
+    }:
+        comparison_status = "UNKNOWN"
+    updated = replace_or_append_block_line(
+        updated,
+        "MRQ_COMPARISON_BASE_STATUS",
+        comparison_status,
+    )
+    comparison_delta = as_float(payload.get("mrq_comparison_base_margin_delta_bps"))
+    updated = replace_or_append_block_line(
+        updated,
+        "MRQ_COMPARISON_BASE_MARGIN_DELTA_BPS",
+        f"{comparison_delta:.1f}" if comparison_delta is not None else "N/A",
+    )
 
     # 5-year return averages feed cyclical-peak detection; the LLM can drop or
     # mis-copy them. Promote the computed signals (already percent-scaled) when the
@@ -396,7 +492,8 @@ def reconcile_high_risk_fields(
         updated = replace_or_append_block_line(
             updated,
             "GROWTH_DATA_QUALITY_NOTE",
-            "TTM growth unavailable in raw payload; FY/MRQ values were not reused.",
+            "Growth horizons and provenance reconciled to raw metrics; unavailable "
+            "TTM/MRQ values were not backfilled from FY data.",
         )
     # yfinance can lag a full fiscal year for some ex-US names: the latest annual
     # statements predate the most recent completed FY, so any FY-based growth may be
