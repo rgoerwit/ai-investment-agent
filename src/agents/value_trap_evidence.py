@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
-from urllib.parse import urlsplit
 
 import structlog
-from langchain_core.messages import BaseMessage, ToolMessage
+from langchain_core.messages import BaseMessage
 
 from src.data_block_utils import (
     build_fenced_block,
@@ -17,36 +15,9 @@ from src.data_block_utils import (
     replace_or_append_block_line,
 )
 
-from .message_utils import extract_string_content
+from .message_utils import normalize_http_url, tool_evidence_urls
 
 logger = structlog.get_logger(__name__)
-
-_URL_RE = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
-_TRAILING_URL_PUNCTUATION = ".,;:!?)]}'"
-
-
-def _normalized_url(value: str) -> str | None:
-    candidate = value.strip().rstrip(_TRAILING_URL_PUNCTUATION)
-    try:
-        parsed = urlsplit(candidate)
-    except ValueError:
-        return None
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-        return None
-    return candidate.rstrip("/")
-
-
-def _tool_evidence_urls(messages: Sequence[BaseMessage]) -> set[str]:
-    urls: set[str] = set()
-    for message in messages:
-        if not isinstance(message, ToolMessage):
-            continue
-        content = extract_string_content(message.content)
-        for match in _URL_RE.finditer(content):
-            normalized = _normalized_url(match.group(0))
-            if normalized:
-                urls.add(normalized)
-    return urls
 
 
 def normalize_value_trap_m_and_a_evidence(
@@ -75,8 +46,8 @@ def normalize_value_trap_m_and_a_evidence(
     status = extract_block_text_value(block_body, "M&A_CONTEXT_EVIDENCE").upper()
     source_url = extract_block_text_value(block_body, "M&A_CONTEXT_SOURCE_URL")
     context = extract_block_text_value(block_body, "M&A_CONTEXT")
-    normalized_source = _normalized_url(source_url)
-    available_urls = _tool_evidence_urls(evidence_messages)
+    normalized_source = normalize_http_url(source_url)
+    available_urls = tool_evidence_urls(evidence_messages)
 
     citation_valid = (
         status == "CITED"

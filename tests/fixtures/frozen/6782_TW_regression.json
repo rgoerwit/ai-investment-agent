@@ -10,5 +10,27 @@
   },
   "fundamentals_output": "### --- START DATA_BLOCK ---\nREVENUE_GROWTH_FY: N/A\nEARNINGS_GROWTH_FY: N/A\nREVENUE_GROWTH_TTM: 15.0%\nEARNINGS_GROWTH_TTM: 39.4%\n### --- END DATA_BLOCK ---\n",
   "m_and_a_narrative": "M&A activity includes the acquisition of Mingdar and From-eyes.",
+  "ownership_evidence": {
+    "captured_as_of": "2026-03-28",
+    "largest_shareholder": {
+      "name": "BenQ Materials Corp.",
+      "ticker": "8215.TW",
+      "pct": 14.82
+    },
+    "control_status": "NOT_CONTROLLED",
+    "relationship": "equity method",
+    "sources": [
+      {
+        "url": "https://www.viscovision.com.tw/tw/investors_shareholders.html",
+        "as_of": "2026-03-28",
+        "supports": "BenQ Materials Corp. is the largest listed shareholder at 14.82%."
+      },
+      {
+        "url": "https://www.benqmaterials.com/download/0/213/",
+        "as_of": "2023-12-31",
+        "supports": "BenQ Materials reports significant influence, one board seat, no control, and equity-method accounting."
+      }
+    ]
+  },
   "value_trap_output": "### --- START VALUE_TRAP_BLOCK ---\nSCORE: 55\nVERDICT: CAUTIOUS\nTRAP_RISK: MEDIUM\nM&A_CONTEXT_EVIDENCE: CITED\nM&A_CONTEXT_SOURCE_URL: https://unsupported.example/from-eyes\nM&A_CONTEXT: Strategic acquisitions, e.g. From-eyes Co., drove growth.\n### --- END VALUE_TRAP_BLOCK ---"
 }

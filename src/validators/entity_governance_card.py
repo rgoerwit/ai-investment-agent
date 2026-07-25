@@ -85,6 +85,7 @@ EntityRole = Literal[
 ]
 HintRole = Literal["HOLDCO", "UNKNOWN"]
 Confidence = Literal["clean", "unresolved", "conflict"]
+ControlStatus = Literal["CONTROLLED", "NOT_CONTROLLED", "UNKNOWN"]
 
 
 # Holdco name tokens across the markets we routinely cover. Treated as HINTS,
@@ -111,7 +112,11 @@ class EntityGovernanceCard:
     canonical_name: str
     local_name: str | None = None
     entity_role: EntityRole = "UNKNOWN"
+    largest_shareholder: dict[str, Any] | None = None
     controlling_shareholder: dict[str, Any] | None = None
+    control_status: ControlStatus = "UNKNOWN"
+    control_basis: str = "UNKNOWN"
+    ownership_evidence: dict[str, str] = field(default_factory=dict)
     related_listed: list[dict[str, Any]] = field(default_factory=list)
     metric_scope: dict[str, str] = field(default_factory=dict)
     confidence: Confidence = "unresolved"
@@ -248,15 +253,22 @@ _FLA_ROLE_RE = re.compile(
     re.IGNORECASE,
 )
 _FLA_RELATED_RE = re.compile(r"Related Listed Tickers:\s*(.+?)(?:\n|$)", re.IGNORECASE)
+_FLA_LARGEST_RE = re.compile(r"Largest Shareholder:\s*(.+?)(?:\n|$)", re.IGNORECASE)
 _FLA_CONTROLLING_RE = re.compile(
     r"Controlling Shareholder:\s*(.+?)(?:\n|$)", re.IGNORECASE
 )
-_VALUE_TRAP_MAJORITY_RE = re.compile(r"MAJORITY_HOLDER:\s*(.+?)(?:\n|$)", re.IGNORECASE)
-_TICKER_RE = re.compile(r"\b[A-Z0-9]{1,8}(?:[.-][A-Z0-9]{1,6})\b", re.IGNORECASE)
-_HOLDER_NOT_PARENT_RE = re.compile(
-    r"\b(?:founder|family|shareholder|private|vehicle|related parties|parties)\b",
+_FLA_CONTROL_STATUS_RE = re.compile(
+    r"Control Status:\s*(CONTROLLED|NOT_CONTROLLED|UNKNOWN)(?:\n|$)",
     re.IGNORECASE,
 )
+_FLA_CONTROL_BASIS_RE = re.compile(r"Control Basis:\s*(.+?)(?:\n|$)", re.IGNORECASE)
+_FLA_EVIDENCE_STATUS_RE = re.compile(
+    r"Ownership Evidence Status:\s*(VERIFIED_URL|VERIFIED_OFFICIAL_FILING|NOT_FOUND|REJECTED|UNKNOWN)(?:\n|$)",
+    re.IGNORECASE,
+)
+_FLA_SOURCE_URL_RE = re.compile(r"Ownership Source URL:\s*(.+?)(?:\n|$)", re.IGNORECASE)
+_FLA_AS_OF_RE = re.compile(r"Ownership As Of:\s*(.+?)(?:\n|$)", re.IGNORECASE)
+_TICKER_RE = re.compile(r"\b[A-Z0-9]{1,8}(?:[.-][A-Z0-9]{1,6})\b", re.IGNORECASE)
 
 
 def _coerce_entity_role(value: str) -> EntityRole | None:
@@ -295,24 +307,38 @@ def _related_from_fla(fla_report: str) -> list[dict[str, Any]]:
     return _parse_related_listed(value)
 
 
-def _controlling_from_fla(fla_report: str) -> dict[str, Any] | None:
+def _shareholder_from_fla(
+    fla_report: str,
+    pattern: re.Pattern[str],
+    *,
+    source: str,
+) -> dict[str, Any] | None:
     if not fla_report:
         return None
-    m = _FLA_CONTROLLING_RE.search(fla_report)
+    m = pattern.search(fla_report)
     if not m:
         return None
-    return _controller_from_text(m.group(1).strip(), source="fla_ownership")
+    return _controller_from_text(m.group(1).strip(), source=source)
 
 
-def _controlling_from_value_trap(value_trap_report: str) -> dict[str, Any] | None:
-    if not value_trap_report:
-        return None
-    m = _VALUE_TRAP_MAJORITY_RE.search(value_trap_report)
-    if not m:
-        return None
-    return _controller_from_text(
-        m.group(1).strip(), source="value_trap_majority_holder"
-    )
+def _fla_control_status(fla_report: str) -> ControlStatus:
+    match = _FLA_CONTROL_STATUS_RE.search(fla_report)
+    if not match:
+        return "UNKNOWN"
+    return cast(ControlStatus, match.group(1).upper())
+
+
+def _fla_ownership_evidence(fla_report: str) -> dict[str, str]:
+    evidence: dict[str, str] = {}
+    for key, pattern in (
+        ("status", _FLA_EVIDENCE_STATUS_RE),
+        ("source_url", _FLA_SOURCE_URL_RE),
+        ("as_of", _FLA_AS_OF_RE),
+    ):
+        match = pattern.search(fla_report)
+        if match:
+            evidence[key] = match.group(1).strip()
+    return evidence
 
 
 def _controller_from_text(text: str, *, source: str) -> dict[str, Any] | None:
@@ -329,20 +355,6 @@ def _controller_from_text(text: str, *, source: str) -> dict[str, Any] | None:
         except ValueError:
             pass
     return out
-
-
-def _senior_parent_company_controller(
-    value: object, role: EntityRole
-) -> dict[str, Any] | None:
-    text = str(value or "").strip()
-    if text.upper() in ("NONE", "N/A", "UNKNOWN", ""):
-        return None
-    if role in {"PURE_HOLDCO", "INTERMEDIATE_HOLDCO"} and (
-        _HOLDER_NOT_PARENT_RE.search(text)
-        or re.search(r"\((?:[0-4]?\d)(?:\.\d+)?%\)", text)
-    ):
-        return None
-    return {"name": text, "source": "senior_parent_company"}
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +458,6 @@ def build_card(
     merged_data: dict[str, Any] | None,
     senior_metrics: dict[str, Any] | None,
     fla_report: str,
-    value_trap_report: str = "",
 ) -> EntityGovernanceCard:
     """Build the card from already-available pipeline artifacts. Pure function."""
 
@@ -459,11 +470,25 @@ def build_card(
 
     role, confidence, notes = _reconcile_role(senior_role, fla_role, hints_role)
 
+    ownership_evidence = _fla_ownership_evidence(fla_report)
+    ownership_verified = ownership_evidence.get("status", "").startswith("VERIFIED")
+    has_ownership_contract = bool(ownership_evidence.get("status"))
+
     related_from_senior = _parse_related_listed(metrics.get("related_listed_tickers"))
     related_from_fla = _related_from_fla(fla_report)
-    # Merge by ticker, prefer Senior's edge data when both surfaced the same ticker.
+    # New-format FLA reports have deterministic evidence gating. Once that
+    # contract is present, all Senior-only related-ticker edges are deliberately
+    # dropped: Senior is downstream of FLA, not an independent ownership source,
+    # so even a legitimate-looking restatement cannot corroborate the claim.
     related_by_ticker: dict[str, dict[str, Any]] = {}
-    for edge in related_from_fla + related_from_senior:  # senior overrides
+    related_candidates = (
+        related_from_fla
+        if ownership_verified
+        else []
+        if has_ownership_contract
+        else related_from_fla + related_from_senior
+    )
+    for edge in related_candidates:
         related_by_ticker[str(edge["ticker"]).upper()] = edge
     related_listed = list(related_by_ticker.values())
 
@@ -481,16 +506,36 @@ def build_card(
     if fla_role is not None or fla_report:
         sources.append("fla_ownership")
 
-    # Controller: prefer FLA's structured shape, then Value Trap majority-holder
-    # data. PARENT_COMPANY remains a corporate-parent fallback only.
-    controller = _controlling_from_fla(fla_report)
-    if controller is None:
-        controller = _controlling_from_value_trap(value_trap_report)
-    if controller is None and metrics.get("parent_company"):
-        controller = _senior_parent_company_controller(
-            metrics["parent_company"],
-            role,
+    # Ownership roles are distinct. A largest shareholder is not a controller,
+    # and internal Value Trap/Senior restatements are not independent evidence.
+    # The FLA evidence normalizer is the sole promotion boundary.
+    largest_shareholder = (
+        _shareholder_from_fla(
+            fla_report,
+            _FLA_LARGEST_RE,
+            source="fla_ownership",
         )
+        if ownership_verified
+        else None
+    )
+    control_status = (
+        _fla_control_status(fla_report) if ownership_verified else "UNKNOWN"
+    )
+    controller = (
+        _shareholder_from_fla(
+            fla_report,
+            _FLA_CONTROLLING_RE,
+            source="fla_ownership",
+        )
+        if control_status == "CONTROLLED"
+        else None
+    )
+    basis_match = _FLA_CONTROL_BASIS_RE.search(fla_report)
+    control_basis = (
+        basis_match.group(1).strip()
+        if ownership_verified and basis_match
+        else "UNKNOWN"
+    )
 
     canonical = (
         company_name
@@ -508,7 +553,11 @@ def build_card(
         canonical_name=str(canonical),
         local_name=None,
         entity_role=role,
+        largest_shareholder=largest_shareholder,
         controlling_shareholder=controller,
+        control_status=control_status,
+        control_basis=control_basis,
+        ownership_evidence=ownership_evidence,
         related_listed=related_listed,
         metric_scope=metric_scope,
         confidence=confidence,
@@ -522,6 +571,7 @@ def build_card(
         ticker=ticker,
         entity_role=role,
         confidence=confidence,
+        control_status=control_status,
         hints_fired=len(hints),
         related_count=len(related_listed),
         sources=sources,
@@ -549,6 +599,15 @@ def card_to_prompt_block(card: EntityGovernanceCard) -> str:
         lines.append(f"Local name: {card.local_name}")
     lines.append(f"Entity role: {card.entity_role}  (confidence: {card.confidence})")
 
+    if card.largest_shareholder:
+        holder = card.largest_shareholder
+        holder_name = holder.get("name", "?")
+        holder_pct = holder.get("pct")
+        holder_suffix = f" ({holder_pct}%)" if holder_pct is not None else ""
+        lines.append(f"Largest shareholder: {holder_name}{holder_suffix}")
+
+    lines.append(f"Control status: {card.control_status}")
+    lines.append(f"Control basis: {card.control_basis}")
     if card.controlling_shareholder:
         cs = card.controlling_shareholder
         cs_name = cs.get("name", "?")
@@ -558,7 +617,7 @@ def card_to_prompt_block(card: EntityGovernanceCard) -> str:
 
     if card.related_listed:
         edges = "; ".join(
-            f"{e.get('ticker')}:{e.get('relationship','?')}:{e.get('pct','?')}"
+            f"{e.get('ticker')}:{e.get('relationship', '?')}:{e.get('pct', '?')}"
             for e in card.related_listed
         )
         lines.append(f"Related listed tickers: {edges}")
@@ -575,6 +634,9 @@ def card_to_prompt_block(card: EntityGovernanceCard) -> str:
         "RULES: Ticker and canonical name are authoritative — do not contradict "
         "without quoting stronger primary evidence. Entity role is confidence-scored; "
         "if you have stronger evidence, state the override explicitly with citation. "
+        "Largest shareholder and controlling shareholder are different concepts; "
+        "do not infer control from a sub-50% stake or group affiliation. "
+        "Only CONTROLLED authorizes parent/controller language. "
         "Metric scope is Senior-derived; if APAC, Consultant, or local filings cite "
         "a scope conflict, reconcile it explicitly rather than treating this card as "
         "automatic rejection authority. Do not silently re-frame the entity."

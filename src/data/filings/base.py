@@ -82,7 +82,16 @@ class FilingResult:
 
         # Ownership Structure
         sections.append("**OWNERSHIP STRUCTURE**")
+        largest_shareholder = None
         if self.major_shareholders:
+            largest_shareholder = max(
+                self.major_shareholders,
+                key=lambda shareholder: (
+                    shareholder.get("percent")
+                    if isinstance(shareholder.get("percent"), int | float)
+                    else -1
+                ),
+            )
             for sh in self.major_shareholders:
                 name = sh.get("name", "Unknown")
                 pct = sh.get("percent", "N/A")
@@ -91,18 +100,67 @@ class FilingResult:
                     pct = f"{pct:.2f}%"
                 type_str = f" ({sh_type})" if sh_type else ""
                 sections.append(f"- {name}: {pct}{type_str}")
+            largest_name = largest_shareholder.get("name", "Unknown")
+            largest_pct = largest_shareholder.get("percent", "N/A")
+            if isinstance(largest_pct, int | float):
+                largest_pct = f"{largest_pct:.2f}%"
+            sections.append(f"- Largest Shareholder: {largest_name} ({largest_pct})")
 
         if self.parent_company:
             name = self.parent_company.get("name", "Unknown")
             pct = self.parent_company.get("percent", "N/A")
             rel = self.parent_company.get("relationship", "parent")
+            numeric_pct = pct if isinstance(pct, int | float) else None
             if isinstance(pct, int | float):
                 pct = f"{pct:.2f}%"
-            sections.append(f"- Controlling Shareholder: {name} ({pct})")
-            sections.append(f"- Parent Company: {name}")
+            relationship = str(rel).casefold()
+            significant_influence = any(
+                token in relationship
+                for token in ("equity method", "significant influence", "associate")
+            )
+            majority_voting_rights = numeric_pct is not None and numeric_pct > 50.0
+            explicit_control_relationship = any(
+                token in relationship
+                for token in ("subsidiary", "controlled", "consolidated")
+            )
+            controlled = not significant_influence and (
+                majority_voting_rights or explicit_control_relationship
+            )
+            control_status = (
+                "NOT_CONTROLLED"
+                if significant_influence
+                else "CONTROLLED"
+                if controlled
+                else "UNKNOWN"
+            )
+            control_basis = (
+                "SIGNIFICANT_INFLUENCE_ONLY"
+                if significant_influence
+                else "MAJORITY_VOTING_RIGHTS"
+                if majority_voting_rights
+                else "CONSOLIDATED_SUBSIDIARY"
+                if controlled
+                else "UNKNOWN"
+            )
+            controller = f"{name} ({pct})" if controlled else "NONE"
+            parent = name if controlled else "NONE"
+            sections.append(f"- Controlling Shareholder: {controller}")
+            sections.append(f"- Control Status: {control_status}")
+            sections.append(f"- Control Basis: {control_basis}")
+            sections.append(f"- Parent Company: {parent}")
             sections.append(f"- Relationship: {rel}")
         elif not self.major_shareholders:
             sections.append("Ownership data not found.")
+        else:
+            sections.append("- Controlling Shareholder: UNKNOWN")
+            sections.append("- Control Status: UNKNOWN")
+            sections.append("- Control Basis: UNKNOWN")
+            sections.append("- Parent Company: UNKNOWN")
+
+        if self.major_shareholders or self.parent_company:
+            sections.append("- Ownership Source Type: OFFICIAL_FILING")
+            sections.append(f"- Ownership Source URL: {self.filing_url or 'N/A'}")
+            sections.append(f"- Ownership As Of: {self.filing_date or 'UNKNOWN'}")
 
         sections.append("")
 

@@ -36,6 +36,7 @@ from . import message_utils, support
 from . import runtime as agent_runtime
 from .capital_structure import promote_capital_structure
 from .evidence_constraints import AUTHORITATIVE_CORRECTION_MARKER
+from .foreign_language_evidence import normalize_foreign_language_evidence
 from .fundamentals_reconciler import (
     HORIZON_FIELD_RAW_KEYS,
     append_analyst_coverage_data_quality_note,
@@ -498,9 +499,13 @@ def _normalize_structured_output(
 ) -> str:
     """Apply narrow deterministic output repairs for known model-format drift."""
     if agent_key == "foreign_language_analyst":
-        return normalize_management_guidance_output(
-            content,
-            management_guidance_evidence,
+        guidance_normalized = normalize_management_guidance_output(
+            content, management_guidance_evidence
+        )
+        return normalize_foreign_language_evidence(
+            guidance_normalized,
+            evidence_messages or [],
+            ticker=ticker,
         )
 
     if agent_key == "value_trap_detector":

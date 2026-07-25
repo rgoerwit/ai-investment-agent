@@ -118,6 +118,17 @@ the Foreign Language Analyst returns useful research but omits or malforms only
 the guidance block, code appends a conservative unresolved/search-failed block;
 empty or unusable agent output still fails closed.
 
+Foreign-language ownership and exact capacity claims are normalized by
+`src/agents/foreign_language_evidence.py` against that agent's own
+`ToolMessage` evidence before Senior Fundamentals can consume them. The
+`EntityGovernanceCard` keeps largest shareholder, controlling shareholder,
+control status/basis, and ownership provenance separate. A minority stake or
+equity-method relationship does not establish control; sub-50% control requires
+an explicit basis plus official-filing evidence or corroboration from two
+single-source tool records on distinct domains.
+Related listed tickers must occur in the same supporting evidence, so an
+unsupported FLA ticker cannot re-enter through Senior's restatement.
+
 `src/tooling/` owns cross-cutting tool execution, audit hooks, argument policy, and untrusted-content inspection.
 
 `src/runtime_diagnostics.py` owns artifact completion/validity and publishability checks.

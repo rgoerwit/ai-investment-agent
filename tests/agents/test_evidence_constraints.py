@@ -49,3 +49,24 @@ def test_liquidity_is_order_relative_and_unknown_notional_cannot_hard_fail() -> 
 
     assert "Assess trading liquidity relative to the proposed order" in constraint
     assert "If order notional is unknown, do not infer a hard fail" in constraint
+
+
+def test_minority_largest_holder_and_no_majority_are_not_a_conflict() -> None:
+    state = _state("PROVEN")
+    state["entity_governance_card"] = {
+        "control_status": "NOT_CONTROLLED",
+        "largest_shareholder": {"name": "BenQ Materials Corp.", "pct": 14.82},
+    }
+
+    constraint = downstream_evidence_constraints(state)
+
+    assert "Do not call the issuer a controlled subsidiary" in constraint
+    assert "MAJORITY_HOLDER: NONE is compatible" in constraint
+    assert "14.82%" in constraint
+
+
+def test_parallel_value_trap_roic_na_is_analysis_quality_not_issuer_risk() -> None:
+    constraint = downstream_evidence_constraints(_state("PROVEN"))
+
+    assert "Value Trap ROIC: N/A is expected" in constraint
+    assert "Score 0.0 risk" in constraint

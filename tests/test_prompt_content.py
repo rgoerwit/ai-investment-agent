@@ -106,6 +106,23 @@ class TestForeignLanguageGuidancePromptContent:
         assert "MANAGEMENT_GUIDANCE" in msg
         assert "NOT_DISCLOSED_AFTER_TARGETED_SEARCH" in msg
 
+    def test_ownership_contract_separates_influence_from_control(self):
+        msg = get_prompt("foreign_language_analyst").system_message
+        for field in (
+            "Largest Shareholder",
+            "Control Status",
+            "Control Basis",
+            "Ownership Source URL",
+            "Ownership As Of",
+        ):
+            assert field in msg
+        assert "Largest shareholder is not a synonym for controlling shareholder" in msg
+        assert "20–50% interest normally indicates significant influence" in msg
+        assert "Never infer a ticker from memory" in msg
+        assert "PENDING_VALIDATION is an asserted pre-validation state" in msg
+        assert "Ownership Evidence Status: NOT_FOUND" in msg
+        assert "do not materialize the other ownership fields" in msg
+
 
 class TestPortfolioManagerPromptContent:
     """Guard PM handling of consultant no-coverage cases."""
@@ -113,8 +130,14 @@ class TestPortfolioManagerPromptContent:
     def test_portfolio_manager_prompt_makes_no_coverage_neutral(self):
         prompt = get_prompt("portfolio_manager")
         assert (
-            "should be noted without adding +0.25" in prompt.system_message
-        ), "PM prompt must keep plain ex-US no-coverage consultant cases neutral."
+            "Missing evidence and internal-agent disagreement are not issuer risk"
+            in prompt.system_message
+        ), "PM prompt must keep no-coverage and internal disagreements neutral."
+
+    def test_portfolio_manager_unverifiable_conflicts_are_zero_weight(self):
+        msg = get_prompt("portfolio_manager").system_message
+        assert "UNVERIFIABLE (+0.00, ANALYSIS_QUALITY only" in msg
+        assert "entity mismatch as ANALYSIS_QUALITY (+0.00)" in msg
 
     def test_portfolio_manager_prompt_mentions_idle_cash_leniency(self):
         prompt = get_prompt("portfolio_manager")

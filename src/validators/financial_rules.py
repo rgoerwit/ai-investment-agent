@@ -1056,11 +1056,28 @@ def detect_red_flags(
             candidate_count=len(transient_strength_labels),
         )
 
+    if guidance_bridge_unresolved and not canonical_distortion:
+        red_flags.append(
+            {
+                "type": "EARNINGS_DRIVER_EVIDENCE_GAP",
+                "severity": "WARNING",
+                "detail": "The latest-results evidence did not resolve the operating-to-net-income bridge, but structured evidence does not establish a material non-operating distortion.",
+                "action": "REVIEW",
+                "risk_penalty": 0.0,
+                "blocks_buy": True,
+                "rationale": "Treat the unresolved bridge as missing evidence, not as proof of a tax, M&A, accounting, or other causal driver. Verify the bridge before relying on reported earnings growth.",
+            }
+        )
+        logger.debug(
+            "red_flag_guidance_bridge_evidence_gap",
+            ticker=ticker,
+        )
+
     # Authoritative bridge requirements come only from structured evidence. A
     # narrative mention is a search/review trigger, not proof of a distortion.
     normalized_bridge_missing = (
         canonical_distortion and normalized_earnings_available not in {"YES", "N/A"}
-    ) or (guidance_bridge_unresolved and normalized_earnings_available != "YES")
+    )
     if normalized_bridge_missing:
         red_flags.append(
             {

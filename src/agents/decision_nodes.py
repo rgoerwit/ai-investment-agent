@@ -1568,7 +1568,6 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                     merged_data=merged_subset,
                     senior_metrics=metrics,
                     fla_report=state.get("foreign_language_report", "") or "",
-                    value_trap_report=state.get("value_trap_report", "") or "",
                 )
                 card_payload = card.to_dict()
                 entity_role = card.entity_role

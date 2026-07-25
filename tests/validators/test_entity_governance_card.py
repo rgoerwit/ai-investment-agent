@@ -91,18 +91,17 @@ class TestDeterministicHints:
 
 
 class TestReconciliation:
-    def _build(self, merged, senior_metrics, fla_report, value_trap_report=""):
+    def _build(self, merged, senior_metrics, fla_report):
         return build_card(
             ticker="TEST.X",
             company_name=merged.get("longName", "TEST"),
             merged_data=merged,
             senior_metrics=senior_metrics,
             fla_report=fla_report,
-            value_trap_report=value_trap_report,
         )
 
-    def test_youngone_clean(self):
-        """All three sources agree → confidence=clean, INTERMEDIATE_HOLDCO."""
+    def test_youngone_role_clean_without_promoting_minor_holder_to_control(self):
+        """Role agreement stays clean; a 29.09% holder is not automatically control."""
         card = self._build(
             merged={
                 "longName": "Youngone Holdings Co., Ltd.",
@@ -125,9 +124,8 @@ class TestReconciliation:
         assert card.confidence == "clean"
         assert any(e["ticker"] == "111770.KS" for e in card.related_listed)
         assert card.metric_scope == {"payout": "SEPARATE", "ocf": "CONSOLIDATED"}
-        assert card.controlling_shareholder is not None
-        assert card.controlling_shareholder.get("name") == "YMSA"
-        assert card.controlling_shareholder.get("pct") == 29.09
+        assert card.controlling_shareholder is None
+        assert card.control_status == "UNKNOWN"
         assert requires_structure_disclosure(card) is True
 
     def test_standalone_toyota(self):
@@ -193,25 +191,16 @@ class TestReconciliation:
         assert card.entity_role == "PURE_HOLDCO"
         assert card.confidence == "clean"
 
-    def test_value_trap_majority_holder_fills_controller_when_fla_silent(self):
+    def test_fla_silence_does_not_invent_controller(self):
         card = self._build(
             merged={"longName": "Youngone Holdings Co., Ltd."},
             senior_metrics={"listing_role": "PURE_HOLDCO", "parent_company": None},
             fla_report="ENTITY_ROLE_OBSERVED: PURE_HOLDCO",
-            value_trap_report=(
-                "### --- START VALUE_TRAP_BLOCK ---\n"
-                "OWNERSHIP:\n"
-                "  MAJORITY_HOLDER: YMSA (29.09%)\n"
-                "### --- END VALUE_TRAP_BLOCK ---"
-            ),
         )
-        assert card.controlling_shareholder == {
-            "name": "YMSA",
-            "pct": 29.09,
-            "source": "value_trap_majority_holder",
-        }
+        assert card.controlling_shareholder is None
+        assert card.control_status == "UNKNOWN"
 
-    def test_youngone_ymsa_survives_when_senior_parent_none(self):
+    def test_youngone_unverified_holder_is_not_promoted(self):
         card = self._build(
             merged={
                 "longName": "Youngone Holdings Co., Ltd.",
@@ -228,25 +217,21 @@ class TestReconciliation:
                 "Controlling Shareholder: YMSA (29.09%)\n"
                 "Related Listed Tickers: 111770.KS:SUBSIDIARY:100"
             ),
-            value_trap_report=(
-                "### --- START VALUE_TRAP_BLOCK ---\n"
-                "OWNERSHIP:\n"
-                "  MAJORITY_HOLDER: YMSA (29.09%)\n"
-                "### --- END VALUE_TRAP_BLOCK ---"
-            ),
         )
-        assert card.controlling_shareholder is not None
-        assert card.controlling_shareholder["name"] == "YMSA"
-        assert card.controlling_shareholder["pct"] == 29.09
-        assert card.controlling_shareholder["source"] == "fla_ownership"
+        assert card.controlling_shareholder is None
+        assert card.largest_shareholder is None
 
-    def test_controller_text_preserves_space_after_parenthetical_removal(self):
+    def test_verified_controller_text_preserves_space_after_parenthetical_removal(self):
         card = self._build(
             merged={"longName": "Youngone Holdings Co., Ltd."},
             senior_metrics={"listing_role": "PURE_HOLDCO"},
             fla_report=(
                 "ENTITY_ROLE_OBSERVED: PURE_HOLDCO\n"
+                "Largest Shareholder: Sung Ki-hak (Chairman) and related parties.\n"
                 "Controlling Shareholder: Sung Ki-hak (Chairman) and related parties."
+                "\nControl Status: CONTROLLED\n"
+                "Control Basis: VOTING_AGREEMENT\n"
+                "Ownership Evidence Status: VERIFIED_OFFICIAL_FILING"
             ),
         )
         assert card.controlling_shareholder is not None
@@ -265,7 +250,7 @@ class TestReconciliation:
         )
         assert card.controlling_shareholder is None
 
-    def test_senior_parent_company_still_fills_listed_subsidiary_parent(self):
+    def test_senior_parent_company_is_not_independent_control_evidence(self):
         card = self._build(
             merged={"longName": "Example Operating Co."},
             senior_metrics={
@@ -274,10 +259,8 @@ class TestReconciliation:
             },
             fla_report="ENTITY_ROLE_OBSERVED: LISTED_SUBSIDIARY",
         )
-        assert card.controlling_shareholder == {
-            "name": "Example Holdings (60.0%)",
-            "source": "senior_parent_company",
-        }
+        assert card.controlling_shareholder is None
+        assert card.control_status == "UNKNOWN"
 
 
 # ---------------------------------------------------------------------------

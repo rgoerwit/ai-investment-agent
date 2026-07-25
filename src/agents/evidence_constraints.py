@@ -17,7 +17,7 @@ def downstream_evidence_constraints(state: Mapping[str, Any]) -> str:
     """Return prompt constraints that must survive report summarization."""
     fundamentals = get_valid_artifact_content(state, "fundamentals_report") or ""
     if not isinstance(fundamentals, str):
-        return ""
+        fundamentals = ""
 
     constraints: list[str] = []
     if AUTHORITATIVE_CORRECTION_MARKER in fundamentals:
@@ -63,6 +63,33 @@ def downstream_evidence_constraints(state: Mapping[str, Any]) -> str:
             "acquisition, infer acquisition-led growth, or score M&A quality from "
             "that report unless M&A_CONTEXT_EVIDENCE is CITED."
         )
+
+    governance_card = state.get("entity_governance_card")
+    if isinstance(governance_card, Mapping):
+        control_status = str(governance_card.get("control_status") or "UNKNOWN").upper()
+        largest = governance_card.get("largest_shareholder")
+        largest_pct = largest.get("pct") if isinstance(largest, Mapping) else None
+        if control_status != "CONTROLLED":
+            constraints.append(
+                "Entity Governance Card control status is "
+                f"{control_status}. Do not call the issuer a controlled subsidiary, "
+                "attribute decisions to a parent/controller, or add parent-control "
+                "risk without stronger primary evidence that establishes control."
+            )
+        if isinstance(largest_pct, int | float) and largest_pct <= 50.0:
+            constraints.append(
+                f"The largest disclosed stake is {largest_pct:g}%, so "
+                "MAJORITY_HOLDER: NONE is compatible with the ownership evidence "
+                "and is not an internal data conflict."
+            )
+
+    constraints.append(
+        "Internal agent disagreement, missing tool coverage, and contract-required "
+        "N/A fields are analysis-quality issues, not issuer risk. In particular, "
+        "Value Trap ROIC: N/A is expected because that parallel agent does not receive "
+        "the later DATA_BLOCK. Score 0.0 risk unless a primary source confirms an "
+        "economic issuer fact."
+    )
 
     constraints.append(
         "Assess trading liquidity relative to the proposed order, not as an "

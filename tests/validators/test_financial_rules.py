@@ -163,6 +163,30 @@ class TestNormalizedEarningsRequiredFlag:
 
 
 class TestCanonicalManagementGuidanceFlags:
+    def test_unresolved_bridge_without_canonical_driver_is_evidence_gap(self):
+        metrics = _sparse_metrics("", strength=False)
+        metrics.update(
+            {
+                "guidance_coverage_status": "FOUND",
+                "guidance_bridge_status": "UNRESOLVED",
+                "material_nonoperating_driver": "UNKNOWN",
+                "driver_type": "UNKNOWN",
+                "normalized_earnings_available": "NO",
+            }
+        )
+
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "6782.TW")
+        flag_types = {flag["type"] for flag in flags}
+
+        assert "EARNINGS_DRIVER_EVIDENCE_GAP" in flag_types
+        assert "NORMALIZED_EARNINGS_REQUIRED" not in flag_types
+        gap = next(
+            flag for flag in flags if flag["type"] == "EARNINGS_DRIVER_EVIDENCE_GAP"
+        )
+        assert "does not establish" in gap["detail"]
+        assert gap["risk_penalty"] == 0.0
+        assert gap["blocks_buy"] is True
+
     def test_expiring_tax_credit_flags_baseline_without_growth_gate(self):
         metrics = _sparse_metrics("", strength=False)
         metrics.update(

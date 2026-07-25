@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
 from typing import Any
+from urllib.parse import urlsplit
 
 import structlog
 from langchain_core.messages import (
@@ -12,6 +15,51 @@ from langchain_core.messages import (
 )
 
 logger = structlog.get_logger(__name__)
+
+ToolEvidenceRecord = tuple[str | None, str, set[str]]
+
+_URL_RE = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
+_TRAILING_URL_PUNCTUATION = ".,;:!?)]}'"
+
+
+def normalize_http_url(value: str) -> str | None:
+    """Return a comparable HTTP(S) URL, or None for malformed/non-web values."""
+
+    candidate = value.strip().rstrip(_TRAILING_URL_PUNCTUATION)
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return None
+    return candidate.rstrip("/")
+
+
+def tool_evidence_records(
+    messages: Sequence[BaseMessage],
+) -> list[ToolEvidenceRecord]:
+    """Extract tool name, text, and normalized URLs from ToolMessages."""
+
+    records: list[ToolEvidenceRecord] = []
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        content = extract_string_content(message.content)
+        urls = {
+            normalized
+            for match in _URL_RE.finditer(content)
+            if (normalized := normalize_http_url(match.group(0)))
+        }
+        records.append((message.name, content, urls))
+    return records
+
+
+def tool_evidence_urls(messages: Sequence[BaseMessage]) -> set[str]:
+    """Return normalized URLs that actually occurred in tool output."""
+
+    return {
+        url for _name, _content, urls in tool_evidence_records(messages) for url in urls
+    }
 
 
 def filter_messages_by_agent(
