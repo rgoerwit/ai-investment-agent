@@ -399,13 +399,11 @@ def _sanitize_fundamentals_output(
         )
 
     latest_quarter_date = payload.get("latest_quarter_date")
-    latest_quarter_date_reconciled = (
-        has_structured_payload
-        and payload.get("_latest_quarter_date_source")
-        == "reconciled_most_recent_quarter"
-    )
+    latest_quarter_date_authoritative = has_structured_payload and payload.get(
+        "_latest_quarter_date_source"
+    ) in {"yfinance_quarterly", "reconciled_most_recent_quarter"}
     if (
-        latest_quarter_date_reconciled
+        latest_quarter_date_authoritative
         and isinstance(latest_quarter_date, str)
         and latest_quarter_date
     ):
@@ -413,6 +411,12 @@ def _sanitize_fundamentals_output(
             updated_body,
             "LATEST_QUARTER_DATE",
             latest_quarter_date,
+        )
+        updated_body = re.sub(
+            r"(?m)^((?:REVENUE|EARNINGS)_GROWTH_MRQ:[^\n]*?"
+            r"\(as of\s*)\d{4}-\d{2}-\d{2}(\))",
+            lambda match: (f"{match.group(1)}{latest_quarter_date}{match.group(2)}"),
+            updated_body,
         )
 
     if _invalid_adr_routing(updated_body, ticker):

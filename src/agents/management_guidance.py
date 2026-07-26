@@ -376,16 +376,19 @@ def normalize_management_guidance_output(
     source_url = extract_block_text_value(block_body, "SOURCE_URL")
 
     bridge_status = "NOT_APPLICABLE"
-    missing_bridge_values = coverage_status == "FOUND" and (
+    incomplete_guidance = coverage_status == "FOUND" and (
         _is_missing_guidance_value(operating_guidance)
         or _is_missing_guidance_value(net_income_guidance)
     )
-    if missing_bridge_values:
+    bridge_required = direction == "OP_UP_NET_DOWN" or material_driver == "YES"
+    if incomplete_guidance:
         # A document URL is not proof that the forward earnings bridge was
-        # actually extracted. Fail conservatively so trailing EPS cannot be
-        # scored as durable merely because a results-release landing page was
-        # found.
-        bridge_status = "UNRESOLVED"
+        # actually extracted. Keep the earnings baseline unknown so trailing EPS
+        # cannot be scored as durable. Reserve UNRESOLVED for evidence that
+        # actually requires an operating-to-net-income bridge; otherwise a
+        # revenue-only source would block BUY more strongly than no causal
+        # evidence at all.
+        bridge_status = "UNRESOLVED" if bridge_required else "NOT_APPLICABLE"
         block_body = replace_or_append_block_line(
             block_body,
             "OPERATING_VS_NET_DIRECTION",

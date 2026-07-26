@@ -92,7 +92,17 @@ SOURCE_QUALITY = {
     "tavily_extraction": 4,
     "proxy": 2,
 }
-PRESERVED_FIELD_PROVENANCE = frozenset({"revenueGrowth", "earningsGrowth"})
+PRESERVED_FIELD_PROVENANCE = frozenset(
+    {
+        "revenueGrowth",
+        "earningsGrowth",
+        "revenueGrowth_MRQ",
+        "earningsGrowth_MRQ",
+        "latest_quarter_date",
+        "mrq_comparison_base_status",
+        "mrq_comparison_base_margin_delta_bps",
+    }
+)
 FORWARD_PE_OUTLIER_THRESHOLD = 200.0
 FORWARD_PE_REFERENCE_MAX = 100.0
 FORWARD_PE_OUTLIER_RATIO = 5.0

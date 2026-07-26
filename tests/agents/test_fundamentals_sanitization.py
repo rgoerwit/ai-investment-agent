@@ -64,6 +64,31 @@ def test_6782_fy_growth_is_preserved_without_relabeling_it_ttm() -> None:
     assert "EARNINGS_GROWTH_TTM: N/A" in sanitized
 
 
+def test_6782_mrq_growth_stays_bound_to_its_statement_date() -> None:
+    content = """### --- START DATA_BLOCK ---
+REVENUE_GROWTH_MRQ: 16.9% (as of 2026-03-31)
+EARNINGS_GROWTH_MRQ: 102.8%
+LATEST_QUARTER_DATE: 2026-03-31
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "latest_quarter_date": "2025-12-31",
+            "_latest_quarter_date_source": "yfinance_quarterly",
+            "revenueGrowth_MRQ": 0.168693,
+            "_revenueGrowth_MRQ_source": "calculated_from_quarterly",
+            "earningsGrowth_MRQ": 1.028262,
+            "_earningsGrowth_MRQ_source": "calculated_from_quarterly",
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "6782.TW")
+
+    assert "REVENUE_GROWTH_MRQ: 16.9% (as of 2025-12-31)" in sanitized
+    assert "LATEST_QUARTER_DATE: 2025-12-31" in sanitized
+    assert "2026-03-31" not in sanitized
+
+
 def test_static_sector_pe_reference_provenance_is_promoted() -> None:
     content = """### --- START DATA_BLOCK ---
 SECTOR_MEDIAN_PE: 22

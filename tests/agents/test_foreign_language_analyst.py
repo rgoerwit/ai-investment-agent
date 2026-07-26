@@ -342,6 +342,41 @@ STATUS: INSUFFICIENT_DATA
         assert "MATERIAL_NONOPERATING_DRIVER: UNKNOWN" in normalized
         assert "DRIVER_TYPE: UNKNOWN" in normalized
         assert "EARNINGS_BASELINE_STATUS: UNKNOWN" in normalized
+        assert "GUIDANCE_BRIDGE_STATUS: NOT_APPLICABLE" in normalized
+
+    def test_incomplete_causal_guidance_keeps_bridge_unresolved(self):
+        content = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_DATE: 2026-05-08
+SOURCE_URL: https://example.com/results-release
+OPERATING_PROFIT_GUIDANCE: JPY 12.3 billion, up year over year
+NET_INCOME_GUIDANCE: N/A
+OPERATING_VS_NET_DIRECTION: OP_UP_NET_DOWN
+MATERIAL_NONOPERATING_DRIVER: YES
+DRIVER_TYPE: TAX_CREDIT
+DRIVER_PERSISTENCE: EXPIRING
+EARNINGS_BASELINE_STATUS: TEMPORARILY_BOOSTED
+NORMALIZED_EARNINGS_AVAILABLE: NO
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = """#### results_package
+STATUS: COMPLETED
+#### earnings_bridge
+STATUS: COMPLETED
+#### statutory_filing_api
+STATUS: COMPLETED
+#### guidance_extract
+STATUS: INSUFFICIENT_DATA
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "6745.T",
+            management_guidance_evidence=evidence,
+        )
+
+        assert "EARNINGS_BASELINE_STATUS: TEMPORARILY_BOOSTED" in normalized
         assert "GUIDANCE_BRIDGE_STATUS: UNRESOLVED" in normalized
 
     def test_missing_guidance_block_is_repaired_without_erasing_useful_report(self):
