@@ -36,14 +36,19 @@ from . import message_utils, support
 from . import runtime as agent_runtime
 from .capital_structure import promote_capital_structure
 from .evidence_constraints import AUTHORITATIVE_CORRECTION_MARKER
-from .foreign_language_evidence import normalize_foreign_language_evidence
+from .foreign_language_evidence import (
+    normalize_foreign_language_evidence,
+    promote_foreign_growth_evidence,
+)
 from .fundamentals_reconciler import (
     HORIZON_FIELD_RAW_KEYS,
     append_analyst_coverage_data_quality_note,
     extract_raw_metrics_payload,
     reconcile_high_risk_fields,
     reconcile_score_consistency,
+    statement_mrq_period_lag_note,
     withhold_eps_growth_for_unusable_baseline,
+    withhold_unsupported_capex_growth,
 )
 from .management_guidance import (
     _preload_management_guidance_evidence,
@@ -81,21 +86,29 @@ values when evidence is absent; never omit these fields.
     end_marker=fenced_end("DATA_BLOCK"),
 )
 
-_FOREIGN_LANGUAGE_GUIDANCE_RETRY_SUFFIX = """
+_FOREIGN_LANGUAGE_EVIDENCE_RETRY_SUFFIX = """
 CRITICAL EVIDENCE CORRECTION:
-Your first response omitted or malformed the mandatory MANAGEMENT_GUIDANCE block.
+Your first response omitted or malformed a mandatory evidence block.
 Run targeted searches of the latest results release, presentation, transcript, and
 statutory filing for management's forward guidance and material tax, subsidy,
-regulatory, accounting, or other non-operating earnings drivers. Then emit exactly
-one parseable block using these markers:
-{start_marker}
+regulatory, accounting, or other non-operating earnings drivers. Also locate the
+newest official income statement and inspect its document before extracting current
+and year-ago comparative revenue and earnings. Then emit one parseable block for
+each of these marker pairs:
+{guidance_start}
 ...
-{end_marker}
+{guidance_end}
+{results_start}
+...
+{results_end}
 If guidance is not disclosed or a search fails, record that explicit coverage status
-and list SEARCHES_COMPLETED. Do not silently omit the block.
+and list SEARCHES_COMPLETED. Use NOT_FOUND or SEARCH_FAILED for latest-results
+coverage when appropriate. Do not silently omit either block.
 """.format(
-    start_marker=fenced_start("MANAGEMENT_GUIDANCE"),
-    end_marker=fenced_end("MANAGEMENT_GUIDANCE"),
+    guidance_start=fenced_start("MANAGEMENT_GUIDANCE"),
+    guidance_end=fenced_end("MANAGEMENT_GUIDANCE"),
+    results_start=fenced_start("LATEST_RESULTS"),
+    results_end=fenced_end("LATEST_RESULTS"),
 )
 
 _QUARANTINED_FORWARD_KEYS = ("PE_RATIO_FORWARD", "PEG_RATIO")
@@ -141,6 +154,18 @@ _NARRATIVE_METRIC_PATTERNS: dict[str, re.Pattern[str]] = {
     "DE_RATIO": re.compile(
         r"(?im)^\s*(?:[-*]\s*)?\*{0,2}(?:debt\s*(?:to|/)\s*equity|d/e)"
         r"\*{0,2}\s*:\s*\*{0,2}\s*(-?\d+(?:\.\d+)?)\s*(%)?"
+    ),
+}
+_NARRATIVE_SCORE_PATTERNS: dict[str, re.Pattern[str]] = {
+    "HEALTH": re.compile(
+        r"(?ims)^###\s+FINANCIAL HEALTH DETAIL\b.*?"
+        r"^\*\*Score\*\*:\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)"
+        r"\s*\(Adjusted:\s*(\d+(?:\.\d+)?)%\)"
+    ),
+    "GROWTH": re.compile(
+        r"(?ims)^###\s+GROWTH TRANSITION DETAIL\b.*?"
+        r"^\*\*Score\*\*:\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)"
+        r"\s*\(Adjusted:\s*(\d+(?:\.\d+)?)%\)"
     ),
 }
 
@@ -192,6 +217,37 @@ def _authoritative_metric_warning(
             f"- {field}: preceding labeled narrative={narrative_match.group(1)}"
             f"{'%' if narrative_match.lastindex and narrative_match.lastindex > 1 and narrative_match.group(2) else ''}; "
             f"authoritative DATA_BLOCK={authoritative_raw}."
+        )
+
+    for kind, pattern in _NARRATIVE_SCORE_PATTERNS.items():
+        narrative_match = pattern.search(narrative)
+        raw_score = extract_block_text_value(updated_body, f"RAW_{kind}_SCORE")
+        adjusted_score = extract_block_text_value(
+            updated_body, f"ADJUSTED_{kind}_SCORE"
+        )
+        raw_match = re.search(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", raw_score)
+        adjusted_match = re.search(r"(\d+(?:\.\d+)?)\s*%", adjusted_score)
+        if not narrative_match or not raw_match or not adjusted_match:
+            continue
+        narrative_values = tuple(float(narrative_match.group(i)) for i in range(1, 4))
+        authoritative_values = (
+            float(raw_match.group(1)),
+            float(raw_match.group(2)),
+            float(adjusted_match.group(1)),
+        )
+        if all(
+            abs(narrative_value - authoritative_value) <= 0.15
+            for narrative_value, authoritative_value in zip(
+                narrative_values,
+                authoritative_values,
+                strict=True,
+            )
+        ):
+            continue
+        conflicts.append(
+            f"- {kind}_SCORE: narrative={narrative_match.group(1)}/"
+            f"{narrative_match.group(2)} ({narrative_match.group(3)}%); "
+            f"authoritative DATA_BLOCK={raw_score} ({adjusted_score})."
         )
 
     if not conflicts:
@@ -297,6 +353,44 @@ def _valuation_input_reliability(payload: dict[str, Any]) -> str:
     return "USABLE"
 
 
+def _append_metric_provenance(body: str, payload: dict[str, Any]) -> str:
+    field_sources = payload.get("_field_sources")
+    if not isinstance(field_sources, dict):
+        field_sources = {}
+
+    updated = body
+    forward_eps = payload.get("forwardEps")
+    if isinstance(forward_eps, int | float) and not isinstance(forward_eps, bool):
+        updated = replace_or_append_block_line(
+            updated,
+            "FORWARD_EPS",
+            f"{float(forward_eps):.2f}",
+        )
+    updated = replace_or_append_block_line(
+        updated,
+        "FORWARD_EPS_SOURCE",
+        str(field_sources.get("forwardEps") or "UNKNOWN"),
+    )
+    updated = replace_or_append_block_line(
+        updated,
+        "PE_RATIO_FORWARD_SOURCE",
+        str(field_sources.get("forwardPE") or "UNKNOWN"),
+    )
+
+    cfo_ni_years = payload.get("moat_cfoToNiYears")
+    if isinstance(cfo_ni_years, int | float) and not isinstance(cfo_ni_years, bool):
+        updated = replace_or_append_block_line(
+            updated,
+            "MOAT_CFO_NI_YEARS",
+            f"{float(cfo_ni_years):g}",
+        )
+    return replace_or_append_block_line(
+        updated,
+        "MOAT_CFO_NI_SOURCE",
+        str(field_sources.get("moat_cfoToNiAvg") or "UNKNOWN"),
+    )
+
+
 def _sanitize_fundamentals_output(
     content: str,
     raw_data: str,
@@ -327,6 +421,23 @@ def _sanitize_fundamentals_output(
     corrective = False
     if has_structured_payload:
         updated_body = reconcile_high_risk_fields(updated_body, payload)
+        updated_body = _append_metric_provenance(updated_body, payload)
+        mrq_lag_note = statement_mrq_period_lag_note(payload)
+        if mrq_lag_note:
+            existing_note = extract_block_text_value(
+                updated_body,
+                "GROWTH_DATA_QUALITY_NOTE",
+            )
+            combined_note = (
+                f"{existing_note} {mrq_lag_note}".strip()
+                if mrq_lag_note not in existing_note
+                else existing_note
+            )
+            updated_body = replace_or_append_block_line(
+                updated_body,
+                "GROWTH_DATA_QUALITY_NOTE",
+                combined_note,
+            )
 
     updated_body, guidance_promoted = promote_management_guidance(
         updated_body,
@@ -334,6 +445,64 @@ def _sanitize_fundamentals_output(
     )
     if guidance_promoted:
         logger.info("management_guidance_promoted", ticker=ticker)
+
+    updated_body, growth_evidence_promoted = promote_foreign_growth_evidence(
+        updated_body,
+        foreign_data,
+    )
+    if growth_evidence_promoted:
+        logger.info("foreign_growth_evidence_promoted", ticker=ticker)
+    latest_results_authority = extract_block_text_value(
+        updated_body,
+        "LATEST_RESULTS_SOURCE_AUTHORITY",
+    ).upper()
+    latest_results_end = extract_block_text_value(
+        updated_body,
+        "LATEST_RESULTS_PERIOD_END",
+    )
+    statement_mrq_period = (
+        payload.get("latest_quarter_date")
+        if payload.get("_latest_quarter_date_source") == "yfinance_quarterly"
+        and any(
+            payload.get(source_field) == "calculated_from_quarterly"
+            for source_field in (
+                "_revenueGrowth_MRQ_source",
+                "_earningsGrowth_MRQ_source",
+            )
+        )
+        else None
+    )
+    if (
+        latest_results_authority == "PRIMARY"
+        and isinstance(statement_mrq_period, str)
+        and latest_results_end
+    ):
+        try:
+            newer_results_exist = datetime.fromisoformat(
+                latest_results_end
+            ) > datetime.fromisoformat(statement_mrq_period)
+        except ValueError:
+            newer_results_exist = False
+        if newer_results_exist:
+            latest_period = extract_block_text_value(
+                updated_body,
+                "LATEST_RESULTS_PERIOD",
+            )
+            latest_note = (
+                f"Newer primary results exist for {latest_period or latest_results_end}; "
+                f"statement-derived MRQ growth remains aligned to "
+                f"{statement_mrq_period}."
+            )
+            existing_note = extract_block_text_value(
+                updated_body,
+                "GROWTH_DATA_QUALITY_NOTE",
+            )
+            if latest_note not in existing_note:
+                updated_body = replace_or_append_block_line(
+                    updated_body,
+                    "GROWTH_DATA_QUALITY_NOTE",
+                    f"{existing_note} {latest_note}".strip(),
+                )
 
     updated_body, capital_structure_promoted = promote_capital_structure(
         updated_body,
@@ -349,6 +518,16 @@ def _sanitize_fundamentals_output(
         corrective = True
         logger.warning(
             "eps_growth_credit_withheld_for_unusable_baseline",
+            ticker=ticker,
+        )
+
+    updated_body, capex_growth_withheld = withhold_unsupported_capex_growth(
+        updated_body
+    )
+    if capex_growth_withheld:
+        corrective = True
+        logger.warning(
+            "capex_growth_credit_withheld_for_unsupported_evidence",
             ticker=ticker,
         )
 
@@ -412,12 +591,49 @@ def _sanitize_fundamentals_output(
             "LATEST_QUARTER_DATE",
             latest_quarter_date,
         )
-        updated_body = re.sub(
-            r"(?m)^((?:REVENUE|EARNINGS)_GROWTH_MRQ:[^\n]*?"
-            r"\(as of\s*)\d{4}-\d{2}-\d{2}(\))",
-            lambda match: (f"{match.group(1)}{latest_quarter_date}{match.group(2)}"),
-            updated_body,
+        mrq_source_fields = {
+            "REVENUE_GROWTH_MRQ": "_revenueGrowth_MRQ_source",
+            "EARNINGS_GROWTH_MRQ": "_earningsGrowth_MRQ_source",
+        }
+        statement_period = (
+            latest_quarter_date
+            if payload.get("_latest_quarter_date_source") == "yfinance_quarterly"
+            else None
         )
+        for field_name, source_field in mrq_source_fields.items():
+            value = extract_block_text_value(updated_body, field_name)
+            if not value or value.upper().startswith(("N/A", "NA", "NONE")):
+                continue
+            if (
+                statement_period is None
+                or payload.get(source_field) != "calculated_from_quarterly"
+            ):
+                unbound_value = re.sub(
+                    r"\s*\(as of\s*\d{4}-\d{2}-\d{2}\)",
+                    "",
+                    value,
+                    flags=re.IGNORECASE,
+                ).strip()
+                if unbound_value != value:
+                    updated_body = replace_or_append_block_line(
+                        updated_body,
+                        field_name,
+                        unbound_value,
+                    )
+                continue
+            value = re.sub(
+                r"\(as of\s*\d{4}-\d{2}-\d{2}\)",
+                f"(as of {statement_period})",
+                value,
+                flags=re.IGNORECASE,
+            )
+            if "(as of" not in value.lower():
+                value = f"{value} (as of {statement_period})"
+            updated_body = replace_or_append_block_line(
+                updated_body,
+                field_name,
+                value,
+            )
 
     if _invalid_adr_routing(updated_body, ticker):
         corrective = True
@@ -477,17 +693,14 @@ def _sanitize_fundamentals_output(
     block_index = content.rfind(block_with_markers)
     if block_index < 0:
         return content
-    narrative = content[:block_index]
+    content_before_block = content[:block_index]
+    content_after_block = content[block_index + len(block_with_markers) :]
+    narrative = content_before_block + content_after_block
     warning = _authoritative_metric_warning(narrative, updated_body)
     if updated_body == block_body and not warning:
         return content
     updated_block = build_fenced_block("DATA_BLOCK", updated_body.rstrip())
-    return (
-        narrative
-        + warning
-        + updated_block
-        + content[block_index + len(block_with_markers) :]
-    )
+    return content_before_block + warning + updated_block + content_after_block
 
 
 def _normalize_structured_output(
@@ -510,6 +723,7 @@ def _normalize_structured_output(
             guidance_normalized,
             evidence_messages or [],
             ticker=ticker,
+            supplemental_evidence=management_guidance_evidence,
         )
 
     if agent_key == "value_trap_detector":
@@ -564,7 +778,9 @@ def _should_retry_output(content: str, agent_key: str) -> bool:
     if agent_key == "fundamentals_analyst":
         return not validate_required_output(agent_key, content)["ok"]
     if agent_key == "foreign_language_analyst":
-        return not validate_required_output(agent_key, content)["ok"]
+        return not validate_required_output(agent_key, content)[
+            "ok"
+        ] or not has_parseable_fenced_block(content, "LATEST_RESULTS")
     return False
 
 
@@ -573,11 +789,13 @@ def _build_retry_invocation_messages(
 ) -> list[Any]:
     """Add the owning agent's structured-output correction for a retry."""
     if agent_key == "foreign_language_analyst":
-        if validate_required_output(agent_key, content)["ok"]:
+        if validate_required_output(agent_key, content)[
+            "ok"
+        ] and has_parseable_fenced_block(content, "LATEST_RESULTS"):
             return invocation_messages
         return [
             *invocation_messages,
-            HumanMessage(content=_FOREIGN_LANGUAGE_GUIDANCE_RETRY_SUFFIX.strip()),
+            HumanMessage(content=_FOREIGN_LANGUAGE_EVIDENCE_RETRY_SUFFIX.strip()),
         ]
 
     if (

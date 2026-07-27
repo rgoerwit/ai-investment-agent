@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from datetime import date
+from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit
 
 import structlog
 from langchain_core.messages import BaseMessage
+
+from src.data_block_utils import replace_or_append_block_line
 
 from .message_utils import (
     ToolEvidenceRecord,
@@ -57,6 +61,46 @@ _CORPORATE_SUFFIXES = {
     "plc",
     "sa",
 }
+_CAPACITY_EXPANSION_TERMS = (
+    "capacity expansion",
+    "capacity expansions",
+    "facility expansion",
+    "facility buildout",
+    "facility build-out",
+    "new production line",
+    "new production lines",
+    "capex",
+)
+_FACILITY_STATUS_TERMS = {
+    "UNDER_CONSTRUCTION": ("under construction", "being built", "construction"),
+    "RAMPING": ("ramping", "ramp-up", "ramp up"),
+    "AT_CAPACITY": ("at capacity", "full capacity"),
+    "NONE": ("no expansion", "no buildout", "no facility expansion"),
+}
+_PREFLIGHT_RESULT_RE = re.compile(r"(?is)<result\b[^>]*>(.*?)</result>")
+_LATEST_RESULTS_FIELDS = (
+    "LATEST_RESULTS_PERIOD",
+    "LATEST_RESULTS_PERIOD_END",
+    "LATEST_RESULTS_PRIOR_PERIOD",
+    "LATEST_RESULTS_PRIOR_PERIOD_END",
+    "LATEST_RESULTS_PERIOD_MONTHS",
+    "LATEST_RESULTS_CURRENCY",
+    "LATEST_RESULTS_REPORTING_UNIT",
+    "LATEST_RESULTS_REVENUE",
+    "LATEST_RESULTS_PRIOR_REVENUE",
+    "LATEST_RESULTS_EARNINGS",
+    "LATEST_RESULTS_PRIOR_EARNINGS",
+    "LATEST_RESULTS_EARNINGS_SCOPE",
+    "LATEST_RESULTS_SOURCE_URL",
+)
+_LATEST_RESULTS_NUMERIC_FIELDS = (
+    "LATEST_RESULTS_REVENUE",
+    "LATEST_RESULTS_PRIOR_REVENUE",
+    "LATEST_RESULTS_EARNINGS",
+    "LATEST_RESULTS_PRIOR_EARNINGS",
+)
+_PRIMARY_EVIDENCE_TOOLS = frozenset({"get_official_document", "get_official_filings"})
+_NUMBER_TOKEN_RE = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?(?![\w.])")
 
 
 def _field(report: str, label: str) -> str:
@@ -115,7 +159,209 @@ def _claim_in_text(text: str, holder: str, pct: float | None) -> bool:
 
 
 def _is_official_filing(tool_name: str | None) -> bool:
-    return tool_name == "get_official_filings"
+    return tool_name in _PRIMARY_EVIDENCE_TOOLS
+
+
+def _normalized_text(value: str) -> str:
+    return " ".join(value.casefold().split())
+
+
+def _exact_decimal(value: str) -> Decimal | None:
+    candidate = value.strip()
+    if not re.fullmatch(r"-?\d[\d,]*(?:\.\d+)?", candidate):
+        return None
+    try:
+        return Decimal(candidate.replace(",", ""))
+    except InvalidOperation:
+        return None
+
+
+def _evidence_has_decimal(content: str, expected: Decimal) -> bool:
+    return any(
+        parsed == expected
+        for token in _NUMBER_TOKEN_RE.findall(content)
+        if (parsed := _exact_decimal(token)) is not None
+    )
+
+
+def _valid_comparative_period(
+    current_period_end: str,
+    prior_period_end: str,
+    period_months: str,
+) -> bool:
+    try:
+        current = date.fromisoformat(current_period_end)
+        prior = date.fromisoformat(prior_period_end)
+        months = int(period_months)
+    except (TypeError, ValueError):
+        return False
+    delta_days = (current - prior).days
+    return 1 <= months <= 12 and 320 <= delta_days <= 410
+
+
+def _latest_results_record_supports(
+    record: ToolEvidenceRecord,
+    values: dict[str, str],
+    decimals: dict[str, Decimal],
+) -> bool:
+    content = record[1]
+    normalized_content = _normalized_text(content)
+    required_text = (
+        "LATEST_RESULTS_PERIOD",
+        "LATEST_RESULTS_PERIOD_END",
+        "LATEST_RESULTS_PRIOR_PERIOD",
+        "LATEST_RESULTS_PRIOR_PERIOD_END",
+        "LATEST_RESULTS_CURRENCY",
+        "LATEST_RESULTS_REPORTING_UNIT",
+        "LATEST_RESULTS_EARNINGS_SCOPE",
+    )
+    if any(
+        _normalized_text(values[field]) not in normalized_content
+        for field in required_text
+    ):
+        return False
+    return all(
+        _evidence_has_decimal(content, decimals[field])
+        for field in _LATEST_RESULTS_NUMERIC_FIELDS
+    )
+
+
+def _normalize_latest_results(
+    report: str,
+    records: list[ToolEvidenceRecord],
+    *,
+    ticker: str,
+) -> str:
+    coverage = _field(report, "LATEST_RESULTS_COVERAGE_STATUS").upper()
+    asserted = any(_field(report, field) for field in _LATEST_RESULTS_FIELDS)
+    if coverage != "FOUND":
+        if not asserted:
+            return report
+        return _replace_or_add_field(
+            report,
+            "LATEST_RESULTS_SOURCE_AUTHORITY",
+            "UNKNOWN",
+            section="START LATEST_RESULTS",
+        )
+
+    values = {field: _field(report, field) for field in _LATEST_RESULTS_FIELDS}
+    source_url = normalize_http_url(values["LATEST_RESULTS_SOURCE_URL"])
+    decimals = {
+        field: parsed
+        for field in _LATEST_RESULTS_NUMERIC_FIELDS
+        if (parsed := _exact_decimal(values[field])) is not None
+    }
+    required_text_values = (
+        values["LATEST_RESULTS_PERIOD"],
+        values["LATEST_RESULTS_PRIOR_PERIOD"],
+        values["LATEST_RESULTS_CURRENCY"],
+        values["LATEST_RESULTS_REPORTING_UNIT"],
+        values["LATEST_RESULTS_EARNINGS_SCOPE"],
+    )
+    structurally_valid = (
+        all(value and value.upper() not in _UNKNOWN for value in required_text_values)
+        and len(decimals) == len(_LATEST_RESULTS_NUMERIC_FIELDS)
+        and _valid_comparative_period(
+            values["LATEST_RESULTS_PERIOD_END"],
+            values["LATEST_RESULTS_PRIOR_PERIOD_END"],
+            values["LATEST_RESULTS_PERIOD_MONTHS"],
+        )
+    )
+
+    candidate_records = [
+        record
+        for record in records
+        if (
+            source_url in record[2]
+            if source_url
+            else record[0] == "get_official_filings"
+        )
+    ]
+    supporting_records = (
+        [
+            record
+            for record in candidate_records
+            if _latest_results_record_supports(record, values, decimals)
+        ]
+        if structurally_valid
+        else []
+    )
+    primary = any(_is_official_filing(record[0]) for record in supporting_records)
+    authority = (
+        "PRIMARY" if primary else "SECONDARY" if supporting_records else "UNSUPPORTED"
+    )
+
+    normalized = _replace_or_add_field(
+        report,
+        "LATEST_RESULTS_SOURCE_AUTHORITY",
+        authority,
+        section="START LATEST_RESULTS",
+    )
+    if not primary:
+        normalized = _replace_or_add_field(
+            normalized,
+            "LATEST_RESULTS_REVENUE_GROWTH_YOY",
+            "N/A",
+            section="START LATEST_RESULTS",
+        )
+        normalized = _replace_or_add_field(
+            normalized,
+            "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
+            "N/A",
+            section="START LATEST_RESULTS",
+        )
+        if authority == "UNSUPPORTED":
+            logger.warning(
+                "fla_latest_results_evidence_rejected",
+                ticker=ticker,
+                source_url_present=source_url is not None,
+            )
+        return normalized
+
+    revenue_prior = decimals["LATEST_RESULTS_PRIOR_REVENUE"]
+    earnings_prior = decimals["LATEST_RESULTS_PRIOR_EARNINGS"]
+    revenue_growth = (
+        (decimals["LATEST_RESULTS_REVENUE"] - revenue_prior) / revenue_prior
+        if revenue_prior > 0
+        else None
+    )
+    earnings_growth = (
+        (decimals["LATEST_RESULTS_EARNINGS"] - earnings_prior) / earnings_prior
+        if earnings_prior > 0
+        else None
+    )
+    normalized = _replace_or_add_field(
+        normalized,
+        "LATEST_RESULTS_REVENUE_GROWTH_YOY",
+        f"{revenue_growth * 100:.1f}%" if revenue_growth is not None else "N/A",
+        section="START LATEST_RESULTS",
+    )
+    return _replace_or_add_field(
+        normalized,
+        "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
+        f"{earnings_growth * 100:.1f}%" if earnings_growth is not None else "N/A",
+        section="START LATEST_RESULTS",
+    )
+
+
+def _preflight_capacity_records(
+    supplemental_evidence: str,
+    pct_token: str,
+) -> list[ToolEvidenceRecord]:
+    """Recover exact capacity claims from code-owned preflight search results."""
+    records: list[ToolEvidenceRecord] = []
+    pct_pattern = re.compile(rf"(?<!\d){re.escape(pct_token)}(?:0+)?\s*%")
+    for block in _PREFLIGHT_RESULT_RE.findall(supplemental_evidence or ""):
+        if "capacity" not in block.casefold() or not pct_pattern.search(block):
+            continue
+        urls = {
+            normalized
+            for raw_url in re.findall(r"(?is)<url>\s*(.*?)\s*</url>", block)
+            if (normalized := normalize_http_url(raw_url))
+        }
+        if urls:
+            records.append(("management_guidance_preflight", block, urls))
+    return records
 
 
 def _normalized_relationship(relationship: str) -> str:
@@ -374,6 +620,7 @@ def _normalize_capacity(
     records: list[ToolEvidenceRecord],
     *,
     ticker: str,
+    supplemental_evidence: str = "",
 ) -> str:
     capacity = _field(report, "CAPACITY_UTILIZATION")
     source_field = _field(report, "CAPACITY_UTILIZATION_SOURCE_URL")
@@ -385,15 +632,49 @@ def _normalize_capacity(
     pct_match = re.search(r"(?<!\d)(\d{1,3}(?:\.\d+)?)\s*%", capacity)
     source_url = source_field
     normalized_source = normalize_http_url(source_url)
-    supported = False
-    if pct_match and normalized_source:
+    matching_records: list[ToolEvidenceRecord] = []
+    if pct_match:
         pct_token = pct_match.group(1)
-        supported = any(
-            normalized_source in urls
-            and "capacity" in content.casefold()
-            and re.search(rf"(?<!\d){re.escape(pct_token)}(?:0+)?\s*%", content)
-            for _name, content, urls in records
-        )
+        candidate_records = [
+            *records,
+            *_preflight_capacity_records(supplemental_evidence, pct_token),
+        ]
+        matching_records = [
+            record
+            for record in candidate_records
+            if "capacity" in record[1].casefold()
+            and re.search(
+                rf"(?<!\d){re.escape(pct_token)}(?:0+)?\s*%",
+                record[1],
+            )
+        ]
+        if normalized_source:
+            matching_records = [
+                record for record in matching_records if normalized_source in record[2]
+            ]
+        elif (
+            len(
+                candidate_urls := {
+                    url for _name, _content, urls in matching_records for url in urls
+                }
+            )
+            == 1
+        ):
+            normalized_source = next(iter(candidate_urls))
+            source_url = normalized_source
+
+    supported = bool(matching_records and normalized_source)
+    evidence_status = (
+        "PRIMARY"
+        if supported
+        and any(_is_official_filing(name) for name, _content, _urls in matching_records)
+        else "SECONDARY"
+        if supported
+        else "UNSUPPORTED"
+        if capacity and capacity.upper() not in _UNKNOWN
+        else "UNKNOWN"
+    )
+    supporting_text = "\n".join(content for _name, content, _urls in matching_records)
 
     normalized = report
     if capacity and capacity.upper() not in _UNKNOWN and not supported:
@@ -414,11 +695,14 @@ def _normalize_capacity(
         source_url if supported else "N/A",
         section="OUTPUT FORMAT",
     )
-    capacity_as_of = _field(report, "CAPACITY_UTILIZATION_AS_OF")
-    evidence_text = "\n".join(
-        content for _name, content, urls in records if normalized_source in urls
+    normalized = _replace_or_add_field(
+        normalized,
+        "CAPACITY_EVIDENCE_STATUS",
+        evidence_status,
+        section="OUTPUT FORMAT",
     )
-    if not capacity_as_of or capacity_as_of not in evidence_text:
+    capacity_as_of = _field(report, "CAPACITY_UTILIZATION_AS_OF")
+    if not capacity_as_of or capacity_as_of not in supporting_text:
         capacity_as_of = "UNKNOWN"
     normalized = _replace_or_add_field(
         normalized,
@@ -426,7 +710,40 @@ def _normalize_capacity(
         capacity_as_of if supported else "UNKNOWN",
         section="OUTPUT FORMAT",
     )
-    return normalized
+
+    facility_status = _field(report, "FACILITY_BUILDOUT_STATUS").upper()
+    facility_supported = bool(
+        supported
+        and facility_status in _FACILITY_STATUS_TERMS
+        and any(
+            term in supporting_text.casefold()
+            for term in _FACILITY_STATUS_TERMS[facility_status]
+        )
+    )
+    if facility_status not in _UNKNOWN and not facility_supported:
+        normalized = _replace_or_add_field(
+            normalized,
+            "FACILITY_BUILDOUT_STATUS",
+            "N/A",
+            section="OUTPUT FORMAT",
+        )
+
+    capex_evidence_status = (
+        evidence_status
+        if supported
+        and any(
+            term in supporting_text.casefold() for term in _CAPACITY_EXPANSION_TERMS
+        )
+        else "UNSUPPORTED"
+        if facility_status not in _UNKNOWN or capacity.upper() not in _UNKNOWN
+        else "UNKNOWN"
+    )
+    return _replace_or_add_field(
+        normalized,
+        "R_AND_D_CAPEX_BACKLOG_EVIDENCE",
+        capex_evidence_status,
+        section="OUTPUT FORMAT",
+    )
 
 
 def normalize_foreign_language_evidence(
@@ -434,11 +751,76 @@ def normalize_foreign_language_evidence(
     evidence_messages: Sequence[BaseMessage],
     *,
     ticker: str,
+    supplemental_evidence: str = "",
 ) -> str:
-    """Fail closed on unsupported ownership and exact capacity claims."""
+    """Fail closed on unsupported ownership, capacity, and latest-results claims."""
 
     if not report.strip():
         return report
     records = tool_evidence_records(evidence_messages)
     normalized = _normalize_ownership(report, records, ticker=ticker)
-    return _normalize_capacity(normalized, records, ticker=ticker)
+    normalized = _normalize_capacity(
+        normalized,
+        records,
+        ticker=ticker,
+        supplemental_evidence=supplemental_evidence,
+    )
+    return _normalize_latest_results(normalized, records, ticker=ticker)
+
+
+FOREIGN_GROWTH_PROMOTION_FIELDS: dict[str, str] = {
+    "CAPACITY_UTILIZATION": "CAPACITY_UTILIZATION",
+    "CAPACITY_UTILIZATION_SOURCE_URL": "CAPACITY_UTILIZATION_SOURCE_URL",
+    "CAPACITY_UTILIZATION_AS_OF": "CAPACITY_UTILIZATION_AS_OF",
+    "CAPACITY_EVIDENCE_STATUS": "CAPACITY_EVIDENCE_STATUS",
+    "FACILITY_BUILDOUT_STATUS": "FACILITY_BUILDOUT_STATUS",
+    "R_AND_D_CAPEX_BACKLOG_EVIDENCE": "R_AND_D_CAPEX_BACKLOG_EVIDENCE",
+}
+LATEST_RESULTS_PROMOTION_FIELDS: tuple[str, ...] = (
+    "LATEST_RESULTS_PERIOD",
+    "LATEST_RESULTS_PERIOD_END",
+    "LATEST_RESULTS_PRIOR_PERIOD",
+    "LATEST_RESULTS_PRIOR_PERIOD_END",
+    "LATEST_RESULTS_PERIOD_MONTHS",
+    "LATEST_RESULTS_CURRENCY",
+    "LATEST_RESULTS_REPORTING_UNIT",
+    "LATEST_RESULTS_REVENUE",
+    "LATEST_RESULTS_PRIOR_REVENUE",
+    "LATEST_RESULTS_EARNINGS",
+    "LATEST_RESULTS_PRIOR_EARNINGS",
+    "LATEST_RESULTS_EARNINGS_SCOPE",
+    "LATEST_RESULTS_SOURCE_URL",
+    "LATEST_RESULTS_SOURCE_AUTHORITY",
+    "LATEST_RESULTS_REVENUE_GROWTH_YOY",
+    "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
+)
+
+
+def promote_foreign_growth_evidence(body: str, foreign_data: str) -> tuple[str, bool]:
+    """Copy code-normalized operating evidence into Senior DATA_BLOCK."""
+    updated = body
+    promoted = False
+    for source_field, target_field in FOREIGN_GROWTH_PROMOTION_FIELDS.items():
+        value = _field(foreign_data, source_field)
+        if not value:
+            continue
+        updated = replace_or_append_block_line(updated, target_field, value)
+        promoted = True
+    if not _field(foreign_data, "R_AND_D_CAPEX_BACKLOG_EVIDENCE") and re.search(
+        r"\bR_AND_D_CAPEX_BACKLOG=(?:0\.5|1)\b",
+        body,
+    ):
+        updated = replace_or_append_block_line(
+            updated,
+            "R_AND_D_CAPEX_BACKLOG_EVIDENCE",
+            "UNKNOWN",
+        )
+        promoted = True
+    if _field(foreign_data, "LATEST_RESULTS_SOURCE_AUTHORITY").upper() == "PRIMARY":
+        for field in LATEST_RESULTS_PROMOTION_FIELDS:
+            value = _field(foreign_data, field)
+            if not value:
+                continue
+            updated = replace_or_append_block_line(updated, field, value)
+            promoted = True
+    return updated, promoted

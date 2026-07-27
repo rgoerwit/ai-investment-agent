@@ -22,6 +22,11 @@ from src.macro_regime import parse_macro_regime
 from src.runtime_diagnostics import get_model_name as _get_model_name
 from src.runtime_diagnostics import infer_provider
 
+from .fundamentals_reconciler import (
+    extract_raw_metrics_payload,
+    statement_mrq_period_lag_note,
+)
+
 logger = structlog.get_logger(__name__)
 
 _UNRESOLVED_NAME_WARNING = (
@@ -288,6 +293,7 @@ def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
         return ""
 
     conflicts: list[str] = []
+    raw_payload = extract_raw_metrics_payload(raw_data)
 
     def _extract_json_number(text: str, key: str) -> float | None:
         for pattern in [
@@ -448,6 +454,10 @@ def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
             f"statement-derived quarter date{date_note}. LATEST_QUARTER_DATE must "
             "use the reconciled newer value."
         )
+
+    mrq_lag_note = statement_mrq_period_lag_note(raw_payload)
+    if mrq_lag_note:
+        conflicts.append(f"- MRQ_PERIOD_LAG: {mrq_lag_note}")
 
     if foreign_data:
         local_analyst_match = re.search(

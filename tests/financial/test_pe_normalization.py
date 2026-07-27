@@ -241,7 +241,8 @@ class TestPENormalizationSanityChecks:
         assert result["latest_quarter_date"] == "2025-12-31"
         assert result["_latest_quarter_date_source"] == "yfinance_quarterly"
         assert any(
-            "statement-derived MRQ metrics remain aligned to 2025-12-31" in note
+            "Newer quarter metadata exists for 2026-03-31" in note
+            and "statement-derived MRQ metrics remain aligned to 2025-12-31" in note
             for note in result["_data_quality_notes"]
         )
 

@@ -10,6 +10,18 @@
   },
   "fundamentals_output": "### --- START DATA_BLOCK ---\nREVENUE_GROWTH_FY: N/A\nEARNINGS_GROWTH_FY: N/A\nREVENUE_GROWTH_TTM: 15.0%\nEARNINGS_GROWTH_TTM: 39.4%\n### --- END DATA_BLOCK ---\n",
   "m_and_a_narrative": "M&A activity includes the acquisition of Mingdar and From-eyes.",
+  "capacity_evidence": {
+    "utilization": "95%",
+    "source_url": "https://www.scribd.com/document/1030190819/2026-0416%E5%85%83%E5%A4%A7%E6%8A%95%E9%A1%A7%E7%A0%94%E7%A9%B6%E5%A0%B1%E5%91%8A-6782-%E8%A6%96%E9%99%BD",
+    "source_authority": "SECONDARY",
+    "summary": "Yuanta Securities research estimates 95% capacity utilization and anticipated capacity expansions."
+  },
+  "guidance_evidence": {
+    "source_type": "RESEARCH_REPORT",
+    "source_authority": "THIRD_PARTY",
+    "management_identified": "NO",
+    "projected_eps_growth": "14%"
+  },
   "ownership_evidence": {
     "captured_as_of": "2026-03-28",
     "largest_shareholder": {

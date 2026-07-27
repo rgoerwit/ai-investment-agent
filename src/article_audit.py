@@ -27,10 +27,38 @@ _UNVERIFIED_TAG_PATTERN = re.compile(r"\s*\[unverified\]\s*$", re.IGNORECASE)
 _SOURCE_CONFIDENCE_FIELDS = (
     "OPERATING_CASH_FLOW_SOURCE",
     "OCF_FILING_REASON",
+    "FORWARD_EPS",
+    "FORWARD_EPS_SOURCE",
+    "PE_RATIO_FORWARD",
+    "PE_RATIO_FORWARD_SOURCE",
+    "GUIDANCE_SOURCE_TYPE",
+    "GUIDANCE_SOURCE_AUTHORITY",
+    "GUIDANCE_MANAGEMENT_IDENTIFIED",
+    "CAPACITY_UTILIZATION",
+    "CAPACITY_UTILIZATION_SOURCE_URL",
+    "CAPACITY_UTILIZATION_AS_OF",
+    "CAPACITY_EVIDENCE_STATUS",
+    "R_AND_D_CAPEX_BACKLOG_EVIDENCE",
+    "R_AND_D_CAPEX_BACKLOG_EVIDENCE_ADJUSTMENT",
+    "MOAT_CFO_NI_AVG",
+    "MOAT_CFO_NI_YEARS",
+    "MOAT_CFO_NI_SOURCE",
+    "NET_CASH_TO_MARKET_CAP",
+    "EARNINGS_GROWTH_FY_SOURCE",
+    "MRQ_COMPARISON_BASE_STATUS",
+    "ANALYST_COVERAGE_ENGLISH",
     "ANALYST_COVERAGE_DATA_QUALITY_NOTE",
     "BALANCE_SHEET_DATA_QUALITY_NOTE",
     "GROWTH_DATA_QUALITY_NOTE",
     "PFIC_ASSET_NOTE",
+    "LATEST_RESULTS_PERIOD",
+    "LATEST_RESULTS_PERIOD_END",
+    "LATEST_RESULTS_PRIOR_PERIOD",
+    "LATEST_RESULTS_REVENUE_GROWTH_YOY",
+    "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
+    "LATEST_RESULTS_EARNINGS_SCOPE",
+    "LATEST_RESULTS_SOURCE_URL",
+    "LATEST_RESULTS_SOURCE_AUTHORITY",
 )
 
 
@@ -56,6 +84,16 @@ def _normalize_citation_value(value: str) -> str:
 
 def _citation_values_match(cited: str, actual: str) -> bool:
     return _normalize_citation_value(cited) == _normalize_citation_value(actual)
+
+
+def _first_number(value: str | None) -> float | None:
+    match = re.search(r"-?\d[\d,]*(?:\.\d+)?", value or "")
+    if not match:
+        return None
+    try:
+        return float(match.group().replace(",", ""))
+    except ValueError:
+        return None
 
 
 def audit_article_citations(
@@ -117,6 +155,37 @@ def audit_article_citations(
                     "action": "Correct the cited value and any narrative built on it.",
                 }
             )
+
+    current_price = _first_number(_lookup("CURRENT_PRICE"))
+    forward_eps = _first_number(_lookup("FORWARD_EPS"))
+    forward_pe = _first_number(_lookup("PE_RATIO_FORWARD"))
+    if (
+        current_price is not None
+        and forward_eps is not None
+        and forward_pe is not None
+        and current_price > 0
+        and forward_eps > 0
+        and forward_pe > 0
+    ):
+        implied_forward_pe = current_price / forward_eps
+        if abs(implied_forward_pe - forward_pe) / forward_pe > 0.03:
+            errors.append(
+                {
+                    "location": "Forward P/E identity audit",
+                    "claim": (
+                        f"PE_RATIO_FORWARD is {forward_pe:g} with CURRENT_PRICE "
+                        f"{current_price:g} and FORWARD_EPS {forward_eps:g}."
+                    ),
+                    "ground_truth": (
+                        "CURRENT_PRICE / FORWARD_EPS implies forward P/E "
+                        f"{implied_forward_pe:.2f}."
+                    ),
+                    "action": (
+                        "Reconcile the forward P/E inputs and do not attribute the "
+                        "multiple to a different EPS estimate or provider."
+                    ),
+                }
+            )
     return errors
 
 
@@ -155,11 +224,13 @@ def extract_source_confidence_context(
 ) -> str:
     block_text = extract_last_data_block(data_block)
     lines: list[str] = []
+    field_values: dict[str, str] = {}
 
     if block_text:
         for field_name in _SOURCE_CONFIDENCE_FIELDS:
             value = extract_block_field_from_text(block_text, field_name)
             if value:
+                field_values[field_name] = value
                 lines.append(f"{field_name}: {value}")
 
     if consultant_review:
@@ -175,5 +246,84 @@ def extract_source_confidence_context(
         "Editor instruction: Do not describe weak-source or coverage-gap metrics as "
         "company-reported or filing-confirmed. Use qualified wording such as "
         "'aggregator-indicated' unless filing/IR support is explicit."
+    )
+    if field_values.get("GUIDANCE_SOURCE_AUTHORITY") in {"THIRD_PARTY", "UNKNOWN"}:
+        lines.append(
+            "Guidance instruction: Treat these figures as third-party estimates or "
+            "unresolved sourcing, never as management/company guidance."
+        )
+    if field_values.get("CAPACITY_EVIDENCE_STATUS") in {
+        "SECONDARY",
+        "UNSUPPORTED",
+        "UNKNOWN",
+    }:
+        lines.append(
+            "Capacity instruction: Qualify secondary capacity/buildout claims; omit "
+            "unsupported claims. If sourcing is secondary or its as-of date is "
+            "unknown, keep every operating inference conditional rather than stating "
+            "that the facility is currently near full utilization."
+        )
+    if field_values.get("FORWARD_EPS_SOURCE") or field_values.get(
+        "PE_RATIO_FORWARD_SOURCE"
+    ):
+        lines.append(
+            "Forward-multiple instruction: Forward P/E belongs to CURRENT_PRICE / "
+            "FORWARD_EPS and their recorded sources. Never say it was computed from "
+            "a different EPS estimate or provider."
+        )
+    if field_values.get("MOAT_CFO_NI_SOURCE") not in {None, "FILING", "PRIMARY"}:
+        lines.append(
+            "Cash-conversion instruction: Describe the multi-year ratio as "
+            "aggregator-indicated and period-limited, not real/proven cash quality "
+            "or manipulation-proof."
+        )
+    net_cash_ratio = _first_number(field_values.get("NET_CASH_TO_MARKET_CAP"))
+    if net_cash_ratio is not None and net_cash_ratio < 10:
+        lines.append(
+            "Balance-sheet instruction: Net cash below 10% of market value is a "
+            "modest cushion, not a valuation floor or backstop."
+        )
+    if field_values.get("EARNINGS_GROWTH_FY_SOURCE"):
+        lines.append(
+            "Trend instruction: One annual year-over-year comparison is a growth "
+            "observation, not proof of a durable multi-year earnings trend."
+        )
+    if field_values.get("MRQ_COMPARISON_BASE_STATUS") == "DEPRESSED":
+        lines.append(
+            "Quarterly-growth instruction: Describe MRQ growth as base-sensitive, "
+            "not structural acceleration, when the comparison base is depressed."
+        )
+    if field_values.get("ANALYST_COVERAGE_ENGLISH"):
+        lines.append(
+            "Coverage instruction: ANALYST_COVERAGE_ENGLISH is an aggregator "
+            "analyst-opinion count, not proof of that many identifiable "
+            "English-language analysts. Describe it as aggregator coverage unless "
+            "analyst identities and source languages are separately established."
+        )
+    if field_values.get("LATEST_RESULTS_SOURCE_AUTHORITY") == "PRIMARY":
+        lines.append(
+            "Latest-results instruction: Treat LATEST_RESULTS_* as historical actual "
+            "results in their stated scope and period. Keep MRQ metrics tied to their "
+            "own period, and never present actual YoY growth as management guidance "
+            "or projected growth."
+        )
+    if "Newer quarter metadata exists" in field_values.get(
+        "GROWTH_DATA_QUALITY_NOTE", ""
+    ) or "Newer primary results exist" in field_values.get(
+        "GROWTH_DATA_QUALITY_NOTE", ""
+    ):
+        lines.append(
+            "Period instruction: Keep MRQ growth tied to its stated period, and never "
+            "call that statement period the latest reported quarter when newer-period "
+            "evidence is identified."
+        )
+    lines.append(
+        "Monitoring instruction: Copy numeric thesis-break or review thresholds "
+        "exactly from the Portfolio Manager or Trader source text; otherwise omit "
+        "them rather than synthesizing new cutoffs."
+    )
+    lines.append(
+        "Valuation instruction: Use 'margin of safety' only when a downside anchor "
+        "(bear value, asset floor, or normalized-earnings range) supports it."
     )
     return "=== SOURCE CONFIDENCE ===\n" + "\n".join(lines)

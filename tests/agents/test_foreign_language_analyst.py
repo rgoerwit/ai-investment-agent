@@ -27,6 +27,7 @@ from src.agents.management_guidance import (
     _management_guidance_queries,
     _preload_management_guidance_evidence,
 )
+from tests.helpers.frozen_regressions import load_frozen_regression
 
 
 class TestForeignLanguageAnalystPrompt:
@@ -111,7 +112,31 @@ class TestForeignLanguageGuidanceRetry:
 
         assert len(retry_messages) == 2
         assert "MANAGEMENT_GUIDANCE" in retry_messages[-1].content
+        assert "LATEST_RESULTS" in retry_messages[-1].content
         assert "SEARCHES_COMPLETED" in retry_messages[-1].content
+
+    def test_valid_guidance_without_latest_results_triggers_retry(self):
+        content = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+SEARCHES_COMPLETED: latest results release
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+
+        assert _should_retry_output(content, "foreign_language_analyst")
+
+    def test_valid_guidance_and_latest_results_do_not_trigger_retry(self):
+        content = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+SEARCHES_COMPLETED: latest results release
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+### --- END MANAGEMENT_GUIDANCE ---
+### --- START LATEST_RESULTS ---
+LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND
+### --- END LATEST_RESULTS ---
+"""
+
+        assert not _should_retry_output(content, "foreign_language_analyst")
 
     def test_fundamentals_retry_corrects_dropped_guidance_fields(self):
         messages = [HumanMessage(content="Analyze TEST.T")]
@@ -407,7 +432,7 @@ STATUS: INSUFFICIENT_DATA
         assert content.strip() in normalized
         assert "COVERAGE_STATUS: UNRESOLVED_AFTER_TARGETED_SEARCH" in normalized
         assert "EARNINGS_BASELINE_STATUS: UNKNOWN" in normalized
-        assert not _should_retry_output(normalized, "foreign_language_analyst")
+        assert _should_retry_output(normalized, "foreign_language_analyst")
 
     def test_all_failed_preflight_preserves_report_but_marks_search_failed(self):
         content = (
@@ -437,7 +462,7 @@ STATUS: SKIPPED
         assert content.strip() in normalized
         assert "COVERAGE_STATUS: SEARCH_FAILED" in normalized
         assert "SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT" in normalized
-        assert not _should_retry_output(normalized, "foreign_language_analyst")
+        assert _should_retry_output(normalized, "foreign_language_analyst")
 
     def test_empty_output_is_not_converted_into_a_success(self):
         evidence = """#### results_package
@@ -487,7 +512,70 @@ STATUS: COMPLETED
 
         assert "DRIVER_TYPE: TAX_CREDIT" in normalized
         assert "EARNINGS_BASELINE_STATUS: TEMPORARILY_BOOSTED" in normalized
-        assert not _should_retry_output(normalized, "foreign_language_analyst")
+        assert _should_retry_output(normalized, "foreign_language_analyst")
+
+    def test_broker_projection_is_labeled_third_party(self):
+        regression = load_frozen_regression("6782_TW_regression.json")
+        guidance = regression["guidance_evidence"]
+        source_url = regression["capacity_evidence"]["source_url"]
+        content = f"""### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_TYPE: {guidance["source_type"]}
+SOURCE_DATE: 2026-04-16
+SOURCE_URL: {source_url}
+NET_INCOME_GUIDANCE: EPS projection, 14% YoY
+NET_INCOME_YOY: {guidance["projected_eps_growth"]}
+MANAGEMENT_IDENTIFIED: {guidance["management_identified"]}
+OPERATING_VS_NET_DIRECTION: UNKNOWN
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+DRIVER_TYPE: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+NORMALIZED_EARNINGS_AVAILABLE: YES
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = f"""#### results_package
+STATUS: COMPLETED
+<result><url>{source_url}</url><summary>Yuanta Securities research report</summary></result>
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            regression["ticker"],
+            management_guidance_evidence=evidence,
+        )
+
+        assert "SOURCE_AUTHORITY: THIRD_PARTY" in normalized
+
+    def test_company_results_guidance_with_matching_evidence_is_primary(self):
+        source_url = "https://issuer.example/investors/results-2026"
+        content = f"""### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_TYPE: RESULTS_RELEASE
+SOURCE_URL: {source_url}
+MANAGEMENT_IDENTIFIED: YES
+OPERATING_PROFIT_GUIDANCE: TWD 1.2 billion
+NET_INCOME_GUIDANCE: TWD 900 million
+OPERATING_VS_NET_DIRECTION: SAME_DIRECTION
+MATERIAL_NONOPERATING_DRIVER: NO
+DRIVER_TYPE: NONE
+EARNINGS_BASELINE_STATUS: DURABLE
+NORMALIZED_EARNINGS_AVAILABLE: YES
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = f"""#### results_package
+STATUS: COMPLETED
+<result><url>{source_url}</url><summary>Issuer FY2026 results release</summary></result>
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "TEST.TW",
+            management_guidance_evidence=evidence,
+        )
+
+        assert "SOURCE_AUTHORITY: PRIMARY" in normalized
 
 
 class TestSearchForeignSourcesTool:
@@ -498,12 +586,13 @@ class TestSearchForeignSourcesTool:
         from src.tools.registry import toolkit
 
         foreign_tools = toolkit.get_foreign_language_tools()
-        assert len(foreign_tools) == 3
+        assert len(foreign_tools) == 4
 
         tool_names = [t.name for t in foreign_tools]
         assert "search_foreign_sources" in tool_names
         assert "extract_guidance_sources" in tool_names
         assert "get_official_filings" in tool_names
+        assert "get_official_document" in tool_names
 
     def test_tool_in_all_tools(self):
         """Verify tool is included in get_all_tools."""
@@ -676,7 +765,7 @@ class TestSearchForeignSourcesTool:
             "Text after the final </search_results> closer trips the "
             "delimiter-breakout heuristic. Move metadata/footers BEFORE "
             "the wrapper. Trailing text was: "
-            f"{result[last_closer.end():]!r}"
+            f"{result[last_closer.end() :]!r}"
         )
 
     @pytest.mark.asyncio
@@ -1105,6 +1194,27 @@ class TestComputeDataConflicts:
         assert "2025-12-31" in result
         assert "LATEST_QUARTER_DATE must use the reconciled newer value" in result
 
+    def test_statement_mrq_period_lag_is_explicit(self):
+        """Newer metadata must not make an older statement MRQ read as latest."""
+        from src.agents import compute_data_conflicts
+
+        junior = json.dumps(
+            {
+                "latest_quarter_date": "2025-12-31",
+                "_latest_quarter_date_source": "yfinance_quarterly",
+                "_data_quality_notes": [
+                    "Newer quarter metadata exists for 2026-03-31, but "
+                    "statement-derived MRQ metrics remain aligned to 2025-12-31."
+                ],
+            }
+        )
+
+        result = compute_data_conflicts(junior, "")
+
+        assert "MRQ_PERIOD_LAG" in result
+        assert "period-bound trailing indicators" in result
+        assert "not the latest reported quarter" in result
+
 
 class TestLocalAnalystCoverageConflict:
     """Tests for conflict #5: local analyst coverage detection."""
@@ -1128,7 +1238,7 @@ class TestLocalAnalystCoverageConflict:
         from src.agents import compute_data_conflicts
 
         junior = '{"numberOfAnalystOpinions": 5}'
-        fla = "**LOCAL ANALYST COVERAGE**\n" "- Estimated Local Analysts: HIGH\n"
+        fla = "**LOCAL ANALYST COVERAGE**\n- Estimated Local Analysts: HIGH\n"
         result = compute_data_conflicts(junior, fla)
         assert "LOCAL_ANALYST_COVERAGE" in result
         assert "HIGH" in result
@@ -1138,7 +1248,7 @@ class TestLocalAnalystCoverageConflict:
         from src.agents import compute_data_conflicts
 
         junior = '{"numberOfAnalystOpinions": 2}'
-        fla = "**LOCAL ANALYST COVERAGE**\n" "- Estimated Local Analysts: MODERATE\n"
+        fla = "**LOCAL ANALYST COVERAGE**\n- Estimated Local Analysts: MODERATE\n"
         result = compute_data_conflicts(junior, fla)
         assert "LOCAL_ANALYST_COVERAGE" in result
         assert "MODERATE" in result
@@ -1148,7 +1258,7 @@ class TestLocalAnalystCoverageConflict:
         from src.agents import compute_data_conflicts
 
         junior = '{"numberOfAnalystOpinions": 3}'
-        fla = "**LOCAL ANALYST COVERAGE**\n" "- Estimated Local Analysts: UNKNOWN\n"
+        fla = "**LOCAL ANALYST COVERAGE**\n- Estimated Local Analysts: UNKNOWN\n"
         result = compute_data_conflicts(junior, fla)
         assert "LOCAL_ANALYST_COVERAGE" not in result
 
@@ -1157,7 +1267,7 @@ class TestLocalAnalystCoverageConflict:
         from src.agents import compute_data_conflicts
 
         junior = '{"numberOfAnalystOpinions": 3}'
-        fla = "**LOCAL ANALYST COVERAGE**\n" "- Estimated Local Analysts: LOW\n"
+        fla = "**LOCAL ANALYST COVERAGE**\n- Estimated Local Analysts: LOW\n"
         result = compute_data_conflicts(junior, fla)
         assert "LOCAL_ANALYST_COVERAGE" not in result
 
@@ -1166,7 +1276,7 @@ class TestLocalAnalystCoverageConflict:
         from src.agents import compute_data_conflicts
 
         junior = '{"numberOfAnalystOpinions": 3}'
-        fla = "**FILING CASH FLOW**\n" "- Operating Cash Flow (Filing): ¥10.91B\n"
+        fla = "**FILING CASH FLOW**\n- Operating Cash Flow (Filing): ¥10.91B\n"
         result = compute_data_conflicts(junior, fla)
         assert "LOCAL_ANALYST_COVERAGE" not in result
 
@@ -1175,7 +1285,7 @@ class TestLocalAnalystCoverageConflict:
         from src.agents import compute_data_conflicts
 
         junior = '{"numberOfAnalystOpinions": 5}'
-        fla = "**LOCAL ANALYST COVERAGE**\n" "- Estimated Local Analysts: 2\n"
+        fla = "**LOCAL ANALYST COVERAGE**\n- Estimated Local Analysts: 2\n"
         result = compute_data_conflicts(junior, fla)
         assert "LOCAL_ANALYST_COVERAGE" not in result
 

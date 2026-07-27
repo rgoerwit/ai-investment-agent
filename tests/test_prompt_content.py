@@ -123,6 +123,28 @@ class TestForeignLanguageGuidancePromptContent:
         assert "Ownership Evidence Status: NOT_FOUND" in msg
         assert "do not materialize the other ownership fields" in msg
 
+    def test_latest_results_snapshot_requires_inspected_same_statement_values(self):
+        msg = get_prompt("foreign_language_analyst").system_message
+        assert "Search L: Latest Official Results Snapshot (MANDATORY)" in msg
+        assert "call `get_official_document`" in msg
+        assert "current and year-ago comparative revenue and earnings" in msg
+        assert "same statement presentation" in msg
+        assert "this agent runs in parallel" in msg
+        assert "LATEST_RESULTS_PERIOD_END" in msg
+
+
+class TestWriterAnalyticalIntegrityPromptContent:
+    def test_writer_scopes_common_semantic_overclaims(self):
+        msg = get_prompt("article_writer").system_message.casefold()
+        for instruction in (
+            "one accounting segment does not establish one product",
+            "related-party transaction does not establish value transfer",
+            "acquisition-led growth requires",
+            "no_catalyst_detected means no identified",
+            "aggregator analyst-opinion count",
+        ):
+            assert instruction in msg
+
 
 class TestPortfolioManagerPromptContent:
     """Guard PM handling of consultant no-coverage cases."""
@@ -186,6 +208,11 @@ class TestPortfolioManagerPromptContent:
         msg = get_prompt("portfolio_manager").system_message
         assert "MATERIAL_UNVERIFIED_OPERATING_SIGNAL" in msg
         assert "BLOCK BUY" in msg
+
+    def test_portfolio_manager_blocks_load_bearing_secondary_growth_evidence(self):
+        msg = get_prompt("portfolio_manager").system_message
+        assert "DECISION_CRITICAL_GROWTH_EVIDENCE_GAP" in msg
+        assert "secondary or unsupported R&D/capex evidence" in msg
 
 
 class TestFundamentalsEbitdaAnnualization:

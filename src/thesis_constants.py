@@ -50,6 +50,8 @@ SECTOR_GROSS_MARGIN_MIN: dict[str, float] = {
 # Quality floors (percent scores from Senior Fundamentals DATA_BLOCK)
 HEALTH_MIN_PCT = 50.0
 GROWTH_MIN_PCT = 50.0
+MODERATE_BUY_GROWTH_MIN_PCT = 65.0
+MODERATE_BUY_PROJECTED_EPS_MIN_PCT = 15.0
 
 # Senior Fundamentals scoring rubric totals (prompt: "FINANCIAL HEALTH SCORE
 # (12 Points Total)" / "GROWTH TRANSITION SCORE (6 Points Total)"). N/A criteria

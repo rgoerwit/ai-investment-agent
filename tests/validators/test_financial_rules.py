@@ -55,6 +55,83 @@ def _sparse_metrics(raw_report: str, *, strength: bool = True) -> dict:
     return metrics
 
 
+class TestDecisionCriticalGrowthEvidence:
+    @staticmethod
+    def _metrics(
+        *,
+        evidence: str = "SECONDARY",
+        authority: str = "THIRD_PARTY",
+        projected_growth: str = "14%",
+    ) -> dict:
+        report = f"""### --- START DATA_BLOCK ---
+GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=0; ROA_ROE_IMPROVING=0; GROSS_MARGIN=1; GLOBAL_EXPANSION=1; R_AND_D_CAPEX_BACKLOG=1
+RAW_GROWTH_SCORE: 4/6
+ADJUSTED_GROWTH_SCORE: 66.7% (based on 6 available points)
+R_AND_D_CAPEX_BACKLOG_EVIDENCE: {evidence}
+GUIDANCE_SOURCE_TYPE: RESEARCH_REPORT
+GUIDANCE_SOURCE_AUTHORITY: {authority}
+GUIDANCE_MANAGEMENT_IDENTIFIED: NO
+GUIDANCE_NET_INCOME: EPS projection, {projected_growth} YoY
+GUIDANCE_NET_INCOME_YOY: {projected_growth}
+### --- END DATA_BLOCK ---
+"""
+        return RedFlagDetector.extract_metrics(report)
+
+    def test_secondary_point_blocks_load_bearing_zone_2_buy(self):
+        metrics = self._metrics()
+
+        assert metrics["growth_score_earned"] == 4
+        assert metrics["growth_score_available"] == 6
+        assert metrics["r_and_d_capex_backlog_score"] == 1
+        assert metrics["guidance_source_authority"] == "THIRD_PARTY"
+
+        flags, result = RedFlagDetector.detect_red_flags(metrics, "6782.TW")
+        gap = next(
+            flag
+            for flag in flags
+            if flag["type"] == "DECISION_CRITICAL_GROWTH_EVIDENCE_GAP"
+        )
+        assert gap["blocks_buy"] is True
+        assert gap["risk_penalty"] == 0.0
+        assert result == "PASS"
+
+    def test_primary_projected_growth_above_15_is_valid_alternative(self):
+        flags, _ = RedFlagDetector.detect_red_flags(
+            self._metrics(authority="PRIMARY", projected_growth="16%"),
+            "TEST.TW",
+        )
+
+        assert "DECISION_CRITICAL_GROWTH_EVIDENCE_GAP" not in {
+            flag["type"] for flag in flags
+        }
+
+    def test_third_party_projection_does_not_satisfy_alternative(self):
+        flags, _ = RedFlagDetector.detect_red_flags(
+            self._metrics(authority="THIRD_PARTY", projected_growth="20%"),
+            "TEST.TW",
+        )
+
+        assert "DECISION_CRITICAL_GROWTH_EVIDENCE_GAP" in {
+            flag["type"] for flag in flags
+        }
+
+    def test_secondary_point_does_not_block_when_growth_still_passes_without_it(self):
+        report = """### --- START DATA_BLOCK ---
+GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=N/A; ROA_ROE_IMPROVING=1; GROSS_MARGIN=1; GLOBAL_EXPANSION=0.5; R_AND_D_CAPEX_BACKLOG=0.5
+RAW_GROWTH_SCORE: 4/6
+ADJUSTED_GROWTH_SCORE: 80% (based on 5 available points)
+R_AND_D_CAPEX_BACKLOG_EVIDENCE: SECONDARY
+### --- END DATA_BLOCK ---
+"""
+        metrics = RedFlagDetector.extract_metrics(report)
+        flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.TW")
+
+        assert metrics["growth_score_available"] == 5
+        assert "DECISION_CRITICAL_GROWTH_EVIDENCE_GAP" not in {
+            flag["type"] for flag in flags
+        }
+
+
 class TestNormalizedEarningsBridge:
     """Distortion-before-catalyst: one-time events need a normalized bridge."""
 

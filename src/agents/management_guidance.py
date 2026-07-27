@@ -27,6 +27,8 @@ GUIDANCE_PREFLIGHT_MAX_CHARS = 36_000
 
 GUIDANCE_PROMOTION_FIELDS: dict[str, str] = {
     "COVERAGE_STATUS": "GUIDANCE_COVERAGE_STATUS",
+    "SOURCE_TYPE": "GUIDANCE_SOURCE_TYPE",
+    "SOURCE_AUTHORITY": "GUIDANCE_SOURCE_AUTHORITY",
     "SOURCE_DATE": "GUIDANCE_SOURCE_DATE",
     "SOURCE_URL": "GUIDANCE_SOURCE_URL",
     "GUIDANCE_PERIOD": "GUIDANCE_PERIOD",
@@ -41,10 +43,63 @@ GUIDANCE_PROMOTION_FIELDS: dict[str, str] = {
     "DRIVER_PERSISTENCE": "DRIVER_PERSISTENCE",
     "DRIVER_MATERIALITY": "DRIVER_MATERIALITY",
     "DRIVER_AFFECTED_PERIOD": "DRIVER_AFFECTED_PERIOD",
+    "MANAGEMENT_IDENTIFIED": "GUIDANCE_MANAGEMENT_IDENTIFIED",
     "EARNINGS_BASELINE_STATUS": "EARNINGS_BASELINE_STATUS",
     "NORMALIZED_EARNINGS_AVAILABLE": "NORMALIZED_EARNINGS_AVAILABLE",
     "GUIDANCE_BRIDGE_STATUS": "GUIDANCE_BRIDGE_STATUS",
 }
+_THIRD_PARTY_SOURCE_MARKERS = (
+    "research report",
+    "analyst report",
+    "sell-side",
+    "broker report",
+    "securities research",
+    "投顧研究報告",
+    "券商報告",
+)
+
+
+def _matching_source_evidence(evidence: str, source_url: str) -> str:
+    if not source_url:
+        return ""
+    for block in re.findall(r"(?is)<result\b[^>]*>(.*?)</result>", evidence or ""):
+        if source_url in block:
+            return block
+    return ""
+
+
+def _guidance_source_authority(
+    block_body: str,
+    management_guidance_evidence: str,
+) -> str:
+    source_type = extract_block_text_value(block_body, "SOURCE_TYPE").upper()
+    source_url = extract_block_text_value(block_body, "SOURCE_URL")
+    management_identified = extract_block_text_value(
+        block_body, "MANAGEMENT_IDENTIFIED"
+    ).upper()
+    matching_evidence = _matching_source_evidence(
+        management_guidance_evidence,
+        source_url,
+    ).casefold()
+    if "RESEARCH" in source_type or any(
+        marker in matching_evidence for marker in _THIRD_PARTY_SOURCE_MARKERS
+    ):
+        return "THIRD_PARTY"
+    primary_types = {
+        "RESULTS_RELEASE",
+        "PRESENTATION",
+        "TRANSCRIPT",
+        "FILING",
+        "MULTIPLE",
+    }
+    if (
+        source_type in primary_types
+        and management_identified == "YES"
+        and bool(matching_evidence)
+        and bool(re.fullmatch(r"https?://\S+", source_url, re.IGNORECASE))
+    ):
+        return "PRIMARY"
+    return "UNKNOWN"
 
 
 def _management_guidance_queries(
@@ -359,6 +414,12 @@ def normalize_management_guidance_output(
             "CODE_OWNED_PREFLIGHT",
         )
 
+    block_body = replace_or_append_block_line(
+        block_body,
+        "SOURCE_AUTHORITY",
+        _guidance_source_authority(block_body, management_guidance_evidence),
+    )
+
     direction = extract_block_text_value(
         block_body, "OPERATING_VS_NET_DIRECTION"
     ).upper()
@@ -496,6 +557,7 @@ def _build_unresolved_guidance_block(
         (
             f"COVERAGE_STATUS: {coverage_status}",
             "SOURCE_TYPE: N/A",
+            "SOURCE_AUTHORITY: UNKNOWN",
             "SOURCE_DATE: N/A",
             "SOURCE_URL: N/A",
             f"SEARCHES_COMPLETED: {searches_completed}",

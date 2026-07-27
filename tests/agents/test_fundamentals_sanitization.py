@@ -79,14 +79,217 @@ LATEST_QUARTER_DATE: 2026-03-31
             "_revenueGrowth_MRQ_source": "calculated_from_quarterly",
             "earningsGrowth_MRQ": 1.028262,
             "_earningsGrowth_MRQ_source": "calculated_from_quarterly",
+            "_data_quality_notes": [
+                "Newer quarter metadata exists for 2026-03-31, but "
+                "statement-derived MRQ metrics remain aligned to 2025-12-31."
+            ],
         }
     )
 
     sanitized = _sanitize_fundamentals_output(content, raw_data, "6782.TW")
 
     assert "REVENUE_GROWTH_MRQ: 16.9% (as of 2025-12-31)" in sanitized
+    assert "EARNINGS_GROWTH_MRQ: 102.8% (as of 2025-12-31)" in sanitized
     assert "LATEST_QUARTER_DATE: 2025-12-31" in sanitized
-    assert "2026-03-31" not in sanitized
+    assert "LATEST_QUARTER_DATE: 2026-03-31" not in sanitized
+    assert "REVENUE_GROWTH_MRQ: 16.9% (as of 2026-03-31)" not in sanitized
+    assert "Newer quarter metadata exists for 2026-03-31" in sanitized
+    assert "not the latest reported quarter" in sanitized
+
+
+def test_mrq_period_is_applied_per_metric_source_not_payload_wide() -> None:
+    content = """### --- START DATA_BLOCK ---
+REVENUE_GROWTH_MRQ: 12.0% (as of 2026-03-31)
+EARNINGS_GROWTH_MRQ: 30.0% (as of 2026-03-31)
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "latest_quarter_date": "2025-12-31",
+            "_latest_quarter_date_source": "yfinance_quarterly",
+            "revenueGrowth_MRQ": 0.12,
+            "_revenueGrowth_MRQ_source": "calculated_from_quarterly",
+            "earningsGrowth_MRQ": 0.30,
+            "_earningsGrowth_MRQ_source": "provider_metadata",
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "TEST")
+
+    assert "REVENUE_GROWTH_MRQ: 12.0% (as of 2025-12-31)" in sanitized
+    assert "EARNINGS_GROWTH_MRQ: 30.0%" in sanitized
+    assert "EARNINGS_GROWTH_MRQ: 30.0% (as of" not in sanitized
+
+
+def test_primary_latest_results_are_promoted_without_relabeling_mrq() -> None:
+    content = """### --- START DATA_BLOCK ---
+REVENUE_GROWTH_MRQ: 16.9%
+EARNINGS_GROWTH_MRQ: 102.8%
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "latest_quarter_date": "2025-12-31",
+            "_latest_quarter_date_source": "yfinance_quarterly",
+            "revenueGrowth_MRQ": 0.169,
+            "_revenueGrowth_MRQ_source": "calculated_from_quarterly",
+            "earningsGrowth_MRQ": 1.028,
+            "_earningsGrowth_MRQ_source": "calculated_from_quarterly",
+        }
+    )
+    foreign_data = """### --- START LATEST_RESULTS ---
+LATEST_RESULTS_PERIOD: Three months ended March 31, 2026
+LATEST_RESULTS_PERIOD_END: 2026-03-31
+LATEST_RESULTS_PRIOR_PERIOD: Three months ended March 31, 2025
+LATEST_RESULTS_PRIOR_PERIOD_END: 2025-03-31
+LATEST_RESULTS_PERIOD_MONTHS: 3
+LATEST_RESULTS_CURRENCY: New dollars
+LATEST_RESULTS_REPORTING_UNIT: thousands
+LATEST_RESULTS_REVENUE: 1,500
+LATEST_RESULTS_PRIOR_REVENUE: 1,000
+LATEST_RESULTS_EARNINGS: 405
+LATEST_RESULTS_PRIOR_EARNINGS: 200
+LATEST_RESULTS_EARNINGS_SCOPE: Net income attributable to owners of parent
+LATEST_RESULTS_SOURCE_URL: https://issuer.example/results
+LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY
+LATEST_RESULTS_REVENUE_GROWTH_YOY: 50.0%
+LATEST_RESULTS_EARNINGS_GROWTH_YOY: 102.5%
+### --- END LATEST_RESULTS ---
+"""
+
+    sanitized = _sanitize_fundamentals_output(
+        content,
+        raw_data,
+        "TEST",
+        foreign_data=foreign_data,
+    )
+
+    assert "LATEST_RESULTS_PERIOD_END: 2026-03-31" in sanitized
+    assert "LATEST_RESULTS_EARNINGS_GROWTH_YOY: 102.5%" in sanitized
+    assert "EARNINGS_GROWTH_MRQ: 102.8% (as of 2025-12-31)" in sanitized
+    assert "Newer primary results exist for Three months ended March 31, 2026" in (
+        sanitized
+    )
+
+
+def test_metadata_only_mrq_date_is_not_described_as_statement_aligned() -> None:
+    content = """### --- START DATA_BLOCK ---
+EARNINGS_GROWTH_MRQ: 30.0% (as of 2026-03-31)
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "latest_quarter_date": "2026-03-31",
+            "_latest_quarter_date_source": "reconciled_most_recent_quarter",
+            "earningsGrowth_MRQ": 0.30,
+            "_earningsGrowth_MRQ_source": "provider_metadata",
+        }
+    )
+    foreign_data = """### --- START LATEST_RESULTS ---
+LATEST_RESULTS_PERIOD: Six months ended June 30, 2026
+LATEST_RESULTS_PERIOD_END: 2026-06-30
+LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY
+### --- END LATEST_RESULTS ---
+"""
+
+    sanitized = _sanitize_fundamentals_output(
+        content,
+        raw_data,
+        "TEST",
+        foreign_data=foreign_data,
+    )
+
+    assert "EARNINGS_GROWTH_MRQ: 30.0%" in sanitized
+    assert "EARNINGS_GROWTH_MRQ: 30.0% (as of" not in sanitized
+    assert "statement-derived MRQ growth remains aligned" not in sanitized
+
+
+def test_unsupported_capex_point_is_withheld_and_stale_detail_is_flagged() -> None:
+    content = """### --- START DATA_BLOCK ---
+GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=0; ROA_ROE_IMPROVING=0; GROSS_MARGIN=1; GLOBAL_EXPANSION=1; R_AND_D_CAPEX_BACKLOG=1
+RAW_GROWTH_SCORE: 4/6
+ADJUSTED_GROWTH_SCORE: 66.7% (based on 6 available points)
+### --- END DATA_BLOCK ---
+### GROWTH TRANSITION DETAIL
+**Score**: 5/6 (Adjusted: 83%)
+"""
+    foreign_data = """CAPACITY_UTILIZATION: N/A
+CAPACITY_UTILIZATION_SOURCE_URL: N/A
+CAPACITY_UTILIZATION_AS_OF: UNKNOWN
+CAPACITY_EVIDENCE_STATUS: UNSUPPORTED
+FACILITY_BUILDOUT_STATUS: N/A
+R_AND_D_CAPEX_BACKLOG_EVIDENCE: UNSUPPORTED
+"""
+
+    sanitized = _sanitize_fundamentals_output(
+        content,
+        "",
+        "6782.TW",
+        foreign_data=foreign_data,
+    )
+
+    assert "R_AND_D_CAPEX_BACKLOG=N/A" in sanitized
+    assert "RAW_GROWTH_SCORE: 3/6" in sanitized
+    assert "ADJUSTED_GROWTH_SCORE: 60.0% (based on 5 available points)" in sanitized
+    assert (
+        "R_AND_D_CAPEX_BACKLOG_EVIDENCE_ADJUSTMENT: WITHHELD_LOAD_BEARING" in sanitized
+    )
+    assert "AUTHORITATIVE_METRIC_CORRECTION" in sanitized
+    assert sanitized.count("### GROWTH TRANSITION DETAIL") == 1
+
+
+def test_secondary_capex_evidence_is_preserved_for_policy_gate() -> None:
+    content = """### --- START DATA_BLOCK ---
+GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=0; ROA_ROE_IMPROVING=0; GROSS_MARGIN=1; GLOBAL_EXPANSION=1; R_AND_D_CAPEX_BACKLOG=1
+RAW_GROWTH_SCORE: 4/6
+ADJUSTED_GROWTH_SCORE: 66.7% (based on 6 available points)
+### --- END DATA_BLOCK ---
+"""
+    foreign_data = """CAPACITY_UTILIZATION: 95%
+CAPACITY_EVIDENCE_STATUS: SECONDARY
+R_AND_D_CAPEX_BACKLOG_EVIDENCE: SECONDARY
+"""
+
+    sanitized = _sanitize_fundamentals_output(
+        content,
+        "",
+        "6782.TW",
+        foreign_data=foreign_data,
+    )
+
+    assert "R_AND_D_CAPEX_BACKLOG=1" in sanitized
+    assert "R_AND_D_CAPEX_BACKLOG_EVIDENCE: SECONDARY" in sanitized
+    assert "R_AND_D_CAPEX_BACKLOG_EVIDENCE_ADJUSTMENT" not in sanitized
+
+
+def test_forward_and_cash_conversion_provenance_are_code_owned() -> None:
+    content = """### --- START DATA_BLOCK ---
+CURRENT_PRICE: 183.00
+PE_RATIO_FORWARD: 9.37
+MOAT_CFO_NI_AVG: 1.48
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "forwardEps": 19.54,
+            "forwardPE": 9.365404,
+            "moat_cfoToNiAvg": 1.4827,
+            "moat_cfoToNiYears": 3,
+            "_field_sources": {
+                "forwardEps": "yfinance",
+                "forwardPE": "yfinance",
+                "moat_cfoToNiAvg": "yfinance",
+            },
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "6782.TW")
+
+    assert "FORWARD_EPS: 19.54" in sanitized
+    assert "FORWARD_EPS_SOURCE: yfinance" in sanitized
+    assert "PE_RATIO_FORWARD_SOURCE: yfinance" in sanitized
+    assert "MOAT_CFO_NI_YEARS: 3" in sanitized
+    assert "MOAT_CFO_NI_SOURCE: yfinance" in sanitized
 
 
 def test_static_sector_pe_reference_provenance_is_promoted() -> None:

@@ -44,6 +44,43 @@ def _tool(content: str, *, name: str = "web_search") -> ToolMessage:
     return ToolMessage(content=content, tool_call_id="call-1", name=name)
 
 
+def _latest_results_report(
+    *,
+    source_url: str = "https://issuer.example/results",
+    prior_earnings: str = "200",
+) -> str:
+    return f"""### --- START LATEST_RESULTS ---
+LATEST_RESULTS_COVERAGE_STATUS: FOUND
+LATEST_RESULTS_PERIOD: Three months ended March 31, 2026
+LATEST_RESULTS_PERIOD_END: 2026-03-31
+LATEST_RESULTS_PRIOR_PERIOD: Three months ended March 31, 2025
+LATEST_RESULTS_PRIOR_PERIOD_END: 2025-03-31
+LATEST_RESULTS_PERIOD_MONTHS: 3
+LATEST_RESULTS_CURRENCY: New dollars
+LATEST_RESULTS_REPORTING_UNIT: thousands
+LATEST_RESULTS_REVENUE: 1,500
+LATEST_RESULTS_PRIOR_REVENUE: 1,000
+LATEST_RESULTS_EARNINGS: 405
+LATEST_RESULTS_PRIOR_EARNINGS: {prior_earnings}
+LATEST_RESULTS_EARNINGS_SCOPE: Net income attributable to owners of parent
+LATEST_RESULTS_SOURCE_URL: {source_url}
+### --- END LATEST_RESULTS ---
+"""
+
+
+def _latest_results_evidence(source_url: str) -> str:
+    return f"""DOCUMENT_METADATA: {{"source_url": "{source_url}"}}
+Three months ended March 31, 2026
+Three months ended March 31, 2025
+2026-03-31
+2025-03-31
+Currency: New dollars
+Reporting unit: thousands
+Revenue 1,500 1,000
+Net income attributable to owners of parent 405 200
+"""
+
+
 def test_6782_equity_method_evidence_is_not_promoted_to_control():
     regression = load_frozen_regression("6782_TW_regression.json")
     ownership = regression["ownership_evidence"]
@@ -324,3 +361,82 @@ def test_exact_capacity_percentage_requires_matching_tool_evidence():
     assert f"CAPACITY_UTILIZATION_SOURCE_URL: {source}" in supported
     assert "CAPACITY_UTILIZATION: N/A" in unsupported
     assert "CAPACITY_UTILIZATION_SOURCE_URL: N/A" in unsupported
+
+
+def test_6782_broker_capacity_claim_is_preserved_as_secondary_not_primary():
+    regression = load_frozen_regression("6782_TW_regression.json")
+    evidence = regression["capacity_evidence"]
+    supplemental = f"""<result>
+<url>{evidence["source_url"]}</url>
+<summary>{evidence["summary"]}</summary>
+</result>"""
+
+    normalized = normalize_foreign_language_evidence(
+        _report(
+            capacity=evidence["utilization"],
+            capacity_url=evidence["source_url"],
+        ),
+        [],
+        ticker=regression["ticker"],
+        supplemental_evidence=supplemental,
+    )
+
+    assert "CAPACITY_UTILIZATION: 95%" in normalized
+    assert "CAPACITY_EVIDENCE_STATUS: SECONDARY" in normalized
+    assert "R_AND_D_CAPEX_BACKLOG_EVIDENCE: SECONDARY" in normalized
+    assert "FACILITY_BUILDOUT_STATUS: N/A" in normalized
+
+
+def test_latest_results_growth_is_computed_only_from_one_official_record():
+    source = "https://issuer.example/results"
+
+    normalized = normalize_foreign_language_evidence(
+        _latest_results_report(source_url=source),
+        [_tool(_latest_results_evidence(source), name="get_official_document")],
+        ticker="TEST",
+    )
+
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY" in normalized
+    assert "LATEST_RESULTS_REVENUE_GROWTH_YOY: 50.0%" in normalized
+    assert "LATEST_RESULTS_EARNINGS_GROWTH_YOY: 102.5%" in normalized
+
+
+def test_search_result_cannot_be_promoted_as_primary_latest_results():
+    source = "https://issuer.example/results"
+
+    normalized = normalize_foreign_language_evidence(
+        _latest_results_report(source_url=source),
+        [_tool(_latest_results_evidence(source))],
+        ticker="TEST",
+    )
+
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: SECONDARY" in normalized
+    assert "LATEST_RESULTS_REVENUE_GROWTH_YOY: N/A" in normalized
+    assert "LATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A" in normalized
+
+
+def test_latest_results_rejects_mismatched_or_split_comparatives():
+    source = "https://issuer.example/results"
+    evidence = _latest_results_evidence(source)
+    split = evidence.partition("Revenue")
+
+    mismatched = normalize_foreign_language_evidence(
+        _latest_results_report(source_url=source, prior_earnings="201"),
+        [_tool(evidence, name="get_official_document")],
+        ticker="TEST",
+    )
+    split_records = normalize_foreign_language_evidence(
+        _latest_results_report(source_url=source),
+        [
+            _tool(split[0] + source, name="get_official_document"),
+            ToolMessage(
+                content=split[1] + split[2] + source,
+                tool_call_id="call-2",
+                name="get_official_document",
+            ),
+        ],
+        ticker="TEST",
+    )
+
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED" in mismatched
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED" in split_records

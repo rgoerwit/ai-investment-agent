@@ -12,7 +12,12 @@ import structlog
 from src.data_block_utils import extract_data_block_field
 from src.earnings_baseline import is_material_baseline_distortion
 from src.guidance_vocabulary import all_transient_tax_terms
-from src.thesis_constants import PE_MAX, PE_VS_SECTOR_RICH
+from src.thesis_constants import (
+    MODERATE_BUY_GROWTH_MIN_PCT,
+    MODERATE_BUY_PROJECTED_EPS_MIN_PCT,
+    PE_MAX,
+    PE_VS_SECTOR_RICH,
+)
 from src.validators.sector_classifier import (
     CAPITAL_INTENSIVE_SECTORS,
     FINANCIALS_SECTORS,
@@ -698,6 +703,66 @@ def detect_red_flags(
             }
         )
         logger.warning("score_consistency_flag", ticker=ticker, kind=kind)
+
+    growth_evidence = str(metrics.get("r_and_d_capex_backlog_evidence") or "").upper()
+    growth_evidence_adjustment = str(
+        metrics.get("r_and_d_capex_backlog_evidence_adjustment") or ""
+    ).upper()
+    growth_earned = metrics.get("growth_score_earned")
+    growth_available = metrics.get("growth_score_available")
+    capex_point = metrics.get("r_and_d_capex_backlog_score")
+    adjusted_growth = metrics.get("adjusted_growth_score")
+    capex_point_is_load_bearing = growth_evidence_adjustment == "WITHHELD_LOAD_BEARING"
+    if (
+        growth_evidence in {"SECONDARY", "UNSUPPORTED", "UNKNOWN"}
+        and isinstance(growth_earned, int | float)
+        and isinstance(growth_available, int | float)
+        and isinstance(capex_point, int | float)
+        and isinstance(adjusted_growth, int | float)
+        and growth_available > 0
+        and adjusted_growth >= MODERATE_BUY_GROWTH_MIN_PCT
+    ):
+        without_capex_pct = (
+            max(0.0, growth_earned - capex_point) / growth_available * 100.0
+        )
+        capex_point_is_load_bearing = without_capex_pct < MODERATE_BUY_GROWTH_MIN_PCT
+
+    guidance_growth_text = str(metrics.get("guidance_net_income_yoy") or "")
+    guidance_growth_match = re.search(r"-?\d+(?:\.\d+)?", guidance_growth_text)
+    primary_projected_growth_pass = (
+        metrics.get("guidance_source_authority") == "PRIMARY"
+        and "EPS" in str(metrics.get("guidance_net_income") or "").upper()
+        and guidance_growth_match is not None
+        and float(guidance_growth_match.group()) > MODERATE_BUY_PROJECTED_EPS_MIN_PCT
+    )
+    if capex_point_is_load_bearing and not primary_projected_growth_pass:
+        red_flags.append(
+            {
+                "type": "DECISION_CRITICAL_GROWTH_EVIDENCE_GAP",
+                "severity": "WARNING",
+                "detail": (
+                    "The Zone-2 growth override depends on an R&D/capex point "
+                    f"supported only by {growth_evidence or 'UNKNOWN'} evidence; "
+                    "the alternative >15% projected-earnings branch is not backed "
+                    "by primary-source guidance."
+                ),
+                "action": "REVIEW",
+                "risk_penalty": 0.0,
+                "blocks_buy": True,
+                "rationale": (
+                    "Secondary operating claims can inform the thesis, but they "
+                    "cannot be the deciding evidence that changes HOLD to BUY. "
+                    "Retain HOLD until primary company evidence supports either "
+                    "the qualitative growth point or projected growth above 15%."
+                ),
+            }
+        )
+        logger.warning(
+            "decision_critical_growth_evidence_gap",
+            ticker=ticker,
+            growth_evidence=growth_evidence or "UNKNOWN",
+            guidance_source_authority=metrics.get("guidance_source_authority"),
+        )
 
     debt_to_equity = metrics.get("debt_to_equity")
     role = str(entity_role or metrics.get("listing_role") or "").upper()

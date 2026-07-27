@@ -42,6 +42,12 @@ def downstream_evidence_constraints(state: Mapping[str, Any]) -> str:
         for flag in state.get("red_flags", []) or []
         if isinstance(flag, Mapping)
     }
+    if "NO_CATALYST_DETECTED" in red_flag_types:
+        constraints.append(
+            "NO_CATALYST_DETECTED is limited to activist, index, tender, and "
+            "restructuring mechanisms. Do not generalize it to an absence of "
+            "operating, earnings, product, capacity, or industry catalysts."
+        )
     if _VALUE_TRAP_CONFLICT_TYPE in red_flag_types:
         constraints.append(
             "The raw Value Trap score and TRAP verdict are UNRECONCILED because "
@@ -62,6 +68,72 @@ def downstream_evidence_constraints(state: Mapping[str, Any]) -> str:
             "Value Trap M&A context is not source-verified. Do not name an "
             "acquisition, infer acquisition-led growth, or score M&A quality from "
             "that report unless M&A_CONTEXT_EVIDENCE is CITED."
+        )
+
+    capacity = extract_block_field(
+        fundamentals,
+        "DATA_BLOCK",
+        "CAPACITY_UTILIZATION",
+    )
+    capacity_status = (
+        extract_block_field(
+            fundamentals,
+            "DATA_BLOCK",
+            "CAPACITY_EVIDENCE_STATUS",
+        )
+        or "UNKNOWN"
+    ).upper()
+    capacity_as_of = (
+        extract_block_field(
+            fundamentals,
+            "DATA_BLOCK",
+            "CAPACITY_UTILIZATION_AS_OF",
+        )
+        or "UNKNOWN"
+    ).upper()
+    if (
+        capacity
+        and capacity.upper() not in {"N/A", "NA", "NONE", "UNKNOWN"}
+        and (capacity_status != "PRIMARY" or capacity_as_of in {"N/A", "UNKNOWN"})
+    ):
+        constraints.append(
+            f"Capacity utilization {capacity} is {capacity_status} with as-of "
+            f"{capacity_as_of}. Retain it as a conditional reference only. Do not "
+            "treat it as a confirmed current operating constraint, volume ceiling, "
+            "spare-capacity fact, or independent risk/bonus."
+        )
+
+    analyst_count = extract_block_field(
+        fundamentals,
+        "DATA_BLOCK",
+        "ANALYST_COVERAGE_ENGLISH",
+    )
+    if analyst_count and analyst_count.upper() not in {"N/A", "NA", "NONE", "UNKNOWN"}:
+        constraints.append(
+            f"ANALYST_COVERAGE_ENGLISH ({analyst_count}) is an aggregator "
+            "analyst-opinion count. Do not claim that many identifiable "
+            "English-language analysts unless separately sourced."
+        )
+
+    latest_results_authority = (
+        extract_block_field(
+            fundamentals,
+            "DATA_BLOCK",
+            "LATEST_RESULTS_SOURCE_AUTHORITY",
+        )
+        or ""
+    ).upper()
+    latest_results_period = extract_block_field(
+        fundamentals,
+        "DATA_BLOCK",
+        "LATEST_RESULTS_PERIOD",
+    )
+    if latest_results_authority == "PRIMARY" and latest_results_period:
+        constraints.append(
+            f"LATEST_RESULTS_* contains primary historical actuals for "
+            f"{latest_results_period}. Keep MRQ metrics tied to their own statement "
+            "period, and do not use actual YoY growth as management guidance, a "
+            "forecast, or projected-growth evidence."
         )
 
     governance_card = state.get("entity_governance_card")

@@ -983,6 +983,13 @@ class ArticleWriter:
             report_text=report_text,
         )
 
+        source_confidence_context = extract_source_confidence_context(
+            report_text,
+            report_text,
+        )
+        if source_confidence_context:
+            user_message += f"\n\n---\n\n{source_confidence_context}"
+
         # Append fact-check context if available
         if fact_check_context:
             user_message += (

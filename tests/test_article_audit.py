@@ -170,6 +170,36 @@ def test_article_citation_audit_still_flags_mismatch_despite_qualifier() -> None
     assert "ADJUSTED_HEALTH_SCORE: 92.1%" in errors[0]["claim"]
 
 
+def test_article_citation_audit_checks_forward_pe_identity() -> None:
+    article = "The forward multiple looks inexpensive."
+    data_block = _block(
+        """
+CURRENT_PRICE: 183.00
+FORWARD_EPS: 18.55
+PE_RATIO_FORWARD: 9.37
+"""
+    )
+
+    errors = audit_article_citations(article, data_block)
+
+    assert len(errors) == 1
+    assert errors[0]["location"] == "Forward P/E identity audit"
+    assert "implies forward P/E 9.87" in errors[0]["ground_truth"]
+
+
+def test_article_citation_audit_accepts_consistent_forward_pe_identity() -> None:
+    article = "The forward multiple looks inexpensive."
+    data_block = _block(
+        """
+CURRENT_PRICE: 183.00
+FORWARD_EPS: 19.54
+PE_RATIO_FORWARD: 9.37
+"""
+    )
+
+    assert audit_article_citations(article, data_block) == []
+
+
 def test_article_citation_audit_qualifier_strip_preserves_units() -> None:
     # Guard against over-normalization: a wrong magnitude suffix must still
     # be flagged even though the numeric prefix matches.
@@ -271,6 +301,61 @@ def test_source_confidence_context_includes_consultant_notes_without_datablock()
     assert context.startswith("=== SOURCE CONFIDENCE ===")
     assert "SPOT_CHECK: COVERAGE_GAP on operating cash flow." in context
     assert "aggregator-indicated" in context
+
+
+def test_source_confidence_context_constrains_6782_overstatements() -> None:
+    data_block = _block(
+        """
+FORWARD_EPS: 19.54
+FORWARD_EPS_SOURCE: yfinance
+PE_RATIO_FORWARD: 9.37
+PE_RATIO_FORWARD_SOURCE: yfinance
+GUIDANCE_SOURCE_AUTHORITY: THIRD_PARTY
+CAPACITY_EVIDENCE_STATUS: SECONDARY
+MOAT_CFO_NI_AVG: 1.48
+MOAT_CFO_NI_YEARS: 3
+MOAT_CFO_NI_SOURCE: yfinance
+NET_CASH_TO_MARKET_CAP: 2.1%
+EARNINGS_GROWTH_FY_SOURCE: NET_INCOME_STATEMENT_PROXY
+MRQ_COMPARISON_BASE_STATUS: DEPRESSED
+GROWTH_DATA_QUALITY_NOTE: Newer quarter metadata exists for 2026-03-31, but statement-derived MRQ metrics remain aligned to 2025-12-31.
+"""
+    )
+
+    context = extract_source_confidence_context(data_block, None)
+
+    assert "never as management/company guidance" in context
+    assert "keep every operating inference conditional" in context
+    assert "different EPS estimate or provider" in context
+    assert "not real/proven cash quality" in context
+    assert "modest cushion, not a valuation floor" in context
+    assert "not proof of a durable multi-year earnings trend" in context
+    assert "base-sensitive, not structural acceleration" in context
+    assert "never call that statement period the latest reported quarter" in context
+    assert "Copy numeric thesis-break or review thresholds exactly" in context
+    assert "Use 'margin of safety' only when a downside anchor" in context
+
+
+def test_source_confidence_context_scopes_latest_actuals_and_coverage_count() -> None:
+    data_block = _block(
+        """
+ANALYST_COVERAGE_ENGLISH: 7
+LATEST_RESULTS_PERIOD: Three months ended March 31, 2026
+LATEST_RESULTS_PERIOD_END: 2026-03-31
+LATEST_RESULTS_EARNINGS_GROWTH_YOY: 102.5%
+LATEST_RESULTS_EARNINGS_SCOPE: Net income attributable to owners of parent
+LATEST_RESULTS_SOURCE_URL: https://issuer.example/results
+LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY
+GROWTH_DATA_QUALITY_NOTE: Newer primary results exist for Three months ended March 31, 2026; statement-derived MRQ growth remains aligned to 2025-12-31.
+"""
+    )
+
+    context = extract_source_confidence_context(data_block, None)
+
+    assert "aggregator analyst-opinion count" in context
+    assert "historical actual results in their stated scope and period" in context
+    assert "never present actual YoY growth as management guidance" in context
+    assert "never call that statement period the latest reported quarter" in context
 
 
 def test_source_confidence_context_empty_inputs_returns_empty_string() -> None:

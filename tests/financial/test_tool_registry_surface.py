@@ -64,6 +64,7 @@ def test_toolkit_group_accessors_return_expected_tools():
         "search_foreign_sources",
         "extract_guidance_sources",
         "get_official_filings",
+        "get_official_document",
     }
 
     legal_tool_names = {tool.name for tool in toolkit.get_legal_tools()}
@@ -73,6 +74,9 @@ def test_toolkit_group_accessors_return_expected_tools():
         "get_official_filings",
         "get_official_document",
     }
+
+    auditor_tool_names = [tool.name for tool in toolkit.get_auditor_tools()]
+    assert auditor_tool_names.count("get_official_document") == 1
 
 
 def test_get_macroeconomic_news_accepts_optional_region_param():

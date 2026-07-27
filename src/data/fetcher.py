@@ -1211,8 +1211,9 @@ class SmartMarketDataFetcher(FinancialFetcher):
         )
         if statement_aligned_mrq:
             note = (
-                "Newer quarter metadata exists, but statement-derived MRQ metrics "
-                f"remain aligned to {latest_dt:%Y-%m-%d}."
+                f"Newer quarter metadata exists for {most_recent_dt:%Y-%m-%d}, but "
+                "statement-derived MRQ metrics remain aligned to "
+                f"{latest_dt:%Y-%m-%d}."
             )
             notes = _quality_notes(info)
             if note not in notes:

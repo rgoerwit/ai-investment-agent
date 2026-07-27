@@ -52,6 +52,7 @@ class Toolkit:
 
     def get_foreign_language_tools(self):
         """Tools for Foreign Language Analyst (supplemental data from native sources)."""
+        from src.tools.official_documents import get_official_document
         from src.tools.research import (
             extract_guidance_sources,
             get_official_filings,
@@ -62,6 +63,7 @@ class Toolkit:
             search_foreign_sources,
             extract_guidance_sources,
             get_official_filings,
+            get_official_document,
         ]
 
     def get_auditor_tools(self):
@@ -70,13 +72,11 @@ class Toolkit:
             calculate_forensic_ratios,
             validate_forensic_evidence,
         )
-        from src.tools.official_documents import get_official_document
 
         return [
             *self.get_foreign_language_tools(),
             *self.get_junior_fundamental_tools(),
             *self.get_news_tools(),
-            get_official_document,
             validate_forensic_evidence,
             calculate_forensic_ratios,
         ]

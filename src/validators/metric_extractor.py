@@ -70,6 +70,12 @@ def extract_metrics(
         "pe_vs_sector": None,
         "pb_ratio": None,
         "adjusted_health_score": None,
+        "adjusted_growth_score": None,
+        "growth_score_earned": None,
+        "growth_score_available": None,
+        "r_and_d_capex_backlog_score": None,
+        "r_and_d_capex_backlog_evidence": None,
+        "r_and_d_capex_backlog_evidence_adjustment": None,
         "health_score_consistency": None,
         "growth_score_consistency": None,
         "payout_ratio": None,
@@ -114,6 +120,9 @@ def extract_metrics(
         "guidance_coverage_status": None,
         "guidance_source_date": None,
         "guidance_source_url": None,
+        "guidance_source_type": None,
+        "guidance_source_authority": None,
+        "guidance_management_identified": None,
         "guidance_period": None,
         "guidance_revenue": None,
         "guidance_operating_profit": None,
@@ -150,6 +159,52 @@ def extract_metrics(
     health_match = re.search(r"ADJUSTED_HEALTH_SCORE:\s*(\d+(?:\.\d+)?)%", data_block)
     if health_match:
         metrics["adjusted_health_score"] = float(health_match.group(1))
+
+    growth_match = re.search(
+        r"ADJUSTED_GROWTH_SCORE:\s*(\d+(?:\.\d+)?)%"
+        r"(?:[^\n]*?based on\s*(\d+(?:\.\d+)?)\s+available points)?",
+        data_block,
+        re.IGNORECASE,
+    )
+    if growth_match:
+        metrics["adjusted_growth_score"] = float(growth_match.group(1))
+
+    raw_growth_match = re.search(
+        r"RAW_GROWTH_SCORE:\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)",
+        data_block,
+    )
+    if raw_growth_match:
+        metrics["growth_score_earned"] = float(raw_growth_match.group(1))
+        metrics["growth_score_available"] = float(raw_growth_match.group(2))
+    if growth_match and growth_match.group(2):
+        metrics["growth_score_available"] = float(growth_match.group(2))
+
+    capex_score_match = re.search(
+        r"GROWTH_SCORE_BREAKDOWN:[^\n]*\bR_AND_D_CAPEX_BACKLOG="
+        r"(0(?:\.5)?|1|N/A|REMOVED)\b",
+        data_block,
+        re.IGNORECASE,
+    )
+    if capex_score_match and capex_score_match.group(1).upper() not in {
+        "N/A",
+        "REMOVED",
+    }:
+        metrics["r_and_d_capex_backlog_score"] = float(capex_score_match.group(1))
+
+    for field_name, metric_name in (
+        ("R_AND_D_CAPEX_BACKLOG_EVIDENCE", "r_and_d_capex_backlog_evidence"),
+        (
+            "R_AND_D_CAPEX_BACKLOG_EVIDENCE_ADJUSTMENT",
+            "r_and_d_capex_backlog_evidence_adjustment",
+        ),
+    ):
+        match = re.search(
+            rf"^{field_name}:\s*([^\n]+)",
+            data_block,
+            re.IGNORECASE | re.MULTILINE,
+        )
+        if match:
+            metrics[metric_name] = match.group(1).strip().upper()
 
     for kind in ("HEALTH", "GROWTH"):
         consistency_match = re.search(
@@ -497,6 +552,9 @@ def extract_metrics(
         "GUIDANCE_COVERAGE_STATUS": "guidance_coverage_status",
         "GUIDANCE_SOURCE_DATE": "guidance_source_date",
         "GUIDANCE_SOURCE_URL": "guidance_source_url",
+        "GUIDANCE_SOURCE_TYPE": "guidance_source_type",
+        "GUIDANCE_SOURCE_AUTHORITY": "guidance_source_authority",
+        "GUIDANCE_MANAGEMENT_IDENTIFIED": "guidance_management_identified",
         "GUIDANCE_PERIOD": "guidance_period",
         "GUIDANCE_REVENUE": "guidance_revenue",
         "GUIDANCE_OPERATING_PROFIT": "guidance_operating_profit",
