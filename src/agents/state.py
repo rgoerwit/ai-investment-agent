@@ -5,6 +5,8 @@ from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
+from src.tooling.structured_ingress import merge_structured_inputs
+
 PROVENANCE_MARKERS = ('"_field_sources"', '"_source_conflicts"')
 MESSAGE_TAIL_LIMIT = 12
 
@@ -220,6 +222,7 @@ class AgentState(TypedDict, total=False):
     risk_debate_state: Annotated[RiskDebateState, merge_risk_state]
     final_trade_decision: Annotated[str, take_last]
     tools_called: Annotated[dict[str, set[str]], merge_dicts]
+    structured_inputs: Annotated[dict[str, dict[str, Any]], merge_structured_inputs]
     prompts_used: Annotated[dict[str, dict[str, str]], merge_dicts]
     artifact_statuses: Annotated[dict[str, dict[str, Any]], merge_dicts]
     consultant_tool_failures: Annotated[int, take_last]
@@ -228,3 +231,5 @@ class AgentState(TypedDict, total=False):
     chart_paths: Annotated[dict[str, str], take_last]
     macro_context_injected_into_news: Annotated[bool, take_last]
     entity_governance_card: Annotated[dict[str, Any], take_last]
+    analysis_snapshot: Annotated[dict[str, Any], take_last]
+    decision_trace: Annotated[dict[str, Any], take_last]

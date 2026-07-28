@@ -4,13 +4,63 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from src.error_safety import summarize_exception
+from src.tooling.evidence_recorder import (
+    EvidenceStatus,
+    ExecutionStatus,
+    classify_evidence_value,
+)
 from src.tooling.runtime import ToolInvocation
 
 PreflightCall = tuple[str, Any, dict[str, Any]]
-PreflightOutcome = tuple[str, str]
+
+
+@dataclass(frozen=True)
+class PreflightOutcome:
+    """Structured execution and evidence semantics for one preflight call."""
+
+    label: str
+    execution_status: ExecutionStatus
+    evidence_status: EvidenceStatus
+    content: str = ""
+    reason: str | None = None
+
+    @property
+    def legacy_status(self) -> str:
+        if self.execution_status != "SUCCEEDED":
+            return self.execution_status
+        if self.evidence_status in {
+            "NO_RESULTS",
+            "UNAVAILABLE",
+            "AUTH_ERROR",
+            "INSUFFICIENT",
+        }:
+            return "INSUFFICIENT_DATA"
+        return "COMPLETED"
+
+    def render(self) -> str:
+        lines = [
+            f"STATUS: {self.legacy_status}",
+            f"EXECUTION_STATUS: {self.execution_status}",
+            f"EVIDENCE_STATUS: {self.evidence_status}",
+        ]
+        if self.reason:
+            lines.append(f"REASON: {self.reason}")
+        if self.content:
+            lines.append(self.content)
+        return "\n".join(lines)
+
+
+def skipped_preflight_outcome(label: str, reason: str) -> PreflightOutcome:
+    return PreflightOutcome(
+        label=label,
+        execution_status="SKIPPED",
+        evidence_status="UNAVAILABLE",
+        reason=reason,
+    )
 
 
 async def run_preflight_calls(
@@ -45,13 +95,20 @@ async def run_preflight_calls(
                 runner=_runner,
             )
             value = str(result.value)
-            if getattr(result, "blocked", False):
-                status = "BLOCKED"
-            elif value.strip().upper().startswith("STATUS: INSUFFICIENT_DATA"):
-                status = "INSUFFICIENT_DATA"
-            else:
-                status = "COMPLETED"
-            return label, f"STATUS: {status}\n{value}"
+            execution_status, evidence_status, reason, content = (
+                classify_evidence_value(
+                    tool.name,
+                    value,
+                    blocked=bool(getattr(result, "blocked", False)),
+                )
+            )
+            return PreflightOutcome(
+                label=label,
+                execution_status=execution_status,
+                evidence_status=evidence_status,
+                content=content,
+                reason=reason,
+            )
         except Exception as exc:
             logger.warning(
                 failure_event,
@@ -59,7 +116,12 @@ async def run_preflight_calls(
                 query_label=label,
                 **summarize_exception(exc, operation=failure_event),
             )
-            return label, f"STATUS: FAILED ({type(exc).__name__})"
+            return PreflightOutcome(
+                label=label,
+                execution_status="FAILED",
+                evidence_status="UNAVAILABLE",
+                reason=type(exc).__name__.upper(),
+            )
         finally:
             durations_ms[label] = round((time.monotonic() - started_at) * 1000)
 

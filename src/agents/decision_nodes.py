@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 from typing import Any
@@ -34,11 +35,16 @@ from src.data_block_utils import (
     unfenced_label,
 )
 from src.error_safety import summarize_exception
-from src.pm_claim_audit import audit_pm_claims
 
 # Verdict canonicalization lives in the neutral, dependency-free parser (it used
 # to live on src.agents.pm_verdict_metadata, which created a charts circular
 # import: pm_block -> pm_verdict_metadata -> agents/__init__ -> decision_nodes).
+from src.pm_claim_audit import (
+    audit_pm_claims,
+    reconcile_final_decision_trace,
+    render_decision_trace_instruction,
+    validate_decision_trace,
+)
 from src.pm_decision_parser import canonicalize_pm_verdict, parse_final_decision_scores
 from src.runtime_diagnostics import (
     failure_artifact,
@@ -519,6 +525,21 @@ def _ensure_auditor_resolution_block(pm_output: str, auditor_report: str | None)
     return _insert_block_before_pm_block(pm_output, fallback)
 
 
+def _ensure_pm_resolution_blocks(
+    pm_output: str,
+    *,
+    consultant: str | None,
+    apac: str | None,
+    auditor: str | None,
+    red_flags: list[dict[str, Any]],
+) -> str:
+    """Apply deterministic resolution blocks identically after every PM attempt."""
+    updated = _ensure_consultant_resolution_block(pm_output, consultant)
+    updated = _ensure_apac_resolution_block(updated, apac)
+    updated = _ensure_auditor_resolution_block(updated, auditor)
+    return _ensure_capital_structure_resolution_block(updated, red_flags)
+
+
 def resolve_pfic_display_status(
     legal_pfic_status: str | None,
     data_block_pfic_risk: str | None,
@@ -751,7 +772,6 @@ def _log_risk_tally_reconciliation(
 
 # Pre-screen flags whose unresolved presence forbids a Zone-2 BUY override (prompt rule).
 _OVERRIDE_BLOCKING_FLAGS = {
-    "DECISION_CRITICAL_GROWTH_EVIDENCE_GAP",
     "EARNINGS_DRIVER_EVIDENCE_GAP",
     "GROWTH_QUALITY_UNPROVEN",
     "MANAGEMENT_GUIDANCE_EVIDENCE_GAP",
@@ -829,7 +849,6 @@ def create_portfolio_manager_node(
         sentiment = get_valid_artifact_content(state, "sentiment_report")
         news = get_valid_artifact_content(state, "news_report")
         fundamentals = get_valid_artifact_content(state, "fundamentals_report")
-        foreign_language = get_valid_artifact_content(state, "foreign_language_report")
         value_trap = get_valid_artifact_content(state, "value_trap_report")
         inv_plan = get_valid_artifact_content(state, "investment_plan")
         consultant = get_valid_artifact_content(state, "consultant_review")
@@ -948,9 +967,7 @@ NEUTRAL ANALYST (Balanced):
         # Scan narrative artifacts (not the structured DATA_BLOCK) for a large,
         # unverified operating decline that must block BUY pending verification.
         narrative_text = "\n\n".join(
-            str(part)
-            for part in (news, value_trap, foreign_language)
-            if isinstance(part, str) and part
+            str(part) for part in (news, value_trap) if isinstance(part, str) and part
         )
         if narrative_text:
             material_signal_flags = (
@@ -1153,7 +1170,7 @@ NEUTRAL ANALYST (Balanced):
             fundamentals,
             market,
             news,
-            foreign_language,
+            "",
             inv_plan,
             apac,
             consultant,
@@ -1166,7 +1183,7 @@ NEUTRAL ANALYST (Balanced):
             fundamentals,
             market,
             news,
-            foreign_language,
+            "",
             inv_plan,
             apac,
             consultant,
@@ -1233,9 +1250,6 @@ NEWS ANALYST REPORT:
 FUNDAMENTALS ANALYST REPORT:
 {support.summarize_for_pm(fundamentals, "fundamentals", 4000) if fundamentals else "N/A"}{attribution_table}{conflict_table}
 
-FOREIGN LANGUAGE / NATIVE-SOURCE ANALYST REPORT:
-{support.summarize_for_pm(foreign_language, "foreign_language", 2500) if foreign_language else "N/A"}
-
 VALUE TRAP ANALYSIS:
 {support.extract_value_trap_verdict(value_trap)}{support.summarize_for_pm(value_trap, "value_trap", 2500) if value_trap else "N/A"}{red_flag_section}{macro_section}
 
@@ -1273,9 +1287,14 @@ RISK TEAM DEBATE:
         constraint_state = dict(state)
         constraint_state["red_flags"] = red_flags
         evidence_constraints = downstream_evidence_constraints(constraint_state)
+        decision_trace_instruction = render_decision_trace_instruction(
+            state.get("analysis_snapshot"),
+            red_flags,
+        )
         prompt = (
             f"{pm_system_msg}{governance_block(state)}{vehicle_directive}{evidence_constraints}\n\n"
-            f"{all_context}\n\nMake Portfolio Manager Verdict."
+            f"{decision_trace_instruction}\n\n{all_context}\n\n"
+            "Make Portfolio Manager Verdict."
         )
 
         try:
@@ -1287,21 +1306,12 @@ RISK TEAM DEBATE:
                 model_name=support.get_model_name(llm),
             )
             content_str = message_utils.extract_string_content(response.content)
-            content_str = _ensure_consultant_resolution_block(
+            content_str = _ensure_pm_resolution_blocks(
                 content_str,
-                consultant if consultant else None,
-            )
-            content_str = _ensure_apac_resolution_block(
-                content_str,
-                apac if apac else None,
-            )
-            content_str = _ensure_auditor_resolution_block(
-                content_str,
-                state.get("auditor_report") or None,
-            )
-            content_str = _ensure_capital_structure_resolution_block(
-                content_str,
-                red_flags,
+                consultant=consultant or None,
+                apac=apac or None,
+                auditor=state.get("auditor_report") or None,
+                red_flags=red_flags,
             )
 
             from src.utils import detect_truncation
@@ -1317,6 +1327,109 @@ RISK TEAM DEBATE:
             )
 
             validation = validate_required_output("portfolio_manager", content_str)
+            trace_sections = {"decision_facts", "decision_gates"}
+            if (
+                validation["missing"]
+                and set(validation["missing"]).issubset(trace_sections)
+                and not trunc_info["truncated"]
+            ):
+                correction_prompt = (
+                    f"{prompt}\n\nYour prior response omitted required decision-trace "
+                    "fields. Return the complete corrected response, including exactly "
+                    "one complete PM_BLOCK with DECISION_FACTS and DECISION_GATES. "
+                    "Do not return a patch.\n\nPRIOR RESPONSE:\n"
+                    f"{content_str}"
+                )
+                response = await agent_runtime.invoke_with_rate_limit_handling(
+                    llm,
+                    [HumanMessage(content=correction_prompt)],
+                    context=f"{agent_prompt.agent_name} structure correction",
+                    provider=support.infer_provider_name(llm),
+                    model_name=support.get_model_name(llm),
+                )
+                content_str = message_utils.extract_string_content(response.content)
+                content_str = _ensure_pm_resolution_blocks(
+                    content_str,
+                    consultant=consultant or None,
+                    apac=apac or None,
+                    auditor=state.get("auditor_report") or None,
+                    red_flags=red_flags,
+                )
+                trunc_info = detect_truncation(
+                    content_str,
+                    agent="portfolio_manager",
+                )
+                validation = validate_required_output(
+                    "portfolio_manager",
+                    content_str,
+                )
+            decision_trace: dict[str, Any] | None = None
+            if not should_fail_closed(
+                "portfolio_manager",
+                validation=validation,
+                truncated=trunc_info["truncated"],
+                content=content_str,
+            ):
+                decision_trace = validate_decision_trace(
+                    content_str,
+                    state.get("analysis_snapshot"),
+                    red_flags,
+                )
+                snapshot = state.get("analysis_snapshot")
+                if (
+                    decision_trace["status"] == "INVALID"
+                    and isinstance(snapshot, dict)
+                    and snapshot.get("contract_status") == "VALID"
+                ):
+                    trace_errors = {
+                        key: decision_trace.get(key)
+                        for key in (
+                            "invalid_facts",
+                            "invalid_gates",
+                            "missing_gates",
+                            "missing_fields",
+                            "support_facts",
+                            "reason",
+                        )
+                        if decision_trace.get(key)
+                    }
+                    correction_prompt = (
+                        f"{prompt}\n\nYour prior response violated the deterministic "
+                        f"decision-trace contract: {trace_errors}. Return one complete "
+                        "corrected response, not a patch. Preserve the investment "
+                        "reasoning, but cite only allowed claim IDs, include every "
+                        "active gate, and ensure a BUY cites a SUPPORT claim.\n\n"
+                        f"PRIOR RESPONSE:\n{content_str}"
+                    )
+                    response = await agent_runtime.invoke_with_rate_limit_handling(
+                        llm,
+                        [HumanMessage(content=correction_prompt)],
+                        context=f"{agent_prompt.agent_name} trace correction",
+                        provider=support.infer_provider_name(llm),
+                        model_name=support.get_model_name(llm),
+                    )
+                    content_str = message_utils.extract_string_content(response.content)
+                    content_str = _ensure_pm_resolution_blocks(
+                        content_str,
+                        consultant=consultant or None,
+                        apac=apac or None,
+                        auditor=state.get("auditor_report") or None,
+                        red_flags=red_flags,
+                    )
+                    trunc_info = detect_truncation(
+                        content_str,
+                        agent="portfolio_manager",
+                    )
+                    validation = validate_required_output(
+                        "portfolio_manager",
+                        content_str,
+                    )
+                    decision_trace = validate_decision_trace(
+                        content_str,
+                        state.get("analysis_snapshot"),
+                        red_flags,
+                    )
+
             log_output_diagnostics(
                 agent_key="portfolio_manager",
                 ticker=ticker,
@@ -1354,6 +1467,30 @@ RISK TEAM DEBATE:
                     provider=support.infer_provider_name(llm),
                     fallback_content=content_str,
                 )
+
+            decision_trace = decision_trace or validate_decision_trace(
+                content_str,
+                state.get("analysis_snapshot"),
+                red_flags,
+            )
+            if (
+                decision_trace["status"] == "INVALID"
+                and decision_trace["verdict"] == "BUY"
+            ):
+                trace_flag = {
+                    "type": "DECISION_TRACE_INVALID",
+                    "severity": "WARNING",
+                    "detail": (
+                        "BUY references missing, unsupported, or inactive canonical "
+                        "claim/gate identifiers."
+                    ),
+                    "action": "REVIEW",
+                    "risk_penalty": 0.0,
+                    "rationale": "Positive override lacks a valid claim trace.",
+                    "blocks_buy": True,
+                }
+                red_flags.append(trace_flag)
+                pm_generated_red_flags.append(trace_flag)
 
             content_str, verdict_floored = maybe_floor_verdict_to_hold(
                 content_str,
@@ -1396,6 +1533,11 @@ RISK TEAM DEBATE:
             # any floor/demote rewrite above — so a BUY→HOLD demotion cannot leave a
             # stale nonzero POSITION_SIZE or "Recommended Position Size" prose.
             content_str = _normalize_pm_block_contract(content_str)
+            content_str, decision_trace = reconcile_final_decision_trace(
+                content_str,
+                state.get("analysis_snapshot"),
+                red_flags,
+            )
             _log_risk_tally_reconciliation(content_str, code_risk_subtotal, ticker)
             _log_pm_discipline_checks(
                 content_str, red_flags, valuation_reliability, ticker
@@ -1437,6 +1579,7 @@ RISK TEAM DEBATE:
                 provider=support.infer_provider_name(llm),
             )
             result["red_flags"] = pm_generated_red_flags
+            result["decision_trace"] = decision_trace
             return result
         except Exception as exc:
             logger.error(
@@ -1485,8 +1628,13 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
         state: AgentState, config: RunnableConfig
     ) -> dict[str, Any]:
         from src.agents.capital_structure import assess_capital_structure_scale
-        from src.agents.fundamentals_reconciler import extract_raw_metrics_payload
+        from src.analysis_snapshot import (
+            add_validated_derivations,
+            build_analysis_snapshot,
+        )
+        from src.claim_policy import RAW_FINANCIAL_METRICS_INPUT
         from src.config import config as settings_config
+        from src.tooling.structured_ingress import get_structured_ingress_payload
         from src.validators.entity_governance_card import (
             build_card,
             extract_merged_subset_from_raw,
@@ -1498,21 +1646,90 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
         company_name = state.get("company_name", ticker)
 
         try:
-            fundamentals_report = state.get("fundamentals_report", "")
-            if not isinstance(fundamentals_report, str):
-                fundamentals_report = message_utils.extract_string_content(
-                    fundamentals_report
+            from src.runtime_services import get_current_evidence_records
+
+            fundamentals_report = get_valid_artifact_content(
+                state,
+                "fundamentals_report",
+            )
+            prior_snapshot = state.get("analysis_snapshot")
+            analysis_snapshot = (
+                add_validated_derivations(
+                    prior_snapshot,
+                    fundamentals_report,
                 )
+                if isinstance(prior_snapshot, dict)
+                else build_analysis_snapshot(
+                    state,
+                    get_current_evidence_records(),
+                    version=1,
+                )
+            )
+            raw_metrics, _ = get_structured_ingress_payload(
+                state,
+                RAW_FINANCIAL_METRICS_INPUT,
+            )
+            raw_metrics = raw_metrics or {}
 
             quiet_mode = settings_config.quiet_mode
 
             if not fundamentals_report:
+                fundamentals_status = get_artifact_status(
+                    state,
+                    "fundamentals_report",
+                )
+                failure_detail = (
+                    fundamentals_status.message or "Fundamentals report is unavailable."
+                )
                 logger.warning(
                     "validator_no_fundamentals",
                     ticker=ticker,
-                    message="No fundamentals report available - skipping pre-screening",
+                    reason=failure_detail,
                 )
-                return {"red_flags": [], "pre_screening_result": "PASS"}
+                return {
+                    "analysis_snapshot": analysis_snapshot,
+                    "red_flags": [
+                        {
+                            "type": "DATA_CONTRACT_INVALID",
+                            "severity": "CRITICAL",
+                            "detail": failure_detail,
+                            "action": "AUTO_REJECT",
+                            "risk_penalty": 0.0,
+                            "rationale": "Deterministic validation cannot run.",
+                        }
+                    ],
+                    "pre_screening_result": "REJECT",
+                }
+
+            snapshot_status = str(analysis_snapshot.get("contract_status") or "INVALID")
+            if isinstance(prior_snapshot, dict) and snapshot_status != "VALID":
+                reason = str(
+                    analysis_snapshot.get("contract_reason")
+                    or "CANONICAL_CONTRACT_NOT_VALID"
+                )
+                logger.warning(
+                    "validator_canonical_contract_unusable",
+                    ticker=ticker,
+                    contract_status=snapshot_status,
+                    reason=reason,
+                )
+                return {
+                    "analysis_snapshot": analysis_snapshot,
+                    "red_flags": [
+                        {
+                            "type": f"DATA_CONTRACT_{snapshot_status}",
+                            "severity": "CRITICAL",
+                            "detail": reason,
+                            "action": "AUTO_REJECT",
+                            "risk_penalty": 0.0,
+                            "rationale": (
+                                "Deterministic validation cannot rely on an "
+                                "invalid or analytically empty canonical contract."
+                            ),
+                        }
+                    ],
+                    "pre_screening_result": "REJECT",
+                }
 
             sector = RedFlagDetector.detect_sector(fundamentals_report)
             metrics = RedFlagDetector.extract_metrics(fundamentals_report)
@@ -1532,17 +1749,18 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                     message="DATA_BLOCK missing or unparseable - cannot validate financial health",
                 )
                 return {
+                    "analysis_snapshot": analysis_snapshot,
                     "red_flags": [
                         {
-                            "type": "DATA_QUALITY_WARNING",
-                            "severity": "WARNING",
+                            "type": "DATA_CONTRACT_INVALID",
+                            "severity": "CRITICAL",
                             "detail": "DATA_BLOCK missing or unparseable in fundamentals report; financial health checks could not be performed",
-                            "action": "RISK_PENALTY",
-                            "risk_penalty": 1.0,
-                            "rationale": "Pre-screening was unable to verify financial health due to missing structured data. Proceeding with caution.",
+                            "action": "AUTO_REJECT",
+                            "risk_penalty": 0.0,
+                            "rationale": "Pre-screening cannot proceed on a malformed deterministic contract.",
                         }
                     ],
-                    "pre_screening_result": "PASS",
+                    "pre_screening_result": "REJECT",
                 }
 
             if not quiet_mode:
@@ -1561,7 +1779,7 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
             entity_role = metrics.get("listing_role")
             try:
                 merged_subset = extract_merged_subset_from_raw(
-                    state.get("raw_fundamentals_data", "")
+                    json.dumps(raw_metrics, ensure_ascii=False)
                 )
                 card = build_card(
                     ticker=ticker,
@@ -1602,9 +1820,7 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                     capital_structure["scale_assessment"] = (
                         assess_capital_structure_scale(
                             capital_structure,
-                            extract_raw_metrics_payload(
-                                state.get("raw_fundamentals_data", "")
-                            ),
+                            raw_metrics,
                             leverage_threshold=leverage_threshold,
                         )
                     )
@@ -1706,6 +1922,7 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                 logger.info("pre_screening_passed", ticker=ticker)
 
             result = {
+                "analysis_snapshot": analysis_snapshot,
                 "red_flags": red_flags,
                 "pre_screening_result": pre_screening_result,
             }
@@ -1718,6 +1935,25 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                 ticker=ticker,
                 **summarize_exception(exc, operation="financial_health_validator"),
             )
-            return {"red_flags": [], "pre_screening_result": "PASS"}
+            return {
+                "analysis_snapshot": {
+                    "version": 1,
+                    "contract_status": "INVALID",
+                    "contract_reason": "VALIDATOR_CRASHED",
+                    "claims": {},
+                    "conflicts": [],
+                },
+                "red_flags": [
+                    {
+                        "type": "VALIDATOR_EXECUTION_FAILED",
+                        "severity": "CRITICAL",
+                        "detail": "Financial validation did not complete.",
+                        "action": "AUTO_REJECT",
+                        "risk_penalty": 0.0,
+                        "rationale": "The decision path cannot bypass a failed validator.",
+                    }
+                ],
+                "pre_screening_result": "REJECT",
+            }
 
     return financial_health_validator_node

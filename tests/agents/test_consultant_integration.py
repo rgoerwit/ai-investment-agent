@@ -986,6 +986,8 @@ class TestPortfolioManagerConsultantGating:
             "VERDICT: HOLD\n"
             "RISK_TALLY: 0.5\n"
             "ZONE: MODERATE\n"
+            "DECISION_FACTS: NONE\n"
+            "DECISION_GATES: NONE\n"
             "### --- END PM_BLOCK ---\n"
         )
         captured_prompt: dict[str, str] = {}
@@ -1066,6 +1068,8 @@ Conditions:
             "VERDICT: HOLD\n"
             "RISK_TALLY: 0.5\n"
             "ZONE: MODERATE\n"
+            "DECISION_FACTS: NONE\n"
+            "DECISION_GATES: NONE\n"
             "### --- END PM_BLOCK ---\n"
         )
 
@@ -1140,6 +1144,8 @@ Conditions:
             "VERDICT: HOLD\n"
             "RISK_TALLY: 0.0\n"
             "ZONE: LOW\n"
+            "DECISION_FACTS: NONE\n"
+            "DECISION_GATES: NONE\n"
             "### --- END PM_BLOCK ---\n"
         )
         captured_prompt: dict[str, str] = {}

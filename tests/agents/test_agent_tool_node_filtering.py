@@ -14,6 +14,7 @@ These tests ensure this bug doesn't regress.
 """
 
 import asyncio
+import json
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -21,6 +22,10 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from src.graph import create_agent_tool_node
+from src.tooling.structured_ingress import (
+    build_structured_ingress_record,
+    merge_structured_inputs,
+)
 
 
 class TestAgentToolNodeFiltering:
@@ -139,6 +144,112 @@ class TestAgentToolNodeFiltering:
         assert result == {"messages": []}
         mock_tools[0].ainvoke.assert_not_called()
         mock_tools[1].ainvoke.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_registered_structured_output_is_captured_before_text_cap(self):
+        tool = MagicMock()
+        tool.name = "get_financial_metrics"
+        payload = {"currentPrice": 178.0, "longBusinessSummary": "x" * 25_000}
+        tool.ainvoke = AsyncMock(return_value=json.dumps(payload))
+        node = create_agent_tool_node(
+            [tool],
+            "junior_fundamentals_analyst",
+        )
+        state = {
+            "messages": [
+                AIMessage(
+                    name="junior_fundamentals_analyst",
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "get_financial_metrics",
+                            "args": {"ticker": "TEST"},
+                            "id": "metrics",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            ]
+        }
+
+        result = await node(state, {"configurable": {}})
+
+        record = result["structured_inputs"]["raw_financial_metrics"]
+        assert record["status"] == "VALID"
+        assert record["payload"] == payload
+        assert "TRUNCATED" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_registered_structured_output_records_parse_failure(self):
+        tool = MagicMock()
+        tool.name = "get_financial_metrics"
+        tool.ainvoke = AsyncMock(return_value='{"currentPrice": 178')
+        node = create_agent_tool_node(
+            [tool],
+            "junior_fundamentals_analyst",
+        )
+        state = {
+            "messages": [
+                AIMessage(
+                    name="junior_fundamentals_analyst",
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "get_financial_metrics",
+                            "args": {"ticker": "TEST"},
+                            "id": "metrics",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            ]
+        }
+
+        result = await node(state, {"configurable": {}})
+
+        record = result["structured_inputs"]["raw_financial_metrics"]
+        assert record["status"] == "INVALID"
+        assert record["reason"] == "MALFORMED_JSON"
+
+    def test_conflicting_valid_structured_outputs_fail_closed(self):
+        first = build_structured_ingress_record(
+            {"trailingPE": 12.0},
+            agent_key="junior_fundamentals_analyst",
+            tool_name="get_financial_metrics",
+        )
+        second = build_structured_ingress_record(
+            {"trailingPE": 99.0},
+            agent_key="junior_fundamentals_analyst",
+            tool_name="get_financial_metrics",
+        )
+
+        merged = merge_structured_inputs(
+            {"raw_financial_metrics": first},
+            {"raw_financial_metrics": second},
+        )
+
+        assert merged["raw_financial_metrics"]["status"] == "INVALID"
+        assert merged["raw_financial_metrics"]["reason"] == "CONFLICTING_VALID_PAYLOADS"
+
+    def test_valid_retry_recovers_failed_structured_input(self):
+        failed = build_structured_ingress_record(
+            "",
+            agent_key="junior_fundamentals_analyst",
+            tool_name="get_financial_metrics",
+            failure_reason="TOOL_TIMEOUT",
+        )
+        recovered = build_structured_ingress_record(
+            {"trailingPE": 12.0},
+            agent_key="junior_fundamentals_analyst",
+            tool_name="get_financial_metrics",
+        )
+
+        merged = merge_structured_inputs(
+            {"raw_financial_metrics": failed},
+            {"raw_financial_metrics": recovered},
+        )
+
+        assert merged["raw_financial_metrics"] == recovered
 
     @pytest.mark.asyncio
     async def test_finds_correct_agent_message_among_many(self, mock_tools):

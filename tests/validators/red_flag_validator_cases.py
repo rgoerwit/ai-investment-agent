@@ -18,6 +18,8 @@ import json
 import pytest
 
 from src.agents import create_financial_health_validator_node
+from src.claim_policy import RAW_FINANCIAL_METRICS_INPUT
+from src.tooling.structured_ingress import build_structured_ingress_record
 from src.validators.red_flag_detector import RedFlagDetector
 
 
@@ -472,6 +474,32 @@ PE_RATIO_TTM: 16.0
         assert len(result["red_flags"]) == 0
 
     @pytest.mark.asyncio
+    async def test_invalid_canonical_snapshot_cannot_be_reminted_from_report(
+        self, validator_node, base_state
+    ):
+        """An explicit ingress failure remains invalid after Senior prose exists."""
+        base_state["analysis_snapshot"] = {
+            "version": 1,
+            "contract_status": "INVALID",
+            "contract_reason": "MALFORMED_JSON",
+            "claims": {},
+            "conflicts": [],
+        }
+        base_state["fundamentals_report"] = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 90%
+PE_RATIO_TTM: 10.0
+### --- END DATA_BLOCK ---
+"""
+
+        result = await validator_node(base_state, {})
+
+        assert result["pre_screening_result"] == "REJECT"
+        assert result["analysis_snapshot"]["contract_status"] == "INVALID"
+        assert result["analysis_snapshot"]["contract_reason"] == "MALFORMED_JSON"
+        assert result["red_flags"][0]["type"] == "DATA_CONTRACT_INVALID"
+
+    @pytest.mark.asyncio
     async def test_multiple_red_flags_all_reported(self, validator_node, base_state):
         """Test that multiple red flags are all detected and reported."""
         base_state["fundamentals_report"] = """
@@ -500,14 +528,16 @@ Free Cash Flow: -$500M
         assert "EARNINGS_QUALITY" in flag_types
 
     @pytest.mark.asyncio
-    async def test_no_fundamentals_report_passes(self, validator_node, base_state):
-        """Test that missing fundamentals report results in PASS (graceful degradation)."""
+    async def test_no_fundamentals_report_rejects_invalid_contract(
+        self, validator_node, base_state
+    ):
+        """Missing fundamentals cannot bypass deterministic validation."""
         base_state["fundamentals_report"] = ""
 
         result = await validator_node(base_state, {})
 
-        assert result["pre_screening_result"] == "PASS"
-        assert len(result["red_flags"]) == 0
+        assert result["pre_screening_result"] == "REJECT"
+        assert result["red_flags"][0]["type"] == "DATA_CONTRACT_INVALID"
 
     @pytest.mark.asyncio
     async def test_incomplete_data_does_not_false_positive(
@@ -540,7 +570,10 @@ PE_RATIO_TTM: 13.5
         """Test edge cases at exact threshold values."""
         # D/E exactly 500%
         base_state["fundamentals_report"] = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
 D/E: 500
+### --- END DATA_BLOCK ---
 """
 
         result = await validator_node(base_state, {})
@@ -554,9 +587,11 @@ D/E: 500
     ):
         """Test that low interest coverage alone doesn't trigger if leverage is OK."""
         base_state["fundamentals_report"] = """
-**Leverage**:
-- D/E: 50
-- Interest Coverage: 1.5x
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+D/E: 50
+Interest Coverage: 1.5x
+### --- END DATA_BLOCK ---
 """
 
         result = await validator_node(base_state, {})
@@ -3859,14 +3894,18 @@ PFIC_RISK: CLEAN
             }
         )
         state = self._make_state(self._CLEAN_DATA_BLOCK, legal_report)
-        state["raw_fundamentals_data"] = json.dumps(
-            {
-                "totalDebt": 100_000_000,
-                "debtToEquity": 0.8,
-                "revenue_TTM": 1_000_000_000,
-                "financialCurrency": "USD",
-            }
-        )
+        state["structured_inputs"] = {
+            RAW_FINANCIAL_METRICS_INPUT: build_structured_ingress_record(
+                {
+                    "totalDebt": 100_000_000,
+                    "debtToEquity": 0.8,
+                    "revenue_TTM": 1_000_000_000,
+                    "financialCurrency": "USD",
+                },
+                agent_key="junior_fundamentals_analyst",
+                tool_name="get_financial_metrics",
+            )
+        }
 
         result = await create_financial_health_validator_node(strict_mode=False)(
             state, {}
@@ -3906,13 +3945,17 @@ PFIC_RISK: CLEAN
             }
         )
         state = self._make_state(self._CLEAN_DATA_BLOCK, legal_report)
-        state["raw_fundamentals_data"] = json.dumps(
-            {
-                "totalDebt": 100_000_000,
-                "debtToEquity": 0.8,
-                "financialCurrency": "USD",
-            }
-        )
+        state["structured_inputs"] = {
+            RAW_FINANCIAL_METRICS_INPUT: build_structured_ingress_record(
+                {
+                    "totalDebt": 100_000_000,
+                    "debtToEquity": 0.8,
+                    "financialCurrency": "USD",
+                },
+                agent_key="junior_fundamentals_analyst",
+                tool_name="get_financial_metrics",
+            )
+        }
 
         result = await create_financial_health_validator_node(strict_mode=False)(
             state, {}

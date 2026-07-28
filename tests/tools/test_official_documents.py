@@ -6,6 +6,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.forensic_budget import AuditorBudgetPolicy
+from src.runtime_services import (
+    IssuerAuthorityRegistry,
+    RuntimeServices,
+    use_runtime_services,
+)
+from src.tooling.inspection_service import InspectionService
+from src.tooling.runtime import ToolExecutionService
 from src.tools import official_documents as documents
 
 
@@ -68,10 +75,87 @@ def test_operator_configured_issuer_host_is_narrowly_allowed() -> None:
     )
 
 
+def test_authority_resolver_distinguishes_registry_and_issuer(monkeypatch) -> None:
+    monkeypatch.setattr(
+        documents.config,
+        "auditor_official_document_hosts",
+        "issuer.example",
+    )
+    assert (
+        documents.resolve_source_authority("https://www.twse.com.tw/report.pdf")
+        == "PRIMARY_REGISTRY"
+    )
+    assert (
+        documents.resolve_source_authority("https://ir.issuer.example/report.pdf")
+        == "PRIMARY_ISSUER"
+    )
+    assert (
+        documents.resolve_source_authority("https://aggregator.example/report")
+        == "SECONDARY"
+    )
+
+
+def test_run_scoped_structured_issuer_host_is_primary_only_in_its_run() -> None:
+    registry = IssuerAuthorityRegistry()
+    assert registry.register_url(
+        "https://www.issuer.example/investors",
+        provenance="yfinance_company_profile",
+    )
+    services = RuntimeServices(
+        tool_service=ToolExecutionService(),
+        inspection_service=InspectionService(),
+        issuer_authority=registry,
+    )
+    issuer_document = "https://ir.issuer.example/results.pdf"
+
+    assert not documents.is_official_document_url(issuer_document)
+    with use_runtime_services(services):
+        assert documents.is_official_document_url(issuer_document)
+        assert documents.resolve_source_authority(issuer_document) == "PRIMARY_ISSUER"
+        assert not documents.is_official_document_url(
+            "https://issuer.example.evil.test/results.pdf"
+        )
+    assert not documents.is_official_document_url(issuer_document)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://mopsov.twse.com.tw/mops/web/t05st01",
+        "https://www.tpex.org.tw/web/regular_emerging/corporateInfo/",
+        "https://disclosure2.edinet-fsa.go.jp/",
+    ],
+)
+def test_exchange_registry_hosts_are_official(url: str) -> None:
+    assert documents.is_official_document_url(url)
+
+
 def test_invalid_configured_hosts_are_ignored() -> None:
     assert documents._configured_host_suffixes(
         "localhost, https://issuer.com/path, good.example, 127.0.0.1"
     ) == ("good.example",)
+
+
+@pytest.mark.asyncio
+async def test_dns_check_rejects_private_resolution(monkeypatch) -> None:
+    monkeypatch.setattr(
+        documents.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (
+                documents.socket.AF_INET,
+                documents.socket.SOCK_STREAM,
+                6,
+                "",
+                ("127.0.0.1", 443),
+            )
+        ],
+    )
+
+    with pytest.raises(documents.DocumentExtractionError) as exc_info:
+        await documents._ensure_public_hostname("https://issuer.example/report.pdf")
+
+    assert exc_info.value.reason == "DOCUMENT_PRIVATE_ADDRESS"
 
 
 def test_page_selection_prefers_financial_pages_and_honors_cap() -> None:
@@ -247,7 +331,9 @@ async def test_document_tool_preserves_download_size_reason(monkeypatch) -> None
 @pytest.mark.asyncio
 async def test_document_tool_uses_html_fallback_and_inspects_text(monkeypatch) -> None:
     html = (
-        b"<html><body><h1>Annual report</h1><p>"
+        b"<html><body><h1>Annual report</h1>"
+        b'<a href="/results/fy-2026.pdf">FY 2026 results</a>'
+        b'<a href="https://evil.example/results.pdf">External results</a><p>'
         + b"financial data " * 30
         + b"</p></body></html>"
     )
@@ -274,5 +360,7 @@ async def test_document_tool_uses_html_fallback_and_inspects_text(monkeypatch) -
     )
 
     assert '"backend": "html"' in result
+    assert '"candidate_paths": ["/results/fy-2026.pdf"]' in result
+    assert "evil.example" not in result
     assert "Annual report" in result
     inspection.check.assert_awaited_once()

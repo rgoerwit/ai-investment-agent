@@ -254,6 +254,21 @@ def test_save_results_to_file_preserves_macro_context_metadata(tmp_path, monkeyp
             "present": True,
         },
         "macro_regime_raw": "MACRO_REGIME_BLOCK:\nRISK_APPETITE: RISK_OFF",
+        "evidence_records": [
+            {
+                "sequence": 1,
+                "agent_key": "foreign_language_analyst",
+                "tool_name": "get_official_document",
+                "content": "official result",
+                "content_sha256": "abc",
+            }
+        ],
+        "structured_inputs": {
+            "raw_financial_metrics": {
+                "status": "VALID",
+                "payload": {"currentPrice": 178.0},
+            }
+        },
     }
 
     output_path = save_results_to_file(result, "7203.T", quick_mode=True)
@@ -264,6 +279,9 @@ def test_save_results_to_file_preserves_macro_context_metadata(tmp_path, monkeyp
     assert payload["macro_context"]["report_present"] is True
     assert payload["macro_context"]["injected_into_news"] is True
     assert payload["macro_context"]["llm_invoked"] is True
+    assert payload["structured_inputs"]["raw_financial_metrics"]["payload"] == {
+        "currentPrice": 178.0
+    }
     assert payload["macro_context"]["cache_dir"] == str(
         tmp_path / ".macro_context_cache"
     )
@@ -272,6 +290,7 @@ def test_save_results_to_file_preserves_macro_context_metadata(tmp_path, monkeyp
     assert payload["reports"]["apac_regional_report"].startswith(
         "### APAC REGIONAL AUDIT"
     )
+    assert payload["evidence_records"] == result["evidence_records"]
 
 
 def test_save_results_to_file_canonicalizes_prediction_snapshot_sector(
@@ -546,4 +565,4 @@ def test_patch_saved_run_summary_missing_file_fails_open(tmp_path):
     patch_saved_run_summary(tmp_path / "missing.json", {"a": 1}, logger_obj=logger)
 
     logger.warning.assert_called_once()
-    assert logger.warning.call_args.args[0] == "run_summary_patch_failed"
+    assert logger.warning.call_args.args[0] == "saved_sections_patch_failed"

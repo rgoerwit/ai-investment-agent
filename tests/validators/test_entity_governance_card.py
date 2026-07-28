@@ -262,6 +262,30 @@ class TestReconciliation:
         assert card.controlling_shareholder is None
         assert card.control_status == "UNKNOWN"
 
+    def test_verified_equity_method_relationship_stays_separate_from_control(self):
+        card = self._build(
+            merged={"longName": "Example Vision Co."},
+            senior_metrics={},
+            fla_report=(
+                "Largest Shareholder: Example Materials (14.82%)\n"
+                "Controlling Shareholder: NONE\n"
+                "Control Status: NOT_CONTROLLED\n"
+                "Control Basis: SIGNIFICANT_INFLUENCE_ONLY\n"
+                "Parent Company: NONE\n"
+                "Relationship: equity method\n"
+                "ENTITY_ROLE_OBSERVED: STANDALONE\n"
+                "Related Listed Tickers: 1234.TW:equity_method:14.82\n"
+                "Ownership Evidence Status: VERIFIED_OFFICIAL_FILING\n"
+                "Ownership Source URL: https://official.example/filing\n"
+                "Ownership As Of: 2026-03-31"
+            ),
+        )
+
+        assert card.ownership_relationship == "EQUITY_METHOD"
+        assert card.control_status == "NOT_CONTROLLED"
+        assert card.controlling_shareholder is None
+        assert requires_structure_disclosure(card) is True
+
 
 # ---------------------------------------------------------------------------
 # Prompt rendering + disclosure gating
@@ -292,6 +316,7 @@ class TestPromptRendering:
         assert "Senior DATA_BLOCK metric scope" in block
         assert "scope conflict" in block
         assert "authoritative" in block.lower()
+        assert "Ownership relationship: UNKNOWN" in block
 
     def test_related_listed_dedupes_malformed_fla_prose_with_senior_edge(self):
         card = build_card(

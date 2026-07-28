@@ -222,6 +222,29 @@ class TestAnalysisValidity:
         assert validity["publishable"] is True
         assert validity["has_data_block"] is True
 
+    def test_publishable_rejects_degraded_snapshot(self):
+        result = self._make_result(quick_mode=False)
+        result["analysis_snapshot"] = {
+            "contract_status": "DEGRADED",
+            "claims": {},
+        }
+
+        validity = build_analysis_validity(result)
+
+        assert validity["publishable"] is False
+        assert validity["analysis_snapshot_status"] == "DEGRADED"
+        assert "analysis_snapshot" in validity["required_failures"]
+
+    def test_publishable_rejects_invalid_decision_trace(self):
+        result = self._make_result(quick_mode=False)
+        result["decision_trace"] = {"status": "INVALID"}
+
+        validity = build_analysis_validity(result)
+
+        assert validity["publishable"] is False
+        assert validity["decision_trace_status"] == "INVALID"
+        assert "decision_trace" in validity["required_failures"]
+
     def test_publishable_ignores_unparseable_datablock_mentions(self):
         result = {
             "market_report": "market",

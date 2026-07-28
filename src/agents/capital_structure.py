@@ -12,7 +12,11 @@ import structlog
 
 from src.data_block_utils import replace_or_append_block_line
 
-from .evidence_preflight import PreflightOutcome, run_preflight_calls
+from .evidence_preflight import (
+    PreflightOutcome,
+    run_preflight_calls,
+    skipped_preflight_outcome,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -95,6 +99,56 @@ _PRIORITY_TERMS = [
     "或有负债",
     "债务担保",
 ]
+_EXPOSURE_TERMS: dict[str, tuple[str, ...]] = {
+    "LEASE_COMMITMENT": (
+        "lease commitment",
+        "lease commitments",
+        "uncommenced lease",
+        "lease liabilities",
+        "租賃承諾",
+        "租赁承诺",
+        "租賃負債",
+        "租赁负债",
+        "リース契約",
+        "리스 약정",
+    ),
+    "TAKE_OR_PAY": (
+        "take-or-pay",
+        "take or pay",
+        "照付不議",
+        "照付不议",
+        "テイク・オア・ペイ",
+        "테이크 오어 페이",
+    ),
+    "PURCHASE_COMMITMENT": (
+        "purchase commitment",
+        "purchase commitments",
+        "採購承諾",
+        "采购承诺",
+        "購入契約",
+        "구매 약정",
+    ),
+    "GUARANTEE_BACKSTOP": (
+        "guarantee",
+        "backstop",
+        "keepwell",
+        "債務保証",
+        "擔保",
+        "担保",
+        "채무보증",
+    ),
+    "UNCONSOLIDATED_ENTITY": (
+        "unconsolidated",
+        "variable interest entity",
+        "special purpose entity",
+        "未合併",
+        "未合并",
+        "非連結",
+        "비연결",
+        "特殊目的實體",
+        "特殊目的实体",
+    ),
+}
 
 
 def _capital_structure_queries(ticker: str, company_name: str) -> tuple[str, str]:
@@ -114,18 +168,21 @@ def _capital_structure_queries(ticker: str, company_name: str) -> tuple[str, str
 
 
 def _status_map(outcomes: list[PreflightOutcome]) -> dict[str, str]:
-    statuses: dict[str, str] = {}
-    for label, payload in outcomes:
-        match = re.search(r"^STATUS:\s+([A-Z_]+)", payload)
-        statuses[label] = match.group(1) if match else "UNKNOWN"
-    return statuses
+    return {
+        outcome.label: f"{outcome.execution_status}/{outcome.evidence_status}"
+        for outcome in outcomes
+    }
 
 
 def _fallback_coverage(evidence: str) -> str:
-    statuses = re.findall(
-        r"(?ms)^####\s+[a-z0-9_]+\s*$.*?^STATUS:\s+([A-Z_]+)", evidence
+    execution_statuses = re.findall(
+        r"(?m)^EXECUTION_STATUS:\s+([A-Z_]+)",
+        evidence,
     )
-    if any(status == "COMPLETED" for status in statuses):
+    if any(status == "SUCCEEDED" for status in execution_statuses):
+        return "UNRESOLVED"
+    legacy_statuses = re.findall(r"(?m)^STATUS:\s+([A-Z_]+)", evidence)
+    if any(status in {"COMPLETED", "INSUFFICIENT_DATA"} for status in legacy_statuses):
         return "UNRESOLVED"
     return "SEARCH_FAILED"
 
@@ -186,17 +243,19 @@ async def preload_capital_structure_evidence(
         failure_event="capital_structure_preflight_call_failed",
         logger=logger,
     )
-    labels = {label for label, _ in outcomes}
+    labels = {outcome.label for outcome in outcomes}
     for missing_label in (
         "statutory_filing_api",
         "structures_search",
         "commitments_search",
     ):
         if missing_label not in labels:
-            outcomes.append((missing_label, "STATUS: SKIPPED (TOOL_UNAVAILABLE)"))
+            outcomes.append(
+                skipped_preflight_outcome(missing_label, "TOOL_UNAVAILABLE")
+            )
 
     search_payload = "\n".join(
-        payload for label, payload in outcomes if "search" in label
+        outcome.render() for outcome in outcomes if "search" in outcome.label
     )
     candidate_urls = list(
         dict.fromkeys(re.findall(r"https?://[^\s<>'\"]+", search_payload))
@@ -206,7 +265,12 @@ async def preload_capital_structure_evidence(
             (
                 f"official_document_{index}",
                 document_tool,
-                {"url": url, "keywords": " ".join(_PRIORITY_TERMS)},
+                {
+                    "url": url,
+                    "keywords": " ".join(_PRIORITY_TERMS),
+                    "ticker": ticker,
+                    "company_name": company_name,
+                },
             )
             for index, url in enumerate(candidate_urls, start=1)
         ]
@@ -222,7 +286,7 @@ async def preload_capital_structure_evidence(
         durations.update(document_durations)
     else:
         reason = "TOOL_UNAVAILABLE" if document_tool is None else "NO_CANDIDATE_URLS"
-        outcomes.append(("official_document", f"STATUS: SKIPPED ({reason})"))
+        outcomes.append(skipped_preflight_outcome("official_document", reason))
 
     sections = [
         "### CODE-OWNED CAPITAL STRUCTURE PREFLIGHT",
@@ -230,8 +294,8 @@ async def preload_capital_structure_evidence(
         "PROVENANCE_RULE: Treat only returned filing text or source-linked search evidence as findings. "
         "A query term appearing by itself is not evidence of an exposure.",
     ]
-    for label, payload in outcomes:
-        sections.extend((f"\n#### {label}", payload))
+    for outcome in outcomes:
+        sections.extend((f"\n#### {outcome.label}", outcome.render()))
     evidence = "\n".join(sections)
     logger.info(
         "capital_structure_preflight_complete",
@@ -305,6 +369,74 @@ def _parse_exposure_amount(raw_amount: Any) -> tuple[float, str] | None:
     if not math.isfinite(value) or value <= 0:
         return None
     return value, match.group("currency")
+
+
+def _source_context(evidence: str, source_url: str) -> str:
+    """Return the bounded preflight section that actually contains the URL."""
+    if not source_url or source_url.upper() in {"N/A", "UNKNOWN"}:
+        return ""
+    result_blocks = re.findall(r"(?is)<result\b[^>]*>.*?</result>", evidence or "")
+    for block in result_blocks:
+        if source_url in block:
+            return block
+    sections = re.split(r"(?m)^####\s+", evidence or "")
+    for section in sections:
+        if source_url in section:
+            return section
+    return ""
+
+
+def _amount_supported(context: str, amount: str) -> bool:
+    parsed = re.search(
+        r"\b(?P<currency>[A-Z]{3})\s+" r"(?P<number>\d[\d,]*(?:\.\d+)?)",
+        amount.upper(),
+    )
+    if parsed is None:
+        return False
+    currency = parsed.group("currency")
+    number = parsed.group("number").replace(",", "")
+    integer, dot, fraction = number.partition(".")
+    number_pattern = re.escape(integer)
+    if dot:
+        number_pattern += rf"(?:\.{re.escape(fraction)}0*)?"
+    normalized_context = context.replace(",", "")
+    return currency in normalized_context.upper() and bool(
+        re.search(rf"(?<!\d){number_pattern}(?!\d)", normalized_context)
+    )
+
+
+def _capital_claim_supported(capital: dict[str, Any], evidence: str) -> bool:
+    exposure_type = str(capital.get("exposure_type") or "UNKNOWN").upper()
+    terms = _EXPOSURE_TERMS.get(exposure_type)
+    if not terms:
+        return False
+    context = _source_context(evidence, str(capital.get("source_url") or ""))
+    folded = context.casefold()
+    return (
+        bool(context)
+        and _amount_supported(context, str(capital.get("amount") or ""))
+        and any(term.casefold() in folded for term in terms)
+    )
+
+
+def _withhold_unsupported_capital_claim(capital: dict[str, Any]) -> None:
+    capital.update(
+        {
+            "coverage_status": "UNRESOLVED",
+            "exposure_type": "UNKNOWN",
+            "entity": "N/A",
+            "amount": "N/A",
+            "amount_basis": "UNKNOWN",
+            "balance_sheet_status": "UNKNOWN",
+            "parent_recourse": "UNKNOWN",
+            "consolidation_risk": "UNKNOWN",
+            "materiality": "UNKNOWN",
+            "evidence": (
+                "Claim withheld because the cited source context did not jointly "
+                "support its amount and accounting category."
+            ),
+        }
+    )
 
 
 def assess_capital_structure_scale(
@@ -476,6 +608,21 @@ def normalize_legal_output(
 
     if capital["coverage_status"] == "UNRESOLVED" and raw_capital is None:
         capital["coverage_status"] = _fallback_coverage(evidence)
+    if (
+        capital["coverage_status"] == "NOT_FOUND"
+        and "EVIDENCE_STATUS: COVERAGE_COMPLETE_NO_MATCH" not in evidence
+    ):
+        capital["coverage_status"] = "UNRESOLVED"
+        capital["evidence"] = (
+            "Search completed, but the available source classes did not establish "
+            "complete no-exposure coverage."
+        )
+    if (
+        capital["coverage_status"] == "FOUND"
+        and capital["exposure_type"] not in {"NONE", "UNKNOWN"}
+        and not _capital_claim_supported(capital, evidence)
+    ):
+        _withhold_unsupported_capital_claim(capital)
     capital["classification"] = classify_capital_structure(capital)
     payload["capital_structure"] = capital
     return json.dumps(payload, ensure_ascii=False), isinstance(raw_capital, dict)

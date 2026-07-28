@@ -209,11 +209,6 @@ class TestPortfolioManagerPromptContent:
         assert "MATERIAL_UNVERIFIED_OPERATING_SIGNAL" in msg
         assert "BLOCK BUY" in msg
 
-    def test_portfolio_manager_blocks_load_bearing_secondary_growth_evidence(self):
-        msg = get_prompt("portfolio_manager").system_message
-        assert "DECISION_CRITICAL_GROWTH_EVIDENCE_GAP" in msg
-        assert "secondary or unsupported R&D/capex evidence" in msg
-
 
 class TestFundamentalsEbitdaAnnualization:
     """Guard EBITDA annualization rule (v9.10+).

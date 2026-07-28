@@ -12,6 +12,30 @@ from src.agents.output_validation import (
 )
 
 
+def _with_latest_results(content: str) -> str:
+    return (
+        content
+        + """
+### --- START LATEST_RESULTS ---
+LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND
+LATEST_RESULTS_PERIOD: N/A
+LATEST_RESULTS_PERIOD_END: N/A
+LATEST_RESULTS_PRIOR_PERIOD: N/A
+LATEST_RESULTS_PRIOR_PERIOD_END: N/A
+LATEST_RESULTS_PERIOD_MONTHS: N/A
+LATEST_RESULTS_CURRENCY: N/A
+LATEST_RESULTS_REPORTING_UNIT: N/A
+LATEST_RESULTS_REVENUE: N/A
+LATEST_RESULTS_PRIOR_REVENUE: N/A
+LATEST_RESULTS_EARNINGS: N/A
+LATEST_RESULTS_PRIOR_EARNINGS: N/A
+LATEST_RESULTS_EARNINGS_SCOPE: N/A
+LATEST_RESULTS_SOURCE_URL: N/A
+### --- END LATEST_RESULTS ---
+"""
+    )
+
+
 def test_validate_required_output_accepts_parseable_data_block():
     content = """
 ### --- START DATA_BLOCK ---
@@ -45,6 +69,28 @@ ADJUSTED_HEALTH_SCORE: 58%
     assert "promoted_management_guidance" in validation["missing"]
 
 
+def test_fundamentals_validation_identifies_invalid_guidance_enum_value():
+    content = """
+### --- START DATA_BLOCK ---
+GUIDANCE_COVERAGE_STATUS: MISSING
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+NORMALIZED_EARNINGS_AVAILABLE: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: UNRESOLVED
+### --- END DATA_BLOCK ---
+"""
+
+    validation = validate_required_output("fundamentals_analyst", content)
+
+    assert validation["ok"] is False
+    assert (
+        validation["issues"]["promoted_management_guidance"]
+        == "GUIDANCE_COVERAGE_STATUS=MISSING; expected one of: FOUND, "
+        "NOT_APPLICABLE, NOT_DISCLOSED_AFTER_TARGETED_SEARCH, SEARCH_FAILED, "
+        "UNRESOLVED_AFTER_TARGETED_SEARCH"
+    )
+
+
 def test_foreign_language_validation_accepts_sourced_guidance_block():
     content = """
 ### --- START MANAGEMENT_GUIDANCE ---
@@ -62,7 +108,9 @@ GUIDANCE_BRIDGE_STATUS: RECONCILED
 ### --- END MANAGEMENT_GUIDANCE ---
 """
 
-    validation = validate_required_output("foreign_language_analyst", content)
+    validation = validate_required_output(
+        "foreign_language_analyst", _with_latest_results(content)
+    )
 
     assert validation["ok"] is True
 
@@ -78,7 +126,9 @@ SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
 ### --- END MANAGEMENT_GUIDANCE ---
 """
 
-    validation = validate_required_output("foreign_language_analyst", content)
+    validation = validate_required_output(
+        "foreign_language_analyst", _with_latest_results(content)
+    )
 
     assert validation["ok"] is False
     assert validation["missing"] == ["management_guidance_block"]
@@ -101,7 +151,9 @@ GUIDANCE_BRIDGE_STATUS: UNRESOLVED
 ### --- END MANAGEMENT_GUIDANCE ---
 """
 
-    validation = validate_required_output("foreign_language_analyst", content)
+    validation = validate_required_output(
+        "foreign_language_analyst", _with_latest_results(content)
+    )
 
     assert validation["ok"] is True
 
@@ -123,7 +175,9 @@ GUIDANCE_BRIDGE_STATUS: UNRESOLVED
 ### --- END MANAGEMENT_GUIDANCE ---
 """
 
-    validation = validate_required_output("foreign_language_analyst", content)
+    validation = validate_required_output(
+        "foreign_language_analyst", _with_latest_results(content)
+    )
 
     assert validation["ok"] is False
 
@@ -138,6 +192,24 @@ def test_validate_required_output_detects_missing_pm_sections():
 
     assert validation["ok"] is False
     assert "position_section" in validation["missing"]
+    assert "decision_facts" in validation["missing"]
+    assert "decision_gates" in validation["missing"]
+
+
+def test_validate_required_output_accepts_complete_pm_trace():
+    content = """
+### PORTFOLIO MANAGER VERDICT: HOLD
+### THESIS COMPLIANCE SUMMARY
+### --- START PM_BLOCK ---
+VERDICT: HOLD
+DECISION_FACTS: claim:pe_ratio_ttm:123
+DECISION_GATES: NONE
+### --- END PM_BLOCK ---
+"""
+
+    validation = validate_required_output("portfolio_manager", content)
+
+    assert validation["ok"] is True
 
 
 def test_validate_required_output_accepts_consultant_structure():

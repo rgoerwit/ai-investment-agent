@@ -897,6 +897,8 @@ Score details here.
     ):
         """Deterministic raw-data facts should override regenerated DATA_BLOCK values."""
         from src.agents import create_analyst_node
+        from src.claim_policy import RAW_FINANCIAL_METRICS_INPUT
+        from src.tooling.structured_ingress import build_structured_ingress_record
 
         mock_llm = MagicMock()
         report = (
@@ -927,11 +929,19 @@ Score details here.
                 "messages": [],
                 "company_of_interest": "4396.T",
                 "trade_date": "2026-03-24",
-                "raw_fundamentals_data": (
-                    '{"_split_sensitive_metrics_quarantined": true, '
-                    '"_latest_quarter_date_source": "reconciled_most_recent_quarter", '
-                    '"latest_quarter_date": "2025-12-31"}'
-                ),
+                "structured_inputs": {
+                    RAW_FINANCIAL_METRICS_INPUT: build_structured_ingress_record(
+                        {
+                            "_split_sensitive_metrics_quarantined": True,
+                            "_latest_quarter_date_source": (
+                                "reconciled_most_recent_quarter"
+                            ),
+                            "latest_quarter_date": "2025-12-31",
+                        },
+                        agent_key="junior_fundamentals_analyst",
+                        tool_name="get_financial_metrics",
+                    )
+                },
             }
             config = {
                 "configurable": {

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.pm_claim_audit import audit_pm_claims
+from src.pm_claim_audit import audit_pm_claims, validate_decision_trace
 
 
 def _block(lines: str) -> str:
@@ -82,6 +82,15 @@ class TestNumberConsistency2a:
         _, caveats = audit_pm_claims(pm, fundamentals=self._BLOCK, ticker="X")
         assert caveats == []
 
+    def test_gate_input_mismatch_is_still_a_hard_claim_error(self):
+        block = _block("DE_RATIO: 20%")
+        pm = "Leverage is low (DE_RATIO: 80%)."
+
+        _, caveats = audit_pm_claims(pm, fundamentals=block, ticker="X")
+
+        assert len(caveats) == 1
+        assert "DE_RATIO" in caveats[0]["claim"]
+
     def test_derived_prose_number_never_caveats(self):
         pm = "Our weighted intrinsic value is $125, implying 35% upside from here."
         out, caveats = audit_pm_claims(pm, fundamentals=self._BLOCK, ticker="X")
@@ -113,3 +122,59 @@ class TestAuditContract:
     def test_empty_inputs_noop(self):
         assert audit_pm_claims("", fundamentals=_GTT_BLOCK) == ("", [])
         assert audit_pm_claims("text", fundamentals=None) == ("text", [])
+
+
+class TestDecisionTraceContract:
+    _SNAPSHOT = {
+        "contract_status": "VALID",
+        "claims": {
+            "claim:pe": {
+                "field": "PE_RATIO_TTM",
+                "value": "12.0",
+                "decision_eligible": True,
+                "decision_role": "SUPPORT",
+            }
+        },
+    }
+
+    @staticmethod
+    def _pm(prose: str) -> str:
+        return (
+            f"{prose}\n"
+            "### --- START PM_BLOCK ---\n"
+            "VERDICT: HOLD\n"
+            "DECISION_FACTS: claim:pe\n"
+            "DECISION_GATES: NONE\n"
+            "### --- END PM_BLOCK ---"
+        )
+
+    def test_negated_guidance_mention_is_advisory_not_structural_failure(self):
+        trace = validate_decision_trace(
+            self._pm("The broker forecast is not management guidance."),
+            self._SNAPSHOT,
+            [],
+        )
+
+        assert trace["status"] == "VALID"
+        assert trace["advisory_source_families"] == ["GUIDANCE"]
+
+    def test_uncited_source_sensitive_prose_does_not_replace_claim_contract(self):
+        trace = validate_decision_trace(
+            self._pm("Management guidance calls for revenue growth."),
+            self._SNAPSHOT,
+            [],
+        )
+
+        assert trace["status"] == "VALID"
+        assert trace["advisory_source_families"] == ["GUIDANCE"]
+
+    def test_invalid_claim_identifier_remains_a_structural_failure(self):
+        pm = self._pm("Valuation is reasonable.").replace(
+            "DECISION_FACTS: claim:pe",
+            "DECISION_FACTS: claim:not-registered",
+        )
+
+        trace = validate_decision_trace(pm, self._SNAPSHOT, [])
+
+        assert trace["status"] == "INVALID"
+        assert trace["invalid_facts"] == ["claim:not-registered"]

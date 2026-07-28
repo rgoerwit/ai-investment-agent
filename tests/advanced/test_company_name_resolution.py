@@ -102,6 +102,37 @@ class TestResolveCompanyName:
         assert "Linklogis" in result.name
 
     @pytest.mark.asyncio
+    async def test_yfinance_profile_registers_run_scoped_issuer_website(self):
+        from src.runtime_services import (
+            RuntimeServices,
+            get_current_issuer_hosts,
+            use_runtime_services,
+        )
+        from src.tooling.inspection_service import InspectionService
+        from src.tooling.runtime import ToolExecutionService
+
+        services = RuntimeServices(
+            tool_service=ToolExecutionService(),
+            inspection_service=InspectionService(),
+        )
+        with (
+            use_runtime_services(services),
+            patch(
+                "src.ticker_utils._try_yfinance",
+                new_callable=AsyncMock,
+                return_value=(
+                    "Linklogis Inc.",
+                    "https://www.linklogis.com/investors",
+                ),
+            ),
+        ):
+            result = await resolve_company_name("2154.HK")
+            hosts = get_current_issuer_hosts()
+
+        assert result.website == "https://www.linklogis.com/investors"
+        assert hosts == ("linklogis.com",)
+
+    @pytest.mark.asyncio
     async def test_yfinance_fails_yahooquery_resolves(self):
         """yfinance returns None, yahooquery succeeds."""
         with (

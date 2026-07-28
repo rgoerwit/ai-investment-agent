@@ -8,8 +8,10 @@ import ipaddress
 import json
 import re
 import shutil
+import socket
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlparse
+from typing import Literal
+from urllib.parse import urljoin, urlparse, urlunsplit
 
 import httpx
 import structlog
@@ -19,23 +21,29 @@ from langchain_core.tools import tool
 from src.blocking_io import BlockingCallPolicy, run_blocking_call
 from src.config import config
 from src.error_safety import summarize_exception
+from src.exchange_metadata import registered_official_document_hosts
 from src.forensic_budget import AuditorBudgetPolicy
-from src.runtime_services import get_current_inspection_service
+from src.runtime_services import (
+    get_current_inspection_service,
+    get_current_issuer_hosts,
+)
 from src.tooling.inspector import InspectionEnvelope, SourceKind
 
 logger = structlog.get_logger(__name__)
 
+SourceAuthority = Literal[
+    "PRIMARY_REGISTRY",
+    "PRIMARY_ISSUER",
+    "SECONDARY",
+    "UNSUPPORTED",
+]
+
 _OFFICIAL_HOST_SUFFIXES = (
-    "sgx.com",
-    "hkexnews.hk",
-    "hkex.com.hk",
-    "jpx.co.jp",
-    "dart.fss.or.kr",
-    "edinet-fsa.go.jp",
-    "companieshouse.gov.uk",
     "sec.gov",
+    *registered_official_document_hosts(),
 )
 _PDF_POLICY = BlockingCallPolicy("official_document_pdf_extract", 20.0)
+_DNS_POLICY = BlockingCallPolicy("official_document_dns_check", 5.0)
 _DOCUMENT_TIMEOUT_SECONDS = 20.0
 _MIN_USEFUL_TEXT_CHARS = 200
 _DEFAULT_KEYWORDS = (
@@ -53,6 +61,16 @@ _DEFAULT_KEYWORDS = (
     "損益計算書",
     "キャッシュフロー",
 )
+_DISCLOSURE_LINK_TERMS = (
+    "result",
+    "earnings",
+    "financial",
+    "quarter",
+    "annual",
+    "guidance",
+    "presentation",
+    "report",
+)
 
 
 @dataclass(frozen=True)
@@ -68,6 +86,57 @@ class DocumentExtractionError(RuntimeError):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+def _rank_same_host_document_paths(
+    soup: BeautifulSoup,
+    base_url: str,
+    keywords: str,
+    *,
+    limit: int = 8,
+) -> tuple[str, ...]:
+    """Return ranked relative paths without turning child links into evidence URLs."""
+    base = urlparse(base_url)
+    if not base.hostname:
+        return ()
+    terms = {
+        *(_DISCLOSURE_LINK_TERMS),
+        *(term.strip().casefold() for term in keywords.split(",") if term.strip()),
+    }
+    ranked: dict[str, int] = {}
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor.get("href") or "").strip()
+        if not href:
+            continue
+        candidate = urlparse(urljoin(base_url, href))
+        try:
+            port = candidate.port
+        except ValueError:
+            continue
+        if (
+            candidate.scheme != "https"
+            or candidate.hostname != base.hostname
+            or candidate.username
+            or candidate.password
+            or port not in {None, 443}
+        ):
+            continue
+        path = urlunsplit(("", "", candidate.path or "/", candidate.query, ""))
+        if path == urlunsplit(("", "", base.path or "/", base.query, "")):
+            continue
+        searchable = f"{anchor.get_text(' ', strip=True)} {candidate.path}".casefold()
+        score = sum(3 for term in terms if term in searchable)
+        score += 2 if re.search(r"\b20\d{2}\b", searchable) else 0
+        score += 2 if candidate.path.casefold().endswith(".pdf") else 0
+        if score:
+            ranked[path] = max(score, ranked.get(path, 0))
+    return tuple(
+        path
+        for path, _ in sorted(
+            ranked.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:limit]
+    )
 
 
 def _configured_host_suffixes(value: str) -> tuple[str, ...]:
@@ -107,6 +176,56 @@ def _official_url(url: str, extra_hosts: tuple[str, ...] = ()) -> bool:
     host = parsed.hostname.rstrip(".").lower()
     approved = (*_OFFICIAL_HOST_SUFFIXES, *extra_hosts)
     return any(host == suffix or host.endswith(f".{suffix}") for suffix in approved)
+
+
+def is_official_document_url(url: str) -> bool:
+    """Return whether a URL is allowed by registered or operator-added policy."""
+    extra_hosts = (
+        *_configured_host_suffixes(config.auditor_official_document_hosts),
+        *get_current_issuer_hosts(),
+    )
+    return _official_url(url, extra_hosts)
+
+
+def resolve_source_authority(url: str | None) -> SourceAuthority:
+    """Classify URL authority from the single run-scoped trust policy."""
+    if not url:
+        return "UNSUPPORTED"
+    configured_hosts = _configured_host_suffixes(config.auditor_official_document_hosts)
+    if _official_url(url):
+        return "PRIMARY_REGISTRY"
+    if _official_url(url, (*configured_hosts, *get_current_issuer_hosts())):
+        return "PRIMARY_ISSUER"
+    parsed = urlparse(url)
+    if parsed.scheme in {"http", "https"} and parsed.hostname:
+        return "SECONDARY"
+    return "UNSUPPORTED"
+
+
+async def _ensure_public_hostname(url: str) -> None:
+    host = urlparse(url).hostname
+    if not host:
+        raise DocumentExtractionError("DOCUMENT_HOST_INVALID")
+
+    def _resolve() -> set[str]:
+        return {
+            item[4][0]
+            for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        }
+
+    try:
+        addresses = await run_blocking_call(_DNS_POLICY, _resolve)
+    except Exception as exc:
+        raise DocumentExtractionError("DOCUMENT_DNS_FAILED") from exc
+    if not addresses:
+        raise DocumentExtractionError("DOCUMENT_DNS_FAILED")
+    for raw_address in addresses:
+        try:
+            address = ipaddress.ip_address(raw_address)
+        except ValueError as exc:
+            raise DocumentExtractionError("DOCUMENT_DNS_INVALID") from exc
+        if not address.is_global:
+            raise DocumentExtractionError("DOCUMENT_PRIVATE_ADDRESS")
 
 
 def _select_pages(
@@ -241,6 +360,7 @@ async def _download_official(
         for _ in range(4):
             if not _official_url(current, extra_hosts):
                 raise DocumentExtractionError("UNAPPROVED_DOCUMENT_HOST")
+            await _ensure_public_hostname(current)
             async with client.stream(
                 "GET", current, follow_redirects=False
             ) as response:
@@ -274,11 +394,14 @@ async def _download_official(
 async def get_official_document(
     url: str,
     keywords: str = "",
+    ticker: str = "",
+    company_name: str = "",
 ) -> str:
     """Download and extract bounded evidence from an approved official URL."""
     policy = AuditorBudgetPolicy.from_settings()
-    extra_hosts = _configured_host_suffixes(config.auditor_official_document_hosts)
-    if not _official_url(url, extra_hosts):
+    configured_hosts = _configured_host_suffixes(config.auditor_official_document_hosts)
+    extra_hosts = (*configured_hosts, *get_current_issuer_hosts())
+    if not is_official_document_url(url):
         return "STATUS: INSUFFICIENT_DATA\nREASON: UNAPPROVED_DOCUMENT_HOST"
     try:
         payload, content_type, final_url = await _download_official(
@@ -287,11 +410,18 @@ async def get_official_document(
         is_pdf = payload.startswith(b"%PDF") or "application/pdf" in content_type
         if is_pdf:
             extracted = await extract_pdf_text(payload, policy, keywords)
+            candidate_paths: tuple[str, ...] = ()
         elif "html" in content_type or payload.lstrip().startswith(b"<"):
             soup = BeautifulSoup(payload, "html.parser")
+            candidate_paths = _rank_same_host_document_paths(
+                soup,
+                final_url,
+                keywords,
+            )
             text = soup.get_text("\n", strip=True)
             extracted = ExtractedDocument(text, "html", 1, (0,))
         elif content_type.startswith("text/"):
+            candidate_paths = ()
             extracted = ExtractedDocument(
                 payload.decode("utf-8", errors="replace"), "text", 1, (0,)
             )
@@ -317,6 +447,7 @@ async def get_official_document(
         )
         metadata = {
             "status": "PARTIAL_DATA" if reason else "EXTRACTED",
+            "authority": resolve_source_authority(final_url),
             "reason": reason,
             "source_url": final_url,
             "backend": extracted.backend,
@@ -324,8 +455,10 @@ async def get_official_document(
             "pages_total": extracted.pages_total,
             "pages_selected": [page + 1 for page in extracted.pages_selected],
             "evidence_chars": len(str(inspected)),
+            "candidate_paths": list(candidate_paths),
         }
         return (
+            "STATUS: EVIDENCE_FOUND\n"
             f"DOCUMENT_METADATA: {json.dumps(metadata, sort_keys=True)}\n\n{inspected}"
         )
     except DocumentExtractionError as exc:

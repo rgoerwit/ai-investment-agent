@@ -12,6 +12,7 @@ Tests cover:
 import json
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -133,10 +134,36 @@ SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
 ### --- END MANAGEMENT_GUIDANCE ---
 ### --- START LATEST_RESULTS ---
 LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND
+LATEST_RESULTS_PERIOD: N/A
+LATEST_RESULTS_PERIOD_END: N/A
+LATEST_RESULTS_PRIOR_PERIOD: N/A
+LATEST_RESULTS_PRIOR_PERIOD_END: N/A
+LATEST_RESULTS_PERIOD_MONTHS: N/A
+LATEST_RESULTS_CURRENCY: N/A
+LATEST_RESULTS_REPORTING_UNIT: N/A
+LATEST_RESULTS_REVENUE: N/A
+LATEST_RESULTS_PRIOR_REVENUE: N/A
+LATEST_RESULTS_EARNINGS: N/A
+LATEST_RESULTS_PRIOR_EARNINGS: N/A
+LATEST_RESULTS_EARNINGS_SCOPE: N/A
+LATEST_RESULTS_SOURCE_URL: N/A
 ### --- END LATEST_RESULTS ---
 """
 
         assert not _should_retry_output(content, "foreign_language_analyst")
+
+    def test_incomplete_latest_results_contract_triggers_retry(self):
+        content = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+SEARCHES_COMPLETED: latest results release
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+### --- END MANAGEMENT_GUIDANCE ---
+### --- START LATEST_RESULTS ---
+LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND
+### --- END LATEST_RESULTS ---
+"""
+
+        assert _should_retry_output(content, "foreign_language_analyst")
 
     def test_fundamentals_retry_corrects_dropped_guidance_fields(self):
         messages = [HumanMessage(content="Analyze TEST.T")]
@@ -257,7 +284,96 @@ LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND
             if call.args == ("management_guidance_preflight_complete",)
         )
         assert telemetry.kwargs["evidence_chars"] > 0
-        assert telemetry.kwargs["call_statuses"]["results_package"] == "COMPLETED"
+        assert (
+            telemetry.kwargs["call_statuses"]["results_package"]
+            == "SUCCEEDED/RESULTS_FOUND"
+        )
+
+    @pytest.mark.asyncio
+    async def test_preflight_extracts_registered_official_results_document(self):
+        from src.tooling.runtime import ToolResult
+
+        calls = []
+        official_url = "https://www.jpx.co.jp/listing/results.pdf"
+
+        class FakeToolService:
+            async def execute(self, call, runner):
+                calls.append(call)
+                if call.name == "get_official_document":
+                    return ToolResult(
+                        value=(
+                            f'DOCUMENT_METADATA: {{"source_url": "{official_url}"}}\n'
+                            "Revenue 1,500; net income 405."
+                        )
+                    )
+                if call.name == "get_official_filings":
+                    return ToolResult(value="EDINET filing payload")
+                if "決算説明資料" in call.args["search_query"]:
+                    return ToolResult(
+                        value=f"<result><url>{official_url}</url></result>"
+                    )
+                return ToolResult(value="native bridge evidence")
+
+        with patch(
+            "src.runtime_services.get_current_tool_service",
+            return_value=FakeToolService(),
+        ):
+            evidence = await _preload_management_guidance_evidence("6745.T", "ホーチキ")
+
+        official_call = next(
+            call for call in calls if call.name == "get_official_document"
+        )
+        assert official_call.args["url"] == official_url
+        assert "#### latest_results_document\nSTATUS: COMPLETED" in evidence
+        assert "Revenue 1,500; net income 405." in evidence
+
+    @pytest.mark.asyncio
+    async def test_preflight_descends_bounded_official_child_paths(self):
+        from src.tooling.runtime import ToolResult
+
+        calls = []
+        hub_url = "https://www.jpx.co.jp/investor-relations"
+        child_url = "https://www.jpx.co.jp/results/fy-2026"
+
+        class FakeToolService:
+            async def execute(self, call, runner):
+                calls.append(call)
+                if call.name == "get_official_filings":
+                    return ToolResult(value="EDINET filing payload")
+                if call.name == "get_official_document":
+                    if call.args["url"] == hub_url:
+                        return ToolResult(
+                            value=(
+                                "STATUS: EVIDENCE_FOUND\n"
+                                "DOCUMENT_METADATA: "
+                                f'{{"source_url": "{hub_url}", '
+                                '"candidate_paths": ["/results/fy-2026"]}\n'
+                                "Investor relations index."
+                            )
+                        )
+                    return ToolResult(
+                        value=(
+                            "STATUS: EVIDENCE_FOUND\n"
+                            f'DOCUMENT_METADATA: {{"source_url": "{child_url}"}}\n'
+                            "FY2026 revenue guidance 740 to 780."
+                        )
+                    )
+                if "決算説明資料" in call.args["search_query"]:
+                    return ToolResult(value=f"<result><url>{hub_url}</url></result>")
+                return ToolResult(value="native bridge evidence")
+
+        with patch(
+            "src.runtime_services.get_current_tool_service",
+            return_value=FakeToolService(),
+        ):
+            evidence = await _preload_management_guidance_evidence("6745.T", "ホーチキ")
+
+        official_urls = [
+            call.args["url"] for call in calls if call.name == "get_official_document"
+        ]
+        assert official_urls == [hub_url, child_url]
+        assert "#### official_child_document_1" in evidence
+        assert "FY2026 revenue guidance 740 to 780." in evidence
 
     @pytest.mark.asyncio
     async def test_preflight_uses_discovered_local_name_for_bridge_query(self):
@@ -326,7 +442,9 @@ STATUS: FAILED
             management_guidance_evidence=evidence,
         )
 
-        assert "SEARCHES_COMPLETED: results_package=COMPLETED" in normalized
+        assert (
+            "SEARCHES_COMPLETED: results_package=SUCCEEDED/RESULTS_FOUND" in normalized
+        )
         assert "statutory_filing_api=FAILED" in normalized
         assert "SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT" in normalized
         assert "EARNINGS_BASELINE_STATUS: TEMPORARILY_BOOSTED" in normalized
@@ -368,6 +486,38 @@ STATUS: INSUFFICIENT_DATA
         assert "DRIVER_TYPE: UNKNOWN" in normalized
         assert "EARNINGS_BASELINE_STATUS: UNKNOWN" in normalized
         assert "GUIDANCE_BRIDGE_STATUS: NOT_APPLICABLE" in normalized
+
+    def test_not_disclosed_requires_complete_source_coverage(self):
+        content = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+SOURCE_TYPE: N/A
+SOURCE_URL: N/A
+OPERATING_PROFIT_GUIDANCE: N/A
+NET_INCOME_GUIDANCE: N/A
+OPERATING_VS_NET_DIRECTION: UNKNOWN
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+DRIVER_TYPE: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = """#### results_package
+STATUS: COMPLETED
+EXECUTION_STATUS: SUCCEEDED
+EVIDENCE_STATUS: RESULTS_FOUND
+#### earnings_bridge
+STATUS: INSUFFICIENT_DATA
+EXECUTION_STATUS: SUCCEEDED
+EVIDENCE_STATUS: NO_RESULTS
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "TEST.T",
+            management_guidance_evidence=evidence,
+        )
+
+        assert "COVERAGE_STATUS: UNRESOLVED_AFTER_TARGETED_SEARCH" in normalized
 
     def test_incomplete_causal_guidance_keeps_bridge_unresolved(self):
         content = """### --- START MANAGEMENT_GUIDANCE ---
@@ -547,7 +697,7 @@ STATUS: COMPLETED
 
         assert "SOURCE_AUTHORITY: THIRD_PARTY" in normalized
 
-    def test_company_results_guidance_with_matching_evidence_is_primary(self):
+    def test_company_results_guidance_search_identity_does_not_mint_primary(self):
         source_url = "https://issuer.example/investors/results-2026"
         content = f"""### --- START MANAGEMENT_GUIDANCE ---
 COVERAGE_STATUS: FOUND
@@ -565,7 +715,8 @@ NORMALIZED_EARNINGS_AVAILABLE: YES
 """
         evidence = f"""#### results_package
 STATUS: COMPLETED
-<result><url>{source_url}</url><summary>Issuer FY2026 results release</summary></result>
+<result><url>{source_url}</url><summary>Issuer FY2026 results release: operating
+profit guidance TWD 1.2 billion; net income guidance TWD 900 million.</summary></result>
 """
 
         normalized = _normalize_structured_output(
@@ -575,7 +726,155 @@ STATUS: COMPLETED
             management_guidance_evidence=evidence,
         )
 
+        assert "SOURCE_AUTHORITY: UNKNOWN" in normalized
+
+    def test_search_only_official_registry_guidance_is_not_primary(self):
+        source_url = "https://www.twse.com.tw/investors/results-2026"
+        content = f"""### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_TYPE: RESULTS_RELEASE
+SOURCE_URL: {source_url}
+MANAGEMENT_IDENTIFIED: YES
+OPERATING_PROFIT_GUIDANCE: TWD 1.2 billion
+NET_INCOME_GUIDANCE: TWD 900 million
+OPERATING_VS_NET_DIRECTION: SAME_DIRECTION
+MATERIAL_NONOPERATING_DRIVER: NO
+DRIVER_TYPE: NONE
+EARNINGS_BASELINE_STATUS: DURABLE
+NORMALIZED_EARNINGS_AVAILABLE: YES
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = f"""#### results_package
+STATUS: COMPLETED
+<result><url>{source_url}</url><summary>Issuer FY2026 results release: operating
+profit guidance TWD 1.2 billion; net income guidance TWD 900 million.</summary></result>
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "TEST.TW",
+            management_guidance_evidence=evidence,
+        )
+
+        assert "SOURCE_AUTHORITY: UNKNOWN" in normalized
+
+    def test_fetched_official_guidance_record_is_primary(self):
+        source_url = "https://www.twse.com.tw/investors/results-2026"
+        content = f"""### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_TYPE: RESULTS_RELEASE
+SOURCE_URL: {source_url}
+MANAGEMENT_IDENTIFIED: YES
+OPERATING_PROFIT_GUIDANCE: TWD 1.2 billion
+NET_INCOME_GUIDANCE: TWD 900 million
+OPERATING_VS_NET_DIRECTION: SAME_DIRECTION
+MATERIAL_NONOPERATING_DRIVER: NO
+DRIVER_TYPE: NONE
+EARNINGS_BASELINE_STATUS: DURABLE
+NORMALIZED_EARNINGS_AVAILABLE: YES
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        record = SimpleNamespace(
+            sequence=1,
+            agent_key="foreign_language_analyst",
+            tool_name="get_official_document",
+            content=(
+                "STATUS: EVIDENCE_FOUND\n"
+                f'DOCUMENT_METADATA: {{"source_url": "{source_url}"}}\n'
+                "Operating profit guidance TWD 1.2 billion; "
+                "net income guidance TWD 900 million."
+            ),
+            content_sha256="abcdef1234567890",
+            requested_urls=(source_url,),
+            urls=(source_url,),
+            blocked=False,
+            evidence_status="EVIDENCE_FOUND",
+        )
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "TEST.TW",
+            management_guidance_evidence="STATUS: COMPLETED",
+            evidence_messages=[],
+        )
+        assert "SOURCE_AUTHORITY: UNKNOWN" in normalized
+
+        from src.agents.management_guidance import normalize_management_guidance_output
+
+        normalized = normalize_management_guidance_output(
+            content,
+            "STATUS: COMPLETED",
+            [record],
+        )
         assert "SOURCE_AUTHORITY: PRIMARY" in normalized
+
+    def test_guidance_values_cannot_be_split_across_records(self):
+        source_url = "https://www.twse.com.tw/investors/results-2026"
+        content = f"""### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_TYPE: RESULTS_RELEASE
+SOURCE_URL: {source_url}
+MANAGEMENT_IDENTIFIED: YES
+OPERATING_PROFIT_GUIDANCE: TWD 1.2 billion
+NET_INCOME_GUIDANCE: TWD 900 million
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        bound_record = SimpleNamespace(
+            sequence=1,
+            tool_name="get_official_document",
+            content="Operating profit guidance TWD 1.2 billion.",
+            content_sha256="abcdef1234567890",
+            requested_urls=(source_url,),
+            urls=(source_url,),
+            blocked=False,
+            evidence_status="EVIDENCE_FOUND",
+        )
+        unrelated_record = SimpleNamespace(
+            sequence=2,
+            tool_name="get_official_document",
+            content="Net income guidance TWD 900 million.",
+            content_sha256="fedcba0987654321",
+            requested_urls=("https://www.twse.com.tw/other",),
+            urls=("https://www.twse.com.tw/other",),
+            blocked=False,
+            evidence_status="EVIDENCE_FOUND",
+        )
+
+        from src.agents.management_guidance import normalize_management_guidance_output
+
+        normalized = normalize_management_guidance_output(
+            content,
+            "STATUS: COMPLETED",
+            [bound_record, unrelated_record],
+        )
+        assert "SOURCE_AUTHORITY: UNKNOWN" in normalized
+
+    def test_official_guidance_url_without_claimed_values_is_not_primary(self):
+        source_url = "https://www.twse.com.tw/investors/results-2026"
+        content = f"""### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_TYPE: RESULTS_RELEASE
+SOURCE_URL: {source_url}
+MANAGEMENT_IDENTIFIED: YES
+OPERATING_PROFIT_GUIDANCE: TWD 1.2 billion
+NET_INCOME_GUIDANCE: TWD 900 million
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = f"""#### results_package
+STATUS: COMPLETED
+<result><url>{source_url}</url><summary>Issuer FY2026 results release.</summary></result>
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "TEST.TW",
+            management_guidance_evidence=evidence,
+        )
+
+        assert "SOURCE_AUTHORITY: UNKNOWN" in normalized
 
 
 class TestSearchForeignSourcesTool:

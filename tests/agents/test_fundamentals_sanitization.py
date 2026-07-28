@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from src.agents import analyst_nodes
 from src.agents.analyst_nodes import (
     _sanitize_fundamentals_output,
     _valuation_input_reliability,
@@ -12,6 +15,7 @@ from src.agents.fundamentals_reconciler import (
     parse_score_breakdown,
     reconcile_score_consistency,
 )
+from src.data_block_utils import replace_or_append_block_line
 from tests.helpers.frozen_regressions import load_frozen_regression
 
 
@@ -172,6 +176,54 @@ LATEST_RESULTS_EARNINGS_GROWTH_YOY: 102.5%
     )
 
 
+def test_unvalidated_latest_period_is_promoted_without_numeric_claims() -> None:
+    content = """### --- START DATA_BLOCK ---
+EARNINGS_GROWTH_MRQ: 102.8%
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "latest_quarter_date": "2025-12-31",
+            "_latest_quarter_date_source": "yfinance_quarterly",
+            "earningsGrowth_MRQ": 1.028,
+            "_earningsGrowth_MRQ_source": "calculated_from_quarterly",
+        }
+    )
+    foreign_data = """### --- START LATEST_RESULTS ---
+LATEST_RESULTS_COVERAGE_STATUS: FOUND
+LATEST_RESULTS_PERIOD: Three months ended March 31, 2026
+LATEST_RESULTS_PERIOD_END: 2026-03-31
+LATEST_RESULTS_PRIOR_PERIOD: Three months ended March 31, 2025
+LATEST_RESULTS_PRIOR_PERIOD_END: 2025-03-31
+LATEST_RESULTS_PERIOD_MONTHS: 3
+LATEST_RESULTS_CURRENCY: New dollars
+LATEST_RESULTS_REPORTING_UNIT: thousands
+LATEST_RESULTS_REVENUE: 1,500
+LATEST_RESULTS_PRIOR_REVENUE: 1,000
+LATEST_RESULTS_EARNINGS: 405
+LATEST_RESULTS_PRIOR_EARNINGS: 200
+LATEST_RESULTS_EARNINGS_SCOPE: Net income attributable to owners of parent
+LATEST_RESULTS_SOURCE_URL: https://issuer.example/results
+LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED
+LATEST_RESULTS_REVENUE_GROWTH_YOY: N/A
+LATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A
+### --- END LATEST_RESULTS ---
+"""
+
+    sanitized = _sanitize_fundamentals_output(
+        content,
+        raw_data,
+        "TEST",
+        foreign_data=foreign_data,
+    )
+
+    assert "LATEST_RESULTS_PERIOD_END: 2026-03-31" in sanitized
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED" in sanitized
+    assert "LATEST_RESULTS_REVENUE: 1,500" not in sanitized
+    assert "newer-period results candidate exists" in sanitized
+    assert "Do not present that MRQ period as the latest reported quarter" in sanitized
+
+
 def test_metadata_only_mrq_date_is_not_described_as_statement_aligned() -> None:
     content = """### --- START DATA_BLOCK ---
 EARNINGS_GROWTH_MRQ: 30.0% (as of 2026-03-31)
@@ -202,40 +254,6 @@ LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY
     assert "EARNINGS_GROWTH_MRQ: 30.0%" in sanitized
     assert "EARNINGS_GROWTH_MRQ: 30.0% (as of" not in sanitized
     assert "statement-derived MRQ growth remains aligned" not in sanitized
-
-
-def test_unsupported_capex_point_is_withheld_and_stale_detail_is_flagged() -> None:
-    content = """### --- START DATA_BLOCK ---
-GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=0; ROA_ROE_IMPROVING=0; GROSS_MARGIN=1; GLOBAL_EXPANSION=1; R_AND_D_CAPEX_BACKLOG=1
-RAW_GROWTH_SCORE: 4/6
-ADJUSTED_GROWTH_SCORE: 66.7% (based on 6 available points)
-### --- END DATA_BLOCK ---
-### GROWTH TRANSITION DETAIL
-**Score**: 5/6 (Adjusted: 83%)
-"""
-    foreign_data = """CAPACITY_UTILIZATION: N/A
-CAPACITY_UTILIZATION_SOURCE_URL: N/A
-CAPACITY_UTILIZATION_AS_OF: UNKNOWN
-CAPACITY_EVIDENCE_STATUS: UNSUPPORTED
-FACILITY_BUILDOUT_STATUS: N/A
-R_AND_D_CAPEX_BACKLOG_EVIDENCE: UNSUPPORTED
-"""
-
-    sanitized = _sanitize_fundamentals_output(
-        content,
-        "",
-        "6782.TW",
-        foreign_data=foreign_data,
-    )
-
-    assert "R_AND_D_CAPEX_BACKLOG=N/A" in sanitized
-    assert "RAW_GROWTH_SCORE: 3/6" in sanitized
-    assert "ADJUSTED_GROWTH_SCORE: 60.0% (based on 5 available points)" in sanitized
-    assert (
-        "R_AND_D_CAPEX_BACKLOG_EVIDENCE_ADJUSTMENT: WITHHELD_LOAD_BEARING" in sanitized
-    )
-    assert "AUTHORITATIVE_METRIC_CORRECTION" in sanitized
-    assert sanitized.count("### GROWTH TRANSITION DETAIL") == 1
 
 
 def test_secondary_capex_evidence_is_preserved_for_policy_gate() -> None:
@@ -1768,3 +1786,40 @@ NET_DEBT_EBITDA: 0.23
     twice = _sanitize_fundamentals_output(once, "", "AGS.SI")
 
     assert twice.count("AUTHORITATIVE_METRIC_CORRECTION") == 1
+
+
+def test_sanitizer_rejects_mutation_after_canonical_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = """### --- START DATA_BLOCK ---
+PE_RATIO_TTM: 99
+### --- END DATA_BLOCK ---
+"""
+    snapshot = {
+        "contract_status": "VALID",
+        "claims": {
+            "PE_RATIO_TTM": {
+                "id": "PE_RATIO_TTM",
+                "field": "PE_RATIO_TTM",
+                "kind": "FACT",
+                "value": "10",
+            }
+        },
+    }
+
+    def mutate_projected_fact(body: str) -> tuple[str, bool]:
+        return replace_or_append_block_line(body, "PE_RATIO_TTM", "11"), True
+
+    monkeypatch.setattr(
+        analyst_nodes,
+        "withhold_eps_growth_for_unusable_baseline",
+        mutate_projected_fact,
+    )
+
+    with pytest.raises(ValueError, match="POST_PROJECTION_FACT_MUTATION"):
+        _sanitize_fundamentals_output(
+            content,
+            "",
+            "TEST",
+            canonical_snapshot=snapshot,
+        )

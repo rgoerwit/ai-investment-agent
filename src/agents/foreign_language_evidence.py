@@ -12,6 +12,10 @@ import structlog
 from langchain_core.messages import BaseMessage
 
 from src.data_block_utils import replace_or_append_block_line
+from src.tooling.evidence_recorder import (
+    classify_evidence_value,
+    resolve_evidence_authority,
+)
 
 from .message_utils import (
     ToolEvidenceRecord,
@@ -78,7 +82,7 @@ _FACILITY_STATUS_TERMS = {
     "NONE": ("no expansion", "no buildout", "no facility expansion"),
 }
 _PREFLIGHT_RESULT_RE = re.compile(r"(?is)<result\b[^>]*>(.*?)</result>")
-_LATEST_RESULTS_FIELDS = (
+LATEST_RESULTS_SOURCE_FIELDS = (
     "LATEST_RESULTS_PERIOD",
     "LATEST_RESULTS_PERIOD_END",
     "LATEST_RESULTS_PRIOR_PERIOD",
@@ -99,8 +103,8 @@ _LATEST_RESULTS_NUMERIC_FIELDS = (
     "LATEST_RESULTS_EARNINGS",
     "LATEST_RESULTS_PRIOR_EARNINGS",
 )
-_PRIMARY_EVIDENCE_TOOLS = frozenset({"get_official_document", "get_official_filings"})
 _NUMBER_TOKEN_RE = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?(?![\w.])")
+_URL_RE = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
 
 
 def _field(report: str, label: str) -> str:
@@ -109,6 +113,60 @@ def _field(report: str, label: str) -> str:
         report,
     )
     return match.group(1).strip() if match else ""
+
+
+def _split_search_result_records(
+    records: Sequence[ToolEvidenceRecord],
+) -> list[ToolEvidenceRecord]:
+    """Make source matching operate on one search result, not an entire result page."""
+    split_records: list[ToolEvidenceRecord] = []
+    for record in records:
+        tool_name, content, urls = record
+        blocks = re.findall(r"(?is)<result\b[^>]*>.*?</result>", content)
+        if not blocks:
+            split_records.append(record)
+            continue
+        for block in blocks:
+            block_urls = {
+                normalized
+                for match in _URL_RE.finditer(block)
+                if (normalized := normalize_http_url(match.group(0)))
+            }
+            if block_urls:
+                split_records.append(
+                    ToolEvidenceRecord(
+                        tool_name=tool_name,
+                        content=block,
+                        urls=block_urls,
+                        evidence_status=record.evidence_status,
+                        authority=record.authority,
+                    )
+                )
+    return split_records
+
+
+def _coerce_tool_evidence_record(record: object) -> ToolEvidenceRecord:
+    if isinstance(record, ToolEvidenceRecord):
+        return record
+    tool_name, content, urls = record  # type: ignore[misc]
+    _, evidence_status, _, bounded = classify_evidence_value(
+        str(tool_name or ""),
+        content,
+    )
+    normalized_urls = {
+        normalized for url in urls if (normalized := normalize_http_url(str(url)))
+    }
+    return ToolEvidenceRecord(
+        tool_name=tool_name,
+        content=bounded,
+        urls=normalized_urls,
+        evidence_status=evidence_status,
+        authority=resolve_evidence_authority(
+            tool_name=str(tool_name or ""),
+            evidence_status=evidence_status,
+            urls=tuple(sorted(normalized_urls)),
+        ),
+    )
 
 
 def _replace_or_add_field(
@@ -158,8 +216,21 @@ def _claim_in_text(text: str, holder: str, pct: float | None) -> bool:
     return bool(re.search(rf"(?<!\d){re.escape(pct_token)}(?:0+)?\s*%?", folded))
 
 
-def _is_official_filing(tool_name: str | None) -> bool:
-    return tool_name in _PRIMARY_EVIDENCE_TOOLS
+def _holder_in_text(text: str, holder: str) -> bool:
+    folded = " ".join(text.casefold().split())
+    holder_tokens = [
+        token
+        for token in re.findall(r"\w+", holder.casefold())
+        if len(token) > 1 and token not in _CORPORATE_SUFFIXES
+    ]
+    return bool(holder_tokens) and all(token in folded for token in holder_tokens)
+
+
+def _is_primary_evidence(record: ToolEvidenceRecord) -> bool:
+    return record.evidence_status == "EVIDENCE_FOUND" and record.authority in {
+        "PRIMARY_REGISTRY",
+        "PRIMARY_ISSUER",
+    }
 
 
 def _normalized_text(value: str) -> str:
@@ -233,7 +304,7 @@ def _normalize_latest_results(
     ticker: str,
 ) -> str:
     coverage = _field(report, "LATEST_RESULTS_COVERAGE_STATUS").upper()
-    asserted = any(_field(report, field) for field in _LATEST_RESULTS_FIELDS)
+    asserted = any(_field(report, field) for field in LATEST_RESULTS_SOURCE_FIELDS)
     if coverage != "FOUND":
         if not asserted:
             return report
@@ -244,7 +315,7 @@ def _normalize_latest_results(
             section="START LATEST_RESULTS",
         )
 
-    values = {field: _field(report, field) for field in _LATEST_RESULTS_FIELDS}
+    values = {field: _field(report, field) for field in LATEST_RESULTS_SOURCE_FIELDS}
     source_url = normalize_http_url(values["LATEST_RESULTS_SOURCE_URL"])
     decimals = {
         field: parsed
@@ -286,7 +357,7 @@ def _normalize_latest_results(
         if structurally_valid
         else []
     )
-    primary = any(_is_official_filing(record[0]) for record in supporting_records)
+    primary = any(_is_primary_evidence(record) for record in supporting_records)
     authority = (
         "PRIMARY" if primary else "SECONDARY" if supporting_records else "UNSUPPORTED"
     )
@@ -360,7 +431,15 @@ def _preflight_capacity_records(
             if (normalized := normalize_http_url(raw_url))
         }
         if urls:
-            records.append(("management_guidance_preflight", block, urls))
+            records.append(
+                ToolEvidenceRecord(
+                    tool_name="management_guidance_preflight",
+                    content=block,
+                    urls=urls,
+                    evidence_status="RESULTS_FOUND",
+                    authority="SECONDARY",
+                )
+            )
     return records
 
 
@@ -403,9 +482,7 @@ def _validated_control_status(
             for record in supporting_records
             if any(term in record[1].casefold() for term in terms)
         ]
-        if any(
-            _is_official_filing(record[0]) for record in relationship_records
-        ) or any(len(_record_domains(record)) == 1 for record in relationship_records):
+        if relationship_records:
             return "NOT_CONTROLLED", basis_value
         return "UNKNOWN", "UNKNOWN"
 
@@ -421,12 +498,12 @@ def _validated_control_status(
         return "UNKNOWN", "UNKNOWN"
 
     corroborating_records = [
-        (name, content, urls)
-        for name, content, urls in supporting_records
-        if any(term in content.casefold() for term in terms)
+        record
+        for record in supporting_records
+        if any(term in record[1].casefold() for term in terms)
     ]
     official_support = any(
-        _is_official_filing(name) for name, _content, _urls in corroborating_records
+        _is_primary_evidence(record) for record in corroborating_records
     )
     if official_support or _has_independent_corroboration(corroborating_records):
         return "CONTROLLED", normalized_basis
@@ -478,10 +555,30 @@ def _normalize_ownership(
         if (
             normalized_source in record[2]
             if normalized_source
-            else _is_official_filing(record[0])
+            else _is_primary_evidence(record)
         )
     ]
     claimed_evidence_status = _field(report, "Ownership Evidence Status").upper()
+    relationship = _field(report, "Relationship") or "UNKNOWN"
+    non_control_rule = _NON_CONTROL_RELATIONSHIPS.get(
+        _normalized_relationship(relationship)
+    )
+    relationship_records = [
+        record
+        for record in records
+        if _holder_in_text(record[1], holder)
+        and non_control_rule
+        and any(term in record[1].casefold() for term in non_control_rule[1])
+    ]
+    relationship_supporting = [
+        record
+        for record in relationship_records
+        if (
+            normalized_source in record[2]
+            if normalized_source
+            else _is_primary_evidence(record)
+        )
+    ]
     no_ownership_found = (
         claimed_evidence_status == "NOT_FOUND"
         or "ownership data not found" in report.casefold()
@@ -490,6 +587,8 @@ def _normalize_ownership(
         evidence_status = "VERIFIED_URL"
     elif supporting:
         evidence_status = "VERIFIED_OFFICIAL_FILING"
+    elif relationship_supporting:
+        evidence_status = "DISCLOSED_UNVERIFIED"
     elif not holder and no_ownership_found:
         evidence_status = "NOT_FOUND"
     elif holder or source_url:
@@ -498,7 +597,6 @@ def _normalize_ownership(
         evidence_status = "UNKNOWN"
     verified = evidence_status.startswith("VERIFIED")
 
-    relationship = _field(report, "Relationship") or "UNKNOWN"
     claimed_status = _field(report, "Control Status") or "UNKNOWN"
     basis = _field(report, "Control Basis") or "UNKNOWN"
     control_status, control_basis = (
@@ -507,14 +605,20 @@ def _normalize_ownership(
             relationship=relationship,
             basis=basis,
             pct=pct,
-            supporting_records=claim_records,
+            supporting_records=(claim_records if verified else relationship_supporting),
         )
-        if verified
+        if verified or evidence_status == "DISCLOSED_UNVERIFIED"
         else ("UNKNOWN", "UNKNOWN")
     )
 
     largest_value = (
         f"{holder} ({pct:g}%)" if verified and holder and pct is not None else "UNKNOWN"
+    )
+    influential_entity = (
+        holder
+        if evidence_status == "DISCLOSED_UNVERIFIED"
+        and control_basis == "SIGNIFICANT_INFLUENCE_ONLY"
+        else "UNKNOWN"
     )
     controller_value = "NONE" if control_status == "NOT_CONTROLLED" else "UNKNOWN"
     if control_status == "CONTROLLED":
@@ -531,10 +635,7 @@ def _normalize_ownership(
                 for _name, _content, urls in controller_records
             )
             if normalized_source
-            else any(
-                _is_official_filing(name)
-                for name, _content, _urls in controller_records
-            )
+            else any(_is_primary_evidence(record) for record in controller_records)
         )
         if controller_supported:
             controller_value = f"{controller_name} ({controller_pct:g}%)"
@@ -579,6 +680,7 @@ def _normalize_ownership(
 
     updates = {
         "Largest Shareholder": largest_value,
+        "Influential Entity": influential_entity,
         "Controlling Shareholder": controller_value,
         "Control Status": control_status,
         "Control Basis": control_basis,
@@ -586,7 +688,12 @@ def _normalize_ownership(
         "ENTITY_ROLE_OBSERVED": entity_role,
         "Related Listed Tickers": related,
         "Ownership Evidence Status": evidence_status,
-        "Ownership Source URL": source_url if verified and normalized_source else "N/A",
+        "Ownership Source URL": (
+            source_url
+            if normalized_source
+            and evidence_status in {"VERIFIED_URL", "DISCLOSED_UNVERIFIED"}
+            else "N/A"
+        ),
         "Ownership As Of": as_of,
     }
     if not holder:
@@ -667,7 +774,7 @@ def _normalize_capacity(
     evidence_status = (
         "PRIMARY"
         if supported
-        and any(_is_official_filing(name) for name, _content, _urls in matching_records)
+        and any(_is_primary_evidence(record) for record in matching_records)
         else "SECONDARY"
         if supported
         else "UNSUPPORTED"
@@ -752,12 +859,18 @@ def normalize_foreign_language_evidence(
     *,
     ticker: str,
     supplemental_evidence: str = "",
+    additional_records: Sequence[ToolEvidenceRecord] = (),
 ) -> str:
     """Fail closed on unsupported ownership, capacity, and latest-results claims."""
 
     if not report.strip():
         return report
-    records = tool_evidence_records(evidence_messages)
+    records = _split_search_result_records(
+        [
+            *tool_evidence_records(evidence_messages),
+            *(_coerce_tool_evidence_record(record) for record in additional_records),
+        ]
+    )
     normalized = _normalize_ownership(report, records, ticker=ticker)
     normalized = _normalize_capacity(
         normalized,
@@ -776,7 +889,8 @@ FOREIGN_GROWTH_PROMOTION_FIELDS: dict[str, str] = {
     "FACILITY_BUILDOUT_STATUS": "FACILITY_BUILDOUT_STATUS",
     "R_AND_D_CAPEX_BACKLOG_EVIDENCE": "R_AND_D_CAPEX_BACKLOG_EVIDENCE",
 }
-LATEST_RESULTS_PROMOTION_FIELDS: tuple[str, ...] = (
+LATEST_RESULTS_CONTEXT_PROMOTION_FIELDS: tuple[str, ...] = (
+    "LATEST_RESULTS_COVERAGE_STATUS",
     "LATEST_RESULTS_PERIOD",
     "LATEST_RESULTS_PERIOD_END",
     "LATEST_RESULTS_PRIOR_PERIOD",
@@ -784,15 +898,20 @@ LATEST_RESULTS_PROMOTION_FIELDS: tuple[str, ...] = (
     "LATEST_RESULTS_PERIOD_MONTHS",
     "LATEST_RESULTS_CURRENCY",
     "LATEST_RESULTS_REPORTING_UNIT",
+    "LATEST_RESULTS_EARNINGS_SCOPE",
+    "LATEST_RESULTS_SOURCE_URL",
+    "LATEST_RESULTS_SOURCE_AUTHORITY",
+)
+LATEST_RESULTS_NUMERIC_PROMOTION_FIELDS: tuple[str, ...] = (
     "LATEST_RESULTS_REVENUE",
     "LATEST_RESULTS_PRIOR_REVENUE",
     "LATEST_RESULTS_EARNINGS",
     "LATEST_RESULTS_PRIOR_EARNINGS",
-    "LATEST_RESULTS_EARNINGS_SCOPE",
-    "LATEST_RESULTS_SOURCE_URL",
-    "LATEST_RESULTS_SOURCE_AUTHORITY",
     "LATEST_RESULTS_REVENUE_GROWTH_YOY",
     "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
+)
+LATEST_RESULTS_PROMOTION_FIELDS = (
+    LATEST_RESULTS_CONTEXT_PROMOTION_FIELDS + LATEST_RESULTS_NUMERIC_PROMOTION_FIELDS
 )
 
 
@@ -816,8 +935,14 @@ def promote_foreign_growth_evidence(body: str, foreign_data: str) -> tuple[str, 
             "UNKNOWN",
         )
         promoted = True
+    for field in LATEST_RESULTS_CONTEXT_PROMOTION_FIELDS:
+        value = _field(foreign_data, field)
+        if not value:
+            continue
+        updated = replace_or_append_block_line(updated, field, value)
+        promoted = True
     if _field(foreign_data, "LATEST_RESULTS_SOURCE_AUTHORITY").upper() == "PRIMARY":
-        for field in LATEST_RESULTS_PROMOTION_FIELDS:
+        for field in LATEST_RESULTS_NUMERIC_PROMOTION_FIELDS:
             value = _field(foreign_data, field)
             if not value:
                 continue

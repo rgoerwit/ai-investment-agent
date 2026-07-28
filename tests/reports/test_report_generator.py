@@ -863,6 +863,35 @@ class TestEdgeCases:
         assert "ANALYSIS FAILED" in report
         assert "Brief Mode" in report
 
+    def test_explicitly_nonpublishable_report_is_diagnostic_only(self):
+        reporter = QuietModeReporter("FAIL")
+        result_dict = {
+            "analysis_validity": {
+                "publishable": False,
+                "required_failures": {
+                    "fundamentals_report": {
+                        "message": (
+                            "GUIDANCE_COVERAGE_STATUS=MISSING; expected a domain status"
+                        )
+                    }
+                },
+            },
+            "market_report": "MARKET_SENTINEL",
+            "investment_plan": "RECOMMENDATION_SENTINEL",
+            "trader_investment_plan": "POSITION_SIZE: 5%",
+            "risk_debate_state": {
+                "current_risky_response": "RISK_SENTINEL",
+            },
+        }
+
+        report = reporter.generate_report(result_dict)
+
+        assert "GUIDANCE_COVERAGE_STATUS=MISSING" in report
+        assert "MARKET_SENTINEL" not in report
+        assert "RECOMMENDATION_SENTINEL" not in report
+        assert "POSITION_SIZE: 5%" not in report
+        assert "RISK_SENTINEL" not in report
+
     def test_malformed_pm_verdict_formats(self):
         """Test various PM verdict format variations."""
         reporter = QuietModeReporter("CSCO")

@@ -728,11 +728,13 @@ class TestRuntimeServiceHookConfig:
         monkeypatch.setattr("src.main.config.mcp_enabled", False)
 
         services = build_runtime_services_from_config(enable_tool_audit=False)
-        assert services.tool_service.hooks == []
+        assert [type(h).__name__ for h in services.tool_service.hooks] == [
+            "EvidenceRecorder"
+        ]
 
         services = build_runtime_services_from_config(enable_tool_audit=True)
         hook_types = [type(h).__name__ for h in services.tool_service.hooks]
-        assert hook_types == ["LoggingToolAuditHook"]
+        assert hook_types == ["EvidenceRecorder", "LoggingToolAuditHook"]
 
     def test_build_runtime_services_from_config_audit_hook_coexists_with_inspection(
         self, monkeypatch

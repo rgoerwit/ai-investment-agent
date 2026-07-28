@@ -41,10 +41,25 @@ def _capital(**overrides) -> dict:
     return value
 
 
+def _supporting_evidence(summary: str) -> str:
+    return (
+        "#### structures_search\n"
+        "STATUS: COMPLETED\n"
+        "EXECUTION_STATUS: SUCCEEDED\n"
+        "EVIDENCE_STATUS: RESULTS_FOUND\n"
+        "<result>"
+        "<url>https://example.com/filing</url>"
+        f"<summary>{summary}</summary>"
+        "</result>"
+    )
+
+
 def test_normalizer_qualifies_ordinary_unrecognized_commitment():
     normalized, contract_present = normalize_legal_output(
         _legal_payload(_capital()),
-        "#### structures_search\nSTATUS: COMPLETED",
+        _supporting_evidence(
+            "USD 2.0 billion of uncommenced lease commitments were disclosed."
+        ),
     )
 
     assert contract_present is True
@@ -60,7 +75,9 @@ def test_normalizer_blocks_material_parent_recourse():
                 parent_recourse="FULL",
             )
         ),
-        "#### structures_search\nSTATUS: COMPLETED",
+        _supporting_evidence(
+            "The parent provided a full guarantee for USD 2.0 billion."
+        ),
     )
 
     capital = json.loads(normalized)["capital_structure"]
@@ -70,7 +87,9 @@ def test_normalizer_blocks_material_parent_recourse():
 def test_normalizer_does_not_double_count_recognized_liability():
     normalized, _ = normalize_legal_output(
         _legal_payload(_capital(balance_sheet_status="RECOGNIZED")),
-        "#### commitments_search\nSTATUS: COMPLETED",
+        _supporting_evidence(
+            "USD 2.0 billion of recognized lease liabilities were disclosed."
+        ),
     )
 
     capital = json.loads(normalized)["capital_structure"]
@@ -86,7 +105,9 @@ def test_nonrecourse_unconsolidated_entity_only_qualifies_ratios():
                 consolidation_risk="NONE",
             )
         ),
-        "#### structures_search\nSTATUS: COMPLETED",
+        _supporting_evidence(
+            "The unconsolidated entity has USD 2.0 billion of maximum exposure."
+        ),
     )
 
     capital = json.loads(normalized)["capital_structure"]
@@ -237,7 +258,9 @@ def test_normalizer_preserves_omitted_contract_as_unresolved():
 def test_promotion_qualifies_de_without_inventing_adjusted_ratio():
     normalized, _ = normalize_legal_output(
         _legal_payload(_capital()),
-        "#### commitments_search\nSTATUS: COMPLETED",
+        _supporting_evidence(
+            "USD 2.0 billion of uncommenced lease commitments were disclosed."
+        ),
     )
 
     updated, promoted = promote_capital_structure("DEBT_TO_EQUITY: 120%", normalized)
@@ -247,6 +270,26 @@ def test_promotion_qualifies_de_without_inventing_adjusted_ratio():
     assert "DE_RATIO_QUALIFICATION: Reported D/E excludes" in updated
     assert "INCREMENTAL_DEBT_LIKE_EXPOSURE: USD 2.0 billion" in updated
     assert "ADJUSTED_DE_RATIO" not in updated
+
+
+def test_normalizer_rejects_pledged_assets_relabeled_as_lease_commitment():
+    normalized, _ = normalize_legal_output(
+        _legal_payload(
+            _capital(
+                amount="TWD 832.76 million",
+                evidence="Pledged assets were disclosed.",
+            )
+        ),
+        _supporting_evidence(
+            "TWD 832.76 million of land, buildings, and deposits were pledged "
+            "as collateral."
+        ),
+    )
+
+    capital = json.loads(normalized)["capital_structure"]
+    assert capital["classification"] == "UNRESOLVED"
+    assert capital["exposure_type"] == "UNKNOWN"
+    assert capital["amount"] == "N/A"
 
 
 @pytest.mark.asyncio

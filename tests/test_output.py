@@ -10,6 +10,35 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
+def test_article_source_context_keeps_labeled_fundamentals_reference() -> None:
+    import src.output as output
+    from src.analysis_snapshot import build_analysis_snapshot
+
+    fundamentals = (
+        "### --- START DATA_BLOCK ---\nPE_RATIO_TTM: 12.5\n### --- END DATA_BLOCK ---"
+    )
+    snapshot = build_analysis_snapshot(
+        {"fundamentals_report": fundamentals},
+        degraded=False,
+    )
+    context = output._build_article_source_context(
+        "RAW REPORT WITH STALE FACT",
+        {
+            "analysis_snapshot": snapshot,
+            "fundamentals_report": fundamentals,
+            "final_trade_decision": "VERDICT: HOLD",
+            "investment_plan": "Reasoning only",
+        },
+    )
+
+    assert "CANONICAL ANALYSIS SNAPSHOT" in context
+    assert "PE_RATIO_TTM: 12.5" in context
+    assert "RAW REPORT WITH STALE FACT" not in context
+    assert "Reasoning only" in context
+    assert "NON-CANONICAL FUNDAMENTALS REFERENCE" in context
+    assert fundamentals in context
+
+
 @pytest.mark.asyncio
 async def test_load_company_name_for_output_async_uses_thread_wrapper(monkeypatch):
     import src.output as output

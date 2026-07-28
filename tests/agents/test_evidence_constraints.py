@@ -105,6 +105,19 @@ CAPACITY_UTILIZATION_AS_OF: 2026-Q1""",
     )
 
 
+def test_significant_influence_is_not_reframed_as_control() -> None:
+    state = _state("PROVEN")
+    state["entity_governance_card"] = {
+        "control_status": "NOT_CONTROLLED",
+        "ownership_relationship": "EQUITY_METHOD",
+    }
+
+    constraint = downstream_evidence_constraints(state)
+
+    assert "EQUITY_METHOD, not control" in constraint
+    assert "parent, controller, subsidiary" in constraint
+
+
 def test_narrow_catalyst_and_aggregator_coverage_scopes_reach_pm() -> None:
     state = _state("PROVEN", extra_fields="ANALYST_COVERAGE_ENGLISH: 7")
     state["red_flags"] = [{"type": "NO_CATALYST_DETECTED"}]
@@ -126,6 +139,19 @@ LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY""",
 
     assert "primary historical actuals" in constraint
     assert "do not use actual YoY growth as management guidance" in constraint
+
+
+def test_unvalidated_latest_candidate_cannot_replace_statement_mrq() -> None:
+    state = _state(
+        "PROVEN",
+        extra_fields="""LATEST_RESULTS_PERIOD: Three months ended March 31, 2026
+LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED""",
+    )
+
+    constraint = downstream_evidence_constraints(state)
+
+    assert "only as a UNSUPPORTED results candidate" in constraint
+    assert "retain the statement-derived MRQ period" in constraint
 
 
 def test_uncited_value_trap_m_and_a_cannot_support_acquisition_claim() -> None:

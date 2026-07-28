@@ -23,18 +23,52 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from src.agents.evidence_constraints import downstream_evidence_constraints
+from src.analysis_snapshot import (
+    build_analysis_snapshot,
+    build_pre_senior_snapshot,
+    decision_claim_ids,
+    reconcile_data_block_projection,
+)
+from src.article_audit import (
+    audit_article_claim_support,
+    audit_article_claim_usage,
+    extract_source_confidence_context,
+)
 from src.charts.extractors.pm_block import extract_pm_block
 from src.charts.extractors.valuation import _extract_params
+from src.claim_policy import MATERIAL_CLAIM_POLICIES, ClaimPolicy
 from src.ibkr.order_builder import parse_trade_block
+from src.pm_claim_audit import (
+    reconcile_final_decision_trace,
+    render_decision_trace_instruction,
+)
+from src.tooling.structured_ingress import build_structured_ingress_record
 from src.validators.financial_rules import detect_red_flags
 from src.validators.metric_extractor import extract_metrics
 from src.validators.sector_classifier import detect_sector
 from src.validators.supplemental_extractors import extract_value_trap_score
 
 FROZEN = Path(__file__).resolve().parents[1] / "fixtures" / "frozen"
+
+
+def _register_metrics(state: dict, payload: dict) -> dict:
+    return {
+        **state,
+        "structured_inputs": {
+            "raw_financial_metrics": build_structured_ingress_record(
+                payload,
+                agent_key="junior_fundamentals_analyst",
+                tool_name="get_financial_metrics",
+            )
+        },
+    }
+
+
 _SNAPSHOT = FROZEN / "2330_TW_metrics_snapshot.json"
 
 
@@ -78,6 +112,8 @@ def test_pm_block_golden():
     assert pm.zone == "HIGH"
     assert pm.risk_tally == 1.58
     assert (pm.health_adj, pm.growth_adj) == (75, 100)
+    assert isinstance(pm.decision_facts, tuple)
+    assert isinstance(pm.decision_gates, tuple)
 
 
 def test_value_trap_golden():
@@ -160,3 +196,207 @@ def test_consumers_degrade_on_malformed_input(bad: str):
     assert pm.verdict is None
     assert parse_trade_block(bad) is None
     assert extract_value_trap_score(bad)["score"] is None
+
+
+# --- evidence → claim → decision → publication contract -----------------------
+
+
+def _block(*lines: str) -> str:
+    return (
+        "### --- START DATA_BLOCK ---\n"
+        + "\n".join(lines)
+        + "\n### --- END DATA_BLOCK ---"
+    )
+
+
+def test_claim_contract_replay_closes_remint_and_publication_seams():
+    """One no-network replay traverses every deterministic contract boundary."""
+    payload = {
+        "trailingPE": 12.5,
+        "revenueGrowth_MRQ": 0.168693,
+        "_revenueGrowth_MRQ_source": "calculated_from_quarterly",
+        "latest_quarter_date": "2025-12-31",
+    }
+    state = _register_metrics(
+        {
+            "raw_fundamentals_data": json.dumps(payload),
+            "foreign_language_report": (
+                "CAPACITY_UTILIZATION: N/A\n"
+                "CAPACITY_UTILIZATION_SOURCE_URL: N/A\n"
+                "CAPACITY_UTILIZATION_AS_OF: UNKNOWN\n"
+                "CAPACITY_EVIDENCE_STATUS: UNSUPPORTED"
+            ),
+        },
+        payload,
+    )
+    snapshot = build_pre_senior_snapshot(state)
+    senior = _block(
+        "PE_RATIO_TTM: 12.5",
+        "REVENUE_GROWTH_MRQ: 16.9%",
+        "LATEST_QUARTER_DATE: 2026-03-31",
+        "CAPACITY_UTILIZATION: 95%",
+        "CAPACITY_UTILIZATION_SOURCE_URL: https://search.example/result",
+        "CAPACITY_UTILIZATION_AS_OF: UNKNOWN",
+        "CAPACITY_EVIDENCE_STATUS: PRIMARY",
+    )
+
+    reconciled, conflicts = reconcile_data_block_projection(senior, snapshot)
+    assert "LATEST_QUARTER_DATE: 2025-12-31" in reconciled
+    assert "CAPACITY_UTILIZATION: N/A" in reconciled
+    assert {conflict["field"] for conflict in conflicts} >= {
+        "CAPACITY_UTILIZATION",
+    }
+
+    support_id = decision_claim_ids(snapshot)[0]
+    pm_output = (
+        "CONSULTANT_RESOLUTION:\n"
+        "- VERDICT: UNVERIFIABLE\n\n"
+        "### PORTFOLIO MANAGER VERDICT: HOLD\n"
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: HOLD\n"
+        f"DECISION_FACTS: {support_id}\n"
+        "DECISION_GATES: NONE\n"
+        "### --- END PM_BLOCK ---"
+    )
+    final_pm, trace = reconcile_final_decision_trace(
+        pm_output,
+        snapshot,
+        [{"type": "CAPACITY_EVIDENCE_GAP", "blocks_buy": True}],
+    )
+    assert "DECISION_GATES: CAPACITY_EVIDENCE_GAP" in final_pm
+    assert trace["status"] == "VALID"
+
+    article = "Capacity utilization is confirmed at 95%."
+    assert audit_article_claim_support(article, snapshot)
+
+
+def test_search_listing_cannot_bind_a_source_required_claim():
+    url = "https://issuer.example/results"
+    search_record = SimpleNamespace(
+        sequence=3,
+        content_sha256="abc123def456789",
+        content=f"Search result points to {url}",
+        urls=(url,),
+        blocked=False,
+        evidence_status="RESULTS_FOUND",
+    )
+    snapshot = build_analysis_snapshot(
+        {
+            "fundamentals_report": _block(
+                "CAPACITY_UTILIZATION: 95%",
+                f"CAPACITY_UTILIZATION_SOURCE_URL: {url}",
+                "CAPACITY_UTILIZATION_AS_OF: 2025-12-31",
+                "CAPACITY_EVIDENCE_STATUS: PRIMARY",
+            )
+        },
+        [search_record],
+    )
+    claim = next(iter(snapshot["claims"].values()))
+
+    assert claim["authority"] == "UNSUPPORTED"
+    assert claim["decision_eligible"] is False
+
+
+def test_annual_only_growth_does_not_inherit_newer_period_metadata():
+    payload = {
+        "earningsGrowth_MRQ": 1.0,
+        "_earningsGrowth_MRQ_source": "aggregator",
+        "latest_quarter_date": "2025-12-31",
+    }
+    snapshot = build_pre_senior_snapshot(
+        _register_metrics(
+            {
+                "raw_fundamentals_data": json.dumps(payload),
+                "foreign_language_report": "",
+            },
+            payload,
+        )
+    )
+    claim = next(
+        claim
+        for claim in snapshot["claims"].values()
+        if claim["field"] == "EARNINGS_GROWTH_MRQ"
+    )
+
+    assert claim["period"] is None
+
+
+def test_uncited_acquisition_context_reaches_every_narrative_consumer():
+    value_trap = (
+        _block()
+        .replace(
+            "DATA_BLOCK",
+            "VALUE_TRAP_BLOCK",
+        )
+        .replace(
+            "\n### --- END",
+            "\nM&A_CONTEXT_EVIDENCE: UNKNOWN\n### --- END",
+        )
+    )
+    state = {
+        "fundamentals_report": _block("PE_RATIO_TTM: 12.5"),
+        "value_trap_report": value_trap,
+        "artifact_statuses": {
+            "fundamentals_report": {
+                "complete": True,
+                "ok": True,
+                "content": _block("PE_RATIO_TTM: 12.5"),
+            },
+            "value_trap_report": {
+                "complete": True,
+                "ok": True,
+                "content": value_trap,
+            },
+        },
+    }
+
+    constraints = downstream_evidence_constraints(state)
+    assert "Do not name an acquisition" in constraints
+    assert "infer acquisition-led growth" in constraints
+
+
+def test_policy_registration_propagates_without_consumer_literals(monkeypatch):
+    field = "SYNTHETIC_MATERIAL_SIGNAL"
+    url = "https://issuer.example/signal"
+    monkeypatch.setitem(
+        MATERIAL_CLAIM_POLICIES,
+        field,
+        ClaimPolicy(
+            source_url_field="SYNTHETIC_SOURCE_URL",
+            authority_field="SYNTHETIC_AUTHORITY",
+            source_required=True,
+            decision_role="SUPPORT",
+            aliases=("synthetic signal",),
+        ),
+    )
+    evidence = SimpleNamespace(
+        sequence=9,
+        content_sha256="987654abcdef000",
+        content="Fetched issuer document",
+        urls=(url,),
+        blocked=False,
+        evidence_status="EVIDENCE_FOUND",
+    )
+    report = _block(
+        f"{field}: 42%",
+        f"SYNTHETIC_SOURCE_URL: {url}",
+        "SYNTHETIC_AUTHORITY: PRIMARY",
+    )
+    snapshot = build_analysis_snapshot(
+        {"fundamentals_report": report},
+        [evidence],
+        degraded=False,
+    )
+    claim_id = next(
+        claim_id
+        for claim_id, claim in snapshot["claims"].items()
+        if claim["field"] == field
+    )
+
+    assert claim_id in render_decision_trace_instruction(snapshot, [])
+    assert field in extract_source_confidence_context(report, None)
+    article = (
+        "The synthetic signal is 42%.\n"
+        f"```CLAIM_USAGE\n- {claim_id} | The synthetic signal is 42%.\n```"
+    )
+    assert audit_article_claim_usage(article, snapshot) == []

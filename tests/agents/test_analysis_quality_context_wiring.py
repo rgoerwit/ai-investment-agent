@@ -73,7 +73,7 @@ async def test_b3_quality_fixture_preserves_consultant_decision_inputs() -> None
 
 
 @pytest.mark.asyncio
-async def test_b3_quality_fixture_preserves_pm_decision_inputs() -> None:
+async def test_b3_quality_fixture_uses_canonical_pm_decision_inputs() -> None:
     state = _load_b3_state()
 
     prompt = await _capture_node_prompt(
@@ -83,9 +83,10 @@ async def test_b3_quality_fixture_preserves_pm_decision_inputs() -> None:
         state,
     )
 
-    assert "FOREIGN LANGUAGE / NATIVE-SOURCE ANALYST REPORT" in prompt
-    assert "FOREIGN LANGUAGE REPORT" in prompt
-    assert "No Foreign Language Analyst report is present" not in prompt
+    assert "FOREIGN LANGUAGE / NATIVE-SOURCE ANALYST REPORT" not in prompt
+    assert "FOREIGN LANGUAGE REPORT" not in prompt
+    assert "FUNDAMENTALS ANALYST REPORT" in prompt
+    assert "DETERMINISTIC EVIDENCE CONSTRAINTS" in prompt
 
 
 def test_b3_quality_fixture_uses_brazil_benchmark() -> None:

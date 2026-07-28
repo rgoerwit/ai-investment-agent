@@ -86,6 +86,13 @@ EntityRole = Literal[
 HintRole = Literal["HOLDCO", "UNKNOWN"]
 Confidence = Literal["clean", "unresolved", "conflict"]
 ControlStatus = Literal["CONTROLLED", "NOT_CONTROLLED", "UNKNOWN"]
+OwnershipRelationship = Literal[
+    "SUBSIDIARY",
+    "EQUITY_METHOD",
+    "SIGNIFICANT_INFLUENCE",
+    "INDEPENDENT",
+    "UNKNOWN",
+]
 
 
 # Holdco name tokens across the markets we routinely cover. Treated as HINTS,
@@ -113,9 +120,11 @@ class EntityGovernanceCard:
     local_name: str | None = None
     entity_role: EntityRole = "UNKNOWN"
     largest_shareholder: dict[str, Any] | None = None
+    influential_entity: dict[str, Any] | None = None
     controlling_shareholder: dict[str, Any] | None = None
     control_status: ControlStatus = "UNKNOWN"
     control_basis: str = "UNKNOWN"
+    ownership_relationship: OwnershipRelationship = "UNKNOWN"
     ownership_evidence: dict[str, str] = field(default_factory=dict)
     related_listed: list[dict[str, Any]] = field(default_factory=list)
     metric_scope: dict[str, str] = field(default_factory=dict)
@@ -254,6 +263,10 @@ _FLA_ROLE_RE = re.compile(
 )
 _FLA_RELATED_RE = re.compile(r"Related Listed Tickers:\s*(.+?)(?:\n|$)", re.IGNORECASE)
 _FLA_LARGEST_RE = re.compile(r"Largest Shareholder:\s*(.+?)(?:\n|$)", re.IGNORECASE)
+_FLA_INFLUENTIAL_RE = re.compile(
+    r"Influential Entity:\s*(.+?)(?:\n|$)",
+    re.IGNORECASE,
+)
 _FLA_CONTROLLING_RE = re.compile(
     r"Controlling Shareholder:\s*(.+?)(?:\n|$)", re.IGNORECASE
 )
@@ -262,8 +275,9 @@ _FLA_CONTROL_STATUS_RE = re.compile(
     re.IGNORECASE,
 )
 _FLA_CONTROL_BASIS_RE = re.compile(r"Control Basis:\s*(.+?)(?:\n|$)", re.IGNORECASE)
+_FLA_RELATIONSHIP_RE = re.compile(r"Relationship:\s*(.+?)(?:\n|$)", re.IGNORECASE)
 _FLA_EVIDENCE_STATUS_RE = re.compile(
-    r"Ownership Evidence Status:\s*(VERIFIED_URL|VERIFIED_OFFICIAL_FILING|NOT_FOUND|REJECTED|UNKNOWN)(?:\n|$)",
+    r"Ownership Evidence Status:\s*(VERIFIED_URL|VERIFIED_OFFICIAL_FILING|DISCLOSED_UNVERIFIED|NOT_FOUND|REJECTED|UNKNOWN)(?:\n|$)",
     re.IGNORECASE,
 )
 _FLA_SOURCE_URL_RE = re.compile(r"Ownership Source URL:\s*(.+?)(?:\n|$)", re.IGNORECASE)
@@ -326,6 +340,21 @@ def _fla_control_status(fla_report: str) -> ControlStatus:
     if not match:
         return "UNKNOWN"
     return cast(ControlStatus, match.group(1).upper())
+
+
+def _fla_ownership_relationship(fla_report: str) -> OwnershipRelationship:
+    match = _FLA_RELATIONSHIP_RE.search(fla_report)
+    if not match:
+        return "UNKNOWN"
+    normalized = " ".join(match.group(1).strip().upper().replace("_", " ").split())
+    relationship_map: dict[str, OwnershipRelationship] = {
+        "SUBSIDIARY": "SUBSIDIARY",
+        "EQUITY METHOD": "EQUITY_METHOD",
+        "ASSOCIATE": "SIGNIFICANT_INFLUENCE",
+        "SIGNIFICANT INFLUENCE": "SIGNIFICANT_INFLUENCE",
+        "INDEPENDENT": "INDEPENDENT",
+    }
+    return relationship_map.get(normalized, "UNKNOWN")
 
 
 def _fla_ownership_evidence(fla_report: str) -> dict[str, str]:
@@ -472,6 +501,7 @@ def build_card(
 
     ownership_evidence = _fla_ownership_evidence(fla_report)
     ownership_verified = ownership_evidence.get("status", "").startswith("VERIFIED")
+    ownership_disclosed = ownership_evidence.get("status") == "DISCLOSED_UNVERIFIED"
     has_ownership_contract = bool(ownership_evidence.get("status"))
 
     related_from_senior = _parse_related_listed(metrics.get("related_listed_tickers"))
@@ -518,8 +548,19 @@ def build_card(
         if ownership_verified
         else None
     )
+    influential_entity = (
+        _shareholder_from_fla(
+            fla_report,
+            _FLA_INFLUENTIAL_RE,
+            source="fla_ownership",
+        )
+        if ownership_verified or ownership_disclosed
+        else None
+    )
     control_status = (
-        _fla_control_status(fla_report) if ownership_verified else "UNKNOWN"
+        _fla_control_status(fla_report)
+        if ownership_verified or ownership_disclosed
+        else "UNKNOWN"
     )
     controller = (
         _shareholder_from_fla(
@@ -533,9 +574,19 @@ def build_card(
     basis_match = _FLA_CONTROL_BASIS_RE.search(fla_report)
     control_basis = (
         basis_match.group(1).strip()
-        if ownership_verified and basis_match
+        if (ownership_verified or ownership_disclosed) and basis_match
         else "UNKNOWN"
     )
+    ownership_relationship = (
+        _fla_ownership_relationship(fla_report)
+        if ownership_verified or ownership_disclosed
+        else "UNKNOWN"
+    )
+    if (
+        ownership_relationship == "UNKNOWN"
+        and control_basis == "SIGNIFICANT_INFLUENCE_ONLY"
+    ):
+        ownership_relationship = "SIGNIFICANT_INFLUENCE"
 
     canonical = (
         company_name
@@ -554,9 +605,11 @@ def build_card(
         local_name=None,
         entity_role=role,
         largest_shareholder=largest_shareholder,
+        influential_entity=influential_entity,
         controlling_shareholder=controller,
         control_status=control_status,
         control_basis=control_basis,
+        ownership_relationship=ownership_relationship,
         ownership_evidence=ownership_evidence,
         related_listed=related_listed,
         metric_scope=metric_scope,
@@ -572,6 +625,7 @@ def build_card(
         entity_role=role,
         confidence=confidence,
         control_status=control_status,
+        ownership_relationship=ownership_relationship,
         hints_fired=len(hints),
         related_count=len(related_listed),
         sources=sources,
@@ -605,9 +659,16 @@ def card_to_prompt_block(card: EntityGovernanceCard) -> str:
         holder_pct = holder.get("pct")
         holder_suffix = f" ({holder_pct}%)" if holder_pct is not None else ""
         lines.append(f"Largest shareholder: {holder_name}{holder_suffix}")
+    if card.influential_entity:
+        lines.append(
+            "Influential entity: "
+            f"{card.influential_entity.get('name', '?')} "
+            f"(evidence: {card.ownership_evidence.get('status', 'UNKNOWN')})"
+        )
 
     lines.append(f"Control status: {card.control_status}")
     lines.append(f"Control basis: {card.control_basis}")
+    lines.append(f"Ownership relationship: {card.ownership_relationship}")
     if card.controlling_shareholder:
         cs = card.controlling_shareholder
         cs_name = cs.get("name", "?")
@@ -636,6 +697,8 @@ def card_to_prompt_block(card: EntityGovernanceCard) -> str:
         "if you have stronger evidence, state the override explicitly with citation. "
         "Largest shareholder and controlling shareholder are different concepts; "
         "do not infer control from a sub-50% stake or group affiliation. "
+        "Equity-method accounting and significant influence are relationships, "
+        "not control. "
         "Only CONTROLLED authorizes parent/controller language. "
         "Metric scope is Senior-derived; if APAC, Consultant, or local filings cite "
         "a scope conflict, reconcile it explicitly rather than treating this card as "
@@ -673,6 +736,11 @@ def requires_structure_disclosure(card: EntityGovernanceCard) -> bool:
     """
 
     if card.confidence == "conflict":
+        return True
+    if (
+        card.ownership_evidence.get("status", "").startswith("VERIFIED")
+        or card.ownership_evidence.get("status") == "DISCLOSED_UNVERIFIED"
+    ) and (card.ownership_relationship in {"EQUITY_METHOD", "SIGNIFICANT_INFLUENCE"}):
         return True
     if card.entity_role in _HOLDCO_FAMILY and card.related_listed:
         return True

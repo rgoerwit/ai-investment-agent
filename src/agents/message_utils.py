@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
 
 import structlog
 from langchain_core.messages import (
@@ -14,25 +14,37 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
+from src.tooling.evidence_recorder import (
+    EvidenceAuthority,
+    EvidenceStatus,
+    classify_evidence_value,
+    normalize_http_url,
+    resolve_evidence_authority,
+)
+
 logger = structlog.get_logger(__name__)
 
-ToolEvidenceRecord = tuple[str | None, str, set[str]]
+
+@dataclass(frozen=True, slots=True)
+class ToolEvidenceRecord:
+    """Agent-facing evidence view with compatibility for legacy tuple consumers."""
+
+    tool_name: str | None
+    content: str
+    urls: set[str]
+    evidence_status: EvidenceStatus
+    authority: EvidenceAuthority
+
+    def __iter__(self):
+        yield self.tool_name
+        yield self.content
+        yield self.urls
+
+    def __getitem__(self, index: int):
+        return (self.tool_name, self.content, self.urls)[index]
+
 
 _URL_RE = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
-_TRAILING_URL_PUNCTUATION = ".,;:!?)]}'"
-
-
-def normalize_http_url(value: str) -> str | None:
-    """Return a comparable HTTP(S) URL, or None for malformed/non-web values."""
-
-    candidate = value.strip().rstrip(_TRAILING_URL_PUNCTUATION)
-    try:
-        parsed = urlsplit(candidate)
-    except ValueError:
-        return None
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-        return None
-    return candidate.rstrip("/")
 
 
 def tool_evidence_records(
@@ -50,7 +62,24 @@ def tool_evidence_records(
             for match in _URL_RE.finditer(content)
             if (normalized := normalize_http_url(match.group(0)))
         }
-        records.append((message.name, content, urls))
+        _, evidence_status, _, _ = classify_evidence_value(
+            message.name or "",
+            content,
+        )
+        url_tuple = tuple(sorted(urls))
+        records.append(
+            ToolEvidenceRecord(
+                tool_name=message.name,
+                content=content,
+                urls=urls,
+                evidence_status=evidence_status,
+                authority=resolve_evidence_authority(
+                    tool_name=message.name or "",
+                    evidence_status=evidence_status,
+                    urls=url_tuple,
+                ),
+            )
+        )
     return records
 
 
@@ -171,3 +200,17 @@ def extract_string_content(content: Any) -> str:
         return "\n".join(filter(None, text_parts))
 
     return str(content) if content is not None else ""
+
+
+def latest_agent_text(messages: Sequence[BaseMessage], agent_key: str) -> str:
+    """Return the latest non-tool-call response emitted by a named agent."""
+    for message in reversed(messages):
+        if (
+            isinstance(message, AIMessage)
+            and getattr(message, "name", None) == agent_key
+            and not getattr(message, "tool_calls", None)
+        ):
+            content = extract_string_content(message.content)
+            if content.strip():
+                return content
+    return ""

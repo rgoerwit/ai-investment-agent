@@ -5,6 +5,7 @@ from typing import Any
 
 import structlog
 
+from src.claim_policy import MATERIAL_CLAIM_POLICIES, claim_source_context_fields
 from src.data_block_utils import (
     extract_block_field_from_text,
     extract_block_field_from_text_raw,
@@ -12,6 +13,15 @@ from src.data_block_utils import (
 )
 
 logger = structlog.get_logger(__name__)
+
+_HARD_CERTAINTY_TERMS = (
+    "confirmed",
+    "verified",
+    "proven",
+    "filing-confirmed",
+    "contractually secured",
+    "guaranteed",
+)
 
 _ARTICLE_CITATION_PATTERN = re.compile(r"`\(([A-Z][A-Z0-9_]+):\s*([^)]+?)\)`")
 # Un-backticked parentheticals: the writer sometimes cites DATA_BLOCK keys as
@@ -24,20 +34,15 @@ _BARE_PARENTHETICAL_PATTERN = re.compile(r"(?<!`)\(([^()`\n]+)\)")
 # 1.95 while "3,057M JPY" stays whole.
 _BARE_PAIR_PATTERN = re.compile(r"\b([A-Z][A-Z0-9_]{2,}):\s*([^,]*(?:,\d[^,]*)*)")
 _UNVERIFIED_TAG_PATTERN = re.compile(r"\s*\[unverified\]\s*$", re.IGNORECASE)
-_SOURCE_CONFIDENCE_FIELDS = (
+_CLAIM_USAGE_PATTERN = re.compile(
+    r"\n*```CLAIM_USAGE\b\s*(.*?)```[ \t]*",
+    re.DOTALL,
+)
+_SOURCE_CONFIDENCE_EXTRA_FIELDS = (
     "OPERATING_CASH_FLOW_SOURCE",
     "OCF_FILING_REASON",
-    "FORWARD_EPS",
-    "FORWARD_EPS_SOURCE",
-    "PE_RATIO_FORWARD",
-    "PE_RATIO_FORWARD_SOURCE",
     "GUIDANCE_SOURCE_TYPE",
-    "GUIDANCE_SOURCE_AUTHORITY",
     "GUIDANCE_MANAGEMENT_IDENTIFIED",
-    "CAPACITY_UTILIZATION",
-    "CAPACITY_UTILIZATION_SOURCE_URL",
-    "CAPACITY_UTILIZATION_AS_OF",
-    "CAPACITY_EVIDENCE_STATUS",
     "R_AND_D_CAPEX_BACKLOG_EVIDENCE",
     "R_AND_D_CAPEX_BACKLOG_EVIDENCE_ADJUSTMENT",
     "MOAT_CFO_NI_AVG",
@@ -46,20 +51,22 @@ _SOURCE_CONFIDENCE_FIELDS = (
     "NET_CASH_TO_MARKET_CAP",
     "EARNINGS_GROWTH_FY_SOURCE",
     "MRQ_COMPARISON_BASE_STATUS",
-    "ANALYST_COVERAGE_ENGLISH",
     "ANALYST_COVERAGE_DATA_QUALITY_NOTE",
     "BALANCE_SHEET_DATA_QUALITY_NOTE",
     "GROWTH_DATA_QUALITY_NOTE",
     "PFIC_ASSET_NOTE",
     "LATEST_RESULTS_PERIOD",
-    "LATEST_RESULTS_PERIOD_END",
     "LATEST_RESULTS_PRIOR_PERIOD",
-    "LATEST_RESULTS_REVENUE_GROWTH_YOY",
-    "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
     "LATEST_RESULTS_EARNINGS_SCOPE",
-    "LATEST_RESULTS_SOURCE_URL",
-    "LATEST_RESULTS_SOURCE_AUTHORITY",
 )
+
+
+def _source_confidence_fields() -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            (*claim_source_context_fields(), *_SOURCE_CONFIDENCE_EXTRA_FIELDS)
+        )
+    )
 
 
 def _normalize_citation_value(value: str) -> str:
@@ -189,6 +196,155 @@ def audit_article_citations(
     return errors
 
 
+def audit_article_claim_support(
+    article: str,
+    snapshot: dict[str, Any] | None,
+) -> list[dict[str, str]]:
+    """Reject unsupported registered operating claims after editorial review."""
+    if not article or not snapshot or snapshot.get("contract_status") != "VALID":
+        return []
+    claims = snapshot.get("claims", {})
+    sentences = re.split(r"(?<=[.!?])\s+|\n+", article)
+    errors: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for claim in claims.values():
+        if not isinstance(claim, dict) or claim.get("decision_eligible"):
+            continue
+        field = str(claim.get("field") or "")
+        policy = MATERIAL_CLAIM_POLICIES.get(field)
+        if not policy or not policy.source_required or not policy.aliases:
+            continue
+        value = str(claim.get("value") or "")
+        for sentence in sentences:
+            folded = sentence.casefold()
+            if not any(alias in folded for alias in policy.aliases):
+                continue
+            asserts_value = bool(value and value.casefold() in folded)
+            asserts_certainty = any(
+                re.search(rf"(?<!\w){re.escape(term)}(?!\w)", folded)
+                for term in _HARD_CERTAINTY_TERMS
+            )
+            if not (asserts_value or asserts_certainty):
+                continue
+            if field in seen:
+                break
+            seen.add(field)
+            errors.append(
+                {
+                    "location": "Canonical claim audit",
+                    "claim": sentence.strip()[:500],
+                    "ground_truth": (
+                        f"{field} is {claim.get('coverage')} with authority "
+                        f"{claim.get('authority')} and is not assertion-eligible."
+                    ),
+                    "action": "Remove the assertion or make the uncertainty explicit.",
+                }
+            )
+            break
+    return errors
+
+
+def strip_claim_usage(article: str) -> str:
+    """Remove the temporary claim-usage manifest before publication."""
+    if not article or "```CLAIM_USAGE" not in article:
+        return article
+    return _CLAIM_USAGE_PATTERN.sub("\n", article).rstrip() + "\n"
+
+
+def audit_article_claim_usage(
+    article: str,
+    snapshot: dict[str, Any] | None,
+) -> list[dict[str, str]]:
+    """Validate source-sensitive prose against an explicit canonical claim manifest."""
+    if not article or not snapshot or snapshot.get("contract_status") != "VALID":
+        return []
+    body = strip_claim_usage(article)
+    match = _CLAIM_USAGE_PATTERN.search(article)
+    claims = snapshot.get("claims", {})
+    usage: dict[str, list[str]] = {}
+    errors: list[dict[str, str]] = []
+    if match:
+        for raw_line in match.group(1).splitlines():
+            line = raw_line.strip().removeprefix("-").strip()
+            if not line:
+                continue
+            claim_id, separator, excerpt = line.partition("|")
+            claim_id = claim_id.strip()
+            excerpt = excerpt.strip()
+            claim = claims.get(claim_id)
+            if not separator or not excerpt or not isinstance(claim, dict):
+                errors.append(
+                    {
+                        "location": "CLAIM_USAGE manifest",
+                        "claim": raw_line.strip()[:500],
+                        "ground_truth": "Each row must use a registered claim ID and exact article excerpt.",
+                        "action": "Correct or remove the manifest row.",
+                    }
+                )
+                continue
+            if not claim.get("decision_eligible"):
+                errors.append(
+                    {
+                        "location": "CLAIM_USAGE manifest",
+                        "claim": raw_line.strip()[:500],
+                        "ground_truth": f"{claim_id} is not assertion-eligible.",
+                        "action": "Remove the assertion or state the uncertainty explicitly.",
+                    }
+                )
+                continue
+            if excerpt not in body:
+                errors.append(
+                    {
+                        "location": "CLAIM_USAGE manifest",
+                        "claim": raw_line.strip()[:500],
+                        "ground_truth": "The quoted excerpt does not occur verbatim in the article body.",
+                        "action": "Use an exact excerpt from the final article.",
+                    }
+                )
+                continue
+            usage.setdefault(str(claim.get("field") or ""), []).append(excerpt)
+
+    sentences = re.split(r"(?<=[.!?])\s+|\n+", body)
+    for claim in claims.values():
+        if not isinstance(claim, dict):
+            continue
+        field = str(claim.get("field") or "")
+        policy = MATERIAL_CLAIM_POLICIES.get(field)
+        if (
+            not claim.get("decision_eligible")
+            or not policy
+            or not policy.source_required
+            or not policy.aliases
+        ):
+            continue
+        for sentence in sentences:
+            folded = sentence.casefold()
+            if not any(alias in folded for alias in policy.aliases):
+                continue
+            if not (
+                re.search(r"\d", sentence)
+                or any(term in folded for term in _HARD_CERTAINTY_TERMS)
+            ):
+                continue
+            if not any(excerpt in sentence for excerpt in usage.get(field, [])):
+                errors.append(
+                    {
+                        "location": "Canonical claim usage audit",
+                        "claim": sentence.strip()[:500],
+                        "ground_truth": (
+                            f"Numeric or certainty-bearing {field} prose is not "
+                            "bound to its canonical claim ID."
+                        ),
+                        "action": (
+                            "Add an exact CLAIM_USAGE row for the canonical claim, "
+                            "or remove/qualify the assertion."
+                        ),
+                    }
+                )
+            break
+    return errors
+
+
 def prepend_verification_caveats(
     article: str,
     factual_errors: list[dict[str, Any]],
@@ -227,7 +383,7 @@ def extract_source_confidence_context(
     field_values: dict[str, str] = {}
 
     if block_text:
-        for field_name in _SOURCE_CONFIDENCE_FIELDS:
+        for field_name in _source_confidence_fields():
             value = extract_block_field_from_text(block_text, field_name)
             if value:
                 field_values[field_name] = value
@@ -307,10 +463,14 @@ def extract_source_confidence_context(
             "own period, and never present actual YoY growth as management guidance "
             "or projected growth."
         )
-    if "Newer quarter metadata exists" in field_values.get(
-        "GROWTH_DATA_QUALITY_NOTE", ""
-    ) or "Newer primary results exist" in field_values.get(
-        "GROWTH_DATA_QUALITY_NOTE", ""
+    growth_quality_note = field_values.get("GROWTH_DATA_QUALITY_NOTE", "")
+    if any(
+        marker in growth_quality_note
+        for marker in (
+            "Newer quarter metadata exists",
+            "Newer primary results exist",
+            "newer-period results candidate",
+        )
     ):
         lines.append(
             "Period instruction: Keep MRQ growth tied to its stated period, and never "

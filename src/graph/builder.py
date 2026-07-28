@@ -25,6 +25,81 @@ from .routing import (
 logger = structlog.get_logger(__name__)
 
 
+def _reconcile_fundamentals_evidence(state: AgentState) -> dict[str, Any]:
+    """Revalidate the original FLA response against all barrier-complete evidence."""
+    from src.agents.foreign_language_evidence import normalize_foreign_language_evidence
+    from src.agents.management_guidance import normalize_management_guidance_output
+    from src.agents.message_utils import ToolEvidenceRecord, latest_agent_text
+    from src.runtime_diagnostics import get_valid_artifact_content
+    from src.runtime_services import get_current_evidence_records
+    from src.tooling.evidence_recorder import (
+        classify_evidence_value,
+        resolve_evidence_authority,
+    )
+
+    valid_report = get_valid_artifact_content(
+        state,
+        "foreign_language_report",
+    )
+    if not valid_report:
+        return {}
+    raw_report = (
+        latest_agent_text(
+            state.get("messages", []),
+            "foreign_language_analyst",
+        )
+        or valid_report
+    )
+    guidance_evidence = state.get("management_guidance_evidence", "") or ""
+    source_records = [
+        record
+        for record in get_current_evidence_records()
+        if not record.blocked
+        and record.agent_key in {"foreign_language_analyst", "legal_counsel"}
+    ]
+    guidance_normalized = normalize_management_guidance_output(
+        raw_report,
+        guidance_evidence,
+        source_records,
+    )
+    records: list[ToolEvidenceRecord] = []
+    for record in source_records:
+        evidence_status = getattr(record, "evidence_status", None)
+        if evidence_status is None:
+            _, evidence_status, _, _ = classify_evidence_value(
+                record.tool_name,
+                record.content,
+            )
+        records.append(
+            ToolEvidenceRecord(
+                tool_name=record.tool_name,
+                content=record.content,
+                urls=set(record.urls),
+                evidence_status=evidence_status,
+                authority=resolve_evidence_authority(
+                    tool_name=record.tool_name,
+                    evidence_status=evidence_status,
+                    urls=record.urls,
+                ),
+            )
+        )
+    reconciled = normalize_foreign_language_evidence(
+        guidance_normalized,
+        [],
+        ticker=state.get("company_of_interest", "UNKNOWN"),
+        supplemental_evidence=guidance_evidence,
+        additional_records=records,
+    )
+    if reconciled == state.get("foreign_language_report", ""):
+        return {}
+    logger.info(
+        "fundamentals_evidence_reconciled",
+        ticker=state.get("company_of_interest", "UNKNOWN"),
+        evidence_records=len(records),
+    )
+    return {"foreign_language_report": reconciled}
+
+
 def create_trading_graph(
     max_debate_rounds: int = 2,
     enable_memory: bool = True,
@@ -63,12 +138,48 @@ def create_trading_graph(
         return {}
 
     async def sync_check_node(state: AgentState, config: RunnableConfig):
-        """Synchronization barrier - routing logic in conditional edges."""
-        return {}
+        """Refresh canonical claims once all pre-debate inputs are complete."""
+        from src.analysis_snapshot import refresh_analysis_snapshot
+        from src.runtime_diagnostics import is_artifact_complete
+        from src.runtime_services import get_current_evidence_records
+
+        required = (
+            "market_report",
+            "sentiment_report",
+            "news_report",
+            "value_trap_report",
+        )
+        ready = all(is_artifact_complete(state, field) for field in required)
+        ready = ready and state.get("pre_screening_result") in {"PASS", "REJECT"}
+        if components.auditor_enabled:
+            ready = ready and is_artifact_complete(state, "auditor_report")
+        if not ready:
+            return {}
+        prior = state.get("analysis_snapshot") or {}
+        return {
+            "analysis_snapshot": refresh_analysis_snapshot(
+                prior,
+                state,
+                get_current_evidence_records(),
+                version=max(2, int(prior.get("version", 1)) + 1),
+            )
+        }
 
     async def fundamentals_sync_node(state: AgentState, config: RunnableConfig):
-        """Synchronization barrier for fundamentals data streams - routing logic in conditional edges."""
-        return {}
+        """Reconcile sanitized FLA and Legal evidence before Senior runs."""
+        from src.analysis_snapshot import build_pre_senior_snapshot
+        from src.runtime_services import get_current_evidence_records
+
+        reconciled = _reconcile_fundamentals_evidence(state)
+        claim_state = {**state, **reconciled}
+        return {
+            **reconciled,
+            "analysis_snapshot": build_pre_senior_snapshot(
+                claim_state,
+                get_current_evidence_records(),
+                version=1,
+            ),
+        }
 
     async def debate_sync_r1_node(state: AgentState, config: RunnableConfig):
         """

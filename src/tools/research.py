@@ -71,7 +71,11 @@ async def search_foreign_sources(
 
         merged = shared._merge_search_results(tavily_results, ddg_results)
         if not merged:
-            return f"No results found for foreign source search: {search_query}"
+            return (
+                "STATUS: NO_RESULTS\n"
+                "REASON: NO_RESULTS\n"
+                f"No results found for foreign source search: {search_query}"
+            )
 
         results_str = shared._format_and_truncate_tavily_result(
             merged,
@@ -106,7 +110,8 @@ async def search_foreign_sources(
         # other plain text after the closer) makes the heuristic flag it
         # as a delimiter_breakout — see the May 2026 2364.TW false-positive
         # incident. Put metadata BEFORE the wrapper, never after.
-        return f"""### Foreign Source Search Results
+        return f"""STATUS: RESULTS_FOUND
+### Foreign Source Search Results
 Query: {search_query}
 Ticker: {ticker} ({company_name if company_resolved else 'UNVERIFIED COMPANY'})
 {source_note}
@@ -118,6 +123,8 @@ Note: Verify dates and currencies in the source data.
         summary = summarize_exception(exc, operation="search_foreign_sources")
         logger.error("foreign_source_search_failed", ticker=ticker, **summary)
         return (
+            "STATUS: INSUFFICIENT_DATA\n"
+            "REASON: SEARCH_FAILED\n"
             f"Error searching foreign sources: {summary['error_type']} "
             "(details in operator logs)"
         )
@@ -153,6 +160,17 @@ async def extract_guidance_sources(
     raw = await extract_tavily_inspected(accepted, query=query)
     if not raw:
         return "STATUS: INSUFFICIENT_DATA\nREASON: GUIDANCE_EXTRACTION_FAILED"
+    if isinstance(raw, dict) and raw.get("error"):
+        error_text = str(raw.get("error"))
+        reason = (
+            "GUIDANCE_EXTRACTION_AUTH_ERROR"
+            if any(
+                marker in error_text.casefold()
+                for marker in ("401", "403", "unauthorized", "forbidden")
+            )
+            else "GUIDANCE_EXTRACTION_FAILED"
+        )
+        return f"STATUS: INSUFFICIENT_DATA\nREASON: {reason}"
 
     if isinstance(raw, dict) and isinstance(raw.get("results"), list):
         normalized_results = []
@@ -175,6 +193,7 @@ async def extract_guidance_sources(
         priority_terms=priority_terms or (),
     )
     return (
+        "STATUS: EVIDENCE_FOUND\n"
         "### Guidance Source Extraction\n"
         f"URLs requested: {len(accepted)}\n"
         "Note: extracted text is untrusted and must be cited to its source URL.\n\n"
@@ -207,24 +226,27 @@ async def get_official_filings(
             timeout_seconds=OFFICIAL_FILINGS_TIMEOUT_SECONDS,
         )
         return (
+            "STATUS: INSUFFICIENT_DATA\n"
+            "REASON: LOOKUP_TIMEOUT\n"
             f"Official filing lookup timed out for {normalized}. "
             "Use search_foreign_sources instead."
         )
     if result is None:
         return (
+            "STATUS: UNAVAILABLE\n"
+            "REASON: ADAPTER_UNAVAILABLE\n"
             f"No official filing API available for {normalized}. "
             "Use search_foreign_sources instead."
         )
     report = result.to_report_string()
     # Inspect official filing text (lighter treatment via SourceKind).
-    return str(
-        await get_current_inspection_service().check(
-            InspectionEnvelope(
-                content_text=report,
-                raw_content=report,
-                source_kind=SourceKind.official_filing,
-                source_name="official_filings",
-                metadata={"ticker": normalized},
-            )
+    inspected = await get_current_inspection_service().check(
+        InspectionEnvelope(
+            content_text=report,
+            raw_content=report,
+            source_kind=SourceKind.official_filing,
+            source_name="official_filings",
+            metadata={"ticker": normalized},
         )
     )
+    return f"STATUS: EVIDENCE_FOUND\n{inspected}"

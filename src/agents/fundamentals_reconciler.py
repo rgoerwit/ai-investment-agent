@@ -20,7 +20,6 @@ from src.thesis_constants import (
     GROWTH_SCORE_CRITERIA,
     HEALTH_RUBRIC_POINTS,
     HEALTH_SCORE_CRITERIA,
-    MODERATE_BUY_GROWTH_MIN_PCT,
     PE_MAX,
     PEG_MAX,
     SCORE_PCT_TOLERANCE,
@@ -689,68 +688,6 @@ def withhold_eps_growth_for_unusable_baseline(body: str) -> tuple[str, bool]:
         "WITHHELD — trailing earnings baseline is not durable and no code-reconciled normalized growth rate is available",
     )
     return updated, True
-
-
-def withhold_unsupported_capex_growth(body: str) -> tuple[str, bool]:
-    """Remove qualitative capex credit when code-owned evidence rejected it."""
-    evidence = extract_block_text_value(body, "R_AND_D_CAPEX_BACKLOG_EVIDENCE").upper()
-    if evidence not in {"UNSUPPORTED", "UNKNOWN"}:
-        return body, False
-
-    breakdown_text = extract_block_text_value(body, "GROWTH_SCORE_BREAKDOWN")
-    awards = parse_score_breakdown(breakdown_text, "GROWTH")
-    if awards is None or set(awards) != set(GROWTH_SCORE_CRITERIA):
-        return body, False
-    token = awards.get("R_AND_D_CAPEX_BACKLOG")
-    if token not in {"0.5", "1"}:
-        return body, False
-
-    original_numeric = {
-        key: float(value)
-        for key, value in awards.items()
-        if value not in {"N/A", "REMOVED"}
-    }
-    original_available = sum(GROWTH_SCORE_CRITERIA[key] for key in original_numeric)
-    original_earned = sum(original_numeric.values())
-    awards["R_AND_D_CAPEX_BACKLOG"] = "N/A"
-    numeric = {
-        key: float(value)
-        for key, value in awards.items()
-        if value not in {"N/A", "REMOVED"}
-    }
-    available = sum(GROWTH_SCORE_CRITERIA[key] for key in numeric)
-    if available <= 0 or original_available <= 0:
-        return body, False
-
-    earned = sum(numeric.values())
-    original_pct = original_earned / original_available * 100.0
-    adjusted_pct = earned / available * 100.0
-    impact = (
-        "WITHHELD_LOAD_BEARING"
-        if original_pct >= MODERATE_BUY_GROWTH_MIN_PCT
-        and adjusted_pct < MODERATE_BUY_GROWTH_MIN_PCT
-        else "WITHHELD"
-    )
-    serialized = "; ".join(f"{key}={awards[key]}" for key in GROWTH_SCORE_CRITERIA)
-    updated = replace_or_append_block_line(body, "GROWTH_SCORE_BREAKDOWN", serialized)
-    updated = replace_or_append_block_line(
-        updated,
-        "RAW_GROWTH_SCORE",
-        f"{earned:g}/{GROWTH_RUBRIC_POINTS:g}",
-    )
-    updated = replace_or_append_block_line(
-        updated,
-        "ADJUSTED_GROWTH_SCORE",
-        f"{adjusted_pct:.1f}% (based on {available:g} available points)",
-    )
-    return (
-        replace_or_append_block_line(
-            updated,
-            "R_AND_D_CAPEX_BACKLOG_EVIDENCE_ADJUSTMENT",
-            impact,
-        ),
-        True,
-    )
 
 
 def _is_negative_amount(text: str) -> bool:

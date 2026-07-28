@@ -656,7 +656,13 @@ def create_legal_counsel_node(llm, tools: list) -> Callable:
             context.trade_date if context else datetime.now().strftime("%Y-%m-%d")
         )
 
-        raw_data = state.get("raw_fundamentals_data", "")
+        from src.claim_policy import RAW_FINANCIAL_METRICS_INPUT
+        from src.tooling.structured_ingress import render_structured_ingress_payload
+
+        raw_data = render_structured_ingress_payload(
+            state,
+            RAW_FINANCIAL_METRICS_INPUT,
+        )
         sector, country = support._extract_sector_country(raw_data)
 
         company_warning = (

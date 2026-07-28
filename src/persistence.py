@@ -649,6 +649,10 @@ def save_results_to_file(
         "run_summary": result.get("run_summary", {}),
         "analysis_validity": result.get("analysis_validity", {}),
         "artifact_statuses": result.get("artifact_statuses", {}),
+        "evidence_records": result.get("evidence_records", []),
+        "structured_inputs": result.get("structured_inputs", {}),
+        "analysis_snapshot": result.get("analysis_snapshot", {}),
+        "decision_trace": result.get("decision_trace", {}),
         "agent_attribution": _build_agent_attribution(
             result, (token_stats or {}).get("agents", {}) or {}
         ),
@@ -789,30 +793,40 @@ def save_results_to_file(
     return filepath
 
 
-def patch_saved_run_summary(
+def patch_saved_sections(
     path: str | Path,
-    fields: dict[str, Any],
+    sections: dict[str, dict[str, Any]],
     *,
     logger_obj=logger,
 ) -> None:
-    """Merge ``fields`` into ``run_summary`` of an already-saved analysis JSON.
+    """Merge top-level metadata sections into an already-saved analysis JSON.
 
-    Used to record post-persistence facts (e.g. the article writer model /
-    fallback flag) without re-running the full save path. Fail-open: a patch
-    failure must never break the run.
+    Used for post-persistence facts without re-running the full save path.
+    Fail-open: a patch failure must never break the run.
     """
     from src.error_safety import summarize_exception
 
     try:
         filepath = Path(path)
         data = json.loads(filepath.read_text(encoding="utf-8"))
-        data.setdefault("run_summary", {}).update(fields)
+        for section, fields in sections.items():
+            data.setdefault(section, {}).update(fields)
         filepath.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception as exc:
         logger_obj.warning(
-            "run_summary_patch_failed",
-            **summarize_exception(exc, operation="patching saved run_summary"),
+            "saved_sections_patch_failed",
+            **summarize_exception(exc, operation="patching saved analysis sections"),
         )
+
+
+def patch_saved_run_summary(
+    path: str | Path,
+    fields: dict[str, Any],
+    *,
+    logger_obj=logger,
+) -> None:
+    """Compatibility wrapper for post-persistence ``run_summary`` updates."""
+    patch_saved_sections(path, {"run_summary": fields}, logger_obj=logger_obj)
 
 
 def _persist_analysis_outputs(

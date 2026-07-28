@@ -5,12 +5,23 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from src.analysis_snapshot import render_analysis_snapshot
 from src.data_block_utils import extract_block_field
 from src.runtime_diagnostics import get_valid_artifact_content
 from src.validators.supplemental_extractors import extract_capital_efficiency_signals
 
 AUTHORITATIVE_CORRECTION_MARKER = "AUTHORITATIVE_METRIC_CORRECTION"
 _VALUE_TRAP_CONFLICT_TYPE = "VALUE_TRAP_DATA_CONFLICT"
+_SOURCE_COVERAGE_FIELDS = (
+    "GUIDANCE_COVERAGE_STATUS",
+    "GUIDANCE_SOURCE_AUTHORITY",
+    "LATEST_RESULTS_COVERAGE_STATUS",
+    "LATEST_RESULTS_SOURCE_AUTHORITY",
+    "REVENUE_BACKLOG_COVERAGE",
+    "CAPITAL_PLAN_STATUS",
+    "VALUE_UP_PLAN_STRENGTH",
+    "SHAREHOLDER_RETURN_EXECUTION",
+)
 
 
 def downstream_evidence_constraints(state: Mapping[str, Any]) -> str:
@@ -20,6 +31,29 @@ def downstream_evidence_constraints(state: Mapping[str, Any]) -> str:
         fundamentals = ""
 
     constraints: list[str] = []
+    snapshot_context = render_analysis_snapshot(state.get("analysis_snapshot"))
+    if snapshot_context:
+        constraints.append(snapshot_context.rstrip())
+    coverage_context = [
+        f"{field}={value}"
+        for field in _SOURCE_COVERAGE_FIELDS
+        if (
+            value := extract_block_field(
+                fundamentals,
+                "DATA_BLOCK",
+                field,
+            )
+        )
+    ]
+    if coverage_context:
+        constraints.append(
+            "Structured source-coverage context: "
+            + "; ".join(coverage_context)
+            + ". These tokens describe what the evidence search established. "
+            "Preserve explicit absence or unresolved states, but do not infer that "
+            "the issuer lacks an economic capability merely because disclosure was "
+            "not found."
+        )
     if AUTHORITATIVE_CORRECTION_MARKER in fundamentals:
         constraints.append(
             "The Fundamentals report contains an AUTHORITATIVE_METRIC_CORRECTION. "
@@ -135,10 +169,21 @@ def downstream_evidence_constraints(state: Mapping[str, Any]) -> str:
             "period, and do not use actual YoY growth as management guidance, a "
             "forecast, or projected-growth evidence."
         )
+    elif latest_results_period:
+        constraints.append(
+            f"LATEST_RESULTS_* identifies {latest_results_period} only as a "
+            f"{latest_results_authority or 'UNKNOWN'} results candidate. Do not "
+            "quote its unvalidated numeric claims or call it the latest reported "
+            "quarter; retain the statement-derived MRQ period until a primary "
+            "document validates the candidate."
+        )
 
     governance_card = state.get("entity_governance_card")
     if isinstance(governance_card, Mapping):
         control_status = str(governance_card.get("control_status") or "UNKNOWN").upper()
+        ownership_relationship = str(
+            governance_card.get("ownership_relationship") or "UNKNOWN"
+        ).upper()
         largest = governance_card.get("largest_shareholder")
         largest_pct = largest.get("pct") if isinstance(largest, Mapping) else None
         if control_status != "CONTROLLED":
@@ -147,6 +192,20 @@ def downstream_evidence_constraints(state: Mapping[str, Any]) -> str:
                 f"{control_status}. Do not call the issuer a controlled subsidiary, "
                 "attribute decisions to a parent/controller, or add parent-control "
                 "risk without stronger primary evidence that establishes control."
+            )
+        if ownership_relationship in {"EQUITY_METHOD", "SIGNIFICANT_INFLUENCE"}:
+            ownership_evidence = governance_card.get("ownership_evidence")
+            evidence_status = (
+                str(ownership_evidence.get("status") or "UNKNOWN").upper()
+                if isinstance(ownership_evidence, Mapping)
+                else "UNKNOWN"
+            )
+            constraints.append(
+                "The ownership relationship is "
+                f"{ownership_relationship}, not control. Describe significant "
+                "influence or equity-method accounting explicitly; do not translate "
+                "it into parent, controller, subsidiary, or consolidation language. "
+                f"Evidence status is {evidence_status}; preserve that qualification."
             )
         if isinstance(largest_pct, int | float) and largest_pct <= 50.0:
             constraints.append(

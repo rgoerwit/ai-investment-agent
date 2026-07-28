@@ -1,8 +1,12 @@
 """Regression tests for deterministic FLA ownership/capacity provenance."""
 
-from langchain_core.messages import ToolMessage
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from langchain_core.messages import AIMessage, ToolMessage
 
 from src.agents.foreign_language_evidence import normalize_foreign_language_evidence
+from src.graph.builder import _reconcile_fundamentals_evidence
 from src.validators.entity_governance_card import build_card
 from tests.helpers.frozen_regressions import load_frozen_regression
 
@@ -148,6 +152,115 @@ def test_6782_equity_method_evidence_is_not_promoted_to_control():
             "pct": 14.82,
         }
     ]
+
+
+def test_relationship_only_evidence_preserves_influence_without_inventing_stake():
+    source = "https://issuer.example/financial-report.pdf"
+    report = _report(
+        holder="BenQ Materials Corp. (14.82%)",
+        controller="NONE",
+        status="NOT_CONTROLLED",
+        basis="SIGNIFICANT_INFLUENCE_ONLY",
+        relationship="significant influence",
+        entity_role="STANDALONE",
+        related="UNKNOWN",
+        source_url=source,
+    )
+
+    normalized = normalize_foreign_language_evidence(
+        report,
+        [],
+        ticker="6782.TW",
+        additional_records=[
+            (
+                "search_foreign_sources",
+                "<result><url>https://noise.example/story</url>"
+                "<summary>Unrelated market commentary.</summary></result>"
+                f"<result><url>{source}</url>"
+                "<summary>BenQ Materials Corp. is the entity with significant "
+                "influence over the group.</summary></result>",
+                {source, "https://noise.example/story"},
+            )
+        ],
+    )
+    card = build_card(
+        ticker="6782.TW",
+        company_name="Visco Vision Inc.",
+        merged_data={},
+        senior_metrics={},
+        fla_report=normalized,
+    )
+
+    assert "Largest Shareholder: UNKNOWN" in normalized
+    assert "Influential Entity: BenQ Materials Corp." in normalized
+    assert "Ownership Evidence Status: DISCLOSED_UNVERIFIED" in normalized
+    assert card.largest_shareholder is None
+    assert card.influential_entity["name"] == "BenQ Materials Corp."
+    assert card.ownership_relationship == "SIGNIFICANT_INFLUENCE"
+    assert card.control_status == "NOT_CONTROLLED"
+
+
+def test_fundamentals_barrier_reconciles_legal_evidence_idempotently():
+    source = "https://issuer.example/financial-report.pdf"
+    raw_report = _report(
+        holder="BenQ Materials Corp. (14.82%)",
+        controller="NONE",
+        status="NOT_CONTROLLED",
+        basis="SIGNIFICANT_INFLUENCE_ONLY",
+        relationship="significant influence",
+        entity_role="STANDALONE",
+        related="UNKNOWN",
+        source_url=source,
+    )
+    initial = normalize_foreign_language_evidence(
+        raw_report,
+        [],
+        ticker="6782.TW",
+    )
+    response = AIMessage(content=raw_report, name="foreign_language_analyst")
+    record = SimpleNamespace(
+        agent_key="legal_counsel",
+        tool_name="search_foreign_sources",
+        content=(
+            "BenQ Materials Corp. is the entity with significant influence "
+            f"over the group. {source}"
+        ),
+        urls=(source,),
+        blocked=False,
+    )
+    state = {
+        "messages": [response],
+        "company_of_interest": "6782.TW",
+        "foreign_language_report": initial,
+    }
+
+    with patch(
+        "src.runtime_services.get_current_evidence_records",
+        return_value=[record],
+    ):
+        update = _reconcile_fundamentals_evidence(state)
+        repeated = _reconcile_fundamentals_evidence({**state, **update})
+
+    assert "DISCLOSED_UNVERIFIED" in update["foreign_language_report"]
+    assert repeated == {}
+
+
+def test_fundamentals_barrier_does_not_reprocess_failed_fla_message():
+    raw_report = _report(source_url="https://issuer.example/report.pdf")
+    state = {
+        "messages": [AIMessage(content=raw_report, name="foreign_language_analyst")],
+        "company_of_interest": "6782.TW",
+        "foreign_language_report": raw_report,
+        "artifact_statuses": {
+            "foreign_language_report": {
+                "complete": True,
+                "ok": False,
+                "content": raw_report,
+            }
+        },
+    }
+
+    assert _reconcile_fundamentals_evidence(state) == {}
 
 
 def test_related_ticker_is_removed_when_it_does_not_appear_in_supporting_evidence():
@@ -388,7 +501,7 @@ def test_6782_broker_capacity_claim_is_preserved_as_secondary_not_primary():
 
 
 def test_latest_results_growth_is_computed_only_from_one_official_record():
-    source = "https://issuer.example/results"
+    source = "https://www.twse.com.tw/results"
 
     normalized = normalize_foreign_language_evidence(
         _latest_results_report(source_url=source),
@@ -398,6 +511,26 @@ def test_latest_results_growth_is_computed_only_from_one_official_record():
 
     assert "LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY" in normalized
     assert "LATEST_RESULTS_REVENUE_GROWTH_YOY: 50.0%" in normalized
+    assert "LATEST_RESULTS_EARNINGS_GROWTH_YOY: 102.5%" in normalized
+
+
+def test_latest_results_accepts_post_inspection_ledger_record():
+    source = "https://www.twse.com.tw/results"
+
+    normalized = normalize_foreign_language_evidence(
+        _latest_results_report(source_url=source),
+        [],
+        ticker="TEST",
+        additional_records=[
+            (
+                "get_official_document",
+                _latest_results_evidence(source),
+                {source},
+            )
+        ],
+    )
+
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY" in normalized
     assert "LATEST_RESULTS_EARNINGS_GROWTH_YOY: 102.5%" in normalized
 
 
