@@ -256,14 +256,21 @@ def _create_openai_responses_fallback_llm(llm):
 
     from langchain_openai import ChatOpenAI
 
-    return ChatOpenAI(
-        model=support.get_model_name(llm),
-        timeout=120,
-        max_retries=3,
-        streaming=False,
-        use_responses_api=True,
-        output_version="responses/v1",
-    )
+    kwargs: dict[str, object] = {
+        "model": support.get_model_name(llm),
+        "timeout": 120,
+        "max_retries": 3,
+        "streaming": False,
+        "api_key": settings_config.get_openai_api_key(),
+    }
+    base_url = settings_config.get_openai_api_base()
+    if isinstance(base_url, str) and base_url:
+        # Custom OpenAI-compatible endpoint (e.g. Kimi): Chat Completions only.
+        kwargs["base_url"] = base_url
+    else:
+        kwargs["use_responses_api"] = True
+        kwargs["output_version"] = "responses/v1"
+    return ChatOpenAI(**kwargs)
 
 
 def create_consultant_node(

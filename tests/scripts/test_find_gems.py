@@ -2012,11 +2012,34 @@ class TestExchangeScrapeIntegration:
         assert handler is not None, f"Unknown method: {exchange['method']}"
 
         with _skip_on_wall_clock_timeout(20, exchange["exchange_name"]):
-            # Skip on any network-level failure — transient outages are not test failures
+            # Classify the failure: a 404/410 got an HTTP response and may signal a
+            # moved/removed source URL (actionable), whereas a transport error
+            # (reset/timeout/DNS/TLS) never got a response and is genuinely transient.
             try:
                 df = handler(exchange, self.session)
+            except _req.exceptions.HTTPError as exc:
+                # HTTPError subclasses RequestException, so this must precede it.
+                status = getattr(exc.response, "status_code", None)
+                if status in (404, 410):
+                    # Still a skip (not a hard fail): a 404 is also how CDN/anti-bot
+                    # layers reject a blocked client, so failing would flake. But the
+                    # message makes a genuine URL move visible instead of silently
+                    # transient — if this persists, the source has moved.
+                    pytest.skip(
+                        f"{exchange['exchange_name']}: source returned {status} for "
+                        f"{exchange.get('source_url')!r} — if this persists the URL has "
+                        "likely moved; update config/exchanges.json (it may also be "
+                        "intermittent CDN/anti-bot blocking of this client)"
+                    )
+                pytest.skip(
+                    f"{exchange['exchange_name']} HTTP {status} (transient): {exc}"
+                )
             except _req.exceptions.RequestException as exc:
-                pytest.skip(f"{exchange['exchange_name']} unreachable: {exc}")
+                # Transport-level failure (ECONNRESET/errno 54, timeout, DNS, TLS reset)
+                # — no HTTP response was received; genuinely transient.
+                pytest.skip(
+                    f"{exchange['exchange_name']} unreachable (transient network): {exc}"
+                )
 
             # Handler returning None signals a source-level problem (site down, blocked)
             # — skip rather than fail since this is outside our control

@@ -548,9 +548,14 @@ class TestFXNormalizationPerformance:
     """Test performance characteristics of FX normalization."""
 
     @pytest.mark.asyncio
-    @pytest.mark.slow
     async def test_batch_normalization_performance(self):
-        """Test normalizing 10 stocks in reasonable time."""
+        """Normalizing 10 stocks stays fast at the code level.
+
+        FX lookups are pinned to the deterministic in-memory fallback so this
+        measures the normalization logic, not live yfinance latency — the old
+        wall-clock bound over real network calls was flaky under load (it took
+        >10s in a loaded full-suite run).
+        """
         import time
 
         test_stocks = [
@@ -566,12 +571,18 @@ class TestFXNormalizationPerformance:
             {"market_cap": 150e9, "currency": "SGD"},
         ]
 
-        start = time.time()
-        results = [await normalize_financial_dict(stock) for stock in test_stocks]
-        elapsed = time.time() - start
+        # Force the pure in-memory fallback (no network) so timing reflects the
+        # normalization code path deterministically.
+        with patch("src.fx_normalization.get_fx_rate_yfinance", return_value=None):
+            start = time.time()
+            results = [await normalize_financial_dict(stock) for stock in test_stocks]
+            elapsed = time.time() - start
 
-        # Should complete in <10 seconds (generous - likely <5s with caching)
-        assert elapsed < 10.0, f"Batch normalization took {elapsed:.2f}s (too slow)"
+        # Deterministic (no network): pure-CPU normalization of 10 dicts is
+        # sub-10ms. 2s is generous headroom that still catches a pathological
+        # regression (an accidental sleep, O(n²) blowup, or a leaked live call).
+        assert elapsed < 2.0, f"Batch normalization took {elapsed:.2f}s (too slow)"
+        assert len(results) == len(test_stocks)
         assert len(results) == 10
         assert all(r["_currency_normalized"] for r in results)
 

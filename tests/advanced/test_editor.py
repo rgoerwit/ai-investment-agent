@@ -1048,7 +1048,9 @@ class TestMainPyIntegration:
         )
 
     @pytest.mark.asyncio
-    async def test_handle_article_generation_preserves_draft_on_editor_failure(self):
+    async def test_handle_article_generation_preserves_draft_on_editor_failure(
+        self, tmp_path
+    ):
         """If editor.edit() raises an exception, the original draft should be preserved."""
         from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
@@ -1093,14 +1095,19 @@ class TestMainPyIntegration:
                     "fundamentals_report": "DATA",
                     "final_trade_decision": "PM",
                 },
-                resolve_article_path_fn=lambda *_args,
-                **_kwargs: "/tmp/test_article.md",
+                resolve_article_path_fn=lambda *_a, **_k: str(
+                    tmp_path / "test_article.md"
+                ),
             )
 
-            # The function should complete without raising
+        # Correct error handling counts as success: the run completes without
+        # raising AND the draft is preserved for review rather than lost.
+        draft = tmp_path / "test_article.draft.md"
+        assert draft.exists(), "draft must be preserved when the editor fails"
+        assert "This is the draft." in draft.read_text(encoding="utf-8")
 
     @pytest.mark.asyncio
-    async def test_handle_article_generation_surfaces_writer_fallback(self):
+    async def test_handle_article_generation_surfaces_writer_fallback(self, tmp_path):
         """A silent Claude → Gemini fallback must land in the run summary."""
         from unittest.mock import MagicMock, mock_open, patch
 
@@ -1141,7 +1148,9 @@ class TestMainPyIntegration:
                 report_text="Full report...",
                 trade_date="2026-01-01",
                 analysis_result=analysis_result,
-                resolve_article_path_fn=lambda *_a, **_k: "/tmp/test_article.md",
+                resolve_article_path_fn=lambda *_a, **_k: str(
+                    tmp_path / "test_article.md"
+                ),
             )
 
         run_summary = analysis_result["run_summary"]
@@ -1211,7 +1220,9 @@ class TestMainPyIntegration:
         assert data["run_summary"]["article_writer_fell_back"] is True
 
     @pytest.mark.asyncio
-    async def test_handle_article_generation_records_primary_writer_model(self):
+    async def test_handle_article_generation_records_primary_writer_model(
+        self, tmp_path
+    ):
         from unittest.mock import MagicMock, mock_open, patch
 
         args = MagicMock()
@@ -1248,7 +1259,9 @@ class TestMainPyIntegration:
                 report_text="Full report...",
                 trade_date="2026-01-01",
                 analysis_result=analysis_result,
-                resolve_article_path_fn=lambda *_a, **_k: "/tmp/test_article.md",
+                resolve_article_path_fn=lambda *_a, **_k: str(
+                    tmp_path / "test_article.md"
+                ),
             )
 
         run_summary = analysis_result["run_summary"]

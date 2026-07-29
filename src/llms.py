@@ -799,8 +799,32 @@ def _apply_openai_service_tier(kwargs: dict[str, Any], *, label: str) -> None:
     )
 
 
+def _apply_openai_api_base(kwargs: dict[str, Any]) -> None:
+    """Route OpenAI-plane calls to a custom base URL when configured.
+
+    Single chokepoint for the consultant, auditor, editor, and writer-fallback
+    seats (all of which construct via ``_construct_chat_openai``). A custom base
+    is treated as an OpenAI-*compatible* — not OpenAI — endpoint: it speaks the
+    Chat Completions API, so the OpenAI-only Responses API fields are dropped
+    (mirrors the APAC/DeepSeek path). No-op when unset, so the default OpenAI
+    path is byte-identical.
+    """
+    base_url = config.get_openai_api_base()
+    # Act only on a real, non-empty URL string. The accessor returns
+    # ``str | None`` in production, so this guard is a no-op there — but it also
+    # keeps the default OpenAI path byte-identical when ``config`` is a bare
+    # test mock, whose attribute access yields a truthy ``MagicMock`` (not a
+    # string) and would otherwise be injected as ``base_url``.
+    if not isinstance(base_url, str) or not base_url:
+        return
+    kwargs["base_url"] = base_url
+    kwargs.pop("use_responses_api", None)
+    kwargs.pop("output_version", None)
+
+
 def _construct_chat_openai(kwargs: dict[str, Any]) -> BaseChatModel:
     """Build ChatOpenAI, using the flex-fallback subclass when tiered."""
+    _apply_openai_api_base(kwargs)
     if kwargs.get("service_tier") == "flex":
         return _get_flex_fallback_chat_openai_cls()(**kwargs)
     from langchain_openai import ChatOpenAI
