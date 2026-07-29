@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 import structlog
@@ -69,7 +70,8 @@ def _source_confidence_fields() -> tuple[str, ...]:
     )
 
 
-def _normalize_citation_value(value: str) -> str:
+def _clean_citation_text(value: str) -> str:
+    """Shared surface cleaning for a citation literal (keeps the unit suffix)."""
     text = value.strip().strip("`").strip()
     text = _UNVERIFIED_TAG_PATTERN.sub("", text)
     # A DATA_BLOCK value may carry a trailing parenthetical qualifier the
@@ -80,7 +82,11 @@ def _normalize_citation_value(value: str) -> str:
     if qualifier_stripped:
         text = qualifier_stripped
     text = text.strip("'\"").replace(",", "")
-    text = re.sub(r"\s+", "", text)
+    return re.sub(r"\s+", "", text)
+
+
+def _normalize_citation_value(value: str) -> str:
+    text = _clean_citation_text(value)
     if text.endswith("%"):
         text = text[:-1]
     try:
@@ -89,8 +95,57 @@ def _normalize_citation_value(value: str) -> str:
         return text.upper()
 
 
+# Simple numeric citation: an optionally-signed number with at most one unit
+# suffix. `%` and a bare number share a class (SCALAR) because
+# _normalize_citation_value already treats them as equivalent; a multiple ("x")
+# is a distinct class so "13.6x" can never match "13.6%".
+_CITATION_NUMBER_RE = re.compile(r"^([+-]?\d+(?:\.(\d+))?)([%xX]?)$")
+
+
+def _parse_citation_number(value: str) -> tuple[Decimal, str, int] | None:
+    """Parse a plain numeric citation into (magnitude, unit_class, decimals).
+
+    Returns None for anything that is not a plain number with at most one of the
+    recognized suffixes, so the precision-aware fallback declines and the exact
+    string comparison result stands.
+    """
+    match = _CITATION_NUMBER_RE.match(_clean_citation_text(value))
+    if not match:
+        return None
+    number, fraction, suffix = match.group(1), match.group(2), match.group(3)
+    try:
+        magnitude = Decimal(number)
+    except InvalidOperation:
+        return None
+    unit_class = "MULTIPLE" if suffix in {"x", "X"} else "SCALAR"
+    return magnitude, unit_class, len(fraction) if fraction else 0
+
+
+def _precision_aware_match(cited: str, actual: str) -> bool:
+    """Allow legitimate display rounding of the canonical value to the cited one.
+
+    Additive: only reached after exact matching fails. Matches only when both
+    sides are plain numerics of the *same* unit class and the canonical value,
+    quantized down to the cited value's display precision, equals the cited
+    value. An article may round the canonical value (fewer decimals) but never
+    fabricate precision or change magnitude/scale.
+    """
+    cited_parsed = _parse_citation_number(cited)
+    actual_parsed = _parse_citation_number(actual)
+    if cited_parsed is None or actual_parsed is None:
+        return False
+    cited_value, cited_class, cited_decimals = cited_parsed
+    actual_value, actual_class, _ = actual_parsed
+    if cited_class != actual_class:
+        return False
+    quantum = Decimal(10) ** -cited_decimals
+    return actual_value.quantize(quantum, rounding=ROUND_HALF_UP) == cited_value
+
+
 def _citation_values_match(cited: str, actual: str) -> bool:
-    return _normalize_citation_value(cited) == _normalize_citation_value(actual)
+    if _normalize_citation_value(cited) == _normalize_citation_value(actual):
+        return True
+    return _precision_aware_match(cited, actual)
 
 
 def _first_number(value: str | None) -> float | None:

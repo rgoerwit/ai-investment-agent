@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
+
 from src.agents.forensic_repair import canonicalize_forensic_auditor_output
 from src.agents.output_validation import (
     extract_completion_tokens,
@@ -88,6 +90,88 @@ GUIDANCE_BRIDGE_STATUS: UNRESOLVED
         == "GUIDANCE_COVERAGE_STATUS=MISSING; expected one of: FOUND, "
         "NOT_APPLICABLE, NOT_DISCLOSED_AFTER_TARGETED_SEARCH, SEARCH_FAILED, "
         "UNRESOLVED_AFTER_TARGETED_SEARCH"
+    )
+
+
+def _guidance_data_block(
+    normalized_available: str,
+    *,
+    coverage: str = "NOT_DISCLOSED_AFTER_TARGETED_SEARCH",
+) -> str:
+    return f"""
+### --- START DATA_BLOCK ---
+RAW_HEALTH_SCORE: 7/12
+ADJUSTED_HEALTH_SCORE: 58%
+GUIDANCE_COVERAGE_STATUS: {coverage}
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+NORMALIZED_EARNINGS_AVAILABLE: {normalized_available}
+GUIDANCE_BRIDGE_STATUS: NOT_APPLICABLE
+### --- END DATA_BLOCK ---
+"""
+
+
+def test_guidance_validation_accepts_present_na_normalized_earnings():
+    # 6831.HK regression: NORMALIZED_EARNINGS_AVAILABLE's allowed set includes the
+    # literal "N/A", but the normalized reader stripped that token to None (rendered
+    # "" by canonical_enum), so a contractually-valid present N/A was reported as
+    # <missing> and the artifact was non-publishable. The raw read fixes this.
+    validation = validate_required_output(
+        "fundamentals_analyst", _guidance_data_block("N/A")
+    )
+
+    assert validation["ok"] is True
+    assert "promoted_management_guidance" not in validation.get("issues", {})
+
+
+@pytest.mark.parametrize("token", ["N/A", "YES", "NO", "UNKNOWN"])
+def test_guidance_validation_accepts_valid_normalized_earnings_tokens(token):
+    validation = validate_required_output(
+        "fundamentals_analyst", _guidance_data_block(token)
+    )
+
+    assert validation["ok"] is True
+
+
+@pytest.mark.parametrize("token", ["n/a", " N/A ", "n/A"])
+def test_guidance_validation_normalizes_na_case_and_whitespace(token):
+    validation = validate_required_output(
+        "fundamentals_analyst", _guidance_data_block(token)
+    )
+
+    assert validation["ok"] is True
+
+
+def test_guidance_validation_rejects_absent_normalized_earnings():
+    block = """
+### --- START DATA_BLOCK ---
+RAW_HEALTH_SCORE: 7/12
+ADJUSTED_HEALTH_SCORE: 58%
+GUIDANCE_COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: NOT_APPLICABLE
+### --- END DATA_BLOCK ---
+"""
+
+    validation = validate_required_output("fundamentals_analyst", block)
+
+    assert validation["ok"] is False
+    assert validation["issues"]["promoted_management_guidance"] == (
+        "NORMALIZED_EARNINGS_AVAILABLE=<missing>; expected one of: "
+        "N/A, NO, UNKNOWN, YES"
+    )
+
+
+def test_guidance_validation_rejects_invalid_normalized_earnings_token():
+    validation = validate_required_output(
+        "fundamentals_analyst", _guidance_data_block("MAYBE")
+    )
+
+    assert validation["ok"] is False
+    assert (
+        "NORMALIZED_EARNINGS_AVAILABLE=MAYBE"
+        in validation["issues"]["promoted_management_guidance"]
     )
 
 

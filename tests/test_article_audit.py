@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from src.article_audit import (
+    _citation_values_match,
     audit_article_citations,
     extract_source_confidence_context,
     prepend_verification_caveats,
@@ -360,3 +363,66 @@ GROWTH_DATA_QUALITY_NOTE: Newer primary results exist for Three months ended Mar
 
 def test_source_confidence_context_empty_inputs_returns_empty_string() -> None:
     assert extract_source_confidence_context(None, None) == ""
+
+
+# --- Precision-aware citation matching (unit-class + scale guarded) ------------
+# `cited` is the article's value; `actual` is the canonical DATA_BLOCK value.
+# The fallback quantizes the canonical value DOWN to the cited display precision.
+@pytest.mark.parametrize(
+    ("actual", "cited", "expected"),
+    [
+        # Legitimate display rounding of the canonical value.
+        ("13.63", "13.6%", True),  # %≡unitless (SCALAR); the observed 6782 case
+        ("13.63%", "13.6%", True),
+        ("13.63x", "13.6x", True),  # MULTIPLE class rounds too
+        ("1.234", "1.2", True),
+        # Rejections: unit class, magnitude/scale, and fabricated precision.
+        ("13.63x", "13.6%", False),  # MULTIPLE vs SCALAR — class differs
+        ("0.136", "13.6%", False),  # magnitude
+        ("136%", "13.6%", False),  # magnitude
+        ("13.6", "13.63", False),  # article fabricates precision
+    ],
+)
+def test_precision_aware_citation_match(actual, cited, expected) -> None:
+    assert _citation_values_match(cited, actual) is expected
+
+
+def test_precision_aware_citation_match_integer_precision_edge() -> None:
+    # Cited value with zero decimals rounds the canonical value to an integer
+    # under ROUND_HALF_UP. Asserted so the behavior is a decision, not accident.
+    assert _citation_values_match("14%", "13.63") is True
+    assert _citation_values_match("13%", "13.63") is False
+
+
+@pytest.mark.parametrize(
+    ("value_a", "value_b"),
+    [
+        ("13.6%", "13.6"),  # existing %≡unitless equivalence
+        ("17.43%", "17.43%"),
+        ("1,234", "1234"),
+        ("-0.01", "-0.01"),
+    ],
+)
+def test_precision_aware_match_preserves_existing_exact_matches(
+    value_a, value_b
+) -> None:
+    # Additive invariant: any pair matching under old exact equality still matches.
+    assert _citation_values_match(value_a, value_b) is True
+
+
+def test_article_citation_audit_accepts_rounded_percent() -> None:
+    # 6782.TW false-positive class: the article legitimately rounds a canonical
+    # 13.63 to 13.6% and should no longer be flagged.
+    article = "Margins reached `(GROSS_MARGIN_PERCENT: 13.6%)`."
+    data_block = _block("GROSS_MARGIN_PERCENT: 13.63")
+
+    assert audit_article_citations(article, data_block) == []
+
+
+def test_article_citation_audit_still_flags_wrong_scale_lookalike() -> None:
+    article = "Margins reached `(GROSS_MARGIN_PERCENT: 13.6%)`."
+    data_block = _block("GROSS_MARGIN_PERCENT: 136")
+
+    errors = audit_article_citations(article, data_block)
+
+    assert len(errors) == 1

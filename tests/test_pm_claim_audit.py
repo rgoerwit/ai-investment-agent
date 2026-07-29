@@ -103,6 +103,22 @@ class TestNumberConsistency2a:
         _, caveats = audit_pm_claims(pm, fundamentals=self._BLOCK, ticker="X")
         assert caveats == []
 
+    def test_rounded_hard_field_citation_no_longer_caveats(self):
+        # Shared-matcher fix: the PM audit imports _citation_values_match, so a
+        # legitimately rounded hard-field citation (canonical 13.63 -> 13.6%)
+        # must no longer caveat.
+        block = _block("DE_RATIO: 13.63%")
+        pm = "Leverage is contained (DE_RATIO: 13.6%)."
+        _, caveats = audit_pm_claims(pm, fundamentals=block, ticker="X")
+        assert caveats == []
+
+    def test_wrong_scale_hard_field_citation_still_caveats(self):
+        block = _block("DE_RATIO: 13.63%")
+        pm = "Leverage is negligible (DE_RATIO: 1.36%)."
+        _, caveats = audit_pm_claims(pm, fundamentals=block, ticker="X")
+        assert len(caveats) == 1
+        assert "DE_RATIO" in caveats[0]["claim"]
+
 
 class TestAuditContract:
     def test_idempotent(self):

@@ -9,6 +9,7 @@ import structlog
 from src.data_block_utils import (
     extract_block_field,
     extract_block_field_from_text_raw,
+    extract_last_data_block,
     extract_last_fenced_block,
     has_parseable_data_block,
     has_parseable_fenced_block,
@@ -168,8 +169,16 @@ def _promoted_management_guidance_issue(content: str) -> str | None:
     baseline_status = canonical_enum(
         extract_block_field(content, "DATA_BLOCK", "EARNINGS_BASELINE_STATUS")
     )
+    # Read this field raw: its allowed set includes the literal "N/A", but the
+    # normalized reader (extract_block_field) strips null tokens to None, which
+    # canonical_enum then renders as "" — an unobservable, self-contradictory
+    # rejection of a contractually-valid N/A. Raw-read preserves the token; a
+    # genuinely absent field still yields None -> "" and still fails.
     normalized_available = canonical_enum(
-        extract_block_field(content, "DATA_BLOCK", "NORMALIZED_EARNINGS_AVAILABLE")
+        extract_block_field_from_text_raw(
+            extract_last_data_block(content),
+            "NORMALIZED_EARNINGS_AVAILABLE",
+        )
     )
     bridge_status = canonical_enum(
         extract_block_field(content, "DATA_BLOCK", "GUIDANCE_BRIDGE_STATUS")
