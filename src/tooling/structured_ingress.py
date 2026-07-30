@@ -15,6 +15,17 @@ from src.data.merge_policy import NON_ACTIONABLE_CONFLICT_FIELDS, QUOTE_PRICE_FI
 # from CRITICAL_ANALYSIS_FIELDS/ANALYSIS_CRITICAL_CONFLICT_FIELDS in
 # merge_policy.py, so excluding them from the *comparison* below can never mask a
 # genuine fundamentals-field conflict. Never stripped from the stored payload.
+#
+# NOTE: this set is global, not scoped per contract_key. Today that's fine —
+# STRUCTURED_INGRESS_SOURCES (src/claim_policy.py) has exactly one registered
+# contract (raw_financial_metrics ← Junior Fundamentals' get_financial_metrics),
+# and it's quote-shaped, so the field names line up. If a second, unrelated
+# contract type is ever registered (e.g. an ownership-structure or ESG ingress)
+# whose payload isn't quote-shaped, this same exclusion set would still apply to
+# it — harmless unless that payload happens to reuse one of these field names for
+# something non-volatile, or needs its own volatile-field carve-outs that don't
+# exist yet. Make _stable_payload_for_comparison contract-scoped
+# (dict[contract_key, frozenset[str]]) at that point; don't build it now.
 _INGRESS_VOLATILE_RECHECK_FIELDS: frozenset[str] = (
     frozenset(QUOTE_PRICE_FIELDS)
     | NON_ACTIONABLE_CONFLICT_FIELDS
