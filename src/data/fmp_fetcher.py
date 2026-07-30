@@ -246,8 +246,8 @@ class FMPFetcher(FinancialFetcher):
             )
             return None
 
-    async def get_company_name(self, ticker: str) -> str | None:
-        """Fetch company name from FMP profile endpoint."""
+    async def get_company_name(self, ticker: str) -> tuple[str, str | None] | None:
+        """Fetch company name and website from FMP profile endpoint."""
         try:
             data = await self._get("profile", {"symbol": ticker})
         except FMPSubscriptionUnavailableError:
@@ -255,7 +255,8 @@ class FMPFetcher(FinancialFetcher):
         if data and isinstance(data, list) and len(data) > 0:
             name = data[0].get("companyName")
             if isinstance(name, str) and name:
-                return name
+                website = data[0].get("website")
+                return name, website if isinstance(website, str) else None
         return None
 
     async def get_price_history(

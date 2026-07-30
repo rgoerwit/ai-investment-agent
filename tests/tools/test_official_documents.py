@@ -130,6 +130,59 @@ def test_exchange_registry_hosts_are_official(url: str) -> None:
     assert documents.is_official_document_url(url)
 
 
+@pytest.mark.asyncio
+async def test_document_tool_rejection_names_host_and_approved_list() -> None:
+    result = await documents.get_official_document.ainvoke(
+        {"url": "https://ir.zigexn.co.jp/report.pdf"}
+    )
+
+    assert result.startswith(
+        "STATUS: INSUFFICIENT_DATA\nREASON: UNAPPROVED_DOCUMENT_HOST\n"
+    )
+    assert "REJECTED_HOST: ir.zigexn.co.jp" in result
+    assert "APPROVED_HOSTS: " in result
+    approved_line = next(
+        line for line in result.splitlines() if line.startswith("APPROVED_HOSTS: ")
+    )
+    assert "edinet-fsa.go.jp" in approved_line
+    assert "ir.zigexn.co.jp" not in approved_line
+
+
+@pytest.mark.asyncio
+async def test_document_tool_rejection_includes_registered_issuer_host() -> None:
+    registry = IssuerAuthorityRegistry()
+    assert registry.register_url(
+        "https://zigexn.co.jp/ir", provenance="yfinance_company_profile"
+    )
+    services = RuntimeServices(
+        tool_service=ToolExecutionService(),
+        inspection_service=InspectionService(),
+        issuer_authority=registry,
+    )
+    with use_runtime_services(services):
+        result = await documents.get_official_document.ainvoke(
+            {"url": "https://some-vendor-ir-host.example/report.pdf"}
+        )
+
+    approved_line = next(
+        line for line in result.splitlines() if line.startswith("APPROVED_HOSTS: ")
+    )
+    assert "zigexn.co.jp" in approved_line
+    assert "REJECTED_HOST: some-vendor-ir-host.example" in result
+
+
+def test_auditor_document_byte_cap_default_covers_real_annual_reports() -> None:
+    """Real JP/KR annual securities reports with embedded exhibits routinely
+    exceed 15MB; the byte cap default must not abort legitimate filings
+    before page-selection ever runs. Guards against an accidental revert.
+    Checks the field default (not the env-loaded instance) since an
+    operator .env override is expected to take precedence at runtime."""
+    assert (
+        type(documents.config).model_fields["auditor_max_document_bytes"].default
+        >= 30_000_000
+    )
+
+
 def test_invalid_configured_hosts_are_ignored() -> None:
     assert documents._configured_host_suffixes(
         "localhost, https://issuer.com/path, good.example, 127.0.0.1"

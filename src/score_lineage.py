@@ -272,10 +272,21 @@ def add_validated_derivations(
                     break
             if resolved:
                 criterion_dependencies[criterion] = resolved
+        # A criterion with no configured dependency group at all (e.g.
+        # GLOBAL_EXPANSION, R_AND_D_CAPEX_BACKLOG — "advisory until their
+        # producers emit structured evidence") can never resolve by
+        # construction; that is not the same failure as a criterion that HAS
+        # a configured dependency but couldn't find a matching eligible fact
+        # this run. Only the latter should veto the scorecard's eligibility —
+        # otherwise a structurally-unbacked, routinely-awarded criterion
+        # permanently zeroes the whole score regardless of how well every
+        # other criterion is corroborated.
         lineage_gaps = tuple(
             criterion
             for criterion, award in numeric_awards.items()
-            if award > 0 and criterion not in criterion_dependencies
+            if award > 0
+            and criterion not in criterion_dependencies
+            and _SCORE_CRITERION_DEPENDENCIES[kind].get(criterion, ()) != ()
         )
         available = reported_available
         earned = sum(numeric_awards.values())

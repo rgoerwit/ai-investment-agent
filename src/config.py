@@ -508,7 +508,7 @@ class Settings(BaseSettings):
         ),
     )
     auditor_max_document_bytes: int = Field(
-        default=15_000_000,
+        default=40_000_000,
         ge=100_000,
         le=50_000_000,
         validation_alias="AUDITOR_MAX_DOCUMENT_BYTES",

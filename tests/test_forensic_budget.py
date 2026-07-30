@@ -76,6 +76,27 @@ def test_typed_insufficient_tool_result_is_recorded_separately() -> None:
 
     assert ledger.insufficient_tools == ["get_official_document"]
     assert ledger.failed_tools == []
+    # No REJECTED_HOST line in this result — must not fire on unrelated
+    # insufficient-data reasons (e.g. a plain DOCUMENT_SIZE_LIMIT rejection).
+    assert ledger.rejected_hosts == []
+
+
+def test_rejected_host_is_recorded_and_deduplicated() -> None:
+    ledger = AuditorBudgetLedger(_policy())
+
+    ledger.record_tool_result(
+        "get_official_document",
+        "STATUS: INSUFFICIENT_DATA\nREASON: UNAPPROVED_DOCUMENT_HOST\n"
+        "REJECTED_HOST: example.com\nAPPROVED_HOSTS: a.com, b.com",
+    )
+    ledger.record_tool_result(
+        "get_official_document",
+        "STATUS: INSUFFICIENT_DATA\nREASON: UNAPPROVED_DOCUMENT_HOST\n"
+        "REJECTED_HOST: example.com\nAPPROVED_HOSTS: a.com, b.com",
+    )
+
+    assert ledger.rejected_hosts == ["example.com"]
+    assert ledger.telemetry()["rejected_hosts"] == ["example.com"]
 
 
 def test_blocked_and_failed_tool_results_are_distinct() -> None:

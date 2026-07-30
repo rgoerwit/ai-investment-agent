@@ -44,7 +44,7 @@ _OFFICIAL_HOST_SUFFIXES = (
 )
 _PDF_POLICY = BlockingCallPolicy("official_document_pdf_extract", 20.0)
 _DNS_POLICY = BlockingCallPolicy("official_document_dns_check", 5.0)
-_DOCUMENT_TIMEOUT_SECONDS = 20.0
+_DOCUMENT_TIMEOUT_SECONDS = 35.0
 _MIN_USEFUL_TEXT_CHARS = 200
 _DEFAULT_KEYWORDS = (
     "statement of financial position",
@@ -402,7 +402,14 @@ async def get_official_document(
     configured_hosts = _configured_host_suffixes(config.auditor_official_document_hosts)
     extra_hosts = (*configured_hosts, *get_current_issuer_hosts())
     if not is_official_document_url(url):
-        return "STATUS: INSUFFICIENT_DATA\nREASON: UNAPPROVED_DOCUMENT_HOST"
+        approved = sorted({*_OFFICIAL_HOST_SUFFIXES, *extra_hosts})
+        rejected_host = urlparse(url).hostname or "unknown"
+        return (
+            "STATUS: INSUFFICIENT_DATA\n"
+            "REASON: UNAPPROVED_DOCUMENT_HOST\n"
+            f"REJECTED_HOST: {rejected_host}\n"
+            f"APPROVED_HOSTS: {', '.join(approved) if approved else 'none'}"
+        )
     try:
         payload, content_type, final_url = await _download_official(
             url, policy.max_document_bytes, extra_hosts

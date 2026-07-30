@@ -841,8 +841,36 @@ def reconcile_score_consistency(body: str) -> tuple[str, bool, bool]:
 
     for kind, total in _SCORE_RUBRIC_TOTALS:
         raw = _parse_raw_score(updated, kind)
+        if raw is None:
+            continue
         adjusted = _parse_adjusted_score(updated, kind)
-        if raw is None or adjusted is None:
+        adjusted_field = f"ADJUSTED_{kind}_SCORE"
+        if adjusted is None:
+            # A genuinely absent ADJUSTED line is left alone (nothing to
+            # correct against). But a *present* line that's unparseable —
+            # most commonly a literal "N/A" — while RAW is fully computable
+            # is exactly the provable-arithmetic case this function already
+            # handles below for a different trigger; fill it in the same way
+            # rather than silently skipping reconciliation entirely.
+            if not has_block_field_value(updated, adjusted_field):
+                continue
+            earned, raw_den = raw
+            if raw_den <= 0:
+                continue
+            corrected = True
+            updated = replace_or_append_block_line(
+                updated,
+                adjusted_field,
+                f"{earned / raw_den * 100.0:.1f}% (based on {raw_den:g} available points)",
+            )
+            updated = replace_or_append_block_line(
+                updated,
+                f"{kind}_SCORE_DATA_QUALITY_NOTE",
+                (
+                    f"Adjusted score computed from RAW {earned:g}/{raw_den:g}; "
+                    "reported value was unparseable ('N/A' or malformed)."
+                ),
+            )
             continue
         (earned, raw_den), (pct, paren_earned, paren_available) = raw, adjusted
 

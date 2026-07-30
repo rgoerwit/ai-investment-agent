@@ -737,11 +737,18 @@ def test_score_derivation_requires_complete_coherent_breakdown() -> None:
         "ADJUSTED_GROWTH_SCORE: 80.0% (based on 5 available points)",
         "GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=1",
     )
+    # GROSS_MARGIN has a real configured dependency (GROSS_MARGIN_PERCENT /
+    # raw "grossMargins") that this snapshot doesn't supply, so it's a
+    # genuine, blocking lineage gap. R_AND_D_CAPEX_BACKLOG has no configured
+    # dependency at all ("advisory until its producer emits structured
+    # evidence") and must NOT block eligibility on its own merely because it
+    # was awarded a point — see test_structurally_unbacked_criteria_do_not_
+    # veto_eligibility below for the case where it's the *only* would-be gap.
     complete = _fundamentals(
-        "ADJUSTED_GROWTH_SCORE: 50.0% (based on 6 available points)",
+        "ADJUSTED_GROWTH_SCORE: 66.7% (based on 6 available points)",
         (
             "GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=1; "
-            "ROA_ROE_IMPROVING=0; GROSS_MARGIN=0; GLOBAL_EXPANSION=0; "
+            "ROA_ROE_IMPROVING=0; GROSS_MARGIN=1; GLOBAL_EXPANSION=0; "
             "R_AND_D_CAPEX_BACKLOG=1"
         ),
     )
@@ -760,11 +767,48 @@ def test_score_derivation_requires_complete_coherent_breakdown() -> None:
     assert score["decision_eligible"] is False
     assert score["decision_role"] == "GATE_INPUT"
     assert len(score["derived_from"]) == 2
-    assert score["value"] == "50.0% (based on 6 available points)"
+    assert score["value"] == "66.7% (based on 6 available points)"
     scorecard = derived["scorecards"]["GROWTH"]
     assert scorecard["criteria"]["GLOBAL_EXPANSION"]["award"] == "0"
     assert scorecard["criteria"]["R_AND_D_CAPEX_BACKLOG"]["award"] == "1"
-    assert scorecard["lineage_gaps"] == ["R_AND_D_CAPEX_BACKLOG"]
+    assert scorecard["lineage_gaps"] == ["GROSS_MARGIN"]
+
+
+def test_structurally_unbacked_criteria_do_not_veto_eligibility() -> None:
+    """GLOBAL_EXPANSION/R_AND_D_CAPEX_BACKLOG have no configured evidence
+    producer yet; a nonzero award on them alone must not zero the whole
+    scorecard the way a genuinely-unresolved dependency does."""
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics(
+            {
+                "raw_fundamentals_data": (
+                    '{"trailingPE": 12.5, "revenueGrowth": 0.2, '
+                    '"earningsGrowth": 0.3, "grossMargins": 0.4}'
+                )
+            }
+        )
+    )
+    report = _fundamentals(
+        "ADJUSTED_GROWTH_SCORE: 66.7% (based on 6 available points)",
+        (
+            "GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=1; "
+            "ROA_ROE_IMPROVING=0; GROSS_MARGIN=1; GLOBAL_EXPANSION=1; "
+            "R_AND_D_CAPEX_BACKLOG=0"
+        ),
+    )
+
+    derived = add_validated_derivations(snapshot, report)
+    score = next(
+        claim
+        for claim in derived["claims"].values()
+        if claim["field"] == "ADJUSTED_GROWTH_SCORE"
+    )
+    scorecard = derived["scorecards"]["GROWTH"]
+
+    assert scorecard["lineage_gaps"] == []
+    assert score["decision_eligible"] is True
+    assert score["coverage"] == "FOUND"
+    assert score["value"] == "66.7% (based on 6 available points)"
 
 
 def test_missing_structured_ingress_fails_closed_instead_of_minting_na_truth() -> None:
@@ -846,8 +890,8 @@ def test_canonical_scorecard_replaces_stale_score_detail() -> None:
     assert "GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=1;" in projected
     assert "GLOBAL_EXPANSION=1; R_AND_D_CAPEX_BACKLOG=1" in projected
     assert "RAW_GROWTH_SCORE: 5/6" in projected
-    assert "ADJUSTED_GROWTH_SCORE: N/A" in projected
-    assert "GROWTH_SCORE_LINEAGE_STATUS: ADVISORY" in projected
+    assert "ADJUSTED_GROWTH_SCORE: 83.3% (based on 6 available points)" in projected
+    assert "GROWTH_SCORE_LINEAGE_STATUS: COMPLETE" in projected
     assert projected.count("### GROWTH TRANSITION DETAIL") == 1
     assert "**Score**: 5/6 (Adjusted: 83.3%)" in projected
     assert "**Score**: 5/6 (Adjusted: 83%)" not in projected

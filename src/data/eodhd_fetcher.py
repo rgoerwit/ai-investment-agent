@@ -73,8 +73,8 @@ class EODHDFetcher(FinancialFetcher):
             return f"<unavailable: {type(exc).__name__}>"
         return " ".join(text.split())[:200]
 
-    async def get_company_name(self, symbol: str) -> str | None:
-        """Fetch company name from EODHD General data (lightweight, ~1kb)."""
+    async def get_company_name(self, symbol: str) -> tuple[str, str | None] | None:
+        """Fetch company name and website from EODHD General data (lightweight, ~1kb)."""
         if not self.is_available():
             return None
 
@@ -94,7 +94,10 @@ class EODHDFetcher(FinancialFetcher):
                             return None
                         if isinstance(data, dict):
                             name = data.get("Name")
-                            return name if isinstance(name, str) else None
+                            if not isinstance(name, str):
+                                return None
+                            website = data.get("WebURL")
+                            return name, website if isinstance(website, str) else None
                     return None
         except Exception as e:
             logger.debug(

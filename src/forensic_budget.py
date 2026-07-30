@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 
 from src.config import config
+
+_REJECTED_HOST_RE = re.compile(r"(?m)^REJECTED_HOST:\s*(\S+)")
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,7 @@ class AuditorBudgetLedger:
     failed_tools: list[str] = field(default_factory=list)
     blocked_tools: list[str] = field(default_factory=list)
     insufficient_tools: list[str] = field(default_factory=list)
+    rejected_hosts: list[str] = field(default_factory=list)
     synthesis_evidence_chars: int = 0
     repair_input_chars: int = 0
 
@@ -115,6 +119,15 @@ class AuditorBudgetLedger:
         if tool_name not in self.insufficient_tools:
             self.insufficient_tools.append(tool_name)
 
+    def record_rejected_host(self, value: object) -> None:
+        """Extract a REJECTED_HOST: line (e.g. from get_official_document's
+        UNAPPROVED_DOCUMENT_HOST reply) so allowlist gaps are deterministically
+        visible in the persisted artifact instead of depending on the LLM
+        accurately paraphrasing the rejected host in its final synthesis."""
+        match = _REJECTED_HOST_RE.search(str(value))
+        if match and match.group(1) not in self.rejected_hosts:
+            self.rejected_hosts.append(match.group(1))
+
     def record_tool_result(
         self,
         tool_name: str,
@@ -128,6 +141,7 @@ class AuditorBudgetLedger:
             self.record_tool_blocked(tool_name)
         elif text.startswith("STATUS: INSUFFICIENT_DATA"):
             self.record_tool_insufficient(tool_name)
+            self.record_rejected_host(value)
         elif text.startswith("TOOL_ERROR:"):
             self.record_tool_failure(tool_name)
 
@@ -157,6 +171,7 @@ class AuditorBudgetLedger:
             "failed_tools": list(self.failed_tools),
             "blocked_tools": list(self.blocked_tools),
             "insufficient_tools": list(self.insufficient_tools),
+            "rejected_hosts": list(self.rejected_hosts),
             "synthesis_evidence_chars": self.synthesis_evidence_chars,
             "repair_input_chars": self.repair_input_chars,
         }

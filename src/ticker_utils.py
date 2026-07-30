@@ -535,26 +535,37 @@ async def _try_yfinance(ticker: str) -> tuple[str, str | None] | None:
     return None
 
 
-async def _try_yahooquery(ticker: str) -> str | None:
+async def _try_yahooquery(ticker: str) -> tuple[str, str | None] | None:
     """Attempt company name resolution via yahooquery."""
     try:
         from yahooquery import Ticker as YQTicker
 
         result = await run_blocking_call(
             YAHOOQUERY_QUOTE_TYPE_POLICY.with_label(f"yahooquery.quote_type:{ticker}"),
-            lambda: YQTicker(ticker).quote_type,
+            lambda: YQTicker(ticker).get_modules("quoteType assetProfile"),
         )
         if isinstance(result, dict) and ticker in result:
             data = result[ticker]
             if isinstance(data, dict):
-                name = data.get("longName") or data.get("shortName")
-                return name if isinstance(name, str) else None
+                quote_type = data.get("quoteType")
+                name = None
+                if isinstance(quote_type, dict):
+                    name = quote_type.get("longName") or quote_type.get("shortName")
+                if not isinstance(name, str):
+                    return None
+                asset_profile = data.get("assetProfile")
+                website = (
+                    asset_profile.get("website")
+                    if isinstance(asset_profile, dict)
+                    else None
+                )
+                return name, website if isinstance(website, str) else None
     except (asyncio.TimeoutError, Exception) as e:
         logger.debug("company_name_yahooquery_failed", ticker=ticker, error=str(e))
     return None
 
 
-async def _try_fmp(ticker: str) -> str | None:
+async def _try_fmp(ticker: str) -> tuple[str, str | None] | None:
     """Attempt company name resolution via FMP profile endpoint."""
     try:
         from src.data.fmp_fetcher import get_fmp_fetcher
@@ -562,14 +573,13 @@ async def _try_fmp(ticker: str) -> str | None:
         fmp = get_fmp_fetcher()
         if not fmp.is_available():
             return None
-        name = await asyncio.wait_for(fmp.get_company_name(ticker), timeout=5)
-        return name
+        return await asyncio.wait_for(fmp.get_company_name(ticker), timeout=5)
     except (asyncio.TimeoutError, Exception) as e:
         logger.debug("company_name_fmp_failed", ticker=ticker, error=str(e))
     return None
 
 
-async def _try_eodhd(ticker: str) -> str | None:
+async def _try_eodhd(ticker: str) -> tuple[str, str | None] | None:
     """Attempt company name resolution via EODHD General endpoint."""
     try:
         from src.data.eodhd_fetcher import get_eodhd_fetcher
@@ -577,8 +587,7 @@ async def _try_eodhd(ticker: str) -> str | None:
         eodhd = get_eodhd_fetcher()
         if not eodhd.is_available():
             return None
-        name = await asyncio.wait_for(eodhd.get_company_name(ticker), timeout=5)
-        return name
+        return await asyncio.wait_for(eodhd.get_company_name(ticker), timeout=5)
     except (asyncio.TimeoutError, Exception) as e:
         logger.debug("company_name_eodhd_failed", ticker=ticker, error=str(e))
     return None

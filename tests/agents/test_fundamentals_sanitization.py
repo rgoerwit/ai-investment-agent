@@ -1138,6 +1138,26 @@ class TestScoreConsistency:
         assert "ADJUSTED_HEALTH_SCORE: 80.0% (based on 10 available points)" in updated
         assert "HEALTH_SCORE_DATA_QUALITY_NOTE:" in updated
 
+    def test_literal_na_adjusted_filled_from_computable_raw(self) -> None:
+        """RAW is fully computable; a present-but-unparseable ADJUSTED line
+        (literal 'N/A') is filled in rather than silently skipped."""
+        body = self._body(
+            "RAW_GROWTH_SCORE: 3/6",
+            "ADJUSTED_GROWTH_SCORE: N/A",
+        )
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert corrected and not suspect
+        assert "ADJUSTED_GROWTH_SCORE: 50.0% (based on 6 available points)" in updated
+        assert "GROWTH_SCORE_DATA_QUALITY_NOTE:" in updated
+
+    def test_missing_adjusted_line_still_skipped(self) -> None:
+        """A genuinely absent ADJUSTED line (not present at all) is left
+        alone — distinct from a present-but-unparseable 'N/A' line."""
+        body = self._body("RAW_HEALTH_SCORE: 8/12")
+        updated, corrected, suspect = reconcile_score_consistency(body)
+        assert updated == body
+        assert not corrected and not suspect
+
     def test_rounding_within_tolerance_no_churn(self) -> None:
         body = self._body(
             "RAW_HEALTH_SCORE: 10/12",
