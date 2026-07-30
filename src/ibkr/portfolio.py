@@ -7,9 +7,12 @@ with yfinance ticker mapping and FX normalization.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import structlog
 
 from src.error_safety import summarize_exception
+from src.fx_normalization import get_fx_rate_cache
 from src.ibkr.client import IbkrClient, mask_account
 from src.ibkr.exceptions import IBKRError
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
@@ -61,6 +64,29 @@ def _position_field(raw: dict, primary: str, fallback: str) -> object:
     return value
 
 
+@dataclass
+class _PendingPosition:
+    """Position state gathered before FX rates are known.
+
+    Ticker/currency resolution (conid lookups, yfinance search) has no
+    dependency on FX rates, so it runs first for every position; FX rates
+    for the resulting currency set are then batch-resolved once (see
+    FxRateCache) instead of once per position.
+    """
+
+    ticker_obj: Ticker
+    ticker_identity_verified: bool
+    ticker_resolution_source: str
+    conid: int | None
+    raw_market_value: float
+    currency: str
+    quantity: float
+    current_price_local: float
+    avg_cost_local: float
+    raw_unrealized_pnl: float | None
+    malformed_fields: list[str]
+
+
 def normalize_positions(
     raw_positions: list[dict],
     *,
@@ -80,7 +106,7 @@ def normalize_positions(
     Returns:
         List of NormalizedPosition models (skips positions that can't be mapped)
     """
-    positions: list[NormalizedPosition] = []
+    pending: list[_PendingPosition] = []
 
     for raw in raw_positions:
         # Extract raw IBKR fields
@@ -191,7 +217,37 @@ def normalize_positions(
         malformed_fields = [
             field for field, is_valid in numeric_validity.items() if not is_valid
         ]
-        if malformed_fields:
+
+        pending.append(
+            _PendingPosition(
+                ticker_obj=ticker_obj,
+                ticker_identity_verified=ticker_identity_verified,
+                ticker_resolution_source=ticker_resolution_source,
+                conid=conid,
+                raw_market_value=raw_market_value,
+                currency=currency,
+                quantity=quantity,
+                current_price_local=current_price_local,
+                avg_cost_local=avg_cost_local,
+                raw_unrealized_pnl=raw_unrealized_pnl,
+                malformed_fields=malformed_fields,
+            )
+        )
+
+    # Batch-resolve FX rates once per unique currency (live yfinance first,
+    # FALLBACK_RATES_TO_USD only if that fails) instead of once per position —
+    # a portfolio with e.g. 15 JPY positions previously fetched JPY 15 times.
+    unique_currencies = {p.currency for p in pending}
+    fx_rates = get_fx_rate_cache().resolve_rates_sync(unique_currencies)
+
+    positions: list[NormalizedPosition] = []
+    for p in pending:
+        ticker_obj = p.ticker_obj
+        currency = p.currency
+        current_price_local = p.current_price_local
+        avg_cost_local = p.avg_cost_local
+
+        if p.malformed_fields:
             normalized_values = NormalizedPositionValues(
                 market_value_usd=0.0,
                 unrealized_pnl_usd=0.0,
@@ -200,17 +256,20 @@ def normalize_positions(
                 unrealized_pnl_basis="UNAVAILABLE",
                 valuation_valid=False,
                 valuation_issue=(
-                    "Malformed broker numeric field(s): " + ", ".join(malformed_fields)
+                    "Malformed broker numeric field(s): "
+                    + ", ".join(p.malformed_fields)
                 ),
             )
         else:
+            rate_info = fx_rates.get(currency.strip().upper())
             normalized_values = normalize_position_values(
-                quantity=quantity,
+                quantity=p.quantity,
                 current_price_local=current_price_local,
                 avg_cost_local=avg_cost_local,
-                raw_market_value=raw_market_value,
-                raw_unrealized_pnl=raw_unrealized_pnl,
+                raw_market_value=p.raw_market_value,
+                raw_unrealized_pnl=p.raw_unrealized_pnl,
                 currency=currency,
+                fx_rate=rate_info[0] if rate_info else None,
             )
         position_fx_rate = normalized_values.fx_rate_to_usd
         if not normalized_values.valuation_valid:
@@ -240,9 +299,9 @@ def normalize_positions(
             )
 
         position = NormalizedPosition(
-            conid=conid or 0,
+            conid=p.conid or 0,
             ticker=ticker_obj,
-            quantity=quantity,
+            quantity=p.quantity,
             avg_cost_local=avg_cost_local,
             market_value_usd=normalized_values.market_value_usd,
             unrealized_pnl_usd=normalized_values.unrealized_pnl_usd,
@@ -253,8 +312,8 @@ def normalize_positions(
             valuation_issue=normalized_values.valuation_issue,
             currency=currency,
             current_price_local=current_price_local,
-            ticker_identity_verified=ticker_identity_verified,
-            ticker_resolution_source=ticker_resolution_source,
+            ticker_identity_verified=p.ticker_identity_verified,
+            ticker_resolution_source=p.ticker_resolution_source,
         )
         positions.append(position)
 

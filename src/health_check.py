@@ -153,19 +153,18 @@ def check_imports() -> bool:
 async def check_llm_connectivity() -> bool:
     """Test basic LLM connectivity with Gemini."""
     try:
-        # UPDATED: Use ChatGoogleGenerativeAI
-        from langchain_google_genai import ChatGoogleGenerativeAI
-
         from src.config import config
+        from src.llms import create_gemini_model
 
         runtime_config = get_runtime_config(config)
         logger.info("testing_llm_connectivity", model=runtime_config.quick_think_llm)
 
-        llm = ChatGoogleGenerativeAI(
-            model=runtime_config.quick_think_llm,
-            temperature=0,
+        llm = create_gemini_model(
+            runtime_config.quick_think_llm,
+            temperature=0.0,
             timeout=10,
             max_retries=1,
+            service_tier="standard",
         )
 
         response = await asyncio.wait_for(

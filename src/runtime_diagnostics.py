@@ -433,6 +433,18 @@ def build_analysis_validity(result: dict[str, Any]) -> dict[str, Any]:
     optional_failures: dict[str, Any] = {}
     required_artifacts = get_required_publishable_artifacts(result)
     optional_artifacts = get_optional_publishable_artifacts(result)
+    snapshot = result.get("analysis_snapshot")
+    snapshot_status = (
+        str(snapshot.get("contract_status") or "INVALID")
+        if isinstance(snapshot, dict)
+        else None
+    )
+    decision_trace = result.get("decision_trace")
+    decision_trace_status = (
+        str(decision_trace.get("status") or "INVALID")
+        if isinstance(decision_trace, dict)
+        else None
+    )
 
     for field in required_artifacts:
         status = get_artifact_status(result, field)
@@ -456,6 +468,26 @@ def build_analysis_validity(result: dict[str, Any]) -> dict[str, Any]:
             "message": "Pre-screening result missing or invalid",
             "retryable": False,
         }
+    if snapshot_status is not None and snapshot_status != "VALID":
+        required_failures["analysis_snapshot"] = {
+            "complete": bool(snapshot),
+            "ok": False,
+            "content": None,
+            "error_kind": "data_contract_error",
+            "provider": "deterministic",
+            "message": f"Canonical analysis snapshot is {snapshot_status}",
+            "retryable": False,
+        }
+    if decision_trace_status is not None and decision_trace_status != "VALID":
+        required_failures["decision_trace"] = {
+            "complete": bool(decision_trace),
+            "ok": False,
+            "content": None,
+            "error_kind": "data_contract_error",
+            "provider": "deterministic",
+            "message": f"Final decision trace is {decision_trace_status}",
+            "retryable": False,
+        }
 
     publishable = bool(
         pm_decision
@@ -470,6 +502,8 @@ def build_analysis_validity(result: dict[str, Any]) -> dict[str, Any]:
         "has_valid_fundamentals": bool(fundamentals),
         "has_data_block": data_block_present,
         "has_valid_pre_screening": has_valid_pre_screening,
+        "analysis_snapshot_status": snapshot_status,
+        "decision_trace_status": decision_trace_status,
         "required_artifacts": sorted(required_artifacts),
         "optional_artifacts": sorted(optional_artifacts),
         "required_failures": required_failures,

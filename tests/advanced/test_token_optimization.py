@@ -290,6 +290,77 @@ class TestResultBoundaryTruncation:
         # Should still have valid wrapper closing
         assert formatted.endswith("</search_results>")
 
+    def test_oversized_second_result_keeps_all_candidates_and_key_excerpt(self):
+        """A long result must be excerpted, not erased at the global boundary."""
+        from src.tools.shared import _format_and_truncate_tavily_result
+
+        key_passage = (
+            "前期は賃上げ促進税制による税額控除の適用がありましたが、"
+            "今期は適用がないため当期純利益は減益となる見込みです。"
+        )
+        results = [
+            {
+                "title": "Generic market-data result",
+                "content": "A" * 600,
+                "url": "https://example.com/generic",
+                "_source": "tavily",
+            },
+            {
+                "title": "Hochiki FY3/26 results briefing transcript",
+                "content": "B" * 4300 + key_passage + "C" * 4800,
+                "url": "https://finance.logmi.jp/articles/384869",
+                "_source": "tavily",
+            },
+            {
+                "title": "Official investor-relations library",
+                "content": "D" * 700,
+                "url": "https://www.hochiki.co.jp/ir/library/",
+                "_source": "duckduckgo",
+            },
+        ]
+
+        formatted = _format_and_truncate_tavily_result(
+            results,
+            max_chars=7000,
+            query="ホーチキ 決算説明会 賃上げ促進税制 当期純利益",
+        )
+
+        assert len(formatted) <= 7000
+        assert formatted.count("</result>") == 3
+        assert "https://finance.logmi.jp/articles/384869" in formatted
+        assert "https://www.hochiki.co.jp/ir/library/" in formatted
+        assert "賃上げ促進税制" in formatted
+        assert 'original_chars="' in formatted
+        assert 'provider="duckduckgo"' in formatted
+        assert formatted.endswith("</search_results>")
+
+    def test_large_first_result_cannot_starve_later_transcript(self):
+        from src.tools.shared import _format_and_truncate_tavily_result
+
+        results = [
+            {
+                "title": "Very large official PDF",
+                "content": "X" * 12000,
+                "url": "https://example.com/results.pdf",
+            },
+            {
+                "title": "Management briefing",
+                "content": "Tax bridge: wage-increase tax credit expired.",
+                "url": "https://example.com/briefing",
+            },
+        ]
+
+        formatted = _format_and_truncate_tavily_result(
+            results,
+            max_chars=1200,
+            query="wage-increase tax credit",
+        )
+
+        assert len(formatted) <= 1200
+        assert "https://example.com/results.pdf" in formatted
+        assert "https://example.com/briefing" in formatted
+        assert "wage-increase tax credit expired" in formatted
+
 
 class TestValidXmlStructure:
     """Tests that output maintains valid XML structure."""

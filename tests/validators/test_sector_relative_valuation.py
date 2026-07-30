@@ -24,6 +24,21 @@ CYCLE_POSITION: PEAK
     assert metrics["cycle_position"] == "PEAK"
 
 
+def test_extracts_sector_pe_reference_provenance() -> None:
+    report = """### --- START DATA_BLOCK ---
+SECTOR: Health Care
+SECTOR_MEDIAN_PE: 22
+PE_VS_SECTOR: 0.50
+SECTOR_PE_REFERENCE_TYPE: STATIC_POLICY_REFERENCE
+SECTOR_PE_REFERENCE_AS_OF: N/A
+### --- END DATA_BLOCK ---"""
+
+    metrics = RedFlagDetector.extract_metrics(report)
+
+    assert metrics["sector_pe_reference_type"] == "STATIC_POLICY_REFERENCE"
+    assert metrics["sector_pe_reference_as_of"] is None
+
+
 def test_sector_relative_valuation_flags_when_absolute_pe_passes() -> None:
     flags, result = RedFlagDetector.detect_red_flags(
         {

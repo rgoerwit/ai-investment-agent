@@ -53,6 +53,8 @@ class TestCurrentModelPricing:
     @pytest.mark.parametrize(
         ("model", "expected"),
         [
+            ("gemini-3.6-flash", 1.50 + 7.50),
+            ("gemini-3.6-flash-002", 1.50 + 7.50),
             ("gemini-3.5-flash", 1.50 + 9.00),
             ("gemini-3.1-flash-lite", 0.25 + 1.50),
             ("gemini-3.1-pro-preview", 2.00 + 12.00),
@@ -68,15 +70,17 @@ class TestCurrentModelPricing:
             ("claude-opus-4-6", 5.00 + 25.00),
             ("glm-5.2", 1.40 + 4.40),
             ("deepseek-v4-pro", 0.435 + 0.87),
+            ("kimi-k3", 0.95 + 4.00),
         ],
     )
     def test_standard_tier_cost(self, model, expected):
         assert _usage(model).estimated_cost_usd == pytest.approx(expected)
 
     def test_no_current_model_hits_default_fallback(self):
-        # These are the models wired via config defaults / .env — each must
-        # prefix-match an explicit entry, never the default fallback.
+        # Configured and adoption-ready models must prefix-match an explicit
+        # entry, never the default fallback.
         for model in (
+            "gemini-3.6-flash",
             "gemini-3.5-flash",
             "gemini-3.1-flash-lite",
             "gemini-3.1-pro-preview",
@@ -90,12 +94,46 @@ class TestCurrentModelPricing:
             "claude-opus-4-6",
             "glm-5.2",
             "deepseek-v4-pro",
+            "kimi-k3",
         ):
             assert _lookup_model_pricing(model) is not DEFAULT_PRICING_PER_1M, model
 
     def test_mini_and_lite_variants_match_before_parents(self):
         assert _lookup_model_pricing("gpt-5.4-mini")["completion"] == 4.50
         assert _lookup_model_pricing("gemini-2.5-flash-lite")["prompt"] == 0.10
+
+
+class TestMatcherOrderIndependence:
+    """A1b: exact-match then longest-prefix, insensitive to dict insertion order."""
+
+    def test_longest_prefix_wins_regardless_of_insertion_order(self, monkeypatch):
+        # Parent listed BEFORE the more-specific variant — the old first-match
+        # loop would have mispriced the variant; longest-prefix must not.
+        shuffled = {
+            "gpt-5.4": {"prompt": 2.50, "completion": 15.00},
+            "gpt-5.4-mini": {"prompt": 0.75, "completion": 4.50},
+        }
+        monkeypatch.setattr(
+            "src.token_tracker.MODEL_PRICING_PER_1M", shuffled, raising=True
+        )
+        assert _lookup_model_pricing("gpt-5.4-mini-2026")["completion"] == 4.50
+        assert _lookup_model_pricing("gpt-5.4")["completion"] == 15.00
+
+    def test_exact_match_preferred(self):
+        # Bare "gpt-5.6" must resolve to its own entry, not a longer sibling.
+        assert _lookup_model_pricing("gpt-5.6")["prompt"] == 5.00
+        assert _lookup_model_pricing("gpt-5.6-terra")["prompt"] == 2.50
+
+    def test_vendor_prefix_is_stripped(self):
+        assert _lookup_model_pricing("moonshot/kimi-k3") is _lookup_model_pricing(
+            "kimi-k3"
+        )
+        assert _lookup_model_pricing("google/gemini-3.6-flash")["completion"] == 7.50
+
+    def test_current_matches_unchanged_by_rewrite(self):
+        # Every table key resolves to itself (regression pin for the rewrite).
+        for key, prices in MODEL_PRICING_PER_1M.items():
+            assert _lookup_model_pricing(key) is prices, key
 
     @pytest.mark.parametrize(
         ("model", "prompt_rate", "completion_rate"),
@@ -157,6 +195,11 @@ class TestFlexTierPricing:
         standard = _usage("gpt-5.4").estimated_cost_usd
         flex = _usage("gpt-5.4", tier="flex").estimated_cost_usd
         assert flex == pytest.approx(standard * FLEX_TIER_MULTIPLIER)
+
+    def test_gemini_36_flex_halves_published_rates(self):
+        assert _usage(
+            "gemini-3.6-flash", tier="flex"
+        ).estimated_cost_usd == pytest.approx((1.50 + 7.50) * FLEX_TIER_MULTIPLIER)
 
     def test_fallback_to_standard_prices_full(self):
         # A flex-configured run whose call fell back reports its real tier

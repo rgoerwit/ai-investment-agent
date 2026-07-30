@@ -102,6 +102,154 @@ class TestResolveCompanyName:
         assert "Linklogis" in result.name
 
     @pytest.mark.asyncio
+    async def test_yfinance_profile_registers_run_scoped_issuer_website(self):
+        from src.runtime_services import (
+            RuntimeServices,
+            get_current_issuer_hosts,
+            use_runtime_services,
+        )
+        from src.tooling.inspection_service import InspectionService
+        from src.tooling.runtime import ToolExecutionService
+
+        services = RuntimeServices(
+            tool_service=ToolExecutionService(),
+            inspection_service=InspectionService(),
+        )
+        with (
+            use_runtime_services(services),
+            patch(
+                "src.ticker_utils._try_yfinance",
+                new_callable=AsyncMock,
+                return_value=(
+                    "Linklogis Inc.",
+                    "https://www.linklogis.com/investors",
+                ),
+            ),
+        ):
+            result = await resolve_company_name("2154.HK")
+            hosts = get_current_issuer_hosts()
+
+        assert result.website == "https://www.linklogis.com/investors"
+        assert hosts == ("linklogis.com",)
+
+    @pytest.mark.asyncio
+    async def test_yahooquery_profile_registers_run_scoped_issuer_website(self):
+        from src.runtime_services import (
+            RuntimeServices,
+            get_current_issuer_hosts,
+            use_runtime_services,
+        )
+        from src.tooling.inspection_service import InspectionService
+        from src.tooling.runtime import ToolExecutionService
+
+        services = RuntimeServices(
+            tool_service=ToolExecutionService(),
+            inspection_service=InspectionService(),
+        )
+        with (
+            use_runtime_services(services),
+            patch(
+                "src.ticker_utils._try_yfinance",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "src.ticker_utils._try_yahooquery",
+                new_callable=AsyncMock,
+                return_value=("Linklogis Inc.", "https://www.linklogis.com/investors"),
+            ),
+        ):
+            result = await resolve_company_name("2154.HK")
+            hosts = get_current_issuer_hosts()
+
+        assert result.source == "yahooquery"
+        assert result.website == "https://www.linklogis.com/investors"
+        assert hosts == ("linklogis.com",)
+
+    @pytest.mark.asyncio
+    async def test_fmp_profile_registers_run_scoped_issuer_website(self):
+        from src.runtime_services import (
+            RuntimeServices,
+            get_current_issuer_hosts,
+            use_runtime_services,
+        )
+        from src.tooling.inspection_service import InspectionService
+        from src.tooling.runtime import ToolExecutionService
+
+        services = RuntimeServices(
+            tool_service=ToolExecutionService(),
+            inspection_service=InspectionService(),
+        )
+        with (
+            use_runtime_services(services),
+            patch(
+                "src.ticker_utils._try_yfinance",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "src.ticker_utils._try_yahooquery",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "src.ticker_utils._try_fmp",
+                new_callable=AsyncMock,
+                return_value=("Linklogis Inc.", "https://www.linklogis.com/investors"),
+            ),
+        ):
+            result = await resolve_company_name("2154.HK")
+            hosts = get_current_issuer_hosts()
+
+        assert result.source == "fmp"
+        assert result.website == "https://www.linklogis.com/investors"
+        assert hosts == ("linklogis.com",)
+
+    @pytest.mark.asyncio
+    async def test_eodhd_profile_registers_run_scoped_issuer_website(self):
+        from src.runtime_services import (
+            RuntimeServices,
+            get_current_issuer_hosts,
+            use_runtime_services,
+        )
+        from src.tooling.inspection_service import InspectionService
+        from src.tooling.runtime import ToolExecutionService
+
+        services = RuntimeServices(
+            tool_service=ToolExecutionService(),
+            inspection_service=InspectionService(),
+        )
+        with (
+            use_runtime_services(services),
+            patch(
+                "src.ticker_utils._try_yfinance",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "src.ticker_utils._try_yahooquery",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "src.ticker_utils._try_fmp",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "src.ticker_utils._try_eodhd",
+                new_callable=AsyncMock,
+                return_value=("Linklogis Inc.", "https://www.linklogis.com/investors"),
+            ),
+        ):
+            result = await resolve_company_name("2154.HK")
+            hosts = get_current_issuer_hosts()
+
+        assert result.source == "eodhd"
+        assert result.website == "https://www.linklogis.com/investors"
+        assert hosts == ("linklogis.com",)
+
+    @pytest.mark.asyncio
     async def test_yfinance_fails_yahooquery_resolves(self):
         """yfinance returns None, yahooquery succeeds."""
         with (
@@ -420,7 +568,13 @@ class TestFMPGetCompanyName:
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.json = AsyncMock(
-            return_value=[{"companyName": "Linklogis Inc.", "symbol": "2154.HK"}]
+            return_value=[
+                {
+                    "companyName": "Linklogis Inc.",
+                    "symbol": "2154.HK",
+                    "website": "https://www.linklogis.com",
+                }
+            ]
         )
 
         mock_response_cm = AsyncMock()
@@ -435,7 +589,7 @@ class TestFMPGetCompanyName:
         with patch("aiohttp.ClientSession", return_value=mock_session):
             result = await fetcher.get_company_name("2154.HK")
 
-        assert result == "Linklogis Inc."
+        assert result == ("Linklogis Inc.", "https://www.linklogis.com")
 
     @pytest.mark.asyncio
     async def test_fmp_get_company_name_empty_response(self):
@@ -487,7 +641,11 @@ class TestEODHDGetCompanyName:
         mock_response = MagicMock()
         mock_response.status = 200
         mock_response.json = AsyncMock(
-            return_value={"Name": "Linklogis Inc.", "Code": "2154"}
+            return_value={
+                "Name": "Linklogis Inc.",
+                "Code": "2154",
+                "WebURL": "https://www.linklogis.com",
+            }
         )
 
         mock_response_cm = AsyncMock()
@@ -502,7 +660,7 @@ class TestEODHDGetCompanyName:
         with patch("aiohttp.ClientSession", return_value=mock_session):
             result = await fetcher.get_company_name("2154.HK")
 
-        assert result == "Linklogis Inc."
+        assert result == ("Linklogis Inc.", "https://www.linklogis.com")
 
     @pytest.mark.asyncio
     async def test_eodhd_get_company_name_not_available(self):

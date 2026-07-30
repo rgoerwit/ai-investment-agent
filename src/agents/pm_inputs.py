@@ -10,7 +10,6 @@ DIRECT_PM_INPUT_FIELDS: tuple[str, ...] = (
     "sentiment_report",
     "news_report",
     "fundamentals_report",
-    "foreign_language_report",
     "value_trap_report",
     "investment_plan",
     "apac_regional_report",

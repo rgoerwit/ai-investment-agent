@@ -10,10 +10,25 @@ Tests cover:
 """
 
 import json
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain_core.messages import HumanMessage
+
+from src.agents.analyst_nodes import (
+    _build_retry_invocation_messages,
+    _normalize_structured_output,
+    _should_retry_output,
+)
+from src.agents.management_guidance import (
+    _discover_local_issuer_name,
+    _management_guidance_queries,
+    _preload_management_guidance_evidence,
+)
+from tests.helpers.frozen_regressions import load_frozen_regression
 
 
 class TestForeignLanguageAnalystPrompt:
@@ -80,6 +95,788 @@ class TestForeignLanguageAnalystPrompt:
         )
 
 
+class TestForeignLanguageGuidanceRetry:
+    def test_missing_guidance_block_triggers_retry(self):
+        assert _should_retry_output(
+            "Native filing review without a structured guidance block.",
+            "foreign_language_analyst",
+        )
+
+    def test_retry_adds_targeted_evidence_correction(self):
+        messages = [HumanMessage(content="Analyze TEST.T")]
+
+        retry_messages = _build_retry_invocation_messages(
+            messages,
+            "foreign_language_analyst",
+            "No guidance block",
+        )
+
+        assert len(retry_messages) == 2
+        assert "MANAGEMENT_GUIDANCE" in retry_messages[-1].content
+        assert "LATEST_RESULTS" in retry_messages[-1].content
+        assert "SEARCHES_COMPLETED" in retry_messages[-1].content
+
+    def test_valid_guidance_without_latest_results_triggers_retry(self):
+        content = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+SEARCHES_COMPLETED: latest results release
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+
+        assert _should_retry_output(content, "foreign_language_analyst")
+
+    def test_valid_guidance_and_latest_results_do_not_trigger_retry(self):
+        content = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+SEARCHES_COMPLETED: latest results release
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+### --- END MANAGEMENT_GUIDANCE ---
+### --- START LATEST_RESULTS ---
+LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND
+LATEST_RESULTS_PERIOD: N/A
+LATEST_RESULTS_PERIOD_END: N/A
+LATEST_RESULTS_PRIOR_PERIOD: N/A
+LATEST_RESULTS_PRIOR_PERIOD_END: N/A
+LATEST_RESULTS_PERIOD_MONTHS: N/A
+LATEST_RESULTS_CURRENCY: N/A
+LATEST_RESULTS_REPORTING_UNIT: N/A
+LATEST_RESULTS_REVENUE: N/A
+LATEST_RESULTS_PRIOR_REVENUE: N/A
+LATEST_RESULTS_EARNINGS: N/A
+LATEST_RESULTS_PRIOR_EARNINGS: N/A
+LATEST_RESULTS_EARNINGS_SCOPE: N/A
+LATEST_RESULTS_SOURCE_URL: N/A
+### --- END LATEST_RESULTS ---
+"""
+
+        assert not _should_retry_output(content, "foreign_language_analyst")
+
+    def test_incomplete_latest_results_contract_triggers_retry(self):
+        content = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+SEARCHES_COMPLETED: latest results release
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+### --- END MANAGEMENT_GUIDANCE ---
+### --- START LATEST_RESULTS ---
+LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND
+### --- END LATEST_RESULTS ---
+"""
+
+        assert _should_retry_output(content, "foreign_language_analyst")
+
+    def test_fundamentals_retry_corrects_dropped_guidance_fields(self):
+        messages = [HumanMessage(content="Analyze TEST.T")]
+        incomplete = (
+            "### --- START DATA_BLOCK ---\n"
+            "RAW_HEALTH_SCORE: 7/12\n"
+            "### --- END DATA_BLOCK ---"
+        )
+
+        retry_messages = _build_retry_invocation_messages(
+            messages,
+            "fundamentals_analyst",
+            incomplete,
+        )
+
+        assert len(retry_messages) == 2
+        assert "GUIDANCE_COVERAGE_STATUS" in retry_messages[-1].content
+        assert "NORMALIZED_EARNINGS_AVAILABLE" in retry_messages[-1].content
+
+    def test_japan_preflight_queries_target_figures_and_tax_bridge(self):
+        queries = dict(
+            _management_guidance_queries(
+                "6745.T",
+                "Hochiki Corporation",
+                as_of=date(2026, 7, 20),
+            )
+        )
+
+        assert queries["earnings_bridge"].startswith("6745 Hochiki Corporation")
+        assert "2027年3月期" in queries["results_package"]
+        assert "決算説明資料" in queries["results_package"]
+        assert "営業利益" in queries["results_package"]
+        assert "当期純利益" in queries["results_package"]
+        assert "決算説明会" in queries["earnings_bridge"]
+        assert "賃上げ促進税制" in queries["earnings_bridge"]
+
+    def test_local_issuer_name_requires_ticker_matched_listing_title(self):
+        payload = """
+<result><title>賃上げ促進税制の一般解説</title></result>
+<result><title>ホーチキ(株)【6745】：決算情報</title></result>
+"""
+
+        assert _discover_local_issuer_name(payload, "6745.T") == "ホーチキ"
+        assert _discover_local_issuer_name(payload, "9999.T") is None
+
+    @pytest.mark.parametrize(
+        ("ticker", "title", "expected"),
+        [
+            ("KTY.WA", "Grupa Kęty S.A. (KTY.WA) - wyniki", "Grupa Kęty S.A."),
+            (
+                "7052.KL",
+                "PADINI: PADINI HOLDINGS BERHAD (7052) | KLSE Screener",
+                "PADINI HOLDINGS BERHAD",
+            ),
+            ("0700.HK", "騰訊控股【0700.HK】業績公告", "騰訊控股"),
+        ],
+    )
+    def test_local_issuer_name_is_script_agnostic(self, ticker, title, expected):
+        payload = f"<result><title>{title}</title></result>"
+
+        assert _discover_local_issuer_name(payload, ticker) == expected
+
+    def test_polish_and_malaysian_queries_use_local_filing_vocabulary(self):
+        polish = dict(
+            _management_guidance_queries(
+                "KTY.WA", "Grupa Kęty S.A.", as_of=date(2026, 7, 20)
+            )
+        )
+        malaysia = dict(
+            _management_guidance_queries(
+                "7052.KL",
+                "Padini Holdings Berhad",
+                as_of=date(2026, 7, 20),
+            )
+        )
+
+        assert "raport okresowy" in polish["results_package"]
+        assert "ulga podatkowa" in polish["earnings_bridge"]
+        assert "laporan tahunan" in malaysia["results_package"]
+        assert "annual report" in malaysia["results_package"]
+        assert "insentif cukai" in malaysia["earnings_bridge"]
+
+    @pytest.mark.asyncio
+    async def test_preflight_records_code_owned_query_outcomes(self):
+        from src.tooling.runtime import ToolResult
+
+        calls = []
+
+        class FakeToolService:
+            async def execute(self, call, runner):
+                calls.append(call)
+                if call.name == "get_official_filings":
+                    return ToolResult(value="EDINET filing payload")
+                query = call.args["search_query"]
+                return ToolResult(value=f"search evidence for {query}")
+
+        with (
+            patch(
+                "src.runtime_services.get_current_tool_service",
+                return_value=FakeToolService(),
+            ),
+            patch("src.agents.management_guidance.logger.info") as log_info,
+        ):
+            evidence = await _preload_management_guidance_evidence("6745.T", "ホーチキ")
+
+        assert len(calls) == 3
+        assert "#### results_package\nSTATUS: COMPLETED" in evidence
+        assert "#### earnings_bridge\nSTATUS: COMPLETED" in evidence
+        assert "#### statutory_filing_api\nSTATUS: COMPLETED" in evidence
+        assert "賃上げ促進税制" in evidence
+        search_calls = [call for call in calls if call.name == "search_foreign_sources"]
+        assert all(
+            "賃上げ促進税制" in call.args["priority_terms"] for call in search_calls
+        )
+        telemetry = next(
+            call
+            for call in log_info.call_args_list
+            if call.args == ("management_guidance_preflight_complete",)
+        )
+        assert telemetry.kwargs["evidence_chars"] > 0
+        assert (
+            telemetry.kwargs["call_statuses"]["results_package"]
+            == "SUCCEEDED/RESULTS_FOUND"
+        )
+
+    @pytest.mark.asyncio
+    async def test_preflight_extracts_registered_official_results_document(self):
+        from src.tooling.runtime import ToolResult
+
+        calls = []
+        official_url = "https://www.jpx.co.jp/listing/results.pdf"
+
+        class FakeToolService:
+            async def execute(self, call, runner):
+                calls.append(call)
+                if call.name == "get_official_document":
+                    return ToolResult(
+                        value=(
+                            f'DOCUMENT_METADATA: {{"source_url": "{official_url}"}}\n'
+                            "Revenue 1,500; net income 405."
+                        )
+                    )
+                if call.name == "get_official_filings":
+                    return ToolResult(value="EDINET filing payload")
+                if "決算説明資料" in call.args["search_query"]:
+                    return ToolResult(
+                        value=f"<result><url>{official_url}</url></result>"
+                    )
+                return ToolResult(value="native bridge evidence")
+
+        with patch(
+            "src.runtime_services.get_current_tool_service",
+            return_value=FakeToolService(),
+        ):
+            evidence = await _preload_management_guidance_evidence("6745.T", "ホーチキ")
+
+        official_call = next(
+            call for call in calls if call.name == "get_official_document"
+        )
+        assert official_call.args["url"] == official_url
+        assert "#### latest_results_document\nSTATUS: COMPLETED" in evidence
+        assert "Revenue 1,500; net income 405." in evidence
+
+    @pytest.mark.asyncio
+    async def test_preflight_descends_bounded_official_child_paths(self):
+        from src.tooling.runtime import ToolResult
+
+        calls = []
+        hub_url = "https://www.jpx.co.jp/investor-relations"
+        child_url = "https://www.jpx.co.jp/results/fy-2026"
+
+        class FakeToolService:
+            async def execute(self, call, runner):
+                calls.append(call)
+                if call.name == "get_official_filings":
+                    return ToolResult(value="EDINET filing payload")
+                if call.name == "get_official_document":
+                    if call.args["url"] == hub_url:
+                        return ToolResult(
+                            value=(
+                                "STATUS: EVIDENCE_FOUND\n"
+                                "DOCUMENT_METADATA: "
+                                f'{{"source_url": "{hub_url}", '
+                                '"candidate_paths": ["/results/fy-2026"]}\n'
+                                "Investor relations index."
+                            )
+                        )
+                    return ToolResult(
+                        value=(
+                            "STATUS: EVIDENCE_FOUND\n"
+                            f'DOCUMENT_METADATA: {{"source_url": "{child_url}"}}\n'
+                            "FY2026 revenue guidance 740 to 780."
+                        )
+                    )
+                if "決算説明資料" in call.args["search_query"]:
+                    return ToolResult(value=f"<result><url>{hub_url}</url></result>")
+                return ToolResult(value="native bridge evidence")
+
+        with patch(
+            "src.runtime_services.get_current_tool_service",
+            return_value=FakeToolService(),
+        ):
+            evidence = await _preload_management_guidance_evidence("6745.T", "ホーチキ")
+
+        official_urls = [
+            call.args["url"] for call in calls if call.name == "get_official_document"
+        ]
+        assert official_urls == [hub_url, child_url]
+        assert "#### official_child_document_1" in evidence
+        assert "FY2026 revenue guidance 740 to 780." in evidence
+
+    @pytest.mark.asyncio
+    async def test_preflight_uses_discovered_local_name_for_bridge_query(self):
+        from src.tooling.runtime import ToolResult
+
+        calls = []
+
+        class FakeToolService:
+            async def execute(self, call, runner):
+                calls.append(call)
+                if call.name == "get_official_filings":
+                    return ToolResult(value="EDINET filing payload")
+                if "決算説明資料" in call.args["search_query"]:
+                    return ToolResult(
+                        value=(
+                            "<result><title>ホーチキ(株)【6745】：決算情報"
+                            "</title><url>https://example.com/results</url></result>"
+                        )
+                    )
+                return ToolResult(value="native bridge evidence")
+
+        with patch(
+            "src.runtime_services.get_current_tool_service",
+            return_value=FakeToolService(),
+        ):
+            evidence = await _preload_management_guidance_evidence(
+                "6745.T", "Hochiki Corporation", enable_extraction=False
+            )
+
+        bridge_call = next(
+            call
+            for call in calls
+            if call.name == "search_foreign_sources"
+            and "決算説明会" in call.args["search_query"]
+        )
+        assert bridge_call.args["search_query"].startswith("6745 ホーチキ ")
+        assert "LOCAL_ISSUER_NAME: ホーチキ" in evidence
+
+    def test_normalizer_overwrites_self_attested_search_coverage(self):
+        content = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_DATE: 2026-05-08
+SOURCE_URL: https://finance.logmi.jp/articles/384869
+SEARCHES_COMPLETED: everything imaginable
+OPERATING_PROFIT_GUIDANCE: JPY 12.3 billion, up from JPY 12.066 billion
+NET_INCOME_GUIDANCE: JPY 9.0 billion, down from JPY 9.377 billion
+OPERATING_VS_NET_DIRECTION: OP_UP_NET_DOWN
+MATERIAL_NONOPERATING_DRIVER: YES
+DRIVER_TYPE: TAX_CREDIT
+DRIVER_PERSISTENCE: EXPIRING
+EARNINGS_BASELINE_STATUS: DURABLE
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = """#### results_package
+STATUS: COMPLETED
+#### earnings_bridge
+STATUS: COMPLETED
+#### statutory_filing_api
+STATUS: FAILED
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "6745.T",
+            management_guidance_evidence=evidence,
+        )
+
+        assert (
+            "SEARCHES_COMPLETED: results_package=SUCCEEDED/RESULTS_FOUND" in normalized
+        )
+        assert "statutory_filing_api=FAILED" in normalized
+        assert "SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT" in normalized
+        assert "EARNINGS_BASELINE_STATUS: TEMPORARILY_BOOSTED" in normalized
+        assert "GUIDANCE_BRIDGE_STATUS: RECONCILED" in normalized
+
+    def test_normalizer_does_not_treat_a_bare_results_url_as_guidance(self):
+        content = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_DATE: 2026-05-08
+SOURCE_URL: https://example.com/results-release
+SEARCHES_COMPLETED: everything imaginable
+OPERATING_PROFIT_GUIDANCE: Not explicitly provided in summary
+NET_INCOME_GUIDANCE: N/A
+OPERATING_VS_NET_DIRECTION: UNKNOWN
+MATERIAL_NONOPERATING_DRIVER: NO
+DRIVER_TYPE: NONE
+EARNINGS_BASELINE_STATUS: DURABLE
+NORMALIZED_EARNINGS_AVAILABLE: NO
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = """#### results_package
+STATUS: COMPLETED
+#### earnings_bridge
+STATUS: COMPLETED
+#### statutory_filing_api
+STATUS: COMPLETED
+#### guidance_extract
+STATUS: INSUFFICIENT_DATA
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "6745.T",
+            management_guidance_evidence=evidence,
+        )
+
+        assert "MATERIAL_NONOPERATING_DRIVER: UNKNOWN" in normalized
+        assert "DRIVER_TYPE: UNKNOWN" in normalized
+        assert "EARNINGS_BASELINE_STATUS: UNKNOWN" in normalized
+        assert "GUIDANCE_BRIDGE_STATUS: NOT_APPLICABLE" in normalized
+
+    def test_not_disclosed_requires_complete_source_coverage(self):
+        content = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+SOURCE_TYPE: N/A
+SOURCE_URL: N/A
+OPERATING_PROFIT_GUIDANCE: N/A
+NET_INCOME_GUIDANCE: N/A
+OPERATING_VS_NET_DIRECTION: UNKNOWN
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+DRIVER_TYPE: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = """#### results_package
+STATUS: COMPLETED
+EXECUTION_STATUS: SUCCEEDED
+EVIDENCE_STATUS: RESULTS_FOUND
+#### earnings_bridge
+STATUS: INSUFFICIENT_DATA
+EXECUTION_STATUS: SUCCEEDED
+EVIDENCE_STATUS: NO_RESULTS
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "TEST.T",
+            management_guidance_evidence=evidence,
+        )
+
+        assert "COVERAGE_STATUS: UNRESOLVED_AFTER_TARGETED_SEARCH" in normalized
+
+    def test_incomplete_causal_guidance_keeps_bridge_unresolved(self):
+        content = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_DATE: 2026-05-08
+SOURCE_URL: https://example.com/results-release
+OPERATING_PROFIT_GUIDANCE: JPY 12.3 billion, up year over year
+NET_INCOME_GUIDANCE: N/A
+OPERATING_VS_NET_DIRECTION: OP_UP_NET_DOWN
+MATERIAL_NONOPERATING_DRIVER: YES
+DRIVER_TYPE: TAX_CREDIT
+DRIVER_PERSISTENCE: EXPIRING
+EARNINGS_BASELINE_STATUS: TEMPORARILY_BOOSTED
+NORMALIZED_EARNINGS_AVAILABLE: NO
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = """#### results_package
+STATUS: COMPLETED
+#### earnings_bridge
+STATUS: COMPLETED
+#### statutory_filing_api
+STATUS: COMPLETED
+#### guidance_extract
+STATUS: INSUFFICIENT_DATA
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "6745.T",
+            management_guidance_evidence=evidence,
+        )
+
+        assert "EARNINGS_BASELINE_STATUS: TEMPORARILY_BOOSTED" in normalized
+        assert "GUIDANCE_BRIDGE_STATUS: UNRESOLVED" in normalized
+
+    def test_missing_guidance_block_is_repaired_without_erasing_useful_report(self):
+        content = (
+            "### FOREIGN SOURCE FINDINGS\n"
+            "The annual report confirms revenue, segment profit, and ownership "
+            "details from local-language sources. Cash-flow and governance findings "
+            "are included with citations. This report remains useful even though "
+            "forward guidance could not be resolved.\n"
+        )
+        evidence = """#### results_package
+STATUS: COMPLETED
+#### earnings_bridge
+STATUS: INSUFFICIENT_DATA
+#### statutory_filing_api
+STATUS: FAILED
+#### guidance_extract
+STATUS: INSUFFICIENT_DATA
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "KTY.WA",
+            management_guidance_evidence=evidence,
+        )
+
+        assert content.strip() in normalized
+        assert "COVERAGE_STATUS: UNRESOLVED_AFTER_TARGETED_SEARCH" in normalized
+        assert "EARNINGS_BASELINE_STATUS: UNKNOWN" in normalized
+        assert _should_retry_output(normalized, "foreign_language_analyst")
+
+    def test_all_failed_preflight_preserves_report_but_marks_search_failed(self):
+        content = (
+            "### FOREIGN SOURCE FINDINGS\n"
+            "A substantive local-source review found segment and ownership data, "
+            "but every code-owned guidance retrieval call failed before evidence "
+            "could be returned. Existing cited findings should remain available "
+            "to downstream analysts rather than being discarded wholesale.\n"
+        )
+        evidence = """#### results_package
+STATUS: FAILED
+#### earnings_bridge
+STATUS: FAILED
+#### statutory_filing_api
+STATUS: FAILED
+#### guidance_extract
+STATUS: SKIPPED
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "7052.KL",
+            management_guidance_evidence=evidence,
+        )
+
+        assert content.strip() in normalized
+        assert "COVERAGE_STATUS: SEARCH_FAILED" in normalized
+        assert "SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT" in normalized
+        assert _should_retry_output(normalized, "foreign_language_analyst")
+
+    def test_empty_output_is_not_converted_into_a_success(self):
+        evidence = """#### results_package
+STATUS: COMPLETED
+#### earnings_bridge
+STATUS: COMPLETED
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            "",
+            "6745.T",
+            management_guidance_evidence=evidence,
+        )
+
+        assert normalized == ""
+        assert _should_retry_output(normalized, "foreign_language_analyst")
+
+    def test_guidance_enums_are_canonicalized_before_validation(self):
+        content = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: found
+SOURCE_TYPE: transcript
+SOURCE_DATE: 2026-05-08
+SOURCE_URL: https://finance.logmi.jp/articles/384869
+OPERATING_PROFIT_GUIDANCE: JPY 12.3 billion
+NET_INCOME_GUIDANCE: JPY 9.0 billion
+OPERATING_VS_NET_DIRECTION: op_up_net_down
+MATERIAL_NONOPERATING_DRIVER: yes
+DRIVER_TYPE: tax_credit
+DRIVER_PERSISTENCE: expiring
+EARNINGS_BASELINE_STATUS: durable
+NORMALIZED_EARNINGS_AVAILABLE: no
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = """#### results_package
+STATUS: COMPLETED
+#### earnings_bridge
+STATUS: COMPLETED
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "6745.T",
+            management_guidance_evidence=evidence,
+        )
+
+        assert "DRIVER_TYPE: TAX_CREDIT" in normalized
+        assert "EARNINGS_BASELINE_STATUS: TEMPORARILY_BOOSTED" in normalized
+        assert _should_retry_output(normalized, "foreign_language_analyst")
+
+    def test_broker_projection_is_labeled_third_party(self):
+        regression = load_frozen_regression("6782_TW_regression.json")
+        guidance = regression["guidance_evidence"]
+        source_url = regression["capacity_evidence"]["source_url"]
+        content = f"""### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_TYPE: {guidance["source_type"]}
+SOURCE_DATE: 2026-04-16
+SOURCE_URL: {source_url}
+NET_INCOME_GUIDANCE: EPS projection, 14% YoY
+NET_INCOME_YOY: {guidance["projected_eps_growth"]}
+MANAGEMENT_IDENTIFIED: {guidance["management_identified"]}
+OPERATING_VS_NET_DIRECTION: UNKNOWN
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+DRIVER_TYPE: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+NORMALIZED_EARNINGS_AVAILABLE: YES
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = f"""#### results_package
+STATUS: COMPLETED
+<result><url>{source_url}</url><summary>Yuanta Securities research report</summary></result>
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            regression["ticker"],
+            management_guidance_evidence=evidence,
+        )
+
+        assert "SOURCE_AUTHORITY: THIRD_PARTY" in normalized
+
+    def test_company_results_guidance_search_identity_does_not_mint_primary(self):
+        source_url = "https://issuer.example/investors/results-2026"
+        content = f"""### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_TYPE: RESULTS_RELEASE
+SOURCE_URL: {source_url}
+MANAGEMENT_IDENTIFIED: YES
+OPERATING_PROFIT_GUIDANCE: TWD 1.2 billion
+NET_INCOME_GUIDANCE: TWD 900 million
+OPERATING_VS_NET_DIRECTION: SAME_DIRECTION
+MATERIAL_NONOPERATING_DRIVER: NO
+DRIVER_TYPE: NONE
+EARNINGS_BASELINE_STATUS: DURABLE
+NORMALIZED_EARNINGS_AVAILABLE: YES
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = f"""#### results_package
+STATUS: COMPLETED
+<result><url>{source_url}</url><summary>Issuer FY2026 results release: operating
+profit guidance TWD 1.2 billion; net income guidance TWD 900 million.</summary></result>
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "TEST.TW",
+            management_guidance_evidence=evidence,
+        )
+
+        assert "SOURCE_AUTHORITY: UNKNOWN" in normalized
+
+    def test_search_only_official_registry_guidance_is_not_primary(self):
+        source_url = "https://www.twse.com.tw/investors/results-2026"
+        content = f"""### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_TYPE: RESULTS_RELEASE
+SOURCE_URL: {source_url}
+MANAGEMENT_IDENTIFIED: YES
+OPERATING_PROFIT_GUIDANCE: TWD 1.2 billion
+NET_INCOME_GUIDANCE: TWD 900 million
+OPERATING_VS_NET_DIRECTION: SAME_DIRECTION
+MATERIAL_NONOPERATING_DRIVER: NO
+DRIVER_TYPE: NONE
+EARNINGS_BASELINE_STATUS: DURABLE
+NORMALIZED_EARNINGS_AVAILABLE: YES
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = f"""#### results_package
+STATUS: COMPLETED
+<result><url>{source_url}</url><summary>Issuer FY2026 results release: operating
+profit guidance TWD 1.2 billion; net income guidance TWD 900 million.</summary></result>
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "TEST.TW",
+            management_guidance_evidence=evidence,
+        )
+
+        assert "SOURCE_AUTHORITY: UNKNOWN" in normalized
+
+    def test_fetched_official_guidance_record_is_primary(self):
+        source_url = "https://www.twse.com.tw/investors/results-2026"
+        content = f"""### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_TYPE: RESULTS_RELEASE
+SOURCE_URL: {source_url}
+MANAGEMENT_IDENTIFIED: YES
+OPERATING_PROFIT_GUIDANCE: TWD 1.2 billion
+NET_INCOME_GUIDANCE: TWD 900 million
+OPERATING_VS_NET_DIRECTION: SAME_DIRECTION
+MATERIAL_NONOPERATING_DRIVER: NO
+DRIVER_TYPE: NONE
+EARNINGS_BASELINE_STATUS: DURABLE
+NORMALIZED_EARNINGS_AVAILABLE: YES
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        record = SimpleNamespace(
+            sequence=1,
+            agent_key="foreign_language_analyst",
+            tool_name="get_official_document",
+            content=(
+                "STATUS: EVIDENCE_FOUND\n"
+                f'DOCUMENT_METADATA: {{"source_url": "{source_url}"}}\n'
+                "Operating profit guidance TWD 1.2 billion; "
+                "net income guidance TWD 900 million."
+            ),
+            content_sha256="abcdef1234567890",
+            requested_urls=(source_url,),
+            urls=(source_url,),
+            blocked=False,
+            evidence_status="EVIDENCE_FOUND",
+        )
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "TEST.TW",
+            management_guidance_evidence="STATUS: COMPLETED",
+            evidence_messages=[],
+        )
+        assert "SOURCE_AUTHORITY: UNKNOWN" in normalized
+
+        from src.agents.management_guidance import normalize_management_guidance_output
+
+        normalized = normalize_management_guidance_output(
+            content,
+            "STATUS: COMPLETED",
+            [record],
+        )
+        assert "SOURCE_AUTHORITY: PRIMARY" in normalized
+
+    def test_guidance_values_cannot_be_split_across_records(self):
+        source_url = "https://www.twse.com.tw/investors/results-2026"
+        content = f"""### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_TYPE: RESULTS_RELEASE
+SOURCE_URL: {source_url}
+MANAGEMENT_IDENTIFIED: YES
+OPERATING_PROFIT_GUIDANCE: TWD 1.2 billion
+NET_INCOME_GUIDANCE: TWD 900 million
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        bound_record = SimpleNamespace(
+            sequence=1,
+            tool_name="get_official_document",
+            content="Operating profit guidance TWD 1.2 billion.",
+            content_sha256="abcdef1234567890",
+            requested_urls=(source_url,),
+            urls=(source_url,),
+            blocked=False,
+            evidence_status="EVIDENCE_FOUND",
+        )
+        unrelated_record = SimpleNamespace(
+            sequence=2,
+            tool_name="get_official_document",
+            content="Net income guidance TWD 900 million.",
+            content_sha256="fedcba0987654321",
+            requested_urls=("https://www.twse.com.tw/other",),
+            urls=("https://www.twse.com.tw/other",),
+            blocked=False,
+            evidence_status="EVIDENCE_FOUND",
+        )
+
+        from src.agents.management_guidance import normalize_management_guidance_output
+
+        normalized = normalize_management_guidance_output(
+            content,
+            "STATUS: COMPLETED",
+            [bound_record, unrelated_record],
+        )
+        assert "SOURCE_AUTHORITY: UNKNOWN" in normalized
+
+    def test_official_guidance_url_without_claimed_values_is_not_primary(self):
+        source_url = "https://www.twse.com.tw/investors/results-2026"
+        content = f"""### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_TYPE: RESULTS_RELEASE
+SOURCE_URL: {source_url}
+MANAGEMENT_IDENTIFIED: YES
+OPERATING_PROFIT_GUIDANCE: TWD 1.2 billion
+NET_INCOME_GUIDANCE: TWD 900 million
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = f"""#### results_package
+STATUS: COMPLETED
+<result><url>{source_url}</url><summary>Issuer FY2026 results release.</summary></result>
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "TEST.TW",
+            management_guidance_evidence=evidence,
+        )
+
+        assert "SOURCE_AUTHORITY: UNKNOWN" in normalized
+
+
 class TestSearchForeignSourcesTool:
     """Tests for the search_foreign_sources tool."""
 
@@ -88,11 +885,13 @@ class TestSearchForeignSourcesTool:
         from src.tools.registry import toolkit
 
         foreign_tools = toolkit.get_foreign_language_tools()
-        assert len(foreign_tools) == 2
+        assert len(foreign_tools) == 4
 
         tool_names = [t.name for t in foreign_tools]
         assert "search_foreign_sources" in tool_names
+        assert "extract_guidance_sources" in tool_names
         assert "get_official_filings" in tool_names
+        assert "get_official_document" in tool_names
 
     def test_tool_in_all_tools(self):
         """Verify tool is included in get_all_tools."""
@@ -111,6 +910,88 @@ class TestSearchForeignSourcesTool:
 
         assert "foreign" in tool.description.lower()
         assert "source" in tool.description.lower()
+
+    @pytest.mark.asyncio
+    async def test_guidance_extraction_keeps_query_relevant_tax_passage(self):
+        from unittest.mock import AsyncMock
+
+        from src.tools.research import extract_guidance_sources
+
+        raw = {
+            "results": [
+                {
+                    "url": "https://finance.logmi.jp/articles/384869",
+                    "raw_content": "X" * 8000
+                    + "賃上げ促進税制による税額控除は今期適用されない。"
+                    + "Y" * 8000,
+                }
+            ]
+        }
+        with patch(
+            "src.tavily_utils.extract_tavily_inspected",
+            new=AsyncMock(return_value=raw),
+        ):
+            output = await extract_guidance_sources.ainvoke(
+                {
+                    "urls": [
+                        "file:///etc/passwd",
+                        "https://finance.logmi.jp/articles/384869",
+                    ],
+                    "query": "ホーチキ 賃上げ促進税制 税額控除",
+                }
+            )
+
+        assert "file:///etc/passwd" not in output
+        assert "https://finance.logmi.jp/articles/384869" in output
+        assert "賃上げ促進税制" in output
+        assert output.rstrip().endswith("</search_results>")
+
+    @pytest.mark.parametrize(
+        ("priority_term", "passage"),
+        [
+            ("ulga podatkowa", "Jednorazowa ulga podatkowa podwyższyła zysk netto."),
+            ("insentif cukai", "Insentif cukai tahun lalu tidak lagi terpakai."),
+        ],
+    )
+    def test_locale_priority_terms_preserve_late_tax_passages(
+        self, priority_term, passage
+    ):
+        from src.tools.shared import _format_and_truncate_tavily_result
+
+        formatted = _format_and_truncate_tavily_result(
+            [
+                {
+                    "title": "Results briefing",
+                    "url": "https://example.com/results",
+                    "content": "A" * 8000 + passage + "B" * 8000,
+                }
+            ],
+            max_chars=1200,
+            query="company results guidance",
+            priority_terms=[priority_term],
+        )
+
+        assert priority_term.casefold() in formatted.casefold()
+
+    def test_generic_formatter_has_no_tax_specific_bias(self):
+        from src.tools.shared import _format_and_truncate_tavily_result
+
+        formatted = _format_and_truncate_tavily_result(
+            [
+                {
+                    "title": "Market report",
+                    "url": "https://example.com/market",
+                    "content": (
+                        "tax credit " + "A" * 8000 + "TARGET_MARKET_SIGNAL" + "B" * 8000
+                    ),
+                }
+            ],
+            max_chars=1200,
+            query="TARGET_MARKET_SIGNAL",
+        )
+
+        assert "TARGET_MARKET_SIGNAL" in formatted
+        assert "tax credit" not in formatted
 
     @pytest.mark.asyncio
     async def test_tool_handles_no_tavily(self):
@@ -183,7 +1064,7 @@ class TestSearchForeignSourcesTool:
             "Text after the final </search_results> closer trips the "
             "delimiter-breakout heuristic. Move metadata/footers BEFORE "
             "the wrapper. Trailing text was: "
-            f"{result[last_closer.end():]!r}"
+            f"{result[last_closer.end() :]!r}"
         )
 
     @pytest.mark.asyncio
@@ -612,6 +1493,27 @@ class TestComputeDataConflicts:
         assert "2025-12-31" in result
         assert "LATEST_QUARTER_DATE must use the reconciled newer value" in result
 
+    def test_statement_mrq_period_lag_is_explicit(self):
+        """Newer metadata must not make an older statement MRQ read as latest."""
+        from src.agents import compute_data_conflicts
+
+        junior = json.dumps(
+            {
+                "latest_quarter_date": "2025-12-31",
+                "_latest_quarter_date_source": "yfinance_quarterly",
+                "_data_quality_notes": [
+                    "Newer quarter metadata exists for 2026-03-31, but "
+                    "statement-derived MRQ metrics remain aligned to 2025-12-31."
+                ],
+            }
+        )
+
+        result = compute_data_conflicts(junior, "")
+
+        assert "MRQ_PERIOD_LAG" in result
+        assert "period-bound trailing indicators" in result
+        assert "not the latest reported quarter" in result
+
 
 class TestLocalAnalystCoverageConflict:
     """Tests for conflict #5: local analyst coverage detection."""
@@ -635,7 +1537,7 @@ class TestLocalAnalystCoverageConflict:
         from src.agents import compute_data_conflicts
 
         junior = '{"numberOfAnalystOpinions": 5}'
-        fla = "**LOCAL ANALYST COVERAGE**\n" "- Estimated Local Analysts: HIGH\n"
+        fla = "**LOCAL ANALYST COVERAGE**\n- Estimated Local Analysts: HIGH\n"
         result = compute_data_conflicts(junior, fla)
         assert "LOCAL_ANALYST_COVERAGE" in result
         assert "HIGH" in result
@@ -645,7 +1547,7 @@ class TestLocalAnalystCoverageConflict:
         from src.agents import compute_data_conflicts
 
         junior = '{"numberOfAnalystOpinions": 2}'
-        fla = "**LOCAL ANALYST COVERAGE**\n" "- Estimated Local Analysts: MODERATE\n"
+        fla = "**LOCAL ANALYST COVERAGE**\n- Estimated Local Analysts: MODERATE\n"
         result = compute_data_conflicts(junior, fla)
         assert "LOCAL_ANALYST_COVERAGE" in result
         assert "MODERATE" in result
@@ -655,7 +1557,7 @@ class TestLocalAnalystCoverageConflict:
         from src.agents import compute_data_conflicts
 
         junior = '{"numberOfAnalystOpinions": 3}'
-        fla = "**LOCAL ANALYST COVERAGE**\n" "- Estimated Local Analysts: UNKNOWN\n"
+        fla = "**LOCAL ANALYST COVERAGE**\n- Estimated Local Analysts: UNKNOWN\n"
         result = compute_data_conflicts(junior, fla)
         assert "LOCAL_ANALYST_COVERAGE" not in result
 
@@ -664,7 +1566,7 @@ class TestLocalAnalystCoverageConflict:
         from src.agents import compute_data_conflicts
 
         junior = '{"numberOfAnalystOpinions": 3}'
-        fla = "**LOCAL ANALYST COVERAGE**\n" "- Estimated Local Analysts: LOW\n"
+        fla = "**LOCAL ANALYST COVERAGE**\n- Estimated Local Analysts: LOW\n"
         result = compute_data_conflicts(junior, fla)
         assert "LOCAL_ANALYST_COVERAGE" not in result
 
@@ -673,7 +1575,7 @@ class TestLocalAnalystCoverageConflict:
         from src.agents import compute_data_conflicts
 
         junior = '{"numberOfAnalystOpinions": 3}'
-        fla = "**FILING CASH FLOW**\n" "- Operating Cash Flow (Filing): ¥10.91B\n"
+        fla = "**FILING CASH FLOW**\n- Operating Cash Flow (Filing): ¥10.91B\n"
         result = compute_data_conflicts(junior, fla)
         assert "LOCAL_ANALYST_COVERAGE" not in result
 
@@ -682,7 +1584,7 @@ class TestLocalAnalystCoverageConflict:
         from src.agents import compute_data_conflicts
 
         junior = '{"numberOfAnalystOpinions": 5}'
-        fla = "**LOCAL ANALYST COVERAGE**\n" "- Estimated Local Analysts: 2\n"
+        fla = "**LOCAL ANALYST COVERAGE**\n- Estimated Local Analysts: 2\n"
         result = compute_data_conflicts(junior, fla)
         assert "LOCAL_ANALYST_COVERAGE" not in result
 

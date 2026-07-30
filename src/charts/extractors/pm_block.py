@@ -41,6 +41,8 @@ class PMBlockData:
 
     # Valuation context
     valuation_context: str | None = None  # STANDARD, CONTEXTUAL_PASS, N_A
+    decision_facts: tuple[str, ...] = ()
+    decision_gates: tuple[str, ...] = ()
 
     def should_show_targets(self) -> bool:
         """Determine if 'Our Target' range should be shown on football field."""
@@ -84,6 +86,13 @@ def _extract_bool(pattern: str, text: str, true_value: str = "YES") -> bool:
     if match:
         return match.group(1).upper() == true_value.upper()
     return True  # Default to True (show charts) if not specified
+
+
+def _extract_tokens(label: str, text: str) -> tuple[str, ...]:
+    value = _extract_str(rf"{re.escape(label)}:\s*([^\n]+)", text)
+    if not value or value.upper() == "NONE":
+        return ()
+    return tuple(token.strip() for token in re.split(r"[,;]", value) if token.strip())
 
 
 def extract_pm_block(pm_output: str) -> PMBlockData:
@@ -164,6 +173,8 @@ def extract_pm_block(pm_output: str) -> PMBlockData:
         valuation_discount=valuation_discount,
         position_size=position_size,
         valuation_context=_extract_str(r"VALUATION_CONTEXT:\s*(\S+)", pm_block),
+        decision_facts=_extract_tokens("DECISION_FACTS", pm_block),
+        decision_gates=_extract_tokens("DECISION_GATES", pm_block),
     )
 
     logger.debug(

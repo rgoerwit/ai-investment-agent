@@ -20,6 +20,7 @@ class ExchangeInfo:
     currency: str
     numeric_symbol_width: int | None = None
     ibkr_numeric_symbol_mode: IBKRNumericSymbolMode = "same_as_yahoo"
+    official_document_hosts: tuple[str, ...] = ()
 
 
 EXCHANGES_BY_SUFFIX: dict[str, ExchangeInfo] = {
@@ -32,8 +33,22 @@ EXCHANGES_BY_SUFFIX: dict[str, ExchangeInfo] = {
     ".LS": ExchangeInfo(".LS", "Euronext Lisbon", "Portugal", "BVLP", "EUR"),
     ".MI": ExchangeInfo(".MI", "Borsa Italiana", "Italy", "BVME", "EUR"),
     ".MC": ExchangeInfo(".MC", "Bolsa de Madrid", "Spain", "BM", "EUR"),
-    ".L": ExchangeInfo(".L", "London Stock Exchange", "UK", "LSE", "GBP"),
-    ".T": ExchangeInfo(".T", "Tokyo Stock Exchange", "Japan", "TSEJ", "JPY"),
+    ".L": ExchangeInfo(
+        ".L",
+        "London Stock Exchange",
+        "UK",
+        "LSE",
+        "GBP",
+        official_document_hosts=("companieshouse.gov.uk",),
+    ),
+    ".T": ExchangeInfo(
+        ".T",
+        "Tokyo Stock Exchange",
+        "Japan",
+        "TSEJ",
+        "JPY",
+        official_document_hosts=("jpx.co.jp", "edinet-fsa.go.jp"),
+    ),
     ".HK": ExchangeInfo(
         ".HK",
         "Hong Kong Stock Exchange",
@@ -42,6 +57,7 @@ EXCHANGES_BY_SUFFIX: dict[str, ExchangeInfo] = {
         "HKD",
         numeric_symbol_width=4,
         ibkr_numeric_symbol_mode="strip_leading_zeroes",
+        official_document_hosts=("hkexnews.hk", "hkex.com.hk"),
     ),
     ".SS": ExchangeInfo(".SS", "Shanghai Stock Exchange", "China", "SSE", "CNY"),
     ".SZ": ExchangeInfo(".SZ", "Shenzhen Stock Exchange", "China", "SZSE", "CNY"),
@@ -52,6 +68,7 @@ EXCHANGES_BY_SUFFIX: dict[str, ExchangeInfo] = {
         "KRX",
         "KRW",
         numeric_symbol_width=6,
+        official_document_hosts=("dart.fss.or.kr",),
     ),
     ".KQ": ExchangeInfo(
         ".KQ",
@@ -60,9 +77,24 @@ EXCHANGES_BY_SUFFIX: dict[str, ExchangeInfo] = {
         "KOSDAQ",
         "KRW",
         numeric_symbol_width=6,
+        official_document_hosts=("dart.fss.or.kr",),
     ),
-    ".TW": ExchangeInfo(".TW", "Taiwan Stock Exchange", "Taiwan", "TWSE", "TWD"),
-    ".SI": ExchangeInfo(".SI", "Singapore Exchange", "Singapore", "SGX", "SGD"),
+    ".TW": ExchangeInfo(
+        ".TW",
+        "Taiwan Stock Exchange",
+        "Taiwan",
+        "TWSE",
+        "TWD",
+        official_document_hosts=("twse.com.tw", "tpex.org.tw"),
+    ),
+    ".SI": ExchangeInfo(
+        ".SI",
+        "Singapore Exchange",
+        "Singapore",
+        "SGX",
+        "SGD",
+        official_document_hosts=("sgx.com",),
+    ),
     ".BO": ExchangeInfo(".BO", "Bombay Stock Exchange", "India", "BSE", "INR"),
     ".NS": ExchangeInfo(
         ".NS", "National Stock Exchange of India", "India", "NSE", "INR"
@@ -87,7 +119,14 @@ EXCHANGES_BY_SUFFIX: dict[str, ExchangeInfo] = {
     ".PR": ExchangeInfo(".PR", "Prague Stock Exchange", "Czech Republic", "PSE", "CZK"),
     ".BD": ExchangeInfo(".BD", "Budapest Stock Exchange", "Hungary", "BSE2", "HUF"),
     ".RO": ExchangeInfo(".RO", "Bucharest Stock Exchange", "Romania", "BVB", "RON"),
-    ".TWO": ExchangeInfo(".TWO", "Taipei Exchange", "Taiwan", "TPEX", "TWD"),
+    ".TWO": ExchangeInfo(
+        ".TWO",
+        "Taipei Exchange",
+        "Taiwan",
+        "TPEX",
+        "TWD",
+        official_document_hosts=("twse.com.tw", "tpex.org.tw"),
+    ),
 }
 
 NORMALIZATION_SUFFIX_ALIASES: dict[str, str] = {
@@ -201,6 +240,17 @@ def padded_numeric_suffixes() -> frozenset[str]:
     )
 
 
+def registered_official_document_hosts() -> tuple[str, ...]:
+    """Return the deduplicated official-host registry for supported exchanges."""
+    return tuple(
+        dict.fromkeys(
+            host
+            for info in EXCHANGES_BY_SUFFIX.values()
+            for host in info.official_document_hosts
+        )
+    )
+
+
 def validate_exchange_metadata() -> None:
     canonical_codes = [info.ibkr_code for info in EXCHANGES_BY_SUFFIX.values()]
     if len(canonical_codes) != len(set(canonical_codes)):
@@ -229,6 +279,11 @@ def validate_exchange_metadata() -> None:
             and info.numeric_symbol_width is None
         ):
             raise ValueError(f"IBKR strip mode requires numeric width: {suffix}")
+        for host in info.official_document_hosts:
+            if host != host.lower() or "." not in host or "://" in host or "/" in host:
+                raise ValueError(
+                    f"Malformed official document host for {suffix}: {host}"
+                )
 
     overlap = set(IBKR_EXCHANGE_ALIASES) & set(canonical_codes)
     if overlap:

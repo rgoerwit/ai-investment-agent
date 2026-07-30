@@ -433,6 +433,7 @@ class CompanyNameResult:
     source: str  # Which source resolved it ("yfinance", "yahooquery", "fmp", "eodhd", "unresolved")
     is_resolved: bool  # True if a real name was found (not just ticker echoed back)
     canonical_name: str | None = None  # Raw resolved name, suffixes preserved.
+    website: str | None = None  # Structured profile URL, when supplied with identity.
     # Why canonical_name exists: state and prompts must carry the legal entity identity
     # ("Youngone Holdings Co., Ltd."), not the search-stripped form ("Youngone"). Without
     # this, downstream agents lose the holdco/opco distinction at the writer boundary.
@@ -509,7 +510,7 @@ def _is_valid_company_name(name: str | None, ticker: str) -> bool:
     return True
 
 
-async def _try_yfinance(ticker: str) -> str | None:
+async def _try_yfinance(ticker: str) -> tuple[str, str | None] | None:
     """Attempt company name resolution via yfinance."""
     try:
         import yfinance as yf
@@ -520,32 +521,51 @@ async def _try_yfinance(ticker: str) -> str | None:
         )
         if info:
             name = info.get("longName") or info.get("shortName")
-            return name if isinstance(name, str) else None
+            website = info.get("website")
+            return (
+                (
+                    name,
+                    website if isinstance(website, str) else None,
+                )
+                if isinstance(name, str)
+                else None
+            )
     except (asyncio.TimeoutError, Exception) as e:
         logger.debug("company_name_yfinance_failed", ticker=ticker, error=str(e))
     return None
 
 
-async def _try_yahooquery(ticker: str) -> str | None:
+async def _try_yahooquery(ticker: str) -> tuple[str, str | None] | None:
     """Attempt company name resolution via yahooquery."""
     try:
         from yahooquery import Ticker as YQTicker
 
         result = await run_blocking_call(
             YAHOOQUERY_QUOTE_TYPE_POLICY.with_label(f"yahooquery.quote_type:{ticker}"),
-            lambda: YQTicker(ticker).quote_type,
+            lambda: YQTicker(ticker).get_modules("quoteType assetProfile"),
         )
         if isinstance(result, dict) and ticker in result:
             data = result[ticker]
             if isinstance(data, dict):
-                name = data.get("longName") or data.get("shortName")
-                return name if isinstance(name, str) else None
+                quote_type = data.get("quoteType")
+                name = None
+                if isinstance(quote_type, dict):
+                    name = quote_type.get("longName") or quote_type.get("shortName")
+                if not isinstance(name, str):
+                    return None
+                asset_profile = data.get("assetProfile")
+                website = (
+                    asset_profile.get("website")
+                    if isinstance(asset_profile, dict)
+                    else None
+                )
+                return name, website if isinstance(website, str) else None
     except (asyncio.TimeoutError, Exception) as e:
         logger.debug("company_name_yahooquery_failed", ticker=ticker, error=str(e))
     return None
 
 
-async def _try_fmp(ticker: str) -> str | None:
+async def _try_fmp(ticker: str) -> tuple[str, str | None] | None:
     """Attempt company name resolution via FMP profile endpoint."""
     try:
         from src.data.fmp_fetcher import get_fmp_fetcher
@@ -553,14 +573,13 @@ async def _try_fmp(ticker: str) -> str | None:
         fmp = get_fmp_fetcher()
         if not fmp.is_available():
             return None
-        name = await asyncio.wait_for(fmp.get_company_name(ticker), timeout=5)
-        return name
+        return await asyncio.wait_for(fmp.get_company_name(ticker), timeout=5)
     except (asyncio.TimeoutError, Exception) as e:
         logger.debug("company_name_fmp_failed", ticker=ticker, error=str(e))
     return None
 
 
-async def _try_eodhd(ticker: str) -> str | None:
+async def _try_eodhd(ticker: str) -> tuple[str, str | None] | None:
     """Attempt company name resolution via EODHD General endpoint."""
     try:
         from src.data.eodhd_fetcher import get_eodhd_fetcher
@@ -568,8 +587,7 @@ async def _try_eodhd(ticker: str) -> str | None:
         eodhd = get_eodhd_fetcher()
         if not eodhd.is_available():
             return None
-        name = await asyncio.wait_for(eodhd.get_company_name(ticker), timeout=5)
-        return name
+        return await asyncio.wait_for(eodhd.get_company_name(ticker), timeout=5)
     except (asyncio.TimeoutError, Exception) as e:
         logger.debug("company_name_eodhd_failed", ticker=ticker, error=str(e))
     return None
@@ -629,7 +647,19 @@ async def resolve_company_name(
     for lookup_ticker, lookup_strategy in lookup_candidates:
         for source_name, resolver in sources:
             try:
-                raw_name = await resolver(lookup_ticker)
+                raw_candidate = await resolver(lookup_ticker)
+                if (
+                    isinstance(raw_candidate, tuple)
+                    and len(raw_candidate) == 2
+                    and isinstance(raw_candidate[0], str)
+                ):
+                    raw_name = raw_candidate[0]
+                    website = (
+                        raw_candidate[1] if isinstance(raw_candidate[1], str) else None
+                    )
+                else:
+                    raw_name = raw_candidate
+                    website = None
                 if isinstance(raw_name, str) and _is_valid_company_name(
                     raw_name, lookup_ticker
                 ):
@@ -645,11 +675,19 @@ async def resolve_company_name(
                         canonical_name=canonical,
                         source=source_name,
                     )
+                    if website:
+                        from src.runtime_services import register_current_issuer_url
+
+                        register_current_issuer_url(
+                            website,
+                            provenance=f"{source_name}_company_profile",
+                        )
                     return CompanyNameResult(
                         name=normalized,
                         source=source_name,
                         is_resolved=True,
                         canonical_name=canonical,
+                        website=website,
                     )
                 if raw_name:
                     logger.debug(

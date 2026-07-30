@@ -459,8 +459,8 @@ That's my assessment."""
         response = "This is not valid JSON at all."
         result = editor._parse_editor_response(response)
 
-        # Should return approved by default (fail-safe)
-        assert result["verdict"] == "APPROVED"
+        # Malformed approval cannot publish a final article.
+        assert result["verdict"] == "REVISE"
         assert "parse_error" in result
 
     def test_is_available_returns_bool(self):
@@ -609,6 +609,7 @@ class TestEditorialLoopIntegration:
         assert feedback["verdict"] == "REVISE"
         assert feedback["confidence"] == 1.0
         assert feedback["deterministic_citation_audit"] is True
+        assert feedback["citation_audit_status"] == "FAILED"
         assert len(feedback["factual_errors"]) == 2
 
     @pytest.mark.asyncio
@@ -827,6 +828,7 @@ class TestEditorialLoopIntegration:
         assert writer.revise.call_count == 1
         revise_feedback = writer.revise.call_args.kwargs["editor_feedback"]
         assert revise_feedback["deterministic_citation_audit"] is True
+        assert revise_feedback["citation_audit_status"] == "FAILED"
         assert revise_feedback["verdict"] == "REVISE"
 
     @pytest.mark.asyncio
@@ -862,6 +864,7 @@ class TestEditorialLoopIntegration:
         assert "NET_DEBT_EBITDA: 1.95" in result
         assert feedback["verdict"] == "REVISE"
         assert feedback["deterministic_citation_audit"] is True
+        assert feedback["citation_audit_status"] == "FAILED"
         assert writer.revise.call_count == 1
         assert editor.review.call_count == 1
 
@@ -869,8 +872,44 @@ class TestEditorialLoopIntegration:
 class TestMainPyIntegration:
     """Tests that verify the editor is properly wired into main.py."""
 
+    @pytest.mark.parametrize(
+        ("feedback", "expected"),
+        [
+            ({"verdict": "APPROVED", "citation_audit_status": "PASSED"}, True),
+            ({"verdict": "APPROVED", "citation_audit_status": "FAILED"}, False),
+            ({"verdict": "APPROVED"}, False),
+            ({"verdict": "REVISE", "citation_audit_status": "PASSED"}, False),
+        ],
+    )
+    def test_publication_requires_editor_and_citation_approval(
+        self,
+        feedback,
+        expected,
+    ):
+        from src.output import _article_is_publishable
+
+        assert _article_is_publishable("# Article", feedback) is expected
+
+    def test_strict_publication_requires_valid_final_decision_trace(self):
+        from src.output import _article_is_publishable
+
+        feedback = {"verdict": "APPROVED", "citation_audit_status": "PASSED"}
+
+        assert not _article_is_publishable(
+            "# Article",
+            feedback,
+            decision_trace={"status": "INVALID"},
+            require_decision_trace=True,
+        )
+        assert _article_is_publishable(
+            "# Article",
+            feedback,
+            decision_trace={"status": "VALID"},
+            require_decision_trace=True,
+        )
+
     @pytest.mark.asyncio
-    async def test_handle_article_generation_calls_editor(self):
+    async def test_handle_article_generation_calls_editor(self, tmp_path):
         """handle_article_generation should call ArticleEditor.edit() when editor is available."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -888,7 +927,13 @@ class TestMainPyIntegration:
         mock_editor_instance = MagicMock()
         mock_editor_instance.is_available.return_value = True
         mock_editor_instance.edit = AsyncMock(
-            return_value=("# Final Article\n\nEdited content.", {"verdict": "APPROVED"})
+            return_value=(
+                "# Final Article\n\nEdited content.",
+                {
+                    "verdict": "APPROVED",
+                    "citation_audit_status": "PASSED",
+                },
+            )
         )
 
         with (
@@ -917,8 +962,9 @@ class TestMainPyIntegration:
                         "canonical_name": "Youngone Holdings Co., Ltd.",
                     },
                 },
-                resolve_article_path_fn=lambda *_args,
-                **_kwargs: "/tmp/test_article.md",
+                resolve_article_path_fn=lambda *_args, **_kwargs: (
+                    tmp_path / "test_article.md"
+                ),
             )
 
             # Verify editor.edit() was called
@@ -930,9 +976,20 @@ class TestMainPyIntegration:
             assert call_kwargs["pm_block"] == "PM_BLOCK"
             assert call_kwargs["valuation_params"] == "VAL_PARAMS"
             assert call_kwargs["governance_card"]["ticker"] == "009970.KS"
+            assert call_kwargs["evidence_constraints"]
+            assert (
+                mock_writer_instance.write.call_args.kwargs["evidence_constraints"]
+                == call_kwargs["evidence_constraints"]
+            )
+            assert mock_writer_instance.write.call_args.kwargs["output_path"] is None
+            assert (tmp_path / "test_article.md").read_text() == (
+                "# Final Article\n\nEdited content."
+            )
 
     @pytest.mark.asyncio
-    async def test_handle_article_generation_skips_editor_when_unavailable(self):
+    async def test_handle_article_generation_skips_editor_when_unavailable(
+        self, tmp_path
+    ):
         """handle_article_generation should skip editor when not available."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -966,12 +1023,15 @@ class TestMainPyIntegration:
                 company_name="Test Corp",
                 report_text="Full report...",
                 trade_date="2026-01-01",
-                resolve_article_path_fn=lambda *_args,
-                **_kwargs: "/tmp/test_article.md",
+                resolve_article_path_fn=lambda *_args, **_kwargs: (
+                    tmp_path / "test_article.md"
+                ),
             )
 
             # Verify editor.edit() was NOT called
             mock_editor_instance.edit.assert_not_called()
+            assert not (tmp_path / "test_article.md").exists()
+            assert (tmp_path / "test_article.draft.md").read_text() == "# Draft Article"
 
     def test_handle_article_generation_signature_includes_analysis_result(self):
         """Verify handle_article_generation accepts analysis_result parameter."""
@@ -988,7 +1048,9 @@ class TestMainPyIntegration:
         )
 
     @pytest.mark.asyncio
-    async def test_handle_article_generation_preserves_draft_on_editor_failure(self):
+    async def test_handle_article_generation_preserves_draft_on_editor_failure(
+        self, tmp_path
+    ):
         """If editor.edit() raises an exception, the original draft should be preserved."""
         from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
@@ -1033,14 +1095,19 @@ class TestMainPyIntegration:
                     "fundamentals_report": "DATA",
                     "final_trade_decision": "PM",
                 },
-                resolve_article_path_fn=lambda *_args,
-                **_kwargs: "/tmp/test_article.md",
+                resolve_article_path_fn=lambda *_a, **_k: str(
+                    tmp_path / "test_article.md"
+                ),
             )
 
-            # The function should complete without raising
+        # Correct error handling counts as success: the run completes without
+        # raising AND the draft is preserved for review rather than lost.
+        draft = tmp_path / "test_article.draft.md"
+        assert draft.exists(), "draft must be preserved when the editor fails"
+        assert "This is the draft." in draft.read_text(encoding="utf-8")
 
     @pytest.mark.asyncio
-    async def test_handle_article_generation_surfaces_writer_fallback(self):
+    async def test_handle_article_generation_surfaces_writer_fallback(self, tmp_path):
         """A silent Claude → Gemini fallback must land in the run summary."""
         from unittest.mock import MagicMock, mock_open, patch
 
@@ -1081,7 +1148,9 @@ class TestMainPyIntegration:
                 report_text="Full report...",
                 trade_date="2026-01-01",
                 analysis_result=analysis_result,
-                resolve_article_path_fn=lambda *_a, **_k: "/tmp/test_article.md",
+                resolve_article_path_fn=lambda *_a, **_k: str(
+                    tmp_path / "test_article.md"
+                ),
             )
 
         run_summary = analysis_result["run_summary"]
@@ -1151,7 +1220,9 @@ class TestMainPyIntegration:
         assert data["run_summary"]["article_writer_fell_back"] is True
 
     @pytest.mark.asyncio
-    async def test_handle_article_generation_records_primary_writer_model(self):
+    async def test_handle_article_generation_records_primary_writer_model(
+        self, tmp_path
+    ):
         from unittest.mock import MagicMock, mock_open, patch
 
         args = MagicMock()
@@ -1188,7 +1259,9 @@ class TestMainPyIntegration:
                 report_text="Full report...",
                 trade_date="2026-01-01",
                 analysis_result=analysis_result,
-                resolve_article_path_fn=lambda *_a, **_k: "/tmp/test_article.md",
+                resolve_article_path_fn=lambda *_a, **_k: str(
+                    tmp_path / "test_article.md"
+                ),
             )
 
         run_summary = analysis_result["run_summary"]

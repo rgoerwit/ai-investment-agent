@@ -1,13 +1,100 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.messages import ToolMessage
 
 from src.agents.consultant_nodes import create_auditor_node, create_legal_counsel_node
 from src.validators.red_flag_detector import RedFlagDetector
 
 
 class TestArtifactFallbacks:
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_legal_counsel_binds_tools_and_preserves_third_pass_failure(
+        self, mock_get_prompt
+    ):
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="legal prompt", agent_name="Legal Counsel"
+        )
+        tool = SimpleNamespace(
+            name="search_legal_tax_disclosures",
+            ainvoke=AsyncMock(),
+        )
+        bound_stub = SimpleNamespace(model_name="gemini-bound")
+        mock_llm = SimpleNamespace(
+            model_name="gemini-3-flash-preview",
+            bind_tools=MagicMock(return_value=bound_stub),
+        )
+        tool_responses = [
+            SimpleNamespace(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_legal_tax_disclosures",
+                        "args": {"ticker": "TEST.T", "query": str(round_number)},
+                        "id": f"legal-{round_number}",
+                    }
+                ],
+            )
+            for round_number in (1, 2, 3, 4)
+        ]
+        final_response = SimpleNamespace(
+            content=(
+                '{"pfic_status":"UNCERTAIN",'
+                '"pfic_evidence":"Third-pass disclosure search failed; '
+                'earlier evidence retained.","vie_structure":"N/A"}'
+            ),
+            tool_calls=None,
+        )
+        invoke_mock = AsyncMock(side_effect=[*tool_responses, final_response])
+        service = SimpleNamespace(
+            execute=AsyncMock(
+                side_effect=[
+                    SimpleNamespace(value="FIRST", blocked=False),
+                    SimpleNamespace(value="SECOND", blocked=False),
+                    RuntimeError("third pass failure"),
+                    SimpleNamespace(value="FOURTH", blocked=False),
+                ]
+            )
+        )
+
+        with (
+            patch(
+                "src.agents.runtime.invoke_with_rate_limit_handling",
+                new=invoke_mock,
+            ),
+            patch(
+                "src.agents.consultant_nodes.get_current_tool_service",
+                return_value=service,
+            ),
+        ):
+            node = create_legal_counsel_node(mock_llm, [tool])
+            result = await node(
+                {
+                    "company_of_interest": "TEST.T",
+                    "company_name": "Test Company",
+                    "company_name_resolved": True,
+                    "raw_fundamentals_data": ("Sector: Industrials\nCountry: Japan"),
+                },
+                {},
+            )
+
+        mock_llm.bind_tools.assert_called_once_with([tool])
+        assert all(
+            call.args[0] is bound_stub for call in invoke_mock.await_args_list[:4]
+        )
+        assert invoke_mock.await_args_list[4].args[0] is mock_llm
+        final_input = invoke_mock.await_args_list[4].args[1]
+        assert any(
+            isinstance(message, ToolMessage)
+            and message.content == "TOOL_ERROR: RuntimeError"
+            for message in final_input
+        )
+        assert result["artifact_statuses"]["legal_report"]["ok"] is True
+        assert "Third-pass disclosure search failed" in result["legal_report"]
+
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")
     async def test_legal_counsel_failure_preserves_conservative_fallback(
@@ -41,6 +128,43 @@ class TestArtifactFallbacks:
         assert status["ok"] is False
         assert risks["pfic_status"] == "UNCERTAIN"
         assert "Legal counsel unavailable" in risks["pfic_evidence"]
+
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_legal_preflight_failure_does_not_abort_legal_analysis(
+        self, mock_get_prompt
+    ):
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="legal prompt", agent_name="Legal Counsel"
+        )
+        response = SimpleNamespace(
+            content='{"pfic_status":"CLEAN","vie_structure":"N/A"}',
+            tool_calls=None,
+        )
+        mock_llm = SimpleNamespace(
+            ainvoke=AsyncMock(return_value=response),
+            model_name="gemini-3-flash-preview",
+        )
+
+        with patch(
+            "src.agents.consultant_nodes.preload_capital_structure_evidence",
+            new=AsyncMock(side_effect=RuntimeError("unexpected adapter failure")),
+        ):
+            result = await create_legal_counsel_node(mock_llm, [])(
+                {
+                    "company_of_interest": "TEST",
+                    "company_name": "Test Company",
+                    "company_name_resolved": True,
+                    "raw_fundamentals_data": "Sector: Industrials\nCountry: USA",
+                },
+                {},
+            )
+
+        status = result["artifact_statuses"]["legal_report"]
+        capital = json.loads(result["legal_report"])["capital_structure"]
+        assert status["ok"] is True
+        assert capital["coverage_status"] == "SEARCH_FAILED"
+        assert capital["classification"] == "UNRESOLVED"
 
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")

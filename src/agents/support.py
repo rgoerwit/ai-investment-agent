@@ -22,6 +22,11 @@ from src.macro_regime import parse_macro_regime
 from src.runtime_diagnostics import get_model_name as _get_model_name
 from src.runtime_diagnostics import infer_provider
 
+from .fundamentals_reconciler import (
+    extract_raw_metrics_payload,
+    statement_mrq_period_lag_note,
+)
+
 logger = structlog.get_logger(__name__)
 
 _UNRESOLVED_NAME_WARNING = (
@@ -288,6 +293,7 @@ def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
         return ""
 
     conflicts: list[str] = []
+    raw_payload = extract_raw_metrics_payload(raw_data)
 
     def _extract_json_number(text: str, key: str) -> float | None:
         for pattern in [
@@ -449,6 +455,10 @@ def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
             "use the reconciled newer value."
         )
 
+    mrq_lag_note = statement_mrq_period_lag_note(raw_payload)
+    if mrq_lag_note:
+        conflicts.append(f"- MRQ_PERIOD_LAG: {mrq_lag_note}")
+
     if foreign_data:
         local_analyst_match = re.search(
             r"Estimated Local Analysts[:\s]*(\d+|HIGH|MODERATE|LOW|UNKNOWN)",
@@ -524,12 +534,13 @@ def extract_value_trap_verdict(value_trap_report: str) -> str:
     )
 
 
-# Tranche-1–4 fenced blocks the summarizer must preserve when truncation
-# fires. These carry load-bearing structured data for downstream consumers
+# Load-bearing fenced blocks the summarizer must preserve when truncation
+# fires. These carry structured evidence and decisions for downstream consumers
 # (PM rationale, memo, quality judge, chart overlay) and are emitted at the
 # tail of long agent outputs — exactly where a naive head-truncate drops them.
 _PRESERVED_BLOCKS: tuple[str, ...] = (
     "DATA_BLOCK",
+    "MANAGEMENT_GUIDANCE",
     "PM_BLOCK",
     "VALUE_TRAP_BLOCK",
     "KILL_CRITERIA",
@@ -568,7 +579,7 @@ def _append_unique_preserved(blocks: list[str], seen: set[str], value: str) -> N
 def summarize_for_pm(report: str, report_type: str, max_chars: int = 3000) -> str:
     """Summarize verbose reports while preserving structured blocks.
 
-    Critical blocks (DATA_BLOCK, PM_BLOCK, the Tranche-1–4 fenced blocks, and
+    Critical blocks (including DATA_BLOCK, MANAGEMENT_GUIDANCE, PM_BLOCK, and
     the VARIANT PERCEPTION section) are always re-appended after truncation,
     even when they sit at the tail of the report. Blocks already present
     inside the retained head window are not re-injected.

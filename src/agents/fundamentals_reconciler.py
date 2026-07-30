@@ -12,6 +12,7 @@ from src.data_block_utils import (
     has_non_na_block_field_value,
     replace_or_append_block_line,
 )
+from src.earnings_baseline import requires_eps_growth_withholding
 from src.sector_normalization import normalize_sector_label
 from src.thesis_constants import (
     FINANCIALS_HEALTH_REMOVED_POINTS,
@@ -29,12 +30,47 @@ from src.validators.pfic_constants import (
 )
 
 HORIZON_FIELD_RAW_KEYS = (
+    ("REVENUE_GROWTH_FY", "revenueGrowth"),
+    ("EARNINGS_GROWTH_FY", "earningsGrowth"),
     ("REVENUE_GROWTH_TTM", "revenueGrowth_TTM"),
     ("REVENUE_GROWTH_MRQ", "revenueGrowth_MRQ"),
     ("EARNINGS_GROWTH_TTM", "earningsGrowth_TTM"),
     ("EARNINGS_GROWTH_MRQ", "earningsGrowth_MRQ"),
     ("GROWTH_TRAJECTORY", "growth_trajectory"),
 )
+
+
+def _growth_source_label(
+    payload: dict[str, Any],
+    field: str,
+) -> str:
+    field_sources = payload.get("_field_sources")
+    if not isinstance(field_sources, dict):
+        field_sources = {}
+    source = str(
+        payload.get(f"_{field}_source") or field_sources.get(field) or ""
+    ).lower()
+    if field == "revenueGrowth":
+        if source == "calculated_from_statements":
+            return "ANNUAL_STATEMENTS"
+    else:
+        source_labels = {
+            "calculated_from_statement_diluted_eps": "DILUTED_EPS_STATEMENTS",
+            "calculated_from_statement_basic_eps": "BASIC_EPS_STATEMENTS",
+            "calculated_from_statement_net_income_proxy": (
+                "NET_INCOME_STATEMENT_PROXY"
+            ),
+        }
+        if source in source_labels:
+            return source_labels[source]
+
+    statement_overrides = payload.get("_statement_overrides")
+    if isinstance(statement_overrides, dict) and field in statement_overrides:
+        return "ANNUAL_STATEMENTS" if field == "revenueGrowth" else "STATEMENT_DERIVED"
+    if source:
+        return "AGGREGATOR"
+    return "UNKNOWN"
+
 
 _RAW_METRICS_MARKER = re.compile(
     r"###\s*TOOL\s*\d+:\s*get_financial_metrics",
@@ -122,6 +158,23 @@ def extract_raw_metrics_payload(raw_data: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def statement_mrq_period_lag_note(payload: dict[str, Any]) -> str | None:
+    """Return the fetcher's code-owned warning for period-bound stale MRQ metrics."""
+    notes = payload.get("_data_quality_notes")
+    candidates = notes if isinstance(notes, list) else [notes]
+    for candidate in candidates:
+        note = str(candidate or "").strip()
+        if (
+            "Newer quarter metadata exists" in note
+            and "statement-derived MRQ metrics remain aligned" in note
+        ):
+            return (
+                f"{note} Treat these MRQ metrics as period-bound trailing indicators, "
+                "not the latest reported quarter."
+            )
+    return None
+
+
 def _reconcile_numeric_field(
     body: str,
     key: str,
@@ -183,6 +236,25 @@ def reconcile_high_risk_fields(
     changed_valuation = False
 
     for datablock_key, raw_key in (
+        ("REVENUE_GROWTH_FY", "revenueGrowth"),
+        ("EARNINGS_GROWTH_FY", "earningsGrowth"),
+    ):
+        value = as_float(payload.get(raw_key))
+        reconciled_value = (
+            format_percent_from_ratio(value) if value is not None else "N/A"
+        )
+        if extract_block_text_value(updated, datablock_key) != reconciled_value:
+            updated = replace_or_append_block_line(
+                updated, datablock_key, reconciled_value
+            )
+            changed_growth = True
+        updated = replace_or_append_block_line(
+            updated,
+            f"{datablock_key}_SOURCE",
+            _growth_source_label(payload, raw_key) if value is not None else "UNKNOWN",
+        )
+
+    for datablock_key, raw_key in (
         ("REVENUE_GROWTH_TTM", "revenueGrowth_TTM"),
         ("EARNINGS_GROWTH_TTM", "earningsGrowth_TTM"),
     ):
@@ -208,6 +280,25 @@ def reconcile_high_risk_fields(
         )
         changed_growth = changed_growth or changed
 
+    reference_type = str(payload.get("sectorPeReferenceType") or "UNKNOWN").upper()
+    if reference_type not in {
+        "STATIC_POLICY_REFERENCE",
+        "LIVE_MARKET_REFERENCE",
+        "UNKNOWN",
+    }:
+        reference_type = "UNKNOWN"
+    updated = replace_or_append_block_line(
+        updated,
+        "SECTOR_PE_REFERENCE_TYPE",
+        reference_type,
+    )
+    reference_as_of = payload.get("sectorPeReferenceAsOf")
+    updated = replace_or_append_block_line(
+        updated,
+        "SECTOR_PE_REFERENCE_AS_OF",
+        str(reference_as_of) if reference_as_of else "N/A",
+    )
+
     cycle_position = str(payload.get("cycle_position") or "").upper()
     if cycle_position in {"PEAK", "MID", "TROUGH"} and (
         extract_block_text_value(updated, "CYCLE_POSITION").upper() != cycle_position
@@ -216,6 +307,29 @@ def reconcile_high_risk_fields(
             updated, "CYCLE_POSITION", cycle_position
         )
         changed_growth = True
+
+    comparison_status = str(
+        payload.get("mrq_comparison_base_status") or "UNKNOWN"
+    ).upper()
+    if comparison_status not in {
+        "DEPRESSED",
+        "ELEVATED",
+        "NORMAL",
+        "NONPOSITIVE",
+        "UNKNOWN",
+    }:
+        comparison_status = "UNKNOWN"
+    updated = replace_or_append_block_line(
+        updated,
+        "MRQ_COMPARISON_BASE_STATUS",
+        comparison_status,
+    )
+    comparison_delta = as_float(payload.get("mrq_comparison_base_margin_delta_bps"))
+    updated = replace_or_append_block_line(
+        updated,
+        "MRQ_COMPARISON_BASE_MARGIN_DELTA_BPS",
+        f"{comparison_delta:.1f}" if comparison_delta is not None else "N/A",
+    )
 
     # 5-year return averages feed cyclical-peak detection; the LLM can drop or
     # mis-copy them. Promote the computed signals (already percent-scaled) when the
@@ -395,7 +509,8 @@ def reconcile_high_risk_fields(
         updated = replace_or_append_block_line(
             updated,
             "GROWTH_DATA_QUALITY_NOTE",
-            "TTM growth unavailable in raw payload; FY/MRQ values were not reused.",
+            "Growth horizons and provenance reconciled to raw metrics; unavailable "
+            "TTM/MRQ values were not backfilled from FY data.",
         )
     # yfinance can lag a full fiscal year for some ex-US names: the latest annual
     # statements predate the most recent completed FY, so any FY-based growth may be
@@ -528,6 +643,51 @@ def parse_score_breakdown(text: str, kind: str = "HEALTH") -> dict[str, str] | N
             return None  # duplicate key
         awards[key] = token
     return awards or None
+
+
+def withhold_eps_growth_for_unusable_baseline(body: str) -> tuple[str, bool]:
+    """Remove sustained EPS-growth credit when the earnings baseline is unsafe."""
+    baseline = extract_block_text_value(body, "EARNINGS_BASELINE_STATUS").upper()
+    bridge_status = extract_block_text_value(body, "GUIDANCE_BRIDGE_STATUS").upper()
+    if not requires_eps_growth_withholding(baseline, bridge_status):
+        return body, False
+
+    breakdown_text = extract_block_text_value(body, "GROWTH_SCORE_BREAKDOWN")
+    awards = parse_score_breakdown(breakdown_text, "GROWTH")
+    if awards is None or set(awards) != set(GROWTH_SCORE_CRITERIA):
+        return body, False
+    if awards.get("EPS_GROWTH") == "0":
+        return body, False
+
+    awards["EPS_GROWTH"] = "0"
+    numeric = {
+        key: float(token)
+        for key, token in awards.items()
+        if token not in {"N/A", "REMOVED"}
+    }
+    earned = sum(numeric.values())
+    available = sum(GROWTH_SCORE_CRITERIA[key] for key in numeric)
+    if available <= 0:
+        return body, False
+
+    serialized = "; ".join(f"{key}={awards[key]}" for key in GROWTH_SCORE_CRITERIA)
+    updated = replace_or_append_block_line(body, "GROWTH_SCORE_BREAKDOWN", serialized)
+    updated = replace_or_append_block_line(
+        updated,
+        "RAW_GROWTH_SCORE",
+        f"{earned:g}/{GROWTH_RUBRIC_POINTS:g}",
+    )
+    updated = replace_or_append_block_line(
+        updated,
+        "ADJUSTED_GROWTH_SCORE",
+        f"{earned / available * 100.0:.1f}% (based on {available:g} available points)",
+    )
+    updated = replace_or_append_block_line(
+        updated,
+        "EPS_GROWTH_BASELINE_ADJUSTMENT",
+        "WITHHELD — trailing earnings baseline is not durable and no code-reconciled normalized growth rate is available",
+    )
+    return updated, True
 
 
 def _is_negative_amount(text: str) -> bool:
@@ -681,8 +841,36 @@ def reconcile_score_consistency(body: str) -> tuple[str, bool, bool]:
 
     for kind, total in _SCORE_RUBRIC_TOTALS:
         raw = _parse_raw_score(updated, kind)
+        if raw is None:
+            continue
         adjusted = _parse_adjusted_score(updated, kind)
-        if raw is None or adjusted is None:
+        adjusted_field = f"ADJUSTED_{kind}_SCORE"
+        if adjusted is None:
+            # A genuinely absent ADJUSTED line is left alone (nothing to
+            # correct against). But a *present* line that's unparseable —
+            # most commonly a literal "N/A" — while RAW is fully computable
+            # is exactly the provable-arithmetic case this function already
+            # handles below for a different trigger; fill it in the same way
+            # rather than silently skipping reconciliation entirely.
+            if not has_block_field_value(updated, adjusted_field):
+                continue
+            earned, raw_den = raw
+            if raw_den <= 0:
+                continue
+            corrected = True
+            updated = replace_or_append_block_line(
+                updated,
+                adjusted_field,
+                f"{earned / raw_den * 100.0:.1f}% (based on {raw_den:g} available points)",
+            )
+            updated = replace_or_append_block_line(
+                updated,
+                f"{kind}_SCORE_DATA_QUALITY_NOTE",
+                (
+                    f"Adjusted score computed from RAW {earned:g}/{raw_den:g}; "
+                    "reported value was unparseable ('N/A' or malformed)."
+                ),
+            )
             continue
         (earned, raw_den), (pct, paren_earned, paren_available) = raw, adjusted
 

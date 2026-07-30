@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Literal
 import structlog
 
 from src.exchange_metadata import IBKR_TO_YFINANCE
-from src.fx_normalization import get_fx_rate_fallback
+from src.fx_normalization import get_fx_rate_cache
 from src.ibkr.models import ActionBasis, AnalysisRecord, NormalizedPosition
 from src.ibkr.portfolio_defaults import (
     DEFAULT_DRIFT_PCT,
@@ -25,6 +25,22 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
+def _fx_rate_for_currency(currency: str) -> float | None:
+    """Live-first FX rate for `currency` via the shared process cache.
+
+    Serves a cache hit (already resolved elsewhere this run, e.g. during
+    position normalization) with no I/O; a cache miss pays one live-first
+    lookup and warms the cache for every later call in the same process.
+    """
+    cache = get_fx_rate_cache()
+    cached = cache.peek_cached_rate(currency)
+    if cached is not None:
+        return cached[0]
+    resolved = cache.resolve_rates_sync([currency])
+    rate_info = resolved.get(currency.strip().upper())
+    return rate_info[0] if rate_info else None
+
+
 def _resolve_fx(analysis: AnalysisRecord) -> float | None:
     """Return a local-to-USD rate, or None when conversion cannot be trusted."""
     currency = (analysis.currency or "USD").strip().upper()
@@ -34,7 +50,7 @@ def _resolve_fx(analysis: AnalysisRecord) -> float | None:
         return 1.0
 
     if saved is not None:
-        fallback = get_fx_rate_fallback(currency)
+        fallback = _fx_rate_for_currency(currency)
         saved_is_sentinel = saved == 1.0
         saved_is_invalid = not math.isfinite(saved) or saved <= 0
         saved_is_unit_mismatch = (
@@ -63,7 +79,7 @@ def _resolve_fx(analysis: AnalysisRecord) -> float | None:
         )
         return None
 
-    rate = get_fx_rate_fallback(currency)
+    rate = _fx_rate_for_currency(currency)
     if rate is not None:
         logger.warning(
             "fx_rate_missing_using_fallback",

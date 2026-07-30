@@ -1196,6 +1196,37 @@ class SmartMarketDataFetcher(FinancialFetcher):
         if newer_dt == latest_dt:
             return info
 
+        # ``mostRecentQuarter`` is metadata only; it does not carry the statement
+        # rows used to calculate MRQ growth. Keep statement-derived metrics bound
+        # to their actual statement period instead of relabeling them as newer.
+        statement_aligned_mrq = info.get(
+            "_latest_quarter_date_source"
+        ) == "yfinance_quarterly" and any(
+            info.get(field) is not None
+            for field in (
+                "revenueGrowth_MRQ",
+                "earningsGrowth_MRQ",
+                "mrq_comparison_base_status",
+            )
+        )
+        if statement_aligned_mrq:
+            note = (
+                f"Newer quarter metadata exists for {most_recent_dt:%Y-%m-%d}, but "
+                "statement-derived MRQ metrics remain aligned to "
+                f"{latest_dt:%Y-%m-%d}."
+            )
+            notes = _quality_notes(info)
+            if note not in notes:
+                notes.append(note)
+            logger.info(
+                "latest_quarter_date_reconciliation_skipped",
+                symbol=symbol,
+                statement_period=latest_dt.strftime("%Y-%m-%d"),
+                metadata_period=most_recent_dt.strftime("%Y-%m-%d"),
+                reason="statement_aligned_mrq",
+            )
+            return info
+
         info["latest_quarter_date"] = newer_dt.strftime("%Y-%m-%d")
         info["_latest_quarter_date_source"] = "reconciled_most_recent_quarter"
         logger.info(

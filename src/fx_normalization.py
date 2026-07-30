@@ -11,6 +11,8 @@ UPDATED: Dec 2025 - Aligned with modern yfinance patterns
 """
 
 import asyncio
+import time
+from collections.abc import Iterable
 from typing import Any
 
 import structlog
@@ -97,7 +99,11 @@ async def get_fx_rate_yfinance(
             return None
 
     except asyncio.TimeoutError:
-        logger.debug("fx_rate_timeout", pair=fx_ticker, timeout_ms=3000)
+        logger.debug(
+            "fx_rate_timeout",
+            pair=fx_ticker,
+            timeout_ms=int(FX_RATE_POLICY.hard_timeout_seconds * 1000),
+        )
         return None
     except YFRateLimitError as e:
         logger.debug("fx_rate_rate_limited", pair=fx_ticker, error=str(e))
@@ -111,39 +117,39 @@ async def get_fx_rate_yfinance(
 # TIER 2: Fallback Rates (Hardcoded, updated quarterly)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Last updated: Mar 2026
-# Source: ECB reference rates, BoJ, HKMA, Bloomberg
+# Last updated: Jul 2026
+# Source: Yahoo Finance FX spot quotes (query1.finance.yahoo.com/v8/finance/chart)
 FALLBACK_RATES_TO_USD = {
     # Major Asian currencies (your primary use case)
-    "JPY": 0.0067,  # Japanese Yen (¥149 = $1)
-    "HKD": 0.128,  # Hong Kong Dollar (HK$7.80 = $1)
-    "TWD": 0.032,  # Taiwan Dollar (NT$31 = $1)
-    "KRW": 0.00075,  # Korean Won (₩1,330 = $1)
-    "CNY": 0.14,  # Chinese Yuan (¥7.2 = $1)
-    "INR": 0.012,  # Indian Rupee (₹83 = $1)
-    "SGD": 0.74,  # Singapore Dollar (S$1.35 = $1)
-    "MYR": 0.23,  # Malaysian Ringgit (MYR 4.35 = $1)
-    "THB": 0.029,  # Thai Baht (THB 34.5 = $1)
-    "IDR": 0.000063,  # Indonesian Rupiah (IDR 15,900 = $1)
-    "PHP": 0.017,  # Philippine Peso (PHP 58 = $1)
+    "JPY": 0.0063,  # Japanese Yen (¥159 = $1)
+    "HKD": 0.1275,  # Hong Kong Dollar (HK$7.84 = $1)
+    "TWD": 0.0308,  # Taiwan Dollar (NT$32.5 = $1)
+    "KRW": 0.0007,  # Korean Won (₩1,421 = $1)
+    "CNY": 0.148,  # Chinese Yuan (¥6.74 = $1)
+    "INR": 0.0105,  # Indian Rupee (₹95.2 = $1)
+    "SGD": 0.780,  # Singapore Dollar (S$1.28 = $1)
+    "MYR": 0.245,  # Malaysian Ringgit (MYR 4.08 = $1)
+    "THB": 0.030,  # Thai Baht (THB 33.3 = $1)
+    "IDR": 0.0000553,  # Indonesian Rupiah (IDR 18,080 = $1)
+    "PHP": 0.0163,  # Philippine Peso (PHP 61.3 = $1)
     # European currencies
-    "EUR": 1.09,  # Euro
-    "GBP": 1.27,  # British Pound
-    "CHF": 1.13,  # Swiss Franc
-    "SEK": 0.093,  # Swedish Krona (SEK 10.75 = $1)
-    "NOK": 0.092,  # Norwegian Krone (NOK 10.87 = $1)
-    "DKK": 0.144,  # Danish Krone (DKK 6.94 = $1)
-    "PLN": 0.250,  # Polish Zloty (PLN 4.0 = $1)
-    "CZK": 0.044,  # Czech Koruna (CZK 22.7 = $1)
-    "HUF": 0.0028,  # Hungarian Forint (HUF 357 = $1)
+    "EUR": 1.153,  # Euro
+    "GBP": 1.347,  # British Pound
+    "CHF": 1.243,  # Swiss Franc
+    "SEK": 0.105,  # Swedish Krona (SEK 9.52 = $1)
+    "NOK": 0.105,  # Norwegian Krone (NOK 9.52 = $1)
+    "DKK": 0.154,  # Danish Krone (DKK 6.49 = $1)
+    "PLN": 0.268,  # Polish Zloty (PLN 3.74 = $1)
+    "CZK": 0.0477,  # Czech Koruna (CZK 21.0 = $1)
+    "HUF": 0.00318,  # Hungarian Forint (HUF 314 = $1)
     # Other major currencies
-    "CAD": 0.72,  # Canadian Dollar
-    "AUD": 0.64,  # Australian Dollar
-    "NZD": 0.60,  # New Zealand Dollar
-    "MXN": 0.049,  # Mexican Peso
-    "BRL": 0.20,  # Brazilian Real
-    "ZAR": 0.055,  # South African Rand (ZAR 18.2 = $1)
-    "ILS": 0.27,  # Israeli Shekel (ILS 3.7 = $1)
+    "CAD": 0.715,  # Canadian Dollar
+    "AUD": 0.703,  # Australian Dollar
+    "NZD": 0.588,  # New Zealand Dollar
+    "MXN": 0.0576,  # Mexican Peso
+    "BRL": 0.197,  # Brazilian Real
+    "ZAR": 0.0606,  # South African Rand (ZAR 16.5 = $1)
+    "ILS": 0.327,  # Israeli Shekel (ILS 3.06 = $1)
     # Identity
     "USD": 1.0,
 }
@@ -179,7 +185,10 @@ def get_fx_rate_fallback(from_currency: str, to_currency: str = "USD") -> float 
     Get FX rate from hardcoded fallback table.
 
     WARNING: These rates are updated manually and may be stale.
-    Only use when yfinance is unavailable.
+    Only use when yfinance is unavailable. This is a low-level primitive —
+    callers that want a deduplicated, actionable log signal when the table
+    is used should go through get_fx_rate() (Tier 3) or FxRateCache, both of
+    which log once per resolution rather than once per call.
     """
     if from_currency == to_currency:
         return 1.0
@@ -193,23 +202,21 @@ def get_fx_rate_fallback(from_currency: str, to_currency: str = "USD") -> float 
         )
         if major_rate:
             scaled_rate = major_rate * scale
-            logger.warning(
+            logger.debug(
                 "fx_rate_using_fallback",
                 from_currency=from_currency,
                 to_currency=to_currency,
                 rate=scaled_rate,
-                warning="Fallback rate may be stale - update FALLBACK_RATES_TO_USD quarterly",
             )
             return scaled_rate
 
     fallback_rate = FALLBACK_RATES_TO_USD.get(from_currency)
     if fallback_rate:
-        logger.warning(
+        logger.debug(
             "fx_rate_using_fallback",
             from_currency=from_currency,
             to_currency=to_currency,
             rate=fallback_rate,
-            warning="Fallback rate may be stale - update FALLBACK_RATES_TO_USD quarterly",
         )
         return fallback_rate
 
@@ -262,6 +269,15 @@ async def get_fx_rate(
     if allow_fallback:
         rate = get_fx_rate_fallback(from_currency, to_currency)
         if rate is not None:
+            logger.warning(
+                "fx_rate_fallback_used",
+                currency=from_currency,
+                rate=rate,
+                msg=(
+                    "Live yfinance FX fetch failed — used FALLBACK_RATES_TO_USD "
+                    "(src/fx_normalization.py); refresh the table if this persists."
+                ),
+            )
             return rate, "fallback"
 
     # Total failure - log and return None
@@ -272,6 +288,192 @@ async def get_fx_rate(
         tried_sources=["yfinance", "fallback"] if allow_fallback else ["yfinance"],
     )
     return None, "unavailable"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TIER 4: Process-Wide Cache — dedupe repeated lookups of the same currency
+# ══════════════════════════════════════════════════════════════════════════════
+
+_FX_RATE_CACHE_TTL_SECONDS = 3600.0  # FX doesn't move enough intraday to matter here
+
+
+class FxRateCache:
+    """Process-wide cache over the live-first get_fx_rate() chain.
+
+    Without this, a portfolio with N positions in the same currency issues N
+    independent live-then-fallback lookups for that one currency. This caches
+    by currency (not by position) so each currency is resolved at most once
+    per TTL window, and batches a whole currency set concurrently.
+    """
+
+    def __init__(
+        self,
+        *,
+        cache_ttl_secs: float = _FX_RATE_CACHE_TTL_SECONDS,
+        max_concurrency: int = 6,
+    ) -> None:
+        self._cache_ttl_secs = cache_ttl_secs
+        self._max_concurrency = max_concurrency
+        # currency -> (expires_at, rate, source)
+        self._cache: dict[str, tuple[float, float, str]] = {}
+
+    def _cached(self, currency: str) -> tuple[float, str] | None:
+        entry = self._cache.get(currency)
+        if entry is None:
+            return None
+        expires_at, rate, source = entry
+        if time.monotonic() >= expires_at:
+            self._cache.pop(currency, None)
+            return None
+        return rate, source
+
+    def _store(self, currency: str, rate: float, source: str) -> None:
+        self._cache[currency] = (time.monotonic() + self._cache_ttl_secs, rate, source)
+
+    async def _resolve_and_cache(
+        self, currency: str, to_currency: str, *, try_live: bool
+    ) -> tuple[float | None, str]:
+        """Resolve one currency and cache it. try_live=False skips straight
+        to the fallback table (used once the batch preflight has shown
+        yfinance is unreachable this run)."""
+        if try_live:
+            rate, source = await get_fx_rate(currency, to_currency)
+        else:
+            rate = get_fx_rate_fallback(currency, to_currency)
+            source = "fallback" if rate is not None else "unavailable"
+            if rate is not None:
+                logger.warning(
+                    "fx_rate_fallback_used",
+                    currency=currency,
+                    rate=rate,
+                    msg=(
+                        "yfinance unreachable this run — used FALLBACK_RATES_TO_USD "
+                        "(src/fx_normalization.py) for the rest of the batch; "
+                        "refresh the table if this persists."
+                    ),
+                )
+        if rate is not None:
+            self._store(currency, rate, source)
+        return rate, source
+
+    async def get_rate(
+        self, from_currency: str, to_currency: str = "USD"
+    ) -> tuple[float | None, str]:
+        """Resolve one currency, live-first, using the process-wide cache."""
+        from_currency = from_currency.strip().upper()
+        to_currency = to_currency.strip().upper()
+        if from_currency == to_currency:
+            return 1.0, "identity"
+
+        cached = self._cached(from_currency)
+        if cached is not None:
+            return cached
+
+        return await self._resolve_and_cache(from_currency, to_currency, try_live=True)
+
+    async def get_rates(
+        self, currencies: Iterable[str], to_currency: str = "USD"
+    ) -> dict[str, tuple[float, str]]:
+        """Resolve many currencies concurrently, deduped against the cache.
+
+        A one-currency preflight detects a total yfinance outage before the
+        rest of the batch pays a full per-currency timeout: if the first
+        live attempt fails, the remaining currencies go straight to the
+        fallback table instead of each attempting (and timing out on) a
+        live fetch too.
+        """
+        to_currency = to_currency.strip().upper()
+        unique = {c.strip().upper() for c in currencies if c and c.strip()}
+        unique.discard(to_currency)
+        if not unique:
+            return {}
+
+        resolved: dict[str, tuple[float, str]] = {}
+        pending: list[str] = []
+        for currency in unique:
+            cached = self._cached(currency)
+            if cached is not None:
+                resolved[currency] = cached
+            else:
+                pending.append(currency)
+        if not pending:
+            return resolved
+
+        preflight, *rest = pending
+        preflight_rate, preflight_source = await self._resolve_and_cache(
+            preflight, to_currency, try_live=True
+        )
+        if preflight_rate is not None:
+            resolved[preflight] = (preflight_rate, preflight_source)
+
+        if rest:
+            live_reachable = preflight_source == "yfinance"
+            results: list[tuple[str, float | None, str]] = []
+            if live_reachable:
+                semaphore = asyncio.Semaphore(self._max_concurrency)
+
+                async def _resolve(currency: str) -> tuple[str, float | None, str]:
+                    async with semaphore:
+                        rate, source = await self._resolve_and_cache(
+                            currency, to_currency, try_live=True
+                        )
+                        return currency, rate, source
+
+                results = list(await asyncio.gather(*(_resolve(c) for c in rest)))
+            else:
+                for currency in rest:
+                    rate, source = await self._resolve_and_cache(
+                        currency, to_currency, try_live=False
+                    )
+                    results.append((currency, rate, source))
+            for currency, rate, source in results:
+                if rate is not None:
+                    resolved[currency] = (rate, source)
+
+        return resolved
+
+    def resolve_rates_sync(
+        self, currencies: Iterable[str], to_currency: str = "USD"
+    ) -> dict[str, tuple[float, str]]:
+        """Sync wrapper for callers outside a running event loop (e.g. the
+        IBKR reconciliation path). Must not be called from inside a running
+        loop — use get_rates()/get_rate() directly there instead."""
+        return asyncio.run(self.get_rates(currencies, to_currency))
+
+    def peek_cached_rate(
+        self, currency: str, to_currency: str = "USD"
+    ) -> tuple[float, str] | None:
+        """Return an already-cached rate with no I/O, or None on a cache miss.
+
+        For sync callers invoked once per ticker (e.g. reconciliation)
+        rather than once per batch — avoids paying asyncio.run() startup
+        cost on every call once the currency is warm in the cache.
+        """
+        currency = currency.strip().upper()
+        to_currency = to_currency.strip().upper()
+        if currency == to_currency:
+            return 1.0, "identity"
+        return self._cached(currency)
+
+
+# Shared, lazily-constructed singleton so every consumer (IBKR position
+# valuation, reconciliation) shares ONE cache — a currency resolved once is
+# reused for the rest of the run instead of being fetched per position/ticker.
+_fx_rate_cache: FxRateCache | None = None
+
+
+def get_fx_rate_cache() -> FxRateCache:
+    """Return the process-wide shared FX rate cache."""
+    global _fx_rate_cache
+    if _fx_rate_cache is None:
+        _fx_rate_cache = FxRateCache()
+    return _fx_rate_cache
+
+
+def set_fx_rate_cache(cache: FxRateCache | None) -> None:
+    """Override (or reset with None) the shared cache — for tests."""
+    global _fx_rate_cache
+    _fx_rate_cache = cache
 
 
 # ══════════════════════════════════════════════════════════════════════════════

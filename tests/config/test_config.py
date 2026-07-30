@@ -159,6 +159,34 @@ class TestLangSmithConfiguration:
         assert "enable_peer_percentiles" not in Settings.model_fields
 
 
+class TestOpenAIApiBase:
+    """OPENAI_API_BASE field + accessor (custom OpenAI-compatible endpoint)."""
+
+    def test_field_default_is_empty(self):
+        from src.config import Settings
+
+        assert "openai_api_base" in Settings.model_fields
+        assert Settings.model_fields["openai_api_base"].default == ""
+
+    @patch.dict(os.environ, {"OPENAI_API_BASE": "https://api.moonshot.cn/v1"})
+    def test_accessor_returns_custom_base(self):
+        from src.config import Settings
+
+        assert Settings().get_openai_api_base() == "https://api.moonshot.cn/v1"
+
+    @patch.dict(os.environ, {"OPENAI_API_BASE": "   "})
+    def test_accessor_blank_returns_none(self):
+        from src.config import Settings
+
+        assert Settings().get_openai_api_base() is None
+
+    @patch.dict(os.environ, {"OPENAI_API_BASE": ""})
+    def test_accessor_empty_returns_none(self):
+        from src.config import Settings
+
+        assert Settings().get_openai_api_base() is None
+
+
 class TestValidateEnvironmentVariables:
     """Test environment variable validation.
 

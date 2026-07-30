@@ -13,9 +13,13 @@ Red-flag criteria tested:
 Run with: pytest tests/test_red_flag_validator.py -v
 """
 
+import json
+
 import pytest
 
 from src.agents import create_financial_health_validator_node
+from src.claim_policy import RAW_FINANCIAL_METRICS_INPUT
+from src.tooling.structured_ingress import build_structured_ingress_record
 from src.validators.red_flag_detector import RedFlagDetector
 
 
@@ -470,6 +474,32 @@ PE_RATIO_TTM: 16.0
         assert len(result["red_flags"]) == 0
 
     @pytest.mark.asyncio
+    async def test_invalid_canonical_snapshot_cannot_be_reminted_from_report(
+        self, validator_node, base_state
+    ):
+        """An explicit ingress failure remains invalid after Senior prose exists."""
+        base_state["analysis_snapshot"] = {
+            "version": 1,
+            "contract_status": "INVALID",
+            "contract_reason": "MALFORMED_JSON",
+            "claims": {},
+            "conflicts": [],
+        }
+        base_state["fundamentals_report"] = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 90%
+PE_RATIO_TTM: 10.0
+### --- END DATA_BLOCK ---
+"""
+
+        result = await validator_node(base_state, {})
+
+        assert result["pre_screening_result"] == "REJECT"
+        assert result["analysis_snapshot"]["contract_status"] == "INVALID"
+        assert result["analysis_snapshot"]["contract_reason"] == "MALFORMED_JSON"
+        assert result["red_flags"][0]["type"] == "DATA_CONTRACT_INVALID"
+
+    @pytest.mark.asyncio
     async def test_multiple_red_flags_all_reported(self, validator_node, base_state):
         """Test that multiple red flags are all detected and reported."""
         base_state["fundamentals_report"] = """
@@ -498,14 +528,16 @@ Free Cash Flow: -$500M
         assert "EARNINGS_QUALITY" in flag_types
 
     @pytest.mark.asyncio
-    async def test_no_fundamentals_report_passes(self, validator_node, base_state):
-        """Test that missing fundamentals report results in PASS (graceful degradation)."""
+    async def test_no_fundamentals_report_rejects_invalid_contract(
+        self, validator_node, base_state
+    ):
+        """Missing fundamentals cannot bypass deterministic validation."""
         base_state["fundamentals_report"] = ""
 
         result = await validator_node(base_state, {})
 
-        assert result["pre_screening_result"] == "PASS"
-        assert len(result["red_flags"]) == 0
+        assert result["pre_screening_result"] == "REJECT"
+        assert result["red_flags"][0]["type"] == "DATA_CONTRACT_INVALID"
 
     @pytest.mark.asyncio
     async def test_incomplete_data_does_not_false_positive(
@@ -538,7 +570,10 @@ PE_RATIO_TTM: 13.5
         """Test edge cases at exact threshold values."""
         # D/E exactly 500%
         base_state["fundamentals_report"] = """
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
 D/E: 500
+### --- END DATA_BLOCK ---
 """
 
         result = await validator_node(base_state, {})
@@ -552,9 +587,11 @@ D/E: 500
     ):
         """Test that low interest coverage alone doesn't trigger if leverage is OK."""
         base_state["fundamentals_report"] = """
-**Leverage**:
-- D/E: 50
-- Interest Coverage: 1.5x
+### --- START DATA_BLOCK ---
+ADJUSTED_HEALTH_SCORE: 60%
+D/E: 50
+Interest Coverage: 1.5x
+### --- END DATA_BLOCK ---
 """
 
         result = await validator_node(base_state, {})
@@ -2254,8 +2291,8 @@ class TestCyclicalPeakDetection:
         growth_flags = [f for f in flags if f["type"] == "GROWTH_QUALITY_UNPROVEN"]
         assert len(growth_flags) == 0
 
-    def test_transient_strength_distortion_detects_named_one_time_driver(self):
-        """Named non-recurring drivers in fundamentals text should trigger warning."""
+    def test_narrative_one_time_driver_is_an_evidence_gap(self):
+        """Narrative suspicion must not be promoted to a verified distortion."""
         metrics = {
             "roa_current": 8.0,
             "roa_5y_avg": 7.5,
@@ -2281,12 +2318,14 @@ class TestCyclicalPeakDetection:
             ),
         }
         flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
-        transient_flags = [
-            f for f in flags if f["type"] == "TRANSIENT_STRENGTH_DISTORTION"
-        ]
-        assert len(transient_flags) == 1
-        assert transient_flags[0]["risk_penalty"] == 0.75
-        assert "legal settlement" in transient_flags[0]["detail"]
+        flag_types = {flag["type"] for flag in flags}
+        assert "EARNINGS_DRIVER_EVIDENCE_GAP" in flag_types
+        assert "TRANSIENT_STRENGTH_DISTORTION" not in flag_types
+        evidence_gap = next(
+            flag for flag in flags if flag["type"] == "EARNINGS_DRIVER_EVIDENCE_GAP"
+        )
+        assert evidence_gap["risk_penalty"] == 0.0
+        assert "legal settlement" not in evidence_gap["detail"]
 
 
 class TestOCFNIRatioCheck:
@@ -3796,6 +3835,139 @@ PFIC_RISK: CLEAN
         state = self._make_state(self._CLEAN_DATA_BLOCK, self._VIE_LEGAL_JSON)
         result = await node(state, {})
         assert result["pre_screening_result"] == "PASS"
+
+    @pytest.mark.asyncio
+    async def test_off_balance_sheet_recourse_survives_validator(self):
+        """Material parent recourse reaches cumulative flags without LLM discretion."""
+        legal_report = json.dumps(
+            {
+                "pfic_status": "CLEAN",
+                "vie_structure": "NO",
+                "capital_structure": {
+                    "coverage_status": "FOUND",
+                    "exposure_type": "GUARANTEE_BACKSTOP",
+                    "entity": "Unconsolidated JV",
+                    "amount": "USD 1.2 billion",
+                    "amount_basis": "MAXIMUM_EXPOSURE",
+                    "balance_sheet_status": "UNRECOGNIZED",
+                    "parent_recourse": "FULL",
+                    "consolidation_risk": "NONE",
+                    "materiality": "MATERIAL",
+                    "source_url": "https://example.com/filing",
+                    "evidence": "Parent guarantees the JV borrowing.",
+                    "classification": "BLOCK_BUY",
+                },
+            }
+        )
+        node = create_financial_health_validator_node(strict_mode=False)
+
+        result = await node(self._make_state(self._CLEAN_DATA_BLOCK, legal_report), {})
+
+        flag = next(
+            flag
+            for flag in result["red_flags"]
+            if flag["type"] == "OFF_BALANCE_SHEET_RECOURSE"
+        )
+        assert result["pre_screening_result"] == "PASS"
+        assert flag["blocks_buy"] is True
+
+    @pytest.mark.asyncio
+    async def test_small_off_balance_sheet_recourse_is_proportional_warning(self):
+        legal_report = json.dumps(
+            {
+                "pfic_status": "CLEAN",
+                "vie_structure": "NO",
+                "capital_structure": {
+                    "coverage_status": "FOUND",
+                    "exposure_type": "GUARANTEE_BACKSTOP",
+                    "entity": "Small JV",
+                    "amount": "USD 5 million",
+                    "amount_basis": "MAXIMUM_EXPOSURE",
+                    "balance_sheet_status": "UNRECOGNIZED",
+                    "parent_recourse": "FULL",
+                    "consolidation_risk": "NONE",
+                    "materiality": "MATERIAL",
+                    "source_url": "https://example.com/filing",
+                    "evidence": "Parent guarantees a small JV borrowing.",
+                    "classification": "BLOCK_BUY",
+                },
+            }
+        )
+        state = self._make_state(self._CLEAN_DATA_BLOCK, legal_report)
+        state["structured_inputs"] = {
+            RAW_FINANCIAL_METRICS_INPUT: build_structured_ingress_record(
+                {
+                    "totalDebt": 100_000_000,
+                    "debtToEquity": 0.8,
+                    "revenue_TTM": 1_000_000_000,
+                    "financialCurrency": "USD",
+                },
+                agent_key="junior_fundamentals_analyst",
+                tool_name="get_financial_metrics",
+            )
+        }
+
+        result = await create_financial_health_validator_node(strict_mode=False)(
+            state, {}
+        )
+
+        flag = next(
+            flag
+            for flag in result["red_flags"]
+            if flag["type"] == "OFF_BALANCE_SHEET_RECOURSE_MINOR"
+        )
+        assert result["pre_screening_result"] == "PASS"
+        assert flag["risk_penalty"] == 0.25
+        assert flag["blocks_buy"] is False
+        assert "5.0% of debt" in flag["detail"]
+        assert "4.0% of equity" in flag["detail"]
+
+    @pytest.mark.asyncio
+    async def test_unusable_scale_data_does_not_kill_analysis(self):
+        legal_report = json.dumps(
+            {
+                "pfic_status": "CLEAN",
+                "vie_structure": "NO",
+                "capital_structure": {
+                    "coverage_status": "FOUND",
+                    "exposure_type": "GUARANTEE_BACKSTOP",
+                    "entity": "Oddly Reported JV",
+                    "amount": "approximately five million dollars",
+                    "amount_basis": "UNKNOWN",
+                    "balance_sheet_status": "UNRECOGNIZED",
+                    "parent_recourse": "FULL",
+                    "consolidation_risk": "NONE",
+                    "materiality": "UNKNOWN",
+                    "source_url": "https://example.com/filing",
+                    "evidence": "A guarantee exists but its amount is ambiguous.",
+                    "classification": "BLOCK_BUY",
+                },
+            }
+        )
+        state = self._make_state(self._CLEAN_DATA_BLOCK, legal_report)
+        state["structured_inputs"] = {
+            RAW_FINANCIAL_METRICS_INPUT: build_structured_ingress_record(
+                {
+                    "totalDebt": 100_000_000,
+                    "debtToEquity": 0.8,
+                    "financialCurrency": "USD",
+                },
+                agent_key="junior_fundamentals_analyst",
+                tool_name="get_financial_metrics",
+            )
+        }
+
+        result = await create_financial_health_validator_node(strict_mode=False)(
+            state, {}
+        )
+
+        flag = next(
+            flag
+            for flag in result["red_flags"]
+            if flag["type"] == "OFF_BALANCE_SHEET_RECOURSE"
+        )
+        assert result["pre_screening_result"] == "PASS"
+        assert flag["blocks_buy"] is True
 
     @pytest.mark.asyncio
     async def test_clean_legal_passes_strict(self):

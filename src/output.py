@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime
@@ -22,6 +26,128 @@ from src.runtime_diagnostics import is_publishable_analysis
 
 logger = structlog.get_logger(__name__)
 console = Console()
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Publish a complete text artifact with one filesystem replacement."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as handle:
+            handle.write(content)
+            temp_path = Path(handle.name)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path and temp_path.exists():
+            temp_path.unlink()
+
+
+def _bounded_review_findings(feedback: dict[str, Any]) -> dict[str, Any]:
+    """Persist a compact explanation without storing prompts or tool arguments."""
+
+    def _bounded(items: Any) -> list[Any]:
+        if not isinstance(items, list):
+            return []
+        bounded: list[Any] = []
+        for item in items[:10]:
+            if isinstance(item, dict):
+                bounded.append(
+                    {
+                        str(key)[:80]: str(value)[:500]
+                        for key, value in item.items()
+                        if key not in {"tool_args", "prompt", "raw_content"}
+                    }
+                )
+            else:
+                bounded.append(str(item)[:500])
+        return bounded
+
+    return {
+        "factual_errors": _bounded(feedback.get("factual_errors")),
+        "failed_references": [
+            item
+            for item in _bounded(feedback.get("reference_checks"))
+            if isinstance(item, dict)
+            and str(item.get("status", "")).lower() in {"broken", "unsupported"}
+        ],
+        "parse_error": bool(feedback.get("parse_error")),
+    }
+
+
+def _article_is_publishable(
+    article: str,
+    feedback: dict[str, Any],
+    *,
+    decision_trace: dict[str, Any] | None = None,
+    require_decision_trace: bool = False,
+) -> bool:
+    return (
+        feedback.get("verdict") == "APPROVED"
+        and str(feedback.get("citation_audit_status") or "NOT_RUN").upper() == "PASSED"
+        and (
+            not require_decision_trace
+            or (
+                isinstance(decision_trace, dict)
+                and decision_trace.get("status") == "VALID"
+            )
+        )
+        and bool(article.strip())
+    )
+
+
+def _build_article_source_context(
+    report_text: str,
+    analysis_result: dict[str, Any] | None,
+) -> str:
+    """Give the writer canonical facts plus bounded, labeled reasoning."""
+    if not isinstance(analysis_result, dict):
+        return report_text
+    from src.analysis_snapshot import render_analysis_snapshot
+
+    snapshot = render_analysis_snapshot(analysis_result.get("analysis_snapshot"))
+    if not snapshot:
+        return report_text
+    sections = [
+        snapshot.rstrip(),
+        (
+            "=== REASONING CONTEXT ===\n"
+            "The following sections are interpretation, not a source of new facts. "
+            "When they conflict with the canonical snapshot, use the snapshot."
+        ),
+    ]
+    for label, field, limit in (
+        ("PORTFOLIO MANAGER DECISION", "final_trade_decision", 10_000),
+        ("RESEARCH SYNTHESIS", "investment_plan", 7_000),
+        ("VALUATION", "valuation_params", 5_000),
+        ("MARKET CONTEXT", "market_report", 3_000),
+        ("NEWS CONTEXT", "news_report", 4_000),
+    ):
+        content = analysis_result.get(field)
+        if isinstance(content, str) and content.strip():
+            sections.append(f"=== {label} ===\n{content[:limit]}")
+    governance = analysis_result.get("entity_governance_card")
+    if isinstance(governance, dict) and governance:
+        sections.append(
+            "=== ENTITY GOVERNANCE CARD ===\n"
+            + json.dumps(governance, ensure_ascii=False, sort_keys=True)
+        )
+    fundamentals = analysis_result.get("fundamentals_report")
+    if isinstance(fundamentals, str) and fundamentals.strip():
+        sections.append(
+            "=== NON-CANONICAL FUNDAMENTALS REFERENCE ===\n"
+            "Use this section for analytical breadth and unregistered context. It "
+            "may contain agent restatements. Registered canonical claims override "
+            "every conflict, and source-sensitive exact claims absent from the "
+            "canonical snapshot must not be presented as verified.\n"
+            f"{fundamentals[:14_000]}"
+        )
+    return "\n\n".join(sections)
 
 
 def _cost_suffix() -> str:
@@ -257,10 +383,11 @@ async def handle_article_generation(
     resolve_article_path_fn=resolve_article_path,
     error_message_formatter=None,
 ) -> None:
-    """Generate article if requested, then run Editor-in-Chief review."""
-    article_path = resolve_article_path_fn(args, ticker)
-    if not article_path:
+    """Generate a draft, require editorial approval, then publish atomically."""
+    resolved_path = resolve_article_path_fn(args, ticker)
+    if not resolved_path:
         return
+    article_path = Path(resolved_path)
 
     if error_message_formatter is None:
 
@@ -268,7 +395,9 @@ async def handle_article_generation(
             return f"Error {type(exc).__name__} {operation}"
 
     try:
+        from src.agents.evidence_constraints import downstream_evidence_constraints
         from src.article_writer import ArticleEditor, ArticleWriter
+        from src.error_safety import summarize_exception
 
         if not args.quiet and not args.brief:
             console_obj.print("\n[cyan]Generating article...[/cyan]")
@@ -286,15 +415,22 @@ async def handle_article_generation(
             if isinstance(analysis_result, dict)
             else None
         )
+        evidence_constraints = downstream_evidence_constraints(analysis_result or {})
+        article_source_context = _build_article_source_context(
+            report_text,
+            analysis_result,
+        )
         draft_article = writer.write(
             ticker=ticker,
             company_name=company_name,
-            report_text=report_text,
+            report_text=article_source_context,
             trade_date=trade_date,
-            output_path=article_path,
+            output_path=None,
             valuation_context=valuation_context,
             governance_card=governance_card,
             chart_paths=chart_paths if isinstance(chart_paths, dict) else None,
+            article_dir=article_path.parent,
+            evidence_constraints=evidence_constraints,
         )
 
         editor = ArticleEditor(
@@ -302,6 +438,12 @@ async def handle_article_generation(
             tracing_metadata=tracing_metadata,
         )
         final_article = draft_article
+        feedback: dict[str, Any] = {
+            "verdict": "REVISE",
+            "confidence": 0.0,
+            "skipped": True,
+            "citation_audit_status": "NOT_RUN",
+        }
 
         if editor.is_available():
             if not args.quiet and not args.brief:
@@ -310,13 +452,12 @@ async def handle_article_generation(
             data_block = ""
             pm_block = ""
             valuation_params = ""
+            consultant_review = ""
             if analysis_result:
                 data_block = analysis_result.get("fundamentals_report", "")
                 pm_block = analysis_result.get("final_trade_decision", "")
                 valuation_params = analysis_result.get("valuation_params", "")
                 consultant_review = analysis_result.get("consultant_review", "")
-            else:
-                consultant_review = ""
 
             try:
                 final_article, feedback = await editor.edit(
@@ -333,58 +474,116 @@ async def handle_article_generation(
                     governance_card=governance_card
                     if isinstance(governance_card, dict)
                     else None,
+                    evidence_constraints=evidence_constraints,
                 )
-
-                if feedback.get("skipped"):
-                    logger_obj.info("Editor skipped (not available)")
-                elif feedback.get("verdict") == "APPROVED":
-                    logger_obj.info(
-                        "Article approved by editor",
-                        confidence=feedback.get("confidence"),
-                    )
-                else:
-                    logger_obj.info(
-                        "Article revised by editor",
-                        revisions=feedback.get("revisions", 0),
-                    )
-
-                if final_article != draft_article:
-                    article_path.write_text(final_article, encoding="utf-8")
-                    if not args.quiet and not args.brief:
-                        console_obj.print("[green]Article revised and saved.[/green]")
-
-            except Exception:
+            except Exception as exc:
                 final_article = draft_article
+                feedback = {
+                    "verdict": "REVISE",
+                    "confidence": 0.0,
+                    "review_error": True,
+                    "citation_audit_status": "NOT_RUN",
+                }
+                logger_obj.warning(
+                    "article_editor_failed",
+                    **summarize_exception(exc, operation="article editorial review"),
+                )
                 if not args.quiet and not args.brief:
                     console_obj.print(
-                        "[yellow]Editor revision failed, using original draft.[/yellow]"
+                        "[yellow]Editor review failed; draft retained for review.[/yellow]"
                     )
 
-        # Surface which model actually wrote the article — a silent Claude →
-        # Gemini fallback (e.g. exhausted Anthropic credits) otherwise only
-        # shows up as a warning buried in the logs, and article-quality
-        # conclusions get drawn against the wrong model.
+        citation_audit_status = str(
+            feedback.get("citation_audit_status") or "NOT_RUN"
+        ).upper()
+        from src.article_audit import (
+            audit_article_claim_support,
+            audit_article_claim_usage,
+            strip_claim_usage,
+        )
+
+        canonical_snapshot = (
+            analysis_result.get("analysis_snapshot")
+            if isinstance(analysis_result, dict)
+            else None
+        )
+        claim_audit_errors = [
+            *audit_article_claim_support(final_article, canonical_snapshot),
+            *audit_article_claim_usage(final_article, canonical_snapshot),
+        ]
+        if claim_audit_errors:
+            feedback.setdefault("factual_errors", []).extend(claim_audit_errors)
+            feedback["verdict"] = "REVISE"
+            feedback["citation_audit_status"] = "FAILED"
+            feedback["canonical_claim_audit"] = True
+            citation_audit_status = "FAILED"
+        final_article = strip_claim_usage(final_article)
+        snapshot = canonical_snapshot
+        strict_snapshot = (
+            isinstance(snapshot, dict) and snapshot.get("contract_status") == "VALID"
+        )
+        decision_trace = (
+            analysis_result.get("decision_trace")
+            if isinstance(analysis_result, dict)
+            else None
+        )
+        approved = isinstance(final_article, str) and _article_is_publishable(
+            final_article,
+            feedback,
+            decision_trace=decision_trace,
+            require_decision_trace=strict_snapshot,
+        )
+        saved_article_path = (
+            article_path
+            if approved
+            else article_path.with_name(
+                f"{article_path.stem}.draft{article_path.suffix or '.md'}"
+            )
+        )
+        _atomic_write_text(saved_article_path, final_article)
+        article_hash = hashlib.sha256(final_article.encode("utf-8")).hexdigest()
+
         writer_model = getattr(writer, "current_model_name", "")
         writer_fell_back = bool(getattr(writer, "writer_fell_back", False))
         if isinstance(analysis_result, dict):
             run_summary = analysis_result.setdefault("run_summary", {})
             run_summary["article_writer_model"] = writer_model
             run_summary["article_writer_fell_back"] = writer_fell_back
-            # The analysis JSON was persisted before article generation, so
-            # the in-memory stamp above never reaches disk on its own — patch
-            # the saved artifact in place (fail-open).
+            article_generation = {
+                "status": "APPROVED" if approved else "REVIEW_REQUIRED",
+                "writer_model": writer_model,
+                "writer_fell_back": writer_fell_back,
+                "editor_verdict": feedback.get("verdict", "REVISE"),
+                "editor_confidence": feedback.get("confidence", 0.0),
+                "editor_revisions": feedback.get("revisions", 0),
+                "editor_skipped": bool(feedback.get("skipped")),
+                "editor_review_error": bool(feedback.get("review_error")),
+                "citation_audit_status": citation_audit_status,
+                "canonical_claim_audit_status": (
+                    "FAILED" if claim_audit_errors else "PASSED"
+                ),
+                "review_findings": _bounded_review_findings(feedback),
+                "saved_path": str(saved_article_path),
+                "intended_final_path": str(article_path),
+                "sha256": article_hash,
+            }
+            analysis_result["article_generation"] = article_generation
             saved_path = analysis_result.get("_saved_analysis_path")
             if saved_path:
-                from src.persistence import patch_saved_run_summary
+                from src.persistence import patch_saved_sections
 
-                patch_saved_run_summary(
+                patch_saved_sections(
                     saved_path,
                     {
-                        "article_writer_model": writer_model,
-                        "article_writer_fell_back": writer_fell_back,
+                        "run_summary": {
+                            "article_writer_model": writer_model,
+                            "article_writer_fell_back": writer_fell_back,
+                        },
+                        "article_generation": article_generation,
                     },
                     logger_obj=logger_obj,
                 )
+
         if writer_fell_back and not args.quiet and not args.brief:
             console_obj.print(
                 f"[yellow]Claude writer unavailable — article written by "
@@ -392,13 +591,15 @@ async def handle_article_generation(
             )
 
         if not args.quiet and not args.brief:
+            label = "Article saved to" if approved else "Draft saved for review to"
+            color = "green" if approved else "yellow"
             console_obj.print(
-                f"[green]Article saved to:[/green] [cyan]{article_path}[/cyan]{_cost_suffix()}"
+                f"[{color}]{label}:[/{color}] "
+                f"[cyan]{saved_article_path}[/cyan]{_cost_suffix()}"
             )
-            word_count = (
-                len(final_article.split()) if isinstance(final_article, str) else 0
+            console_obj.print(
+                f"[dim]Word count: {len(final_article.split())} words[/dim]"
             )
-            console_obj.print(f"[dim]Word count: {word_count} words[/dim]")
 
     except Exception as exc:
         from src.error_safety import summarize_exception
@@ -556,6 +757,10 @@ def _render_primary_output(
     company_name = _resolved_output_company_name(
         result, args.ticker, company_name_loader
     )
+    if "analysis_validity" not in result:
+        from src.runtime_diagnostics import build_analysis_validity
+
+        result["analysis_validity"] = build_analysis_validity(result)
     reporter = reporter_cls(
         args.ticker,
         company_name,

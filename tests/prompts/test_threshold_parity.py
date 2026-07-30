@@ -153,14 +153,15 @@ def test_prompt_matches_canonical_threshold(fname: str, pattern: str, label: str
     )
 
 
-@pytest.mark.parametrize(("sector", "median"), sorted(tc.SECTOR_MEDIAN_PE.items()))
-def test_valuation_prompt_sector_pe_table_matches_constants(sector: str, median: float):
+def test_valuation_prompt_reuses_data_block_sector_pe_reference():
     msg = _system_message("valuation_calculator.json")
-    pattern = rf"{re.escape(sector)}\s*:?\s+{median:g}"
-    assert re.search(pattern, msg), (
-        f"valuation_calculator.json: sector median P/E for {sector} drifted — "
-        f"expected /{pattern}/ derived from src/thesis_constants.py"
-    )
+    assert "Copy SECTOR_MEDIAN_PE and its provenance from DATA_BLOCK" in msg
+    for sector, median in tc.SECTOR_MEDIAN_PE.items():
+        duplicated_literal = rf"{re.escape(sector)}\s*:?\s+{median:g}"
+        assert not re.search(duplicated_literal, msg), (
+            "valuation_calculator.json must not duplicate the canonical sector "
+            f"P/E table ({sector}={median:g}); the data layer owns it"
+        )
 
 
 @pytest.mark.parametrize("fname", sorted(p.name for p in PROMPTS_DIR.glob("*.json")))

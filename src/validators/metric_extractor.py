@@ -70,6 +70,12 @@ def extract_metrics(
         "pe_vs_sector": None,
         "pb_ratio": None,
         "adjusted_health_score": None,
+        "adjusted_growth_score": None,
+        "growth_score_earned": None,
+        "growth_score_available": None,
+        "r_and_d_capex_backlog_score": None,
+        "r_and_d_capex_backlog_evidence": None,
+        "r_and_d_capex_backlog_evidence_adjustment": None,
         "health_score_consistency": None,
         "growth_score_consistency": None,
         "payout_ratio": None,
@@ -97,6 +103,8 @@ def extract_metrics(
         "fcf_cagr_3y": None,
         "cycle_position": None,
         "revenue_growth_ttm": None,
+        "sector_pe_reference_type": None,
+        "sector_pe_reference_as_of": None,
         "revenue_backlog_coverage": None,
         "latest_quarter_date": None,
         "net_cash_to_market_cap": None,
@@ -109,6 +117,27 @@ def extract_metrics(
         "capacity_utilization": None,
         "facility_buildout_status": None,
         "capital_plan_status": None,
+        "guidance_coverage_status": None,
+        "guidance_source_date": None,
+        "guidance_source_url": None,
+        "guidance_source_type": None,
+        "guidance_source_authority": None,
+        "guidance_management_identified": None,
+        "guidance_period": None,
+        "guidance_revenue": None,
+        "guidance_operating_profit": None,
+        "guidance_ordinary_or_pretax_profit": None,
+        "guidance_net_income": None,
+        "guidance_net_income_yoy": None,
+        "operating_vs_net_direction": None,
+        "material_nonoperating_driver": None,
+        "driver_type": None,
+        "driver_persistence": None,
+        "driver_materiality": None,
+        "driver_affected_period": None,
+        "earnings_baseline_status": None,
+        "normalized_earnings_available": None,
+        "guidance_bridge_status": None,
         "sector": None,
         "industry": None,
         "_raw_report": fundamentals_report,
@@ -131,6 +160,52 @@ def extract_metrics(
     if health_match:
         metrics["adjusted_health_score"] = float(health_match.group(1))
 
+    growth_match = re.search(
+        r"ADJUSTED_GROWTH_SCORE:\s*(\d+(?:\.\d+)?)%"
+        r"(?:[^\n]*?based on\s*(\d+(?:\.\d+)?)\s+available points)?",
+        data_block,
+        re.IGNORECASE,
+    )
+    if growth_match:
+        metrics["adjusted_growth_score"] = float(growth_match.group(1))
+
+    raw_growth_match = re.search(
+        r"RAW_GROWTH_SCORE:\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)",
+        data_block,
+    )
+    if raw_growth_match:
+        metrics["growth_score_earned"] = float(raw_growth_match.group(1))
+        metrics["growth_score_available"] = float(raw_growth_match.group(2))
+    if growth_match and growth_match.group(2):
+        metrics["growth_score_available"] = float(growth_match.group(2))
+
+    capex_score_match = re.search(
+        r"GROWTH_SCORE_BREAKDOWN:[^\n]*\bR_AND_D_CAPEX_BACKLOG="
+        r"(0(?:\.5)?|1|N/A|REMOVED)\b",
+        data_block,
+        re.IGNORECASE,
+    )
+    if capex_score_match and capex_score_match.group(1).upper() not in {
+        "N/A",
+        "REMOVED",
+    }:
+        metrics["r_and_d_capex_backlog_score"] = float(capex_score_match.group(1))
+
+    for field_name, metric_name in (
+        ("R_AND_D_CAPEX_BACKLOG_EVIDENCE", "r_and_d_capex_backlog_evidence"),
+        (
+            "R_AND_D_CAPEX_BACKLOG_EVIDENCE_ADJUSTMENT",
+            "r_and_d_capex_backlog_evidence_adjustment",
+        ),
+    ):
+        match = re.search(
+            rf"^{field_name}:\s*([^\n]+)",
+            data_block,
+            re.IGNORECASE | re.MULTILINE,
+        )
+        if match:
+            metrics[metric_name] = match.group(1).strip().upper()
+
     for kind in ("HEALTH", "GROWTH"):
         consistency_match = re.search(
             rf"{kind}_SCORE_CONSISTENCY:\s*SUSPECT\b", data_block
@@ -151,6 +226,26 @@ def extract_metrics(
     pe_vs_sector_match = re.search(r"PE_VS_SECTOR:\s*(\d+(?:\.\d+)?)", data_block)
     if pe_vs_sector_match:
         metrics["pe_vs_sector"] = float(pe_vs_sector_match.group(1))
+
+    sector_pe_reference_type_match = re.search(
+        r"SECTOR_PE_REFERENCE_TYPE:\s*"
+        r"(STATIC_POLICY_REFERENCE|LIVE_MARKET_REFERENCE|UNKNOWN)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if sector_pe_reference_type_match:
+        metrics["sector_pe_reference_type"] = sector_pe_reference_type_match.group(
+            1
+        ).upper()
+    sector_pe_reference_as_of_match = re.search(
+        r"SECTOR_PE_REFERENCE_AS_OF:\s*(.+?)(?:\n|$)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if sector_pe_reference_as_of_match:
+        reference_as_of = sector_pe_reference_as_of_match.group(1).strip()
+        if reference_as_of.upper() not in {"N/A", "NA", "NONE", "UNKNOWN"}:
+            metrics["sector_pe_reference_as_of"] = reference_as_of
 
     pb_match = re.search(r"PB_RATIO:\s*(\d+(?:\.\d+)?)", data_block)
     if pb_match:
@@ -452,6 +547,42 @@ def extract_metrics(
         value = plan_status_match.group(1).upper()
         if value != "N/A":
             metrics["capital_plan_status"] = value
+
+    guidance_fields = {
+        "GUIDANCE_COVERAGE_STATUS": "guidance_coverage_status",
+        "GUIDANCE_SOURCE_DATE": "guidance_source_date",
+        "GUIDANCE_SOURCE_URL": "guidance_source_url",
+        "GUIDANCE_SOURCE_TYPE": "guidance_source_type",
+        "GUIDANCE_SOURCE_AUTHORITY": "guidance_source_authority",
+        "GUIDANCE_MANAGEMENT_IDENTIFIED": "guidance_management_identified",
+        "GUIDANCE_PERIOD": "guidance_period",
+        "GUIDANCE_REVENUE": "guidance_revenue",
+        "GUIDANCE_OPERATING_PROFIT": "guidance_operating_profit",
+        "GUIDANCE_ORDINARY_OR_PRETAX_PROFIT": ("guidance_ordinary_or_pretax_profit"),
+        "GUIDANCE_NET_INCOME": "guidance_net_income",
+        "GUIDANCE_NET_INCOME_YOY": "guidance_net_income_yoy",
+        "OPERATING_VS_NET_DIRECTION": "operating_vs_net_direction",
+        "MATERIAL_NONOPERATING_DRIVER": "material_nonoperating_driver",
+        "DRIVER_TYPE": "driver_type",
+        "DRIVER_PERSISTENCE": "driver_persistence",
+        "DRIVER_MATERIALITY": "driver_materiality",
+        "DRIVER_AFFECTED_PERIOD": "driver_affected_period",
+        "EARNINGS_BASELINE_STATUS": "earnings_baseline_status",
+        "NORMALIZED_EARNINGS_AVAILABLE": "normalized_earnings_available",
+        "GUIDANCE_BRIDGE_STATUS": "guidance_bridge_status",
+    }
+    for field_name, metric_name in guidance_fields.items():
+        match = re.search(
+            rf"^{re.escape(field_name)}:\s*([^\n]+)",
+            data_block,
+            re.IGNORECASE | re.MULTILINE,
+        )
+        if match:
+            value = match.group(1).strip()
+            if value.upper() not in {"N/A", "NA", "NONE", ""}:
+                metrics[metric_name] = (
+                    value.upper() if "_URL" not in field_name else value
+                )
 
     sector_match = re.search(r"SECTOR:\s*(.+?)(?:\n|$)", data_block)
     if sector_match:

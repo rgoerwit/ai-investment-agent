@@ -9,13 +9,27 @@ from pathlib import Path
 import pytest
 
 from src.config import config
+from src.fx_normalization import set_fx_rate_cache
 from src.ibkr.models import AnalysisRecord, NormalizedPosition, PortfolioSummary
 from src.ibkr.reconciler import _populate_portfolio_weights, reconcile
 from src.ibkr.reconciliation_rules import _resolve_fx
 from src.ibkr.ticker import Ticker
-from tests.ibkr.reconciler_cases import _make_analysis, _make_portfolio
+from tests.ibkr.reconciler_cases import (
+    _FakeFxRateCache,
+    _make_analysis,
+    _make_portfolio,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_fx_cache():
+    """These tests exercise _resolve_fx's sentinel/unit-mismatch repair
+    logic, not live FX fetching — pin a fixed, network-free cache."""
+    set_fx_rate_cache(_FakeFxRateCache())
+    yield
+    set_fx_rate_cache(None)
 
 
 def _analysis(currency: str, rate: float | None) -> AnalysisRecord:

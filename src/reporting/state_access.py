@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.claim_policy import RAW_FINANCIAL_METRICS_INPUT
+from src.tooling.structured_ingress import render_structured_ingress_payload
 from src.validators.financial_rules import reconcile_ocf_period_mismatch_flags
 from src.validators.supplemental_extractors import parse_consultant_conditions
 
@@ -82,10 +84,11 @@ def get_fundamentals_report(source: Any) -> str:
 
 
 def get_raw_fundamentals_data(source: Any) -> str:
-    """Return Junior Fundamentals raw metrics text from either shape."""
+    """Return code-owned raw metrics JSON, with legacy artifacts as fallback."""
     s = _safe(source)
     return (
-        s.get("raw_fundamentals_data")
+        render_structured_ingress_payload(s, RAW_FINANCIAL_METRICS_INPUT)
+        or s.get("raw_fundamentals_data")
         or (s.get("source_artifacts") or {}).get("raw_fundamentals_data")
         or ""
     )

@@ -173,7 +173,7 @@ async def run_bounded_consultant_loop(
                                 tool_err, operation="consultant_tool_failed"
                             ),
                         )
-                        result = f"TOOL_ERROR: {tool_err}"
+                        result = f"TOOL_ERROR: {type(tool_err).__name__}"
             else:
                 result_failed = True
                 result = f"Unknown tool: {tool_call['name']}"

@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
+
 from src.agents.forensic_repair import canonicalize_forensic_auditor_output
 from src.agents.output_validation import (
     extract_completion_tokens,
@@ -12,7 +14,50 @@ from src.agents.output_validation import (
 )
 
 
+def _with_latest_results(content: str) -> str:
+    return (
+        content
+        + """
+### --- START LATEST_RESULTS ---
+LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND
+LATEST_RESULTS_PERIOD: N/A
+LATEST_RESULTS_PERIOD_END: N/A
+LATEST_RESULTS_PRIOR_PERIOD: N/A
+LATEST_RESULTS_PRIOR_PERIOD_END: N/A
+LATEST_RESULTS_PERIOD_MONTHS: N/A
+LATEST_RESULTS_CURRENCY: N/A
+LATEST_RESULTS_REPORTING_UNIT: N/A
+LATEST_RESULTS_REVENUE: N/A
+LATEST_RESULTS_PRIOR_REVENUE: N/A
+LATEST_RESULTS_EARNINGS: N/A
+LATEST_RESULTS_PRIOR_EARNINGS: N/A
+LATEST_RESULTS_EARNINGS_SCOPE: N/A
+LATEST_RESULTS_SOURCE_URL: N/A
+### --- END LATEST_RESULTS ---
+"""
+    )
+
+
 def test_validate_required_output_accepts_parseable_data_block():
+    content = """
+### --- START DATA_BLOCK ---
+RAW_HEALTH_SCORE: 7/12
+ADJUSTED_HEALTH_SCORE: 58%
+GUIDANCE_COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+NORMALIZED_EARNINGS_AVAILABLE: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: NOT_APPLICABLE
+### --- END DATA_BLOCK ---
+"""
+
+    validation = validate_required_output("fundamentals_analyst", content)
+
+    assert validation["ok"] is True
+    assert validation["missing"] == []
+
+
+def test_fundamentals_validation_rejects_silently_dropped_guidance_fields():
     content = """
 ### --- START DATA_BLOCK ---
 RAW_HEALTH_SCORE: 7/12
@@ -22,8 +67,203 @@ ADJUSTED_HEALTH_SCORE: 58%
 
     validation = validate_required_output("fundamentals_analyst", content)
 
+    assert validation["ok"] is False
+    assert "promoted_management_guidance" in validation["missing"]
+
+
+def test_fundamentals_validation_identifies_invalid_guidance_enum_value():
+    content = """
+### --- START DATA_BLOCK ---
+GUIDANCE_COVERAGE_STATUS: MISSING
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+NORMALIZED_EARNINGS_AVAILABLE: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: UNRESOLVED
+### --- END DATA_BLOCK ---
+"""
+
+    validation = validate_required_output("fundamentals_analyst", content)
+
+    assert validation["ok"] is False
+    assert (
+        validation["issues"]["promoted_management_guidance"]
+        == "GUIDANCE_COVERAGE_STATUS=MISSING; expected one of: FOUND, "
+        "NOT_APPLICABLE, NOT_DISCLOSED_AFTER_TARGETED_SEARCH, SEARCH_FAILED, "
+        "UNRESOLVED_AFTER_TARGETED_SEARCH"
+    )
+
+
+def _guidance_data_block(
+    normalized_available: str,
+    *,
+    coverage: str = "NOT_DISCLOSED_AFTER_TARGETED_SEARCH",
+) -> str:
+    return f"""
+### --- START DATA_BLOCK ---
+RAW_HEALTH_SCORE: 7/12
+ADJUSTED_HEALTH_SCORE: 58%
+GUIDANCE_COVERAGE_STATUS: {coverage}
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+NORMALIZED_EARNINGS_AVAILABLE: {normalized_available}
+GUIDANCE_BRIDGE_STATUS: NOT_APPLICABLE
+### --- END DATA_BLOCK ---
+"""
+
+
+def test_guidance_validation_accepts_present_na_normalized_earnings():
+    # 6831.HK regression: NORMALIZED_EARNINGS_AVAILABLE's allowed set includes the
+    # literal "N/A", but the normalized reader stripped that token to None (rendered
+    # "" by canonical_enum), so a contractually-valid present N/A was reported as
+    # <missing> and the artifact was non-publishable. The raw read fixes this.
+    validation = validate_required_output(
+        "fundamentals_analyst", _guidance_data_block("N/A")
+    )
+
     assert validation["ok"] is True
-    assert validation["missing"] == []
+    assert "promoted_management_guidance" not in validation.get("issues", {})
+
+
+@pytest.mark.parametrize("token", ["N/A", "YES", "NO", "UNKNOWN"])
+def test_guidance_validation_accepts_valid_normalized_earnings_tokens(token):
+    validation = validate_required_output(
+        "fundamentals_analyst", _guidance_data_block(token)
+    )
+
+    assert validation["ok"] is True
+
+
+@pytest.mark.parametrize("token", ["n/a", " N/A ", "n/A"])
+def test_guidance_validation_normalizes_na_case_and_whitespace(token):
+    validation = validate_required_output(
+        "fundamentals_analyst", _guidance_data_block(token)
+    )
+
+    assert validation["ok"] is True
+
+
+def test_guidance_validation_rejects_absent_normalized_earnings():
+    block = """
+### --- START DATA_BLOCK ---
+RAW_HEALTH_SCORE: 7/12
+ADJUSTED_HEALTH_SCORE: 58%
+GUIDANCE_COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: NOT_APPLICABLE
+### --- END DATA_BLOCK ---
+"""
+
+    validation = validate_required_output("fundamentals_analyst", block)
+
+    assert validation["ok"] is False
+    assert validation["issues"]["promoted_management_guidance"] == (
+        "NORMALIZED_EARNINGS_AVAILABLE=<missing>; expected one of: "
+        "N/A, NO, UNKNOWN, YES"
+    )
+
+
+def test_guidance_validation_rejects_invalid_normalized_earnings_token():
+    validation = validate_required_output(
+        "fundamentals_analyst", _guidance_data_block("MAYBE")
+    )
+
+    assert validation["ok"] is False
+    assert (
+        "NORMALIZED_EARNINGS_AVAILABLE=MAYBE"
+        in validation["issues"]["promoted_management_guidance"]
+    )
+
+
+def test_foreign_language_validation_accepts_sourced_guidance_block():
+    content = """
+### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_DATE: 2026-05-08
+SOURCE_URL: https://example.com/results
+SEARCHES_COMPLETED: results release, presentation, transcript, filing
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+OPERATING_VS_NET_DIRECTION: OP_UP_NET_DOWN
+MATERIAL_NONOPERATING_DRIVER: YES
+DRIVER_TYPE: TAX_CREDIT
+DRIVER_PERSISTENCE: EXPIRING
+EARNINGS_BASELINE_STATUS: TEMPORARILY_BOOSTED
+GUIDANCE_BRIDGE_STATUS: RECONCILED
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+
+    validation = validate_required_output(
+        "foreign_language_analyst", _with_latest_results(content)
+    )
+
+    assert validation["ok"] is True
+
+
+def test_foreign_language_validation_requires_explicit_negative_search_coverage():
+    content = """
+### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+SOURCE_DATE: N/A
+SOURCE_URL: N/A
+SEARCHES_COMPLETED: N/A
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+
+    validation = validate_required_output(
+        "foreign_language_analyst", _with_latest_results(content)
+    )
+
+    assert validation["ok"] is False
+    assert validation["missing"] == ["management_guidance_block"]
+    assert should_fail_closed(
+        "foreign_language_analyst",
+        validation=validation,
+        truncated=False,
+        content=content,
+    )
+
+
+def test_foreign_language_validation_accepts_targeted_unresolved_status():
+    content = """
+### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: UNRESOLVED_AFTER_TARGETED_SEARCH
+SEARCHES_COMPLETED: results_package=COMPLETED; earnings_bridge=INSUFFICIENT_DATA
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+EARNINGS_BASELINE_STATUS: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: UNRESOLVED
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+
+    validation = validate_required_output(
+        "foreign_language_analyst", _with_latest_results(content)
+    )
+
+    assert validation["ok"] is True
+
+
+def test_foreign_language_validation_rejects_false_durable_divergence():
+    content = """
+### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_DATE: 2026-05-08
+SOURCE_URL: https://example.com/results
+SEARCHES_COMPLETED: results_package=COMPLETED; earnings_bridge=COMPLETED
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+OPERATING_VS_NET_DIRECTION: OP_UP_NET_DOWN
+MATERIAL_NONOPERATING_DRIVER: NO
+DRIVER_TYPE: NONE
+DRIVER_PERSISTENCE: N/A
+EARNINGS_BASELINE_STATUS: DURABLE
+GUIDANCE_BRIDGE_STATUS: UNRESOLVED
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+
+    validation = validate_required_output(
+        "foreign_language_analyst", _with_latest_results(content)
+    )
+
+    assert validation["ok"] is False
 
 
 def test_validate_required_output_detects_missing_pm_sections():
@@ -36,6 +276,24 @@ def test_validate_required_output_detects_missing_pm_sections():
 
     assert validation["ok"] is False
     assert "position_section" in validation["missing"]
+    assert "decision_facts" in validation["missing"]
+    assert "decision_gates" in validation["missing"]
+
+
+def test_validate_required_output_accepts_complete_pm_trace():
+    content = """
+### PORTFOLIO MANAGER VERDICT: HOLD
+### THESIS COMPLIANCE SUMMARY
+### --- START PM_BLOCK ---
+VERDICT: HOLD
+DECISION_FACTS: claim:pe_ratio_ttm:123
+DECISION_GATES: NONE
+### --- END PM_BLOCK ---
+"""
+
+    validation = validate_required_output("portfolio_manager", content)
+
+    assert validation["ok"] is True
 
 
 def test_validate_required_output_accepts_consultant_structure():

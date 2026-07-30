@@ -141,12 +141,15 @@ def _build_quick_consultant_summary(
     attempts = [
         attempt
         for attempt in tracker_stats.get("call_attempts", []) or []
-        if "consultant" in str(attempt.get("agent_name", "")).lower()
+        if attempt.get("canonical_agent") == "Consultant"
+        # Backward-compat for pre-canonical artifacts (no canonical_agent field).
+        or (
+            not attempt.get("canonical_agent")
+            and "consultant" in str(attempt.get("agent_name", "")).lower()
+        )
     ]
     agent_rows = tracker_stats.get("agents", {}) or {}
-    token_rows = [
-        row for name, row in agent_rows.items() if "consultant" in str(name).lower()
-    ]
+    token_rows = [row for name, row in agent_rows.items() if name == "Consultant"]
     tokens = sum(int(row.get("total_tokens") or 0) for row in token_rows)
     elapsed = sum(float(attempt.get("elapsed_seconds") or 0.0) for attempt in attempts)
     timeout = any(attempt.get("failure_kind") == "timeout" for attempt in attempts)
@@ -578,6 +581,10 @@ def save_results_to_file(
         "entity_governance_card": result.get("entity_governance_card") or None,
         "auditor_budget": result.get("auditor_budget") or None,
         "source_artifacts": {
+            "management_guidance_evidence": _persisted_source_artifact(
+                result.get("management_guidance_evidence"),
+                "management_guidance_evidence",
+            ),
             "raw_fundamentals_data": _persisted_source_artifact(
                 result.get("raw_fundamentals_data"),
                 "raw_fundamentals_data",
@@ -645,6 +652,10 @@ def save_results_to_file(
         "run_summary": result.get("run_summary", {}),
         "analysis_validity": result.get("analysis_validity", {}),
         "artifact_statuses": result.get("artifact_statuses", {}),
+        "evidence_records": result.get("evidence_records", []),
+        "structured_inputs": result.get("structured_inputs", {}),
+        "analysis_snapshot": result.get("analysis_snapshot", {}),
+        "decision_trace": result.get("decision_trace", {}),
         "agent_attribution": _build_agent_attribution(
             result, (token_stats or {}).get("agents", {}) or {}
         ),
@@ -785,30 +796,40 @@ def save_results_to_file(
     return filepath
 
 
-def patch_saved_run_summary(
+def patch_saved_sections(
     path: str | Path,
-    fields: dict[str, Any],
+    sections: dict[str, dict[str, Any]],
     *,
     logger_obj=logger,
 ) -> None:
-    """Merge ``fields`` into ``run_summary`` of an already-saved analysis JSON.
+    """Merge top-level metadata sections into an already-saved analysis JSON.
 
-    Used to record post-persistence facts (e.g. the article writer model /
-    fallback flag) without re-running the full save path. Fail-open: a patch
-    failure must never break the run.
+    Used for post-persistence facts without re-running the full save path.
+    Fail-open: a patch failure must never break the run.
     """
     from src.error_safety import summarize_exception
 
     try:
         filepath = Path(path)
         data = json.loads(filepath.read_text(encoding="utf-8"))
-        data.setdefault("run_summary", {}).update(fields)
+        for section, fields in sections.items():
+            data.setdefault(section, {}).update(fields)
         filepath.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception as exc:
         logger_obj.warning(
-            "run_summary_patch_failed",
-            **summarize_exception(exc, operation="patching saved run_summary"),
+            "saved_sections_patch_failed",
+            **summarize_exception(exc, operation="patching saved analysis sections"),
         )
+
+
+def patch_saved_run_summary(
+    path: str | Path,
+    fields: dict[str, Any],
+    *,
+    logger_obj=logger,
+) -> None:
+    """Compatibility wrapper for post-persistence ``run_summary`` updates."""
+    patch_saved_sections(path, {"run_summary": fields}, logger_obj=logger_obj)
 
 
 def _persist_analysis_outputs(

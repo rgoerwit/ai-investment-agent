@@ -65,8 +65,11 @@ class TestFXRateFetching:
         assert rate == 1.0
 
     @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_get_fx_rate_yfinance_invalid_currency(self):
-        """Test invalid currency returns None gracefully."""
+        """Test invalid currency returns None gracefully (live network call —
+        can take up to FX_RATE_POLICY's timeout to resolve/fail against a
+        bogus ticker)."""
         rate = await get_fx_rate_yfinance("ZZZ", "USD")
         assert rate is None
 
@@ -121,6 +124,79 @@ class TestFXRateFetching:
 
             assert rate is None
             assert source == "unavailable"
+
+    @pytest.mark.asyncio
+    async def test_get_fx_rate_yfinance_succeeds_within_configured_timeout(self):
+        """A fetch slower than FX_RATE_POLICY's old 3.0s value but within its
+        current (widened) timeout must succeed — proves the call honors
+        whatever FX_RATE_POLICY.hard_timeout_seconds is currently set to,
+        rather than a stale hardcoded ceiling."""
+        import asyncio as _asyncio
+
+        from src.blocking_io import BlockingCallPolicy
+
+        class _FastInfo:
+            last_price = None
+
+        class _FakeTicker:
+            fast_info = _FastInfo()
+
+            @property
+            def info(self):
+                return {"regularMarketPrice": 0.0067}
+
+        async def _slow_to_thread(fn):
+            await _asyncio.sleep(0.05)
+            return fn()
+
+        with (
+            patch("yfinance.Ticker", return_value=_FakeTicker()),
+            patch("src.yfinance_runtime.configure_yfinance_defaults"),
+            patch("asyncio.to_thread", side_effect=_slow_to_thread),
+            patch(
+                "src.fx_normalization.FX_RATE_POLICY",
+                BlockingCallPolicy("fx_rate", 0.2),
+            ),
+        ):
+            rate = await get_fx_rate_yfinance("JPY", "USD")
+
+        assert rate == pytest.approx(0.0067)
+
+    @pytest.mark.asyncio
+    async def test_get_fx_rate_yfinance_still_times_out_past_configured_ceiling(self):
+        """A fetch slower than FX_RATE_POLICY's configured timeout must still
+        time out and fall through to None — the widened timeout is not
+        unbounded, the fail-safe is preserved."""
+        import asyncio as _asyncio
+
+        from src.blocking_io import BlockingCallPolicy
+
+        class _FastInfo:
+            last_price = None
+
+        class _FakeTicker:
+            fast_info = _FastInfo()
+
+            @property
+            def info(self):
+                return {"regularMarketPrice": 0.0067}
+
+        async def _too_slow_to_thread(fn):
+            await _asyncio.sleep(0.2)
+            return fn()
+
+        with (
+            patch("yfinance.Ticker", return_value=_FakeTicker()),
+            patch("src.yfinance_runtime.configure_yfinance_defaults"),
+            patch("asyncio.to_thread", side_effect=_too_slow_to_thread),
+            patch(
+                "src.fx_normalization.FX_RATE_POLICY",
+                BlockingCallPolicy("fx_rate", 0.05),
+            ),
+        ):
+            rate = await get_fx_rate_yfinance("JPY", "USD")
+
+        assert rate is None
 
     @pytest.mark.asyncio
     async def test_get_fx_rate_case_insensitive(self):
@@ -548,9 +624,14 @@ class TestFXNormalizationPerformance:
     """Test performance characteristics of FX normalization."""
 
     @pytest.mark.asyncio
-    @pytest.mark.slow
     async def test_batch_normalization_performance(self):
-        """Test normalizing 10 stocks in reasonable time."""
+        """Normalizing 10 stocks stays fast at the code level.
+
+        FX lookups are pinned to the deterministic in-memory fallback so this
+        measures the normalization logic, not live yfinance latency — the old
+        wall-clock bound over real network calls was flaky under load (it took
+        >10s in a loaded full-suite run).
+        """
         import time
 
         test_stocks = [
@@ -566,12 +647,18 @@ class TestFXNormalizationPerformance:
             {"market_cap": 150e9, "currency": "SGD"},
         ]
 
-        start = time.time()
-        results = [await normalize_financial_dict(stock) for stock in test_stocks]
-        elapsed = time.time() - start
+        # Force the pure in-memory fallback (no network) so timing reflects the
+        # normalization code path deterministically.
+        with patch("src.fx_normalization.get_fx_rate_yfinance", return_value=None):
+            start = time.time()
+            results = [await normalize_financial_dict(stock) for stock in test_stocks]
+            elapsed = time.time() - start
 
-        # Should complete in <10 seconds (generous - likely <5s with caching)
-        assert elapsed < 10.0, f"Batch normalization took {elapsed:.2f}s (too slow)"
+        # Deterministic (no network): pure-CPU normalization of 10 dicts is
+        # sub-10ms. 2s is generous headroom that still catches a pathological
+        # regression (an accidental sleep, O(n²) blowup, or a leaked live call).
+        assert elapsed < 2.0, f"Batch normalization took {elapsed:.2f}s (too slow)"
+        assert len(results) == len(test_stocks)
         assert len(results) == 10
         assert all(r["_currency_normalized"] for r in results)
 

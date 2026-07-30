@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-07-19
+Last updated: 2026-07-28
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
@@ -98,6 +98,37 @@ when period type/end, currency, and consolidation scope align. Fiscal-year
 labels are never inferred from calendar years. Saved artifacts include the
 actual Auditor budget ledger and attribution lists only models that made calls.
 
+Management-guidance baseline evidence is owned by
+`src/agents/management_guidance.py`. Before the Foreign Language Analyst runs,
+it searches the latest results package and earnings bridge, checks the statutory
+filing API, and in full mode extracts query-relevant passages from discovered
+sources. Exchange-aware searches include the active fiscal period where the
+exchange convention supports it and local filing vocabulary otherwise. An exact
+ticker-matched result title can supply a bounded local listing name in any script
+for the bridge search, with the previously resolved name retained only as fallback.
+Search provenance is code-owned, then promoted deterministically into Senior
+Fundamentals so temporary tax/regulatory benefits can affect scoring and BUY
+eligibility even when no extraordinary-expense line appears. A results URL
+without operating- and net-income guidance is treated as an unresolved baseline,
+not evidence of durable earnings. `src/guidance_vocabulary.py` owns the
+jurisdiction-specific search and excerpt vocabulary; the generic search formatter
+accepts explicit priority terms and has no embedded finance-language bias.
+`src/earnings_baseline.py` owns the pure status sets and scoring predicates. If
+the Foreign Language Analyst returns useful research but omits or malforms only
+the guidance block, code appends a conservative unresolved/search-failed block;
+empty or unusable agent output still fails closed.
+
+Foreign-language ownership and exact capacity claims are normalized by
+`src/agents/foreign_language_evidence.py` against that agent's own
+`ToolMessage` evidence before Senior Fundamentals can consume them. The
+`EntityGovernanceCard` keeps largest shareholder, controlling shareholder,
+control status/basis, and ownership provenance separate. A minority stake or
+equity-method relationship does not establish control; sub-50% control requires
+an explicit basis plus official-filing evidence or corroboration from two
+single-source tool records on distinct domains.
+Related listed tickers must occur in the same supporting evidence, so an
+unsupported FLA ticker cannot re-enter through Senior's restatement.
+
 `src/tooling/` owns cross-cutting tool execution, audit hooks, argument policy, and untrusted-content inspection.
 
 `src/runtime_diagnostics.py` owns artifact completion/validity and publishability checks.
@@ -111,6 +142,62 @@ guard for prompt marker form, parser shape parity, and source-level marker drift
 ## Information Flow Model
 
 Primary agent-to-agent flow is through typed state fields, not just message history.
+
+Material factual claims flow through the canonical claim envelope. Policy and roles
+live in `src/claim_policy.py`; `src/tooling/structured_ingress.py` captures registered
+tool payloads before text conversion or truncation and rejects conflicting valid
+payloads instead of choosing one silently. `src/analysis_snapshot.py` owns claim
+construction, monotonic refresh, and Senior fact reconciliation;
+`src/score_lineage.py` owns rubric dependencies and deterministic score/report
+projection. The Fundamentals Sync barrier mints the first snapshot from deterministic
+raw metrics, normalized structured reports, and bound fetched evidence before Senior
+Fundamentals runs. Senior may interpret those claims and calculate rubric scores, but
+registered facts in its `DATA_BLOCK` are overwritten from the pre-Senior snapshot when
+they conflict. Later stages may add validated derivations or stronger newly bound
+evidence; they do not rebuild canonical facts from agent prose.
+
+Claims have explicit `SUPPORT`, `GATE_INPUT`, or `CONTEXT` decision roles. The Portfolio
+Manager references eligible canonical claim IDs and every active deterministic gate in
+`DECISION_FACTS` / `DECISION_GATES`. `src/pm_claim_audit.py` reconciles and validates
+that trace after all verdict rewrites, so the persisted trace describes the final
+decision rather than the model's pre-policy draft. Invalid structured traces receive
+one bounded correction attempt. Free-prose source-family lint remains advisory because
+the claim IDs and gates are the load-bearing contract; existing PM/article claim audits
+still caveat or block unsupported published assertions.
+
+Revenue and earnings MRQ claims carry separate period provenance; the shared
+`LATEST_QUARTER_DATE` display field is populated only when all available MRQ claim
+periods agree. Source-required policies always mint explicit negative claims when
+evidence is missing or unsupported, so omission cannot let Senior reintroduce a
+number. Post-Senior compatibility snapshots are `DEGRADED`, cannot support BUY, and
+make the analysis non-publishable. Adjusted rubric scores are `GATE_INPUT` claims,
+never standalone BUY support. Every positive score credit must resolve transitively to
+an eligible registered fact; otherwise the score remains visible as advisory but is
+projected as N/A for decision use.
+
+Article flow is Writer → Editor/revision → deterministic audit → atomic save.
+Source-sensitive assertions carry a temporary `CLAIM_USAGE` manifest tied to eligible
+canonical IDs; `src/article_audit.py` validates and strips it. A valid strict snapshot
+with an invalid final decision trace, unsupported registered prose, or a failed
+citation/claim audit is saved as a draft rather than published.
+The Writer also receives a bounded, explicitly non-canonical Fundamentals reference
+for analytical breadth; registered snapshot claims override every conflict. Report
+publishability, like article publishability, requires a valid snapshot and final
+decision trace when those contracts are present.
+
+`src/tooling/evidence_recorder.py` is the run-scoped inspected-evidence ledger and the
+shared tool-result status classifier. Embedded provider errors override optimistic
+outer status tokens, while mixed valid/error result sets retain valid evidence with a
+partial-error reason. Search-result identity establishes relevance only; a
+source-required claim binds only to fetched `EVIDENCE_FOUND` content, never a
+`RESULTS_FOUND` listing. Issuer source authority comes from the centralized
+official-document trust policy, not a producing-tool name, model-written token, title,
+ticker, jurisdiction, or inferred issuer domain.
+Latest-results and management-guidance numeric decision eligibility additionally
+requires the asserted values to occur in the URL-bound evidence; URL identity alone is
+insufficient. Approved HTML IR hubs may expose a bounded ranked list of same-host
+relative disclosure paths; those children are fetched through the same URL, DNS,
+redirect, size, and inspection controls before they can bind.
 
 Important distinction:
 

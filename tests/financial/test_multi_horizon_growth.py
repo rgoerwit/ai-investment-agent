@@ -143,6 +143,37 @@ class TestQuarterlyHorizonExtraction:
         assert result.get("revenueGrowth_TTM") == pytest.approx(0.12, abs=0.01)
         assert result["growth_trajectory"] == "STABLE"
 
+    @pytest.mark.parametrize(
+        ("prior_net_income", "expected_status"),
+        (
+            (2.0, "DEPRESSED"),
+            (10.0, "NORMAL"),
+            (20.0, "ELEVATED"),
+            (0.0, "NONPOSITIVE"),
+        ),
+    )
+    def test_mrq_comparison_base_uses_prior_quarter_margin(
+        self,
+        fetcher,
+        prior_net_income,
+        expected_status,
+    ):
+        """MRQ growth gets a distinct comparison-base classification."""
+        revenues = [100.0] * 8
+        net_incomes = [12.0, 10.0, 10.0, 10.0, prior_net_income, 10.0, 10.0, 10.0]
+        qt_inc = _make_quarterly_income(revenues, net_incomes)
+
+        result = fetcher._extract_quarterly_horizons(
+            _make_mock_ticker(qt_inc=qt_inc),
+            "6782.TW",
+        )
+
+        assert result["mrq_comparison_base_status"] == expected_status
+        if expected_status == "NONPOSITIVE":
+            assert "mrq_comparison_base_margin_delta_bps" not in result
+        else:
+            assert "mrq_comparison_base_margin_delta_bps" in result
+
 
 class TestEdgeCases:
     """Test data gap and boundary conditions."""

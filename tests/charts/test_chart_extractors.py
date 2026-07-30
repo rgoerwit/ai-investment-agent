@@ -473,6 +473,8 @@ class TestValuationParamsExtractor:
         METHOD: P/E_NORMALIZATION
         SECTOR: Technology
         SECTOR_MEDIAN_PE: 25
+        SECTOR_PE_REFERENCE_TYPE: LIVE_MARKET_REFERENCE
+        SECTOR_PE_REFERENCE_AS_OF: 2026-07-23
         CURRENT_PE: 18.5
         PEG_RATIO: N/A
         GROWTH_SCORE_PCT: N/A
@@ -488,6 +490,8 @@ class TestValuationParamsExtractor:
         assert result.method == "P/E_NORMALIZATION"
         assert result.sector == "Technology"
         assert result.sector_median_pe == 25
+        assert result.sector_pe_reference_type == "LIVE_MARKET_REFERENCE"
+        assert result.sector_pe_reference_as_of == "2026-07-23"
         assert result.current_pe == 18.5
         assert result.peg_ratio is None  # N/A
         assert result.growth_score_pct is None  # N/A
@@ -515,6 +519,7 @@ class TestValuationParamsExtractor:
         result = _extract_params("")
         assert result.method is None
         assert result.current_price is None
+        assert result.sector_pe_reference_type == "UNKNOWN"
 
     def test_extract_no_params_block(self):
         """Test extraction when VALUATION_PARAMS block is missing."""
@@ -597,6 +602,23 @@ class TestPENormalizationCalculation:
         # High = 66.67 * 1.15 = 76.67
         assert result.low == pytest.approx(56.67, rel=0.01)
         assert result.high == pytest.approx(76.67, rel=0.01)
+
+    def test_static_sector_reference_is_labeled_and_low_confidence(self):
+        params = ValuationParams(
+            method="P/E_NORMALIZATION",
+            sector="Health Care",
+            sector_median_pe=22,
+            sector_pe_reference_type="STATIC_POLICY_REFERENCE",
+            current_pe=11,
+            current_price=100.0,
+            confidence="HIGH",
+        )
+
+        result = _calculate_pe_normalization(params)
+
+        assert result.confidence == "LOW"
+        assert "static policy sector reference" in (result.methodology or "")
+        assert "live" not in (result.methodology or "")
 
     def test_missing_current_pe(self):
         """Test calculation fails gracefully with missing current PE."""

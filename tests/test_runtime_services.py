@@ -5,9 +5,12 @@ from types import SimpleNamespace
 import pytest
 
 from src.runtime_services import (
+    IssuerAuthorityRegistry,
     ProviderRuntime,
     RuntimeServices,
+    get_current_issuer_hosts,
     get_current_runtime_services,
+    register_current_issuer_url,
     use_runtime_services,
 )
 from src.tooling.inspection_service import InspectionService
@@ -69,3 +72,28 @@ def test_with_extra_tool_hooks_returns_new_service_without_mutating_original():
 
     assert services.tool_service.hooks == [base_hook]
     assert scoped.tool_service.hooks == [base_hook, extra_hook]
+
+
+def test_issuer_authority_is_validated_and_run_scoped():
+    services = RuntimeServices(
+        tool_service=ToolExecutionService(),
+        inspection_service=InspectionService(),
+        issuer_authority=IssuerAuthorityRegistry(),
+    )
+
+    assert get_current_issuer_hosts() == ()
+    with use_runtime_services(services):
+        assert register_current_issuer_url(
+            "https://www.issuer.example/investors",
+            provenance="structured_profile",
+        )
+        assert not register_current_issuer_url(
+            "http://issuer.example/investors",
+            provenance="untrusted",
+        )
+        assert not register_current_issuer_url(
+            "https://127.0.0.1/investors",
+            provenance="untrusted",
+        )
+        assert get_current_issuer_hosts() == ("issuer.example",)
+    assert get_current_issuer_hosts() == ()

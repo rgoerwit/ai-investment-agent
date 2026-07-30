@@ -1,8 +1,14 @@
 import sys
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from langchain_core.messages import AIMessage
 
-from src.health_check import check_python_version, get_package_version
+from src.health_check import (
+    check_llm_connectivity,
+    check_python_version,
+    get_package_version,
+)
 
 
 @pytest.mark.parametrize(
@@ -56,3 +62,29 @@ def test_get_package_version_returns_unknown_for_missing_package():
     """Non-existent package must not raise — returns 'unknown' gracefully."""
     result = get_package_version("_no_such_package_xyz_")
     assert result == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_llm_connectivity_uses_shared_gemini_factory():
+    llm = AsyncMock()
+    llm.ainvoke.return_value = AIMessage(content="OK")
+
+    with patch("src.llms.create_gemini_model", return_value=llm) as create:
+        assert await check_llm_connectivity() is True
+
+    assert create.call_args.args[0]
+    assert create.call_args.kwargs == {
+        "temperature": 0.0,
+        "timeout": 10,
+        "max_retries": 1,
+        "service_tier": "standard",
+    }
+
+
+@pytest.mark.asyncio
+async def test_llm_connectivity_handles_factory_error():
+    with patch(
+        "src.llms.create_gemini_model",
+        side_effect=RuntimeError("construction failed"),
+    ):
+        assert await check_llm_connectivity() is False

@@ -7,9 +7,19 @@ from typing import Any
 import structlog
 
 from src.data_block_utils import (
+    extract_block_field,
+    extract_block_field_from_text_raw,
+    extract_last_data_block,
+    extract_last_fenced_block,
     has_parseable_data_block,
     has_parseable_fenced_block,
     unfenced_label,
+)
+from src.earnings_baseline import (
+    EARNINGS_BASELINE_STATUSES,
+    GUIDANCE_BRIDGE_STATUSES,
+    GUIDANCE_COVERAGE_STATUSES,
+    canonical_enum,
 )
 from src.llm_usage import extract_token_usage_breakdown
 
@@ -18,6 +28,219 @@ logger = structlog.get_logger(__name__)
 _FORENSIC_VERDICT_PATTERN = re.compile(
     r"(?im)^\s*(?:\*\*)?\s*verdict\s*(?:\*\*)?\s*:\s*\S+"
 )
+
+
+def _has_valid_latest_results_block(content: str) -> bool:
+    """Require the complete latest-results contract, including explicit N/A fields."""
+    from src.agents.foreign_language_evidence import LATEST_RESULTS_SOURCE_FIELDS
+
+    block = extract_last_fenced_block(content, "LATEST_RESULTS")
+    if not block:
+        return False
+
+    coverage = canonical_enum(
+        extract_block_field_from_text_raw(
+            block,
+            "LATEST_RESULTS_COVERAGE_STATUS",
+        )
+    )
+    if coverage not in {"FOUND", "NOT_FOUND", "SEARCH_FAILED"}:
+        return False
+
+    required_fields = (
+        "LATEST_RESULTS_COVERAGE_STATUS",
+        *LATEST_RESULTS_SOURCE_FIELDS,
+    )
+    if any(
+        extract_block_field_from_text_raw(block, field) is None
+        for field in required_fields
+    ):
+        return False
+
+    if coverage != "FOUND":
+        return True
+
+    period = extract_block_field_from_text_raw(block, "LATEST_RESULTS_PERIOD")
+    period_end = extract_block_field_from_text_raw(
+        block,
+        "LATEST_RESULTS_PERIOD_END",
+    )
+    source_url = extract_block_field_from_text_raw(
+        block,
+        "LATEST_RESULTS_SOURCE_URL",
+    )
+    if not (
+        period
+        and period.upper() not in {"N/A", "NA", "NONE", "UNKNOWN"}
+        and period_end
+        and re.fullmatch(r"\d{4}-\d{2}-\d{2}", period_end)
+        and source_url
+        and re.fullmatch(r"https?://\S+", source_url, re.IGNORECASE)
+    ):
+        return False
+    return True
+
+
+def _has_valid_management_guidance_block(content: str) -> bool:
+    """Validate the minimum evidence contract for forward-guidance research."""
+    if not has_parseable_fenced_block(content, "MANAGEMENT_GUIDANCE"):
+        return False
+
+    coverage_status = canonical_enum(
+        extract_block_field(content, "MANAGEMENT_GUIDANCE", "COVERAGE_STATUS")
+    )
+    if coverage_status not in GUIDANCE_COVERAGE_STATUSES:
+        return False
+
+    searches_completed = extract_block_field(
+        content, "MANAGEMENT_GUIDANCE", "SEARCHES_COMPLETED"
+    )
+    search_provenance = extract_block_field(
+        content, "MANAGEMENT_GUIDANCE", "SEARCH_PROVENANCE"
+    )
+    if search_provenance != "CODE_OWNED_PREFLIGHT":
+        return False
+
+    if coverage_status == "FOUND":
+        source_date = extract_block_field(content, "MANAGEMENT_GUIDANCE", "SOURCE_DATE")
+        source_url = extract_block_field(content, "MANAGEMENT_GUIDANCE", "SOURCE_URL")
+        direction = canonical_enum(
+            extract_block_field(
+                content, "MANAGEMENT_GUIDANCE", "OPERATING_VS_NET_DIRECTION"
+            )
+        )
+        material_driver = canonical_enum(
+            extract_block_field(
+                content, "MANAGEMENT_GUIDANCE", "MATERIAL_NONOPERATING_DRIVER"
+            )
+        )
+        driver_type = canonical_enum(
+            extract_block_field(content, "MANAGEMENT_GUIDANCE", "DRIVER_TYPE")
+        )
+        persistence = canonical_enum(
+            extract_block_field(content, "MANAGEMENT_GUIDANCE", "DRIVER_PERSISTENCE")
+        )
+        baseline_status = canonical_enum(
+            extract_block_field(
+                content, "MANAGEMENT_GUIDANCE", "EARNINGS_BASELINE_STATUS"
+            )
+        )
+        bridge_status = canonical_enum(
+            extract_block_field(
+                content, "MANAGEMENT_GUIDANCE", "GUIDANCE_BRIDGE_STATUS"
+            )
+        )
+        if not (
+            source_date
+            and source_url
+            and re.fullmatch(r"https?://\S+", source_url, re.IGNORECASE)
+            and direction
+            and bridge_status in GUIDANCE_BRIDGE_STATUSES
+        ):
+            return False
+        if material_driver == "YES" and driver_type in {None, "NONE", "UNKNOWN"}:
+            return False
+        if direction == "OP_UP_NET_DOWN":
+            if bridge_status == "RECONCILED" and (
+                material_driver != "YES" or driver_type in {None, "NONE", "UNKNOWN"}
+            ):
+                return False
+            if bridge_status == "UNRESOLVED" and baseline_status == "DURABLE":
+                return False
+        if (
+            driver_type == "TAX_CREDIT"
+            and persistence in {"ONE_TIME", "EXPIRING"}
+            and baseline_status == "DURABLE"
+        ):
+            return False
+        return True
+
+    return bool(searches_completed and searches_completed.upper() not in {"N/A", "NA"})
+
+
+def _promoted_management_guidance_issue(content: str) -> str | None:
+    """Describe the first invalid Senior guidance-contract field, if any."""
+    coverage_status = canonical_enum(
+        extract_block_field(content, "DATA_BLOCK", "GUIDANCE_COVERAGE_STATUS")
+    )
+    material_driver = canonical_enum(
+        extract_block_field(content, "DATA_BLOCK", "MATERIAL_NONOPERATING_DRIVER")
+    )
+    baseline_status = canonical_enum(
+        extract_block_field(content, "DATA_BLOCK", "EARNINGS_BASELINE_STATUS")
+    )
+    # Read this field raw: its allowed set includes the literal "N/A", but the
+    # normalized reader (extract_block_field) strips null tokens to None, which
+    # canonical_enum then renders as "" — an unobservable, self-contradictory
+    # rejection of a contractually-valid N/A. Raw-read preserves the token; a
+    # genuinely absent field still yields None -> "" and still fails.
+    normalized_available = canonical_enum(
+        extract_block_field_from_text_raw(
+            extract_last_data_block(content),
+            "NORMALIZED_EARNINGS_AVAILABLE",
+        )
+    )
+    bridge_status = canonical_enum(
+        extract_block_field(content, "DATA_BLOCK", "GUIDANCE_BRIDGE_STATUS")
+    )
+    enum_checks = (
+        (
+            "GUIDANCE_COVERAGE_STATUS",
+            coverage_status,
+            GUIDANCE_COVERAGE_STATUSES,
+        ),
+        (
+            "MATERIAL_NONOPERATING_DRIVER",
+            material_driver,
+            frozenset({"YES", "NO", "UNKNOWN"}),
+        ),
+        (
+            "EARNINGS_BASELINE_STATUS",
+            baseline_status,
+            EARNINGS_BASELINE_STATUSES,
+        ),
+        (
+            "NORMALIZED_EARNINGS_AVAILABLE",
+            normalized_available,
+            frozenset({"YES", "NO", "UNKNOWN", "N/A"}),
+        ),
+        (
+            "GUIDANCE_BRIDGE_STATUS",
+            bridge_status,
+            GUIDANCE_BRIDGE_STATUSES,
+        ),
+    )
+    for field, actual, allowed in enum_checks:
+        if actual not in allowed:
+            expected = ", ".join(sorted(allowed))
+            return f"{field}={actual or '<missing>'}; expected one of: {expected}"
+
+    if coverage_status != "FOUND":
+        return None
+
+    source_url = extract_block_field(content, "DATA_BLOCK", "GUIDANCE_SOURCE_URL")
+    direction = canonical_enum(
+        extract_block_field(content, "DATA_BLOCK", "OPERATING_VS_NET_DIRECTION")
+    )
+    if not source_url or not re.fullmatch(r"https?://\S+", source_url, re.IGNORECASE):
+        return (
+            f"GUIDANCE_SOURCE_URL={source_url or '<missing>'}; expected an HTTP(S) URL"
+        )
+    if not direction:
+        return "OPERATING_VS_NET_DIRECTION=<missing>; expected an explicit token"
+    if direction == "OP_UP_NET_DOWN" and bridge_status == "UNRESOLVED":
+        if baseline_status == "DURABLE":
+            return (
+                "EARNINGS_BASELINE_STATUS=DURABLE conflicts with "
+                "OPERATING_VS_NET_DIRECTION=OP_UP_NET_DOWN and "
+                "GUIDANCE_BRIDGE_STATUS=UNRESOLVED"
+            )
+    return None
+
+
+def _has_promoted_management_guidance(content: str) -> bool:
+    """Require Senior Fundamentals to preserve the evidence/baseline outcome."""
+    return _promoted_management_guidance_issue(content) is None
 
 
 def _coerce_optional_int(value: Any) -> int | None:
@@ -76,10 +299,33 @@ def _has_forensic_verdict(content: str) -> bool:
 
 def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
     checks: list[tuple[str, bool]] = []
+    issues: dict[str, str] = {}
 
-    if agent_key == "fundamentals_analyst":
-        checks.append(("parseable_data_block", has_parseable_data_block(content)))
+    if agent_key == "foreign_language_analyst":
+        checks.extend(
+            [
+                (
+                    "management_guidance_block",
+                    _has_valid_management_guidance_block(content),
+                ),
+                ("latest_results_block", _has_valid_latest_results_block(content)),
+            ]
+        )
+    elif agent_key == "fundamentals_analyst":
+        guidance_issue = _promoted_management_guidance_issue(content)
+        checks.extend(
+            [
+                ("parseable_data_block", has_parseable_data_block(content)),
+                (
+                    "promoted_management_guidance",
+                    guidance_issue is None,
+                ),
+            ]
+        )
+        if guidance_issue is not None:
+            issues["promoted_management_guidance"] = guidance_issue
     elif agent_key == "portfolio_manager":
+        pm_block = extract_last_fenced_block(content, "PM_BLOCK")
         checks.extend(
             [
                 ("verdict_header", "PORTFOLIO MANAGER VERDICT" in content),
@@ -94,6 +340,16 @@ def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
                     or "FINAL EXECUTION PARAMETERS" in content  # legacy output
                     or "Recommended Position Size" in content
                     or "PM_BLOCK" in content,
+                ),
+                (
+                    "decision_facts",
+                    extract_block_field_from_text_raw(pm_block, "DECISION_FACTS")
+                    is not None,
+                ),
+                (
+                    "decision_gates",
+                    extract_block_field_from_text_raw(pm_block, "DECISION_GATES")
+                    is not None,
                 ),
             ]
         )
@@ -133,7 +389,12 @@ def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
         )
 
     missing = [name for name, ok in checks if not ok]
-    return {"ok": not missing, "checks": checks, "missing": missing}
+    return {
+        "ok": not missing,
+        "checks": checks,
+        "missing": missing,
+        "issues": issues,
+    }
 
 
 def should_fail_closed(
@@ -146,7 +407,11 @@ def should_fail_closed(
     if validation["ok"]:
         return False
 
-    if agent_key in {"portfolio_manager", "fundamentals_analyst"}:
+    if agent_key in {
+        "portfolio_manager",
+        "fundamentals_analyst",
+        "foreign_language_analyst",
+    }:
         return True
 
     if agent_key == "global_forensic_auditor":

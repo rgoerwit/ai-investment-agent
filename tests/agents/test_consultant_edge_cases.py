@@ -9,7 +9,7 @@ import asyncio
 import json
 import time
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from langgraph.types import RunnableConfig
@@ -618,6 +618,51 @@ class TestConfigurationEdgeCases:
 
         with pytest.raises(ValueError, match="OpenAI"):
             _create_openai_responses_fallback_llm(mock_llm)
+
+    def test_openai_fallback_uses_custom_base_and_chat_completions(self):
+        """A custom OPENAI_API_BASE routes the fallback to Chat Completions."""
+        from pydantic import SecretStr
+
+        from src.agents import consultant_nodes as cn
+
+        fake_cls = MagicMock()
+        with (
+            patch.object(cn.support, "infer_provider_name", return_value="openai"),
+            patch.object(cn.support, "get_model_name", return_value="kimi-k2"),
+            patch.object(
+                cn.settings_config, "openai_api_base", "https://api.moonshot.cn/v1"
+            ),
+            patch.object(cn.settings_config, "openai_api_key", SecretStr("k")),
+            patch("langchain_openai.ChatOpenAI", fake_cls),
+        ):
+            _create_openai_responses_fallback_llm(Mock())
+
+        _, kwargs = fake_cls.call_args
+        assert kwargs["base_url"] == "https://api.moonshot.cn/v1"
+        assert kwargs["api_key"] == "k"
+        assert "use_responses_api" not in kwargs
+        assert "output_version" not in kwargs
+
+    def test_openai_fallback_default_uses_responses_api(self):
+        """With no custom base the fallback keeps the OpenAI Responses API."""
+        from pydantic import SecretStr
+
+        from src.agents import consultant_nodes as cn
+
+        fake_cls = MagicMock()
+        with (
+            patch.object(cn.support, "infer_provider_name", return_value="openai"),
+            patch.object(cn.support, "get_model_name", return_value="gpt-5.4"),
+            patch.object(cn.settings_config, "openai_api_base", ""),
+            patch.object(cn.settings_config, "openai_api_key", SecretStr("k")),
+            patch("langchain_openai.ChatOpenAI", fake_cls),
+        ):
+            _create_openai_responses_fallback_llm(Mock())
+
+        _, kwargs = fake_cls.call_args
+        assert "base_url" not in kwargs
+        assert kwargs["use_responses_api"] is True
+        assert kwargs["output_version"] == "responses/v1"
 
 
 class TestErrorPropagation:

@@ -55,6 +55,7 @@ class TestEODHDIntegration:
 
         assert merged["revenueGrowth"] == 0.10
         assert meta["field_sources"]["revenueGrowth"] == "yfinance"
+        assert merged["_revenueGrowth_source"] == "calculated_from_statements"
 
     @pytest.mark.asyncio
     async def test_eodhd_fetcher_integration(self, fetcher):

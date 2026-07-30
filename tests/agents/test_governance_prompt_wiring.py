@@ -179,9 +179,7 @@ async def test_pm_vehicle_choice_directive_requires_nonstandard_related(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_researcher_round1_includes_fla_when_present(monkeypatch):
-    """Bull researcher round 1 must see the FLA report directly so absence-of-evidence
-    signals (e.g., 'no Value-Up disclosure in DART') reach the debate before Consultant cleanup."""
+async def test_researcher_round1_uses_structured_coverage_not_raw_fla(monkeypatch):
     from src.agents import research_nodes
 
     captured: dict[str, str] = {}
@@ -203,15 +201,22 @@ async def test_researcher_round1_includes_fla_when_present(monkeypatch):
         Mock(), None, "bull_researcher", round_num=1
     )
     state = _state_with_card()
+    state["fundamentals_report"] = state["fundamentals_report"].replace(
+        "### --- END DATA_BLOCK ---",
+        "GUIDANCE_COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH\n"
+        "### --- END DATA_BLOCK ---",
+    )
     state["foreign_language_report"] = (
-        "OWNERSHIP STRUCTURE:\n- Controlling Shareholder: Test\n"
-        "CATALYST DISCLOSURE: No Value-Up program disclosed in DART filings.\n"
+        "RAW_FLA_SENTINEL: No Value-Up program disclosed in DART filings.\n"
     )
 
     await researcher(state, {"configurable": {}})
 
-    assert "FOREIGN LANGUAGE / LOCAL FILINGS" in captured["prompt"]
-    assert "No Value-Up program disclosed" in captured["prompt"]
+    assert "RAW_FLA_SENTINEL" not in captured["prompt"]
+    assert (
+        "GUIDANCE_COVERAGE_STATUS=NOT_DISCLOSED_AFTER_TARGETED_SEARCH"
+        in captured["prompt"]
+    )
 
 
 @pytest.mark.asyncio
@@ -253,7 +258,7 @@ async def test_researcher_round2_omits_fla_anchor(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_research_manager_includes_fla_when_present(monkeypatch):
+async def test_research_manager_uses_structured_coverage_not_raw_fla(monkeypatch):
     from src.agents import research_nodes
 
     captured: dict[str, str] = {}
@@ -268,14 +273,18 @@ async def test_research_manager_includes_fla_when_present(monkeypatch):
 
     manager = research_nodes.create_research_manager_node(Mock(), None)
     state = _state_with_card()
+    state["fundamentals_report"] = state["fundamentals_report"].replace(
+        "### --- END DATA_BLOCK ---",
+        "CAPITAL_PLAN_STATUS: NOT_DISCLOSED\n" "### --- END DATA_BLOCK ---",
+    )
     state["foreign_language_report"] = (
-        "FILING-LEVEL DISCLOSURE: No mid-term plan published as of 2026-05."
+        "RAW_FLA_SENTINEL: No mid-term plan published as of 2026-05."
     )
 
     await manager(state, {"configurable": {}})
 
-    assert "FOREIGN LANGUAGE / LOCAL FILINGS" in captured["prompt"]
-    assert "No mid-term plan published" in captured["prompt"]
+    assert "RAW_FLA_SENTINEL" not in captured["prompt"]
+    assert "CAPITAL_PLAN_STATUS=NOT_DISCLOSED" in captured["prompt"]
 
 
 @pytest.mark.asyncio

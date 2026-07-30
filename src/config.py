@@ -508,7 +508,7 @@ class Settings(BaseSettings):
         ),
     )
     auditor_max_document_bytes: int = Field(
-        default=15_000_000,
+        default=40_000_000,
         ge=100_000,
         le=50_000_000,
         validation_alias="AUDITOR_MAX_DOCUMENT_BYTES",
@@ -1096,6 +1096,15 @@ class Settings(BaseSettings):
         validation_alias="OPENAI_API_KEY",
         description="OpenAI API key for consultant agent (optional)",
     )
+    openai_api_base: str = Field(
+        default="",
+        validation_alias="OPENAI_API_BASE",
+        description=(
+            "Custom OpenAI-compatible base URL (optional; e.g. Kimi/Moonshot). "
+            "Empty uses the default OpenAI endpoint. A custom base uses the Chat "
+            "Completions API rather than the OpenAI-only Responses API."
+        ),
+    )
     langsmith_api_key: SecretStr = Field(
         default=SecretStr(""),
         validation_alias="LANGSMITH_API_KEY",
@@ -1256,6 +1265,11 @@ class Settings(BaseSettings):
     def get_openai_api_key(self) -> str:
         """Get OpenAI API key securely from SecretStr field."""
         return self.openai_api_key.get_secret_value()
+
+    def get_openai_api_base(self) -> str | None:
+        """Get the custom OpenAI-compatible base URL, or None if unset/blank."""
+        value = (self.openai_api_base or "").strip()
+        return value or None
 
     def get_apac_specialist_api_key(self) -> str:
         """Get APAC Regional Specialist API key securely from SecretStr field."""

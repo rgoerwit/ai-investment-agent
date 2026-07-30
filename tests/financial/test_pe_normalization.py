@@ -223,6 +223,29 @@ class TestPENormalizationSanityChecks:
             != "reconciled_most_recent_quarter"
         )
 
+    def test_does_not_relabel_statement_mrq_to_newer_metadata(self, fetcher):
+        """Keep 6782.TW MRQ growth bound to the statement period it came from."""
+        info = {
+            "latest_quarter_date": "2025-12-31",
+            "_latest_quarter_date_source": "yfinance_quarterly",
+            "mostRecentQuarter": 1774915200,
+            "revenueGrowth_MRQ": 0.168693,
+            "_revenueGrowth_MRQ_source": "calculated_from_quarterly",
+            "earningsGrowth_MRQ": 1.028262,
+            "_earningsGrowth_MRQ_source": "calculated_from_quarterly",
+            "mrq_comparison_base_status": "DEPRESSED",
+        }
+
+        result = fetcher._normalize_data_integrity(info, "6782.TW")
+
+        assert result["latest_quarter_date"] == "2025-12-31"
+        assert result["_latest_quarter_date_source"] == "yfinance_quarterly"
+        assert any(
+            "Newer quarter metadata exists for 2026-03-31" in note
+            and "statement-derived MRQ metrics remain aligned to 2025-12-31" in note
+            for note in result["_data_quality_notes"]
+        )
+
     def test_quarantines_low_pe_when_identity_check_fails(self, fetcher):
         """P/E below 3 is nulled when price/EPS cannot reproduce it."""
         info = {

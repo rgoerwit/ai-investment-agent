@@ -253,6 +253,7 @@ def extract_legal_risks(legal_report: str) -> dict[str, Any]:
         "cmic_status": None,
         "cmic_evidence": None,
         "other_regulatory_risks": [],
+        "capital_structure": None,
         "country": None,
         "sector": None,
     }
@@ -284,6 +285,10 @@ def extract_legal_risks(legal_report: str) -> dict[str, Any]:
         risks["cmic_status"] = data.get("cmic_status")
         risks["cmic_evidence"] = data.get("cmic_evidence")
         risks["other_regulatory_risks"] = data.get("other_regulatory_risks") or []
+        capital_structure = data.get("capital_structure")
+        risks["capital_structure"] = (
+            capital_structure if isinstance(capital_structure, dict) else None
+        )
         risks["country"] = data.get("country")
         risks["sector"] = data.get("sector")
         logger.debug(
@@ -345,6 +350,9 @@ def extract_value_trap_score(value_trap_report: str) -> dict[str, Any]:
         "payout_trend": None,
         "cash_position": None,
         "mid_term_plan": None,
+        "m_and_a_context_evidence": None,
+        "m_and_a_context_source_url": None,
+        "m_and_a_context": None,
     }
 
     if not value_trap_report:
@@ -396,6 +404,9 @@ def extract_value_trap_score(value_trap_report: str) -> dict[str, Any]:
         metrics["capital_allocation_rating"] = capital_allocation_match.group(1).upper()
 
     for field, key in (
+        ("M&A_CONTEXT_EVIDENCE", "m_and_a_context_evidence"),
+        ("M&A_CONTEXT_SOURCE_URL", "m_and_a_context_source_url"),
+        ("M&A_CONTEXT", "m_and_a_context"),
         ("BUYBACK_CONTEXT", "buyback_context"),
         ("PAYOUT_TREND", "payout_trend"),
         ("CASH_POSITION", "cash_position"),
@@ -407,7 +418,9 @@ def extract_value_trap_score(value_trap_report: str) -> dict[str, Any]:
         if match:
             value = match.group(1).strip()
             if value.upper() not in ("NONE", "N/A"):
-                metrics[key] = value
+                metrics[key] = (
+                    value.upper() if field == "M&A_CONTEXT_EVIDENCE" else value
+                )
 
     catalysts_section = re.search(
         r"CATALYSTS:(.+?)(?:KEY_RISKS:|$)", value_trap_report, re.DOTALL

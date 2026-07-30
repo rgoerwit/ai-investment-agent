@@ -3,7 +3,9 @@
 import asyncio
 import concurrent.futures
 import math  # noqa: E402  (kept after concurrent.futures for grouping)
+import re
 import threading
+from collections.abc import Sequence
 from typing import Any
 
 import structlog
@@ -108,8 +110,10 @@ _tavily_search_with_timeout = tavily_search_with_timeout
 
 _TAVILY_XML_HEADER = '<search_results source="tavily" data_type="external_web_content">'
 _TAVILY_XML_FOOTER = "</search_results>"
-_TAVILY_TRUNCATION_SUFFIX = "\n[...truncated]\n</search_results>"
-_TAVILY_TRUNCATION_RESERVE = len(_TAVILY_TRUNCATION_SUFFIX) + 10
+_TAVILY_TRUNCATION_NOTE = (
+    "[...truncated]\n"
+    "[summary policy: result metadata and query-relevant excerpts preserved]"
+)
 
 
 def _sanitize_for_xml_wrapper(text: str) -> str:
@@ -117,64 +121,268 @@ def _sanitize_for_xml_wrapper(text: str) -> str:
     return text.replace("</search_results>", "[removed]")
 
 
-def _format_and_truncate_tavily_result(
-    result: Any, max_chars: int | None = None
+def _bounded_field(text: str, max_chars: int) -> str:
+    """Bound metadata only when an unusually small envelope makes it necessary."""
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 3:
+        return text[:max_chars]
+    return text[: max_chars - 3] + "..."
+
+
+def _query_terms(query: str | None) -> list[str]:
+    """Return useful search terms, longest first, for excerpt selection."""
+    if not query:
+        return []
+    terms = {
+        token.strip(".,:;!?()[]{}\"'")
+        for token in re.split(r"\s+", query)
+        if len(token.strip(".,:;!?()[]{}\"'")) >= 2
+    }
+    return sorted(terms, key=len, reverse=True)
+
+
+def _query_centered_excerpt(
+    content: str,
+    *,
+    max_chars: int,
+    query: str | None,
+    priority_terms: Sequence[str] = (),
 ) -> str:
-    """Format and truncate Tavily search result with security boundaries."""
+    """Return a bounded excerpt centered on the first useful query-term match."""
+    if max_chars <= 0:
+        return ""
+    if len(content) <= max_chars:
+        return content
+
+    folded = content.casefold()
+    match_start: int | None = None
+    match_length = 0
+    query_terms = _query_terms(query)
+    preferred_terms = [
+        term.strip()
+        for term in priority_terms
+        if isinstance(term, str) and len(term.strip()) >= 2
+    ]
+    terms = preferred_terms + [
+        term
+        for term in query_terms
+        if term.casefold()
+        not in {preferred.casefold() for preferred in preferred_terms}
+    ]
+    for term in terms:
+        index = folded.find(term.casefold())
+        if index >= 0 and (match_start is None or len(term) > match_length):
+            match_start = index
+            match_length = len(term)
+
+    if match_start is None:
+        return content[: max(0, max_chars - 3)] + "..."
+
+    marker_chars = 6
+    window_chars = max(0, max_chars - marker_chars)
+    start = max(0, match_start - window_chars // 2)
+    end = min(len(content), start + window_chars)
+    start = max(0, end - window_chars)
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(content) else ""
+    return prefix + content[start:end] + suffix
+
+
+def _normalize_search_items(result: Any) -> list[dict[str, Any]]:
+    if isinstance(result, dict) and isinstance(result.get("results"), list):
+        result = result["results"]
+    if not isinstance(result, list):
+        return [{"raw": _sanitize_for_xml_wrapper(str(result))}]
+
+    normalized: list[dict[str, Any]] = []
+    for item in result:
+        if not isinstance(item, dict):
+            normalized.append({"raw": _sanitize_for_xml_wrapper(str(item))})
+            continue
+        normalized.append(
+            {
+                "title": _sanitize_for_xml_wrapper(str(item.get("title", "No Title"))),
+                "content": _sanitize_for_xml_wrapper(
+                    str(item.get("content", "No Content"))
+                ),
+                "url": _sanitize_for_xml_wrapper(str(item.get("url", "No URL"))),
+                "score": item.get("score"),
+                "published": _sanitize_for_xml_wrapper(
+                    str(item.get("published_date", ""))
+                ),
+                "source": _sanitize_for_xml_wrapper(str(item.get("_source", ""))),
+            }
+        )
+    return normalized
+
+
+def _render_search_item(
+    item: dict[str, Any],
+    *,
+    summary_budget: int | None,
+    query: str | None,
+    priority_terms: Sequence[str] = (),
+    title_limit: int = 240,
+    url_limit: int = 500,
+) -> str:
+    raw = item.get("raw")
+    if raw is not None:
+        raw_text = str(raw)
+        excerpt = (
+            raw_text
+            if summary_budget is None
+            else _query_centered_excerpt(
+                raw_text,
+                max_chars=summary_budget,
+                query=query,
+                priority_terms=priority_terms,
+            )
+        )
+        truncated_attr = (
+            f' truncated="true" original_chars="{len(raw_text)}"'
+            if len(excerpt) < len(raw_text)
+            else ""
+        )
+        return f"<result{truncated_attr}><raw>{excerpt}</raw></result>"
+
+    title = _bounded_field(str(item.get("title", "No Title")), title_limit)
+    url = _bounded_field(str(item.get("url", "No URL")), url_limit)
+    content = str(item.get("content", "No Content"))
+    excerpt = (
+        content
+        if summary_budget is None
+        else _query_centered_excerpt(
+            content,
+            max_chars=summary_budget,
+            query=query,
+            priority_terms=priority_terms,
+        )
+    )
+    score = item.get("score")
+    published = str(item.get("published", ""))
+    source = str(item.get("source", ""))
+    relevance_attr = f' relevance="{score:.2f}"' if score is not None else ""
+    published_attr = f' published="{published}"' if published else ""
+    source_attr = f' provider="{source}"' if source else ""
+    truncated_attr = (
+        f' truncated="true" original_chars="{len(content)}"'
+        if len(excerpt) < len(content)
+        else ""
+    )
+    return (
+        f"<result{relevance_attr}{published_attr}{source_attr}{truncated_attr}>\n"
+        f"<title>{title}</title>\n"
+        f"<url>{url}</url>\n"
+        f"<summary>{excerpt}</summary>\n"
+        f"</result>"
+    )
+
+
+def _format_and_truncate_tavily_result(
+    result: Any,
+    max_chars: int | None = None,
+    *,
+    query: str | None = None,
+    priority_terms: Sequence[str] = (),
+) -> str:
+    """Format search results without letting one long document erase others.
+
+    The global envelope remains bounded, but normal result metadata is reserved
+    before summary space is allocated fairly. Oversized summaries become
+    query-centered excerpts instead of causing the whole result to disappear.
+    """
     if max_chars is None:
         from src.config import config as runtime_config
 
         max_chars = runtime_config.tavily_max_chars
+    max_chars = max(160, max_chars)
+    items = _normalize_search_items(result)
+    full_items = [
+        _render_search_item(
+            item,
+            summary_budget=None,
+            query=query,
+            priority_terms=priority_terms,
+        )
+        for item in items
+    ]
+    wrapped = (
+        f"{_TAVILY_XML_HEADER}\n" + "\n".join(full_items) + f"\n{_TAVILY_XML_FOOTER}"
+    )
+    if len(wrapped) <= max_chars:
+        return wrapped
 
-    formatted_str = ""
+    footer = f"\n{_TAVILY_TRUNCATION_NOTE}\n{_TAVILY_XML_FOOTER}"
+    body_budget = max_chars - len(_TAVILY_XML_HEADER) - len(footer) - 1
+    item_count = max(1, len(items))
 
-    if isinstance(result, list):
-        formatted_items = []
-        for item in result:
-            if isinstance(item, dict):
-                title = _sanitize_for_xml_wrapper(str(item.get("title", "No Title")))
-                content = _sanitize_for_xml_wrapper(
-                    str(item.get("content", "No Content"))
-                )
-                url = _sanitize_for_xml_wrapper(str(item.get("url", "No URL")))
-                score = item.get("score")
-                published = item.get("published_date")
-                relevance_attr = (
-                    f' relevance="{score:.2f}"' if score is not None else ""
-                )
-                published_attr = f' published="{published}"' if published else ""
-                formatted_items.append(
-                    f"<result{relevance_attr}{published_attr}>\n"
-                    f"<title>{title}</title>\n"
-                    f"<url>{url}</url>\n"
-                    f"<summary>{content}</summary>\n"
-                    f"</result>"
-                )
-            else:
-                sanitized = _sanitize_for_xml_wrapper(str(item))
-                formatted_items.append(f"<result><raw>{sanitized}</raw></result>")
-        formatted_str = "\n".join(formatted_items)
-    elif (
-        isinstance(result, dict)
-        and "results" in result
-        and isinstance(result["results"], list)
-    ):
-        return _format_and_truncate_tavily_result(result["results"], max_chars)
-    else:
-        sanitized = _sanitize_for_xml_wrapper(str(result))
-        formatted_str = f"<result><raw>{sanitized}</raw></result>"
+    # At the normal 7,000-character limit this preserves complete titles and
+    # URLs. Tiny test/operator envelopes degrade metadata uniformly rather than
+    # dropping later candidates altogether.
+    metadata_probe = [
+        _render_search_item(
+            item,
+            summary_budget=0,
+            query=query,
+            priority_terms=priority_terms,
+        )
+        for item in items
+    ]
+    metadata_chars = len("\n".join(metadata_probe))
+    title_limit = 240
+    url_limit = 500
+    if metadata_chars > body_budget:
+        per_item = max(64, body_budget // item_count)
+        title_limit = max(16, min(120, per_item // 3))
+        url_limit = max(24, min(240, per_item // 2))
+        metadata_probe = [
+            _render_search_item(
+                item,
+                summary_budget=0,
+                query=query,
+                priority_terms=priority_terms,
+                title_limit=title_limit,
+                url_limit=url_limit,
+            )
+            for item in items
+        ]
+        metadata_chars = len("\n".join(metadata_probe))
 
-    wrapped = f"{_TAVILY_XML_HEADER}\n{formatted_str}\n{_TAVILY_XML_FOOTER}"
+    summary_total = max(0, body_budget - metadata_chars)
+    summary_budget = summary_total // item_count
+    rendered_items = [
+        _render_search_item(
+            item,
+            summary_budget=summary_budget,
+            query=query,
+            priority_terms=priority_terms,
+            title_limit=title_limit,
+            url_limit=url_limit,
+        )
+        for item in items
+    ]
+    bounded = f"{_TAVILY_XML_HEADER}\n" + "\n".join(rendered_items) + footer
 
-    if len(wrapped) > max_chars:
-        search_limit = max_chars - _TAVILY_TRUNCATION_RESERVE
-        last_complete_result = wrapped.rfind("</result>", 0, search_limit)
-        if last_complete_result > 0:
-            cut_point = last_complete_result + len("</result>")
-            return wrapped[:cut_point] + _TAVILY_TRUNCATION_SUFFIX
-        return wrapped[:search_limit] + "\n[...truncated mid-result]\n</search_results>"
+    # Attribute overhead can vary slightly once truncation telemetry appears.
+    # Reduce all excerpts evenly until the hard envelope is met.
+    while len(bounded) > max_chars and summary_budget > 0:
+        excess_per_item = math.ceil((len(bounded) - max_chars) / item_count)
+        summary_budget = max(0, summary_budget - max(1, excess_per_item))
+        rendered_items = [
+            _render_search_item(
+                item,
+                summary_budget=summary_budget,
+                query=query,
+                priority_terms=priority_terms,
+                title_limit=title_limit,
+                url_limit=url_limit,
+            )
+            for item in items
+        ]
+        bounded = f"{_TAVILY_XML_HEADER}\n" + "\n".join(rendered_items) + footer
 
-    return wrapped
+    return bounded
 
 
 async def fetch_with_timeout(coroutine, timeout_seconds=10, error_msg="Timeout"):
@@ -343,6 +551,7 @@ def _merge_search_results(tavily_results, ddg_results) -> list[dict]:
     if isinstance(tavily_results, list):
         for item in tavily_results:
             if isinstance(item, dict):
+                item = {**item, "_source": item.get("_source", "tavily")}
                 url = item.get("url", "")
                 if url:
                     seen_urls.add(url.rstrip("/"))
@@ -350,6 +559,7 @@ def _merge_search_results(tavily_results, ddg_results) -> list[dict]:
     elif isinstance(tavily_results, dict) and "results" in tavily_results:
         for item in tavily_results.get("results", []):
             if isinstance(item, dict):
+                item = {**item, "_source": item.get("_source", "tavily")}
                 url = item.get("url", "")
                 if url:
                     seen_urls.add(url.rstrip("/"))
@@ -366,6 +576,7 @@ def _merge_search_results(tavily_results, ddg_results) -> list[dict]:
                             "title": item.get("title", ""),
                             "url": url,
                             "content": item.get("body", item.get("content", "")),
+                            "_source": "duckduckgo",
                         }
                     )
 

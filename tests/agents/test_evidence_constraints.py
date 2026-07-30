@@ -1,10 +1,16 @@
 from src.agents.evidence_constraints import downstream_evidence_constraints
 
 
-def _state(execution: str, *, corrected: bool = False) -> dict:
+def _state(
+    execution: str,
+    *,
+    corrected: bool = False,
+    extra_fields: str = "",
+) -> dict:
     warning = "AUTHORITATIVE_METRIC_CORRECTION\n" if corrected else ""
     report = f"""{warning}### --- START DATA_BLOCK ---
 SHAREHOLDER_RETURN_EXECUTION: {execution}
+{extra_fields}
 ### --- END DATA_BLOCK ---"""
     return {
         "fundamentals_report": report,
@@ -49,3 +55,118 @@ def test_liquidity_is_order_relative_and_unknown_notional_cannot_hard_fail() -> 
 
     assert "Assess trading liquidity relative to the proposed order" in constraint
     assert "If order notional is unknown, do not infer a hard fail" in constraint
+
+
+def test_minority_largest_holder_and_no_majority_are_not_a_conflict() -> None:
+    state = _state("PROVEN")
+    state["entity_governance_card"] = {
+        "control_status": "NOT_CONTROLLED",
+        "largest_shareholder": {"name": "BenQ Materials Corp.", "pct": 14.82},
+    }
+
+    constraint = downstream_evidence_constraints(state)
+
+    assert "Do not call the issuer a controlled subsidiary" in constraint
+    assert "MAJORITY_HOLDER: NONE is compatible" in constraint
+    assert "14.82%" in constraint
+
+
+def test_parallel_value_trap_roic_na_is_analysis_quality_not_issuer_risk() -> None:
+    constraint = downstream_evidence_constraints(_state("PROVEN"))
+
+    assert "Value Trap ROIC: N/A is expected" in constraint
+    assert "Score 0.0 risk" in constraint
+
+
+def test_secondary_or_undated_capacity_is_conditionally_constrained() -> None:
+    state = _state(
+        "PROVEN",
+        extra_fields="""CAPACITY_UTILIZATION: 95%
+CAPACITY_EVIDENCE_STATUS: SECONDARY
+CAPACITY_UTILIZATION_AS_OF: UNKNOWN""",
+    )
+
+    constraint = downstream_evidence_constraints(state)
+
+    assert "Retain it as a conditional reference only" in constraint
+    assert "independent risk/bonus" in constraint
+
+
+def test_primary_dated_capacity_does_not_receive_uncertainty_constraint() -> None:
+    state = _state(
+        "PROVEN",
+        extra_fields="""CAPACITY_UTILIZATION: 95%
+CAPACITY_EVIDENCE_STATUS: PRIMARY
+CAPACITY_UTILIZATION_AS_OF: 2026-Q1""",
+    )
+
+    assert "Retain it as a conditional reference only" not in (
+        downstream_evidence_constraints(state)
+    )
+
+
+def test_significant_influence_is_not_reframed_as_control() -> None:
+    state = _state("PROVEN")
+    state["entity_governance_card"] = {
+        "control_status": "NOT_CONTROLLED",
+        "ownership_relationship": "EQUITY_METHOD",
+    }
+
+    constraint = downstream_evidence_constraints(state)
+
+    assert "EQUITY_METHOD, not control" in constraint
+    assert "parent, controller, subsidiary" in constraint
+
+
+def test_narrow_catalyst_and_aggregator_coverage_scopes_reach_pm() -> None:
+    state = _state("PROVEN", extra_fields="ANALYST_COVERAGE_ENGLISH: 7")
+    state["red_flags"] = [{"type": "NO_CATALYST_DETECTED"}]
+
+    constraint = downstream_evidence_constraints(state)
+
+    assert "limited to activist, index, tender, and restructuring" in constraint
+    assert "aggregator analyst-opinion count" in constraint
+
+
+def test_primary_latest_actuals_cannot_be_recast_as_forward_evidence() -> None:
+    state = _state(
+        "PROVEN",
+        extra_fields="""LATEST_RESULTS_PERIOD: Three months ended March 31, 2026
+LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY""",
+    )
+
+    constraint = downstream_evidence_constraints(state)
+
+    assert "primary historical actuals" in constraint
+    assert "do not use actual YoY growth as management guidance" in constraint
+
+
+def test_unvalidated_latest_candidate_cannot_replace_statement_mrq() -> None:
+    state = _state(
+        "PROVEN",
+        extra_fields="""LATEST_RESULTS_PERIOD: Three months ended March 31, 2026
+LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED""",
+    )
+
+    constraint = downstream_evidence_constraints(state)
+
+    assert "only as a UNSUPPORTED results candidate" in constraint
+    assert "retain the statement-derived MRQ period" in constraint
+
+
+def test_uncited_value_trap_m_and_a_cannot_support_acquisition_claim() -> None:
+    state = _state("PROVEN")
+    value_trap = """### --- START VALUE_TRAP_BLOCK ---
+M&A_CONTEXT_EVIDENCE: UNKNOWN
+### --- END VALUE_TRAP_BLOCK ---"""
+    state["value_trap_report"] = value_trap
+    state["artifact_statuses"]["value_trap_report"] = {
+        "complete": True,
+        "ok": True,
+        "content": value_trap,
+    }
+
+    constraint = downstream_evidence_constraints(state)
+
+    assert "Do not name an acquisition" in constraint
+    assert "infer acquisition-led growth" in constraint

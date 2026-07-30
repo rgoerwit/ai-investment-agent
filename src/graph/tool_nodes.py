@@ -8,9 +8,14 @@ import structlog
 from langchain_core.messages import AIMessage, ToolMessage
 
 from src.agents import AgentState
+from src.claim_policy import STRUCTURED_INGRESS_SOURCES
 from src.error_safety import summarize_exception
 from src.runtime_services import get_current_tool_service
 from src.tooling.runtime import ToolInvocation
+from src.tooling.structured_ingress import (
+    build_structured_ingress_record,
+    merge_structured_inputs,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -42,6 +47,26 @@ def create_agent_tool_node(tools: list, agent_key: str):
     """
     tool_names = {tool.name for tool in tools}
     tools_by_name = {tool.name: tool for tool in tools}
+
+    def _structured_record(
+        tool_name: str,
+        value: Any,
+        *,
+        blocked: bool = False,
+        failure_reason: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        contract_key = STRUCTURED_INGRESS_SOURCES.get((agent_key, tool_name))
+        if not contract_key:
+            return {}
+        return {
+            contract_key: build_structured_ingress_record(
+                value,
+                agent_key=agent_key,
+                tool_name=tool_name,
+                blocked=blocked,
+                failure_reason=failure_reason,
+            )
+        }
 
     def _tool_name(tc: Any) -> str:
         if not isinstance(tc, dict):
@@ -103,7 +128,9 @@ def create_agent_tool_node(tools: list, agent_key: str):
         )
         return msg
 
-    async def _execute_one(tc: Any) -> ToolMessage:
+    async def _execute_one(
+        tc: Any,
+    ) -> tuple[ToolMessage, dict[str, dict[str, Any]]]:
         tool_name = _tool_name(tc)
         tool_args = _tool_args(tc)
         tool_id = tc.get("id", tool_name) if isinstance(tc, dict) else tool_name
@@ -112,10 +139,17 @@ def create_agent_tool_node(tools: list, agent_key: str):
         tool_fn = tools_by_name.get(tool_name)
 
         if not tool_fn:
-            return _error_message(
-                tool_name,
-                tool_id,
-                f"Error: Unknown tool '{tool_name}'",
+            return (
+                _error_message(
+                    tool_name,
+                    tool_id,
+                    f"Error: Unknown tool '{tool_name}'",
+                ),
+                _structured_record(
+                    tool_name,
+                    "",
+                    failure_reason="UNKNOWN_TOOL",
+                ),
             )
 
         logger.debug(
@@ -148,12 +182,19 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 agent=agent_key,
                 tool=tool_name,
             )
-            return _success_message(
-                tool_name,
-                tool_id,
-                content=_cap_tool_output(str(tool_result.value), tool_name),
-                blocked=tool_result.blocked,
-                findings=tool_result.findings,
+            return (
+                _success_message(
+                    tool_name,
+                    tool_id,
+                    content=_cap_tool_output(str(tool_result.value), tool_name),
+                    blocked=tool_result.blocked,
+                    findings=tool_result.findings,
+                ),
+                _structured_record(
+                    tool_name,
+                    tool_result.value,
+                    blocked=tool_result.blocked,
+                ),
             )
         except asyncio.TimeoutError:
             logger.error(
@@ -162,11 +203,18 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 tool=tool_name,
                 timeout_seconds=_TOOL_CALL_TIMEOUT_SECONDS,
             )
-            return _error_message(
-                tool_name,
-                tool_id,
-                f"Error: Tool '{tool_name}' timed out after"
-                f" {_TOOL_CALL_TIMEOUT_SECONDS}s",
+            return (
+                _error_message(
+                    tool_name,
+                    tool_id,
+                    f"Error: Tool '{tool_name}' timed out after"
+                    f" {_TOOL_CALL_TIMEOUT_SECONDS}s",
+                ),
+                _structured_record(
+                    tool_name,
+                    "",
+                    failure_reason="TOOL_TIMEOUT",
+                ),
             )
         except Exception as exc:
             logger.error(
@@ -175,7 +223,14 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 tool=tool_name,
                 **summarize_exception(exc, operation="tool_call_error"),
             )
-            return _error_message(tool_name, tool_id, f"Error: {exc}")
+            return (
+                _error_message(tool_name, tool_id, f"Error: {exc}"),
+                _structured_record(
+                    tool_name,
+                    "",
+                    failure_reason="TOOL_EXECUTION_FAILED",
+                ),
+            )
 
     async def agent_tool_node(state: AgentState, config) -> dict:
         """Execute tools for a specific agent by filtering messages."""
@@ -213,13 +268,22 @@ def create_agent_tool_node(tools: list, agent_key: str):
             total_messages=len(messages),
         )
 
-        result_messages = list(
+        outcomes = list(
             await asyncio.gather(
                 *[_execute_one(tc) for tc in target_message.tool_calls]
             )
         )
+        result_messages = [message for message, _ in outcomes]
+        structured_inputs: dict[str, dict[str, Any]] = {}
+        for _, records in outcomes:
+            structured_inputs = merge_structured_inputs(
+                structured_inputs,
+                records,
+            )
 
         result = {"messages": result_messages}
+        if structured_inputs:
+            result["structured_inputs"] = structured_inputs
 
         result_msg_count = len(result.get("messages", []))
         expected_count = len(target_message.tool_calls)

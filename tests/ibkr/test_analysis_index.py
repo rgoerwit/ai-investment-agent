@@ -476,7 +476,7 @@ def test_build_analysis_record_repairs_legacy_currency():
 
     assert record is not None
     assert record.currency == "MXN"
-    assert record.fx_rate_to_usd == 0.049
+    assert record.fx_rate_to_usd == 0.0576
     assert record.currency_repaired is True
     assert record.currency_repair_reason == "legacy_snapshot_usd_default"
 
@@ -499,7 +499,7 @@ def test_build_analysis_record_repairs_apr_wa_legacy_currency():
 
     assert record is not None
     assert record.currency == "PLN"
-    assert record.fx_rate_to_usd == 0.25
+    assert record.fx_rate_to_usd == 0.268
     assert record.currency_repaired is True
 
 
@@ -521,7 +521,7 @@ def test_build_analysis_record_repairs_apr_ol_legacy_currency():
 
     assert record is not None
     assert record.currency == "NOK"
-    assert record.fx_rate_to_usd == 0.092
+    assert record.fx_rate_to_usd == 0.105
 
 
 def test_build_analysis_record_repairs_deme_br_legacy_currency():
@@ -542,7 +542,7 @@ def test_build_analysis_record_repairs_deme_br_legacy_currency():
 
     assert record is not None
     assert record.currency == "EUR"
-    assert record.fx_rate_to_usd == 1.09
+    assert record.fx_rate_to_usd == 1.153
 
 
 def test_build_analysis_record_preserves_valid_usd():

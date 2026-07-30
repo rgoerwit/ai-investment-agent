@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any
 
@@ -30,17 +30,34 @@ from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import failure_artifact, success_artifact
 from src.service_tiers import floor_llm_hard_timeout
 from src.thesis_constants import DRAWDOWN_52WK_RATIO, DRAWDOWN_SMA200_RATIO
+from src.token_tracker import (
+    TokenTrackingCallback,
+    canonical_display_name,
+    get_tracker,
+)
 from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .capital_structure import promote_capital_structure
 from .evidence_constraints import AUTHORITATIVE_CORRECTION_MARKER
+from .foreign_language_evidence import (
+    normalize_foreign_language_evidence,
+    promote_foreign_growth_evidence,
+)
 from .fundamentals_reconciler import (
     HORIZON_FIELD_RAW_KEYS,
     append_analyst_coverage_data_quality_note,
     extract_raw_metrics_payload,
     reconcile_high_risk_fields,
     reconcile_score_consistency,
+    statement_mrq_period_lag_note,
+    withhold_eps_growth_for_unusable_baseline,
+)
+from .management_guidance import (
+    _preload_management_guidance_evidence,
+    normalize_management_guidance_output,
+    promote_management_guidance,
 )
 from .output_limits import cap_state_value
 from .output_validation import (
@@ -50,6 +67,7 @@ from .output_validation import (
     validate_required_output,
 )
 from .state import AgentState
+from .value_trap_evidence import normalize_value_trap_m_and_a_evidence
 
 logger = structlog.get_logger(__name__)
 
@@ -62,9 +80,39 @@ Use exactly these fenced markers:
 {end_marker}
 Inside DATA_BLOCK, use plain KEY: VALUE lines only.
 Do NOT use markdown tables inside DATA_BLOCK.
+Promote the Foreign Language Analyst MANAGEMENT_GUIDANCE result into DATA_BLOCK.
+At minimum emit GUIDANCE_COVERAGE_STATUS, MATERIAL_NONOPERATING_DRIVER,
+EARNINGS_BASELINE_STATUS, and NORMALIZED_EARNINGS_AVAILABLE. If coverage is FOUND,
+also emit GUIDANCE_SOURCE_URL and OPERATING_VS_NET_DIRECTION. Use explicit UNKNOWN/N/A
+values when evidence is absent; never omit these fields.
 """.format(
     start_marker=fenced_start("DATA_BLOCK"),
     end_marker=fenced_end("DATA_BLOCK"),
+)
+
+_FOREIGN_LANGUAGE_EVIDENCE_RETRY_SUFFIX = """
+CRITICAL EVIDENCE CORRECTION:
+Your first response omitted or malformed a mandatory evidence block.
+Run targeted searches of the latest results release, presentation, transcript, and
+statutory filing for management's forward guidance and material tax, subsidy,
+regulatory, accounting, or other non-operating earnings drivers. Also locate the
+newest official income statement and inspect its document before extracting current
+and year-ago comparative revenue and earnings. Then emit one parseable block for
+each of these marker pairs:
+{guidance_start}
+...
+{guidance_end}
+{results_start}
+...
+{results_end}
+If guidance is not disclosed or a search fails, record that explicit coverage status
+and list SEARCHES_COMPLETED. Use NOT_FOUND or SEARCH_FAILED for latest-results
+coverage when appropriate. Do not silently omit either block.
+""".format(
+    guidance_start=fenced_start("MANAGEMENT_GUIDANCE"),
+    guidance_end=fenced_end("MANAGEMENT_GUIDANCE"),
+    results_start=fenced_start("LATEST_RESULTS"),
+    results_end=fenced_end("LATEST_RESULTS"),
 )
 
 _QUARANTINED_FORWARD_KEYS = ("PE_RATIO_FORWARD", "PEG_RATIO")
@@ -110,6 +158,18 @@ _NARRATIVE_METRIC_PATTERNS: dict[str, re.Pattern[str]] = {
     "DE_RATIO": re.compile(
         r"(?im)^\s*(?:[-*]\s*)?\*{0,2}(?:debt\s*(?:to|/)\s*equity|d/e)"
         r"\*{0,2}\s*:\s*\*{0,2}\s*(-?\d+(?:\.\d+)?)\s*(%)?"
+    ),
+}
+_NARRATIVE_SCORE_PATTERNS: dict[str, re.Pattern[str]] = {
+    "HEALTH": re.compile(
+        r"(?ims)^###\s+FINANCIAL HEALTH DETAIL\b.*?"
+        r"^\*\*Score\*\*:\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)"
+        r"\s*\(Adjusted:\s*(\d+(?:\.\d+)?)%\)"
+    ),
+    "GROWTH": re.compile(
+        r"(?ims)^###\s+GROWTH TRANSITION DETAIL\b.*?"
+        r"^\*\*Score\*\*:\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)"
+        r"\s*\(Adjusted:\s*(\d+(?:\.\d+)?)%\)"
     ),
 }
 
@@ -161,6 +221,37 @@ def _authoritative_metric_warning(
             f"- {field}: preceding labeled narrative={narrative_match.group(1)}"
             f"{'%' if narrative_match.lastindex and narrative_match.lastindex > 1 and narrative_match.group(2) else ''}; "
             f"authoritative DATA_BLOCK={authoritative_raw}."
+        )
+
+    for kind, pattern in _NARRATIVE_SCORE_PATTERNS.items():
+        narrative_match = pattern.search(narrative)
+        raw_score = extract_block_text_value(updated_body, f"RAW_{kind}_SCORE")
+        adjusted_score = extract_block_text_value(
+            updated_body, f"ADJUSTED_{kind}_SCORE"
+        )
+        raw_match = re.search(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", raw_score)
+        adjusted_match = re.search(r"(\d+(?:\.\d+)?)\s*%", adjusted_score)
+        if not narrative_match or not raw_match or not adjusted_match:
+            continue
+        narrative_values = tuple(float(narrative_match.group(i)) for i in range(1, 4))
+        authoritative_values = (
+            float(raw_match.group(1)),
+            float(raw_match.group(2)),
+            float(adjusted_match.group(1)),
+        )
+        if all(
+            abs(narrative_value - authoritative_value) <= 0.15
+            for narrative_value, authoritative_value in zip(
+                narrative_values,
+                authoritative_values,
+                strict=True,
+            )
+        ):
+            continue
+        conflicts.append(
+            f"- {kind}_SCORE: narrative={narrative_match.group(1)}/"
+            f"{narrative_match.group(2)} ({narrative_match.group(3)}%); "
+            f"authoritative DATA_BLOCK={raw_score} ({adjusted_score})."
         )
 
     if not conflicts:
@@ -266,11 +357,51 @@ def _valuation_input_reliability(payload: dict[str, Any]) -> str:
     return "USABLE"
 
 
+def _append_metric_provenance(body: str, payload: dict[str, Any]) -> str:
+    field_sources = payload.get("_field_sources")
+    if not isinstance(field_sources, dict):
+        field_sources = {}
+
+    updated = body
+    forward_eps = payload.get("forwardEps")
+    if isinstance(forward_eps, int | float) and not isinstance(forward_eps, bool):
+        updated = replace_or_append_block_line(
+            updated,
+            "FORWARD_EPS",
+            f"{float(forward_eps):.2f}",
+        )
+    updated = replace_or_append_block_line(
+        updated,
+        "FORWARD_EPS_SOURCE",
+        str(field_sources.get("forwardEps") or "UNKNOWN"),
+    )
+    updated = replace_or_append_block_line(
+        updated,
+        "PE_RATIO_FORWARD_SOURCE",
+        str(field_sources.get("forwardPE") or "UNKNOWN"),
+    )
+
+    cfo_ni_years = payload.get("moat_cfoToNiYears")
+    if isinstance(cfo_ni_years, int | float) and not isinstance(cfo_ni_years, bool):
+        updated = replace_or_append_block_line(
+            updated,
+            "MOAT_CFO_NI_YEARS",
+            f"{float(cfo_ni_years):g}",
+        )
+    return replace_or_append_block_line(
+        updated,
+        "MOAT_CFO_NI_SOURCE",
+        str(field_sources.get("moat_cfoToNiAvg") or "UNKNOWN"),
+    )
+
+
 def _sanitize_fundamentals_output(
     content: str,
     raw_data: str,
     ticker: str,
     foreign_data: str = "",
+    legal_data: str = "",
+    canonical_snapshot: Mapping[str, Any] | None = None,
 ) -> str:
     # Score consistency is checked even without raw data (it is DATA_BLOCK-internal),
     # so only an unparseable block short-circuits; payload-dependent steps stay
@@ -295,18 +426,101 @@ def _sanitize_fundamentals_output(
     corrective = False
     if has_structured_payload:
         updated_body = reconcile_high_risk_fields(updated_body, payload)
+        updated_body = _append_metric_provenance(updated_body, payload)
+        mrq_lag_note = statement_mrq_period_lag_note(payload)
+        if mrq_lag_note:
+            existing_note = extract_block_text_value(
+                updated_body,
+                "GROWTH_DATA_QUALITY_NOTE",
+            )
+            combined_note = (
+                f"{existing_note} {mrq_lag_note}".strip()
+                if mrq_lag_note not in existing_note
+                else existing_note
+            )
+            updated_body = replace_or_append_block_line(
+                updated_body,
+                "GROWTH_DATA_QUALITY_NOTE",
+                combined_note,
+            )
 
-    updated_body, score_corrected, score_suspect = reconcile_score_consistency(
-        updated_body
+    updated_body, guidance_promoted = promote_management_guidance(
+        updated_body,
+        foreign_data,
     )
-    if score_corrected or score_suspect:
-        corrective = True
-        logger.warning(
-            "score_consistency_reconciled",
-            ticker=ticker,
-            corrected=score_corrected,
-            suspect=score_suspect,
+    if guidance_promoted:
+        logger.info("management_guidance_promoted", ticker=ticker)
+
+    updated_body, growth_evidence_promoted = promote_foreign_growth_evidence(
+        updated_body,
+        foreign_data,
+    )
+    if growth_evidence_promoted:
+        logger.info("foreign_growth_evidence_promoted", ticker=ticker)
+    latest_results_authority = extract_block_text_value(
+        updated_body,
+        "LATEST_RESULTS_SOURCE_AUTHORITY",
+    ).upper()
+    latest_results_end = extract_block_text_value(
+        updated_body,
+        "LATEST_RESULTS_PERIOD_END",
+    )
+    statement_mrq_period = (
+        payload.get("latest_quarter_date")
+        if payload.get("_latest_quarter_date_source") == "yfinance_quarterly"
+        and any(
+            payload.get(source_field) == "calculated_from_quarterly"
+            for source_field in (
+                "_revenueGrowth_MRQ_source",
+                "_earningsGrowth_MRQ_source",
+            )
         )
+        else None
+    )
+    if isinstance(statement_mrq_period, str) and latest_results_end:
+        try:
+            newer_results_exist = datetime.fromisoformat(
+                latest_results_end
+            ) > datetime.fromisoformat(statement_mrq_period)
+        except ValueError:
+            newer_results_exist = False
+        if newer_results_exist:
+            latest_period = extract_block_text_value(
+                updated_body,
+                "LATEST_RESULTS_PERIOD",
+            )
+            if latest_results_authority == "PRIMARY":
+                latest_note = (
+                    f"Newer primary results exist for "
+                    f"{latest_period or latest_results_end}; statement-derived MRQ "
+                    f"growth remains aligned to {statement_mrq_period}."
+                )
+            else:
+                latest_note = (
+                    f"A newer-period results candidate exists for "
+                    f"{latest_period or latest_results_end} (authority: "
+                    f"{latest_results_authority or 'UNKNOWN'}) but was not "
+                    "primary-validated; statement-derived MRQ growth remains aligned "
+                    f"to {statement_mrq_period}. Do not present that MRQ period as "
+                    "the latest reported quarter."
+                )
+            existing_note = extract_block_text_value(
+                updated_body,
+                "GROWTH_DATA_QUALITY_NOTE",
+            )
+            if latest_note not in existing_note:
+                updated_body = replace_or_append_block_line(
+                    updated_body,
+                    "GROWTH_DATA_QUALITY_NOTE",
+                    f"{existing_note} {latest_note}".strip(),
+                )
+
+    updated_body, capital_structure_promoted = promote_capital_structure(
+        updated_body,
+        legal_data,
+    )
+    if capital_structure_promoted:
+        logger.info("capital_structure_promoted", ticker=ticker)
 
     updated_body = append_analyst_coverage_data_quality_note(
         updated_body,
@@ -343,13 +557,11 @@ def _sanitize_fundamentals_output(
         )
 
     latest_quarter_date = payload.get("latest_quarter_date")
-    latest_quarter_date_reconciled = (
-        has_structured_payload
-        and payload.get("_latest_quarter_date_source")
-        == "reconciled_most_recent_quarter"
-    )
+    latest_quarter_date_authoritative = has_structured_payload and payload.get(
+        "_latest_quarter_date_source"
+    ) in {"yfinance_quarterly", "reconciled_most_recent_quarter"}
     if (
-        latest_quarter_date_reconciled
+        latest_quarter_date_authoritative
         and isinstance(latest_quarter_date, str)
         and latest_quarter_date
     ):
@@ -358,6 +570,49 @@ def _sanitize_fundamentals_output(
             "LATEST_QUARTER_DATE",
             latest_quarter_date,
         )
+        mrq_source_fields = {
+            "REVENUE_GROWTH_MRQ": "_revenueGrowth_MRQ_source",
+            "EARNINGS_GROWTH_MRQ": "_earningsGrowth_MRQ_source",
+        }
+        statement_period = (
+            latest_quarter_date
+            if payload.get("_latest_quarter_date_source") == "yfinance_quarterly"
+            else None
+        )
+        for field_name, source_field in mrq_source_fields.items():
+            value = extract_block_text_value(updated_body, field_name)
+            if not value or value.upper().startswith(("N/A", "NA", "NONE")):
+                continue
+            if (
+                statement_period is None
+                or payload.get(source_field) != "calculated_from_quarterly"
+            ):
+                unbound_value = re.sub(
+                    r"\s*\(as of\s*\d{4}-\d{2}-\d{2}\)",
+                    "",
+                    value,
+                    flags=re.IGNORECASE,
+                ).strip()
+                if unbound_value != value:
+                    updated_body = replace_or_append_block_line(
+                        updated_body,
+                        field_name,
+                        unbound_value,
+                    )
+                continue
+            value = re.sub(
+                r"\(as of\s*\d{4}-\d{2}-\d{2}\)",
+                f"(as of {statement_period})",
+                value,
+                flags=re.IGNORECASE,
+            )
+            if "(as of" not in value.lower():
+                value = f"{value} (as of {statement_period})"
+            updated_body = replace_or_append_block_line(
+                updated_body,
+                field_name,
+                value,
+            )
 
     if _invalid_adr_routing(updated_body, ticker):
         corrective = True
@@ -410,6 +665,65 @@ def _sanitize_fundamentals_output(
                     value,
                 )
 
+    # This is the single final writer for registered factual claims. Everything
+    # below derives scores or annotations from the reconciled facts.
+    from src.analysis_snapshot import reconcile_data_block_projection
+
+    updated_body, projection_conflicts = reconcile_data_block_projection(
+        updated_body,
+        canonical_snapshot,
+    )
+    if projection_conflicts:
+        corrective = True
+        logger.warning(
+            "senior_claim_projection_reconciled",
+            ticker=ticker,
+            conflict_fields=[
+                conflict["field"] for conflict in projection_conflicts[:20]
+            ],
+        )
+
+    updated_body, eps_growth_withheld = withhold_eps_growth_for_unusable_baseline(
+        updated_body
+    )
+    if eps_growth_withheld:
+        corrective = True
+        logger.warning(
+            "eps_growth_credit_withheld_for_unusable_baseline",
+            ticker=ticker,
+        )
+
+    updated_body, score_corrected, score_suspect = reconcile_score_consistency(
+        updated_body
+    )
+    if score_corrected or score_suspect:
+        corrective = True
+        logger.warning(
+            "score_consistency_reconciled",
+            ticker=ticker,
+            corrected=score_corrected,
+            suspect=score_suspect,
+        )
+
+    # Keep the final-writer boundary enforceable as this sanitizer evolves.
+    # Reusing the projector avoids maintaining a second list of protected fields.
+    integrity_projection, late_projection_conflicts = reconcile_data_block_projection(
+        updated_body, canonical_snapshot
+    )
+    if integrity_projection != updated_body:
+        conflict_fields = [
+            conflict["field"] for conflict in late_projection_conflicts[:20]
+        ]
+        logger.error(
+            "post_projection_fact_mutation",
+            ticker=ticker,
+            conflict_fields=conflict_fields or ["REGISTERED_METADATA"],
+        )
+        raise ValueError(
+            "POST_PROJECTION_FACT_MUTATION: "
+            + ", ".join(conflict_fields or ["registered claim metadata"])
+        )
+
     # WARNING only when a corrective fix was applied; routine additive annotation
     # (which changes the block on nearly every run) logs at INFO.
     log = logger.warning if corrective else logger.info
@@ -417,17 +731,14 @@ def _sanitize_fundamentals_output(
     block_index = content.rfind(block_with_markers)
     if block_index < 0:
         return content
-    narrative = content[:block_index]
+    content_before_block = content[:block_index]
+    content_after_block = content[block_index + len(block_with_markers) :]
+    narrative = content_before_block + content_after_block
     warning = _authoritative_metric_warning(narrative, updated_body)
     if updated_body == block_body and not warning:
         return content
     updated_block = build_fenced_block("DATA_BLOCK", updated_body.rstrip())
-    return (
-        narrative
-        + warning
-        + updated_block
-        + content[block_index + len(block_with_markers) :]
-    )
+    return content_before_block + warning + updated_block + content_after_block
 
 
 def _normalize_structured_output(
@@ -437,8 +748,44 @@ def _normalize_structured_output(
     *,
     raw_data: str = "",
     foreign_data: str = "",
+    legal_data: str = "",
+    management_guidance_evidence: str = "",
+    evidence_messages: list[BaseMessage] | None = None,
+    canonical_snapshot: Mapping[str, Any] | None = None,
 ) -> str:
     """Apply narrow deterministic output repairs for known model-format drift."""
+    if agent_key == "foreign_language_analyst":
+        from src.runtime_services import get_current_evidence_records
+
+        evidence_records = [
+            record
+            for record in get_current_evidence_records(agent_key=agent_key)
+            if not record.blocked
+        ]
+        ledger_records = [
+            (record.tool_name, record.content, set(record.urls))
+            for record in evidence_records
+        ]
+        guidance_normalized = normalize_management_guidance_output(
+            content,
+            management_guidance_evidence,
+            evidence_records,
+        )
+        return normalize_foreign_language_evidence(
+            guidance_normalized,
+            evidence_messages or [],
+            ticker=ticker,
+            supplemental_evidence=management_guidance_evidence,
+            additional_records=ledger_records,
+        )
+
+    if agent_key == "value_trap_detector":
+        return normalize_value_trap_m_and_a_evidence(
+            content,
+            evidence_messages or [],
+            ticker=ticker,
+        )
+
     if agent_key != "fundamentals_analyst":
         return content
 
@@ -471,6 +818,8 @@ def _normalize_structured_output(
         raw_data,
         ticker,
         foreign_data=foreign_data,
+        legal_data=legal_data,
+        canonical_snapshot=canonical_snapshot,
     )
     return normalized
 
@@ -480,14 +829,29 @@ def _should_retry_output(content: str, agent_key: str) -> bool:
     if support._is_output_insufficient(content, agent_key):
         return True
 
-    return agent_key == "fundamentals_analyst" and not has_parseable_data_block(content)
+    if agent_key == "fundamentals_analyst":
+        return not validate_required_output(agent_key, content)["ok"]
+    if agent_key == "foreign_language_analyst":
+        return not validate_required_output(agent_key, content)["ok"]
+    return False
 
 
 def _build_retry_invocation_messages(
     invocation_messages: list[Any], agent_key: str, content: str
 ) -> list[Any]:
-    """Add a short corrective suffix for fundamentals format retries only."""
-    if agent_key != "fundamentals_analyst" or has_parseable_data_block(content):
+    """Add the owning agent's structured-output correction for a retry."""
+    if agent_key == "foreign_language_analyst":
+        if validate_required_output(agent_key, content)["ok"]:
+            return invocation_messages
+        return [
+            *invocation_messages,
+            HumanMessage(content=_FOREIGN_LANGUAGE_EVIDENCE_RETRY_SUFFIX.strip()),
+        ]
+
+    if (
+        agent_key != "fundamentals_analyst"
+        or validate_required_output(agent_key, content)["ok"]
+    ):
         return invocation_messages
 
     return [
@@ -679,6 +1043,29 @@ def create_analyst_node(
             extra_context = ""
             trusted_context_instructions = ""
             macro_context_injected_into_news = False
+            management_guidance_evidence = ""
+
+            if agent_key == "foreign_language_analyst":
+                management_guidance_evidence = state.get(
+                    "management_guidance_evidence", ""
+                )
+                if not management_guidance_evidence:
+                    management_guidance_evidence = (
+                        await _preload_management_guidance_evidence(
+                            ticker,
+                            company_name,
+                            enable_extraction=not get_runtime_config(
+                                settings_config
+                            ).quick_mode_active,
+                        )
+                    )
+                trusted_context_instructions += (
+                    "\nA code-owned management-guidance preflight is supplied below. "
+                    "Use it before optional follow-up searches. SEARCHES_COMPLETED "
+                    "must reflect its recorded outcomes plus any tool calls you "
+                    "actually make; never infer source-class coverage.\n"
+                )
+                extra_context += f"\n\n{management_guidance_evidence}\n"
 
             if agent_key == "junior_fundamentals_analyst":
                 news_report = state.get("news_report", "")
@@ -689,27 +1076,39 @@ def create_analyst_node(
                     )
 
             if agent_key == "fundamentals_analyst":
-                raw_data = state.get("raw_fundamentals_data", "")
-                foreign_data = state.get("foreign_language_report", "")
+                from src.claim_policy import RAW_FINANCIAL_METRICS_INPUT
+                from src.runtime_diagnostics import get_valid_artifact_content
+                from src.tooling.structured_ingress import (
+                    render_structured_ingress_payload,
+                )
+
+                raw_data = render_structured_ingress_payload(
+                    state,
+                    RAW_FINANCIAL_METRICS_INPUT,
+                )
+                foreign_data = get_valid_artifact_content(
+                    state,
+                    "foreign_language_report",
+                )
+                legal_data = get_valid_artifact_content(state, "legal_report")
                 news_report = state.get("news_report", "")
 
                 if raw_data:
                     extra_context = (
-                        "\n\n### RAW FINANCIAL DATA FROM JUNIOR ANALYST (Primary Source)"
-                        f"\n{raw_data}\n"
+                        "\n\n### CODE-OWNED RAW FINANCIAL METRICS" f"\n{raw_data}\n"
                     )
                 else:
                     logger.warning(
                         "senior_fundamentals_no_raw_data",
                         ticker=ticker,
-                        message="Junior Analyst data not available - this should not happen",
+                        message="Canonical raw-metrics contract is unavailable",
                     )
 
                 if foreign_data:
                     trusted_context_instructions += (
                         "\nCross-reference foreign or alternative-source data against "
-                        "Junior Analyst data. Prioritize Junior data when both sources "
-                        "report the same metric.\n"
+                        "the code-owned raw metrics. Preserve the canonical snapshot "
+                        "when both sources report the same registered metric.\n"
                     )
                     extra_context += (
                         "\n\n### FOREIGN/ALTERNATIVE SOURCE DATA (Cross-Reference)"
@@ -724,7 +1123,7 @@ def create_analyst_node(
                     logger.debug(
                         "senior_fundamentals_no_foreign_data",
                         ticker=ticker,
-                        message="Foreign Language Analyst data not available - proceeding with Junior data only",
+                        message="Foreign Language Analyst data not available - proceeding with canonical raw metrics only",
                     )
 
                 if news_report:
@@ -756,23 +1155,23 @@ def create_analyst_node(
                         conflict_count=conflict_report.count("\n- "),
                     )
 
-                legal_report = state.get("legal_report", "")
-                if legal_report:
+                if legal_data:
                     trusted_context_instructions += (
                         "\nUse Legal Counsel output to inform PFIC_RISK in DATA_BLOCK. "
                         "If Legal Counsel found PFIC disclosure (pfic_status: PROBABLE), "
                         "set PFIC_RISK to MEDIUM or HIGH. If no disclosure was found in "
                         "a high-risk sector (pfic_status: UNCERTAIN), set PFIC_RISK to "
-                        "at least MEDIUM.\n"
+                        "at least MEDIUM. Preserve its capital-structure assessment and "
+                        "do not treat ordinary non-recourse commitments as hidden debt.\n"
                     )
                     extra_context += (
                         "\n\n### LEGAL/TAX RISK ASSESSMENT (From Legal Counsel)"
-                        f"{legal_report}\n"
+                        f"{legal_data}\n"
                     )
                     logger.debug(
                         "senior_fundamentals_has_legal_data",
                         ticker=ticker,
-                        legal_data_length=len(legal_report),
+                        legal_data_length=len(legal_data),
                     )
                 else:
                     logger.debug(
@@ -780,6 +1179,20 @@ def create_analyst_node(
                         ticker=ticker,
                         message="Legal Counsel data not yet available - proceeding without legal context",
                     )
+
+                from src.analysis_snapshot import render_analysis_snapshot
+
+                snapshot_context = render_analysis_snapshot(
+                    state.get("analysis_snapshot")
+                )
+                if snapshot_context:
+                    trusted_context_instructions += (
+                        "\nThe canonical pre-Senior snapshot below owns every "
+                        "registered fact. Preserve its value, period, authority, "
+                        "and eligibility; do not fill an N/A registered fact from "
+                        "memory or narrative.\n"
+                    )
+                    extra_context += f"\n\n{snapshot_context}\n"
 
             if agent_key == "news_analyst":
                 news_macro_context = _build_news_macro_extra_context(ticker, context)
@@ -832,6 +1245,8 @@ def create_analyst_node(
                 new_state["macro_context_injected_into_news"] = (
                     macro_context_injected_into_news
                 )
+            if agent_key == "foreign_language_analyst":
+                new_state["management_guidance_evidence"] = management_guidance_evidence
 
             tool_calls = getattr(response, "tool_calls", None)
             has_tool_calls = isinstance(tool_calls, list) and len(tool_calls) > 0
@@ -856,6 +1271,10 @@ def create_analyst_node(
                 foreign_data=foreign_data
                 if agent_key == "fundamentals_analyst"
                 else "",
+                legal_data=legal_data if agent_key == "fundamentals_analyst" else "",
+                management_guidance_evidence=management_guidance_evidence,
+                evidence_messages=filtered_messages,
+                canonical_snapshot=state.get("analysis_snapshot"),
             )
 
             if (
@@ -874,10 +1293,23 @@ def create_analyst_node(
                 retry_messages = _build_retry_invocation_messages(
                     invocation_messages, agent_key, content_str
                 )
-                retry_runnable = (
+                _retry_base = (
                     prompt_template | retry_llm.bind_tools(tools)
                     if tools
                     else prompt_template | retry_llm
+                )
+                # Attribute the deep-model retry cost to the ORIGINATING agent
+                # (not a pooled "Retry Agent (Deep)" bucket): retry_llm carries no
+                # bound token-tracking callback, so attach one per-call via config.
+                retry_runnable = _retry_base.with_config(
+                    {
+                        "callbacks": [
+                            TokenTrackingCallback(
+                                canonical_display_name(agent_prompt.agent_name),
+                                get_tracker(),
+                            )
+                        ]
+                    }
                 )
 
                 # In --quick, base the retry's overall budget on the same
@@ -923,6 +1355,12 @@ def create_analyst_node(
                         foreign_data=foreign_data
                         if agent_key == "fundamentals_analyst"
                         else "",
+                        legal_data=legal_data
+                        if agent_key == "fundamentals_analyst"
+                        else "",
+                        management_guidance_evidence=management_guidance_evidence,
+                        evidence_messages=filtered_messages,
+                        canonical_snapshot=state.get("analysis_snapshot"),
                     )
                     retry_tool_calls = getattr(retry_response, "tool_calls", None)
                     retry_has_tool_calls = (
@@ -992,16 +1430,43 @@ def create_analyst_node(
                     agent=agent_key,
                     ticker=ticker,
                     missing_sections=validation["missing"],
+                    validation_issues=validation.get("issues", {}),
+                )
+                issue_text = "; ".join(validation.get("issues", {}).values())
+                failure_message = (
+                    f"{agent_key} output invalid: {issue_text}"
+                    if issue_text
+                    else f"{agent_key} output missing required structure"
                 )
                 result = failure_artifact(
                     output_field,
-                    f"{agent_key} output missing required structure",
+                    failure_message,
                     provider=support.infer_provider_name(llm),
                     fallback_content=content_str,
                 )
                 new_state.update(result)
                 return new_state
 
+            if agent_key == "fundamentals_analyst":
+                from src.analysis_snapshot import (
+                    add_validated_derivations,
+                    project_analysis_report,
+                )
+
+                derived_snapshot = add_validated_derivations(
+                    state.get("analysis_snapshot"),
+                    content_str,
+                )
+                content_str = project_analysis_report(
+                    content_str,
+                    derived_snapshot,
+                )
+                new_state["analysis_snapshot"] = derived_snapshot
+                logger.debug(
+                    "fundamentals_output",
+                    has_datablock=has_parseable_data_block(content_str),
+                    length=len(content_str),
+                )
             new_state.update(
                 success_artifact(
                     output_field,
@@ -1009,13 +1474,6 @@ def create_analyst_node(
                     provider=support.infer_provider_name(llm),
                 )
             )
-
-            if agent_key == "fundamentals_analyst":
-                logger.debug(
-                    "fundamentals_output",
-                    has_datablock=has_parseable_data_block(content_str),
-                    length=len(content_str),
-                )
             return new_state
         except Exception as exc:
             logger.error(

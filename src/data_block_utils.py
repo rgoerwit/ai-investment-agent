@@ -37,6 +37,7 @@ def unfenced_label(name: str) -> str:
 
 BLOCK_SHAPES: dict[str, BlockShape] = {
     "DATA_BLOCK": BlockShape.FENCED,
+    "MANAGEMENT_GUIDANCE": BlockShape.FENCED,
     "PM_BLOCK": BlockShape.FENCED,
     "VALUE_TRAP_BLOCK": BlockShape.FENCED,
     "VALUATION_PARAMS": BlockShape.FENCED,

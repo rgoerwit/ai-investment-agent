@@ -13,6 +13,9 @@ from src.ibkr.ticker import Ticker
 
 
 def _normalize(**overrides):
+    # normalize_position_values() is a pure function — fx_rate is caller-supplied
+    # (see FxRateCache in src/fx_normalization.py), not looked up here. This
+    # default is a fixed test fixture, independent of the real fallback table.
     values = {
         "quantity": 100.0,
         "current_price_local": 90.0,
@@ -20,6 +23,7 @@ def _normalize(**overrides):
         "raw_market_value": 9_000.0,
         "raw_unrealized_pnl": -1_000.0,
         "currency": "JPY",
+        "fx_rate": 0.0067,
     }
     values.update(overrides)
     return normalize_position_values(**values)
@@ -38,7 +42,7 @@ def _normalize(**overrides):
     ],
 )
 def test_local_values_are_converted_exactly_once(currency, rate):
-    result = _normalize(currency=currency)
+    result = _normalize(currency=currency, fx_rate=rate)
 
     assert result.valuation_valid is True
     assert result.market_value_basis == "LOCAL_CONVERTED"
@@ -64,6 +68,7 @@ def test_values_already_in_usd_are_not_converted_again(currency, rate):
 
     result = _normalize(
         currency=currency,
+        fx_rate=rate,
         raw_market_value=market_usd,
         raw_unrealized_pnl=pnl_usd,
     )
@@ -198,7 +203,9 @@ def test_non_finite_broker_values_fail_closed(field, value):
 
 
 def test_unknown_currency_never_becomes_usd_by_default():
-    result = _normalize(currency="ZZZ")
+    # The caller (FxRateCache) is what determines a currency is unresolvable
+    # and passes fx_rate=None — this function just fails closed on it.
+    result = _normalize(currency="ZZZ", fx_rate=None)
 
     assert result.valuation_valid is False
     assert result.fx_rate_to_usd is None

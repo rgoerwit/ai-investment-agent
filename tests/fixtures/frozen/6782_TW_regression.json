@@ -1,0 +1,48 @@
+{
+  "ticker": "6782.TW",
+  "raw_metrics": {
+    "revenueGrowth": 0.150221699,
+    "earningsGrowth": 0.39373357,
+    "revenueGrowth_TTM": null,
+    "earningsGrowth_TTM": null,
+    "_revenueGrowth_source": "calculated_from_statements",
+    "_earningsGrowth_source": "calculated_from_statement_net_income_proxy"
+  },
+  "fundamentals_output": "### --- START DATA_BLOCK ---\nREVENUE_GROWTH_FY: N/A\nEARNINGS_GROWTH_FY: N/A\nREVENUE_GROWTH_TTM: 15.0%\nEARNINGS_GROWTH_TTM: 39.4%\n### --- END DATA_BLOCK ---\n",
+  "m_and_a_narrative": "M&A activity includes the acquisition of Mingdar and From-eyes.",
+  "capacity_evidence": {
+    "utilization": "95%",
+    "source_url": "https://www.scribd.com/document/1030190819/2026-0416%E5%85%83%E5%A4%A7%E6%8A%95%E9%A1%A7%E7%A0%94%E7%A9%B6%E5%A0%B1%E5%91%8A-6782-%E8%A6%96%E9%99%BD",
+    "source_authority": "SECONDARY",
+    "summary": "Yuanta Securities research estimates 95% capacity utilization and anticipated capacity expansions."
+  },
+  "guidance_evidence": {
+    "source_type": "RESEARCH_REPORT",
+    "source_authority": "THIRD_PARTY",
+    "management_identified": "NO",
+    "projected_eps_growth": "14%"
+  },
+  "ownership_evidence": {
+    "captured_as_of": "2026-03-28",
+    "largest_shareholder": {
+      "name": "BenQ Materials Corp.",
+      "ticker": "8215.TW",
+      "pct": 14.82
+    },
+    "control_status": "NOT_CONTROLLED",
+    "relationship": "equity method",
+    "sources": [
+      {
+        "url": "https://www.viscovision.com.tw/tw/investors_shareholders.html",
+        "as_of": "2026-03-28",
+        "supports": "BenQ Materials Corp. is the largest listed shareholder at 14.82%."
+      },
+      {
+        "url": "https://www.benqmaterials.com/download/0/213/",
+        "as_of": "2023-12-31",
+        "supports": "BenQ Materials reports significant influence, one board seat, no control, and equity-method accounting."
+      }
+    ]
+  },
+  "value_trap_output": "### --- START VALUE_TRAP_BLOCK ---\nSCORE: 55\nVERDICT: CAUTIOUS\nTRAP_RISK: MEDIUM\nM&A_CONTEXT_EVIDENCE: CITED\nM&A_CONTEXT_SOURCE_URL: https://unsupported.example/from-eyes\nM&A_CONTEXT: Strategic acquisitions, e.g. From-eyes Co., drove growth.\n### --- END VALUE_TRAP_BLOCK ---"
+}

@@ -86,6 +86,9 @@ def test_calculate_derived_metrics_adds_pe_vs_sector() -> None:
 
     assert result["sectorMedianPE"] == pytest.approx(12.0)
     assert result["peVsSector"] == pytest.approx(1.17)
+    assert result["sectorPeReferenceType"] == "STATIC_POLICY_REFERENCE"
+    assert result["sectorPeReferenceAsOf"] == "N/A"
+    assert result["_sectorMedianPE_source"] == "static_gics_sector_median"
     assert result["_peVsSector_source"] == "static_gics_sector_median"
 
 

@@ -1,6 +1,28 @@
 """Toolkit registry and grouped tool accessors."""
 
 
+def _dedup_tools_by_name(tools: list) -> list:
+    """Drop duplicate tools by name, preserving first occurrence and order.
+
+    Composed tool sets (e.g. the auditor's) splat several groups that overlap —
+    ``search_foreign_sources`` appears in both the foreign-language and news
+    groups. OpenAI silently tolerates a duplicate function name in one ``tools``
+    payload, but strict OpenAI-compatible providers (e.g. Moonshot/Kimi) reject
+    it with a 400 ``function name ... is duplicated``. Binding the same function
+    twice is never intended, so dedup is a provider-agnostic correctness fix.
+    """
+    seen: set[str] = set()
+    out: list = []
+    for tool in tools:
+        name = getattr(tool, "name", None) or getattr(tool, "__name__", None)
+        if name is not None and name in seen:
+            continue
+        if name is not None:
+            seen.add(name)
+        out.append(tool)
+    return out
+
+
 class Toolkit:
     def __init__(self):
         pass
@@ -52,9 +74,19 @@ class Toolkit:
 
     def get_foreign_language_tools(self):
         """Tools for Foreign Language Analyst (supplemental data from native sources)."""
-        from src.tools.research import get_official_filings, search_foreign_sources
+        from src.tools.official_documents import get_official_document
+        from src.tools.research import (
+            extract_guidance_sources,
+            get_official_filings,
+            search_foreign_sources,
+        )
 
-        return [search_foreign_sources, get_official_filings]
+        return [
+            search_foreign_sources,
+            extract_guidance_sources,
+            get_official_filings,
+            get_official_document,
+        ]
 
     def get_auditor_tools(self):
         """Bounded retrieval and deterministic calculations for the Auditor."""
@@ -62,22 +94,32 @@ class Toolkit:
             calculate_forensic_ratios,
             validate_forensic_evidence,
         )
-        from src.tools.official_documents import get_official_document
 
-        return [
-            *self.get_foreign_language_tools(),
-            *self.get_junior_fundamental_tools(),
-            *self.get_news_tools(),
-            get_official_document,
-            validate_forensic_evidence,
-            calculate_forensic_ratios,
-        ]
+        # These groups overlap (search_foreign_sources is in both the foreign-
+        # language and news sets); dedup so the bound payload has no duplicate
+        # function name (rejected with a 400 by strict providers like Moonshot).
+        return _dedup_tools_by_name(
+            [
+                *self.get_foreign_language_tools(),
+                *self.get_junior_fundamental_tools(),
+                *self.get_news_tools(),
+                validate_forensic_evidence,
+                calculate_forensic_ratios,
+            ]
+        )
 
     def get_legal_tools(self):
-        """Tools for Legal Counsel (PFIC/VIE detection for US investors)."""
+        """Tools for Legal Counsel tax, structural, and disclosure review."""
         from src.tools.legal import search_legal_tax_disclosures
+        from src.tools.official_documents import get_official_document
+        from src.tools.research import get_official_filings, search_foreign_sources
 
-        return [search_legal_tax_disclosures]
+        return [
+            search_legal_tax_disclosures,
+            search_foreign_sources,
+            get_official_filings,
+            get_official_document,
+        ]
 
     def get_portfolio_tools(self):
         """Read-only IBKR/account tools for portfolio-aware workflows."""

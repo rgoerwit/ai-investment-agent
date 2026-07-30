@@ -16,6 +16,10 @@ from src.thesis_constants import SECTOR_MEDIAN_PE
 
 logger = structlog.get_logger(__name__)
 
+_MRQ_BASE_ABS_DELTA_BPS = 500.0
+_MRQ_BASE_RELATIVE_DELTA = 0.30
+_MRQ_BASE_MIN_REFERENCE_QUARTERS = 3
+
 
 def _safe_float(value: Any) -> float | None:
     try:
@@ -466,6 +470,9 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
                 best_idx = i
         return best_idx
 
+    rev_series: pd.Series | None = None
+    ni_series: pd.Series | None = None
+
     if income_available and "Total Revenue" in qt_inc.index:
         rev_raw = qt_inc.loc["Total Revenue"]
         rev_series = rev_raw.dropna()
@@ -583,6 +590,60 @@ def extract_quarterly_horizons(ticker, symbol: str) -> dict[str, Any]:
         add_diagnostic("earningsGrowth_MRQ", "quarterly_income_unavailable")
         add_diagnostic("earningsGrowth_TTM", "quarterly_income_unavailable")
         add_diagnostic("netIncome_TTM", "quarterly_income_unavailable")
+
+    if rev_series is not None and ni_series is not None:
+        common_dates = rev_series.index.intersection(ni_series.index)
+        comparison_status = "UNKNOWN"
+        comparison_delta_bps: float | None = None
+        if len(common_dates) >= 5:
+            latest_date = common_dates[0]
+            prior_idx = _find_yoy_match_idx(common_dates, latest_date)
+            if prior_idx is not None:
+                prior_date = common_dates[prior_idx]
+                prior_revenue = float(rev_series.loc[prior_date])
+                prior_net_income = float(ni_series.loc[prior_date])
+                if prior_revenue > 0 and prior_net_income <= 0:
+                    comparison_status = "NONPOSITIVE"
+                elif prior_revenue > 0:
+                    reference_margins = [
+                        float(ni_series.loc[date]) / float(rev_series.loc[date])
+                        for date in common_dates
+                        if date not in {latest_date, prior_date}
+                        and float(rev_series.loc[date]) > 0
+                    ]
+                    if len(reference_margins) >= _MRQ_BASE_MIN_REFERENCE_QUARTERS:
+                        reference_margin = float(statistics.median(reference_margins))
+                        prior_margin = prior_net_income / prior_revenue
+                        if reference_margin > 0:
+                            comparison_delta_bps = (
+                                prior_margin - reference_margin
+                            ) * 10_000
+                            relative_delta = (
+                                prior_margin - reference_margin
+                            ) / reference_margin
+                            if (
+                                comparison_delta_bps <= -_MRQ_BASE_ABS_DELTA_BPS
+                                or relative_delta <= -_MRQ_BASE_RELATIVE_DELTA
+                            ):
+                                comparison_status = "DEPRESSED"
+                            elif (
+                                comparison_delta_bps >= _MRQ_BASE_ABS_DELTA_BPS
+                                or relative_delta >= _MRQ_BASE_RELATIVE_DELTA
+                            ):
+                                comparison_status = "ELEVATED"
+                            else:
+                                comparison_status = "NORMAL"
+        extracted["mrq_comparison_base_status"] = comparison_status
+        extracted["_mrq_comparison_base_status_source"] = (
+            "calculated_from_quarterly_margins"
+        )
+        if comparison_delta_bps is not None:
+            extracted["mrq_comparison_base_margin_delta_bps"] = round(
+                comparison_delta_bps, 1
+            )
+            extracted["_mrq_comparison_base_margin_delta_bps_source"] = (
+                "calculated_from_quarterly_margins"
+            )
 
     if cashflow_available and "Operating Cash Flow" in qt_cf.index:
         ocf_raw = qt_cf.loc["Operating Cash Flow"]
@@ -1110,7 +1171,12 @@ def calculate_derived_metrics(data: dict[str, Any], symbol: str) -> dict[str, An
         if pe and sector_median_pe:
             calculated["sectorMedianPE"] = sector_median_pe
             calculated["peVsSector"] = round(pe / sector_median_pe, 2)
+            calculated["sectorPeReferenceType"] = "STATIC_POLICY_REFERENCE"
+            calculated["sectorPeReferenceAsOf"] = "N/A"
+            calculated["_sectorMedianPE_source"] = "static_gics_sector_median"
             calculated["_peVsSector_source"] = "static_gics_sector_median"
+            calculated["_sectorPeReferenceType_source"] = "static_gics_sector_median"
+            calculated["_sectorPeReferenceAsOf_source"] = "static_gics_sector_median"
 
         if data.get("growth_trajectory") is None:
             mrq = data.get("revenueGrowth_MRQ")

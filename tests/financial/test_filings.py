@@ -130,6 +130,31 @@ class TestFilingResult:
         assert "8.50%" in report
         assert "Ownership data not found." not in report
 
+    def test_equity_method_investor_is_not_rendered_as_controller(self):
+        result = FilingResult(
+            source="TEST",
+            ticker="6782.TW",
+            filing_date="2023-12-31",
+            filing_url="https://example.com/filing",
+            major_shareholders=[
+                {"name": "BenQ Materials Corp.", "percent": 14.82, "type": "corporate"}
+            ],
+            parent_company={
+                "name": "BenQ Materials Corp.",
+                "percent": 14.82,
+                "relationship": "equity method",
+            },
+        )
+
+        report = result.to_report_string()
+
+        assert "Largest Shareholder: BenQ Materials Corp. (14.82%)" in report
+        assert "Controlling Shareholder: NONE" in report
+        assert "Control Status: NOT_CONTROLLED" in report
+        assert "Control Basis: SIGNIFICANT_INFLUENCE_ONLY" in report
+        assert "Parent Company: NONE" in report
+        assert "Ownership Source Type: OFFICIAL_FILING" in report
+
     def test_data_gaps_listed(self):
         """Data gaps should be listed at the end."""
         result = FilingResult(

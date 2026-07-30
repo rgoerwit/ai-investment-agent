@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [3.14.0] - 2026-07-30
+
+### Added
+
+- **Canonical evidence infrastructure** — Registered tool payloads enter through a typed, fail-closed contract before LLM rendering (`src/tooling/evidence_recorder.py`, `src/claim_policy.py`); material claims retain source and period provenance; positive score credits require transitive fact lineage (`src/score_lineage.py`); corrected facts and scores project from one canonical snapshot (`src/analysis_snapshot.py`); and invalid analyses or unapproved articles are retained as diagnostic/draft artifacts rather than silently discarded.
+- **Capital-structure evidence checks** — New deterministic checks on capital-structure claims (`src/agents/capital_structure.py`) feeding the Legal Counsel prompt and red-flag detector.
+- **Management-guidance & earnings-durability classification** — Deterministic management-guidance retrieval plus an earnings-baseline durability classifier (`TEMPORARILY_BOOSTED`, etc.) that suppresses moat/capital-efficiency bonuses earned on a transient cyclical-peak print.
+- **Live-first FX rate cache** — `FxRateCache` (`src/fx_normalization.py`) resolves currency rates live-then-fallback, batched per unique currency per run and cached with a 1-hour TTL, replacing the previous always-fallback path in `src/ibkr/portfolio.py` and `src/ibkr/reconciliation_rules.py`; `FALLBACK_RATES_TO_USD` refreshed to current spot rates.
+- **Per-agent/provider/model/tier cost accounting** — Cost rollups by provider, model, and service tier; unpriced-model surfacing; an order-independent pricing matcher (prices `kimi-k3`); retry-cost re-attribution to the originating agent; and a new `scripts/cost_report.py` for ranking spend and diffing baseline-vs-candidate runs.
+- **OpenAI-compatible endpoint routing** — `OPENAI_API_BASE` lets the Consultant/Auditor route through OpenAI-compatible providers (e.g. Kimi/Moonshot).
+
+### Changed
+
+- **BUY rationale discipline** — A BUY must cite at least one eligible supporting fact; passing health/growth scores alone no longer establish the forward case.
+- **Ownership and evidence provenance** — Further hardening of ownership-structure and MRQ statement-period provenance, with analysis-quality gaps now scored separately from issuer risk instead of being conflated into one penalty.
+- **Value Trap Detector** — Thinking level bumped one notch in full mode specifically to reduce fabrication.
+- **Gemini model support** — Updated model health checks and pricing for current-generation Gemini models.
+
+### Fixed
+
+- **False rejections from the new evidence gates** — Raw-read `N/A` in guidance validation and rounded-precision citation matches no longer trip false rejections; live-data conflict fast-fails no longer fire on false positives; FLA output budget and FX timeout widened.
+- **Forensic-auditor host-rejection observability** — Rejected document hosts are now logged deterministically (previously visible only in the LLM's prose) alongside multi-source issuer-website discovery and raised byte/timeout caps.
+- **False `N/A` collapse on `ADJUSTED_*_SCORE`** — `GROWTH_ADJ`/`HEALTH_ADJ` no longer collapse to a false `N/A` when a structurally-unbacked rubric criterion (one that can never be corroborated by design) vetoed an otherwise fully-corroborated scorecard.
+- **Article-relative chart paths** — Corrected chart path resolution when generating articles.
+
 ## [3.13.0] - 2026-07-19
 
 ### Added

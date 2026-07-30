@@ -269,9 +269,11 @@ def build_graph_components(
     retry_llm = None
     allow_retry = False
     if not quick_mode and is_gemini_v3_or_greater(runtime_config.quick_think_llm):
-        retry_llm = create_deep_thinking_llm(
-            callbacks=tracked_callbacks("Retry Agent (Deep)"),
-        )
+        # No bound token-tracking callback: this deep-model instance is shared
+        # across every analyst's retry path, so its cost is attributed to the
+        # ORIGINATING agent at the retry call site (analyst_nodes) via a per-call
+        # callback — not pooled into a synthetic "Retry Agent (Deep)" bucket.
+        retry_llm = create_deep_thinking_llm(callbacks=[])
         allow_retry = True
         logger.debug("retry_llm_enabled", ticker=ticker)
     elif quick_mode:
@@ -456,6 +458,13 @@ def build_graph_components(
     value_trap_llm = create_quick_thinking_llm(
         callbacks=tracked_callbacks("Value Trap Detector"),
         max_output_tokens=output_budget("Value Trap Detector"),
+        # Full mode only: the Value Trap Detector interprets native-language
+        # filings and distinguishes announced vs. executed corporate actions —
+        # a synthesis task where a thinking-level notch reduces fabrication.
+        # Quick-mode batch sweeps (four-figure ticker counts) stay unbumped to
+        # keep screening cheap, matching the codebase's quick-mode degradation
+        # convention.
+        thinking_level_bump=not quick_mode,
     )
     value_trap_detector = create_analyst_node(
         value_trap_llm,

@@ -7,11 +7,14 @@ ownership explicit without forcing broad signature churn through the codebase.
 
 from __future__ import annotations
 
+import ipaddress
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
+from urllib.parse import urlparse
 
 from langchain_core.rate_limiters import BaseRateLimiter
 
@@ -23,6 +26,7 @@ from src.tooling.runtime import TOOL_SERVICE, ToolExecutionService, ToolHook
 if TYPE_CHECKING:
     from src.data.fetcher import SmartMarketDataFetcher
     from src.mcp.client import MCPRuntime
+    from src.tooling.evidence_recorder import EvidenceRecord, EvidenceRecorder
 
 
 @dataclass(frozen=True)
@@ -33,6 +37,44 @@ class ProviderRuntime:
     rate_limiter: BaseRateLimiter
 
 
+@dataclass
+class IssuerAuthorityRegistry:
+    """Run-scoped issuer hosts bound from structured company-profile identity."""
+
+    _provenance_by_host: dict[str, str] = field(default_factory=dict)
+
+    def register_url(self, url: str, *, provenance: str) -> bool:
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            return False
+        try:
+            port = parsed.port
+        except ValueError:
+            return False
+        if parsed.username or parsed.password or port not in {None, 443}:
+            return False
+        host = parsed.hostname.rstrip(".").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if (
+            "." not in host
+            or len(host) > 253
+            or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", host)
+        ):
+            return False
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            pass
+        else:
+            return False
+        self._provenance_by_host.setdefault(host, provenance)
+        return True
+
+    def hosts(self) -> tuple[str, ...]:
+        return tuple(self._provenance_by_host)
+
+
 @dataclass(frozen=True)
 class RuntimeServices:
     """Runtime-scoped services used by tool- and prompt-bound execution."""
@@ -41,6 +83,10 @@ class RuntimeServices:
     inspection_service: InspectionService
     providers: ProviderRuntime | None = None
     mcp_runtime: MCPRuntime | None = None
+    evidence_recorder: EvidenceRecorder | None = None
+    issuer_authority: IssuerAuthorityRegistry = field(
+        default_factory=IssuerAuthorityRegistry
+    )
 
     def with_tool_service(self, tool_service: ToolExecutionService) -> RuntimeServices:
         return replace(self, tool_service=tool_service)
@@ -81,6 +127,27 @@ def get_current_tool_service() -> ToolExecutionService:
 def get_current_inspection_service() -> InspectionService:
     services = get_current_runtime_services()
     return services.inspection_service if services is not None else INSPECTION_SERVICE
+
+
+def get_current_evidence_records(
+    *, agent_key: str | None = None
+) -> list[EvidenceRecord]:
+    services = get_current_runtime_services()
+    if services is None or services.evidence_recorder is None:
+        return []
+    return services.evidence_recorder.snapshot(agent_key=agent_key)
+
+
+def register_current_issuer_url(url: str, *, provenance: str) -> bool:
+    services = get_current_runtime_services()
+    if services is None:
+        return False
+    return services.issuer_authority.register_url(url, provenance=provenance)
+
+
+def get_current_issuer_hosts() -> tuple[str, ...]:
+    services = get_current_runtime_services()
+    return services.issuer_authority.hosts() if services is not None else ()
 
 
 def get_current_provider_runtime() -> ProviderRuntime | None:
@@ -141,13 +208,17 @@ def build_runtime_services_from_config(
 ) -> RuntimeServices:
     """Build runtime services from the active config object."""
     from src.tooling.audit import LoggingToolAuditHook
+    from src.tooling.evidence_recorder import EvidenceRecorder
     from src.tooling.inspection_hook import ContentInspectionHook
     from src.tooling.inspector import NullInspector
     from src.tooling.runtime import ToolExecutionService
     from src.tooling.tool_argument_policy import ToolArgumentPolicyHook
 
     inspection_service = InspectionService()
-    hooks: list[ToolHook] = []
+    evidence_recorder = EvidenceRecorder()
+    # First in the chain means last in reverse after-hook order, so the ledger
+    # receives the final inspected/sanitized result.
+    hooks: list[ToolHook] = [evidence_recorder]
     providers = provider_runtime or build_provider_runtime()
 
     if enable_tool_audit:
@@ -242,4 +313,6 @@ def build_runtime_services_from_config(
         inspection_service=inspection_service,
         providers=providers,
         mcp_runtime=mcp_runtime,
+        evidence_recorder=evidence_recorder,
+        issuer_authority=IssuerAuthorityRegistry(),
     )

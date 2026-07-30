@@ -151,6 +151,43 @@ def test_eodhd_fills_growth_when_yfinance_untagged() -> None:
     assert source == "eodhd"
 
 
+def test_merge_preserves_statement_mrq_provenance() -> None:
+    merged, _ = smart_merge_with_quality(
+        {
+            "yfinance": {
+                "latest_quarter_date": "2025-12-31",
+                "_latest_quarter_date_source": "yfinance_quarterly",
+                "revenueGrowth_MRQ": 0.168693,
+                "_revenueGrowth_MRQ_source": "calculated_from_quarterly",
+                "earningsGrowth_MRQ": 1.028262,
+                "_earningsGrowth_MRQ_source": "calculated_from_quarterly",
+                "mrq_comparison_base_status": "DEPRESSED",
+                "_mrq_comparison_base_status_source": (
+                    "calculated_from_quarterly_margins"
+                ),
+                "mrq_comparison_base_margin_delta_bps": -692.8,
+                "_mrq_comparison_base_margin_delta_bps_source": (
+                    "calculated_from_quarterly_margins"
+                ),
+            }
+        },
+        "6782.TW",
+        quarantine_forward_pe_outlier,
+    )
+
+    assert merged["_latest_quarter_date_source"] == "yfinance_quarterly"
+    assert merged["_revenueGrowth_MRQ_source"] == "calculated_from_quarterly"
+    assert merged["_earningsGrowth_MRQ_source"] == "calculated_from_quarterly"
+    assert (
+        merged["_mrq_comparison_base_status_source"]
+        == "calculated_from_quarterly_margins"
+    )
+    assert (
+        merged["_mrq_comparison_base_margin_delta_bps_source"]
+        == "calculated_from_quarterly_margins"
+    )
+
+
 # --- Live canary: yfinance annual statements must still yield FY growth ---------
 # Mirrors tests/scripts/test_find_gems.py::TestExchangeMetricCanary. Catches the
 # bug class this work addresses: yfinance row-label drift (e.g. "Diluted EPS"

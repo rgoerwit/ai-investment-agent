@@ -729,6 +729,7 @@ async def run_analysis(
                 ),
                 final_trade_decision="",
                 tools_called={},
+                structured_inputs={},
                 prompts_used={},
                 artifact_statuses={},
                 red_flags=[],
@@ -1152,7 +1153,7 @@ async def _execute_analysis(
         capture_hook = baseline_capture.make_tool_hook()
         scoped_runtime_services = runtime_services.with_extra_tool_hooks([capture_hook])
 
-    return await run_analysis(
+    result = await run_analysis(
         args.ticker,
         args.quick,
         strict_mode=args.strict,
@@ -1168,6 +1169,14 @@ async def _execute_analysis(
         tracing_metadata=tracing_metadata,
         runtime_services=scoped_runtime_services,
     )
+    if (
+        isinstance(result, dict)
+        and scoped_runtime_services.evidence_recorder is not None
+    ):
+        result["evidence_records"] = (
+            scoped_runtime_services.evidence_recorder.serialized_snapshot()
+        )
+    return result
 
 
 def _create_baseline_capture_manager(
