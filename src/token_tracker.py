@@ -3,6 +3,7 @@ Token usage tracking and cost estimation module.
 Provides comprehensive logging of LLM token consumption across all agents.
 """
 
+import re
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -21,11 +22,13 @@ logger = structlog.get_logger(__name__)
 # Sources: ai.google.dev/gemini-api/docs/pricing, developers.openai.com/api/docs/pricing,
 # platform.claude.com/docs/en/pricing, docs.z.ai/guides/overview/pricing,
 # api-docs.deepseek.com/quick_start/pricing.
-# IMPORTANT: Prefix-matched in insertion order — more specific keys (mini/lite/
-# preview variants) must come before their parents. Gemini >200k-context rate
-# differences are not modeled (single blended rate per model). Provider-specific
-# cached-input rates use ``cached_prompt`` when present; otherwise they use
-# CACHED_PROMPT_MULTIPLIER below.
+# Matched by exact key first, then longest-prefix-wins (see
+# ``_lookup_model_pricing``) — so insertion order does NOT matter and a
+# more-specific variant (mini/lite/preview) always beats its parent regardless
+# of where it appears. Gemini >200k-context rate differences are not modeled
+# (single blended rate per model). Provider-specific cached-input rates use
+# ``cached_prompt`` when present; otherwise they use CACHED_PROMPT_MULTIPLIER
+# below.
 MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     # Current-generation models only — retired/deprecated models are
     # deliberately absent; if one is somehow used it hits the default-pricing
@@ -63,6 +66,11 @@ MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     "glm-5.2": {"prompt": 1.40, "cached_prompt": 0.26, "completion": 4.40},
     # --- DeepSeek (APAC regional specialist) ---
     "deepseek-v4": {"prompt": 0.435, "completion": 0.87},
+    # --- Moonshot Kimi (APAC regional specialist) ---
+    # kimi-k3 has no separately published SKU yet; anchored to the latest
+    # published Kimi (K2.6, Apr 2026): $0.95 cache-miss input / $0.16 cache-hit /
+    # $4.00 output per 1M. CONFIRM against Moonshot's kimi-k3 rate once published.
+    "kimi-k3": {"prompt": 0.95, "cached_prompt": 0.16, "completion": 4.00},
 }
 
 # Fallback for models missing from the table (Flash-class assumption).
@@ -92,10 +100,100 @@ CACHE_WRITE_PROMPT_MULTIPLIER = 1.25
 _warned_unknown_pricing_models: set[str] = set()
 
 
+def _normalize_model_name(model_name: str) -> str:
+    """Strip a single leading ``vendor/`` namespace before matching.
+
+    OpenRouter/LiteLLM-style ids (``moonshot/kimi-k3``, ``google/gemini-3.6``)
+    would otherwise miss the table. Native base-URL callers already pass bare
+    names, so this is a defensive no-op for them.
+    """
+    return model_name.split("/", 1)[1] if "/" in model_name else model_name
+
+
+def _match_pricing(model_name: str) -> dict[str, float] | None:
+    """Resolve pricing by exact key, then longest-prefix-wins.
+
+    Order-independent of ``MODEL_PRICING_PER_1M`` insertion order: a more
+    specific variant (``gpt-5.4-mini``) always beats its parent (``gpt-5.4``)
+    because it is the longer matching prefix. Returns ``None`` when unpriced.
+    """
+    name = _normalize_model_name(model_name)
+    exact = MODEL_PRICING_PER_1M.get(name)
+    if exact is not None:
+        return exact
+    best_key: str | None = None
+    for model_key in MODEL_PRICING_PER_1M:
+        if name.startswith(model_key) and (
+            best_key is None or len(model_key) > len(best_key)
+        ):
+            best_key = model_key
+    return MODEL_PRICING_PER_1M[best_key] if best_key is not None else None
+
+
+def _is_model_priced(model_name: str) -> bool:
+    """True when ``model_name`` resolves to a real table entry (no warning)."""
+    return _match_pricing(model_name) is not None
+
+
+def _provider_for_model(model_name: str) -> str:
+    """Billing vendor for a model id, for the ``by_provider`` cost rollup.
+
+    Grouped by who bills for the tokens (so "where does spend go" is answerable
+    from model names alone) — coarser than the transport ``provider`` recorded
+    in ``call_attempts``. Unknown families fall to ``"unknown"`` (a visible
+    bucket that pairs with the unpriced-model flag), never silently misattributed.
+    """
+    name = _normalize_model_name(model_name).lower()
+    if "gemini" in name:
+        return "google"
+    if "claude" in name:
+        return "anthropic"
+    if "deepseek" in name:
+        return "deepseek"
+    if name.startswith("kimi") or "moonshot" in name:
+        return "moonshot"
+    if name.startswith("glm") or "zhipu" in name:
+        return "zhipu"
+    if name.startswith(("gpt", "o1", "o3", "o4")) or "openai" in name:
+        return "openai"
+    return "unknown"
+
+
+# The prompt-namespace ``agent_name`` (from prompts/*.json, recorded in
+# ``call_attempts``) differs from the callback display label (recorded in the
+# ``agents`` rollup) for four seats. Map them so the two ledgers join.
+_AGENT_DISPLAY_NAME_MAP = {
+    "External Consultant": "Consultant",
+    "Global Forensic Accountant": "Global Forensic Auditor",
+    "Bull Analyst": "Bull Researcher",
+    "Bear Analyst": "Bear Researcher",
+}
+
+# Suffixes appended at call sites to decorate the base agent name (debate round,
+# consultant/auditor final synthesis, high-thinking retry, escalation). This is a
+# closed, code-controlled set — stripping it is deterministic, not free-text
+# guessing.
+_AGENT_SUFFIX_RE = re.compile(
+    r"(?:_final_synthesis|\s+R\d+|\s+\(RETRY-HIGH\)|\s+Escalation|\s+Direct Retry)+$"
+)
+
+
+def canonical_display_name(raw: str) -> str:
+    """Map a decorated prompt-namespace agent name to its ``agents``-rollup label.
+
+    Strips the closed set of call-site suffixes, then applies the 4-entry
+    spelling map — so ``"Bull Analyst R2"`` and ``"External Consultant_final_synthesis"``
+    reconcile to ``"Bull Researcher"`` / ``"Consultant"``. Names already in the
+    display namespace (e.g. ``"Portfolio Manager"``) pass through unchanged.
+    """
+    base = _AGENT_SUFFIX_RE.sub("", raw).strip()
+    return _AGENT_DISPLAY_NAME_MAP.get(base, base)
+
+
 def _lookup_model_pricing(model_name: str) -> dict[str, float]:
-    for model_key, prices in MODEL_PRICING_PER_1M.items():
-        if model_name.startswith(model_key):
-            return prices
+    prices = _match_pricing(model_name)
+    if prices is not None:
+        return prices
     if model_name not in _warned_unknown_pricing_models:
         _warned_unknown_pricing_models.add(model_name)
         logger.warning(
@@ -226,6 +324,23 @@ class AgentTokenStats:
             if usage.elapsed_seconds > self.wall_clock_max_seconds:
                 self.wall_clock_max_seconds = usage.elapsed_seconds
 
+    def by_model(self) -> dict[str, dict[str, float]]:
+        """Per-model cost/token breakdown for this agent.
+
+        Folds the authoritative per-call ``TokenUsage`` records by model name —
+        no re-pricing, so the rows sum to this agent's ``total_cost_usd``. Lets
+        an agent that spans models (e.g. a quick→deep retry) show both.
+        """
+        out: dict[str, dict[str, float]] = {}
+        for usage in self.calls:
+            row = out.setdefault(
+                usage.model_name, {"calls": 0, "tokens": 0, "cost_usd": 0.0}
+            )
+            row["calls"] += 1
+            row["tokens"] += usage.total_tokens
+            row["cost_usd"] += usage.estimated_cost_usd
+        return out
+
 
 @dataclass
 class LLMCallAttempt:
@@ -238,6 +353,9 @@ class LLMCallAttempt:
     status: Literal["success", "failure"]
     attempt: int
     elapsed_seconds: float
+    # Reconciled display-namespace name (joins to the ``agents`` rollup). Derived
+    # from ``agent_name`` via ``canonical_display_name`` unless supplied.
+    canonical_agent: str = ""
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
@@ -340,6 +458,7 @@ class TokenTracker:
         status: Literal["success", "failure"],
         attempt: int,
         elapsed_seconds: float,
+        canonical_agent: str | None = None,
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
         total_tokens: int | None = None,
@@ -352,6 +471,11 @@ class TokenTracker:
         Aggregate token totals remain driven by ``record_usage`` callbacks.
         This ledger exists for latency/retry diagnostics and may have null token
         fields when the provider did not return usage metadata.
+
+        ``canonical_agent`` is the display-namespace identity (joins to the
+        ``agents`` rollup). It is always run through ``canonical_display_name``
+        (idempotent) — pass the undecorated agent name to skip suffix-stripping;
+        omit it to derive from the (possibly decorated) ``agent_name``.
         """
         attempt_record = LLMCallAttempt(
             timestamp=datetime.now().isoformat(),
@@ -361,6 +485,7 @@ class TokenTracker:
             status=status,
             attempt=attempt,
             elapsed_seconds=round(float(elapsed_seconds), 4),
+            canonical_agent=canonical_display_name(canonical_agent or agent_name),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
@@ -407,6 +532,33 @@ class TokenTracker:
                 stats.total_cost_usd for stats in self.agent_stats.values()
             )
 
+            # Provider/model rollups + unpriced-model detection, derived from the
+            # authoritative per-call usages (so they reconcile to total_cost and
+            # need no separate mutable state). A model that misses the pricing
+            # table is surfaced here rather than only in a once-per-process log.
+            by_provider: dict[str, dict[str, float]] = {}
+            by_model: dict[str, dict[str, float]] = {}
+            # Effective service tier of each call: "flex" (billed 0.5x) vs
+            # "standard"/"auto" (full rate). When a flex-configured run can't get
+            # flex capacity it falls back to standard, so this rollup makes the
+            # variable "flex-unavailable → paid full rate" cost visible.
+            by_tier: dict[str, dict[str, float]] = {}
+            unpriced: set[str] = set()
+            for usage in self.all_usages:
+                if not _is_model_priced(usage.model_name):
+                    unpriced.add(usage.model_name)
+                for bucket, key in (
+                    (by_model, usage.model_name),
+                    (by_provider, _provider_for_model(usage.model_name)),
+                    (by_tier, usage.service_tier or "unspecified"),
+                ):
+                    row = bucket.setdefault(
+                        key, {"calls": 0, "tokens": 0, "cost_usd": 0.0}
+                    )
+                    row["calls"] += 1
+                    row["tokens"] += usage.total_tokens
+                    row["cost_usd"] += usage.estimated_cost_usd
+
             return {
                 "failed_attempts": len(self.failed_attempts),
                 "total_calls": len(self.all_usages),
@@ -429,6 +581,7 @@ class TokenTracker:
                             stats.total_cache_write_prompt_tokens
                         ),
                         "cost_usd": stats.total_cost_usd,
+                        "by_model": stats.by_model(),
                         "wall_clock_seconds": round(stats.wall_clock_seconds, 4),
                         "wall_clock_max_seconds": round(
                             stats.wall_clock_max_seconds, 4
@@ -436,6 +589,10 @@ class TokenTracker:
                     }
                     for name, stats in self.agent_stats.items()
                 },
+                "by_provider": by_provider,
+                "by_model": by_model,
+                "by_tier": by_tier,
+                "unpriced_models": sorted(unpriced),
                 "failed_by_provider": self._count_failures("provider"),
                 "failed_by_kind": self._count_failures("failure_kind"),
                 "call_attempts": [asdict(attempt) for attempt in self.call_attempts],
@@ -469,9 +626,10 @@ class TokenTracker:
         )
         failed_by_agent: dict[str, int] = {}
         for attempt in failures:
-            failed_by_agent[attempt.agent_name] = (
-                failed_by_agent.get(attempt.agent_name, 0) + 1
-            )
+            # Key on the canonical name so retry/round-suffixed variants of one
+            # seat (e.g. "Bull Analyst R1"/"R2") aggregate together.
+            key = attempt.canonical_agent or attempt.agent_name
+            failed_by_agent[key] = failed_by_agent.get(key, 0) + 1
         return {
             "total_attempts": len(self.call_attempts),
             "successful_attempts": sum(
@@ -483,7 +641,7 @@ class TokenTracker:
             "timeout_seconds_lost": round(timeout_seconds_lost, 4),
             "consultant_timeout": any(
                 attempt.failure_kind == "timeout"
-                and "consultant" in attempt.agent_name.lower()
+                and attempt.canonical_agent == "Consultant"
                 for attempt in failures
             ),
             "failed_by_agent": failed_by_agent,
@@ -588,6 +746,13 @@ class TokenTracker:
 
         stats = self.get_total_stats()
         top_spenders = self.get_top_spenders()
+
+        if stats["unpriced_models"]:
+            logger.warning(
+                "unpriced_models_detected",
+                models=stats["unpriced_models"],
+                note="cost fabricated at default rate — add to MODEL_PRICING_PER_1M",
+            )
 
         logger.info(
             "token_usage_summary",

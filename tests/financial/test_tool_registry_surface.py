@@ -98,3 +98,30 @@ async def test_get_macroeconomic_news_region_hint_reaches_tavily_query():
     assert "timed out or failed" in result
     called_query = tavily_search.await_args.args[0]["query"]
     assert "Japan" in called_query
+
+
+def _tool_names(tools):
+    return [getattr(t, "name", None) or getattr(t, "__name__", None) for t in tools]
+
+
+def test_auditor_tools_have_no_duplicate_names():
+    # get_auditor_tools splats overlapping groups; a duplicate function name in
+    # one bound payload is rejected by strict OpenAI-compatible providers
+    # (Moonshot/Kimi 400 "function name ... is duplicated"). Dedup keeps one.
+    names = _tool_names(toolkit.get_auditor_tools())
+    assert len(names) == len(set(names)), f"duplicate auditor tool names: {names}"
+    assert names.count("search_foreign_sources") == 1
+
+
+def test_no_grouped_tool_set_binds_duplicate_names():
+    tk = Toolkit()
+    for getter in (
+        tk.get_auditor_tools,
+        tk.get_news_tools,
+        tk.get_foreign_language_tools,
+        tk.get_legal_tools,
+        tk.get_technical_tools,
+        tk.get_junior_fundamental_tools,
+    ):
+        names = _tool_names(getter())
+        assert len(names) == len(set(names)), f"{getter.__name__} duplicates: {names}"

@@ -255,10 +255,15 @@ async def invoke_with_rate_limit_handling(
     context: str = "LLM",
     provider: str | None = None,
     model_name: str | None = None,
+    canonical_agent: str | None = None,
     overall_timeout_seconds: float | None = None,
 ) -> Any:
     """
     Invoke an LLM with explicit 429 and transient error handling.
+
+    ``canonical_agent`` is the display-namespace identity for cost/diagnostic
+    joins; when omitted the token tracker derives it from ``context`` (which may
+    carry a round/retry suffix).
     """
     quiet_mode = settings_config.quiet_mode
     resolved_model = model_name or get_model_name(runnable)
@@ -394,6 +399,7 @@ async def invoke_with_rate_limit_handling(
                 usage = extract_token_usage_breakdown(result)
                 get_tracker().record_call_attempt(
                     agent_name=context,
+                    canonical_agent=canonical_agent,
                     provider=resolved_provider,
                     model_name=resolved_model or "",
                     status="success",
@@ -424,6 +430,7 @@ async def invoke_with_rate_limit_handling(
 
                 get_tracker().record_call_attempt(
                     agent_name=context,
+                    canonical_agent=canonical_agent,
                     provider=resolved_provider,
                     model_name=resolved_model or "",
                     status="failure",
@@ -454,6 +461,7 @@ async def invoke_with_rate_limit_handling(
 
                 get_tracker().record_call_attempt(
                     agent_name=context,
+                    canonical_agent=canonical_agent,
                     provider=resolved_provider,
                     model_name=resolved_model or "",
                     status="failure",
@@ -540,6 +548,7 @@ async def invoke_with_rate_limit_handling(
                 )
                 get_tracker().record_call_attempt(
                     agent_name=context,
+                    canonical_agent=canonical_agent,
                     provider=details.provider,
                     model_name=resolved_model or "",
                     status="failure",

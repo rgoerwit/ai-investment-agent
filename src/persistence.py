@@ -141,12 +141,15 @@ def _build_quick_consultant_summary(
     attempts = [
         attempt
         for attempt in tracker_stats.get("call_attempts", []) or []
-        if "consultant" in str(attempt.get("agent_name", "")).lower()
+        if attempt.get("canonical_agent") == "Consultant"
+        # Backward-compat for pre-canonical artifacts (no canonical_agent field).
+        or (
+            not attempt.get("canonical_agent")
+            and "consultant" in str(attempt.get("agent_name", "")).lower()
+        )
     ]
     agent_rows = tracker_stats.get("agents", {}) or {}
-    token_rows = [
-        row for name, row in agent_rows.items() if "consultant" in str(name).lower()
-    ]
+    token_rows = [row for name, row in agent_rows.items() if name == "Consultant"]
     tokens = sum(int(row.get("total_tokens") or 0) for row in token_rows)
     elapsed = sum(float(attempt.get("elapsed_seconds") or 0.0) for attempt in attempts)
     timeout = any(attempt.get("failure_kind") == "timeout" for attempt in attempts)

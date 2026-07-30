@@ -30,6 +30,11 @@ from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import failure_artifact, success_artifact
 from src.service_tiers import floor_llm_hard_timeout
 from src.thesis_constants import DRAWDOWN_52WK_RATIO, DRAWDOWN_SMA200_RATIO
+from src.token_tracker import (
+    TokenTrackingCallback,
+    canonical_display_name,
+    get_tracker,
+)
 from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
@@ -1288,10 +1293,23 @@ def create_analyst_node(
                 retry_messages = _build_retry_invocation_messages(
                     invocation_messages, agent_key, content_str
                 )
-                retry_runnable = (
+                _retry_base = (
                     prompt_template | retry_llm.bind_tools(tools)
                     if tools
                     else prompt_template | retry_llm
+                )
+                # Attribute the deep-model retry cost to the ORIGINATING agent
+                # (not a pooled "Retry Agent (Deep)" bucket): retry_llm carries no
+                # bound token-tracking callback, so attach one per-call via config.
+                retry_runnable = _retry_base.with_config(
+                    {
+                        "callbacks": [
+                            TokenTrackingCallback(
+                                canonical_display_name(agent_prompt.agent_name),
+                                get_tracker(),
+                            )
+                        ]
+                    }
                 )
 
                 # In --quick, base the retry's overall budget on the same

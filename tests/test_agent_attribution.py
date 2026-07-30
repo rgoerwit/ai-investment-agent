@@ -24,13 +24,11 @@ import pytest
 from src.persistence import _ARTIFACT_AGENT_MAP, save_results_to_file
 
 # Token-agent names produced by tracked_callbacks(...) that are intentionally
-# NOT mapped to a saved-JSON artifact (e.g., the retry path's secondary LLM,
-# which inherits whichever agent it was retrying for).
-_UNMAPPED_TOKEN_AGENTS: frozenset[str] = frozenset(
-    {
-        "Retry Agent (Deep)",
-    }
-)
+# NOT mapped to a saved-JSON artifact. Empty since the deep-retry LLM stopped
+# carrying its own "Retry Agent (Deep)" callback (July 2026): retry cost is now
+# attributed to the originating agent via a per-call callback in analyst_nodes,
+# so there is no unmapped pooled bucket. Kept as the seam for future additions.
+_UNMAPPED_TOKEN_AGENTS: frozenset[str] = frozenset()
 
 
 @pytest.fixture(autouse=True)
@@ -96,6 +94,33 @@ def test_agent_attribution_block_present_with_all_fields(tmp_path: Path) -> None
     attribution = saved["agent_attribution"]
     expected_fields = {field for field, _, _ in _ARTIFACT_AGENT_MAP}
     assert set(attribution.keys()) == expected_fields
+
+
+def test_saved_token_usage_carries_cost_rollup_dimensions(tmp_path: Path) -> None:
+    # The A3/A4 rollups must survive serialization into results/*.json (they
+    # ride get_total_stats() wholesale). Record spend on two providers/tiers
+    # plus an unpriced model, then round-trip through save_results_to_file.
+    from src.token_tracker import get_tracker
+
+    tracker = get_tracker()
+    tracker.record_usage(
+        agent_name="Consultant",
+        model_name="gpt-5.6-terra",
+        prompt_tokens=10_000,
+        completion_tokens=1_000,
+        service_tier="flex",
+    )
+    tracker.record_usage(
+        agent_name="Mystery",
+        model_name="totally-unpriced-model-x",
+        prompt_tokens=1_000,
+        completion_tokens=100,
+    )
+    tu = _save(tmp_path, _baseline_result())["token_usage"]
+    assert {"by_provider", "by_model", "by_tier", "unpriced_models"} <= set(tu)
+    assert tu["by_provider"]["openai"]["cost_usd"] > 0
+    assert "flex" in tu["by_tier"]
+    assert "totally-unpriced-model-x" in tu["unpriced_models"]
 
 
 def test_agent_attribution_row_shape(tmp_path: Path) -> None:

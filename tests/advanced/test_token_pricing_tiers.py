@@ -70,6 +70,7 @@ class TestCurrentModelPricing:
             ("claude-opus-4-6", 5.00 + 25.00),
             ("glm-5.2", 1.40 + 4.40),
             ("deepseek-v4-pro", 0.435 + 0.87),
+            ("kimi-k3", 0.95 + 4.00),
         ],
     )
     def test_standard_tier_cost(self, model, expected):
@@ -93,12 +94,46 @@ class TestCurrentModelPricing:
             "claude-opus-4-6",
             "glm-5.2",
             "deepseek-v4-pro",
+            "kimi-k3",
         ):
             assert _lookup_model_pricing(model) is not DEFAULT_PRICING_PER_1M, model
 
     def test_mini_and_lite_variants_match_before_parents(self):
         assert _lookup_model_pricing("gpt-5.4-mini")["completion"] == 4.50
         assert _lookup_model_pricing("gemini-2.5-flash-lite")["prompt"] == 0.10
+
+
+class TestMatcherOrderIndependence:
+    """A1b: exact-match then longest-prefix, insensitive to dict insertion order."""
+
+    def test_longest_prefix_wins_regardless_of_insertion_order(self, monkeypatch):
+        # Parent listed BEFORE the more-specific variant — the old first-match
+        # loop would have mispriced the variant; longest-prefix must not.
+        shuffled = {
+            "gpt-5.4": {"prompt": 2.50, "completion": 15.00},
+            "gpt-5.4-mini": {"prompt": 0.75, "completion": 4.50},
+        }
+        monkeypatch.setattr(
+            "src.token_tracker.MODEL_PRICING_PER_1M", shuffled, raising=True
+        )
+        assert _lookup_model_pricing("gpt-5.4-mini-2026")["completion"] == 4.50
+        assert _lookup_model_pricing("gpt-5.4")["completion"] == 15.00
+
+    def test_exact_match_preferred(self):
+        # Bare "gpt-5.6" must resolve to its own entry, not a longer sibling.
+        assert _lookup_model_pricing("gpt-5.6")["prompt"] == 5.00
+        assert _lookup_model_pricing("gpt-5.6-terra")["prompt"] == 2.50
+
+    def test_vendor_prefix_is_stripped(self):
+        assert _lookup_model_pricing("moonshot/kimi-k3") is _lookup_model_pricing(
+            "kimi-k3"
+        )
+        assert _lookup_model_pricing("google/gemini-3.6-flash")["completion"] == 7.50
+
+    def test_current_matches_unchanged_by_rewrite(self):
+        # Every table key resolves to itself (regression pin for the rewrite).
+        for key, prices in MODEL_PRICING_PER_1M.items():
+            assert _lookup_model_pricing(key) is prices, key
 
     @pytest.mark.parametrize(
         ("model", "prompt_rate", "completion_rate"),

@@ -14,7 +14,7 @@ def test_agent_budgets_scale_when_base_cap_doubles():
 
 
 def test_unknown_agents_default_to_global_base_cap():
-    assert get_agent_output_budget("Retry Agent (Deep)", 32768) == 32768
+    assert get_agent_output_budget("Some Unbudgeted Agent", 32768) == 32768
 
 
 def test_generation_budget_default_reserve():
