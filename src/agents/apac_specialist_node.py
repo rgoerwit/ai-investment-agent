@@ -148,7 +148,7 @@ def create_apac_specialist_node(llm, *, fallback_llm=None) -> Callable:
                 response = await agent_runtime.invoke_with_rate_limit_handling(
                     active_llm,
                     messages,
-                    context=f"{agent_prompt.agent_name}_direct_retry",
+                    context=f"{agent_prompt.agent_name} Direct Retry",
                     provider=support.infer_provider_name(active_llm),
                     model_name=support.get_model_name(active_llm),
                     overall_timeout_seconds=240,

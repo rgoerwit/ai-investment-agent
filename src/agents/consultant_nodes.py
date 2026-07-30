@@ -1213,7 +1213,7 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                     escalated = await _invoke_agent_loop_llm(
                         escalation_llm,
                         escalation_messages,
-                        context="global_forensic_auditor_escalation",
+                        context="Global Forensic Auditor Escalation",
                     )
                     response_str = canonicalize_forensic_auditor_output(
                         message_utils.extract_string_content(

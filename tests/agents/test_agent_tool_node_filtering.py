@@ -231,6 +231,85 @@ class TestAgentToolNodeFiltering:
         assert merged["raw_financial_metrics"]["status"] == "INVALID"
         assert merged["raw_financial_metrics"]["reason"] == "CONFLICTING_VALID_PAYLOADS"
 
+    def test_benign_volatile_diff_does_not_conflict(self):
+        """Two live re-fetches within a run tick price/volume/marketCap/timestamps —
+        this must NOT poison the contract."""
+        first = build_structured_ingress_record(
+            {
+                "trailingPE": 12.0,
+                "currentPrice": 101.20,
+                "volume": 1_204_500,
+                "marketCap": 5_012_000_000,
+                "regularMarketTime": 1780000000,
+            },
+            agent_key="junior_fundamentals_analyst",
+            tool_name="get_financial_metrics",
+        )
+        second = build_structured_ingress_record(
+            {
+                "trailingPE": 12.0,
+                "currentPrice": 101.35,
+                "volume": 1_240_100,
+                "marketCap": 5_013_800_000,
+                "regularMarketTime": 1780000045,
+            },
+            agent_key="junior_fundamentals_analyst",
+            tool_name="get_financial_metrics",
+        )
+
+        merged = merge_structured_inputs(
+            {"raw_financial_metrics": first},
+            {"raw_financial_metrics": second},
+        )
+
+        assert merged["raw_financial_metrics"]["status"] == "VALID"
+        assert merged["raw_financial_metrics"] == second
+
+    def test_volatile_stripping_does_not_mask_real_conflict(self):
+        """A real fundamentals-field diff must still conflict even when it's
+        bundled alongside benign volatile-field noise."""
+        first = build_structured_ingress_record(
+            {"trailingPE": 12.0, "currentPrice": 101.20},
+            agent_key="junior_fundamentals_analyst",
+            tool_name="get_financial_metrics",
+        )
+        second = build_structured_ingress_record(
+            {"trailingPE": 99.0, "currentPrice": 101.35},
+            agent_key="junior_fundamentals_analyst",
+            tool_name="get_financial_metrics",
+        )
+
+        merged = merge_structured_inputs(
+            {"raw_financial_metrics": first},
+            {"raw_financial_metrics": second},
+        )
+
+        assert merged["raw_financial_metrics"]["status"] == "INVALID"
+        assert merged["raw_financial_metrics"]["reason"] == "CONFLICTING_VALID_PAYLOADS"
+
+    def test_missing_stable_field_on_one_side_still_conflicts(self):
+        """A non-volatile (fundamentals) field disappearing between fetches is a
+        genuine conflict signal, unlike a volatile field that's dropped from the
+        comparison entirely regardless of which side has it."""
+        first = build_structured_ingress_record(
+            {"trailingPE": 12.0, "marketCap": 5_012_000_000},
+            agent_key="junior_fundamentals_analyst",
+            tool_name="get_financial_metrics",
+        )
+        second = build_structured_ingress_record(
+            {"marketCap": 5_013_800_000},
+            agent_key="junior_fundamentals_analyst",
+            tool_name="get_financial_metrics",
+        )
+
+        merged = merge_structured_inputs(
+            {"raw_financial_metrics": first},
+            {"raw_financial_metrics": second},
+        )
+
+        assert merged["raw_financial_metrics"]["status"] == "INVALID"
+        assert merged["raw_financial_metrics"]["reason"] == "CONFLICTING_VALID_PAYLOADS"
+
     def test_valid_retry_recovers_failed_structured_input(self):
         failed = build_structured_ingress_record(
             "",

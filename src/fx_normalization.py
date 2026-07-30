@@ -97,7 +97,11 @@ async def get_fx_rate_yfinance(
             return None
 
     except asyncio.TimeoutError:
-        logger.debug("fx_rate_timeout", pair=fx_ticker, timeout_ms=3000)
+        logger.debug(
+            "fx_rate_timeout",
+            pair=fx_ticker,
+            timeout_ms=int(FX_RATE_POLICY.hard_timeout_seconds * 1000),
+        )
         return None
     except YFRateLimitError as e:
         logger.debug("fx_rate_rate_limited", pair=fx_ticker, error=str(e))

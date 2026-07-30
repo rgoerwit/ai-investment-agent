@@ -7,6 +7,44 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from src.data.merge_policy import NON_ACTIONABLE_CONFLICT_FIELDS, QUOTE_PRICE_FIELDS
+
+# Fields that legitimately tick between two live fetches of the same contract
+# within a single graph run (quote microstructure + volume/cap scalars that move
+# with price, plus fetch-time timestamps) — not analytic fundamentals. Disjoint
+# from CRITICAL_ANALYSIS_FIELDS/ANALYSIS_CRITICAL_CONFLICT_FIELDS in
+# merge_policy.py, so excluding them from the *comparison* below can never mask a
+# genuine fundamentals-field conflict. Never stripped from the stored payload.
+_INGRESS_VOLATILE_RECHECK_FIELDS: frozenset[str] = (
+    frozenset(QUOTE_PRICE_FIELDS)
+    | NON_ACTIONABLE_CONFLICT_FIELDS
+    | frozenset(
+        {
+            "volume",
+            "averageVolume",
+            "regularMarketVolume",
+            "marketCap",
+            "enterpriseValue",
+            "regularMarketTime",
+            "preMarketTime",
+            "postMarketTime",
+        }
+    )
+)
+
+
+def _stable_payload_for_comparison(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Strip volatile/live-ticking fields before comparing two VALID payloads.
+
+    Two independent live fetches of the same entity minutes apart are never
+    byte-identical (price ticks, volume, timestamps) even when the underlying
+    fundamentals are unchanged. Used only to decide "same vs. conflicting" — the
+    full payload (including volatile fields) is still what gets stored.
+    """
+    return {
+        k: v for k, v in payload.items() if k not in _INGRESS_VOLATILE_RECHECK_FIELDS
+    }
+
 
 def build_structured_ingress_record(
     value: Any,
@@ -73,7 +111,9 @@ def merge_structured_inputs(
         old_valid = existing.get("status") == "VALID"
         new_valid = new_record.get("status") == "VALID"
         if old_valid and new_valid:
-            if existing.get("payload") == new_record.get("payload"):
+            if _stable_payload_for_comparison(
+                existing.get("payload") or {}
+            ) == _stable_payload_for_comparison(new_record.get("payload") or {}):
                 merged[key] = new_record
             else:
                 merged[key] = {

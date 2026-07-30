@@ -35,4 +35,4 @@ async def run_blocking_call(policy: BlockingCallPolicy, fn: Callable[[], T]) -> 
 YFINANCE_INFO_POLICY = BlockingCallPolicy("yfinance.info", 5.0)
 YAHOOQUERY_QUOTE_TYPE_POLICY = BlockingCallPolicy("yahooquery.quote_type", 5.0)
 OUTPUT_COMPANY_NAME_POLICY = BlockingCallPolicy("output_company_name", 6.0)
-FX_RATE_POLICY = BlockingCallPolicy("fx_rate", 3.0)
+FX_RATE_POLICY = BlockingCallPolicy("fx_rate", 8.0)

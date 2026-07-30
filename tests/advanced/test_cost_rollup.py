@@ -156,6 +156,35 @@ class TestCanonicalAgentName:
         # failed_by_agent aggregates on the canonical name.
         assert stats["call_diagnostics"]["failed_by_agent"] == {"Bull Researcher": 1}
 
+    def test_escalation_and_direct_retry_context_strings_join_to_rollup(self, tracker):
+        """The exact context= strings used at the real call sites (consultant_nodes
+        .py's auditor escalation and apac_specialist_node.py's direct retry) must
+        reconcile canonical_agent back to the agents-rollup key set via
+        tracked_callbacks() in components.py — not just the isolated
+        canonical_display_name() unit checks above."""
+        tracker.record_call_attempt(
+            agent_name="Global Forensic Auditor Escalation",
+            provider="openai",
+            model_name="gpt-5.6-terra",
+            status="success",
+            attempt=1,
+            elapsed_seconds=1.0,
+        )
+        tracker.record_call_attempt(
+            agent_name="APAC Regional Specialist Direct Retry",
+            provider="google",
+            model_name="gemini-3.6-flash",
+            status="success",
+            attempt=1,
+            elapsed_seconds=1.0,
+        )
+        stats = tracker.get_total_stats()
+        canonical_agents = {
+            attempt["canonical_agent"] for attempt in stats["call_attempts"]
+        }
+        assert "Global Forensic Auditor" in canonical_agents
+        assert "APAC Regional Specialist" in canonical_agents
+
     def test_explicit_canonical_overrides_derivation(self, tracker):
         tracker.record_call_attempt(
             agent_name="something odd",
