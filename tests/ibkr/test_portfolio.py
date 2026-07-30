@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.fx_normalization import set_fx_rate_cache
 from src.ibkr.exceptions import IBKRAPIError
 from src.ibkr.models import NormalizedPosition, PortfolioSummary
 from src.ibkr.portfolio import (
@@ -14,6 +15,18 @@ from src.ibkr.portfolio import (
     read_watchlist,
 )
 from src.ibkr.ticker import Ticker
+from tests.ibkr.reconciler_cases import _FakeFxRateCache
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_fx_cache():
+    """normalize_positions() now resolves FX live-first via the shared
+    FxRateCache — pin a fixed, network-free cache so these tests don't
+    depend on yfinance availability or the real (periodically-refreshed)
+    FALLBACK_RATES_TO_USD table."""
+    set_fx_rate_cache(_FakeFxRateCache())
+    yield
+    set_fx_rate_cache(None)
 
 
 class TestNormalizePositions:

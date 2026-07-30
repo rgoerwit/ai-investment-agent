@@ -13,6 +13,7 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
+from src.fx_normalization import set_fx_rate_cache
 from src.ibkr.analysis_index import (
     AnalysisLoadProgress,
     _analysis_index_lock,
@@ -40,6 +41,47 @@ from src.ibkr.reconciliation_rules import (
     check_target_hit,
 )
 from src.ibkr.ticker import Ticker
+
+
+class _FakeFxRateCache:
+    """Deterministic, network-free stand-in for FxRateCache.
+
+    Most IBKR reconciliation/portfolio tests exercise unit-classification or
+    repair logic, not live FX fetching — pinning fixed rates here keeps them
+    independent of both yfinance availability and future
+    FALLBACK_RATES_TO_USD refreshes. Currencies not listed here resolve to
+    None, matching production behavior for a genuinely unresolvable currency.
+    """
+
+    _RATES = {
+        "JPY": 0.0067,
+        "KRW": 0.00075,
+        "TWD": 0.032,
+        "HKD": 0.128,
+        "GBP": 1.27,
+        "SEK": 0.093,
+        "NOK": 0.092,
+        "DKK": 0.144,
+    }
+
+    def peek_cached_rate(self, currency: str, to_currency: str = "USD"):
+        currency = currency.strip().upper()
+        if currency == to_currency:
+            return 1.0, "identity"
+        rate = self._RATES.get(currency)
+        return (rate, "fallback") if rate is not None else None
+
+    def resolve_rates_sync(self, currencies, to_currency: str = "USD"):
+        to_currency = to_currency.strip().upper()
+        result = {}
+        for currency in currencies:
+            currency = currency.strip().upper()
+            if currency == to_currency:
+                continue
+            rate = self._RATES.get(currency)
+            if rate is not None:
+                result[currency] = (rate, "fallback")
+        return result
 
 
 def _recent(days_ago: int) -> str:
@@ -3653,6 +3695,15 @@ class TestCurrencyAccuracy:
 
 class TestResolveFx:
     """Unit tests for _resolve_fx() — FX rate fallback chain."""
+
+    @pytest.fixture(autouse=True)
+    def _deterministic_fx_cache(self):
+        """_resolve_fx() now resolves live-first via the shared FxRateCache —
+        pin a fixed, network-free cache so exact-rate assertions below don't
+        depend on yfinance availability."""
+        set_fx_rate_cache(_FakeFxRateCache())
+        yield
+        set_fx_rate_cache(None)
 
     def _analysis(self, currency: str, fx_rate: float | None) -> AnalysisRecord:
         return AnalysisRecord(

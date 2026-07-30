@@ -6,8 +6,6 @@ import math
 from dataclasses import dataclass
 from typing import Literal
 
-from src.fx_normalization import get_fx_rate_fallback
-
 ValueBasis = Literal["BROKER_USD", "LOCAL_CONVERTED", "UNAVAILABLE"]
 
 _MARKET_VALUE_TOLERANCE = 0.35
@@ -36,6 +34,7 @@ def normalize_position_values(
     raw_market_value: float,
     raw_unrealized_pnl: float | None,
     currency: str,
+    fx_rate: float | None,
 ) -> NormalizedPositionValues:
     """Classify broker values as local or USD and convert them exactly once.
 
@@ -43,9 +42,12 @@ def normalize_position_values(
     values are denominated in the contract currency while others are already
     in the account's base currency. Quantity and local prices provide an
     independent unit check. Values that match neither convention fail closed.
+
+    fx_rate must be resolved by the caller (see FxRateCache in
+    src/fx_normalization.py) — this function is a pure computation and does
+    not fetch rates itself.
     """
     normalized_currency = currency.strip().upper() or "USD"
-    fx_rate = get_fx_rate_fallback(normalized_currency)
     if normalized_currency == "USD":
         fx_rate = 1.0
     if fx_rate is None or fx_rate <= 0:
