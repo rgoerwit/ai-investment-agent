@@ -23,7 +23,6 @@ from src.ibkr.models import (
 from src.ibkr.portfolio_presentation import (
     build_cash_summary,
     build_live_order_note,
-    group_portfolio_actions,
 )
 from src.ibkr.refresh_service import RefreshActivity
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
@@ -159,7 +158,17 @@ class TestDipWatch:
     """DIP WATCH section rendering and eligibility filtering."""
 
     def _items_with_dip_candidates(self) -> list[ReconciliationItem]:
-        """8 demoted SOFT_REJECT items: 5 high-quality, 3 low-quality."""
+        """8 demoted SOFT_REJECT items: 5 high-quality, 3 low-quality.
+
+        verdict="DO_NOT_INITIATE" mirrors production: _classify_sell_type()
+        (reconciliation_rules.py) only ever stamps SOFT_REJECT alongside a
+        reject-class verdict (_REJECT_VERDICTS) — a real macro_review item
+        never carries verdict="BUY". Using the (unrealistic) verdict="BUY"
+        default here let these items slip past is_dip_watch_eligible()'s
+        verdict/zone fallback screen even with no active macro event, which
+        was previously masked only by the CLI selector's redundant source
+        allowlist.
+        """
         high = [
             _make_dip_item(
                 f"GOOD{i:02d}.T",
@@ -169,6 +178,7 @@ class TestDipWatch:
                 current_price=1850,
                 stop=1700,
                 target=2500,
+                verdict="DO_NOT_INITIATE",
             )
             for i in range(5)
         ]
@@ -182,6 +192,7 @@ class TestDipWatch:
                 current_price=1850,
                 stop=1700,
                 target=2500,
+                verdict="DO_NOT_INITIATE",
             )
             for i in range(3)
         ]
@@ -196,14 +207,17 @@ class TestDipWatch:
         )
         assert "DIP WATCH" in report
 
-    def test_dip_watch_section_absent_without_correlated_event(self):
-        """No CORRELATED_SELL_EVENT → no DIP WATCH section."""
+    def test_dip_watch_section_shows_empty_state_without_correlated_event(self):
+        """No CORRELATED_SELL_EVENT → DIP WATCH renders but with no candidates
+        (the section header always renders; only the macro_review items are
+        gated on an active event)."""
         report = format_report(
             self._items_with_dip_candidates(),
             _make_portfolio(),
             portfolio_health_flags=[],
         )
-        assert "DIP WATCH" not in report
+        assert "DIP WATCH" in report
+        assert "No dip-buy candidates this run." in report
 
     def test_dip_watch_held_buy_pullback_shows_without_correlated_event(self):
         """Held BUY pullbacks do not require a correlated-sell event."""
@@ -322,7 +336,7 @@ class TestDipWatch:
 
     def test_dip_watch_excludes_intact_macro_review_without_event(self):
         """Outside a macro event the normal gates apply: a DNI/HIGH-zone review is
-        NOT a dip-buy candidate."""
+        NOT a dip-buy candidate (section still renders, empty)."""
         item = _make_dip_item(
             "DNI.T",
             health=95,
@@ -335,7 +349,8 @@ class TestDipWatch:
             zone="HIGH",
         )
         report = format_report([item], _make_portfolio(), portfolio_health_flags=[])
-        assert "DIP WATCH" not in report
+        assert "DIP WATCH" in report
+        assert "No dip-buy candidates this run." in report
 
     def test_dip_watch_excludes_stale_macro_review_during_event(self):
         """The recency safeguard holds even during a macro event: a stale review is
@@ -357,7 +372,8 @@ class TestDipWatch:
             _make_portfolio(),
             portfolio_health_flags=[CORRELATED_SELL_EVENT_FLAG],
         )
-        assert "DIP WATCH" not in report
+        assert "DIP WATCH" in report
+        assert "No dip-buy candidates this run." in report
 
     def test_dip_watch_excludes_unsound_macro_review_during_event(self):
         """Weak fundamentals are excluded even during a macro event."""
@@ -377,10 +393,12 @@ class TestDipWatch:
             _make_portfolio(),
             portfolio_health_flags=[CORRELATED_SELL_EVENT_FLAG],
         )
-        assert "DIP WATCH" not in report
+        assert "DIP WATCH" in report
+        assert "No dip-buy candidates this run." in report
 
-    def test_dip_watch_absent_when_no_scoreable_items(self):
-        """CORRELATED_SELL_EVENT but all macro_reviews have health < 55 → no DIP WATCH."""
+    def test_dip_watch_shows_empty_state_when_no_scoreable_items(self):
+        """CORRELATED_SELL_EVENT but all macro_reviews have health < 55 → DIP
+        WATCH still renders, with no candidates."""
         items = [
             _make_dip_item(
                 f"POOR{i:02d}.T",
@@ -398,7 +416,8 @@ class TestDipWatch:
             _make_portfolio(),
             portfolio_health_flags=[CORRELATED_SELL_EVENT_FLAG],
         )
-        assert "DIP WATCH" not in report
+        assert "DIP WATCH" in report
+        assert "No dip-buy candidates this run." in report
 
     def test_dip_watch_run_cmd_uses_analysis_ticker_when_item_ticker_bare(self):
         """DIP WATCH re-run cmd uses analysis.ticker (with suffix) when item.ticker is bare.
@@ -454,6 +473,100 @@ class TestDipWatch:
         # Re-run command must use canonical yf ticker (analysis.ticker), not bare symbol
         assert "--ticker BARE.L" in report
         assert "⚠ verify exchange suffix" not in report
+
+    def _bounded_dip_watch_section(self, report: str) -> str:
+        """Slice out just the DIP WATCH block (its own header through the next
+        section's opening divider), so a ticker appearing elsewhere in the
+        report (e.g. REVIEWS) can't produce a false-positive membership check."""
+        from src.ibkr.portfolio_report_formatting import DIVIDER
+
+        dw_idx = report.index("DIP WATCH")
+        closing_divider_idx = report.index(DIVIDER, dw_idx)
+        next_divider_idx = report.index(DIVIDER, closing_divider_idx + len(DIVIDER))
+        return report[dw_idx:next_divider_idx]
+
+    def test_dip_watch_includes_held_thesis_dip_candidate(self):
+        """A held REVIEW with an intact-thesis action_basis and a >=15% drawdown
+        is a dip-buy candidate even with no macro event and no BUY verdict —
+        this is the class select_report_dip_candidates() previously dropped."""
+        item = _make_dip_item(
+            "THESIS.T",
+            health=70,
+            growth=70,
+            entry=2000,
+            current_price=1650,  # 17.5% drawdown, clears INTACT_THESIS_DIP_MIN_PCT
+            stop=1500,
+            target=2400,
+            verdict="DO_NOT_INITIATE",
+            action="REVIEW",
+            sell_type=None,
+        ).model_copy(update={"action_basis": "THESIS_REASSESSMENT"})
+        report = format_report([item], _make_portfolio(), portfolio_health_flags=[])
+        section = self._bounded_dip_watch_section(report)
+        assert "THESIS.T" in section
+        assert "intact-thesis drawdown" in section
+
+    def _bounded_dip_opportunities_section(self, report: str) -> str:
+        """Slice out just the DIP OPPORTUNITIES mini-list inside ACTION PLAN
+        (its header line through the blank line that terminates it), so a
+        ticker appearing elsewhere in ACTION PLAN (or the rest of the report)
+        can't produce a false-positive membership check."""
+        start_idx = report.index("DIP OPPORTUNITIES")
+        end_idx = report.index("\n\n", start_idx)
+        return report[start_idx:end_idx]
+
+    def test_dip_opportunities_action_plan_includes_held_thesis_dip(self):
+        """select_report_dip_candidates() also feeds the ACTION PLAN's DIP
+        OPPORTUNITIES mini-list (portfolio_report_execution.py) — the same
+        held_thesis_dip fix must surface there too, not just in DIP WATCH."""
+        item = _make_dip_item(
+            "THESIS3.T",
+            health=70,
+            growth=70,
+            entry=2000,
+            current_price=1650,
+            stop=1500,
+            target=2400,
+            verdict="DO_NOT_INITIATE",
+            action="REVIEW",
+            sell_type=None,
+        ).model_copy(update={"action_basis": "THESIS_REASSESSMENT"})
+        report = format_report([item], _make_portfolio(), portfolio_health_flags=[])
+        assert "ACTION PLAN" in report
+        dip_opportunities_section = self._bounded_dip_opportunities_section(report)
+        assert "THESIS3.T" in dip_opportunities_section
+
+    def test_select_report_dip_candidates_includes_held_thesis_dip(self):
+        """Pure unit test: select_report_dip_candidates() itself must not
+        filter out a held_thesis_dip item, given one already sitting in
+        plan.groups.dip_candidates. Upstream eligibility construction
+        (is_dip_watch_eligible / select_dip_watch_candidates) is covered
+        separately by tests/web/test_dip_watch.py — not re-exercised here."""
+        from types import SimpleNamespace
+
+        from src.ibkr.dip_watch import dip_watch_source
+        from src.ibkr.portfolio_report import select_report_dip_candidates
+
+        item = _make_dip_item(
+            "THESIS2.T",
+            health=70,
+            growth=70,
+            entry=2000,
+            current_price=1650,
+            stop=1500,
+            target=2400,
+            verdict="DO_NOT_INITIATE",
+            action="REVIEW",
+            sell_type=None,
+        ).model_copy(update={"action_basis": "THESIS_REASSESSMENT"})
+        assert dip_watch_source(item) == "held_thesis_dip"
+
+        fake_plan = SimpleNamespace(
+            groups=SimpleNamespace(dip_candidates=(item,)),
+            macro_event_active=False,
+        )
+        result = select_report_dip_candidates(fake_plan)
+        assert item in result
 
 
 # ── _pnl_line helpers ─────────────────────────────────────────────────────────

@@ -45,6 +45,12 @@
              holding:   100 shares  ·  last JPY 1,800.00  ·  position value ~$1,200 USD
 
 ══════════════════════════════════════════════════════
+  DIP WATCH  (existing positions — consider adding)
+══════════════════════════════════════════════════════
+
+  No dip-buy candidates this run.
+
+══════════════════════════════════════════════════════
   ADDS  (increase underweight positions)
 ══════════════════════════════════════════════════════
 

@@ -189,6 +189,12 @@ def get_fx_rate_fallback(from_currency: str, to_currency: str = "USD") -> float 
     callers that want a deduplicated, actionable log signal when the table
     is used should go through get_fx_rate() (Tier 3) or FxRateCache, both of
     which log once per resolution rather than once per call.
+
+    FALLBACK_RATES_TO_USD is USD-anchored (each entry is "1 unit = $X"), so a
+    non-USD to_currency is resolved as a cross-rate through USD
+    (from->USD / to->USD), not a direct table lookup — the table has no
+    entry for e.g. "EUR->GBP". Returns None (never a mislabeled USD rate)
+    when either leg is missing from the table.
     """
     if from_currency == to_currency:
         return 1.0
@@ -200,27 +206,33 @@ def get_fx_rate_fallback(from_currency: str, to_currency: str = "USD") -> float 
             if normalized_currency is not None
             else None
         )
-        if major_rate:
-            scaled_rate = major_rate * scale
+        from_rate_to_usd = major_rate * scale if major_rate else None
+    else:
+        from_rate_to_usd = FALLBACK_RATES_TO_USD.get(from_currency)
+
+    if not from_rate_to_usd:
+        return None
+
+    if to_currency == "USD":
+        fallback_rate = from_rate_to_usd
+    else:
+        to_rate_to_usd = FALLBACK_RATES_TO_USD.get(to_currency)
+        if not to_rate_to_usd:
             logger.debug(
-                "fx_rate_using_fallback",
+                "fx_rate_fallback_cross_rate_unavailable",
                 from_currency=from_currency,
                 to_currency=to_currency,
-                rate=scaled_rate,
             )
-            return scaled_rate
+            return None
+        fallback_rate = from_rate_to_usd / to_rate_to_usd
 
-    fallback_rate = FALLBACK_RATES_TO_USD.get(from_currency)
-    if fallback_rate:
-        logger.debug(
-            "fx_rate_using_fallback",
-            from_currency=from_currency,
-            to_currency=to_currency,
-            rate=fallback_rate,
-        )
-        return fallback_rate
-
-    return None
+    logger.debug(
+        "fx_rate_using_fallback",
+        from_currency=from_currency,
+        to_currency=to_currency,
+        rate=fallback_rate,
+    )
+    return fallback_rate
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -314,21 +326,25 @@ class FxRateCache:
     ) -> None:
         self._cache_ttl_secs = cache_ttl_secs
         self._max_concurrency = max_concurrency
-        # currency -> (expires_at, rate, source)
-        self._cache: dict[str, tuple[float, float, str]] = {}
+        # (currency, to_currency) -> (expires_at, rate, source)
+        self._cache: dict[tuple[str, str], tuple[float, float, str]] = {}
 
-    def _cached(self, currency: str) -> tuple[float, str] | None:
-        entry = self._cache.get(currency)
+    def _cached(self, currency: str, to_currency: str) -> tuple[float, str] | None:
+        entry = self._cache.get((currency, to_currency))
         if entry is None:
             return None
         expires_at, rate, source = entry
         if time.monotonic() >= expires_at:
-            self._cache.pop(currency, None)
+            self._cache.pop((currency, to_currency), None)
             return None
         return rate, source
 
-    def _store(self, currency: str, rate: float, source: str) -> None:
-        self._cache[currency] = (time.monotonic() + self._cache_ttl_secs, rate, source)
+    def _store(self, currency: str, to_currency: str, rate: float, source: str) -> None:
+        self._cache[(currency, to_currency)] = (
+            time.monotonic() + self._cache_ttl_secs,
+            rate,
+            source,
+        )
 
     async def _resolve_and_cache(
         self, currency: str, to_currency: str, *, try_live: bool
@@ -353,7 +369,7 @@ class FxRateCache:
                     ),
                 )
         if rate is not None:
-            self._store(currency, rate, source)
+            self._store(currency, to_currency, rate, source)
         return rate, source
 
     async def get_rate(
@@ -365,7 +381,7 @@ class FxRateCache:
         if from_currency == to_currency:
             return 1.0, "identity"
 
-        cached = self._cached(from_currency)
+        cached = self._cached(from_currency, to_currency)
         if cached is not None:
             return cached
 
@@ -391,7 +407,7 @@ class FxRateCache:
         resolved: dict[str, tuple[float, str]] = {}
         pending: list[str] = []
         for currency in unique:
-            cached = self._cached(currency)
+            cached = self._cached(currency, to_currency)
             if cached is not None:
                 resolved[currency] = cached
             else:
@@ -453,7 +469,7 @@ class FxRateCache:
         to_currency = to_currency.strip().upper()
         if currency == to_currency:
             return 1.0, "identity"
-        return self._cached(currency)
+        return self._cached(currency, to_currency)
 
 
 # Shared, lazily-constructed singleton so every consumer (IBKR position

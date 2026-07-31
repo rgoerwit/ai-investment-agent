@@ -108,6 +108,12 @@
              holding:   100 shares  ·  last JPY 2,100.00  ·  position value ~$1,400 USD
 
 ══════════════════════════════════════════════════════
+  DIP WATCH  (existing positions — consider adding)
+══════════════════════════════════════════════════════
+
+  No dip-buy candidates this run.
+
+══════════════════════════════════════════════════════
   WATCHLIST ADDITION REVIEW
   (watchlist status unknown; additions are advisory until IBKR is rechecked)
 ══════════════════════════════════════════════════════
