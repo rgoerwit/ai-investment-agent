@@ -106,6 +106,24 @@ def test_data_block_red_flags_golden():
     }
 
 
+def test_decision_inputs_path_matches_dict_path():
+    """Stage 5 parity gate: the typed DecisionInputs path must produce
+    byte-identical red-flag output to the raw metrics-dict path on the frozen
+    corpus (both the base fixture and the extreme-leverage mutation)."""
+    from src.decision_inputs import DecisionInputs
+
+    for block in (
+        _read("2330_TW_data_block.txt"),
+        _read("2330_TW_data_block.txt").replace("D/E: 0.20", "D/E: 9.00"),
+    ):
+        metrics = extract_metrics(block)
+        sector = detect_sector(block)
+        inputs = DecisionInputs.from_metrics(metrics, sector=sector)
+        assert detect_red_flags(inputs, sector=sector) == detect_red_flags(
+            metrics, sector=sector
+        )
+
+
 def test_pm_block_golden():
     pm = extract_pm_block(_read("2330_TW_pm_block.txt"))
     assert pm.verdict == "DO_NOT_INITIATE"

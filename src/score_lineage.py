@@ -101,14 +101,26 @@ def _render_score_detail(
             f"- {criterion}: {award}/{float(component['max_points']):g} — "
             f"{support_text}"
         )
-    lines.append(
-        "- Decision use: "
-        + (
-            "eligible; every included criterion has canonical lineage."
-            if scorecard.get("decision_eligible")
-            else "advisory only; score consistency validation failed."
+    advisory_only = tuple(scorecard.get("advisory_only_awards") or ())
+    if advisory_only:
+        advisory_pct = float(
+            scorecard.get("advisory_percentage", scorecard["percentage"])
         )
-    )
+        lines.append(
+            "- Advisory-only (no evidence producer; excluded from the decision "
+            f"score): {', '.join(advisory_only)} — model's raw score "
+            f"{advisory_pct:.1f}%"
+        )
+    if not scorecard.get("decision_eligible"):
+        decision_use = "advisory only; score consistency validation failed."
+    elif advisory_only:
+        decision_use = (
+            "decision-score eligible; advisory-only criteria excluded from the "
+            "score (see above), every scored criterion has canonical lineage."
+        )
+    else:
+        decision_use = "eligible; every included criterion has canonical lineage."
+    lines.append(f"- Decision use: {decision_use}")
     return "\n".join(lines)
 
 
@@ -288,10 +300,31 @@ def add_validated_derivations(
             and criterion not in criterion_dependencies
             and _SCORE_CRITERION_DEPENDENCIES[kind].get(criterion, ()) != ()
         )
+        # Class-1 "advisory" criteria: a positive award on a criterion that has NO
+        # configured evidence producer at all (GLOBAL_EXPANSION,
+        # R_AND_D_CAPEX_BACKLOG). Such credit is not decision-evidence, so it is
+        # excluded from the *decision* score numerator while the full rubric stays
+        # the denominator (conservative — an unbacked award can only lower the
+        # decision score, never lift it across the 50% gate). The model's raw
+        # percentage is preserved as advisory_percentage. Class-2 criteria
+        # (configured dependency, unresolved this run) still veto eligibility via
+        # lineage_gaps — unchanged, so a genuine lineage gap remains N/A.
+        advisory_only_awards = tuple(
+            criterion
+            for criterion, award in numeric_awards.items()
+            if award > 0
+            and _SCORE_CRITERION_DEPENDENCIES[kind].get(criterion, ()) == ()
+        )
         available = reported_available
-        earned = sum(numeric_awards.values())
-        expected_pct = reported_pct
-        decision_eligible = not suspect and not lineage_gaps
+        raw_earned = sum(numeric_awards.values())
+        decision_earned = raw_earned - sum(
+            numeric_awards[criterion] for criterion in advisory_only_awards
+        )
+        advisory_pct = reported_pct
+        decision_pct = decision_earned / available * 100.0 if available else None
+        decision_eligible = (
+            not suspect and not lineage_gaps and decision_pct is not None
+        )
 
         score_claim_id = claim_id(score_field, None)
         lineage_id = f"derived:score_reconciler:{kind.lower()}"
@@ -301,7 +334,7 @@ def add_validated_derivations(
             for dependency_id in criterion_dependencies.get(criterion, ())
         )
         normalized_value = (
-            f"{expected_pct:.1f}% (based on {available:g} available points)"
+            f"{decision_pct:.1f}% (based on {available:g} available points)"
         )
         scorecards[kind] = {
             "criteria": {
@@ -312,10 +345,12 @@ def add_validated_derivations(
                 }
                 for criterion in criteria
             },
-            "earned": earned,
+            "earned": raw_earned,
             "available": available,
             "rubric_total": sum(criteria.values()),
-            "percentage": round(expected_pct, 1),
+            "percentage": round(decision_pct, 1),
+            "advisory_percentage": round(advisory_pct, 1),
+            "advisory_only_awards": list(advisory_only_awards),
             "decision_eligible": decision_eligible,
             "lineage_gaps": list(lineage_gaps),
         }

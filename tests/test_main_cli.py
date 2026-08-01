@@ -1594,6 +1594,11 @@ class TestSavedDiagnostics:
             "pre_screening_result": "PASS",
             "investment_debate_state": {"count": 0},
             "value_trap_report": "",
+            # A real live run carries a VALID canonical snapshot + decision trace;
+            # _attach_run_summary now stamps the provenance contract, so these are
+            # required for publishability (fail-closed).
+            "analysis_snapshot": {"contract_status": "VALID", "claims": {}},
+            "decision_trace": {"status": "VALID"},
             "fundamentals_report": (
                 "### --- START DATA_BLOCK ---\n"
                 "SECTOR: Industrials\n"

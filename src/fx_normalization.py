@@ -314,8 +314,9 @@ class FxRateCache:
 
     Without this, a portfolio with N positions in the same currency issues N
     independent live-then-fallback lookups for that one currency. This caches
-    by currency (not by position) so each currency is resolved at most once
-    per TTL window, and batches a whole currency set concurrently.
+    by currency pair (from_currency, to_currency) — not by position — so each
+    pair is resolved at most once per TTL window, and batches a whole currency
+    set concurrently.
     """
 
     def __init__(
@@ -347,27 +348,16 @@ class FxRateCache:
         )
 
     async def _resolve_and_cache(
-        self, currency: str, to_currency: str, *, try_live: bool
+        self, currency: str, to_currency: str
     ) -> tuple[float | None, str]:
-        """Resolve one currency and cache it. try_live=False skips straight
-        to the fallback table (used once the batch preflight has shown
-        yfinance is unreachable this run)."""
-        if try_live:
-            rate, source = await get_fx_rate(currency, to_currency)
-        else:
-            rate = get_fx_rate_fallback(currency, to_currency)
-            source = "fallback" if rate is not None else "unavailable"
-            if rate is not None:
-                logger.warning(
-                    "fx_rate_fallback_used",
-                    currency=currency,
-                    rate=rate,
-                    msg=(
-                        "yfinance unreachable this run — used FALLBACK_RATES_TO_USD "
-                        "(src/fx_normalization.py) for the rest of the batch; "
-                        "refresh the table if this persists."
-                    ),
-                )
+        """Resolve one currency live-first and cache it.
+
+        get_fx_rate() already does live-then-fallback for this single currency
+        (and logs one actionable fx_rate_fallback_used signal on fallback), so
+        each currency resolves independently — one pair's live outage never
+        downgrades another pair that could resolve live.
+        """
+        rate, source = await get_fx_rate(currency, to_currency)
         if rate is not None:
             self._store(currency, to_currency, rate, source)
         return rate, source
@@ -385,18 +375,20 @@ class FxRateCache:
         if cached is not None:
             return cached
 
-        return await self._resolve_and_cache(from_currency, to_currency, try_live=True)
+        return await self._resolve_and_cache(from_currency, to_currency)
 
     async def get_rates(
         self, currencies: Iterable[str], to_currency: str = "USD"
     ) -> dict[str, tuple[float, str]]:
         """Resolve many currencies concurrently, deduped against the cache.
 
-        A one-currency preflight detects a total yfinance outage before the
-        rest of the batch pays a full per-currency timeout: if the first
-        live attempt fails, the remaining currencies go straight to the
-        fallback table instead of each attempting (and timing out on) a
-        live fetch too.
+        Each pending currency is resolved independently, live-first, under a
+        concurrency bound. There is deliberately no shared preflight/health
+        gate: one currency pair's live-FX outage must never force other pairs
+        onto the stale fallback table when they could resolve live. During a
+        genuine total yfinance outage every pair independently (and
+        concurrently) falls back via get_fx_rate(), so the wall-clock cost is
+        one timeout per concurrency batch, not one per currency serially.
         """
         to_currency = to_currency.strip().upper()
         unique = {c.strip().upper() for c in currencies if c and c.strip()}
@@ -406,7 +398,9 @@ class FxRateCache:
 
         resolved: dict[str, tuple[float, str]] = {}
         pending: list[str] = []
-        for currency in unique:
+        # Sorted so resolution order (and result insertion order) is deterministic
+        # regardless of the input set's iteration order.
+        for currency in sorted(unique):
             cached = self._cached(currency, to_currency)
             if cached is not None:
                 resolved[currency] = cached
@@ -415,36 +409,18 @@ class FxRateCache:
         if not pending:
             return resolved
 
-        preflight, *rest = pending
-        preflight_rate, preflight_source = await self._resolve_and_cache(
-            preflight, to_currency, try_live=True
-        )
-        if preflight_rate is not None:
-            resolved[preflight] = (preflight_rate, preflight_source)
+        semaphore = asyncio.Semaphore(self._max_concurrency)
 
-        if rest:
-            live_reachable = preflight_source == "yfinance"
-            results: list[tuple[str, float | None, str]] = []
-            if live_reachable:
-                semaphore = asyncio.Semaphore(self._max_concurrency)
+        async def _resolve(currency: str) -> tuple[str, float | None, str]:
+            async with semaphore:
+                rate, source = await self._resolve_and_cache(currency, to_currency)
+                return currency, rate, source
 
-                async def _resolve(currency: str) -> tuple[str, float | None, str]:
-                    async with semaphore:
-                        rate, source = await self._resolve_and_cache(
-                            currency, to_currency, try_live=True
-                        )
-                        return currency, rate, source
-
-                results = list(await asyncio.gather(*(_resolve(c) for c in rest)))
-            else:
-                for currency in rest:
-                    rate, source = await self._resolve_and_cache(
-                        currency, to_currency, try_live=False
-                    )
-                    results.append((currency, rate, source))
-            for currency, rate, source in results:
-                if rate is not None:
-                    resolved[currency] = (rate, source)
+        for currency, rate, source in await asyncio.gather(
+            *(_resolve(currency) for currency in pending)
+        ):
+            if rate is not None:
+                resolved[currency] = (rate, source)
 
         return resolved
 

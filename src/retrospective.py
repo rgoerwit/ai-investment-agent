@@ -304,10 +304,7 @@ def extract_snapshot(
 
     # Exchange/currency/benchmark mapping
     from src.currency_resolver import resolve_local_trading_currency
-    from src.fx_normalization import (
-        FALLBACK_RATES_TO_USD,
-        normalize_minor_unit_currency,
-    )
+    from src.fx_normalization import get_fx_rate_fallback
 
     suffix = get_ticker_suffix(ticker)
 
@@ -342,11 +339,11 @@ def extract_snapshot(
     # FX rate at analysis time (synchronous fallback only — no async in snapshot).
     # Saved here so the reconciler has an at-analysis-time rate to use for cost
     # calculations without needing a live FX fetch.
-    fx_rate = None
-    if currency:
-        normalized_currency, scale = normalize_minor_unit_currency(currency)
-        major_rate = FALLBACK_RATES_TO_USD.get(normalized_currency or "")
-        fx_rate = major_rate * scale if major_rate is not None else None
+    # get_fx_rate_fallback is the canonical fallback-table conversion (minor-unit
+    # scaling + USD anchoring); deliberately the table, not live/cache, because
+    # this reconstructs the at-analysis-time rate (see the FX section in
+    # CLAUDE.md). Do not switch this to a live fetch.
+    fx_rate = get_fx_rate_fallback(currency, "USD") if currency else None
     if currency and fx_rate is None:
         logger.warning(
             "snapshot_fx_rate_unknown",

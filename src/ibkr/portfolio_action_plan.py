@@ -4,11 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.ibkr.dip_watch import (
-    collect_dip_watch_source_items,
-    screen_dip_candidates_by_concentration,
-    select_dip_watch_candidates,
-)
 from src.ibkr.models import PortfolioSummary, ReconciliationItem
 from src.ibkr.order_presentation import find_live_order
 from src.ibkr.portfolio_defaults import (
@@ -81,17 +76,9 @@ def build_portfolio_action_plan(
         exchange_limit_pct=exchange_limit_pct,
         sector_limit_pct=sector_limit_pct,
     )
-
-    _, withheld_dips = screen_dip_candidates_by_concentration(
-        select_dip_watch_candidates(
-            collect_dip_watch_source_items(items),
-            macro_event_active=macro_event_active,
-        ),
-        exchange_weights=portfolio.exchange_weights,
-        sector_weights=portfolio.sector_weights,
-        exchange_limit_pct=exchange_limit_pct,
-        sector_limit_pct=sector_limit_pct,
-    )
+    # The concentration-withheld dips come from the SAME single evaluation that
+    # produced groups.dip_candidates — no second select+screen pass.
+    withheld_dips = groups.dip_withheld
 
     in_flight_buys = tuple(
         item

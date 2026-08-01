@@ -42,7 +42,10 @@ from src.runtime_config import (
     get_runtime_config,
     quick_runtime_clamp_changes,
 )
-from src.runtime_diagnostics import build_analysis_validity
+from src.runtime_diagnostics import (
+    build_analysis_validity,
+    stamp_provenance_contract,
+)
 from src.runtime_init import initialize_runtime_environment
 
 # IMPORTANT: Don't import get_tracker here - it instantiates the singleton immediately
@@ -825,6 +828,10 @@ async def run_analysis(
                 )
 
             if isinstance(result, dict):
+                # Stamp the provenance contract before any validity computation so
+                # this live run is held to fail-closed publication (snapshot + trace
+                # must be present and VALID). Legacy artifacts carry no stamp.
+                stamp_provenance_contract(result)
                 result["macro_context_report"] = macro_context_report
                 result["macro_context_region"] = macro_context_region
                 result["macro_context_status"] = macro_context_status

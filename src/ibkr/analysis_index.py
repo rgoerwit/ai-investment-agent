@@ -22,7 +22,7 @@ import structlog
 from src.currency_resolver import resolve_local_trading_currency
 from src.data_block_utils import extract_kill_criteria
 from src.error_safety import summarize_exception
-from src.fx_normalization import FALLBACK_RATES_TO_USD, normalize_minor_unit_currency
+from src.fx_normalization import get_fx_rate_fallback
 from src.ibkr.models import AnalysisRecord, PortfolioEvidence, TradeBlockData
 from src.ibkr.order_builder import parse_trade_block
 from src.ibkr.reconciliation_rules import _exchange_from_ticker, _normalize_verdict
@@ -598,9 +598,10 @@ def _repair_legacy_snapshot_currency(
         and resolution.code != "USD"
         and (missing_currency or suspicious_usd)
     ):
-        normalized_currency, scale = normalize_minor_unit_currency(resolution.code)
-        major_rate = FALLBACK_RATES_TO_USD.get(normalized_currency or "")
-        repaired_fx_rate = major_rate * scale if major_rate is not None else None
+        # Canonical fallback-table conversion (minor-unit + USD anchoring).
+        # Deliberately the table, not live/cache: this reconstructs the rate a
+        # past snapshot should have had, so a live rate would be wrong.
+        repaired_fx_rate = get_fx_rate_fallback(resolution.code, "USD")
         logger.debug(
             "legacy_snapshot_currency_repaired",
             ticker=ticker,

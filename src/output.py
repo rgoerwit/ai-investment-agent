@@ -22,7 +22,7 @@ from src.cli import OutputTargets, resolve_article_path
 from src.config import config
 from src.report_generator import QuietModeReporter
 from src.runtime_config import get_runtime_config
-from src.runtime_diagnostics import is_publishable_analysis
+from src.runtime_diagnostics import has_provenance_contract, is_publishable_analysis
 
 logger = structlog.get_logger(__name__)
 console = Console()
@@ -84,21 +84,32 @@ def _article_is_publishable(
     article: str,
     feedback: dict[str, Any],
     *,
+    snapshot: dict[str, Any] | None = None,
     decision_trace: dict[str, Any] | None = None,
     require_decision_trace: bool = False,
+    require_provenance: bool = False,
 ) -> bool:
-    return (
+    base_ok = (
         feedback.get("verdict") == "APPROVED"
         and str(feedback.get("citation_audit_status") or "NOT_RUN").upper() == "PASSED"
-        and (
-            not require_decision_trace
-            or (
-                isinstance(decision_trace, dict)
-                and decision_trace.get("status") == "VALID"
-            )
-        )
         and bool(article.strip())
     )
+    if not base_ok:
+        return False
+    trace_valid = (
+        isinstance(decision_trace, dict) and decision_trace.get("status") == "VALID"
+    )
+    # Under the provenance contract, a published article requires BOTH a valid
+    # canonical snapshot and a valid decision trace — a missing one is a failure,
+    # not a pass (matches build_analysis_validity's fail-closed rule).
+    if require_provenance:
+        snapshot_valid = (
+            isinstance(snapshot, dict) and snapshot.get("contract_status") == "VALID"
+        )
+        return trace_valid and snapshot_valid
+    if require_decision_trace:
+        return trace_valid
+    return True
 
 
 def _build_article_source_context(
@@ -527,11 +538,16 @@ async def handle_article_generation(
             if isinstance(analysis_result, dict)
             else None
         )
+        require_provenance = isinstance(
+            analysis_result, dict
+        ) and has_provenance_contract(analysis_result)
         approved = isinstance(final_article, str) and _article_is_publishable(
             final_article,
             feedback,
+            snapshot=snapshot,
             decision_trace=decision_trace,
             require_decision_trace=strict_snapshot,
+            require_provenance=require_provenance,
         )
         saved_article_path = (
             article_path

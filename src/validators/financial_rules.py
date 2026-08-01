@@ -648,13 +648,20 @@ def reconcile_ocf_period_mismatch_flags(
 
 
 def detect_red_flags(
-    metrics: dict[str, Any],
+    metrics: Any,
     ticker: str = "UNKNOWN",
     sector: Sector = Sector.INDUSTRIALS,
     strict_mode: bool = False,
     entity_role: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Apply sector-aware threshold-based red-flag detection logic."""
+    """Apply sector-aware threshold-based red-flag detection logic.
+
+    Accepts either a parsed metrics dict or a typed ``DecisionInputs`` (whose
+    ``decision_metrics`` carries the snapshot-authoritative scores). The typed
+    input is the canonical production contract; the dict path is retained for
+    the deterministic golden tests and any snapshot-free caller.
+    """
+    metrics = getattr(metrics, "decision_metrics", metrics)
     red_flags: list[dict[str, Any]] = []
 
     leverage_threshold, coverage_threshold, coverage_de_threshold = (

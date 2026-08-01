@@ -122,6 +122,68 @@ async def test_search_result_url_is_discovery_not_bindable_evidence() -> None:
 
 
 @pytest.mark.asyncio
+async def test_same_content_from_different_urls_kept_as_distinct_sources() -> None:
+    recorder = EvidenceRecorder()
+    service = ToolExecutionService([recorder])
+
+    async def runner(_args):
+        return "STATUS: RESULTS_FOUND\nidentical corroborating content"
+
+    for url in (
+        "https://a.example/doc",
+        "https://b.example/doc",
+        "https://a.example/doc",  # duplicate of the first → deduped
+    ):
+        await service.execute(
+            ToolInvocation(
+                name="get_official_document",
+                args={"url": url},
+                source="toolnode",
+                agent_key="foreign_language_analyst",
+            ),
+            runner,
+        )
+
+    records = recorder.snapshot()
+    # Same content from two DIFFERENT URLs kept as two sources; the repeat of
+    # the first URL is deduped.
+    assert len(records) == 2
+    assert {record.requested_urls for record in records} == {
+        ("https://a.example/doc",),
+        ("https://b.example/doc",),
+    }
+
+
+@pytest.mark.asyncio
+async def test_ledger_overflow_appends_durable_marker(monkeypatch) -> None:
+    import src.tooling.evidence_recorder as er
+
+    monkeypatch.setattr(er, "_MAX_RECORDS", 2)
+    recorder = EvidenceRecorder()
+    service = ToolExecutionService([recorder])
+
+    for i in range(4):
+
+        async def runner(_args, i=i):
+            return f"STATUS: RESULTS_FOUND\ncontent number {i}"
+
+        await service.execute(
+            ToolInvocation(
+                name="search_foreign_sources",
+                args={"search_query": str(i)},
+                source="toolnode",
+                agent_key="foreign_language_analyst",
+            ),
+            runner,
+        )
+
+    overflow = [r for r in recorder.snapshot() if r.tool_name == "__ledger_overflow__"]
+    assert len(overflow) == 1
+    assert overflow[0].reason == "LEDGER_OVERFLOW"
+    assert "EVIDENCE_LEDGER_CAPACITY_REACHED" in overflow[0].findings
+
+
+@pytest.mark.asyncio
 async def test_requested_url_binds_to_validated_final_document_url() -> None:
     recorder = EvidenceRecorder()
     service = ToolExecutionService([recorder])

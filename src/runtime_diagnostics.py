@@ -59,6 +59,46 @@ QUICK_OPTIONAL_PUBLISHABLE_ARTIFACTS = OPTIONAL_PUBLISHABLE_ARTIFACTS | frozense
     {"value_trap_report"}
 )
 
+# Provenance publication contract. Any result stamped with this version is
+# produced by current code and therefore MUST carry a present-and-VALID canonical
+# analysis snapshot and final decision trace to be publishable — absence is a
+# failure, not a pass. Legacy/frozen artifacts (produced before the stamp existed)
+# carry no version and are grandfathered: their snapshot/trace are only checked
+# when present. Bump when the required-provenance shape changes.
+PROVENANCE_CONTRACT_VERSION = 1
+
+
+def stamp_provenance_contract(result: dict[str, Any]) -> None:
+    """Stamp the current provenance contract onto a live-run result.
+
+    The single stamping seam for every current-run entry point (main analyzer,
+    portfolio_manager refresh persistence). Sets — not setdefault — so a stale or
+    lower version can never survive on a run current code produced.
+    """
+    result["provenance_contract_version"] = PROVENANCE_CONTRACT_VERSION
+
+
+def has_provenance_contract(result: Mapping[str, Any]) -> bool:
+    """Whether ``result`` declares the current provenance publication contract.
+
+    True only for artifacts stamped by current code; legacy artifacts (no stamp)
+    return False and are grandfathered through the present-but-invalid checks.
+    """
+    version = result.get("provenance_contract_version")
+    return isinstance(version, int) and version >= PROVENANCE_CONTRACT_VERSION
+
+
+def _missing_provenance_failure(message: str) -> dict[str, Any]:
+    return {
+        "complete": False,
+        "ok": False,
+        "content": None,
+        "error_kind": "data_contract_error",
+        "provider": "deterministic",
+        "message": message,
+        "retryable": False,
+    }
+
 
 @dataclass(frozen=True)
 class FailureDetails:
@@ -468,7 +508,12 @@ def build_analysis_validity(result: dict[str, Any]) -> dict[str, Any]:
             "message": "Pre-screening result missing or invalid",
             "retryable": False,
         }
-    if snapshot_status is not None and snapshot_status != "VALID":
+    provenance_required = has_provenance_contract(result)
+    if provenance_required and not isinstance(snapshot, dict):
+        required_failures["analysis_snapshot"] = _missing_provenance_failure(
+            "Canonical analysis snapshot is missing under the provenance contract"
+        )
+    elif snapshot_status is not None and snapshot_status != "VALID":
         required_failures["analysis_snapshot"] = {
             "complete": bool(snapshot),
             "ok": False,
@@ -478,7 +523,11 @@ def build_analysis_validity(result: dict[str, Any]) -> dict[str, Any]:
             "message": f"Canonical analysis snapshot is {snapshot_status}",
             "retryable": False,
         }
-    if decision_trace_status is not None and decision_trace_status != "VALID":
+    if provenance_required and not isinstance(decision_trace, dict):
+        required_failures["decision_trace"] = _missing_provenance_failure(
+            "Final decision trace is missing under the provenance contract"
+        )
+    elif decision_trace_status is not None and decision_trace_status != "VALID":
         required_failures["decision_trace"] = {
             "complete": bool(decision_trace),
             "ok": False,

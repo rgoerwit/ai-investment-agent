@@ -713,6 +713,28 @@ class TestFxRateCacheKeying:
         assert cache.peek_cached_rate("EUR", "GBP") == (pytest.approx(0.85), "yfinance")
 
     @pytest.mark.asyncio
+    async def test_get_rates_one_pair_fallback_does_not_downgrade_others(self):
+        """A single currency falling to the fallback table must not force other
+        currencies onto fallback — each pair resolves independently."""
+        from src.fx_normalization import FxRateCache
+
+        cache = FxRateCache()
+        with patch(
+            "src.fx_normalization.get_fx_rate",
+            side_effect=lambda frm, to: {
+                "JPY": (0.0067, "fallback"),  # live failed → fallback for JPY only
+                "EUR": (1.10, "yfinance"),
+                "GBP": (1.27, "yfinance"),
+            }[frm],
+        ):
+            results = await cache.get_rates(["JPY", "EUR", "GBP"], to_currency="USD")
+
+        assert results["JPY"] == (pytest.approx(0.0067), "fallback")
+        # These stayed on the live source despite JPY's fallback.
+        assert results["EUR"] == (pytest.approx(1.10), "yfinance")
+        assert results["GBP"] == (pytest.approx(1.27), "yfinance")
+
+    @pytest.mark.asyncio
     async def test_get_rates_batch_keeps_targets_independent(self):
         from src.fx_normalization import FxRateCache
 

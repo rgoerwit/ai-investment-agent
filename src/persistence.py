@@ -411,8 +411,16 @@ def attach_run_summary(
     ``build_analysis_validity`` is imported lazily to avoid a module-level import
     cycle (``runtime_diagnostics`` imports from this module at call time).
     """
-    from src.runtime_diagnostics import build_analysis_validity
+    from src.runtime_diagnostics import (
+        build_analysis_validity,
+        stamp_provenance_contract,
+    )
 
+    # Any result reaching this enrichment chokepoint is a live analysis (main
+    # analyzer or portfolio_manager refresh) and is held to the fail-closed
+    # provenance contract. Idempotent with the main.py stamp; sets (not
+    # setdefault) so a stale/lower version cannot survive.
+    stamp_provenance_contract(result)
     result["analysis_validity"] = build_analysis_validity(result)
     result["run_summary"] = build_run_summary(
         result,
@@ -656,6 +664,7 @@ def save_results_to_file(
         "structured_inputs": result.get("structured_inputs", {}),
         "analysis_snapshot": result.get("analysis_snapshot", {}),
         "decision_trace": result.get("decision_trace", {}),
+        "provenance_contract_version": result.get("provenance_contract_version"),
         "agent_attribution": _build_agent_attribution(
             result, (token_stats or {}).get("agents", {}) or {}
         ),

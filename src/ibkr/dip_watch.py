@@ -296,7 +296,17 @@ def screen_dip_candidates_by_concentration(
     return kept, withheld
 
 
-def select_dip_watch_candidates(
+@dataclass(frozen=True)
+class DipWatchSelection:
+    """The dip-watch policy evaluated once: kept (display-limited, ranked) and
+    the names withheld by the concentration screen. Callers reuse this single
+    result instead of re-running the eligibility + screen twice."""
+
+    kept: tuple[ReconciliationItem, ...]
+    withheld: tuple[ReconciliationItem, ...]
+
+
+def select_dip_watch(
     items: list[ReconciliationItem],
     *,
     min_health: float = 55.0,
@@ -311,8 +321,8 @@ def select_dip_watch_candidates(
     sector_weights: dict[str, float] | None = None,
     exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT,
     sector_limit_pct: float = DEFAULT_SECTOR_LIMIT_PCT,
-) -> list[ReconciliationItem]:
-    """Return items eligible for DIP WATCH using the current CLI rules."""
+) -> DipWatchSelection:
+    """Evaluate the DIP WATCH policy once, returning both kept and withheld."""
     ranked = [
         item
         for item in items
@@ -329,17 +339,53 @@ def select_dip_watch_candidates(
     ]
     # Concentration screen runs before the display limit so withheld names
     # free their slots for under-limit dips instead of shipping short.
-    ranked, _ = screen_dip_candidates_by_concentration(
+    kept, withheld = screen_dip_candidates_by_concentration(
         ranked,
         exchange_weights=exchange_weights,
         sector_weights=sector_weights,
         exchange_limit_pct=exchange_limit_pct,
         sector_limit_pct=sector_limit_pct,
     )
-    ranked.sort(key=score_dip_watch_item, reverse=True)
+    kept.sort(key=score_dip_watch_item, reverse=True)
     if limit is not None:
-        return ranked[:limit]
-    return ranked
+        kept = kept[:limit]
+    return DipWatchSelection(kept=tuple(kept), withheld=tuple(withheld))
+
+
+def select_dip_watch_candidates(
+    items: list[ReconciliationItem],
+    *,
+    min_health: float = 55.0,
+    min_growth: float = 55.0,
+    min_score: float = 50.0,
+    max_age_days: int = _DEFAULT_DIP_WATCH_MAX_AGE_DAYS,
+    excluded_zones: frozenset[str] = _DEFAULT_DIP_WATCH_EXCLUDED_ZONES,
+    min_dip_pct: float = _DEFAULT_DIP_WATCH_MIN_DIP_PCT,
+    macro_event_active: bool = False,
+    limit: int | None = None,
+    exchange_weights: dict[str, float] | None = None,
+    sector_weights: dict[str, float] | None = None,
+    exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT,
+    sector_limit_pct: float = DEFAULT_SECTOR_LIMIT_PCT,
+) -> list[ReconciliationItem]:
+    """Return items eligible for DIP WATCH (the kept slice of select_dip_watch)."""
+    return list(
+        select_dip_watch(
+            items,
+            min_health=min_health,
+            min_growth=min_growth,
+            min_score=min_score,
+            max_age_days=max_age_days,
+            excluded_zones=excluded_zones,
+            min_dip_pct=min_dip_pct,
+            macro_event_active=macro_event_active,
+            limit=limit,
+            exchange_weights=exchange_weights,
+            sector_weights=sector_weights,
+            exchange_limit_pct=exchange_limit_pct,
+            sector_limit_pct=sector_limit_pct,
+        ).kept
+    )
 
 
 def build_dip_watch_candidates(

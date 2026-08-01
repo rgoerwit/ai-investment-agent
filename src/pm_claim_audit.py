@@ -47,6 +47,12 @@ from src.pm_decision_parser import canonicalize_pm_verdict
 logger = structlog.get_logger(__name__)
 
 _TRACE_FIELDS = ("DECISION_FACTS", "DECISION_GATES")
+# SUPPORT-role claims that are *incidental* — true but not thesis-bearing. A BUY
+# citing only these (e.g. the current price) has no valuation/growth/guidance/
+# quality claim behind it and must not satisfy the trace. Every other SUPPORT
+# field (valuation multiples, growth rates, guidance, latest results) is a real
+# thesis claim, so a small denylist is both sufficient and robust to new metrics.
+_INCIDENTAL_SUPPORT_FIELDS = frozenset({"CURRENT_PRICE"})
 _SOURCE_SENSITIVE_FAMILIES: dict[str, tuple[str, ...]] = {
     "CAPACITY": ("CAPACITY_UTILIZATION",),
     "GUIDANCE": ("GUIDANCE_REVENUE", "GUIDANCE_NET_INCOME"),
@@ -150,8 +156,10 @@ def render_decision_trace_instruction(
             "=== DECISION TRACE CONTRACT ===",
             (
                 "DECISION_FACTS may contain only the eligible claim IDs below. "
-                "A BUY must cite at least one role=SUPPORT claim; GATE_INPUT claims "
-                "may constrain a decision but cannot independently support BUY. "
+                "A BUY must cite at least one thesis-bearing role=SUPPORT claim "
+                "(valuation, growth, guidance, or quality) — the current price "
+                "alone is not a thesis; GATE_INPUT claims may constrain a decision "
+                "but cannot independently support BUY. "
                 "Uncited source-sensitive information may be discussed only as an "
                 "explicitly qualified evidence gap; it is not decision support."
             ),
@@ -201,11 +209,26 @@ def validate_decision_trace(
         for claim_id in facts
         if claim_id in eligible and eligible[claim_id].get("decision_role") == "SUPPORT"
     ]
+    # A BUY requires a THESIS-bearing support claim, not merely any SUPPORT claim:
+    # citing only the current price is not a thesis.
+    thesis_support_facts = [
+        claim_id
+        for claim_id in support_facts
+        if str(eligible[claim_id].get("field")) not in _INCIDENTAL_SUPPORT_FIELDS
+    ]
     missing_fields = [
         field
         for field in _TRACE_FIELDS
         if extract_block_field_from_text_raw(block, field) is None
     ]
+    # Source-sensitive prose (guidance/capacity/latest results) that cites no
+    # backing eligible claim is surfaced as an advisory signal only. It is
+    # deliberately NOT promoted to a structural failure: the classifier is a
+    # loose marker match that intentionally also flags *negated*/contextual
+    # mentions ("not management guidance") for observability (see
+    # test_negated_guidance_mention_is_advisory_not_structural_failure), so
+    # invalidating on it would false-positive on benign prose. The precise
+    # uncited-overclaim defense is the 2b provenance gate below.
     untraced_source_families = _untraced_source_families(
         pm_output,
         facts,
@@ -218,7 +241,7 @@ def validate_decision_trace(
         or missing_gates
         or not (facts or gates)
         or verdict == "UNPARSEABLE"
-        or (verdict == "BUY" and not support_facts)
+        or (verdict == "BUY" and not thesis_support_facts)
     )
     return {
         "status": "INVALID" if structurally_invalid else "VALID",
@@ -226,6 +249,7 @@ def validate_decision_trace(
         "decision_facts": facts,
         "decision_gates": gates,
         "support_facts": support_facts,
+        "thesis_support_facts": thesis_support_facts,
         "invalid_facts": invalid_facts,
         "invalid_gates": invalid_gates,
         "missing_gates": missing_gates,

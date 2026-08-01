@@ -245,6 +245,50 @@ class TestAnalysisValidity:
         assert validity["decision_trace_status"] == "INVALID"
         assert "decision_trace" in validity["required_failures"]
 
+    def test_provenance_contract_publishable_with_valid_snapshot_and_trace(self):
+        result = self._make_result(quick_mode=False)
+        result["provenance_contract_version"] = 1
+        result["analysis_snapshot"] = {"contract_status": "VALID", "claims": {}}
+        result["decision_trace"] = {"status": "VALID"}
+
+        validity = build_analysis_validity(result)
+
+        assert validity["publishable"] is True
+        assert validity["required_failures"] == {}
+
+    def test_provenance_contract_rejects_missing_snapshot(self):
+        result = self._make_result(quick_mode=False)
+        result["provenance_contract_version"] = 1
+        result["decision_trace"] = {"status": "VALID"}
+        # analysis_snapshot deliberately absent
+
+        validity = build_analysis_validity(result)
+
+        assert validity["publishable"] is False
+        assert "analysis_snapshot" in validity["required_failures"]
+
+    def test_provenance_contract_rejects_missing_trace(self):
+        result = self._make_result(quick_mode=False)
+        result["provenance_contract_version"] = 1
+        result["analysis_snapshot"] = {"contract_status": "VALID", "claims": {}}
+        # decision_trace deliberately absent
+
+        validity = build_analysis_validity(result)
+
+        assert validity["publishable"] is False
+        assert "decision_trace" in validity["required_failures"]
+
+    def test_legacy_artifact_grandfathered_without_snapshot_or_trace(self):
+        # No provenance_contract_version stamp: a pre-contract / frozen artifact.
+        result = self._make_result(quick_mode=False)
+        # No analysis_snapshot, no decision_trace at all.
+
+        validity = build_analysis_validity(result)
+
+        assert validity["publishable"] is True
+        assert "analysis_snapshot" not in validity["required_failures"]
+        assert "decision_trace" not in validity["required_failures"]
+
     def test_publishable_ignores_unparseable_datablock_mentions(self):
         result = {
             "market_report": "market",

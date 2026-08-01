@@ -263,6 +263,12 @@ def test_decision_trace_requires_cited_source_sensitive_rationale() -> None:
         [],
     )
 
+    # Uncited source-sensitive prose is surfaced as an advisory signal but does
+    # NOT structurally fail the trace — the loose marker classifier also flags
+    # negated/contextual mentions, so promoting it to invalidating would
+    # false-positive on benign prose (see the negation test in
+    # tests/test_pm_claim_audit.py). The BUY here still has thesis support
+    # (PE_RATIO_TTM), so the trace is VALID.
     assert untraced["status"] == "VALID"
     assert untraced["untraced_source_families"] == ["CAPACITY"]
     assert untraced["advisory_source_families"] == ["CAPACITY"]
@@ -299,6 +305,43 @@ def test_every_final_decision_requires_a_fact_or_active_gate() -> None:
 
     assert validate_decision_trace(buy, snapshot, [])["status"] == "INVALID"
     assert validate_decision_trace(hold, snapshot, [])["status"] == "INVALID"
+
+
+def test_buy_citing_only_current_price_is_not_thesis_support() -> None:
+    """CURRENT_PRICE is a SUPPORT claim but incidental — a BUY citing only it has
+    no thesis-bearing claim and must be INVALID."""
+    snapshot = _legacy_snapshot(
+        {
+            "fundamentals_report": _fundamentals(
+                "PE_RATIO_TTM: 12.5",
+                "CURRENT_PRICE: 178",
+            )
+        }
+    )
+    claims = {
+        claim["field"]: claim_id for claim_id, claim in snapshot["claims"].items()
+    }
+    price_only = (
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: BUY\n"
+        f"DECISION_FACTS: {claims['CURRENT_PRICE']}\n"
+        "DECISION_GATES: NONE\n"
+        "### --- END PM_BLOCK ---"
+    )
+    with_thesis = price_only.replace(
+        claims["CURRENT_PRICE"],
+        f"{claims['CURRENT_PRICE']}, {claims['PE_RATIO_TTM']}",
+    )
+
+    price_trace = validate_decision_trace(price_only, snapshot, [])
+    thesis_trace = validate_decision_trace(with_thesis, snapshot, [])
+
+    assert price_trace["status"] == "INVALID"
+    assert price_trace["support_facts"] == [claims["CURRENT_PRICE"]]
+    assert price_trace["thesis_support_facts"] == []
+    # Adding a valuation claim provides thesis support → VALID.
+    assert thesis_trace["status"] == "VALID"
+    assert thesis_trace["thesis_support_facts"] == [claims["PE_RATIO_TTM"]]
 
 
 def test_gate_input_cannot_independently_support_buy() -> None:
@@ -767,17 +810,25 @@ def test_score_derivation_requires_complete_coherent_breakdown() -> None:
     assert score["decision_eligible"] is False
     assert score["decision_role"] == "GATE_INPUT"
     assert len(score["derived_from"]) == 2
-    assert score["value"] == "66.7% (based on 6 available points)"
+    # R_AND_D_CAPEX_BACKLOG=1 is a class-1 advisory award (no evidence producer),
+    # so it is excluded from the decision score: 3/6 = 50.0% (raw 4/6 = 66.7%
+    # remains as advisory_percentage). Eligibility is still False here because of
+    # the class-2 GROSS_MARGIN lineage gap.
+    assert score["value"] == "50.0% (based on 6 available points)"
     scorecard = derived["scorecards"]["GROWTH"]
     assert scorecard["criteria"]["GLOBAL_EXPANSION"]["award"] == "0"
     assert scorecard["criteria"]["R_AND_D_CAPEX_BACKLOG"]["award"] == "1"
     assert scorecard["lineage_gaps"] == ["GROSS_MARGIN"]
+    assert scorecard["advisory_only_awards"] == ["R_AND_D_CAPEX_BACKLOG"]
+    assert scorecard["advisory_percentage"] == 66.7
 
 
 def test_structurally_unbacked_criteria_do_not_veto_eligibility() -> None:
     """GLOBAL_EXPANSION/R_AND_D_CAPEX_BACKLOG have no configured evidence
     producer yet; a nonzero award on them alone must not zero the whole
-    scorecard the way a genuinely-unresolved dependency does."""
+    scorecard the way a genuinely-unresolved dependency does. It IS excluded
+    from the decision score (conservative) while the model's raw percentage is
+    retained as advisory_percentage."""
     snapshot = build_pre_senior_snapshot(
         _with_structured_metrics(
             {
@@ -808,7 +859,42 @@ def test_structurally_unbacked_criteria_do_not_veto_eligibility() -> None:
     assert scorecard["lineage_gaps"] == []
     assert score["decision_eligible"] is True
     assert score["coverage"] == "FOUND"
-    assert score["value"] == "66.7% (based on 6 available points)"
+    # GLOBAL_EXPANSION=1 is advisory-only: decision score drops it (3/6 = 50.0%),
+    # advisory_percentage keeps the model's raw 66.7%.
+    assert score["value"] == "50.0% (based on 6 available points)"
+    assert scorecard["percentage"] == 50.0
+    assert scorecard["advisory_percentage"] == 66.7
+    assert scorecard["advisory_only_awards"] == ["GLOBAL_EXPANSION"]
+
+
+def test_fully_backed_scorecard_decision_equals_advisory() -> None:
+    """When no advisory-only (unbacked) positive award exists, the decision
+    score is byte-identical to the model's raw percentage — parity guarantee."""
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics(
+            {
+                "raw_fundamentals_data": (
+                    '{"trailingPE": 12.5, "revenueGrowth": 0.2, '
+                    '"earningsGrowth": 0.3, "grossMargins": 0.4}'
+                )
+            }
+        )
+    )
+    report = _fundamentals(
+        "ADJUSTED_GROWTH_SCORE: 50.0% (based on 6 available points)",
+        (
+            "GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=1; "
+            "ROA_ROE_IMPROVING=0; GROSS_MARGIN=1; GLOBAL_EXPANSION=0; "
+            "R_AND_D_CAPEX_BACKLOG=0"
+        ),
+    )
+
+    derived = add_validated_derivations(snapshot, report)
+    scorecard = derived["scorecards"]["GROWTH"]
+
+    assert scorecard["advisory_only_awards"] == []
+    assert scorecard["percentage"] == scorecard["advisory_percentage"] == 50.0
+    assert scorecard["decision_eligible"] is True
 
 
 def test_missing_structured_ingress_fails_closed_instead_of_minting_na_truth() -> None:
@@ -890,10 +976,13 @@ def test_canonical_scorecard_replaces_stale_score_detail() -> None:
     assert "GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=1;" in projected
     assert "GLOBAL_EXPANSION=1; R_AND_D_CAPEX_BACKLOG=1" in projected
     assert "RAW_GROWTH_SCORE: 5/6" in projected
-    assert "ADJUSTED_GROWTH_SCORE: 83.3% (based on 6 available points)" in projected
+    # GLOBAL_EXPANSION=1 and R_AND_D_CAPEX_BACKLOG=1 are both advisory-only
+    # (no evidence producer), so the decision score excludes both: 3/6 = 50.0%.
+    # RAW stays 5/6; the model's raw 83.3% survives only as advisory context.
+    assert "ADJUSTED_GROWTH_SCORE: 50.0% (based on 6 available points)" in projected
     assert "GROWTH_SCORE_LINEAGE_STATUS: COMPLETE" in projected
     assert projected.count("### GROWTH TRANSITION DETAIL") == 1
-    assert "**Score**: 5/6 (Adjusted: 83.3%)" in projected
+    assert "**Score**: 5/6 (Adjusted: 50.0%)" in projected
     assert "**Score**: 5/6 (Adjusted: 83%)" not in projected
 
 

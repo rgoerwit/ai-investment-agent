@@ -34,6 +34,7 @@ from src.data_block_utils import (
     has_parseable_data_block,
     unfenced_label,
 )
+from src.decision_inputs import DecisionInputs
 from src.error_safety import summarize_exception
 
 # Verdict canonicalization lives in the neutral, dependency-free parser (it used
@@ -1797,8 +1798,19 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                     **summarize_exception(card_exc, operation="entity_governance_card"),
                 )
 
+            # Typed, snapshot-authoritative decision inputs (Stage 5): the
+            # red-flag engine consumes DecisionInputs, whose health/growth
+            # decision scores come from the canonical scorecard when the contract
+            # is VALID (the snapshot value wins over the text reparse). The
+            # analyst-judgment fields (segment flags, ROIC quality, cycle
+            # position, …) legitimately ride the parsed DATA_BLOCK — they are the
+            # Senior analyst's output, not a competing canonical store.
+            decision_inputs = DecisionInputs.from_metrics_and_snapshot(
+                metrics, sector, analysis_snapshot, ticker=ticker
+            )
+
             red_flags, pre_screening_result = RedFlagDetector.detect_red_flags(
-                metrics,
+                decision_inputs,
                 ticker,
                 sector,
                 strict_mode=strict_mode,
