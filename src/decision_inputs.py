@@ -25,6 +25,8 @@ from typing import Any
 
 import structlog
 
+from src.provenance_schema import SchemaDecodeError, Scorecard
+
 logger = structlog.get_logger(__name__)
 
 
@@ -35,15 +37,21 @@ def _snapshot_decision_score(
 
     Returns None unless the contract is VALID and the scorecard is
     decision-eligible — mirroring what `project_analysis_report` would have
-    written into the DATA_BLOCK (N/A otherwise).
+    written into the DATA_BLOCK (N/A otherwise). A future-schema or corrupt
+    scorecard decodes fail-closed to None (the conservative ineligible path).
     """
     if not isinstance(snapshot, Mapping) or snapshot.get("contract_status") != "VALID":
         return None
-    scorecard = (snapshot.get("scorecards") or {}).get(kind)
-    if not isinstance(scorecard, Mapping) or not scorecard.get("decision_eligible"):
+    raw = (snapshot.get("scorecards") or {}).get(kind)
+    if not isinstance(raw, Mapping):
         return None
-    percentage = scorecard.get("percentage")
-    return float(percentage) if isinstance(percentage, int | float) else None
+    try:
+        scorecard = Scorecard.from_dict(dict(raw))
+    except SchemaDecodeError:
+        return None
+    if not scorecard.decision_eligible:
+        return None
+    return float(scorecard.percentage)
 
 
 def _scores_close(a: float | None, b: float | None) -> bool:

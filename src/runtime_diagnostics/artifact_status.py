@@ -4,11 +4,47 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import structlog
+
 from src.data_block_utils import has_parseable_data_block
+from src.provenance_schema import DecisionTrace, SchemaDecodeError
 from src.runtime_diagnostics.failure_classification import (
     ArtifactErrorKind,
     classify_failure,
 )
+
+logger = structlog.get_logger(__name__)
+
+
+def _decode_snapshot_status(snapshot: Any) -> str | None:
+    """Contract status via the typed codec, fail-closed on a corrupt/future shape.
+
+    ``None`` when no snapshot is present (grandfathered legacy path). A
+    ``SchemaDecodeError`` (future schema_version or a type-corrupt
+    contract_status) yields ``DECODE_FAILED`` → a required failure downstream,
+    so a payload current code cannot safely read is never treated as VALID.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    # Lazy import avoids any chance of an analysis_snapshot import cycle.
+    from src.analysis_snapshot import AnalysisSnapshot
+
+    try:
+        return AnalysisSnapshot.from_dict(snapshot).contract_status or "INVALID"
+    except SchemaDecodeError as exc:
+        logger.warning("analysis_snapshot_schema_decode_failed", reason=str(exc))
+        return "DECODE_FAILED"
+
+
+def _decode_trace_status(decision_trace: Any) -> str | None:
+    if not isinstance(decision_trace, dict):
+        return None
+    try:
+        return DecisionTrace.from_dict(decision_trace).status or "INVALID"
+    except SchemaDecodeError as exc:
+        logger.warning("decision_trace_schema_decode_failed", reason=str(exc))
+        return "DECODE_FAILED"
+
 
 FUNDAMENTALS_SYNC_FIELDS = frozenset(
     {"raw_fundamentals_data", "foreign_language_report", "legal_report"}
@@ -227,17 +263,9 @@ def build_analysis_validity(result: dict[str, Any]) -> dict[str, Any]:
     required_artifacts = get_required_publishable_artifacts(result)
     optional_artifacts = get_optional_publishable_artifacts(result)
     snapshot = result.get("analysis_snapshot")
-    snapshot_status = (
-        str(snapshot.get("contract_status") or "INVALID")
-        if isinstance(snapshot, dict)
-        else None
-    )
+    snapshot_status = _decode_snapshot_status(snapshot)
     decision_trace = result.get("decision_trace")
-    decision_trace_status = (
-        str(decision_trace.get("status") or "INVALID")
-        if isinstance(decision_trace, dict)
-        else None
-    )
+    decision_trace_status = _decode_trace_status(decision_trace)
 
     for field in required_artifacts:
         status = get_artifact_status(result, field)

@@ -96,16 +96,30 @@ def _article_is_publishable(
     )
     if not base_ok:
         return False
-    trace_valid = (
-        isinstance(decision_trace, dict) and decision_trace.get("status") == "VALID"
-    )
+    from src.provenance_schema import DecisionTrace, SchemaDecodeError
+
+    # Decode fail-closed so a future-schema or corrupt trace/snapshot is never
+    # treated as VALID here either — consistent with build_analysis_validity.
+    trace_valid = False
+    if isinstance(decision_trace, dict):
+        try:
+            trace_valid = DecisionTrace.from_dict(decision_trace).status == "VALID"
+        except SchemaDecodeError:
+            trace_valid = False
     # Under the provenance contract, a published article requires BOTH a valid
     # canonical snapshot and a valid decision trace — a missing one is a failure,
     # not a pass (matches build_analysis_validity's fail-closed rule).
     if require_provenance:
-        snapshot_valid = (
-            isinstance(snapshot, dict) and snapshot.get("contract_status") == "VALID"
-        )
+        from src.analysis_snapshot import AnalysisSnapshot
+
+        snapshot_valid = False
+        if isinstance(snapshot, dict):
+            try:
+                snapshot_valid = (
+                    AnalysisSnapshot.from_dict(snapshot).contract_status == "VALID"
+                )
+            except SchemaDecodeError:
+                snapshot_valid = False
         return trace_valid and snapshot_valid
     if require_decision_trace:
         return trace_valid

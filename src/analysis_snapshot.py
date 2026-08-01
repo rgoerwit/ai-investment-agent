@@ -7,7 +7,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from src.claim_policy import (
     MATERIAL_CLAIM_POLICIES,
@@ -23,6 +23,10 @@ from src.claim_policy import (
 from src.data_block_utils import (
     extract_last_data_block,
     replace_or_append_block_line,
+)
+from src.provenance_schema import (
+    SchemaDecodeError,
+    classify_schema_version,
 )
 from src.tooling.evidence_recorder import bind_fetched_evidence
 from src.tooling.structured_ingress import get_structured_ingress_payload
@@ -49,6 +53,93 @@ class ClaimRecord:
     source_provider: str | None = None
     lineage_ids: tuple[str, ...] = ()
     derived_from: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisSnapshot:
+    """Shallow, versioned wire codec for the canonical analysis snapshot.
+
+    Deliberately shallow: ``claims`` and ``conflicts`` stay in their existing
+    dict wire form (``claims`` is already ``asdict(ClaimRecord)``), so this is a
+    single typed definition of the snapshot's key set + schema versioning + a
+    fail-closed loader — not a re-typing of every claim.
+
+    ``stage`` / ``commentary_status`` / ``scorecards`` are None-omitted by
+    ``to_dict`` so the reduced INVALID snapshot shape is reproduced exactly (it
+    carries neither ``stage`` nor ``commentary_status``). ``schema_version`` is
+    appended last; nothing else in the wire shape changes.
+
+    Only the two primary builders (``_snapshot_from_fields`` and the reduced
+    INVALID form) serialize through this codec. ``add_validated_derivations`` and
+    ``refresh_analysis_snapshot`` keep their ``{**snapshot, ...}`` spreads: a
+    spread cannot add or drop a key, so it inherits this canonical shape (incl.
+    ``schema_version``) from its codec-produced input — drift is structurally
+    impossible without re-serializing (which would risk dropping an unknown key).
+    """
+
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    version: int
+    contract_status: str
+    contract_reason: str | None
+    claims: dict[str, Any]
+    conflicts: list[Any]
+    stage: str | None = None
+    commentary_status: str | None = None
+    scorecards: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"version": self.version}
+        if self.stage is not None:
+            payload["stage"] = self.stage
+        payload["contract_status"] = self.contract_status
+        payload["contract_reason"] = self.contract_reason
+        payload["claims"] = self.claims
+        payload["conflicts"] = self.conflicts
+        if self.commentary_status is not None:
+            payload["commentary_status"] = self.commentary_status
+        if self.scorecards is not None:
+            payload["scorecards"] = self.scorecards
+        payload["schema_version"] = self.SCHEMA_VERSION
+        return payload
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> AnalysisSnapshot:
+        if not isinstance(d, Mapping):
+            raise SchemaDecodeError(
+                f"analysis_snapshot must be a mapping, got {type(d).__name__}"
+            )
+        status = classify_schema_version(d.get("schema_version"), cls.SCHEMA_VERSION)
+        if not status.compatible:
+            raise SchemaDecodeError(
+                "AnalysisSnapshot: incompatible schema_version "
+                f"{d.get('schema_version')!r}"
+            )
+        contract_status = d.get("contract_status")
+        if contract_status is None:
+            # Match the historical coercion (missing status → INVALID); a
+            # present-but-wrong-type status is a genuine corruption → fail closed.
+            contract_status = "INVALID"
+        elif not isinstance(contract_status, str):
+            raise SchemaDecodeError(
+                "analysis_snapshot.contract_status must be a string, got "
+                f"{type(contract_status).__name__}"
+            )
+        version = d.get("version")
+        return cls(
+            version=(
+                version
+                if isinstance(version, int) and not isinstance(version, bool)
+                else 1
+            ),
+            contract_status=contract_status,
+            contract_reason=d.get("contract_reason"),
+            claims=dict(d.get("claims") or {}),
+            conflicts=list(d.get("conflicts") or []),
+            stage=d.get("stage"),
+            commentary_status=d.get("commentary_status"),
+            scorecards=d.get("scorecards"),
+        )
 
 
 def _normalize_authority(value: str | None, *, default: Authority) -> Authority:
@@ -261,15 +352,15 @@ def _snapshot_from_fields(
         )
         claims[record.id] = asdict(record)
 
-    return {
-        "version": version,
-        "stage": stage,
-        "contract_status": contract_status,
-        "contract_reason": contract_reason,
-        "claims": claims,
-        "conflicts": conflicts,
-        "commentary_status": "NON_AUTHORITATIVE_UNLESS_CLAIM_REFERENCED",
-    }
+    return AnalysisSnapshot(
+        version=version,
+        stage=stage,
+        contract_status=contract_status,
+        contract_reason=contract_reason,
+        claims=claims,
+        conflicts=conflicts,
+        commentary_status="NON_AUTHORITATIVE_UNLESS_CLAIM_REFERENCED",
+    ).to_dict()
 
 
 def build_analysis_snapshot(
@@ -285,13 +376,13 @@ def build_analysis_snapshot(
         fundamentals if isinstance(fundamentals, str) else ""
     )
     if not block:
-        return {
-            "version": version,
-            "contract_status": "INVALID",
-            "contract_reason": "DATA_BLOCK_MISSING_OR_UNPARSEABLE",
-            "claims": {},
-            "conflicts": [],
-        }
+        return AnalysisSnapshot(
+            version=version,
+            contract_status="INVALID",
+            contract_reason="DATA_BLOCK_MISSING_OR_UNPARSEABLE",
+            claims={},
+            conflicts=[],
+        ).to_dict()
 
     fields: dict[str, str] = {
         match.group(1): match.group(2).strip() for match in _FIELD_RE.finditer(block)

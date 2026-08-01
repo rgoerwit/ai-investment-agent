@@ -357,6 +357,9 @@ Already split:
 - `src/toolkit.py` -> `src/tools/` with facade removed
 - `src/graph.py` -> `src/graph/`
 - `src/validators/red_flag_detector.py` -> facade plus validator ownership submodules
+- `src/runtime_diagnostics.py` -> `src/runtime_diagnostics/` package (`failure_classification` + `artifact_status` behind a re-exporting `__init__` with explicit `__all__`) — Stage 6, July 2026
+
+Provenance typing (Stage 6, July 2026): the gate-critical snapshot / decision-trace / scorecard payloads now have versioned typed codecs in `src/provenance_schema.py` (`Scorecard`, `DecisionTrace`, `SchemaStatus`) plus `AnalysisSnapshot` in `analysis_snapshot.py`. `to_dict` appends `schema_version` (the only additive wire delta); `from_dict` fails closed on a future/corrupt gate-critical payload → `build_analysis_validity` marks it non-publishable. The `detect_red_flags` dict adapter and the `pm_claim_audit`/`article_audit` modules were deliberately left as-is (see the Stage 6 note in `CLAUDE.md`).
 
 Recent completed control-plane/security work:
 

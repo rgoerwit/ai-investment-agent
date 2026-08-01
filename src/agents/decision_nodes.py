@@ -1947,14 +1947,16 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                 ticker=ticker,
                 **summarize_exception(exc, operation="financial_health_validator"),
             )
+            from src.analysis_snapshot import AnalysisSnapshot
+
             return {
-                "analysis_snapshot": {
-                    "version": 1,
-                    "contract_status": "INVALID",
-                    "contract_reason": "VALIDATOR_CRASHED",
-                    "claims": {},
-                    "conflicts": [],
-                },
+                "analysis_snapshot": AnalysisSnapshot(
+                    version=1,
+                    contract_status="INVALID",
+                    contract_reason="VALIDATOR_CRASHED",
+                    claims={},
+                    conflicts=[],
+                ).to_dict(),
                 "red_flags": [
                     {
                         "type": "VALIDATOR_EXECUTION_FAILED",

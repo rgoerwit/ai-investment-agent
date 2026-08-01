@@ -43,6 +43,7 @@ from src.data_block_utils import (
     replace_or_append_block_line,
 )
 from src.pm_decision_parser import canonicalize_pm_verdict
+from src.provenance_schema import DecisionTrace, SchemaDecodeError, Scorecard
 
 logger = structlog.get_logger(__name__)
 
@@ -185,16 +186,12 @@ def validate_decision_trace(
         extract_block_field_from_text_raw(block, "VERDICT") if block else None
     )
     if not block:
-        return {
-            "status": "INVALID",
-            "verdict": verdict,
-            "decision_facts": [],
-            "decision_gates": [],
-            "invalid_facts": [],
-            "invalid_gates": [],
-            "missing_gates": list(_active_gate_ids(red_flags)),
-            "reason": "PM_BLOCK_MISSING",
-        }
+        return DecisionTrace(
+            status="INVALID",
+            verdict=verdict,
+            missing_gates=tuple(_active_gate_ids(red_flags)),
+            reason="PM_BLOCK_MISSING",
+        ).to_dict()
 
     facts = _parse_trace_ids(extract_block_field_from_text_raw(block, "DECISION_FACTS"))
     gates = _parse_trace_ids(extract_block_field_from_text_raw(block, "DECISION_GATES"))
@@ -243,21 +240,20 @@ def validate_decision_trace(
         or verdict == "UNPARSEABLE"
         or (verdict == "BUY" and not thesis_support_facts)
     )
-    return {
-        "status": "INVALID" if structurally_invalid else "VALID",
-        "verdict": verdict,
-        "decision_facts": facts,
-        "decision_gates": gates,
-        "support_facts": support_facts,
-        "thesis_support_facts": thesis_support_facts,
-        "invalid_facts": invalid_facts,
-        "invalid_gates": invalid_gates,
-        "missing_gates": missing_gates,
-        "missing_fields": missing_fields,
-        "untraced_source_families": untraced_source_families,
-        "advisory_source_families": untraced_source_families,
-        "reason": "TRACE_CONTRACT_VIOLATION" if structurally_invalid else None,
-    }
+    return DecisionTrace(
+        status="INVALID" if structurally_invalid else "VALID",
+        verdict=verdict,
+        decision_facts=tuple(facts),
+        decision_gates=tuple(gates),
+        support_facts=tuple(support_facts),
+        thesis_support_facts=tuple(thesis_support_facts),
+        invalid_facts=tuple(invalid_facts),
+        invalid_gates=tuple(invalid_gates),
+        missing_gates=tuple(missing_gates),
+        missing_fields=tuple(missing_fields),
+        source_families=tuple(untraced_source_families),
+        reason="TRACE_CONTRACT_VIOLATION" if structurally_invalid else None,
+    ).to_dict()
 
 
 def reconcile_final_decision_trace(
@@ -297,11 +293,14 @@ def reconcile_final_decision_trace(
         scorecard = scorecards.get(kind)
         if not snapshot or snapshot.get("contract_status") != "VALID":
             continue
-        value = (
-            str(round(float(scorecard["percentage"])))
-            if isinstance(scorecard, Mapping) and scorecard.get("decision_eligible")
-            else "N/A"
-        )
+        value = "N/A"
+        if isinstance(scorecard, Mapping):
+            try:
+                card = Scorecard.from_dict(dict(scorecard))
+            except SchemaDecodeError:
+                card = None
+            if card is not None and card.decision_eligible:
+                value = str(round(float(card.percentage)))
         updated = replace_or_append_block_line(updated, field, value)
     matches = list(fenced_block_pattern("PM_BLOCK").finditer(pm_output))
     if matches:
