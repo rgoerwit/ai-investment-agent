@@ -102,6 +102,7 @@ def find_opportunities(
                 prior_verdicts,
                 risk_tally=analysis.risk_tally,
                 active_flags=analysis.quality_flag_types,
+                flags_available=analysis.quality_flags_available,
                 cfg=stability_cfg,
             )
             if withhold_reason:

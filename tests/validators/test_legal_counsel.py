@@ -487,6 +487,29 @@ class TestLegalFlagDetection:
         assert warnings[0]["severity"] == "HIGH"
         assert warnings[0]["action"] == "RISK_PENALTY"
         assert warnings[0]["risk_penalty"] == 2.0  # Highest legal penalty
+        # A US person is legally prohibited from initiating this position, so the
+        # flag must carry mechanical force, not just a tally the PM can reason past.
+        assert warnings[0]["blocks_buy"] is True
+
+    def test_cmic_flagged_demotes_a_buy_verdict(self):
+        """End-to-end: the blocks_buy chain turns a PM BUY into HOLD."""
+        from src.agents.verdict_policy import maybe_demote_buy_on_blocking_flags
+
+        warnings = RedFlagDetector.detect_legal_flags(
+            {"cmic_status": "FLAGGED", "cmic_evidence": "NS-CMIC listed"}, "0001.SS"
+        )
+        pm_text = (
+            "### PORTFOLIO MANAGER VERDICT: BUY\n\n"
+            "### --- START PM_BLOCK ---\nVERDICT: BUY\n### --- END PM_BLOCK ---\n"
+        )
+
+        out, demoted = maybe_demote_buy_on_blocking_flags(
+            pm_text, red_flags=warnings, ticker="0001.SS"
+        )
+
+        assert demoted is True
+        assert "VERDICT: HOLD" in out
+        assert "VERDICT: BUY" not in out
 
     def test_cmic_uncertain_warning(self):
         """Test CMIC_UNCERTAIN warning flag detection."""
@@ -503,6 +526,8 @@ class TestLegalFlagDetection:
         assert len(warnings) == 1
         assert warnings[0]["type"] == "CMIC_UNCERTAIN"
         assert warnings[0]["risk_penalty"] == 1.0
+        # An unconfirmed connection is a penalty, not a prohibition.
+        assert warnings[0].get("blocks_buy") is not True
 
     def test_cmic_clear_no_warning(self):
         """Test CMIC CLEAR status generates no CMIC warning."""

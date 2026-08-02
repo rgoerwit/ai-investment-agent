@@ -27,7 +27,6 @@ from src.reporting.state_access import (
     get_apac_regional_report,
     get_auditor_report,
     get_consultant_review,
-    get_effective_red_flags,
     get_fundamentals_report,
     get_raw_fundamentals_data,
 )
@@ -73,14 +72,6 @@ def _apac_status(state: dict) -> str | None:
         if tag in apac:
             return tag
     return "RAN"
-
-
-def _has_effective_flag(state: dict, flag_type: str) -> bool:
-    target = flag_type.upper()
-    return any(
-        isinstance(flag, dict) and str(flag.get("type", "")).upper() == target
-        for flag in get_effective_red_flags(state)
-    )
 
 
 def _safe_float(value: object) -> float | None:
@@ -244,19 +235,7 @@ def build_source_confidence_rows(state: dict) -> list[SourceRow]:
         .strip()
         .upper()
     )
-    if (
-        ocf_source == "FILING"
-        and ocf_reason == "DISCREPANCY"
-        and _has_effective_flag(state, "OCF_PERIOD_MISMATCH_RESOLVED")
-    ):
-        rows.append(
-            (
-                "Core financials",
-                "Filing OCF corroborated; API difference appears period mismatch",
-                "MEDIUM",
-            )
-        )
-    elif ocf_source == "FILING" and ocf_reason == "DISCREPANCY":
+    if ocf_source == "FILING" and ocf_reason == "DISCREPANCY":
         # Filing and aggregator OCF materially diverged: not "ground truth".
         # Verify against the actual cash-flow statement line (KTY.WA 2026-06-27).
         rows.append(

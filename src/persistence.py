@@ -491,7 +491,8 @@ def save_results_to_file(
 
     `strict_mode` is recorded in the prediction_snapshot so retrospectives
     can weight strict-mode rejections differently from normal-mode ones
-    (strict mode rejects valid REIT/PFIC/VIE candidates at the gate).
+    (strict mode rejects valid REIT/ETF and earnings-quality candidates at the
+    gate; PFIC/VIE stay risk-penalty warnings in every mode).
     """
     from src.error_safety import summarize_exception
     from src.memory import get_ticker_memory_stats

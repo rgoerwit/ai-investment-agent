@@ -1226,15 +1226,6 @@ NEUTRAL ANALYST (Balanced):
             red_flags.append(valuation_flag)
             pm_generated_red_flags.append(valuation_flag)
 
-        red_flags = RedFlagDetector.reconcile_ocf_period_mismatch_flags(
-            red_flags,
-            fundamentals_report=fundamentals,
-            consultant_review=consultant_review,
-            auditor_report=auditor_report,
-            ticker=ticker,
-            consultant_conditions=consultant_conditions,
-        )
-
         red_flag_section, code_risk_subtotal = support.format_red_flag_section(
             pre_screening_result, red_flags
         )
@@ -1493,9 +1484,18 @@ RISK TEAM DEBATE:
                 red_flags.append(trace_flag)
                 pm_generated_red_flags.append(trace_flag)
 
+            # Same authority resolver the pre-screening validator uses, so the
+            # floor cannot upgrade a verdict on a score the canonical contract
+            # would not stand behind (a non-VALID snapshot marks both unreliable).
+            floor_inputs = DecisionInputs.from_metrics_and_snapshot(
+                RedFlagDetector.extract_metrics(fundamentals or "", ticker=ticker),
+                RedFlagDetector.detect_sector(fundamentals) if fundamentals else None,
+                state.get("analysis_snapshot"),
+                ticker=ticker,
+            )
             content_str, verdict_floored = maybe_floor_verdict_to_hold(
                 content_str,
-                fundamentals_report=fundamentals,
+                decision_inputs=floor_inputs,
                 red_flags=red_flags,
                 code_subtotal=code_risk_subtotal,
                 pre_screening_result=pre_screening_result,

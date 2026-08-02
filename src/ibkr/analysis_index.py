@@ -11,7 +11,7 @@ import re
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +31,7 @@ from src.sector_normalization import normalize_sector_label
 from src.validators.financial_rules import detect_red_flags
 from src.validators.metric_extractor import extract_metrics
 from src.validators.quality_flags import PEAK_OR_TRANSIENT_FLAGS
+from src.validators.sector_classifier import detect_sector
 from src.validators.supplemental_flags import (
     detect_capital_efficiency_flags,
     detect_moat_flags,
@@ -46,7 +47,11 @@ logger = structlog.get_logger(__name__)
 #     artifacts sell-confirmation authority).
 # v8: kill_criteria (bear thesis-break triggers from the saved bear history) —
 #     the fundamental exit conditions surfaced ahead of legacy downside levels.
-_ANALYSIS_INDEX_VERSION = 8
+# v9: capital/quality flag types read from the persisted red_flags ledger when
+#     present (prose re-derivation is now the legacy fallback only), plus
+#     flag_source provenance — cached v8 records hold prose-re-derived tuples
+#     computed with the wrong sector and without the value-trap report.
+_ANALYSIS_INDEX_VERSION = 9
 _DATA_VACUUM_COVERAGE_THRESHOLD_PCT = 40.0
 
 
@@ -258,31 +263,72 @@ _PROFIT_TAKE_CAPITAL_FLAGS = frozenset(
 )
 
 
+def _partition_flag_types(
+    flags: Iterable[Any],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split a flag list into (capital_flag_types, quality_flag_types)."""
+    types = tuple(
+        dict.fromkeys(
+            str(flag_type)
+            for flag in flags
+            if isinstance(flag, dict) and (flag_type := flag.get("type"))
+        )
+    )
+    return (
+        tuple(t for t in types if t in _PROFIT_TAKE_CAPITAL_FLAGS),
+        tuple(t for t in types if t in PEAK_OR_TRANSIENT_FLAGS),
+    )
+
+
 def _extract_flag_types(
     data: dict[str, Any],
     ticker: str,
     *,
     source_file: str | None = None,
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Single validator pass → (capital_flag_types, quality_flag_types).
+) -> tuple[tuple[str, ...], tuple[str, ...], str]:
+    """Return (capital_flag_types, quality_flag_types, flag_source).
 
-    Runs the validators once over the saved fundamentals/value-trap reports and
-    partitions the result into:
+    The run's own ``red_flags`` ledger is authoritative when the artifact carries
+    it: those are the flags the original analysis actually decided on, already
+    merged from the validator and PM nodes. Re-deriving them from saved prose is
+    a second, weaker store — it cannot see the run's sector, strict mode, entity
+    role, or canonical snapshot, so it can legitimately disagree with the
+    decision that was made. Prose re-derivation is therefore the *legacy*
+    fallback only (artifacts predating ``red_flags`` persistence).
+
+    Partitions into:
       - capital_flag_types: idle-cash capital flags (_PROFIT_TAKE_CAPITAL_FLAGS)
       - quality_flag_types: peak/transient markers (PEAK_OR_TRANSIENT_FLAGS) —
         CYCLICAL_PEAK_WARNING, TRANSIENT_STRENGTH_DISTORTION, and the
         moat/capital-efficiency bonus-suppression flags — for the BUY stability gate.
 
-    Re-derivation is deterministic; any failure degrades both to ().
+    ``flag_source`` is one of PERSISTED_CANONICAL / LEGACY_REPORT_REDERIVATION /
+    REDERIVATION_FAILED / NO_FUNDAMENTALS. A failure is reported as such rather
+    than as an empty flag set: absence of evidence must not read as "clean" to
+    the BUY stability gate.
     """
+    # Written unconditionally by `save_results_to_file` since the ledger landed,
+    # so the key's presence (even as an empty list) is what marks a modern
+    # artifact — the same discriminator `_extract_portfolio_evidence` uses.
+    persisted = data.get("red_flags")
+    if isinstance(persisted, list):
+        capital_types, quality_types = _partition_flag_types(persisted)
+        return capital_types, quality_types, "PERSISTED_CANONICAL"
+
     reports = data.get("reports") or {}
     fundamentals_report = (
         reports.get("fundamentals_report") or data.get("fundamentals_report") or ""
     )
     if not fundamentals_report:
-        return (), ()
+        return (), (), "NO_FUNDAMENTALS"
+    # `save_results_to_file` writes this under source_artifacts, not reports;
+    # reading only `reports` silently disabled the mid-term-plan inference in
+    # `detect_capital_efficiency_flags` on every legacy re-derivation.
     value_trap_report = (
-        reports.get("value_trap_report") or data.get("value_trap_report") or ""
+        (data.get("source_artifacts") or {}).get("value_trap_report")
+        or reports.get("value_trap_report")
+        or data.get("value_trap_report")
+        or ""
     )
     try:
         metrics = extract_metrics(
@@ -290,7 +336,10 @@ def _extract_flag_types(
             ticker=ticker,
             source_file=source_file,
         )
-        red_flags, _ = detect_red_flags(metrics, ticker=ticker)
+        # Sector-branched leverage thresholds: defaulting to INDUSTRIALS here
+        # re-derived a different flag set than the original run produced.
+        sector = detect_sector(fundamentals_report)
+        red_flags, _ = detect_red_flags(metrics, ticker=ticker, sector=sector)
         moat = detect_moat_flags(
             fundamentals_report,
             ticker=ticker,
@@ -301,6 +350,7 @@ def _extract_flag_types(
             ticker=ticker,
             value_trap_report=value_trap_report or None,
             base_metrics=metrics,
+            sector=sector,
         )
     except Exception as exc:
         log_fields = _safe_exception_fields(exc, operation="extracting analysis flags")
@@ -311,23 +361,10 @@ def _extract_flag_types(
             ticker=ticker,
             **log_fields,
         )
-        return (), ()
+        return (), (), "REDERIVATION_FAILED"
 
-    capital_types = tuple(
-        dict.fromkeys(
-            flag_type
-            for flag in capital
-            if (flag_type := flag.get("type")) in _PROFIT_TAKE_CAPITAL_FLAGS
-        )
-    )
-    quality_types = tuple(
-        dict.fromkeys(
-            flag_type
-            for flag in (*red_flags, *moat, *capital)
-            if (flag_type := flag.get("type")) in PEAK_OR_TRANSIENT_FLAGS
-        )
-    )
-    return capital_types, quality_types
+    capital_types, quality_types = _partition_flag_types((*red_flags, *moat, *capital))
+    return capital_types, quality_types, "LEGACY_REPORT_REDERIVATION"
 
 
 _COMPLIANCE_FLAG_PREFIXES = ("PFIC_", "VIE_", "CMIC_", "REGULATORY_")
@@ -532,7 +569,7 @@ def _build_analysis_record_from_data(
     )
     macro_regime = macro_regime_raw if isinstance(macro_regime_raw, dict) else {}
     data_quality = _extract_analysis_data_quality(data, snapshot)
-    capital_flag_types, quality_flag_types = _extract_flag_types(
+    capital_flag_types, quality_flag_types, flag_source = _extract_flag_types(
         data,
         ticker,
         source_file=filepath.name,
@@ -570,6 +607,7 @@ def _build_analysis_record_from_data(
         capital_flag_types=capital_flag_types,
         risk_tally=snapshot.get("risk_tally"),
         quality_flag_types=quality_flag_types,
+        flag_source=flag_source,
         kill_criteria=kill_criteria,
         macro_regime=macro_regime,
         data_quality=data_quality,

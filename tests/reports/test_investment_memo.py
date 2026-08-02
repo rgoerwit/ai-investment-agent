@@ -430,7 +430,10 @@ def test_build_memo_happy_path_buy() -> None:
     assert "consultant" in memo.confidence
 
 
-def test_build_memo_uses_effective_resolved_ocf_flags() -> None:
+def test_build_memo_surfaces_unsuppressed_ocf_discrepancy() -> None:
+    """With the period-mismatch suppression retired, the memo shows the conflict
+    and asks the reader to verify the statement line — it is no longer downgraded
+    to a "corroborated" note on the strength of consultant prose."""
     state = {
         "final_trade_decision": (
             "### PORTFOLIO MANAGER VERDICT: HOLD\n\n"
@@ -459,8 +462,8 @@ def test_build_memo_uses_effective_resolved_ocf_flags() -> None:
         ],
     }
     memo = build_memo(state)
-    assert memo.top_risks == []
-    assert "period mismatch" in memo.source_confidence[0][1]
+    assert "Filing/API OCF conflict" in memo.source_confidence[0][1]
+    assert "period mismatch" not in memo.source_confidence[0][1]
 
 
 def test_render_memo_markdown_happy_path_renders_all_sections() -> None:

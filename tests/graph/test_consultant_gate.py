@@ -284,3 +284,61 @@ class TestSharedOpenAIPlaneInvariant:
                 routing, "is_openai_consultant_available", lambda a=available: a
             )
             assert routing._is_auditor_enabled() is available
+
+
+class TestGateFlagTokensAreLive:
+    """Every flag name the gate keys on must actually be emitted by src/.
+
+    `CMIC_LISTED` sat in the blocking set for months producing nothing: the real
+    emitters are CMIC_FLAGGED / CMIC_UNCERTAIN, so a genuine NS-CMIC hit never
+    kept the Consultant active through this gate. A dead string here fails open
+    and is invisible, so it gets a structural guard rather than a comment.
+    """
+
+    @staticmethod
+    def _emitted_flag_types() -> set[str]:
+        import ast
+        import pathlib
+
+        src_root = pathlib.Path(routing.__file__).resolve().parents[1]
+        emitted: set[str] = set()
+        for path in src_root.rglob("*.py"):
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError):  # pragma: no cover
+                continue
+            for node in ast.walk(tree):
+                # A flag is emitted as a dict literal carrying a "type" key.
+                if not isinstance(node, ast.Dict):
+                    continue
+                for key, value in zip(node.keys, node.values, strict=False):
+                    if (
+                        isinstance(key, ast.Constant)
+                        and key.value == "type"
+                        and isinstance(value, ast.Constant)
+                        and isinstance(value.value, str)
+                    ):
+                        emitted.add(value.value)
+        return emitted
+
+    @pytest.mark.parametrize(
+        "gate_set_name",
+        ["_GATE_BLOCKING_RED_FLAGS", "_GATE_DATA_DISCREPANCY_FLAGS"],
+    )
+    def test_gate_flags_are_emitted_somewhere(self, gate_set_name):
+        emitted = self._emitted_flag_types()
+        assert emitted, "AST scan found no flag literals — the scan itself is broken"
+        gate_flags = getattr(routing, gate_set_name)
+        dead = sorted(flag for flag in gate_flags if flag not in emitted)
+        assert not dead, f"{gate_set_name} references flags nothing emits: {dead}"
+
+    def test_cmic_tokens_match_the_detector(self):
+        from src.validators.red_flag_detector import RedFlagDetector
+
+        for status, expected in (
+            ("FLAGGED", "CMIC_FLAGGED"),
+            ("UNCERTAIN", "CMIC_UNCERTAIN"),
+        ):
+            flags = RedFlagDetector.detect_legal_flags({"cmic_status": status}, "T")
+            assert flags[0]["type"] == expected
+            assert expected in routing._GATE_BLOCKING_RED_FLAGS

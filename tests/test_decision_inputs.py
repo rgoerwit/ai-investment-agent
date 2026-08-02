@@ -114,3 +114,106 @@ def test_score_consistency_suspect_marks_unreliable() -> None:
     assert inputs.health_score_reliable is False
     assert inputs.growth_score_reliable is True
     assert inputs.sector == "Financials"
+
+
+class TestNonValidSnapshotFailsClosed:
+    """A snapshot that RAN but did not validate must not silently authorize the
+    unprojected DATA_BLOCK arithmetic it failed to reconcile."""
+
+    def test_invalid_contract_marks_both_scores_suspect(self) -> None:
+        inputs = DecisionInputs.from_metrics_and_snapshot(
+            {"adjusted_health_score": 70.0, "adjusted_growth_score": 68.0},
+            "Industrials",
+            {"contract_status": "INVALID", "contract_reason": "VALIDATOR_CRASHED"},
+            ticker="TEST",
+        )
+
+        assert inputs.snapshot_authoritative is False
+        assert inputs.snapshot_status == "INVALID"
+        assert inputs.health_score_reliable is False
+        assert inputs.growth_score_reliable is False
+        assert inputs.decision_metrics["health_score_consistency"] == "SUSPECT"
+        assert inputs.decision_metrics["growth_score_consistency"] == "SUSPECT"
+
+    def test_suspect_stamp_raises_blocking_unreliable_flags(self) -> None:
+        """The SUSPECT contract is the point: it routes into the existing
+        *_SCORE_UNRELIABLE -> blocks_buy chain rather than inventing semantics."""
+        from src.validators.financial_rules import detect_red_flags
+
+        inputs = DecisionInputs.from_metrics_and_snapshot(
+            {"adjusted_health_score": 70.0, "adjusted_growth_score": 68.0},
+            "Industrials",
+            {"contract_status": "INVALID"},
+            ticker="TEST",
+        )
+        flags, _pre_screen = detect_red_flags(inputs, "TEST")
+        blocking = {f["type"] for f in flags if f.get("blocks_buy")}
+
+        assert "HEALTH_SCORE_UNRELIABLE" in blocking
+        assert "GROWTH_SCORE_UNRELIABLE" in blocking
+
+    def test_future_schema_claiming_valid_is_not_authoritative(self) -> None:
+        """Two readers, one verdict: a payload the publication boundary decodes
+        to DECODE_FAILED must not be authoritative here just because its raw
+        contract_status string says VALID."""
+        from src.runtime_diagnostics.artifact_status import _decode_snapshot_status
+
+        payload = {
+            "contract_status": "VALID",
+            "schema_version": 99_999,
+            "scorecards": {
+                "HEALTH": {"percentage": 91.0, "decision_eligible": True},
+                "GROWTH": {"percentage": 88.0, "decision_eligible": True},
+            },
+        }
+        inputs = DecisionInputs.from_metrics_and_snapshot(
+            {"adjusted_health_score": 40.0, "adjusted_growth_score": 40.0},
+            "Industrials",
+            payload,
+            ticker="TEST",
+        )
+
+        assert _decode_snapshot_status(payload) == "DECODE_FAILED"
+        assert inputs.snapshot_status == "DECODE_FAILED"
+        assert inputs.snapshot_authoritative is False
+        # The snapshot's 91/88 is NOT adopted, and the DATA_BLOCK 40/40 is not
+        # trusted either — it is marked untrusted rather than consumed.
+        assert inputs.health_decision_pct == 40.0
+        assert inputs.health_score_reliable is False
+
+    def test_degraded_contract_does_not_poison_scores(self) -> None:
+        """DEGRADED is a pre-senior input-availability state (no usable analytic
+        RAW_METRICS fields), not a rejection of the score arithmetic. It must not
+        stamp SUSPECT — that would flag every thin-data run as untrusted."""
+        inputs = DecisionInputs.from_metrics_and_snapshot(
+            {"adjusted_health_score": 68.0, "adjusted_growth_score": 55.0},
+            "Financials",
+            {"contract_status": "DEGRADED", "contract_reason": "RAW_METRICS_NO_USABLE"},
+            ticker="TEST",
+        )
+
+        assert inputs.snapshot_status == "DEGRADED"
+        assert inputs.snapshot_authoritative is False
+        assert inputs.health_score_reliable is True
+        assert inputs.growth_score_reliable is True
+        assert "health_score_consistency" not in inputs.decision_metrics
+
+    def test_legacy_no_snapshot_is_untouched(self) -> None:
+        """Absent snapshot stays fully backward compatible (no SUSPECT stamp)."""
+        metrics = {"adjusted_health_score": 70.0, "adjusted_growth_score": 55.0}
+        for snapshot in (None, {}):
+            inputs = DecisionInputs.from_metrics_and_snapshot(
+                metrics, "Industrials", snapshot, ticker="TEST"
+            )
+            assert inputs.snapshot_status is None
+            assert inputs.snapshot_authoritative is False
+            assert inputs.health_score_reliable is True
+            assert inputs.decision_metrics == metrics
+
+    def test_non_mapping_snapshot_is_treated_as_absent(self) -> None:
+        for snapshot in ([], "corrupt", 3):
+            inputs = DecisionInputs.from_metrics_and_snapshot(
+                {"adjusted_health_score": 70.0}, "Industrials", snapshot, ticker="TEST"
+            )
+            assert inputs.snapshot_status is None
+            assert inputs.health_score_reliable is True

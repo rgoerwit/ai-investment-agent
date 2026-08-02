@@ -9,6 +9,7 @@ from src.ibkr.analysis_index import (
     _extract_tool1_financial_metrics,
     _parse_scores_from_final_decision,
 )
+from src.validators.sector_classifier import Sector
 from tests.import_boundary import assert_no_offenders
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -174,21 +175,158 @@ def test_build_analysis_record_quality_flags_empty_without_fundamentals():
 
 
 def test_extract_flag_types_partitions_in_one_pass():
-    """Single pass returns (capital_flag_types, quality_flag_types)."""
-    capital, quality = _extract_flag_types(
+    """Legacy pass returns (capital_flag_types, quality_flag_types, source)."""
+    capital, quality, source = _extract_flag_types(
         {"reports": {"fundamentals_report": _PEAK_FUNDAMENTALS}}, "TEST.T"
     )
     assert "CYCLICAL_PEAK_WARNING" in quality
     assert capital == ()  # peak-only report has no idle-cash flags
+    assert source == "LEGACY_REPORT_REDERIVATION"
 
 
 def test_extract_flag_types_empty_without_fundamentals():
-    assert _extract_flag_types({}, "TEST.T") == ((), ())
+    assert _extract_flag_types({}, "TEST.T") == ((), (), "NO_FUNDAMENTALS")
+
+
+class TestPersistedFlagLedger:
+    """The run's own red_flags ledger outranks re-parsing its saved prose."""
+
+    def test_persisted_ledger_is_used_without_touching_prose(self, monkeypatch):
+        def boom(*args, **kwargs):  # pragma: no cover - must never run
+            raise AssertionError("prose must not be re-parsed when the ledger exists")
+
+        monkeypatch.setattr(analysis_index, "extract_metrics", boom)
+
+        capital, quality, source = _extract_flag_types(
+            {
+                "red_flags": [
+                    {"type": "CAPITAL_IDLE_CASH_RISK"},
+                    {"type": "CYCLICAL_PEAK_WARNING"},
+                    {"type": "PFIC_PROBABLE"},  # neither capital nor quality
+                ],
+                "reports": {"fundamentals_report": _PEAK_FUNDAMENTALS},
+            },
+            "TEST.T",
+        )
+
+        assert capital == ("CAPITAL_IDLE_CASH_RISK",)
+        assert quality == ("CYCLICAL_PEAK_WARNING",)
+        assert source == "PERSISTED_CANONICAL"
+
+    def test_empty_ledger_is_evidence_of_absence_not_a_legacy_artifact(
+        self, monkeypatch
+    ):
+        """A modern run with no flags persists []; that is a real 'clean'."""
+
+        def boom(*args, **kwargs):  # pragma: no cover - must never run
+            raise AssertionError("an empty ledger is still a ledger")
+
+        monkeypatch.setattr(analysis_index, "extract_metrics", boom)
+
+        assert _extract_flag_types(
+            {"red_flags": [], "reports": {"fundamentals_report": _PEAK_FUNDAMENTALS}},
+            "TEST.T",
+        ) == ((), (), "PERSISTED_CANONICAL")
+
+    def test_malformed_ledger_falls_back_to_rederivation(self):
+        """A non-list red_flags payload is not a ledger — re-derive instead."""
+        _capital, quality, source = _extract_flag_types(
+            {
+                "red_flags": "corrupted",
+                "reports": {"fundamentals_report": _PEAK_FUNDAMENTALS},
+            },
+            "TEST.T",
+        )
+
+        assert "CYCLICAL_PEAK_WARNING" in quality
+        assert source == "LEGACY_REPORT_REDERIVATION"
+
+    def test_non_dict_ledger_entries_are_skipped_not_stringified(self):
+        capital, quality, source = _extract_flag_types(
+            {"red_flags": [None, "CYCLICAL_PEAK_WARNING", {"type": None}]},
+            "TEST.T",
+        )
+
+        assert (capital, quality, source) == ((), (), "PERSISTED_CANONICAL")
+
+    def test_legacy_rederivation_reads_value_trap_from_source_artifacts(
+        self, monkeypatch
+    ):
+        """save_results_to_file writes it under source_artifacts, not reports."""
+        seen: list[str | None] = []
+
+        def fake_capital_flags(
+            fundamentals_report, ticker="UNKNOWN", value_trap_report=None, **kwargs
+        ):
+            seen.append(value_trap_report)
+            return []
+
+        monkeypatch.setattr(
+            analysis_index, "detect_capital_efficiency_flags", fake_capital_flags
+        )
+
+        _extract_flag_types(
+            {
+                "reports": {"fundamentals_report": _PEAK_FUNDAMENTALS},
+                "source_artifacts": {
+                    "value_trap_report": "VALUE_TRAP_BLOCK\nSCORE: 30"
+                },
+            },
+            "TEST.T",
+        )
+
+        assert seen == ["VALUE_TRAP_BLOCK\nSCORE: 30"]
+
+    def test_rederivation_failure_is_reported_not_silently_clean(self, monkeypatch):
+        def boom(*args, **kwargs):
+            raise ValueError("parser exploded")
+
+        monkeypatch.setattr(analysis_index, "extract_metrics", boom)
+
+        assert _extract_flag_types(
+            {"reports": {"fundamentals_report": _PEAK_FUNDAMENTALS}}, "TEST.T"
+        ) == ((), (), "REDERIVATION_FAILED")
+
+    def test_record_marks_unavailable_flag_evidence(self, monkeypatch):
+        def boom(*args, **kwargs):
+            raise ValueError("parser exploded")
+
+        monkeypatch.setattr(analysis_index, "extract_metrics", boom)
+
+        record = _build_analysis_record_from_data(
+            Path("TEST.T_20260601_000000_analysis.json"),
+            {
+                "prediction_snapshot": {"ticker": "TEST.T", "currency": "JPY"},
+                "reports": {"fundamentals_report": _PEAK_FUNDAMENTALS},
+                "investment_analysis": {"trader_plan": ""},
+            },
+        )
+
+        assert record is not None
+        assert record.flag_source == "REDERIVATION_FAILED"
+        assert record.quality_flags_available is False
+
+    def test_record_from_persisted_ledger_marks_evidence_available(self):
+        record = _build_analysis_record_from_data(
+            Path("TEST.T_20260601_000000_analysis.json"),
+            {
+                "prediction_snapshot": {"ticker": "TEST.T", "currency": "JPY"},
+                "red_flags": [{"type": "CYCLICAL_PEAK_WARNING"}],
+                "investment_analysis": {"trader_plan": ""},
+            },
+        )
+
+        assert record is not None
+        assert record.flag_source == "PERSISTED_CANONICAL"
+        assert record.quality_flag_types == ("CYCLICAL_PEAK_WARNING",)
+        assert record.quality_flags_available is True
 
 
 def test_extract_flag_types_reuses_base_metrics(monkeypatch):
     """Index loading should parse the fundamentals DATA_BLOCK once per file."""
-    report = "malformed but present"
+    # Carries a SECTOR line so the real detect_sector resolves a non-default
+    # sector — the index must thread the run's own sector, not INDUSTRIALS.
+    report = "malformed but present\nSECTOR: Financials\n"
     parsed_metrics = {"cycle_position": "PEAK"}
     extract_calls = []
 
@@ -201,9 +339,10 @@ def test_extract_flag_types_reuses_base_metrics(monkeypatch):
         extract_calls.append((fundamentals_report, ticker, source_file))
         return parsed_metrics
 
-    def fake_detect_red_flags(metrics: dict, *, ticker: str):
+    def fake_detect_red_flags(metrics: dict, *, ticker: str, sector=None):
         assert metrics is parsed_metrics
         assert ticker == "TEST.T"
+        assert sector is Sector.FINANCIALS
         return [{"type": "CYCLICAL_PEAK_WARNING"}], 0.0
 
     def fake_detect_moat_flags(
@@ -228,7 +367,7 @@ def test_extract_flag_types_reuses_base_metrics(monkeypatch):
         assert fundamentals_report == report
         assert ticker == "TEST.T"
         assert value_trap_report is None
-        assert sector is None
+        assert sector is Sector.FINANCIALS
         assert base_metrics is parsed_metrics
         return [{"type": "CAPITAL_IDLE_CASH_RISK"}]
 
@@ -241,7 +380,7 @@ def test_extract_flag_types_reuses_base_metrics(monkeypatch):
         fake_detect_capital_flags,
     )
 
-    capital, quality = analysis_index._extract_flag_types(
+    capital, quality, source = analysis_index._extract_flag_types(
         {"reports": {"fundamentals_report": report}},
         "TEST.T",
         source_file="TEST.T_20260601_000000_analysis.json",
@@ -250,6 +389,7 @@ def test_extract_flag_types_reuses_base_metrics(monkeypatch):
     assert extract_calls == [(report, "TEST.T", "TEST.T_20260601_000000_analysis.json")]
     assert capital == ("CAPITAL_IDLE_CASH_RISK",)
     assert quality == ("CYCLICAL_PEAK_WARNING",)
+    assert source == "LEGACY_REPORT_REDERIVATION"
 
 
 def test_parse_scores_handles_signed_risk_tally():

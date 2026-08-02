@@ -4,6 +4,7 @@ import asyncio
 import random
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 
 import structlog
@@ -230,6 +231,89 @@ class ProviderPartialResponseError(RuntimeError):
     `invoke_with_rate_limit_handling`."""
 
 
+@dataclass(frozen=True)
+class RefusalSignal:
+    """A recognized provider safety/content-policy block on a returned
+    response. ``reason_code`` is a stable lowercase token
+    (``content_filter``/``safety``/``recitation``/``prohibited_content``/
+    ``refusal``/``prompt_blocked:<x>``); ``stage`` is ``"response"`` (the
+    model produced output that was blocked/refused) or ``"request"`` (the
+    prompt itself was blocked before generation)."""
+
+    reason_code: str
+    stage: str
+
+
+class ProviderRefusalError(RuntimeError):
+    """Raised when an LLM call returned a provider safety block / content
+    refusal instead of a usable response. The message carries the marker
+    `provider_safety_block` so `classify_failure` maps it to the
+    ``provider_safety_block`` kind — which is in neither the rate-limit nor
+    the transient-retry set, so it is non-retryable by construction and
+    degrades through the node-level `except -> failure_artifact` wrapper."""
+
+    def __init__(self, signal: RefusalSignal):
+        self.reason_code = signal.reason_code
+        self.stage = signal.stage
+        super().__init__(
+            f"provider_safety_block: {signal.reason_code} (stage={signal.stage})"
+        )
+
+
+def _detect_provider_refusal(result: Any) -> RefusalSignal | None:
+    """Return a `RefusalSignal` iff *result* is a provider safety block /
+    content-policy refusal — otherwise None.
+
+    Metadata-only by design: this inspects `finish_reason`/`stop_reason`,
+    the OpenAI Responses-API `incomplete_details.reason`, the OpenAI Chat
+    structured `.refusal` field, and Gemini `prompt_feedback.block_reason`.
+    It never matches on the model's prose — a keyword scan of output text
+    would false-positive on legitimate financial content (e.g. a report that
+    discusses "safety") and kill a good run. Callers must short-circuit
+    active tool-call turns before calling this (an empty content on a
+    tool_calls turn is normal, not a refusal)."""
+    response_metadata = getattr(result, "response_metadata", None)
+    if not isinstance(response_metadata, dict):
+        response_metadata = {}
+
+    # OpenAI Responses API: an incomplete status names the reason.
+    if response_metadata.get("status") == "incomplete":
+        details = response_metadata.get("incomplete_details") or {}
+        reason = details.get("reason") if isinstance(details, dict) else None
+        if reason in ("content_filter", "refusal"):
+            return RefusalSignal(reason, "response")
+
+    finish_reason = response_metadata.get("finish_reason") or response_metadata.get(
+        "stop_reason"
+    )
+    if finish_reason == "content_filter":
+        return RefusalSignal("content_filter", "response")
+    if finish_reason == "SAFETY":
+        return RefusalSignal("safety", "response")
+    if finish_reason == "RECITATION":
+        return RefusalSignal("recitation", "response")
+    if finish_reason in ("PROHIBITED_CONTENT", "SPII", "BLOCKLIST"):
+        return RefusalSignal(str(finish_reason).lower(), "response")
+    if finish_reason == "refusal":  # Anthropic stop_reason
+        return RefusalSignal("refusal", "response")
+
+    # OpenAI Chat Completions structured refusal (langchain surfaces it in
+    # additional_kwargs; the response text is empty in this case).
+    additional_kwargs = getattr(result, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict) and additional_kwargs.get("refusal"):
+        return RefusalSignal("refusal", "response")
+
+    # Gemini prompt-level block, when the wrapper surfaces prompt_feedback
+    # (best-effort — not currently exposed by every langchain-google version).
+    prompt_feedback = response_metadata.get("prompt_feedback")
+    if isinstance(prompt_feedback, dict) and prompt_feedback.get("block_reason"):
+        return RefusalSignal(
+            f"prompt_blocked:{prompt_feedback['block_reason']}", "request"
+        )
+
+    return None
+
+
 def _timeout_failure_origin(exc: BaseException) -> str | None:
     """Classify timeout source without changing the stable failure_kind."""
     text = f"{type(exc).__name__}: {exc}".lower()
@@ -341,6 +425,35 @@ async def invoke_with_rate_limit_handling(
                 timeout=effective_timeout,
                 label=f"llm:{context}:{resolved_provider}:{resolved_model}",
             )
+            # Refusal / provider safety block: a returned response that the
+            # provider blocked or refused (finish_reason SAFETY/content_filter,
+            # Anthropic stop_reason=refusal, OpenAI structured .refusal, Gemini
+            # prompt block). An active tool-call turn is never a refusal, so
+            # skip the check there. On a hit, emit the dedicated event (safe
+            # metadata only — no prompt contents) and raise; the generic
+            # `except` below records the single ledger failure via
+            # classify_failure -> provider_safety_block (non-retryable).
+            _tool_calls = getattr(result, "tool_calls", None)
+            if not (isinstance(_tool_calls, list) and _tool_calls):
+                refusal = _detect_provider_refusal(result)
+                if refusal is not None:
+                    _content = getattr(result, "content", "") or ""
+                    logger.warning(
+                        "llm_refusal_detected",
+                        context=context,
+                        provider=resolved_provider,
+                        model=resolved_model,
+                        stage=refusal.stage,
+                        reason_code=refusal.reason_code,
+                        output_len=len(_content) if isinstance(_content, str) else None,
+                        input_messages=(
+                            len(input_data["messages"])
+                            if isinstance(input_data, dict)
+                            and isinstance(input_data.get("messages"), list)
+                            else None
+                        ),
+                    )
+                    raise ProviderRefusalError(refusal)
             # Inspect finish_reason: providers occasionally return a "200 OK"
             # with truncated content and no finish_reason under load. Raise
             # the marker exception so the existing transient-retry branch
@@ -500,7 +613,15 @@ async def invoke_with_rate_limit_handling(
                 and runtime_config.quick_mode_active
                 and provider_flex_active(resolved_provider, settings_config)
             )
-            if breaker is not None and not flex_latency_timeout_quick:
+            # A provider safety block / content refusal is content-specific, not
+            # evidence the provider or model is unhealthy — exclude it from the
+            # circuit breakers so a run's repeated refusals cannot trip them and
+            # fast-fail unrelated sibling agents. (Same rationale as the flex
+            # queue-event exclusion above.)
+            exclude_from_breakers = (
+                flex_latency_timeout_quick or details.kind == "provider_safety_block"
+            )
+            if breaker is not None and not exclude_from_breakers:
                 breaker.record_outcome(
                     agent_name=context,
                     provider=resolved_provider,
@@ -508,7 +629,7 @@ async def invoke_with_rate_limit_handling(
                     ok=False,
                     failure_kind=details.kind,
                 )
-            if network_breaker is not None and not flex_latency_timeout_quick:
+            if network_breaker is not None and not exclude_from_breakers:
                 network_breaker.record_outcome(ok=False, failure_kind=details.kind)
             with _accounting_hook("capture_manager_failure"):
                 capture_manager = _get_capture_manager()

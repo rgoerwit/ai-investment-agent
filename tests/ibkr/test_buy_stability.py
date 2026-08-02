@@ -89,6 +89,33 @@ class TestAssessBuyStability:
             is None
         )
 
+    def test_marginal_with_unavailable_flag_evidence_withheld(self):
+        """Absent evidence is not evidence of absence: an empty flag set that
+        could not be loaded must not clear a marginal BUY."""
+        note = assess_buy_stability(
+            "BUY",
+            [],
+            risk_tally=0.9,
+            active_flags=(),
+            flags_available=False,
+            cfg=_CFG,
+        )
+        assert note is not None
+        assert "unavailable" in note
+
+    def test_unavailable_flag_evidence_without_margin_passes(self):
+        assert (
+            assess_buy_stability(
+                "BUY",
+                [],
+                risk_tally=0.0,
+                active_flags=(),
+                flags_available=False,
+                cfg=_CFG,
+            )
+            is None
+        )
+
 
 class TestLoadRecentSameTickerVerdicts:
     _NOW = datetime(2026, 6, 19, 12, 0, 0)

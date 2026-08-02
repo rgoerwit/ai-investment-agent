@@ -483,7 +483,8 @@ async def run_analysis(
     Args:
         ticker: Stock ticker symbol
         quick_mode: If True, use faster/cheaper models and skip some steps
-        strict_mode: If True, apply tighter quality gates and reject REITs/PFIC/VIE
+        strict_mode: If True, apply tighter quality gates and auto-reject
+            REITs/ETFs and earnings-quality failures (PFIC/VIE stay warnings)
         chart_format: Chart output format ('png' or 'svg')
         transparent_charts: Whether to use transparent chart backgrounds
         image_dir: Directory for chart output (None = use config default)

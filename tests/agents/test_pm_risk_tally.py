@@ -90,8 +90,11 @@ def test_net_positive_subtotal_is_floored() -> None:
     assert subtotal == 2.5
 
 
-def test_resolved_ocf_period_mismatch_drops_old_penalty() -> None:
-    from src.validators.red_flag_detector import RedFlagDetector
+def test_ocf_discrepancy_penalty_is_not_suppressed_at_report_stage() -> None:
+    """The period-mismatch suppression is retired, so the 0.5 penalty reaches the
+    subtotal that gates Zone-1 and the verdict floor. Report-stage access is now a
+    passthrough — nothing between the ledger and the renderer removes a flag."""
+    from src.reporting.state_access import get_effective_red_flags
 
     flags = [
         {
@@ -100,31 +103,14 @@ def test_resolved_ocf_period_mismatch_drops_old_penalty() -> None:
             "risk_penalty": 0.5,
         }
     ]
-    fundamentals = (
-        "### --- START DATA_BLOCK ---\n"
-        "OPERATING_CASH_FLOW: 151.97M PLN\n"
-        "OPERATING_CASH_FLOW_SOURCE: FILING\n"
-        "OCF_FILING_REASON: DISCREPANCY\n"
-        "### --- END DATA_BLOCK ---\n"
-    )
-    consultant = (
-        "SPOT_CHECK operatingCashflow: DATA_BLOCK 151.97m PLN FY2025; "
-        "FMP 178.06m PLN TTM/Q1 — PERIOD MISMATCH, not a data conflict."
-    )
-    auditor = "Operating cash flow: PLN 151.967m"
 
-    effective = RedFlagDetector.reconcile_ocf_period_mismatch_flags(
-        flags,
-        fundamentals_report=fundamentals,
-        consultant_review=consultant,
-        auditor_report=auditor,
-        ticker="APR.WA",
+    text, subtotal = format_red_flag_section(
+        "PASS", get_effective_red_flags({"red_flags": flags})
     )
-    text, subtotal = format_red_flag_section("PASS", effective)
 
-    assert subtotal == 0.0
-    assert "OCF_PERIOD_MISMATCH_RESOLVED [risk_penalty +0.00]" in text
-    assert "OCF_SOURCE_DISCREPANCY" not in text
+    assert subtotal == 0.5
+    assert "OCF_SOURCE_DISCREPANCY [risk_penalty +0.50]" in text
+    assert "OCF_PERIOD_MISMATCH_RESOLVED" not in text
 
 
 # --------------------------------------------------------------------------- #

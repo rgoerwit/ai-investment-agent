@@ -282,7 +282,11 @@ _GATE_BLOCKING_RED_FLAGS = frozenset(
         "SEGMENT_DETERIORATION",
         "OCF_SOURCE_DISCREPANCY",
         "NO_CATALYST_DETECTED",
-        "CMIC_LISTED",
+        # Must match what detect_legal_flags actually emits: the old "CMIC_LISTED"
+        # entry was a dead string produced by nothing in src/, so a genuine
+        # NS-CMIC hit never kept the Consultant active through this gate.
+        "CMIC_FLAGGED",
+        "CMIC_UNCERTAIN",
     }
 )
 

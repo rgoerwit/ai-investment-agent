@@ -9,6 +9,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any, ClassVar
 
+import structlog
+
 from src.claim_policy import (
     MATERIAL_CLAIM_POLICIES,
     RAW_FINANCIAL_METRICS_INPUT,
@@ -30,6 +32,8 @@ from src.provenance_schema import (
 )
 from src.tooling.evidence_recorder import bind_fetched_evidence
 from src.tooling.structured_ingress import get_structured_ingress_payload
+
+logger = structlog.get_logger(__name__)
 
 _FIELD_RE = re.compile(r"(?m)^\s*(?:[-*]\s*)?([A-Z][A-Z0-9_]{2,})\s*:\s*(.*?)\s*$")
 _UNKNOWN_VALUES = frozenset({"", "N/A", "NA", "NONE", "UNKNOWN", "NOT FOUND"})
@@ -164,6 +168,28 @@ class AnalysisSnapshot:
             commentary_status=d.get("commentary_status"),
             scorecards=scorecards,
         )
+
+
+def decoded_contract_status(snapshot: Any) -> str | None:
+    """Contract status via the typed codec, fail-closed on a corrupt/future shape.
+
+    The single reader of ``contract_status`` for every consumer that acts on
+    snapshot authority. Reading the raw string instead lets two consumers reach
+    opposite verdicts on one payload — a future-schema snapshot literally
+    claiming ``"VALID"`` would be trusted by one and rejected by another.
+
+    ``None`` when no snapshot is present (grandfathered legacy path). A
+    ``SchemaDecodeError`` (future schema_version, or a type-corrupt
+    contract_status) yields ``DECODE_FAILED``, so a payload current code cannot
+    safely read is never treated as VALID.
+    """
+    if not isinstance(snapshot, Mapping):
+        return None
+    try:
+        return AnalysisSnapshot.from_dict(snapshot).contract_status or "INVALID"
+    except SchemaDecodeError as exc:
+        logger.warning("analysis_snapshot_schema_decode_failed", reason=str(exc))
+        return "DECODE_FAILED"
 
 
 def _normalize_authority(value: str | None, *, default: Authority) -> Authority:

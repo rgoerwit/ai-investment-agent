@@ -19,21 +19,18 @@ logger = structlog.get_logger(__name__)
 def _decode_snapshot_status(snapshot: Any) -> str | None:
     """Contract status via the typed codec, fail-closed on a corrupt/future shape.
 
-    ``None`` when no snapshot is present (grandfathered legacy path). A
-    ``SchemaDecodeError`` (future schema_version or a type-corrupt
-    contract_status) yields ``DECODE_FAILED`` → a required failure downstream,
-    so a payload current code cannot safely read is never treated as VALID.
+    Thin wrapper over the canonical `analysis_snapshot.decoded_contract_status`
+    so this boundary and every other snapshot-authority consumer read the field
+    through exactly one decoder. A ``DECODE_FAILED`` result becomes a required
+    failure downstream, so a payload current code cannot safely read is never
+    treated as VALID.
     """
     if not isinstance(snapshot, dict):
         return None
     # Lazy import avoids any chance of an analysis_snapshot import cycle.
-    from src.analysis_snapshot import AnalysisSnapshot
+    from src.analysis_snapshot import decoded_contract_status
 
-    try:
-        return AnalysisSnapshot.from_dict(snapshot).contract_status or "INVALID"
-    except SchemaDecodeError as exc:
-        logger.warning("analysis_snapshot_schema_decode_failed", reason=str(exc))
-        return "DECODE_FAILED"
+    return decoded_contract_status(snapshot)
 
 
 def _decode_trace_status(decision_trace: Any) -> str | None:

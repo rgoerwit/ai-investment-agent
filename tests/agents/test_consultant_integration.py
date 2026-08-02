@@ -1131,7 +1131,10 @@ Conditions:
         )
 
     @pytest.mark.asyncio
-    async def test_pm_prompt_uses_resolved_ocf_period_mismatch_flag(self):
+    async def test_pm_prompt_keeps_ocf_discrepancy_despite_period_mismatch_text(self):
+        """The consultant's "PERIOD MISMATCH, not a data conflict" prose no longer
+        neutralizes the OCF discrepancy: that suppression could only ever remove a
+        risk flag, and is retired. The PM sees the discrepancy and decides."""
         mock_llm = Mock()
         mock_response = Mock()
         mock_response.content = (
@@ -1226,8 +1229,8 @@ Conditions:
                 result = await node(state, RunnableConfig(configurable={}))
 
         prompt_text = captured_prompt["text"]
-        assert "OCF_PERIOD_MISMATCH_RESOLVED [risk_penalty +0.00]" in prompt_text
-        assert "OCF_SOURCE_DISCREPANCY [risk_penalty +0.50]" not in prompt_text
+        assert "OCF_SOURCE_DISCREPANCY [risk_penalty +0.50]" in prompt_text
+        assert "OCF_PERIOD_MISMATCH_RESOLVED" not in prompt_text
         assert "PORTFOLIO MANAGER VERDICT: HOLD" in result["final_trade_decision"]
 
 

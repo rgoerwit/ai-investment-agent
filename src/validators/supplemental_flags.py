@@ -290,6 +290,12 @@ def detect_legal_flags(
                 "detail": f"Company appears on NS-CMIC list. {cmic_evidence[:80]}",
                 "action": "RISK_PENALTY",
                 "risk_penalty": 2.0,
+                # A US person is legally prohibited from initiating this position.
+                # Without this the flag carried strictly less mechanical force than
+                # a score-arithmetic warning: a 2.0 penalty the PM could still
+                # reason past. blocks_buy routes it through the existing
+                # maybe_demote_buy_on_blocking_flags chain — no new machinery.
+                "blocks_buy": True,
                 "rationale": "US Executive Orders prohibit US persons from investing in NS-CMIC listed companies. Verify current OFAC status before investing. Restrictions may be modified by future executive orders.",
             }
         )

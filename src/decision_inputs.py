@@ -29,20 +29,41 @@ from src.provenance_schema import Scorecard
 
 logger = structlog.get_logger(__name__)
 
+# Contract statuses meaning "the canonical layer ran and would not stand behind
+# this payload". DEGRADED is excluded by design — see from_metrics_and_snapshot.
+_REJECTED_CONTRACT_STATUSES = frozenset({"INVALID", "DECODE_FAILED"})
+
+
+def _contract_status(snapshot: Mapping[str, Any] | None) -> str | None:
+    """Decoded contract status, or None when no snapshot is present.
+
+    Deliberately routed through the one canonical decoder rather than reading
+    the raw ``contract_status`` string: a future-schema payload that literally
+    says ``"VALID"`` must not be authoritative here while the publication
+    boundary independently decodes it to DECODE_FAILED.
+    """
+    if not isinstance(snapshot, Mapping) or not snapshot:
+        return None
+    # Lazy import mirrors the publication boundary: keeps this leaf module free
+    # of the snapshot builder's heavier dependency graph.
+    from src.analysis_snapshot import decoded_contract_status
+
+    return decoded_contract_status(snapshot)
+
 
 def _snapshot_decision_score(
     snapshot: Mapping[str, Any] | None, kind: str
 ) -> float | None:
     """The decision percentage the canonical scorecard owns for HEALTH/GROWTH.
 
-    Returns None unless the contract is VALID and the scorecard is
-    decision-eligible — mirroring what `project_analysis_report` would have
-    written into the DATA_BLOCK (N/A otherwise). A future-schema or corrupt
-    scorecard decodes fail-closed to None (the conservative ineligible path).
+    Callers must have already established that the contract is VALID. Returns
+    None when the scorecard is missing or not decision-eligible — mirroring what
+    `project_analysis_report` would have written into the DATA_BLOCK (N/A
+    otherwise). A future-schema or corrupt scorecard decodes fail-closed to None
+    (the conservative ineligible path).
     """
-    if not isinstance(snapshot, Mapping) or snapshot.get("contract_status") != "VALID":
-        return None
-    scorecard = Scorecard.decode_or_none((snapshot.get("scorecards") or {}).get(kind))
+    scorecards = (snapshot or {}).get("scorecards") or {}
+    scorecard = Scorecard.decode_or_none(scorecards.get(kind))
     if scorecard is None or not scorecard.decision_eligible:
         return None
     return float(scorecard.percentage)
@@ -109,7 +130,12 @@ class DecisionInputs:
     # True when a VALID canonical snapshot owns the scores (whether it supplied
     # a number or an authoritative None). In that state the DATA_BLOCK value is
     # never used — a snapshot None means "canonically unusable", not "fall back".
+    # False covers two distinct states, distinguished by `snapshot_status`:
+    # a legacy/no-snapshot run (parsed scores stand), and a snapshot that ran
+    # but did not validate (parsed scores stand but are marked SUSPECT).
     snapshot_authoritative: bool
+    # Decoded contract status: None (no snapshot) | VALID | INVALID | DECODE_FAILED.
+    snapshot_status: str | None = None
 
     @classmethod
     def from_metrics(
@@ -141,26 +167,52 @@ class DecisionInputs:
         # None ("canonically unusable"). In neither case may the validator fall
         # back to the narrative DATA_BLOCK value — the canonical layer has
         # already spoken. Only a legacy / no-snapshot run uses the parsed value.
-        snapshot_authoritative = (
-            isinstance(snapshot, Mapping) and snapshot.get("contract_status") == "VALID"
-        )
-        if snapshot_authoritative:
-            health = _snapshot_decision_score(snapshot, "HEALTH")
-            growth = _snapshot_decision_score(snapshot, "GROWTH")
-            _log_score_override("HEALTH", health, parsed_health, ticker)
-            _log_score_override("GROWTH", growth, parsed_growth, ticker)
-        else:
-            health = parsed_health
-            growth = parsed_growth
+        snapshot_status = _contract_status(snapshot)
+        snapshot_authoritative = snapshot_status == "VALID"
 
         # The reconciled dict the engine reads: the parsed metrics with the
         # snapshot-authoritative scores written in. Under a VALID snapshot this
         # can replace a stale narrative score with None (fail-closed); otherwise
         # it is a no-op (the DATA_BLOCK is already the Stage-2 projection).
         decision_metrics = dict(metrics)
+        health = parsed_health
+        growth = parsed_growth
+
         if snapshot_authoritative:
+            health = _snapshot_decision_score(snapshot, "HEALTH")
+            growth = _snapshot_decision_score(snapshot, "GROWTH")
+            _log_score_override("HEALTH", health, parsed_health, ticker)
+            _log_score_override("GROWTH", growth, parsed_growth, ticker)
             decision_metrics["adjusted_health_score"] = health
             decision_metrics["adjusted_growth_score"] = growth
+        elif snapshot_status in _REJECTED_CONTRACT_STATUSES:
+            # The canonical layer RAN and rejected the payload (INVALID) or could
+            # not read it at all (DECODE_FAILED). `project_analysis_report` only
+            # projects under a VALID contract, so the DATA_BLOCK still holds the
+            # model's own unreconciled arithmetic — consuming it as a decision
+            # score is exactly what the projection exists to prevent. Mark both
+            # scores untrusted via the established SUSPECT contract: the gates
+            # become indeterminate in BOTH directions (no auto-DNI on the value,
+            # and it cannot count as a pass supporting BUY) rather than silently
+            # authoritative.
+            #
+            # Deliberately NOT applied to DEGRADED: that is a pre-senior
+            # input-availability state (no usable analytic RAW_METRICS fields),
+            # not a verdict on the score arithmetic, and it predates the
+            # scorecard entirely. A no-snapshot legacy run is untouched too.
+            decision_metrics["health_score_consistency"] = "SUSPECT"
+            decision_metrics["growth_score_consistency"] = "SUSPECT"
+            logger.warning(
+                "decision_input_snapshot_not_authoritative",
+                ticker=ticker,
+                snapshot_status=snapshot_status,
+                health=parsed_health,
+                growth=parsed_growth,
+                msg=(
+                    "Canonical contract did not validate; DATA_BLOCK scores are "
+                    "unprojected model arithmetic and are marked untrusted."
+                ),
+            )
 
         sector_value = getattr(sector, "value", sector)
         return cls(
@@ -172,7 +224,14 @@ class DecisionInputs:
             fcf=metrics.get("fcf"),
             health_decision_pct=health,
             growth_decision_pct=growth,
-            health_score_reliable=metrics.get("health_score_consistency") != "SUSPECT",
-            growth_score_reliable=metrics.get("growth_score_consistency") != "SUSPECT",
+            # Read from the reconciled dict, not the raw metrics: a non-VALID
+            # contract stamps SUSPECT above and must be visible here too.
+            health_score_reliable=(
+                decision_metrics.get("health_score_consistency") != "SUSPECT"
+            ),
+            growth_score_reliable=(
+                decision_metrics.get("growth_score_consistency") != "SUSPECT"
+            ),
             snapshot_authoritative=snapshot_authoritative,
+            snapshot_status=snapshot_status,
         )

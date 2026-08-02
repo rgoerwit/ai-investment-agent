@@ -20,6 +20,7 @@ FailureKind = Literal[
     "bad_request",
     "application_error",
     "data_unavailable",
+    "provider_safety_block",
     "provider_partial_response",
     "unknown_provider_error",
 ]
@@ -171,6 +172,28 @@ def classify_failure(
         )
     ):
         kind = "auth_error"
+        retryable = False
+    elif any(
+        # Placed before bad_request/server_error: content-policy rejections often
+        # carry a "400" (and occasionally a "500") that would otherwise be
+        # swallowed as a generic bad_request. Markers are specific provider
+        # phrases, never the bare word "safety" (avoids unrelated false matches);
+        # "provider_safety_block" is the marker our own ProviderRefusalError emits.
+        marker in combined
+        for marker in (
+            "provider_safety_block",
+            "content_filter",
+            "content filter",
+            "content management policy",
+            "content_policy_violation",
+            "responsibleaipolicyviolation",
+            "prohibited_content",
+            "recitation",
+            "was blocked by the safety",
+            "blocked by responsible ai",
+        )
+    ):
+        kind = "provider_safety_block"
         retryable = False
     elif "provider_partial_response" in combined:
         kind = "provider_partial_response"

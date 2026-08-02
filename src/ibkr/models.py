@@ -275,6 +275,23 @@ class AnalysisRecord(BaseModel):
     # moat/capital-efficiency bonus-suppression markers). Consumed by the BUY
     # stability gate; intentionally distinct from idle-cash `capital_flag_types`.
     quality_flag_types: tuple[str, ...] = ()
+    # Provenance of capital_flag_types/quality_flag_types above:
+    #   PERSISTED_CANONICAL        — the run's own red_flags ledger (authoritative)
+    #   LEGACY_REPORT_REDERIVATION — re-derived from saved prose (pre-ledger artifact)
+    #   REDERIVATION_FAILED        — re-derivation raised; the empty tuples above are
+    #                                absence of evidence, NOT evidence of absence
+    #   NO_FUNDAMENTALS            — no fundamentals report to re-derive from
+    flag_source: str = "LEGACY_REPORT_REDERIVATION"
+
+    @property
+    def quality_flags_available(self) -> bool:
+        """True when the empty/non-empty flag tuples above are real evidence.
+
+        False means flag evidence could not be loaded at all, so an empty
+        ``quality_flag_types`` must not be read as "no unresolved flags".
+        """
+        return self.flag_source not in {"REDERIVATION_FAILED", "NO_FUNDAMENTALS"}
+
     # Bear Researcher thesis-break triggers (fenced KILL_CRITERIA block in the
     # saved bear history; ≤3 entries). These are the fundamental exit
     # conditions surfaced to the operator where downside price levels once led —

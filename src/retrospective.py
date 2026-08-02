@@ -411,8 +411,8 @@ def extract_snapshot(
         "quick_model": get_runtime_config(config).quick_think_llm,
         "is_quick_mode": is_quick_mode,
         # `is_strict_mode` records whether `--strict` was active during
-        # analysis. Strict gates reject some valid candidates (REIT, PFIC,
-        # VIE) at the screening layer, so a non-BUY verdict in strict mode
+        # analysis. Strict gates auto-reject some valid candidates (REIT/ETF,
+        # earnings quality) at the screening layer, so a non-BUY in strict mode
         # carries different signal than the same verdict in normal mode —
         # downstream lesson weighting can use this to discount strict-mode
         # rejections.
@@ -1144,8 +1144,8 @@ async def save_rejection_record(
         document += f"\nBear risks excerpt: {bear_risks}"
 
     # 4. Build metadata (extends existing schema)
-    # Strict-mode rejections are softer signal: strict gates reject some
-    # valid candidates (REIT/PFIC/VIE) at the screening layer, so a non-BUY
+    # Strict-mode rejections are softer signal: strict gates auto-reject some
+    # valid candidates (REIT/ETF, earnings quality) at the screening layer, so a non-BUY
     # in strict mode is partly an artifact of the gates rather than a pure
     # quality signal. Multiplicatively discount the existing quick-mode
     # weight by 0.7 for strict rejections.
