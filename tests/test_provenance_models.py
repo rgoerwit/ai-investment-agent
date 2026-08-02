@@ -123,6 +123,22 @@ def test_scorecard_present_but_corrupt_earned_fails_closed() -> None:
         Scorecard.from_dict(wire)
 
 
+def test_scorecard_huge_int_number_decodes_without_overflow() -> None:
+    # math.isfinite(huge int) raises OverflowError; the codec must guard it so a
+    # large integer decodes (finite) rather than crashing with a raw exception.
+    wire = _full_scorecard_wire()
+    wire["earned"] = 10**400
+    assert Scorecard.from_dict(wire).earned == 10**400
+
+
+def test_scorecard_criteria_wrong_type_fails_closed() -> None:
+    # criteria=[] must fail closed, not be silently normalized to {} by `or {}`.
+    wire = _full_scorecard_wire()
+    wire["criteria"] = []
+    with pytest.raises(SchemaDecodeError):
+        Scorecard.from_dict(wire)
+
+
 def test_scorecard_criterion_missing_award_defaults() -> None:
     crit = ScorecardCriterion.from_dict({"max_points": 1.0})
     assert crit.award == "N/A"
@@ -253,6 +269,11 @@ def test_snapshot_future_schema_fails_closed() -> None:
         AnalysisSnapshot.from_dict({"contract_status": "VALID", "schema_version": 2})
 
 
+def test_snapshot_scalar_scorecards_fails_closed() -> None:
+    with pytest.raises(SchemaDecodeError):
+        AnalysisSnapshot.from_dict({"contract_status": "VALID", "scorecards": 1})
+
+
 # --------------------------------------------------------------------------- #
 # Boundary integration: future/corrupt gate-critical payload => non-publishable #
 # --------------------------------------------------------------------------- #
@@ -292,4 +313,76 @@ def test_corrupt_trace_makes_analysis_non_publishable() -> None:
     validity = build_analysis_validity(result)
     assert validity["decision_trace_status"] == "DECODE_FAILED"
     assert "decision_trace" in validity["required_failures"]
+    assert not validity["publishable"]
+
+
+# --------------------------------------------------------------------------- #
+# Malformed-input boundaries (fail closed, never a raw TypeError / crash)      #
+# --------------------------------------------------------------------------- #
+def test_trace_scalar_collection_field_fails_closed() -> None:
+    # A scalar where a list is required must raise SchemaDecodeError, not the
+    # raw TypeError that would escape the boundary's except and crash.
+    with pytest.raises(SchemaDecodeError):
+        DecisionTrace.from_dict(
+            {"status": "VALID", "verdict": "BUY", "decision_facts": 1}
+        )
+
+
+def test_snapshot_scalar_claims_fails_closed() -> None:
+    with pytest.raises(SchemaDecodeError):
+        AnalysisSnapshot.from_dict({"contract_status": "VALID", "claims": 5})
+
+
+def test_snapshot_scalar_conflicts_fails_closed() -> None:
+    with pytest.raises(SchemaDecodeError):
+        AnalysisSnapshot.from_dict({"contract_status": "VALID", "conflicts": "oops"})
+
+
+def test_scorecard_string_bool_eligibility_fails_closed() -> None:
+    # bool("false") is True — a corrupt eligibility flag must not decode eligible.
+    wire = _full_scorecard_wire()
+    wire["decision_eligible"] = "false"
+    with pytest.raises(SchemaDecodeError):
+        Scorecard.from_dict(wire)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_scorecard_nonfinite_percentage_fails_closed(bad: float) -> None:
+    wire = _full_scorecard_wire()
+    wire["percentage"] = bad
+    with pytest.raises(SchemaDecodeError):
+        Scorecard.from_dict(wire)
+
+
+def test_trace_codec_is_transport_only_not_semantic() -> None:
+    # The codec validates shape/type only; trace semantic validity is owned by
+    # validate_decision_trace at construction. A well-typed but semantically
+    # impossible VALID trace therefore decodes (accepted residual) rather than
+    # the codec re-deriving the business formula.
+    trace = DecisionTrace.from_dict({"status": "VALID", "verdict": "UNPARSEABLE"})
+    assert trace.status == "VALID" and trace.verdict == "UNPARSEABLE"
+
+
+def test_str_collection_nonstring_element_fails_closed() -> None:
+    # A corrupt element must fail closed, not be silently stringified to "1".
+    with pytest.raises(SchemaDecodeError):
+        DecisionTrace.from_dict(
+            {"status": "VALID", "verdict": "BUY", "decision_facts": [1]}
+        )
+
+
+def test_scorecard_decode_or_none_swallows_corrupt() -> None:
+    assert Scorecard.decode_or_none({"percentage": "x"}) is None
+    assert Scorecard.decode_or_none(5) is None
+    assert Scorecard.decode_or_none(None) is None
+    assert Scorecard.decode_or_none(_full_scorecard_wire()) is not None
+
+
+def test_malformed_trace_collection_reaches_validity_non_publishable() -> None:
+    # The F1 regression: a scalar collection field must surface as DECODE_FAILED
+    # (non-publishable), not crash build_analysis_validity with a TypeError.
+    result = _publishable_base()
+    result["decision_trace"]["decision_facts"] = 1
+    validity = build_analysis_validity(result)  # must not raise
+    assert validity["decision_trace_status"] == "DECODE_FAILED"
     assert not validity["publishable"]

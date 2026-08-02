@@ -904,7 +904,7 @@ class TestMainPyIntegration:
         assert _article_is_publishable(
             "# Article",
             feedback,
-            decision_trace={"status": "VALID"},
+            decision_trace={"status": "VALID", "verdict": "BUY"},
             require_decision_trace=True,
         )
 

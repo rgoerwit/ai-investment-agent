@@ -25,7 +25,7 @@ from typing import Any
 
 import structlog
 
-from src.provenance_schema import SchemaDecodeError, Scorecard
+from src.provenance_schema import Scorecard
 
 logger = structlog.get_logger(__name__)
 
@@ -42,14 +42,8 @@ def _snapshot_decision_score(
     """
     if not isinstance(snapshot, Mapping) or snapshot.get("contract_status") != "VALID":
         return None
-    raw = (snapshot.get("scorecards") or {}).get(kind)
-    if not isinstance(raw, Mapping):
-        return None
-    try:
-        scorecard = Scorecard.from_dict(dict(raw))
-    except SchemaDecodeError:
-        return None
-    if not scorecard.decision_eligible:
+    scorecard = Scorecard.decode_or_none((snapshot.get("scorecards") or {}).get(kind))
+    if scorecard is None or not scorecard.decision_eligible:
         return None
     return float(scorecard.percentage)
 
@@ -95,8 +89,11 @@ class DecisionInputs:
     Those judgment fields legitimately originate in the analyst's structured
     output — they are not deterministic facts a canonical claim can own, so the
     engine correctly consumes them from the DATA_BLOCK rather than a fact ledger,
-    and there is no competing store for them. Making the engine consume the
-    typed fields directly (retiring the dict passthrough) is Stage 6.
+    and there is no competing store for them. Retiring the ``decision_metrics``
+    dict passthrough entirely was deliberately deferred by Stage 6 (the
+    ``detect_red_flags`` dict adapter is kept for the golden dict-tests and the
+    snapshot-free ``analysis_index`` caller) — this passthrough is the stable
+    contract, not a transitional stopgap.
     """
 
     decision_metrics: dict[str, Any]

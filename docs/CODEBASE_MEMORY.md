@@ -42,7 +42,7 @@ Read in this order:
 11. `src/agents/`
 12. `src/tools/`
 13. `src/data/fetcher.py`
-14. `src/runtime_diagnostics.py`
+14. `src/runtime_diagnostics/` (package: `failure_classification` + `artifact_status`)
 15. `src/validators/red_flag_detector.py`
 16. `src/validators/sector_classifier.py`
 17. `src/validators/metric_extractor.py`
@@ -131,7 +131,7 @@ unsupported FLA ticker cannot re-enter through Senior's restatement.
 
 `src/tooling/` owns cross-cutting tool execution, audit hooks, argument policy, and untrusted-content inspection.
 
-`src/runtime_diagnostics.py` owns artifact completion/validity and publishability checks.
+`src/runtime_diagnostics/` owns artifact completion/validity and publishability checks.
 
 `src/data_block_utils.py` owns structured data-block marker vocabulary. Use
 `BLOCK_SHAPES`, `fenced_start()`, `fenced_end()`, `build_fenced_block()`,
@@ -224,7 +224,7 @@ If something breaks, check these first:
 - `src/agents/decision_nodes.py`
 - `src/agents/consultant_nodes.py`
 - `src/data/fetcher.py`
-- `src/runtime_diagnostics.py`
+- `src/runtime_diagnostics/`
 - `src/validators/red_flag_detector.py`
 - `src/ibkr/reconciler.py`
 - `scripts/portfolio_manager.py`

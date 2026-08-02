@@ -26,7 +26,7 @@ from src.data_block_utils import (
 )
 from src.provenance_schema import (
     SchemaDecodeError,
-    classify_schema_version,
+    require_schema_compatible,
 )
 from src.tooling.evidence_recorder import bind_fetched_evidence
 from src.tooling.structured_ingress import get_structured_ingress_payload
@@ -62,7 +62,10 @@ class AnalysisSnapshot:
     Deliberately shallow: ``claims`` and ``conflicts`` stay in their existing
     dict wire form (``claims`` is already ``asdict(ClaimRecord)``), so this is a
     single typed definition of the snapshot's key set + schema versioning + a
-    fail-closed loader — not a re-typing of every claim.
+    fail-closed loader — not a re-typing of every claim. The dataclass is
+    ``frozen`` (no field reassignment) but shallow: ``to_dict`` returns the same
+    ``claims``/``conflicts`` objects the model holds, so it is a transient wire
+    adapter, not a deep-immutable value.
 
     ``stage`` / ``commentary_status`` / ``scorecards`` are None-omitted by
     ``to_dict`` so the reduced INVALID snapshot shape is reproduced exactly (it
@@ -109,12 +112,9 @@ class AnalysisSnapshot:
             raise SchemaDecodeError(
                 f"analysis_snapshot must be a mapping, got {type(d).__name__}"
             )
-        status = classify_schema_version(d.get("schema_version"), cls.SCHEMA_VERSION)
-        if not status.compatible:
-            raise SchemaDecodeError(
-                "AnalysisSnapshot: incompatible schema_version "
-                f"{d.get('schema_version')!r}"
-            )
+        require_schema_compatible(
+            "AnalysisSnapshot", d.get("schema_version"), cls.SCHEMA_VERSION
+        )
         contract_status = d.get("contract_status")
         if contract_status is None:
             # Match the historical coercion (missing status → INVALID); a
@@ -125,6 +125,30 @@ class AnalysisSnapshot:
                 "analysis_snapshot.contract_status must be a string, got "
                 f"{type(contract_status).__name__}"
             )
+        # Guard collection coercions so a scalar wire value fails closed with a
+        # SchemaDecodeError rather than a raw TypeError (which would escape the
+        # boundary's except and crash build_analysis_validity).
+        claims = d.get("claims")
+        if claims is None:
+            claims = {}
+        elif not isinstance(claims, Mapping):
+            raise SchemaDecodeError(
+                f"analysis_snapshot.claims must be a mapping, got {type(claims).__name__}"
+            )
+        conflicts = d.get("conflicts")
+        if conflicts is None:
+            conflicts = []
+        elif not isinstance(conflicts, list | tuple):
+            raise SchemaDecodeError(
+                "analysis_snapshot.conflicts must be a list, got "
+                f"{type(conflicts).__name__}"
+            )
+        scorecards = d.get("scorecards")
+        if scorecards is not None and not isinstance(scorecards, Mapping):
+            raise SchemaDecodeError(
+                "analysis_snapshot.scorecards must be a mapping, got "
+                f"{type(scorecards).__name__}"
+            )
         version = d.get("version")
         return cls(
             version=(
@@ -134,11 +158,11 @@ class AnalysisSnapshot:
             ),
             contract_status=contract_status,
             contract_reason=d.get("contract_reason"),
-            claims=dict(d.get("claims") or {}),
-            conflicts=list(d.get("conflicts") or []),
+            claims=dict(claims),
+            conflicts=list(conflicts),
             stage=d.get("stage"),
             commentary_status=d.get("commentary_status"),
-            scorecards=d.get("scorecards"),
+            scorecards=scorecards,
         )
 
 

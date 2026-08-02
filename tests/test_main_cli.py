@@ -1598,7 +1598,7 @@ class TestSavedDiagnostics:
             # _attach_run_summary now stamps the provenance contract, so these are
             # required for publishability (fail-closed).
             "analysis_snapshot": {"contract_status": "VALID", "claims": {}},
-            "decision_trace": {"status": "VALID"},
+            "decision_trace": {"status": "VALID", "verdict": "BUY"},
             "fundamentals_report": (
                 "### --- START DATA_BLOCK ---\n"
                 "SECTOR: Industrials\n"

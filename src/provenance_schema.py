@@ -6,24 +6,44 @@ decision trace, and score scorecard travel through state and persistence as
 lowest-read payloads (``Scorecard``, ``DecisionTrace``) a single typed
 definition with an explicit ``to_dict`` wire shape and a fail-closed
 ``from_dict`` loader. ``AnalysisSnapshot`` (co-located with ``ClaimRecord`` in
-``analysis_snapshot``) reuses the ``SchemaStatus`` machinery here.
+``analysis_snapshot``) reuses this module's schema-version machinery.
 
 Design contract:
-- **Immutable**: frozen dataclasses hold tuples internally; ``to_dict``
-  materializes the exact existing wire shape (lists, key set, key order).
-- **Additive versioning**: ``to_dict`` appends ``schema_version`` last; nothing
-  else in the wire shape changes.
-- **Fail-closed decoding**: ``from_dict`` raises ``SchemaDecodeError`` on a
-  *future* (``seen > current``) or non-integer ``schema_version`` and on a
-  present-but-type-invalid *required* field. A missing version is legacy and
-  loads. Boundary callers translate the exception into a non-publishable /
-  ineligible outcome — never a silent default of a corrupted value.
+- **Frozen fields, tuple internals.** ``Scorecard`` / ``DecisionTrace`` hold
+  tuples, and every ``to_dict`` builds fresh dicts/lists — they are genuinely
+  value-immutable. ``AnalysisSnapshot`` is a *shallow* wire adapter: it is a
+  frozen dataclass (no field reassignment) but its ``claims`` / ``conflicts`` are
+  shared by reference with the wire dict, so it is a transient codec, not a
+  deep-immutable value (documented on the class).
+- **Additive versioning.** ``to_dict`` appends ``schema_version`` last. That is
+  the only additive wire change for the scorecard, the full decision trace, and
+  the full/reduced snapshot. The PM_BLOCK-missing decision trace additionally
+  gains the previously-omitted (empty) list keys, because both trace shapes are
+  now one unified model.
+- **Fail-closed, transport/type-only decoding.** ``from_dict`` raises
+  ``SchemaDecodeError`` — never a raw ``TypeError``/``OverflowError`` and never a
+  silently-defaulted corrupt value — on a *future* or non-integer
+  ``schema_version``, or a present-but-type-invalid field: a non-numeric/non-finite
+  number, a non-``bool`` eligibility, a non-string status, a wrong-typed
+  collection (``criteria``/``scorecards`` not a mapping), or a list holding a
+  non-string element. A missing ``schema_version`` is legacy and loads; a missing
+  optional field defaults. The codecs validate *shape and type* only — payload
+  *semantics* (a trace's facts/thesis-support invariants, a score's range) are
+  owned by their producers (``validate_decision_trace``, the score reconciler),
+  not re-derived here. Boundary callers translate the exception into a
+  non-publishable / ineligible outcome.
 """
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar
+
+# Wire numbers preserve their JSON type (int stays int, float stays float) so a
+# round-trip is byte-identical; the fields below are therefore int-or-float.
+Number = int | float
 
 
 class SchemaDecodeError(Exception):
@@ -55,7 +75,12 @@ def classify_schema_version(seen: Any, current: int) -> SchemaStatus:
     return SchemaStatus(compatible=True, legacy=False, future=False, seen=seen)
 
 
-def _check_version(cls_name: str, seen: Any, current: int) -> None:
+def require_schema_compatible(cls_name: str, seen: Any, current: int) -> None:
+    """Raise ``SchemaDecodeError`` unless ``seen`` is a compatible schema version.
+
+    Shared by every payload codec (scorecard, decision trace, analysis snapshot)
+    so the future/corrupt-version rule cannot drift between them.
+    """
     status = classify_schema_version(seen, current)
     if not status.compatible:
         raise SchemaDecodeError(
@@ -63,20 +88,28 @@ def _check_version(cls_name: str, seen: Any, current: int) -> None:
         )
 
 
-def _coerce_number(value: Any, field: str) -> float:
-    """Preserve an existing int/float as-is; raise on a non-numeric required field.
+def _coerce_number(value: Any, field: str) -> Number:
+    """Preserve an existing finite int/float as-is; raise on anything else.
 
     Numeric type is preserved (int stays int, float stays float) so a wire
-    round-trip is byte-identical. ``bool`` is rejected (it is an ``int``
-    subclass but never a legitimate score value).
+    round-trip is byte-identical. ``bool`` is rejected (an ``int`` subclass but
+    never a legitimate score value); NaN/inf are rejected so a corrupt score
+    cannot slip past the gate comparisons (``nan >= 50`` and ``nan < 50`` are
+    both False).
     """
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise SchemaDecodeError(f"{field} is not numeric: {value!r}")
+    # Only floats can be non-finite. ``math.isfinite`` on a huge int itself raises
+    # OverflowError (a raw exception that would escape the boundary), so the
+    # finiteness check is guarded behind ``isinstance(float)`` — ints are always
+    # finite and pass through unchanged.
+    if isinstance(value, float) and not math.isfinite(value):
+        raise SchemaDecodeError(f"{field} is not finite: {value!r}")
     return value
 
 
-def _optional_number(value: Any, field: str, default: float) -> float:
-    """A defaulted numeric: absent → default; present-but-non-numeric → fail closed.
+def _optional_number(value: Any, field: str, default: Number) -> Number:
+    """A defaulted numeric: absent → default; present-but-invalid → fail closed.
 
     Lets a minimal/legacy scorecard (only ``percentage`` + ``decision_eligible``,
     as several internal consumers build) decode, while a *present* corrupt value
@@ -87,6 +120,22 @@ def _optional_number(value: Any, field: str, default: float) -> float:
     return _coerce_number(value, field)
 
 
+def _require_bool(value: Any, field: str) -> bool:
+    """A strict boolean: absent/null → False (legacy); present-non-bool → fail closed.
+
+    Guards against ``bool("false") is True`` making a corrupt scorecard
+    decision-eligible. A JSON ``null`` decodes to ``None`` and is treated as the
+    absent/legacy default (``False``).
+    """
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise SchemaDecodeError(
+            f"{field} must be a boolean, got {type(value).__name__}"
+        )
+    return value
+
+
 def _require_str_or_default(value: Any, default: str, field: str) -> str:
     if value is None:
         return default
@@ -95,16 +144,30 @@ def _require_str_or_default(value: Any, default: str, field: str) -> str:
     return value
 
 
-def _str_tuple(value: Any) -> tuple[str, ...]:
-    if not value:
+def _str_tuple(value: Any, field: str = "value") -> tuple[str, ...]:
+    """Decode a wire list of strings into a tuple; anything else fails closed.
+
+    The historical helper assumed every truthy value was iterable and stringified
+    each element, so a corrupt scalar (``"decision_facts": 1``) raised a raw
+    ``TypeError`` that escaped the ``SchemaDecodeError`` boundary, and a corrupt
+    element (``[1]``) was silently coerced to ``"1"``. Both now fail closed.
+    """
+    if value is None:
         return ()
-    return tuple(str(item) for item in value)
+    if not isinstance(value, list | tuple):
+        raise SchemaDecodeError(f"{field} must be a list, got {type(value).__name__}")
+    for item in value:
+        if not isinstance(item, str):
+            raise SchemaDecodeError(
+                f"{field} must contain only strings, got {type(item).__name__}"
+            )
+    return tuple(value)
 
 
 @dataclass(frozen=True, slots=True)
 class ScorecardCriterion:
     award: str
-    max_points: float
+    max_points: Number
     derived_from: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -116,15 +179,15 @@ class ScorecardCriterion:
 
     @classmethod
     def from_dict(cls, d: Any) -> ScorecardCriterion:
-        award = d.get("award") if isinstance(d, dict) else None
+        if not isinstance(d, dict):
+            raise SchemaDecodeError(
+                f"scorecard criterion must be a mapping, got {type(d).__name__}"
+            )
+        award = d.get("award")
         return cls(
             award=str(award) if award is not None else "N/A",
-            max_points=_coerce_number(
-                d.get("max_points") if isinstance(d, dict) else None, "max_points"
-            ),
-            derived_from=_str_tuple(
-                d.get("derived_from") if isinstance(d, dict) else None
-            ),
+            max_points=_coerce_number(d.get("max_points"), "max_points"),
+            derived_from=_str_tuple(d.get("derived_from"), "derived_from"),
         )
 
 
@@ -135,11 +198,11 @@ class Scorecard:
     SCHEMA_VERSION: ClassVar[int] = 1
 
     criteria: tuple[tuple[str, ScorecardCriterion], ...]
-    earned: float
-    available: float
-    rubric_total: float
-    percentage: float
-    advisory_percentage: float
+    earned: Number
+    available: Number
+    rubric_total: Number
+    percentage: Number
+    advisory_percentage: Number
     advisory_only_awards: tuple[str, ...]
     decision_eligible: bool
     lineage_gaps: tuple[str, ...]
@@ -164,10 +227,18 @@ class Scorecard:
             raise SchemaDecodeError(
                 f"scorecard must be a mapping, got {type(d).__name__}"
             )
-        _check_version("Scorecard", d.get("schema_version"), cls.SCHEMA_VERSION)
-        raw_criteria = d.get("criteria") or {}
-        if not isinstance(raw_criteria, dict):
-            raise SchemaDecodeError("scorecard.criteria must be a mapping")
+        require_schema_compatible(
+            "Scorecard", d.get("schema_version"), cls.SCHEMA_VERSION
+        )
+        raw_criteria = d.get("criteria")
+        if raw_criteria is None:
+            raw_criteria = {}
+        elif not isinstance(raw_criteria, dict):
+            # Explicitly type-checked so a wrong-typed value (e.g. []) fails
+            # closed rather than being silently normalized to {} by `or {}`.
+            raise SchemaDecodeError(
+                f"scorecard.criteria must be a mapping, got {type(raw_criteria).__name__}"
+            )
         percentage = _coerce_number(d.get("percentage"), "percentage")
         advisory = d.get("advisory_percentage")
         return cls(
@@ -184,10 +255,30 @@ class Scorecard:
                 if advisory is not None
                 else percentage
             ),
-            advisory_only_awards=_str_tuple(d.get("advisory_only_awards")),
-            decision_eligible=bool(d.get("decision_eligible")),
-            lineage_gaps=_str_tuple(d.get("lineage_gaps")),
+            advisory_only_awards=_str_tuple(
+                d.get("advisory_only_awards"), "advisory_only_awards"
+            ),
+            decision_eligible=_require_bool(
+                d.get("decision_eligible"), "decision_eligible"
+            ),
+            lineage_gaps=_str_tuple(d.get("lineage_gaps"), "lineage_gaps"),
         )
+
+    @classmethod
+    def decode_or_none(cls, raw: Any) -> Scorecard | None:
+        """Decode a scorecard mapping, fail-closed to ``None`` (ineligible path).
+
+        The shared entry point for the decision consumers (score projection, PM
+        trace reconciliation, ``DecisionInputs``) so their fail-closed handling
+        cannot drift. A non-mapping or an undecodable payload yields ``None`` —
+        the conservative "no usable score" outcome.
+        """
+        if not isinstance(raw, Mapping):
+            return None
+        try:
+            return cls.from_dict(dict(raw))
+        except SchemaDecodeError:
+            return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,22 +331,36 @@ class DecisionTrace:
             raise SchemaDecodeError(
                 f"decision_trace must be a mapping, got {type(d).__name__}"
             )
-        _check_version("DecisionTrace", d.get("schema_version"), cls.SCHEMA_VERSION)
+        require_schema_compatible(
+            "DecisionTrace", d.get("schema_version"), cls.SCHEMA_VERSION
+        )
+        # Transport/type-only: this codec validates shape, type, and schema
+        # version. Trace *semantic* validity — facts/gates present, thesis
+        # support for a BUY, no invalid/missing references — is owned solely by
+        # validate_decision_trace at construction (the single place that computes
+        # `status`), so it is not re-derived here (that would couple the wire
+        # codec to the business formula and drift from it). A well-typed but
+        # semantically-impossible VALID trace is an accepted residual, addressed
+        # by the provenance contract, not by the codec.
+        status = _require_str_or_default(d.get("status"), "INVALID", "status")
+        verdict = _require_str_or_default(d.get("verdict"), "UNPARSEABLE", "verdict")
         families = d.get("untraced_source_families")
         if families is None:
             families = d.get("advisory_source_families")
         reason = d.get("reason")
         return cls(
-            status=_require_str_or_default(d.get("status"), "INVALID", "status"),
-            verdict=_require_str_or_default(d.get("verdict"), "UNPARSEABLE", "verdict"),
-            decision_facts=_str_tuple(d.get("decision_facts")),
-            decision_gates=_str_tuple(d.get("decision_gates")),
-            support_facts=_str_tuple(d.get("support_facts")),
-            thesis_support_facts=_str_tuple(d.get("thesis_support_facts")),
-            invalid_facts=_str_tuple(d.get("invalid_facts")),
-            invalid_gates=_str_tuple(d.get("invalid_gates")),
-            missing_gates=_str_tuple(d.get("missing_gates")),
-            missing_fields=_str_tuple(d.get("missing_fields")),
-            source_families=_str_tuple(families),
+            status=status,
+            verdict=verdict,
+            decision_facts=_str_tuple(d.get("decision_facts"), "decision_facts"),
+            decision_gates=_str_tuple(d.get("decision_gates"), "decision_gates"),
+            support_facts=_str_tuple(d.get("support_facts"), "support_facts"),
+            thesis_support_facts=_str_tuple(
+                d.get("thesis_support_facts"), "thesis_support_facts"
+            ),
+            invalid_facts=_str_tuple(d.get("invalid_facts"), "invalid_facts"),
+            invalid_gates=_str_tuple(d.get("invalid_gates"), "invalid_gates"),
+            missing_gates=_str_tuple(d.get("missing_gates"), "missing_gates"),
+            missing_fields=_str_tuple(d.get("missing_fields"), "missing_fields"),
+            source_families=_str_tuple(families, "source_families"),
             reason=reason if reason is None or isinstance(reason, str) else str(reason),
         )

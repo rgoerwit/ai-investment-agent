@@ -43,7 +43,7 @@ from src.data_block_utils import (
     replace_or_append_block_line,
 )
 from src.pm_decision_parser import canonicalize_pm_verdict
-from src.provenance_schema import DecisionTrace, SchemaDecodeError, Scorecard
+from src.provenance_schema import DecisionTrace, Scorecard
 
 logger = structlog.get_logger(__name__)
 
@@ -290,17 +290,14 @@ def reconcile_final_decision_trace(
         ("HEALTH", "HEALTH_ADJ"),
         ("GROWTH", "GROWTH_ADJ"),
     ):
-        scorecard = scorecards.get(kind)
         if not snapshot or snapshot.get("contract_status") != "VALID":
             continue
-        value = "N/A"
-        if isinstance(scorecard, Mapping):
-            try:
-                card = Scorecard.from_dict(dict(scorecard))
-            except SchemaDecodeError:
-                card = None
-            if card is not None and card.decision_eligible:
-                value = str(round(float(card.percentage)))
+        card = Scorecard.decode_or_none(scorecards.get(kind))
+        value = (
+            str(round(float(card.percentage)))
+            if card is not None and card.decision_eligible
+            else "N/A"
+        )
         updated = replace_or_append_block_line(updated, field, value)
     matches = list(fenced_block_pattern("PM_BLOCK").finditer(pm_output))
     if matches:

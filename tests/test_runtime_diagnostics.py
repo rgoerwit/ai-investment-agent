@@ -249,7 +249,7 @@ class TestAnalysisValidity:
         result = self._make_result(quick_mode=False)
         result["provenance_contract_version"] = 1
         result["analysis_snapshot"] = {"contract_status": "VALID", "claims": {}}
-        result["decision_trace"] = {"status": "VALID"}
+        result["decision_trace"] = {"status": "VALID", "verdict": "BUY"}
 
         validity = build_analysis_validity(result)
 
@@ -259,7 +259,7 @@ class TestAnalysisValidity:
     def test_provenance_contract_rejects_missing_snapshot(self):
         result = self._make_result(quick_mode=False)
         result["provenance_contract_version"] = 1
-        result["decision_trace"] = {"status": "VALID"}
+        result["decision_trace"] = {"status": "VALID", "verdict": "BUY"}
         # analysis_snapshot deliberately absent
 
         validity = build_analysis_validity(result)

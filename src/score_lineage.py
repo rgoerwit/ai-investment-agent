@@ -18,7 +18,6 @@ from src.data_block_utils import (
     replace_or_append_block_line,
 )
 from src.provenance_schema import (
-    SchemaDecodeError,
     Scorecard,
     ScorecardCriterion,
 )
@@ -140,16 +139,10 @@ def project_analysis_report(
     raw_scorecards = snapshot.get("scorecards", {})
     # Decode each scorecard once, fail-closed: a future-schema or corrupt
     # scorecard becomes None and is treated exactly like a missing one (N/A).
-    decoded: dict[str, Scorecard | None] = {}
-    for kind in ("HEALTH", "GROWTH"):
-        raw = raw_scorecards.get(kind)
-        if isinstance(raw, Mapping):
-            try:
-                decoded[kind] = Scorecard.from_dict(dict(raw))
-            except SchemaDecodeError:
-                decoded[kind] = None
-        else:
-            decoded[kind] = None
+    decoded: dict[str, Scorecard | None] = {
+        kind: Scorecard.decode_or_none(raw_scorecards.get(kind))
+        for kind in ("HEALTH", "GROWTH")
+    }
     for kind in ("HEALTH", "GROWTH"):
         scorecard = decoded[kind]
         if scorecard is None:
