@@ -6,6 +6,7 @@ to ensure the consultant doesn't break existing functionality under stress.
 """
 
 import asyncio
+import copy
 import json
 import time
 from types import SimpleNamespace
@@ -453,6 +454,159 @@ class TestDataFormatEdgeCases:
         assert ("fundamentals", 3600) in summarize_calls
         assert ("research", 2200) in summarize_calls
         assert result["consultant_quick_profile"] == "quick_expanded"
+
+    async def _consultant_prompt(self, state: dict, *, quick_mode: bool) -> str:
+        """Assemble a consultant prompt and return it verbatim."""
+        mock_response = Mock()
+        mock_response.content = (
+            "### CONSULTANT REVIEW: APPROVED\n\n"
+            "### FINAL CONSULTANT VERDICT\nAPPROVED"
+        )
+        invoke_messages: list = []
+
+        async def mock_invoke(_llm, messages, **kwargs):
+            invoke_messages.extend(messages)
+            return mock_response
+
+        with (
+            patch(
+                "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+            ),
+            patch("src.prompts.get_prompt") as mock_get_prompt,
+        ):
+            mock_prompt = Mock()
+            mock_prompt.system_message = "You are a consultant."
+            mock_prompt.agent_name = "External Consultant"
+            mock_get_prompt.return_value = mock_prompt
+
+            node = create_consultant_node(
+                Mock(), "consultant", tools=[], quick_mode=quick_mode
+            )
+            await node(
+                {
+                    "company_of_interest": "TEST",
+                    "company_name": "Test Co",
+                    "investment_debate_state": {"history": "Debate"},
+                    **state,
+                },
+                RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")}),
+            )
+        return invoke_messages[0].content
+
+
+class TestConsultantRedFlagRendering:
+    """The consultant reads flags through the canonical renderer, not dict repr.
+
+    ``prompts/consultant.json`` grants this seat veto authority keyed on the
+    literal token ``CMIC_FLAGGED``, which is a red-flag ``type`` value. It used to
+    arrive only inside a Python ``repr`` of ``list[dict]`` — and, in quick mode,
+    inside a copy clipped at 220 chars that dropped ``risk_penalty`` and
+    ``blocks_buy`` first, because ``detail``/``rationale`` are long strings
+    ordered ahead of them.
+    """
+
+    CMIC_FLAG = {
+        "type": "CMIC_FLAGGED",
+        "severity": "HIGH",
+        "detail": "Company appears on NS-CMIC list. Named in an OFAC listing.",
+        "action": "RISK_PENALTY",
+        "risk_penalty": 2.0,
+        "blocks_buy": True,
+        "rationale": "US Executive Orders prohibit US persons from investing in "
+        "NS-CMIC listed companies. Verify current OFAC status before investing. "
+        "Restrictions may be modified by future executive orders.",
+    }
+
+    @pytest.mark.asyncio
+    async def test_veto_token_is_legible_with_its_penalty(self):
+        prompt = await TestDataFormatEdgeCases()._consultant_prompt(
+            {"red_flags": [self.CMIC_FLAG], "pre_screening_result": "PASS"},
+            quick_mode=False,
+        )
+        assert "CMIC_FLAGGED [risk_penalty +2.00]" in prompt
+        assert "Company appears on NS-CMIC list." in prompt
+
+    @pytest.mark.asyncio
+    async def test_no_python_dict_repr_reaches_the_prompt(self):
+        prompt = await TestDataFormatEdgeCases()._consultant_prompt(
+            {"red_flags": [self.CMIC_FLAG], "pre_screening_result": "PASS"},
+            quick_mode=False,
+        )
+        assert "{'type':" not in prompt
+        assert "'blocks_buy'" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_quick_mode_renders_the_flag_set_once(self):
+        """Counts the *rendered* flag line, not the bare token.
+
+        These tests mock the system message, so a whole-prompt token count would
+        not measure the real prompt — `prompts/consultant.json` itself names
+        `CMIC_FLAGGED` once in its veto rule, so the real assembled prompt
+        legitimately contains the token twice (rule + rendered flag). What must
+        not recur is the flag *rendering*, which quick mode used to duplicate.
+        """
+        prompt = await TestDataFormatEdgeCases()._consultant_prompt(
+            {
+                "red_flags": [self.CMIC_FLAG],
+                "pre_screening_result": "PASS",
+                "investment_plan": "HOLD",
+            },
+            quick_mode=True,
+        )
+        assert prompt.count("CMIC_FLAGGED [risk_penalty") == 1
+
+    @pytest.mark.asyncio
+    async def test_consultant_is_not_given_the_pm_tally_contract(self):
+        """`TOTAL RISK COUNT` is a Portfolio Manager output field.
+
+        `prompts/consultant.json` never mentions it, so shipping the PM's tally
+        instruction here would ask this seat to produce a field it does not own.
+        """
+        prompt = await TestDataFormatEdgeCases()._consultant_prompt(
+            {"red_flags": [self.CMIC_FLAG], "pre_screening_result": "PASS"},
+            quick_mode=False,
+        )
+        assert "CODE-COMPUTED RISK SUBTOTAL" in prompt
+        assert "TOTAL RISK COUNT" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_penalties_survive_a_long_flag_list(self):
+        """The truncation regression: every penalty must reach the model."""
+        flags = [
+            {
+                "type": f"FLAG_{i}",
+                "detail": "d" * 400,
+                "rationale": "r" * 400,
+                "risk_penalty": 0.5,
+            }
+            for i in range(8)
+        ]
+        prompt = await TestDataFormatEdgeCases()._consultant_prompt(
+            {"red_flags": flags, "pre_screening_result": "PASS"}, quick_mode=True
+        )
+        for i in range(8):
+            assert f"FLAG_{i} [risk_penalty +0.50]" in prompt
+        assert (
+            "CODE-COMPUTED RISK SUBTOTAL (deterministic, already weighted): +4.00"
+            in (prompt)
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("red_flags", [None, [], "not-a-list", [None, 3]])
+    async def test_malformed_flags_still_produce_a_prompt(self, red_flags):
+        prompt = await TestDataFormatEdgeCases()._consultant_prompt(
+            {"red_flags": red_flags, "pre_screening_result": "PASS"}, quick_mode=False
+        )
+        assert "RED FLAGS (Pre-Screening Results)" in prompt
+
+    @pytest.mark.asyncio
+    async def test_state_red_flags_are_not_mutated(self):
+        flags = [dict(self.CMIC_FLAG)]
+        snapshot = copy.deepcopy(flags)
+        await TestDataFormatEdgeCases()._consultant_prompt(
+            {"red_flags": flags, "pre_screening_result": "PASS"}, quick_mode=False
+        )
+        assert flags == snapshot
 
     @pytest.mark.asyncio
     async def test_consultant_handles_missing_debate_state(self):

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Callable
 from typing import Any
 
@@ -11,7 +10,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import RunnableConfig
 
 from src.error_safety import summarize_exception
-from src.runtime_diagnostics import failure_artifact, success_artifact
+from src.runtime_diagnostics import (
+    failure_artifact,
+    failure_classification,
+    is_provider_content_block,
+    success_artifact,
+)
 from src.tooling.text_boundary import format_untrusted_block
 from src.validators.supplemental_extractors import extract_capital_efficiency_signals
 
@@ -29,16 +33,27 @@ APAC_UNAVAILABLE_SENTINEL = "APAC_SPECIALIST_UNAVAILABLE"
 APAC_REPORT_FIELD = "apac_regional_report"
 
 
-def _is_glm_1301_policy_block(exc: BaseException) -> bool:
-    message = str(exc)
-    return bool(
-        re.search(r"(?<!\d)1301(?!\d)", message)
-        and re.search(
-            r"error|policy|content|sensitive|unsafe|moderation|不安全|敏感",
-            message,
-            re.IGNORECASE,
-        )
-    )
+def _is_content_policy_block(exc: BaseException) -> bool:
+    """Delegate to the canonical refusal predicate.
+
+    Formerly ``_is_glm_1301_policy_block``, which recognized only the Z.AI/GLM
+    1301 shape while the global classifier recognized vendors it missed. Both now
+    read ``is_provider_content_block`` so they cannot drift apart again.
+
+    **This deliberately widens the re-issue below beyond GLM.** The hypothesis it
+    encodes — that the block fired on the reasoning stream, so the same request
+    with thinking disabled may pass — is a property of reasoning models, not of
+    one vendor, and this seat talks to whichever single OpenAI-compatible vendor
+    ``APAC_SPECIALIST_BASE_URL`` names (DeepSeek by default, not GLM). Keeping it
+    GLM-only would have meant the default vendor got no re-issue for arbitrary
+    reasons. It remains one bounded re-issue that *changes the request*, which is
+    why it does not contradict the non-retryable contract for identical input.
+    """
+    return is_provider_content_block(str(exc))
+
+
+# Back-compat alias for the pre-Aug-2026 name.
+_is_glm_1301_policy_block = _is_content_policy_block
 
 
 def _clip(value: object, limit: int) -> str:
@@ -134,13 +149,19 @@ def create_apac_specialist_node(llm, *, fallback_llm=None) -> Callable:
                     overall_timeout_seconds=240,
                 )
             except Exception as exc:
-                if fallback_llm is None or not _is_glm_1301_policy_block(exc):
+                if fallback_llm is None or not _is_content_policy_block(exc):
                     raise
                 payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
                 logger.warning(
                     "apac_policy_block_direct_retry",
                     ticker=ticker,
-                    provider_code=1301,
+                    # Was a hardcoded provider_code=1301, which became a lie the
+                    # moment this branch stopped being GLM-only. Report what was
+                    # actually reached instead of asserting a vendor code.
+                    model=support.get_model_name(active_llm),
+                    # get_base_url() returns the FULL url — path, query, and any
+                    # embedded credential. Only the parsed host may be logged.
+                    endpoint_host=failure_classification.get_endpoint_host(active_llm),
                     payload_sha256=hashlib.sha256(payload_json.encode()).hexdigest(),
                     payload_chars=len(payload_json),
                 )

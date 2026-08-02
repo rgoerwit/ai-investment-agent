@@ -21,6 +21,7 @@ from src.llm_usage import extract_token_usage_breakdown
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import (
     classify_failure,
+    get_base_url,
     get_class_name,
     get_model_name,
     infer_provider,
@@ -599,6 +600,11 @@ async def invoke_with_rate_limit_handling(
                 provider=resolved_provider,
                 model_name=resolved_model,
                 class_name=class_name,
+                # `provider` names the transport family, which is "openai" for
+                # every OpenAI-compatible endpoint. The endpoint host is what
+                # identifies the vendor that actually served (or refused) the
+                # call, and it needs no vendor lookup table to do so.
+                base_url=get_base_url(runnable),
             )
             elapsed_seconds = time.monotonic() - attempt_started
             # Quick-mode flex latency timeout: a queued flex call the transport
@@ -658,6 +664,7 @@ async def invoke_with_rate_limit_handling(
                             "error_type": details.error_type,
                             "root_cause_type": details.root_cause_type,
                             "host": details.host,
+                            "endpoint_host": details.endpoint_host,
                             "error_message": details.message,
                         }
                     )

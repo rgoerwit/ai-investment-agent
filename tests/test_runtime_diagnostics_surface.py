@@ -54,6 +54,21 @@ HISTORICAL_PUBLIC_NAMES = frozenset(
     }
 )
 
+# Names added to the package API after the split. Deliberately a separate set:
+# the equality assertion below still fails on an *accidental* export, but an
+# intentional addition is recorded here rather than silently widening the
+# historical surface.
+INTENTIONAL_ADDITIONS = frozenset(
+    {
+        # Aug 2026: the single content-refusal predicate, shared by
+        # classify_failure and the APAC specialist's policy-block retry.
+        "is_provider_content_block",
+        "get_base_url",
+        # Log-safe host; get_base_url returns the credential-bearing full URL.
+        "get_endpoint_host",
+    }
+)
+
 # Private implementation helpers that must NOT be part of the package API.
 PRIVATE_NAMES = (
     "_root_cause",
@@ -73,7 +88,11 @@ def test_historical_name_importable(name: str) -> None:
 
 
 def test_all_matches_historical_surface() -> None:
-    assert set(rd.__all__) == HISTORICAL_PUBLIC_NAMES
+    assert set(rd.__all__) == HISTORICAL_PUBLIC_NAMES | INTENTIONAL_ADDITIONS
+
+
+def test_no_historical_name_dropped() -> None:
+    assert HISTORICAL_PUBLIC_NAMES <= set(rd.__all__)
 
 
 def test_all_entries_resolve() -> None:

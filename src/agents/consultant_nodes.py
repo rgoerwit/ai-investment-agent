@@ -234,10 +234,18 @@ def _consultant_context_budget(section: str, *, profile: str) -> int:
 
 
 def _build_decision_critical_evidence_index(state: AgentState) -> str:
-    lines: list[str] = []
-    for flag in (state.get("red_flags") or [])[:5]:
-        lines.append(str(flag))
+    """Quick-mode salience index for signals the summarized reports can bury.
 
+    Deliberately carries no red flags: they are rendered once, in full, by
+    ``support.format_red_flag_section``. This function used to repeat the first
+    five as ``str(flag)`` clipped to 220 chars — and since ``detail`` and
+    ``rationale`` are long strings ordered ahead of the numeric keys, the clip
+    dropped ``risk_penalty`` first, which is precisely the weight this index
+    existed to raise the salience of. (``blocks_buy`` was also clipped, but no
+    prompt renderer surfaces it to any seat: it is enforced deterministically by
+    ``maybe_demote_buy_on_blocking_flags`` after the PM speaks.)
+    """
+    lines: list[str] = []
     plan_upper = str(state.get("investment_plan") or "").upper()
     for marker in ("PFIC", "CMIC", "VALUE TRAP", "LIQUIDITY", "LEVERAGE"):
         if marker in plan_upper:
@@ -354,6 +362,15 @@ def create_consultant_node(
         evidence_index = (
             _build_decision_critical_evidence_index(state) if quick_mode else ""
         )
+        # The same renderer the PM consumes. Previously this section interpolated
+        # the raw list[dict], i.e. Python repr as a prompt serialization format —
+        # which is how the consultant's own documented veto trigger (CMIC_FLAGGED
+        # -> "HARD STOP: RESTRICTED") reached it, buried inside a dict literal.
+        flag_section, _flag_subtotal = support.format_red_flag_section(
+            str(state.get("pre_screening_result", "UNKNOWN")),
+            state.get("red_flags") or [],
+            audience="consultant",
+        )
 
         all_context = f"""
 {evidence_index}\
@@ -388,9 +405,7 @@ FUNDAMENTALS ANALYST REPORT:
 {support.summarize_for_pm(value_trap, "value_trap", _consultant_context_budget("value_trap", profile=consultant_profile)) if value_trap != "N/A" else "N/A"}
 
 === RED FLAGS (Pre-Screening Results) ===
-
-Red Flags Detected: {state.get("red_flags", [])}
-Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
+{flag_section}
 
 === INDEPENDENT FORENSIC AUDIT ===
 {support.summarize_for_pm(auditor, "auditor", _consultant_context_budget("auditor", profile=consultant_profile)) if auditor != "N/A" else "N/A"}

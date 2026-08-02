@@ -41,9 +41,12 @@ from src.runtime_diagnostics.failure_classification import (
     FailureKind,
     ProviderName,
     classify_failure,
+    get_base_url,
     get_class_name,
+    get_endpoint_host,
     get_model_name,
     infer_provider,
+    is_provider_content_block,
 )
 
 __all__ = [
@@ -53,8 +56,11 @@ __all__ = [
     "ArtifactErrorKind",
     "FailureDetails",
     "infer_provider",
+    "is_provider_content_block",
     "get_model_name",
     "get_class_name",
+    "get_base_url",
+    "get_endpoint_host",
     "classify_failure",
     # artifact_status — constants
     "FUNDAMENTALS_SYNC_FIELDS",
