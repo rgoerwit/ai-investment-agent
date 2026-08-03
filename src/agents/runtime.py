@@ -224,6 +224,25 @@ def _detect_provider_partial_response(result: Any) -> str | None:
     return None
 
 
+def response_hit_output_cap(result: Any) -> bool:
+    """True when the provider says the response stopped at the token cap.
+
+    Derived from the one partial-response classifier above so there is a single
+    definition of "the provider cut this off". The retry loop already raises on
+    a partial, but the *final* attempt returns the truncated message as-is —
+    callers that publish an artifact need to know they are holding a fragment
+    rather than a finished answer. Fragments are truthy, so an emptiness check
+    alone cannot see this (the 1088.HK consultant "review" of 46 characters).
+    """
+    reason = _detect_provider_partial_response(result)
+    if reason is None:
+        return False
+    lowered = reason.lower()
+    return any(
+        marker in lowered for marker in ("length", "max_tokens", "max_output_tokens")
+    )
+
+
 class ProviderPartialResponseError(RuntimeError):
     """Raised when an LLM call returned successfully but the response
     looks like a provider-side partial (no finish_reason, length cap,

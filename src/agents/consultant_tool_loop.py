@@ -15,6 +15,7 @@ from src.runtime_services import get_current_tool_service
 from src.tooling.runtime import ToolInvocation
 
 from . import message_utils
+from . import runtime as agent_runtime
 
 logger = structlog.get_logger(__name__)
 
@@ -256,11 +257,52 @@ async def run_bounded_consultant_loop(
             )
             break
 
-    if not content_str and (tools_by_name or policy.max_tool_iterations > 0):
-        response = await invoke_with_deadline(fallback_llm, messages)
-        content_str = message_utils.extract_string_content(
-            getattr(response, "content", "")
-        )
+    # A response the provider cut off at the token cap is a fragment, not a
+    # review — and a fragment is truthy, so the emptiness check above cannot
+    # see it. Re-ask once (tool-free) so the model spends its budget on the
+    # answer instead of on reasoning it already did.
+    #
+    # Cost is bounded to exactly one extra call: this runs once, after the
+    # loop, and the consultant invokes with ``max_transient_attempts=1``, so
+    # the runtime does not separately retry a partial before we get here. The
+    # re-ask is strictly additive — any failure (deadline exhausted, provider
+    # error) leaves whatever content we already had, so widening the trigger
+    # from "empty" to "empty or truncated" cannot lose a usable fragment.
+    truncated = agent_runtime.response_hit_output_cap(response)
+    if (not content_str or truncated) and (
+        tools_by_name or policy.max_tool_iterations > 0
+    ):
+        if truncated:
+            logger.warning(
+                "consultant_response_truncated_at_cap",
+                ticker=ticker,
+                agent=agent_name,
+                partial_content_chars=len(content_str),
+            )
+        retry_content = ""
+        retry_response: object | None = None
+        try:
+            retry_response = await invoke_with_deadline(fallback_llm, messages)
+            retry_content = message_utils.extract_string_content(
+                getattr(retry_response, "content", "")
+            )
+        except Exception as synthesis_exc:
+            if not content_str:
+                raise
+            logger.warning(
+                "consultant_truncation_resynthesis_failed",
+                ticker=ticker,
+                agent=agent_name,
+                partial_content_chars=len(content_str),
+                **summarize_exception(
+                    synthesis_exc, operation="consultant_truncation_resynthesis"
+                ),
+            )
+        # Never trade usable text for nothing: keep the fragment when the
+        # re-ask comes back empty.
+        if retry_content or not content_str:
+            response = retry_response
+            content_str = retry_content
 
     return ConsultantLoopResult(
         content=content_str,

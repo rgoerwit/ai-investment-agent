@@ -12,7 +12,7 @@ Tests the token tracking functionality:
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 from rich.console import Console
 
@@ -1149,3 +1149,156 @@ class TestPerAgentWallClock:
         # Simulate an error path with no run_id passed back.
         callback.on_llm_error(RuntimeError("boom"))
         assert "__default__" not in callback._run_starts
+
+
+class TestPromptCacheDiagnostics:
+    """The `prompt_cache_diagnostics` DEBUG event.
+
+    Its job is to answer what the persisted artifact cannot: how large the
+    leading system-message span of a request was, next to the provider's
+    reported cache hit. Sizes only -- never prompt text. The measured span is
+    a lower bound on the cacheable prefix (tool schemas are not visible here).
+    """
+
+    @staticmethod
+    def _response(
+        prompt_tokens=9000, cached=0, completion=100, model="gemini-3.6-flash"
+    ):
+        message = AIMessage(content="x")
+        message.usage_metadata = {
+            "input_tokens": prompt_tokens,
+            "output_tokens": completion,
+            "total_tokens": prompt_tokens + completion,
+            "input_token_details": {"cache_read": cached},
+        }
+        message.response_metadata = {"model_name": model}
+        return LLMResult(generations=[[ChatGeneration(message=message)]])
+
+    def _emit(self, messages, response):
+        callback = TokenTrackingCallback(agent_name="seat", tracker=TokenTracker())
+        with patch("src.token_tracker.logger") as log:
+            callback.on_chat_model_start({}, messages, run_id="r")
+            callback.on_llm_end(response, run_id="r")
+        events = [
+            c
+            for c in log.debug.call_args_list
+            if c.args and c.args[0] == "prompt_cache_diagnostics"
+        ]
+        assert len(events) == 1
+        return events[0].kwargs
+
+    def test_stable_prefix_is_the_leading_system_turn_only(self):
+        """Per-ticker content after the system turn is not reusable and must
+        not be counted toward the cacheable prefix."""
+        messages = [
+            [
+                SystemMessage(content="S" * 10063),
+                HumanMessage(content="R" * 40000),
+            ]
+        ]
+        fields = self._emit(messages, self._response())
+        assert fields["stable_prefix_chars"] == 10063
+        assert fields["total_request_chars"] == 50063
+        assert fields["estimated_stable_prefix_tokens"] == 2515
+        assert fields["prefix_meets_assumed_cache_floor"] is False
+
+    def test_large_prefix_clears_floor_and_ratio_tracks_provider(self):
+        messages = [[SystemMessage(content="S" * 45443), HumanMessage(content="R")]]
+        fields = self._emit(messages, self._response(prompt_tokens=9000, cached=4600))
+        assert fields["estimated_stable_prefix_tokens"] == 11360
+        assert fields["prefix_meets_assumed_cache_floor"] is True
+        assert fields["cache_hit_ratio"] == round(4600 / 9000, 4)
+
+    def test_assumed_floor_flag_is_google_only(self):
+        """The 4,096 figure is an assumed *Gemini* minimum; other vendors
+        publish different floors, so annotating their calls with it would be
+        a false claim. Sizes are still reported for every vendor."""
+        messages = [[SystemMessage(content="S" * 45443), HumanMessage(content="R")]]
+        for model in ("gpt-5.4", "kimi-k3", "claude-opus-5"):
+            fields = self._emit(messages, self._response(model=model))
+            assert fields["prefix_meets_assumed_cache_floor"] is None, model
+            assert fields["estimated_stable_prefix_tokens"] == 11360, model
+
+    def test_trailing_system_turn_does_not_extend_the_prefix(self):
+        """Only the *leading* system span is cacheable; a system turn after
+        volatile content sits behind a cache-busting boundary."""
+        messages = [
+            [
+                SystemMessage(content="S" * 400),
+                HumanMessage(content="R" * 100),
+                SystemMessage(content="T" * 8000),
+            ]
+        ]
+        fields = self._emit(messages, self._response())
+        assert fields["stable_prefix_chars"] == 400
+        assert fields["total_request_chars"] == 8500
+
+    def test_never_logs_prompt_content(self):
+        secret = "TICKER-SPECIFIC-EVIDENCE-0005HK"
+        messages = [[SystemMessage(content=secret), HumanMessage(content=secret)]]
+        fields = self._emit(messages, self._response())
+        assert secret not in repr(fields)
+        assert all(
+            isinstance(v, int | float | str | bool | None) for v in fields.values()
+        )
+        assert secret not in str(fields.get("model", ""))
+
+    def test_zero_prompt_tokens_emit_no_event(self):
+        """A response with no usage metadata records nothing, so there is no
+        cache outcome to report."""
+        message = AIMessage(content="x")
+        message.response_metadata = {"model_name": "gemini-3.6-flash"}
+        empty = LLMResult(generations=[[ChatGeneration(message=message)]])
+        callback = TokenTrackingCallback(agent_name="seat", tracker=TokenTracker())
+        with patch("src.token_tracker.logger") as log:
+            callback.on_chat_model_start({}, [[SystemMessage(content="s")]], run_id="r")
+            callback.on_llm_end(empty, run_id="r")
+        assert not [
+            c
+            for c in log.debug.call_args_list
+            if c.args and c.args[0] == "prompt_cache_diagnostics"
+        ]
+
+    def test_malformed_messages_do_not_raise(self):
+        """A diagnostic must never break a run; callbacks receive arbitrary
+        provider and test objects."""
+        callback = TokenTrackingCallback(agent_name="seat", tracker=TokenTracker())
+        for bad in ([], [[object()]], [[None]], "not-a-list"):
+            callback.on_chat_model_start({}, bad, run_id="r")
+            callback.on_llm_end(self._response(), run_id="r")
+
+    def test_error_path_clears_recorded_shape(self):
+        callback = TokenTrackingCallback(agent_name="seat", tracker=TokenTracker())
+        callback.on_chat_model_start({}, [[SystemMessage(content="s")]], run_id="r")
+        assert "r" in callback._run_shapes
+        callback.on_llm_error(RuntimeError("boom"), run_id="r")
+        assert callback._run_shapes == {}
+
+    def test_completion_without_run_id_releases_the_shape(self):
+        """The start carries a run_id but the end does not (the single-inflight
+        fallback). Both maps are keyed alike, so the shape must be released
+        under the same key -- otherwise diagnostic state accumulates for the
+        life of the process."""
+        callback = TokenTrackingCallback(agent_name="seat", tracker=TokenTracker())
+        callback.on_chat_model_start(
+            {}, [[SystemMessage(content="S" * 45443)]], run_id="r"
+        )
+        with patch("src.token_tracker.logger") as log:
+            callback.on_llm_end(self._response())
+        assert callback._run_shapes == {}
+        assert callback._run_starts == {}
+        # The shape is not merely dropped -- it is still the one reported.
+        fields = next(
+            c.kwargs
+            for c in log.debug.call_args_list
+            if c.args and c.args[0] == "prompt_cache_diagnostics"
+        )
+        assert fields["stable_prefix_chars"] == 45443
+
+    def test_error_without_run_id_leaves_no_shape_for_the_default_key(self):
+        callback = TokenTrackingCallback(agent_name="seat", tracker=TokenTracker())
+        callback.on_chat_model_start({}, [[SystemMessage(content="s")]])
+        assert "__default__" in callback._run_shapes
+        callback.on_llm_error(RuntimeError("boom"))
+        assert callback._run_shapes == {}
+        assert callback._run_starts == {}

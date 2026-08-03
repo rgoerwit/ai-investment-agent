@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from importlib.util import find_spec
 from numbers import Real
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import structlog
 from langchain_core.callbacks import BaseCallbackHandler
@@ -27,7 +28,11 @@ from langchain_google_genai import (
 import src.config as config_module
 from src.config import config
 from src.error_safety import summarize_exception
-from src.llm_budgets import GenerationBudget, get_generation_budget
+from src.llm_budgets import (
+    GenerationBudget,
+    get_agent_output_budget,
+    get_generation_budget,
+)
 from src.runtime_config import get_runtime_config
 from src.runtime_services import get_current_provider_runtime
 from src.service_tiers import (
@@ -91,45 +96,117 @@ def bump_thinking_level(
     return level
 
 
-# OpenAI GPT-5 reasoning capabilities documented for the model families this
-# repository can select.  GPT-5.1+ models no longer use the legacy
-# ``minimal`` setting; ``low`` is the portable quick-mode setting across the
-# current GPT-5.x families, including GPT-5.6 Sol/Terra/Luna.
-_OPENAI_GPT5_REASONING_EFFORTS: tuple[tuple[str, frozenset[str]], ...] = (
+# Reasoning-effort capabilities per OpenAI-compatible model family.
+#
+# Every seat on the OpenAI plane (consultant, auditor, editor, writer
+# fallback, APAC specialist) may point at an OpenAI-*compatible* endpoint via
+# OPENAI_API_BASE / APAC_SPECIALIST_BASE_URL, so this table is keyed by model
+# family rather than by vendor.  Registering a family here is what bounds its
+# hidden reasoning: on these models the reasoning tokens are drawn from the
+# same completion-token pool as the visible answer, so an *unset* effort lets
+# the model spend the whole budget thinking.  Measured against the live
+# Moonshot endpoint on 2026-08-02 with a consultant-scale prompt under the
+# production 4096-token cap: no effort -> 2553 reasoning tokens, high -> 1434,
+# low -> 26.  The unbounded case is what produced the 1088.HK consultant
+# "review" of 46 characters.
+#
+# Longest matching prefix wins, so entries are order-independent (same rule as
+# ``token_tracker._lookup_model_pricing``).  Values are the vendor-documented
+# settings only — an undocumented value that today happens to be accepted is
+# not a contract.
+_OPENAI_REASONING_EFFORTS: tuple[tuple[str, frozenset[str]], ...] = (
     ("gpt-5.6", frozenset({"none", "low", "medium", "high", "xhigh", "max"})),
     ("gpt-5.5", frozenset({"none", "low", "medium", "high", "xhigh"})),
     ("gpt-5.4", frozenset({"none", "low", "medium", "high", "xhigh"})),
     ("gpt-5.2", frozenset({"none", "low", "medium", "high", "xhigh"})),
     ("gpt-5.1", frozenset({"none", "low", "medium", "high"})),
     ("gpt-5", frozenset({"minimal", "low", "medium", "high"})),
+    # Moonshot Kimi K3 — documented low|high|max, defaulting to ``max``.
+    ("kimi-k3", frozenset({"low", "high", "max"})),
 )
 
+# Substring markers for variants that reject the reasoning parameter outright
+# (OpenAI's ``-pro`` tier).  Checked against the whole normalized model id.
+_OPENAI_NO_REASONING_MARKERS: tuple[str, ...] = ("pro",)
 
-def _openai_gpt5_reasoning_effort(model_name: str, *, quick_mode: bool) -> str | None:
-    """Return a documented reasoning setting for a GPT-5 model.
+# Efforts deep enough that the small "default" reserve cannot cover the hidden
+# reasoning; these earn the "deep" reserve instead.
+_DEEP_REASONING_EFFORTS = frozenset({"high", "xhigh", "max"})
 
-    ``low`` is deliberately used for quick mode even when a legacy model also
-    accepts ``minimal``.  This keeps the quick path valid for current GPT-5.6
-    models, whose documented settings do not include ``minimal``.
-    """
-    normalized_name = model_name.lower()
-    if not normalized_name.startswith("gpt-5") or "pro" in normalized_name:
+# Ordered preferences, resolved against a family's supported set.  ``low`` is
+# deliberately preferred over ``minimal`` for quick mode even where a legacy
+# model accepts both: current GPT-5.6 models do not document ``minimal``.
+_EFFORT_PREFERENCE_QUICK: tuple[str, ...] = ("low", "minimal")
+_EFFORT_PREFERENCE_FULL: tuple[str, ...] = ("medium", "high")
+# Long-form prose wants output budget, not reasoning depth.
+_EFFORT_PREFERENCE_PROSE: tuple[str, ...] = ("low", "minimal")
+# The APAC regional specialist is a deliberately deep single-shot seat.
+_EFFORT_PREFERENCE_DEEPEST: tuple[str, ...] = ("max", "xhigh", "high")
+
+_warned_unknown_openai_reasoning: set[str] = set()
+
+
+def _normalized_openai_model_id(model_name: str) -> str:
+    """Lowercase a model id and drop a single leading ``vendor/`` segment."""
+    normalized = model_name.strip().lower()
+    if normalized.count("/") == 1:
+        normalized = normalized.split("/", 1)[1]
+    return normalized
+
+
+def _openai_supported_reasoning_efforts(model_name: str) -> frozenset[str] | None:
+    """Return a model family's documented efforts, or None when unregistered."""
+    normalized_name = _normalized_openai_model_id(model_name)
+    if any(marker in normalized_name for marker in _OPENAI_NO_REASONING_MARKERS):
         return None
 
+    best_prefix_length = -1
     supported_efforts: frozenset[str] | None = None
-    for prefix, efforts in _OPENAI_GPT5_REASONING_EFFORTS:
-        if normalized_name.startswith(prefix):
+    for prefix, efforts in _OPENAI_REASONING_EFFORTS:
+        if normalized_name.startswith(prefix) and len(prefix) > best_prefix_length:
+            best_prefix_length = len(prefix)
             supported_efforts = efforts
-            break
+    return supported_efforts
+
+
+def _openai_reasoning_effort(
+    model_name: str, *, preference: tuple[str, ...]
+) -> str | None:
+    """Resolve the first preferred effort the model family documents.
+
+    ``None`` means "no reasoning parameter for this model" — either the family
+    is unregistered or it rejects the parameter.  Callers must then leave the
+    parameter off entirely rather than guessing a value.
+    """
+    supported_efforts = _openai_supported_reasoning_efforts(model_name)
     if supported_efforts is None:
         return None
-
-    preferred = "low" if quick_mode else "medium"
-    if preferred in supported_efforts:
-        return preferred
-    if quick_mode and "minimal" in supported_efforts:
-        return "minimal"
+    for effort in preference:
+        if effort in supported_efforts:
+            return effort
     return None
+
+
+def _effort_preference_for_mode(quick_mode: bool) -> tuple[str, ...]:
+    return _EFFORT_PREFERENCE_QUICK if quick_mode else _EFFORT_PREFERENCE_FULL
+
+
+def _reserve_class_for_effort(effort: str | None) -> Literal["default", "deep"]:
+    """Size the completion-cap reserve to the reasoning depth requested."""
+    return "deep" if effort in _DEEP_REASONING_EFFORTS else "default"
+
+
+def _centralized_output_budget(agent_name: str) -> int:
+    """Resolve an agent's share of ``LLM_BASE_OUTPUT_TOKENS``.
+
+    The graph resolves these budgets itself; this is for the seats built
+    outside the graph (editor) and for direct factory calls, so no caller has
+    to re-literalize a token count that ``AGENT_OUTPUT_BUDGET_FRACTIONS`` owns.
+    """
+    return get_agent_output_budget(
+        agent_name,
+        _coerce_int_setting(getattr(config, "llm_base_output_tokens", None), 32768),
+    )
 
 
 # Relax safety settings slightly for financial/market analysis context
@@ -380,6 +457,7 @@ def _reset_openai_rate_limiter_for_tests() -> None:
     _openai_rate_limiter = None
     _openai_rate_limiter_initialized = False
     _warned_openai_unthrottled.clear()
+    _warned_unknown_openai_reasoning.clear()
 
 
 # Track LLM instances for cleanup
@@ -822,6 +900,85 @@ def _apply_openai_api_base(kwargs: dict[str, Any]) -> None:
     kwargs.pop("output_version", None)
 
 
+def _openai_base_url_override() -> str | None:
+    """Return the configured OpenAI-compatible base URL, or None when unset."""
+    base_url = config.get_openai_api_base()
+    if not isinstance(base_url, str) or not base_url:
+        return None
+    return base_url
+
+
+def _openai_endpoint_host() -> str | None:
+    """Log-safe host of the configured base URL — never the full URL.
+
+    Mirrors ``runtime_diagnostics.get_endpoint_host``: a base URL may carry a
+    path, a query string, or embedded credentials, none of which may be logged.
+    """
+    base_url = _openai_base_url_override()
+    if base_url is None:
+        return None
+    try:
+        return urlsplit(base_url).hostname
+    except ValueError:
+        return None
+
+
+def _warn_unknown_openai_reasoning_capability(model_name: str) -> None:
+    """Warn once when a compatible endpoint serves an unregistered family.
+
+    Silence here is how the kimi-k3 starvation went unnoticed: an unregistered
+    reasoning model gets no effort bound *and* no completion-cap reserve, so
+    its hidden reasoning quietly eats the visible-output budget.  Stock OpenAI
+    models are not warned about — the table covers every reasoning family
+    OpenAI serves, so a miss there is a plain non-reasoning model.
+    """
+    if _openai_base_url_override() is None:
+        return
+    if model_name in _warned_unknown_openai_reasoning:
+        return
+    _warned_unknown_openai_reasoning.add(model_name)
+    logger.warning(
+        "openai_reasoning_capability_unknown",
+        model=model_name,
+        endpoint_host=_openai_endpoint_host(),
+        reason=(
+            "no reasoning-effort profile registered for this model family; "
+            "if it is a reasoning model its hidden reasoning shares the "
+            "completion-token cap and can starve the visible output. Add the "
+            "family to _OPENAI_REASONING_EFFORTS in src/llms.py."
+        ),
+    )
+
+
+def _apply_openai_reasoning_effort(
+    kwargs: dict[str, Any], *, model_name: str, preference: tuple[str, ...]
+) -> str | None:
+    """Set ``reasoning_effort`` when the model family documents one."""
+    effort = _openai_reasoning_effort(model_name, preference=preference)
+    if effort is None:
+        _warn_unknown_openai_reasoning_capability(model_name)
+        return None
+    kwargs["reasoning_effort"] = effort
+    return effort
+
+
+def _apply_openai_generation_budget(
+    kwargs: dict[str, Any], *, model_name: str, effort: str | None
+) -> GenerationBudget:
+    """Convert an intent budget into an API cap with a reasoning reserve."""
+    budget = _resolve_generation_budget(
+        intent_tokens=kwargs["max_completion_tokens"],
+        reserve_class=_reserve_class_for_effort(effort),
+        reserve_enabled=_reasoning_counts_against_completion_cap(
+            provider="openai",
+            model_name=model_name,
+            reasoning_effort=effort,
+        ),
+    )
+    kwargs["max_completion_tokens"] = budget.api_cap_tokens
+    return budget
+
+
 def _construct_chat_openai(kwargs: dict[str, Any]) -> BaseChatModel:
     """Build ChatOpenAI, using the flex-fallback subclass when tiered."""
     _apply_openai_api_base(kwargs)
@@ -1258,7 +1415,7 @@ def create_writer_openai_fallback_llm(
         max_completion_tokens=16384,
         service_tier_label="openai_sdk_timeout:writer_fallback",
         unthrottled_kind="writer_fallback",
-        gpt5_reasoning_effort="low",
+        effort_preference=_EFFORT_PREFERENCE_PROSE,
     )
 
 
@@ -1401,20 +1558,14 @@ def create_consultant_llm(
     else:
         _warn_openai_unthrottled_once("consultant")
 
-    reasoning_effort = _openai_gpt5_reasoning_effort(model_name, quick_mode=quick_mode)
-    if reasoning_effort is not None:
-        kwargs["reasoning_effort"] = reasoning_effort
-
-    budget = _resolve_generation_budget(
-        intent_tokens=kwargs["max_completion_tokens"],
-        reserve_class="default",
-        reserve_enabled=_reasoning_counts_against_completion_cap(
-            provider="openai",
-            model_name=model_name,
-            reasoning_effort=kwargs.get("reasoning_effort"),
-        ),
+    reasoning_effort = _apply_openai_reasoning_effort(
+        kwargs,
+        model_name=model_name,
+        preference=_effort_preference_for_mode(quick_mode),
     )
-    kwargs["max_completion_tokens"] = budget.api_cap_tokens
+    budget = _apply_openai_generation_budget(
+        kwargs, model_name=model_name, effort=reasoning_effort
+    )
 
     llm = _construct_chat_openai(kwargs)
     _stamp_budget_metadata(
@@ -1483,8 +1634,11 @@ def create_auditor_llm(
         "max_retries": 3,
         "api_key": api_key,
         "callbacks": callbacks or [],
+        # Fallback only: the graph always passes the auditor's centralized
+        # budget explicitly. Deriving the same value here keeps a direct call
+        # (tests, scripts) from silently running on a different cap.
         "max_completion_tokens": max_completion_tokens
-        or (6144 if quick_mode else 16384),
+        or _centralized_output_budget("Global Forensic Auditor"),
         "streaming": False,
         "use_responses_api": True,
         "output_version": "responses/v1",
@@ -1496,20 +1650,14 @@ def create_auditor_llm(
     else:
         _warn_openai_unthrottled_once("auditor")
 
-    reasoning_effort = _openai_gpt5_reasoning_effort(model_name, quick_mode=quick_mode)
-    if reasoning_effort is not None:
-        kwargs["reasoning_effort"] = reasoning_effort
-
-    budget = _resolve_generation_budget(
-        intent_tokens=kwargs["max_completion_tokens"],
-        reserve_class="default",
-        reserve_enabled=_reasoning_counts_against_completion_cap(
-            provider="openai",
-            model_name=model_name,
-            reasoning_effort=kwargs.get("reasoning_effort"),
-        ),
+    reasoning_effort = _apply_openai_reasoning_effort(
+        kwargs,
+        model_name=model_name,
+        preference=_effort_preference_for_mode(quick_mode),
     )
-    kwargs["max_completion_tokens"] = budget.api_cap_tokens
+    budget = _apply_openai_generation_budget(
+        kwargs, model_name=model_name, effort=reasoning_effort
+    )
 
     llm = _construct_chat_openai(kwargs)
     _stamp_budget_metadata(
@@ -1569,7 +1717,16 @@ def create_apac_specialist_llm(
         "streaming": False,
     }
     if thinking_enabled:
-        kwargs["reasoning_effort"] = "max"
+        # Deliberately the deepest setting the family documents — this seat is
+        # a single-shot regional audit with a deep reserve behind it. An
+        # unregistered family keeps the literal "max" (byte-identical to the
+        # long-standing z.ai/DeepSeek behaviour); a registered one that does
+        # not document "max" degrades to its deepest documented setting rather
+        # than sending a value the vendor would reject.
+        kwargs["reasoning_effort"] = (
+            _openai_reasoning_effort(model_name, preference=_EFFORT_PREFERENCE_DEEPEST)
+            or "max"
+        )
         kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
     else:
         kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
@@ -1696,12 +1853,15 @@ def _build_openai_chat(
     max_completion_tokens: int,
     service_tier_label: str,
     unthrottled_kind: str,
-    gpt5_reasoning_effort: str,
+    effort_preference: tuple[str, ...],
 ) -> BaseChatModel:
     """Shared ChatOpenAI construction for the editor and writer-fallback tiers.
 
-    Service-tier floor, process rate limiter, gpt-5 reasoning effort, and
+    Service-tier floor, process rate limiter, reasoning-effort resolution, and
     generation-budget handling live here once so the two callers cannot drift.
+    ``effort_preference`` is an ordered wish list, not a literal: it is resolved
+    against whatever the configured model family actually documents, so these
+    seats behave correctly on an OpenAI-compatible endpoint too.
     """
     kwargs: dict[str, Any] = {
         "model": model_name,
@@ -1720,18 +1880,12 @@ def _build_openai_chat(
         kwargs["rate_limiter"] = _rl
     else:
         _warn_openai_unthrottled_once(unthrottled_kind)
-    if model_name.startswith("gpt-5") and "pro" not in model_name:
-        kwargs["reasoning_effort"] = gpt5_reasoning_effort
-    budget = _resolve_generation_budget(
-        intent_tokens=kwargs["max_completion_tokens"],
-        reserve_class="default",
-        reserve_enabled=_reasoning_counts_against_completion_cap(
-            provider="openai",
-            model_name=model_name,
-            reasoning_effort=kwargs.get("reasoning_effort"),
-        ),
+    reasoning_effort = _apply_openai_reasoning_effort(
+        kwargs, model_name=model_name, preference=effort_preference
     )
-    kwargs["max_completion_tokens"] = budget.api_cap_tokens
+    budget = _apply_openai_generation_budget(
+        kwargs, model_name=model_name, effort=reasoning_effort
+    )
 
     llm = _construct_chat_openai(kwargs)
     _stamp_budget_metadata(
@@ -1782,10 +1936,10 @@ def create_editor_llm(
         model_name,
         api_key=api_key,
         callbacks=callbacks,
-        max_completion_tokens=8192,
+        max_completion_tokens=_centralized_output_budget("Article Editor"),
         service_tier_label="openai_sdk_timeout:editor",
         unthrottled_kind="editor",
-        gpt5_reasoning_effort="medium",
+        effort_preference=_EFFORT_PREFERENCE_FULL,
     )
 
 

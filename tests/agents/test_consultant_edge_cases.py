@@ -1443,5 +1443,224 @@ class TestConsultantQuickEnvelope:
         assert seen_timeouts[0] <= 10.0
 
 
+class TestTruncatedFinalResponse:
+    """1088.HK 2026-08-02: a review cut off at the token cap is a fragment.
+
+    The model burned its whole completion budget on hidden reasoning and
+    returned 46 characters of preamble. A fragment is truthy, so the existing
+    empty-content fallback could not see it and the fragment was persisted as a
+    complete consultant review (``ok=True``). The provider says so in
+    ``finish_reason``; the loop now reads it.
+    """
+
+    @staticmethod
+    def _loop_kwargs(fake_invoke, **overrides):
+        from src.agents.consultant_tool_loop import ConsultantToolLoopPolicy
+
+        kwargs = {
+            "active_llm": "active",
+            "fallback_llm": "fallback",
+            "messages": [],
+            "tools_by_name": {"spot_check_metric": object()},
+            "policy": ConsultantToolLoopPolicy(
+                max_tool_iterations=1,
+                max_tool_calls_per_turn=4,
+                deadline=time.monotonic() + 60,
+                total_timeout=60,
+            ),
+            "invoke_with_deadline": fake_invoke,
+            "agent_name": "External Consultant",
+            "agent_key": "consultant",
+            "ticker": "1088.HK",
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            {"finish_reason": "length"},
+            {"status": "incomplete", "incomplete_details": {"reason": "max_tokens"}},
+        ],
+    )
+    async def test_capped_fragment_is_replaced_by_a_forced_synthesis(self, metadata):
+        from src.agents.consultant_tool_loop import run_bounded_consultant_loop
+
+        fragment = SimpleNamespace(
+            content="I'll spot-check the decision-critical conflict",
+            tool_calls=[],
+            response_metadata=metadata,
+        )
+        synthesis = SimpleNamespace(
+            content="FINAL CONSULTANT VERDICT: CONDITIONAL APPROVAL",
+            tool_calls=[],
+            response_metadata={"finish_reason": "stop"},
+        )
+        invoked = []
+
+        async def fake_invoke(llm, _messages):
+            invoked.append(llm)
+            return fragment if llm == "active" else synthesis
+
+        result = await run_bounded_consultant_loop(**self._loop_kwargs(fake_invoke))
+
+        assert invoked == ["active", "fallback"]
+        assert result.content == "FINAL CONSULTANT VERDICT: CONDITIONAL APPROVAL"
+
+    @pytest.mark.asyncio
+    async def test_fragment_is_kept_when_the_retry_returns_nothing(self):
+        """Never trade a usable fragment for an empty response."""
+        from src.agents.consultant_tool_loop import run_bounded_consultant_loop
+
+        fragment = SimpleNamespace(
+            content="Partial review text",
+            tool_calls=[],
+            response_metadata={"finish_reason": "length"},
+        )
+        empty = SimpleNamespace(
+            content="", tool_calls=[], response_metadata={"finish_reason": "stop"}
+        )
+
+        async def fake_invoke(llm, _messages):
+            return fragment if llm == "active" else empty
+
+        result = await run_bounded_consultant_loop(**self._loop_kwargs(fake_invoke))
+
+        assert result.content == "Partial review text"
+
+    @pytest.mark.asyncio
+    async def test_clean_finish_does_not_pay_for_a_second_call(self):
+        from src.agents.consultant_tool_loop import run_bounded_consultant_loop
+
+        clean = SimpleNamespace(
+            content="FINAL CONSULTANT VERDICT: APPROVED",
+            tool_calls=[],
+            response_metadata={"finish_reason": "stop"},
+        )
+        invoked = []
+
+        async def fake_invoke(llm, _messages):
+            invoked.append(llm)
+            return clean
+
+        result = await run_bounded_consultant_loop(**self._loop_kwargs(fake_invoke))
+
+        assert invoked == ["active"]
+        assert result.content == "FINAL CONSULTANT VERDICT: APPROVED"
+
+    @pytest.mark.asyncio
+    async def test_failed_resynthesis_keeps_the_fragment(self):
+        """The re-ask is strictly additive — it must not cost us the fragment.
+
+        Widening the trigger from "empty" to "empty or truncated" means a
+        deadline-exhausted re-ask could otherwise turn a degraded-but-usable
+        review into a failed artifact.
+        """
+        from src.agents.consultant_tool_loop import run_bounded_consultant_loop
+
+        fragment = SimpleNamespace(
+            content="Partial but usable review",
+            tool_calls=[],
+            response_metadata={"finish_reason": "length"},
+        )
+
+        async def fake_invoke(llm, _messages):
+            if llm == "active":
+                return fragment
+            raise TimeoutError("consultant deadline exhausted")
+
+        result = await run_bounded_consultant_loop(**self._loop_kwargs(fake_invoke))
+
+        assert result.content == "Partial but usable review"
+
+    @pytest.mark.asyncio
+    async def test_failed_resynthesis_still_raises_when_there_is_no_content(self):
+        """The pre-existing empty-content path keeps propagating failures."""
+        from src.agents.consultant_tool_loop import run_bounded_consultant_loop
+
+        empty = SimpleNamespace(content="", tool_calls=[], response_metadata={})
+
+        async def fake_invoke(llm, _messages):
+            if llm == "active":
+                return empty
+            raise TimeoutError("consultant deadline exhausted")
+
+        with pytest.raises(TimeoutError):
+            await run_bounded_consultant_loop(**self._loop_kwargs(fake_invoke))
+
+    @pytest.mark.asyncio
+    async def test_provider_response_object_is_appended_verbatim(self):
+        """Tool turns must replay the provider's own message object.
+
+        Vendor-specific fields (Kimi's ``reasoning_content``, any future
+        equivalent) live on the response object. Reconstructing a message from
+        ``content`` + ``tool_calls`` would silently drop them, so the contract
+        this loop owns is: append what the provider returned, unmodified.
+        """
+        from src.agents.consultant_tool_loop import run_bounded_consultant_loop
+
+        tool_turn = SimpleNamespace(
+            content="",
+            tool_calls=[
+                {"name": "spot_check_metric", "args": {"ticker": "X"}, "id": "call_1"}
+            ],
+            response_metadata={"finish_reason": "tool_calls"},
+            reasoning_content="hidden chain of thought",
+        )
+        final = SimpleNamespace(
+            content="FINAL CONSULTANT VERDICT: APPROVED",
+            tool_calls=[],
+            response_metadata={"finish_reason": "stop"},
+        )
+        responses = iter((tool_turn, final))
+        seen_messages = []
+
+        async def fake_invoke(_llm, loop_messages):
+            seen_messages.append(list(loop_messages))
+            return next(responses)
+
+        class _Tool:
+            async def ainvoke(self, _args):
+                return "42"
+
+        class PassthroughService:
+            async def execute(self, invocation, runner):
+                return SimpleNamespace(value=await runner(invocation.args))
+
+        result = await run_bounded_consultant_loop(
+            **self._loop_kwargs(
+                fake_invoke,
+                tools_by_name={"spot_check_metric": _Tool()},
+                tool_service_getter=lambda: PassthroughService(),
+            )
+        )
+
+        assert result.content == "FINAL CONSULTANT VERDICT: APPROVED"
+        second_turn = seen_messages[1]
+        assert tool_turn in second_turn, "assistant turn was not replayed"
+        replayed = second_turn[second_turn.index(tool_turn)]
+        assert replayed is tool_turn
+        assert replayed.reasoning_content == "hidden chain of thought"
+        assert replayed.tool_calls == tool_turn.tool_calls
+
+    @pytest.mark.asyncio
+    async def test_metadata_free_response_is_not_treated_as_truncated(self):
+        """Synthetic AIMessages (tests, non-streaming providers) stay clean."""
+        from src.agents.consultant_tool_loop import run_bounded_consultant_loop
+
+        bare = SimpleNamespace(content="A complete review.", tool_calls=[])
+        invoked = []
+
+        async def fake_invoke(llm, _messages):
+            invoked.append(llm)
+            return bare
+
+        result = await run_bounded_consultant_loop(**self._loop_kwargs(fake_invoke))
+
+        assert invoked == ["active"]
+        assert result.content == "A complete review."
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
