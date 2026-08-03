@@ -186,6 +186,57 @@ class ScanResult:
     modified_since: float | None = None  # epoch (mtime mode)
 
 
+@dataclass(frozen=True)
+class FreshOutputCheck:
+    """Validity result for one ticker expected to emit one fresh artifact."""
+
+    status: str
+    path: Path | None = None
+    detail: str = ""
+
+    @property
+    def publishable(self) -> bool:
+        return self.status == "PUBLISHABLE"
+
+
+def check_fresh_ticker_output(
+    results_dir: Path,
+    ticker: str,
+    modified_since: float,
+) -> FreshOutputCheck:
+    """Require exactly one fresh, publishable artifact for a completed invocation."""
+    matches = [
+        record
+        for record in load_records(results_dir)
+        if record.ticker == ticker and record.mtime >= modified_since
+    ]
+    if not matches:
+        return FreshOutputCheck("MISSING", detail="no fresh analysis artifact")
+    if len(matches) > 1:
+        paths = ", ".join(str(record.path) for record in matches)
+        return FreshOutputCheck(
+            "AMBIGUOUS",
+            detail=f"multiple fresh artifacts: {paths}",
+        )
+
+    record = matches[0]
+    anomalies = detect_anomalies(record, prior=None)
+    validity_failures = [
+        anomaly
+        for anomaly in anomalies
+        if anomaly == "not publishable"
+        or anomaly.startswith("required failures:")
+        or anomaly.startswith("fatal failures:")
+    ]
+    if validity_failures:
+        return FreshOutputCheck(
+            "INCOMPLETE",
+            path=record.path,
+            detail="; ".join(validity_failures),
+        )
+    return FreshOutputCheck("PUBLISHABLE", path=record.path)
+
+
 def scan(
     results_dir: Path,
     run_date_compact: str | None = None,
@@ -267,9 +318,38 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Exit 1 when anomalies are found (default: always exit 0)",
     )
+    parser.add_argument(
+        "--require-publishable-ticker",
+        default=None,
+        metavar="TICKER",
+        help=(
+            "Require exactly one publishable artifact for TICKER in the "
+            "--modified-since window; intended for batch runners"
+        ),
+    )
     args = parser.parse_args(argv)
 
     results_dir = Path(args.results_dir)
+    if args.require_publishable_ticker:
+        if args.modified_since is None:
+            parser.error("--require-publishable-ticker requires --modified-since")
+        check = check_fresh_ticker_output(
+            results_dir,
+            args.require_publishable_ticker,
+            args.modified_since,
+        )
+        print(
+            json.dumps(
+                {
+                    "ticker": args.require_publishable_ticker,
+                    "status": check.status,
+                    "publishable": check.publishable,
+                    "path": str(check.path) if check.path else None,
+                    "detail": check.detail,
+                }
+            )
+        )
+        return 0 if check.publishable else 1
     if args.modified_since is not None:
         result = scan(results_dir, modified_since=args.modified_since)
     else:

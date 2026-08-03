@@ -251,6 +251,46 @@ class TestModifiedSinceSelection:
         assert any("verdict flip" in a for a in flagged.get("AAA.T", []))
 
 
+class TestFreshOutputCheck:
+    def test_publishable_single_artifact_passes(self, tmp_path: Path):
+        artifact = _write(tmp_path, "X.T", "20260712", "120000")
+        os.utime(artifact, (5000, 5000))
+
+        check = sbh.check_fresh_ticker_output(tmp_path, "X.T", 3000)
+
+        assert check.status == "PUBLISHABLE"
+        assert check.publishable is True
+        assert check.path == artifact
+
+    def test_nonpublishable_artifact_is_retained_but_incomplete(self, tmp_path: Path):
+        artifact = _write(
+            tmp_path,
+            "1681.HK",
+            "20260712",
+            "120000",
+            publishable=False,
+            required_failures=["fundamentals_report"],
+        )
+        os.utime(artifact, (5000, 5000))
+
+        check = sbh.check_fresh_ticker_output(tmp_path, "1681.HK", 3000)
+
+        assert check.status == "INCOMPLETE"
+        assert check.path == artifact
+        assert "not publishable" in check.detail
+
+    def test_multiple_fresh_artifacts_are_ambiguous(self, tmp_path: Path):
+        first = _write(tmp_path, "X.T", "20260712", "120000")
+        second = _write(tmp_path, "X.T", "20260712", "120001")
+        os.utime(first, (5000, 5000))
+        os.utime(second, (5001, 5001))
+
+        check = sbh.check_fresh_ticker_output(tmp_path, "X.T", 3000)
+
+        assert check.status == "AMBIGUOUS"
+        assert check.publishable is False
+
+
 class TestMainArgHandling:
     def test_run_date_and_modified_since_mutually_exclusive(self):
         with pytest.raises(SystemExit):

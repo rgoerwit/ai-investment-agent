@@ -290,7 +290,13 @@ def build_source_confidence_rows(state: dict) -> list[SourceRow]:
     # the legacy "ran ok → HIGH" path only for pre-change saved JSON (verdict None).
     verdict = summary.get("consultant_verdict")
     if verdict == "CLEAN" or (verdict is None and summary.get("consultant_successful")):
-        rows.append(("Cross-model review", "Consultant (gpt-5.4)", "HIGH"))
+        rows.append(
+            (
+                "Cross-model review",
+                "Consultant — no material concerns in bounded review",
+                "HIGH",
+            )
+        )
     elif verdict == "CONDITIONAL":
         rows.append(("Cross-model review", "Consultant — conditional", "MEDIUM"))
     elif verdict == "MAJOR_CONCERNS":

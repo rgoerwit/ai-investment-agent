@@ -90,15 +90,26 @@ for ticker in "${TICKERS[@]}"; do
     echo "--- [$n/${#TICKERS[@]}] $ticker ($(date)) ---" | tee -a "$LOG_FILE"
 
     REPORT_PATH="${OUT_DIR}/${ticker}.md"
+    ANALYSIS_STARTED_AT="$(date +%s)"
 
     if "${PYTHON_CMD[@]}" -m src.main --ticker "$ticker" \
             --imagedir "$IMAGE_DIR" --output "$REPORT_PATH" \
             --quiet --brief >> "$LOG_FILE" 2>&1; then
-        echo "OK: $ticker" | tee -a "$LOG_FILE"
-        echo "| $ticker | OK | [$ticker.md](./${ticker}.md) |" >> "$SUMMARY_FILE"
+        if VALIDITY_RESULT="$("${PYTHON_CMD[@]}" scripts/scan_batch_health.py \
+                --modified-since "$ANALYSIS_STARTED_AT" \
+                --require-publishable-ticker "$ticker" 2>> "$LOG_FILE")"; then
+            echo "OK: $ticker" | tee -a "$LOG_FILE"
+            echo "$VALIDITY_RESULT" >> "$LOG_FILE"
+            echo "| $ticker | OK | [$ticker.md](./${ticker}.md) |" >> "$SUMMARY_FILE"
+        else
+            echo "INCOMPLETE: $ticker (diagnostic output retained)" | tee -a "$LOG_FILE"
+            echo "$VALIDITY_RESULT" >> "$LOG_FILE"
+            echo "| $ticker | INCOMPLETE | [$ticker.md](./${ticker}.md); see run.log |" >> "$SUMMARY_FILE"
+            failed=$((failed + 1))
+        fi
     else
-        echo "FAILED: $ticker" | tee -a "$LOG_FILE"
-        echo "| $ticker | FAILED | see run.log |" >> "$SUMMARY_FILE"
+        echo "FAILED_RUNTIME: $ticker" | tee -a "$LOG_FILE"
+        echo "| $ticker | FAILED_RUNTIME | see run.log |" >> "$SUMMARY_FILE"
         failed=$((failed + 1))
     fi
 
@@ -111,7 +122,7 @@ done
 {
     echo ""
     echo "Finished: $(date)"
-    echo "Processed: $n, Failed: $failed"
+    echo "Processed: $n, Incomplete or failed: $failed"
     echo ""
     echo "Corresponding *_analysis.json artifacts were written to \$RESULTS_DIR"
     echo "(results/ by default) with a fresh timestamp -- diff those against"

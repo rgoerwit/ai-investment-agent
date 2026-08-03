@@ -398,7 +398,9 @@ def summarize_confidence(state: dict) -> str:
     ):
         # `verdict is None` = pre-change saved JSON; fall back to the legacy
         # "ran ok" signal so old analyses still render.
-        bits.append("consultant cross-check passed")
+        bits.append(
+            "consultant reported no material concerns in its bounded cross-check"
+        )
     elif verdict == "CONDITIONAL":
         bits.append("consultant approved with conditions — verify open items")
     elif verdict == "MAJOR_CONCERNS":
@@ -414,7 +416,7 @@ def summarize_confidence(state: dict) -> str:
     elif run_summary.get("consultant_completed"):
         bits.append("consultant ran but did not approve")
     if run_summary.get("auditor_successful"):
-        bits.append("forensic auditor clean")
+        bits.append("forensic auditor reported clean within the evidence reviewed")
     elif run_summary.get("auditor_completed"):
         bits.append("forensic auditor ran with caveats")
     if run_summary.get("apac_specialist_successful"):

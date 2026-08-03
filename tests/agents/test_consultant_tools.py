@@ -280,6 +280,26 @@ class TestSpotCheckMetricAlt:
 
 class TestMCPConsultantTools:
     @pytest.mark.asyncio
+    async def test_fmp_mcp_forward_pe_is_an_explicit_coverage_gap(self):
+        result = json.loads(
+            await spot_check_metric_mcp_fmp.ainvoke(
+                {"ticker": "8002.T", "metric": "forwardPE"}
+            )
+        )
+
+        assert "not available via FMP MCP" in result["error"]
+        assert "forwardPE" not in result["available_metrics"]
+        assert result["source"] == "fmp_mcp"
+
+    def test_fmp_mcp_dispatch_has_a_response_field_for_every_metric(self):
+        from src.consultant_tools import (
+            _FMP_MCP_RESPONSE_FIELDS,
+            _FMP_METRIC_DISPATCH,
+        )
+
+        assert _FMP_METRIC_DISPATCH.keys() <= _FMP_MCP_RESPONSE_FIELDS.keys()
+
+    @pytest.mark.asyncio
     async def test_fmp_mcp_wrapper_returns_value_from_nested_payload(self):
         mock_runtime = MagicMock()
         mock_runtime.execute_raw = AsyncMock(
@@ -315,6 +335,30 @@ class TestMCPConsultantTools:
             scope="consultant",
             agent_key="consultant",
         )
+
+    @pytest.mark.asyncio
+    async def test_fmp_mcp_wrapper_reads_stable_ttm_operating_margin_field(self):
+        mock_runtime = MagicMock()
+        mock_runtime.execute_raw = AsyncMock(
+            return_value={
+                "structured_content": {"data": [{"operatingProfitMarginTTM": 0.187}]},
+                "payload_profile": "structured_financial",
+            }
+        )
+        services = RuntimeServices(
+            tool_service=ToolExecutionService(),
+            inspection_service=InspectionService(),
+            mcp_runtime=mock_runtime,
+        )
+
+        with use_runtime_services(services):
+            result = json.loads(
+                await spot_check_metric_mcp_fmp.ainvoke(
+                    {"ticker": "7740.T", "metric": "operatingMargins"}
+                )
+            )
+
+        assert result["value"] == 0.187
 
     @pytest.mark.asyncio
     async def test_fmp_mcp_wrapper_surfaces_vendor_tool_error(self):

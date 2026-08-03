@@ -89,7 +89,6 @@ FMP_MCP_REQUIRED_TOOLS = frozenset({"statements", "quote"})
 # cross-validating the *current* state, not historical snapshots.
 _FMP_METRIC_DISPATCH: dict[str, tuple[str, str]] = {
     "trailingPE": ("statements", "metrics-ratios-ttm"),
-    "forwardPE": ("statements", "metrics-ratios-ttm"),
     "priceToBook": ("statements", "metrics-ratios-ttm"),
     "debtToEquity": ("statements", "metrics-ratios-ttm"),
     "returnOnEquity": ("statements", "metrics-ratios-ttm"),
@@ -106,12 +105,33 @@ _FMP_METRIC_DISPATCH: dict[str, tuple[str, str]] = {
     "marketCap": ("quote", "quote"),
 }
 
+_FMP_MCP_RESPONSE_FIELDS: dict[str, tuple[str, ...]] = {
+    metric: (FMP_FIELD_MAP[metric][1],)
+    for metric in _FMP_METRIC_DISPATCH.keys() & FMP_FIELD_MAP.keys()
+}
+_FMP_MCP_RESPONSE_FIELDS.update(
+    {
+        "currentPrice": ("price",),
+        "marketCap": ("marketCap",),
+        # Official stable ratios-ttm response key. Do not substitute a plausible
+        # non-TTM alias: that was the same class of pre-execution contract bug as
+        # forwardPE.
+        "operatingMargins": ("operatingProfitMarginTTM",),
+        # Support the stable response keys while retaining compatibility with
+        # observed legacy MCP payloads and older fixtures.
+        "trailingPE": ("priceToEarningsRatioTTM", "priceEarningsRatio"),
+        "priceToBook": ("priceToBookRatioTTM", "priceToBookRatio"),
+        "debtToEquity": ("debtToEquityRatioTTM", "debtEquityRatio"),
+        "dividendYield": ("dividendYieldTTM", "dividendYield"),
+        "payoutRatio": ("dividendPayoutRatioTTM", "payoutRatio"),
+        "currentRatio": ("currentRatioTTM", "currentRatio"),
+    }
+)
 
-def _fmp_mcp_field_for(metric: str) -> str:
-    """Return the response-field name to extract from the FMP MCP payload."""
-    if metric in FMP_FIELD_MAP:
-        return FMP_FIELD_MAP[metric][1]
-    return {"currentPrice": "price", "marketCap": "marketCap"}[metric]
+
+def _fmp_mcp_fields_for(metric: str) -> tuple[str, ...]:
+    """Return verified stable and observed legacy response fields for a metric."""
+    return _FMP_MCP_RESPONSE_FIELDS[metric]
 
 
 def _build_fmp_access_failure(
@@ -584,7 +604,7 @@ async def spot_check_metric_mcp_fmp(
         )
 
     tool_name, endpoint = _FMP_METRIC_DISPATCH[metric]
-    metric_field = _fmp_mcp_field_for(metric)
+    metric_fields = _fmp_mcp_fields_for(metric)
 
     try:
         result = await _execute_mcp_via_tool_service(
@@ -689,7 +709,11 @@ async def spot_check_metric_mcp_fmp(
 
     normalized_payload = value
     for payload in _extract_candidate_payloads(normalized_payload):
-        extracted = _find_nested_value(payload, metric_field)
+        extracted = None
+        for metric_field in metric_fields:
+            extracted = _find_nested_value(payload, metric_field)
+            if extracted is not None:
+                break
         if extracted is not None:
             response = {
                 "ticker": ticker,

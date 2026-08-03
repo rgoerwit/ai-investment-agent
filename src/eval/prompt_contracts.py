@@ -168,6 +168,7 @@ PROMPT_CONTRACTS: tuple[PromptContract, ...] = (
         parser=parse_trade_block,
         success=_trade_ok,
         block_name="TRADE_BLOCK",
+        required_fields=("action",),
     ),
     PromptContract(
         name="auditor_status",

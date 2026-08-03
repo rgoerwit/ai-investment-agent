@@ -17,7 +17,11 @@ from src.data_block_utils import (
     normalize_legacy_data_block_report,
     normalize_structured_block_boundaries,
 )
-from src.eval.capture_contract import NodeCaptureSpec, get_node_capture_spec
+from src.eval.capture_contract import (
+    NODE_CAPTURE_SPECS,
+    NodeCaptureSpec,
+    get_node_capture_spec,
+)
 from src.eval.scenario_catalog import (
     DEFAULT_SUITE_NAME,
     PromptCheckScenario,
@@ -25,11 +29,34 @@ from src.eval.scenario_catalog import (
     load_prompt_check_suite,
     load_prompt_check_suite_from_path,
 )
-from src.ibkr.order_builder import parse_trade_block
+from src.ibkr.order_builder import PARSEABLE_TRADE_ACTIONS, parse_trade_block
 from src.main import run_analysis
+from src.runtime_diagnostics import OPTIONAL_PUBLISHABLE_ARTIFACTS
 from src.validators.red_flag_detector import RedFlagDetector
 
-_OPTIONAL_PROMPT_KEYS = frozenset({"consultant"})
+
+def _optional_prompt_keys() -> frozenset[str]:
+    """Nodes whose absence the pipeline itself tolerates.
+
+    Derived from the publication contract rather than hand-maintained: a node is
+    optional here exactly when every artifact it owns is optional there. The old
+    literal ``{"consultant"}`` had drifted — the Auditor and Valuation Calculator
+    are optional for publication, yet a run with the OpenAI cross-check plane
+    switched off (a supported configuration; consultant and auditor share one
+    gate) reported the Auditor as a suite *failure*. That is the evaluator's model
+    of the pipeline going stale, the same defect class as the TRADE_BLOCK action
+    vocabulary.
+    """
+    return frozenset(
+        spec.prompt_key
+        for spec in NODE_CAPTURE_SPECS.values()
+        if spec.prompt_key
+        and spec.artifact_fields
+        and set(spec.artifact_fields) <= OPTIONAL_PUBLISHABLE_ARTIFACTS
+    )
+
+
+_OPTIONAL_PROMPT_KEYS = _optional_prompt_keys()
 
 
 @dataclass(frozen=True)
@@ -228,12 +255,7 @@ def check_valuation_params_present(text: str) -> tuple[bool, str | None]:
 
 def check_trade_block_present(text: str) -> tuple[bool, str | None]:
     trade_block = parse_trade_block(text)
-    ok = trade_block is not None and trade_block.action in {
-        "BUY",
-        "SELL",
-        "HOLD",
-        "REJECT",
-    }
+    ok = trade_block is not None and trade_block.action in PARSEABLE_TRADE_ACTIONS
     return ok, None if ok else "TRADE_BLOCK missing or ACTION not parseable"
 
 
@@ -512,7 +534,12 @@ def _print_suite_report(report: PromptCheckSuiteReport) -> None:
             )
         for node_report in scenario.run_report.node_reports:
             if node_report.skipped:
-                print(f"  - {node_report.node_name}: skipped")
+                # Rendered in the same bulleted list as real failures, so say
+                # plainly that it did not contribute one.
+                print(
+                    f"  - {node_report.node_name}: optional - not run "
+                    "(excluded from pass/fail)"
+                )
                 continue
             for check in node_report.checks:
                 if not check.passed:

@@ -664,6 +664,32 @@ STATUS: COMPLETED
         assert "EARNINGS_BASELINE_STATUS: TEMPORARILY_BOOSTED" in normalized
         assert _should_retry_output(normalized, "foreign_language_analyst")
 
+    def test_guidance_na_semantic_unknowns_are_normalized_before_promotion(self):
+        content = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+OPERATING_VS_NET_DIRECTION: N/A
+MATERIAL_NONOPERATING_DRIVER: N/A
+EARNINGS_BASELINE_STATUS: N/A
+NORMALIZED_EARNINGS_AVAILABLE: N/A
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+        evidence = """#### results_package
+STATUS: COMPLETED
+EVIDENCE_STATUS: COVERAGE_COMPLETE_NO_MATCH
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            content,
+            "1681.HK",
+            management_guidance_evidence=evidence,
+        )
+
+        assert "OPERATING_VS_NET_DIRECTION: UNKNOWN" in normalized
+        assert "MATERIAL_NONOPERATING_DRIVER: UNKNOWN" in normalized
+        assert "EARNINGS_BASELINE_STATUS: UNKNOWN" in normalized
+        assert "NORMALIZED_EARNINGS_AVAILABLE: N/A" in normalized
+
     def test_broker_projection_is_labeled_third_party(self):
         regression = load_frozen_regression("6782_TW_regression.json")
         guidance = regression["guidance_evidence"]

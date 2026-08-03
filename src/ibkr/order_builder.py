@@ -20,6 +20,15 @@ logger = structlog.get_logger(__name__)
 # TRADE_BLOCK Parsing
 # ══════════════════════════════════════════════════════════════════════════════
 
+# The Trader's TRADE_BLOCK ACTION vocabulary, canonical for every consumer.
+# `prompts/trader.json` v4.3 (the retail alignment) retired SELL/REJECT in favour of
+# DO_NOT_INITIATE; those two are kept parseable for archived analyses only, the same
+# way `pm_decision_parser` still folds a legacy REJECT. Parity with the prompt is
+# guarded by tests/prompts/test_threshold_parity.py::test_trader_action_enum_matches_parser.
+CURRENT_TRADE_ACTIONS = frozenset({"BUY", "HOLD", "DO_NOT_INITIATE"})
+LEGACY_TRADE_ACTIONS = frozenset({"SELL", "REJECT"})
+PARSEABLE_TRADE_ACTIONS = CURRENT_TRADE_ACTIONS | LEGACY_TRADE_ACTIONS
+
 # Regex for each TRADE_BLOCK field — tolerant of whitespace and markdown
 _FIELD_PATTERNS = {
     "action": re.compile(r"ACTION:\s*(.+?)(?:\n|$)", re.IGNORECASE),
@@ -91,7 +100,7 @@ def parse_trade_block(text: str) -> TradeBlockData | None:
     action_raw = fields["action"].strip("*").strip()
     # Normalize to base action for classification
     action_base = action_raw.split("(")[0].strip().upper()
-    if action_base not in ("BUY", "SELL", "HOLD", "REJECT"):
+    if action_base not in PARSEABLE_TRADE_ACTIONS:
         action_base = action_raw.upper()
 
     size_pct = 0.0

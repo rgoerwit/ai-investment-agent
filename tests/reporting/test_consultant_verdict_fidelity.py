@@ -133,8 +133,11 @@ def _memo(verdict, **extra) -> str:
     return summarize_confidence({"run_summary": summary})
 
 
-def test_memo_clean_says_passed():
-    assert "consultant cross-check passed" in _memo("CLEAN")
+def test_memo_clean_describes_bounded_review_without_implying_proof():
+    text = _memo("CLEAN")
+    assert "no material concerns" in text
+    assert "bounded cross-check" in text
+    assert "verified" not in text
 
 
 def test_memo_conditional_does_not_say_passed():
@@ -164,7 +167,7 @@ def test_memo_legacy_fallback_passes():
     text = summarize_confidence(
         {"run_summary": {"consultant_successful": True, "consultant_completed": True}}
     )
-    assert "consultant cross-check passed" in text
+    assert "no material concerns" in text
 
 
 # --------------------------------------------------------------------------- #
@@ -184,7 +187,7 @@ def _consultant_row(verdict, **extra) -> tuple[str, str, str]:
 def test_source_clean_is_high():
     assert _consultant_row("CLEAN") == (
         "Cross-model review",
-        "Consultant (gpt-5.4)",
+        "Consultant — no material concerns in bounded review",
         "HIGH",
     )
 
@@ -218,7 +221,11 @@ def test_source_legacy_fallback_is_high():
         {"run_summary": {"consultant_successful": True, "consultant_completed": True}}
     )
     row = next(r for r in rows if r[0] == "Cross-model review")
-    assert row == ("Cross-model review", "Consultant (gpt-5.4)", "HIGH")
+    assert row == (
+        "Cross-model review",
+        "Consultant — no material concerns in bounded review",
+        "HIGH",
+    )
 
 
 def test_source_not_run():

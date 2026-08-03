@@ -48,9 +48,17 @@ def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
     )
 
     assert summary["consultant_finished"] is True
+    assert summary["consultant_review_status"] == "FAILED"
+    assert summary["consultant_review_scope"] == (
+        "BOUNDED_CROSS_CHECK_NOT_FACTUAL_PROOF"
+    )
     assert summary["consultant_successful"] is False
     assert summary["auditor_finished"] is True
     assert summary["auditor_successful"] is True
+    assert summary["auditor_review_status"] == "COMPLETED"
+    assert summary["auditor_review_scope"] == (
+        "BOUNDED_FORENSIC_REVIEW_NOT_AUDIT_OPINION"
+    )
     assert summary["apac_specialist_completed"] is True
     assert summary["apac_specialist_successful"] is True
     assert summary["apac_specialist_status"] == "ok"
@@ -271,9 +279,16 @@ def test_save_results_to_file_preserves_macro_context_metadata(tmp_path, monkeyp
         },
     }
 
-    output_path = save_results_to_file(result, "7203.T", quick_mode=True)
+    output_path = save_results_to_file(
+        result,
+        "7203.T",
+        quick_mode=True,
+        trace_id="trace-7203",
+    )
     payload = json.loads(output_path.read_text())
 
+    assert payload["metadata"]["run_id"] == "trace-7203"
+    assert payload["metadata"]["trace_id"] == "trace-7203"
     assert payload["macro_context"]["status"] == "generated"
     assert payload["macro_context"]["region"] == "JAPAN"
     assert payload["macro_context"]["report_present"] is True

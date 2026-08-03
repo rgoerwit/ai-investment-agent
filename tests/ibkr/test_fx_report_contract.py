@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from scripts.portfolio_manager import format_report
 from src.config import config
 from src.ibkr.models import (
@@ -192,7 +194,13 @@ def test_unknown_fx_buy_renders_as_review_not_order(monkeypatch):
     monkeypatch.setattr(config, "buy_stability_enabled", False, raising=False)
     analysis = AnalysisRecord(
         ticker="TEST.ST",
-        analysis_date="2026-07-19",
+        # Must stay inside DEFAULT_MAX_AGE_DAYS: this test's subject is the
+        # unknown-FX block, not staleness. A pinned date silently became a time
+        # bomb — "2026-07-19" passed until it aged past the 14-day window on
+        # 2026-08-03 and the row rendered as a stale REVIEW instead. The absolute
+        # -date rule applies to rendered goldens, which need date *stability*;
+        # freshness-dependent behaviour tests need date *recency*.
+        analysis_date=(datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d"),
         verdict="BUY",
         currency="ZZZ",
         entry_price=100.0,

@@ -93,6 +93,11 @@ class RunRow:
     contract_status: str | None = None
     consultant_verdict: str | None = None
     auditor_status: str | None = None
+    publishable: bool | None = None
+    required_failures: list[str] = field(default_factory=list)
+    data_coverage_pct: float | None = None
+    growth_gap_count: int = 0
+    source_conflict_count: int = 0
     red_flag_types: list[str] = field(default_factory=list)
 
     @property
@@ -140,6 +145,36 @@ def extract_row(path: Path) -> RunRow:
     if isinstance(snapshot, dict):
         contract_status = snapshot.get("contract_status") or snapshot.get("status")
 
+    structured_inputs = d.get("structured_inputs") or {}
+    raw_metrics = (
+        structured_inputs.get("raw_financial_metrics", {})
+        if isinstance(structured_inputs, dict)
+        else {}
+    )
+    raw_payload = (
+        raw_metrics.get("payload", {}) if isinstance(raw_metrics, dict) else {}
+    )
+    raw_payload = raw_payload if isinstance(raw_payload, dict) else {}
+    quality = raw_payload.get("_quality") or {}
+    coverage = quality.get("coverage_pct") if isinstance(quality, dict) else None
+    try:
+        coverage_pct = float(coverage) if coverage is not None else None
+    except (TypeError, ValueError):
+        coverage_pct = None
+    quarterly_diagnostics = raw_payload.get("_quarterly_diagnostics") or []
+    growth_gap_count = sum(
+        1
+        for item in quarterly_diagnostics
+        if isinstance(item, dict) and item.get("status") == "unavailable"
+    )
+    source_conflicts = raw_payload.get("_source_conflicts") or {}
+    source_conflict_count = (
+        len(source_conflicts) if isinstance(source_conflicts, dict) else 0
+    )
+    required_failures = run_summary.get("required_failures") or []
+    if not isinstance(required_failures, list):
+        required_failures = [str(required_failures)]
+
     return RunRow(
         ticker=d.get("metadata", {}).get("ticker") or path.stem.split("_")[0],
         timestamp=ts,
@@ -151,6 +186,11 @@ def extract_row(path: Path) -> RunRow:
         contract_status=contract_status,
         consultant_verdict=run_summary.get("consultant_verdict"),
         auditor_status=run_summary.get("auditor_status"),
+        publishable=run_summary.get("publishable"),
+        required_failures=[str(item) for item in required_failures],
+        data_coverage_pct=coverage_pct,
+        growth_gap_count=growth_gap_count,
+        source_conflict_count=source_conflict_count,
         red_flag_types=sorted(set(flag_types)),
     )
 
@@ -204,9 +244,9 @@ def render_timeline_markdown(ticker: str, rows: list[RunRow]) -> str:
 
     lines = [f"### {ticker}", ""]
     lines.append(
-        "| Date | Verdict | Health | Growth | Risk | Contract | Consultant | Auditor | Flags |"
+        "| Date | Outcome | Verdict | Health | Growth | Risk | Data quality | Contract | Consultant | Auditor | Flags |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
 
     prev_flags: set[str] = set()
     for i, r in enumerate(rows):
@@ -228,9 +268,28 @@ def render_timeline_markdown(ticker: str, rows: list[RunRow]) -> str:
         flags_disp = ", ".join(flag_cells) or "—"
         prev_flags = set(r.red_flag_types)
 
+        if r.publishable is True:
+            outcome = "PUBLISHABLE"
+        elif r.publishable is False:
+            failure_suffix = (
+                f": {', '.join(r.required_failures)}" if r.required_failures else ""
+            )
+            outcome = f"INCOMPLETE{failure_suffix}"
+        else:
+            outcome = "—"
+        quality_parts = []
+        if r.data_coverage_pct is not None:
+            quality_parts.append(f"coverage {r.data_coverage_pct:.1f}%")
+        if r.growth_gap_count:
+            quality_parts.append(f"growth gaps {r.growth_gap_count}")
+        if r.source_conflict_count:
+            quality_parts.append(f"conflicts {r.source_conflict_count}")
+        quality_disp = "; ".join(quality_parts) or "—"
+
         lines.append(
-            f"| {date_disp} | {fmt(r.verdict)} | {fmt(r.health_adj, '%')} | "
-            f"{fmt(r.growth_adj, '%')} | {fmt(r.risk_total)} | {fmt(r.contract_status)} | "
+            f"| {date_disp} | {outcome} | {fmt(r.verdict)} | "
+            f"{fmt(r.health_adj, '%')} | {fmt(r.growth_adj, '%')} | "
+            f"{fmt(r.risk_total)} | {quality_disp} | {fmt(r.contract_status)} | "
             f"{fmt(r.consultant_verdict)} | {fmt(r.auditor_status)} | {flags_disp} |"
         )
     lines.append("")
@@ -358,6 +417,12 @@ def main(argv: list[str] | None = None) -> int:
                 sections.append(scan_run_log(p))
 
     sections.append("## Per-ticker timelines")
+    sections.append("")
+    sections.append(
+        "> Review columns describe cross-check execution and coverage, not factual "
+        "proof. `CLEAN` means no material concern was identified in the evidence the "
+        "review could inspect; partial or insufficient-data reviews are explicitly limited."
+    )
     sections.append("")
     for t in args.tickers:
         rows = discover_rows(

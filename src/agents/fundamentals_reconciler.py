@@ -39,6 +39,13 @@ HORIZON_FIELD_RAW_KEYS = (
     ("GROWTH_TRAJECTORY", "growth_trajectory"),
 )
 
+_PERIOD_COMPARABLE_GROWTH_FIELDS = (
+    ("REVENUE_GROWTH_TTM", "revenueGrowth_TTM"),
+    ("REVENUE_GROWTH_MRQ", "revenueGrowth_MRQ"),
+    ("EARNINGS_GROWTH_TTM", "earningsGrowth_TTM"),
+    ("EARNINGS_GROWTH_MRQ", "earningsGrowth_MRQ"),
+)
+
 
 def _growth_source_label(
     payload: dict[str, Any],
@@ -511,6 +518,31 @@ def reconcile_high_risk_fields(
             "GROWTH_DATA_QUALITY_NOTE",
             "Growth horizons and provenance reconciled to raw metrics; unavailable "
             "TTM/MRQ values were not backfilled from FY data.",
+        )
+    missing_growth_fields = [
+        label
+        for label, raw_key in _PERIOD_COMPARABLE_GROWTH_FIELDS
+        if payload.get(raw_key) is None
+    ]
+    if missing_growth_fields:
+        existing_note = extract_block_text_value(
+            updated,
+            "GROWTH_DATA_QUALITY_NOTE",
+        )
+        missing_note = (
+            "Missing period-comparable growth inputs: "
+            f"{', '.join(missing_growth_fields)}. Their absence is a data gap, "
+            "not evidence of acceleration, deceleration, or structural contraction."
+        )
+        combined_note = (
+            f"{existing_note} {missing_note}".strip()
+            if missing_note not in existing_note
+            else existing_note
+        )
+        updated = replace_or_append_block_line(
+            updated,
+            "GROWTH_DATA_QUALITY_NOTE",
+            combined_note,
         )
     # yfinance can lag a full fiscal year for some ex-US names: the latest annual
     # statements predate the most recent completed FY, so any FY-based growth may be
