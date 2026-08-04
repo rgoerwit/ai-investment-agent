@@ -175,6 +175,81 @@ async def _create_accepted_rm_capture(tmp_path: Path, monkeypatch) -> Path:
     return run_dir
 
 
+async def _finalize_with_statuses(tmp_path, monkeypatch, statuses: dict) -> Path | None:
+    """Run one clean node, then finalize with a caller-supplied status set."""
+    manager = _make_manager(tmp_path, monkeypatch)
+    llm = StaticRunnable(AIMessage(content="investment plan body"))
+
+    async def fake_rm_node(state, config):
+        await invoke_with_rate_limit_handling(
+            llm,
+            [HumanMessage(content="Provide Investment Plan.")],
+            context="Research Manager",
+            provider="google",
+            model_name="test-model",
+        )
+        return success_artifact(
+            "investment_plan", "Investment plan body", provider="google"
+        )
+
+    await _run_wrapped(manager, "Research Manager", fake_rm_node)
+    return manager.finalize_run(
+        {
+            "analysis_validity": {"publishable": True},
+            "artifact_statuses": {
+                "investment_plan": _artifact_status(True),
+                **statuses,
+            },
+            "run_summary": {
+                "quick_model": "gemini-2.5-flash",
+                "deep_model": "gemini-2.5-pro",
+                "llm_provider": "google",
+                "llm_providers_used": ["google"],
+            },
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_optional_artifact_does_not_reject_the_capture(
+    tmp_path, monkeypatch
+):
+    """An artifact the pipeline publishes without must not veto its capture.
+
+    On 2026-08-03 all six smoke-suite tickers produced publishable analyses and
+    all six captures were rejected for `artifact_failed:auditor_report` alone —
+    the optional cross-check seat timing out made a clean corpus uncapturable.
+    """
+    run_dir = await _finalize_with_statuses(
+        tmp_path,
+        monkeypatch,
+        {
+            "auditor_report": _artifact_status(False),
+            "consultant_review": _artifact_status(False),
+        },
+    )
+
+    assert run_dir is not None
+    manifest = _read_json(run_dir / "run_manifest.json")
+    assert manifest["capture_status"] == "accepted"
+    assert "/accepted/" in str(run_dir)
+
+
+@pytest.mark.asyncio
+async def test_failed_required_artifact_still_rejects_the_capture(
+    tmp_path, monkeypatch
+):
+    """The relaxation is scoped: a required artifact's failure is still fatal."""
+    run_dir = await _finalize_with_statuses(
+        tmp_path, monkeypatch, {"fundamentals_report": _artifact_status(False)}
+    )
+
+    assert run_dir is not None
+    manifest = _read_json(run_dir / "run_manifest.json")
+    assert manifest["capture_status"] == "rejected"
+    assert "artifact_failed:fundamentals_report" in manifest["rejection_reasons"]
+
+
 def test_node_capture_contract_covers_live_prompt_nodes():
     expected_eligible = {
         "Market Analyst",

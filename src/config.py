@@ -751,6 +751,24 @@ class Settings(BaseSettings):
         ),
     )
 
+    # The OpenAI cross-check plane (Consultant + Forensic Auditor) is budgeted
+    # separately from the APEX seats: its constraint is *vendor latency*, not
+    # gate-criticality. Both seats can be pointed at an OpenAI-compatible endpoint
+    # via OPENAI_API_BASE, and a reasoning vendor there can exceed the flat 60s
+    # quick cap outright — kimi-k3's slowest measured call is ~69s, so on
+    # 2026-08-03 the auditor timed out on 6/6 smoke-suite tickers and every
+    # baseline capture was rejected. Kept distinct from the APEX knob so tuning
+    # one cannot silently starve the other.
+    cross_check_quick_llm_call_hard_timeout_seconds: float = Field(
+        default=180.0,
+        gt=0.0,
+        validation_alias="CROSS_CHECK_QUICK_LLM_CALL_HARD_TIMEOUT_SECONDS",
+        description=(
+            "Hard wall-clock cap (seconds) for a single OpenAI cross-check-seat "
+            "LLM ainvoke (Consultant, Forensic Auditor) in --quick mode."
+        ),
+    )
+
     # --- LLM circuit breaker (P2-7) ----------------------------------------
     # When a provider/model starts serving back-to-back hard-timeouts (e.g.,
     # regional Gemini Flash degradation), the breaker short-circuits the

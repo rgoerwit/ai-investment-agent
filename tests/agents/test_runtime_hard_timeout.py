@@ -116,6 +116,82 @@ class TestApexQuickHardTimeout:
         )
         assert quick_mode_hard_timeout_seconds("News Analyst", settings_config) == 60.0
 
+    def test_decorated_context_still_resolves_to_its_seat_budget(self, monkeypatch):
+        """Call sites decorate the context; a raw membership test missed them all.
+
+        Live defect this pins: the deep-model retry of a gate-critical seat is
+        invoked as "Fundamentals Analyst (RETRY-HIGH)", which resolved to the 60s
+        flat cap — a *smaller* per-call budget than its own first attempt, inside
+        an outer allowance that had correctly been sized at 180s.
+        """
+        from src.agents.runtime import quick_mode_hard_timeout_seconds
+
+        monkeypatch.setattr(
+            settings_config, "apex_quick_llm_call_hard_timeout_seconds", 180.0
+        )
+        monkeypatch.setattr(
+            settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
+        )
+        for context in (
+            "Fundamentals Analyst (RETRY-HIGH)",
+            "Portfolio Manager (RETRY-HIGH)",
+        ):
+            assert quick_mode_hard_timeout_seconds(context, settings_config) == 180.0
+        # Decoration must not promote a cheap agent.
+        assert (
+            quick_mode_hard_timeout_seconds("Bull Researcher R2", settings_config)
+            == 60.0
+        )
+
+    def test_cross_check_seats_get_the_vendor_latency_budget(self, monkeypatch):
+        """Consultant + Auditor are budgeted for vendor latency, not criticality.
+
+        Both can be pointed at an OpenAI-compatible endpoint whose reasoning model
+        outruns the flat cap: on 2026-08-03 kimi-k3 blew the 60s quick cap on 6/6
+        smoke-suite tickers and every baseline capture was rejected.
+        """
+        from src.agents.runtime import (
+            CROSS_CHECK_SEAT_CONTEXTS,
+            quick_mode_hard_timeout_seconds,
+        )
+
+        monkeypatch.setattr(
+            settings_config, "cross_check_quick_llm_call_hard_timeout_seconds", 180.0
+        )
+        monkeypatch.setattr(
+            settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
+        )
+        for context in CROSS_CHECK_SEAT_CONTEXTS:
+            assert quick_mode_hard_timeout_seconds(context, settings_config) == 180.0
+        # The real, decorated call-site spellings must resolve too.
+        for context in (
+            "Global Forensic Accountant",
+            "Global Forensic Accountant_final_synthesis",
+            "Global Forensic Auditor Escalation",
+            "External Consultant",
+            "External Consultant_final_synthesis",
+        ):
+            assert quick_mode_hard_timeout_seconds(context, settings_config) == 180.0
+
+    def test_cross_check_budget_is_independent_of_the_apex_budget(self, monkeypatch):
+        """Separate knobs: tuning one must not silently starve the other."""
+        from src.agents.runtime import quick_mode_hard_timeout_seconds
+
+        monkeypatch.setattr(
+            settings_config, "apex_quick_llm_call_hard_timeout_seconds", 90.0
+        )
+        monkeypatch.setattr(
+            settings_config, "cross_check_quick_llm_call_hard_timeout_seconds", 240.0
+        )
+        monkeypatch.setattr(
+            settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
+        )
+        assert (
+            quick_mode_hard_timeout_seconds("Portfolio Manager", settings_config)
+            == 90.0
+        )
+        assert quick_mode_hard_timeout_seconds("Consultant", settings_config) == 240.0
+
     def test_apex_seat_contexts_match_prompt_agent_names(self):
         # APEX_SEAT_CONTEXTS must equal the on-disk agent_name of the two APEX
         # seats, or the larger budget silently stops applying after a rename.

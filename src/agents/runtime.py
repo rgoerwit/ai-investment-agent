@@ -27,6 +27,7 @@ from src.runtime_diagnostics import (
     infer_provider,
 )
 from src.service_tiers import floor_llm_hard_timeout, provider_flex_active
+from src.token_tracker import canonical_display_name
 
 logger = structlog.get_logger(__name__)
 
@@ -37,19 +38,42 @@ logger = structlog.get_logger(__name__)
 # data-gathering agents. Kept in lockstep with APEX_SEATS in src/llms.py via
 # tests/agents/test_runtime_hard_timeout.py (the seats' prompt agent_name).
 APEX_SEAT_CONTEXTS = frozenset({"Fundamentals Analyst", "Portfolio Manager"})
+# Canonical display names — see canonical_display_name() below on why these are
+# not the raw context strings.
+CROSS_CHECK_SEAT_CONTEXTS = frozenset({"Consultant", "Global Forensic Auditor"})
 
 
 def quick_mode_hard_timeout_seconds(context: str, cfg: Any = settings_config) -> float:
     """Per-call hard wall-clock cap for a single ``--quick`` LLM ainvoke.
 
-    Gate-critical APEX seats (Senior Fundamentals, Portfolio Manager) get the
-    larger ``apex_quick_llm_call_hard_timeout_seconds`` budget so the tight quick
-    cap can't guillotine the DATA_BLOCK / PM_BLOCK the hard gates depend on;
-    every other (cheap, fast) agent keeps ``quick_llm_call_hard_timeout_seconds``
-    so quick mode still surfaces a hung provider quickly.
+    Three budgets, by why the seat needs one:
+
+    * Gate-critical APEX seats (Senior Fundamentals, Portfolio Manager) get
+      ``apex_quick_llm_call_hard_timeout_seconds`` so the tight quick cap can't
+      guillotine the DATA_BLOCK / PM_BLOCK the hard gates depend on.
+    * The OpenAI cross-check plane (Consultant, Forensic Auditor) gets
+      ``cross_check_quick_llm_call_hard_timeout_seconds`` — a *vendor-latency*
+      allowance, not a criticality one, because these seats can be pointed at an
+      OpenAI-compatible endpoint whose reasoning model exceeds the flat cap.
+    * Everything else (cheap, fast flash agents) keeps
+      ``quick_llm_call_hard_timeout_seconds`` so quick mode still surfaces a hung
+      provider quickly.
+
+    The context is canonicalized first. Call sites decorate it — ``(RETRY-HIGH)``,
+    ``_final_synthesis``, ``Escalation`` — and a raw membership test silently
+    missed every decorated variant. That was a live defect, not just a gap for
+    the seats added here: ``"Fundamentals Analyst (RETRY-HIGH)"`` resolved to the
+    60s flat cap, so the deep-model retry of a gate-critical seat ran on a
+    *smaller* per-call budget than its first attempt, inside an outer allowance
+    that had correctly been sized at 180s.
     """
-    if context in APEX_SEAT_CONTEXTS:
+    seat = canonical_display_name(context)
+    if seat in APEX_SEAT_CONTEXTS:
         return float(getattr(cfg, "apex_quick_llm_call_hard_timeout_seconds", 180.0))
+    if seat in CROSS_CHECK_SEAT_CONTEXTS:
+        return float(
+            getattr(cfg, "cross_check_quick_llm_call_hard_timeout_seconds", 180.0)
+        )
     return float(getattr(cfg, "quick_llm_call_hard_timeout_seconds", 60.0))
 
 

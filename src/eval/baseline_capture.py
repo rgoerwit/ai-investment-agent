@@ -10,6 +10,8 @@ from typing import Any, cast
 
 import structlog
 
+from src.runtime_diagnostics import get_optional_publishable_artifacts
+
 from .capture_contract import NodeCaptureSpec, get_node_capture_spec
 from .capture_validation import validate_capture_bundle
 from .execution_profile import summarize_agent_llm_profile
@@ -868,7 +870,16 @@ class BaselineCaptureManager:
             acceptance_reasons.append("result_not_dict")
         elif not result.get("analysis_validity", {}).get("publishable", False):
             acceptance_reasons.append("analysis_not_publishable")
+        # Optionality follows the publication contract, not a second opinion: an
+        # artifact the pipeline is willing to publish without must not veto the
+        # capture of an otherwise-complete run. On 2026-08-03 all six smoke-suite
+        # tickers produced publishable analyses and all six captures were rejected
+        # for `artifact_failed:auditor_report` alone — the optional cross-check
+        # seat timing out made a clean corpus uncapturable.
+        optional_fields = get_optional_publishable_artifacts(result)
         for field, status in (result.get("artifact_statuses", {}) or {}).items():
+            if field in optional_fields:
+                continue
             if (
                 isinstance(status, dict)
                 and status.get("complete")
