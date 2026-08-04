@@ -192,6 +192,110 @@ class TestApexQuickHardTimeout:
         )
         assert quick_mode_hard_timeout_seconds("Consultant", settings_config) == 240.0
 
+    def test_every_gate_critical_call_site_resolves_to_its_seat_budget(
+        self, monkeypatch
+    ):
+        """Source-driven: enumerate real call sites instead of hand-picked strings.
+
+        The previous test listed spellings by hand and therefore could not catch
+        an omission — which is exactly how "Portfolio Manager structure
+        correction", "Portfolio Manager trace correction", "pm_verdict_recovery"
+        and "global_forensic_auditor_repair" all silently kept the 60s flat cap
+        while enforcing the final recommendation's evidence contract.
+
+        Any invoke call site whose ``context`` is a decorated or free-form string
+        must pass an explicit ``canonical_agent``; this scans ``src/agents`` and
+        fails if a gate-critical/cross-check seat is left to derivation.
+        """
+        from src.agents.runtime import (
+            APEX_SEAT_CONTEXTS,
+            CROSS_CHECK_SEAT_CONTEXTS,
+            quick_mode_hard_timeout_seconds,
+        )
+
+        monkeypatch.setattr(
+            settings_config, "apex_quick_llm_call_hard_timeout_seconds", 180.0
+        )
+        monkeypatch.setattr(
+            settings_config, "cross_check_quick_llm_call_hard_timeout_seconds", 180.0
+        )
+        monkeypatch.setattr(
+            settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
+        )
+
+        big_seats = set(APEX_SEAT_CONTEXTS) | set(CROSS_CHECK_SEAT_CONTEXTS)
+        agents_dir = Path(__file__).resolve().parents[2] / "src" / "agents"
+        offenders: list[str] = []
+
+        for path in sorted(agents_dir.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                kwargs = {
+                    kw.arg: kw.value for kw in node.keywords if kw.arg is not None
+                }
+                if "context" not in kwargs:
+                    continue
+                ctx, canon = kwargs["context"], kwargs.get("canonical_agent")
+                # A plain literal is self-describing; derivation handles it.
+                if isinstance(ctx, ast.Constant) and isinstance(ctx.value, str):
+                    if quick_mode_hard_timeout_seconds(ctx.value) == 60.0 and any(
+                        seat.lower().split()[0] in ctx.value.lower()
+                        or ctx.value.lower().startswith(("pm_", "global_forensic"))
+                        for seat in big_seats
+                    ):
+                        if canon is None:
+                            offenders.append(f"{path.name}: context={ctx.value!r}")
+                    continue
+                # An f-string context decorates a seat name -> must be explicit.
+                if isinstance(ctx, ast.JoinedStr) and canon is None:
+                    literal = "".join(
+                        part.value
+                        for part in ctx.values
+                        if isinstance(part, ast.Constant)
+                    )
+                    if literal.strip():
+                        offenders.append(f"{path.name}: decorated context {literal!r}")
+
+        assert not offenders, (
+            "invoke call sites must pass canonical_agent so seat budgets apply:\n  "
+            + "\n  ".join(offenders)
+        )
+
+    def test_explicit_canonical_agent_overrides_a_freeform_context(self, monkeypatch):
+        """The corrections that enforce the PM's evidence contract get 180s."""
+        from src.agents.runtime import quick_mode_hard_timeout_seconds
+
+        monkeypatch.setattr(
+            settings_config, "apex_quick_llm_call_hard_timeout_seconds", 180.0
+        )
+        monkeypatch.setattr(
+            settings_config, "cross_check_quick_llm_call_hard_timeout_seconds", 180.0
+        )
+        monkeypatch.setattr(
+            settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
+        )
+        for context, seat in (
+            ("pm_verdict_recovery", "Portfolio Manager"),
+            ("Portfolio Manager structure correction", "Portfolio Manager"),
+            ("Portfolio Manager trace correction", "Portfolio Manager"),
+            ("Fundamentals Analyst structure correction", "Fundamentals Analyst"),
+            ("global_forensic_auditor_repair", "Global Forensic Auditor"),
+        ):
+            assert (
+                quick_mode_hard_timeout_seconds(
+                    context, settings_config, canonical_agent=seat
+                )
+                == 180.0
+            ), context
+        # Without the explicit identity these free-form contexts are unrecognizable,
+        # which is precisely why the call sites must supply it.
+        assert (
+            quick_mode_hard_timeout_seconds("pm_verdict_recovery", settings_config)
+            == 60.0
+        )
+
     def test_apex_seat_contexts_match_prompt_agent_names(self):
         # APEX_SEAT_CONTEXTS must equal the on-disk agent_name of the two APEX
         # seats, or the larger budget silently stops applying after a rename.

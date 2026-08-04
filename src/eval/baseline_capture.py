@@ -499,11 +499,31 @@ class BaselineCaptureManager:
             "digest": prompt_digest(payload),
         }
 
+    def _optional_artifact_fields(self) -> frozenset[str]:
+        """Optional-by-publication-contract fields, for this run's mode.
+
+        The manager knows its own mode from the manifest, so node-level and
+        finalize-level invalidation agree — they must, since node-level rejection
+        latches and finalize can never revisit it.
+        """
+        quick = bool((self._run_manifest.get("mode") or {}).get("quick"))
+        return get_optional_publishable_artifacts(
+            {"run_summary": {"quick_mode": quick}}
+        )
+
     def _detect_invalidating_reasons(self, result: dict[str, Any]) -> list[str]:
         reasons: list[str] = []
         artifact_statuses = result.get("artifact_statuses")
+        # An artifact the pipeline publishes without must not veto the capture —
+        # and this is the load-bearing site, not finalize_run(): a failing node
+        # rejects here first and rejection latches, so exempting only at
+        # finalization is dead code for every real optional-seat failure (the
+        # 2026-08-03 captures all record first_rejection_stage='Auditor').
+        optional_fields = self._optional_artifact_fields()
         if isinstance(artifact_statuses, dict):
             for field, status in artifact_statuses.items():
+                if field in optional_fields:
+                    continue
                 if (
                     isinstance(status, dict)
                     and status.get("complete")
@@ -517,7 +537,26 @@ class BaselineCaptureManager:
                 if isinstance(value, dict) and not value.get("version"):
                     reasons.append(f"prompt_metadata_missing:{key}")
 
+        # Skipping the artifact_failed reason above is not sufficient on its own:
+        # this generic scan would still reach the same optional artifact's body and
+        # its status message, so a failure rendered as "TOOL_ERROR: ..." (the
+        # auditor/consultant loops emit exactly that prefix) re-latches the
+        # rejection through a different door. Exclude only the known failed-optional
+        # subtrees; unrelated error markers anywhere else still invalidate.
+        statuses = artifact_statuses if isinstance(artifact_statuses, dict) else {}
+        failed_optional = {
+            field
+            for field in optional_fields
+            if isinstance(statuses.get(field), dict)
+            and not statuses[field].get("ok", False)
+        }
+        exempt_paths = {f"result.{field}" for field in failed_optional} | {
+            f"result.artifact_statuses.{field}" for field in failed_optional
+        }
+
         def walk(value: Any, path: str) -> None:
+            if path in exempt_paths:
+                return
             if isinstance(value, str):
                 if value.startswith(_ERROR_MARKERS):
                     reasons.append(f"error_marker:{path}")
@@ -682,7 +721,24 @@ class BaselineCaptureManager:
             metadata = record["metadata"]
             if not metadata.get("baseline_eligible"):
                 continue
-            metadata["usable_for_replay"] = True
+            # Accepting the *run* despite a failed optional seat must not promote
+            # that seat's output to reference material. `valuation_params` feeds
+            # the `valuation_structured` rubric and, in quick mode,
+            # `value_trap_report` feeds `risk_structured` — so an empty or failed
+            # optional output could otherwise become the baseline that future
+            # good output is judged against.
+            spec = get_node_capture_spec(record["node_name"])
+            statuses = (record.get("output") or {}).get("artifact_statuses")
+            failed = False
+            if isinstance(statuses, dict):
+                failed = any(
+                    isinstance(statuses.get(field), dict)
+                    and not statuses[field].get("ok", False)
+                    for field in spec.artifact_fields
+                )
+            metadata["usable_for_replay"] = not failed
+            if failed:
+                metadata["replay_ineligible_reason"] = "artifact_failed"
             agent_dir = agents_dir / self._agent_dir_name(record["node_name"])
             agent_dir.mkdir(parents=True, exist_ok=True)
             self._write_json(agent_dir / "metadata.json", metadata)
@@ -876,7 +932,7 @@ class BaselineCaptureManager:
         # tickers produced publishable analyses and all six captures were rejected
         # for `artifact_failed:auditor_report` alone — the optional cross-check
         # seat timing out made a clean corpus uncapturable.
-        optional_fields = get_optional_publishable_artifacts(result)
+        optional_fields = self._optional_artifact_fields()
         for field, status in (result.get("artifact_statuses", {}) or {}).items():
             if field in optional_fields:
                 continue

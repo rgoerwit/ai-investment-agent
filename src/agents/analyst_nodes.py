@@ -1133,7 +1133,7 @@ def create_analyst_node(
 
                 if raw_data:
                     extra_context = (
-                        "\n\n### CODE-OWNED RAW FINANCIAL METRICS" f"\n{raw_data}\n"
+                        f"\n\n### CODE-OWNED RAW FINANCIAL METRICS\n{raw_data}\n"
                     )
                 else:
                     logger.warning(
@@ -1368,6 +1368,7 @@ def create_analyst_node(
                             retry_runnable,
                             {"messages": retry_messages},
                             context=f"{agent_prompt.agent_name} (RETRY-HIGH)",
+                            canonical_agent=agent_prompt.agent_name,
                             provider=support.infer_provider_name(retry_llm),
                             model_name=support.get_model_name(retry_llm),
                             # Floor for flex: an un-floored overall budget

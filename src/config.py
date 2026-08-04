@@ -759,13 +759,34 @@ class Settings(BaseSettings):
     # 2026-08-03 the auditor timed out on 6/6 smoke-suite tickers and every
     # baseline capture was rejected. Kept distinct from the APEX knob so tuning
     # one cannot silently starve the other.
+    # Scope note: in practice this governs the **Auditor**. The Consultant passes
+    # its own `overall_timeout_seconds` = min(CONSULTANT_CALL_TIMEOUT_SECONDS=90,
+    # remaining-of-CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS), which overrides this
+    # cap — so raising this alone does not lengthen a Consultant call. Tune the
+    # consultant via those two knobs instead.
     cross_check_quick_llm_call_hard_timeout_seconds: float = Field(
         default=180.0,
         gt=0.0,
         validation_alias="CROSS_CHECK_QUICK_LLM_CALL_HARD_TIMEOUT_SECONDS",
         description=(
             "Hard wall-clock cap (seconds) for a single OpenAI cross-check-seat "
-            "LLM ainvoke (Consultant, Forensic Auditor) in --quick mode."
+            "LLM ainvoke in --quick mode. Governs the Forensic Auditor; the "
+            "Consultant supplies its own tighter per-call deadline."
+        ),
+    )
+    # An *optional* seat must never cost the ticker. The Auditor loops up to
+    # auditor_max_llm_calls (4) LLM calls plus tools, each now eligible for the
+    # 180s cross-check cap — 4x180 = 720s, past the 600s Stage-1 pipeline
+    # watchdog, which SIGTERMs the whole process and discards a valid analysis.
+    # This total deadline degrades the auditor to its INSUFFICIENT_DATA artifact
+    # instead. Keep comfortably below STAGE1_TICKER_TIMEOUT_SECONDS (600).
+    auditor_quick_total_timeout_seconds: float = Field(
+        default=300.0,
+        gt=0.0,
+        validation_alias="AUDITOR_QUICK_TOTAL_TIMEOUT_SECONDS",
+        description=(
+            "Total wall-clock Forensic Auditor budget in --quick mode; on "
+            "exhaustion the auditor degrades rather than stalling the ticker."
         ),
     )
 

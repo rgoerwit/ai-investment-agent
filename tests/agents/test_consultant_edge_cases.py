@@ -195,9 +195,7 @@ class TestDataFormatEdgeCases:
 
     def test_auditor_output_normalizes_block_and_status_labels(self):
         content = (
-            "FORENSIC BLOCK:\n"
-            "STATUS: **UNAVAILABLE**\n"
-            "META: CONTEXT_LIMIT_EXCEEDED\n"
+            "FORENSIC BLOCK:\nSTATUS: **UNAVAILABLE**\nMETA: CONTEXT_LIMIT_EXCEEDED\n"
         )
 
         normalized = canonicalize_forensic_auditor_output(content)
@@ -303,8 +301,7 @@ class TestDataFormatEdgeCases:
         mock_llm = Mock()
         mock_response = Mock()
         mock_response.content = (
-            "### CONSULTANT REVIEW: APPROVED\n\n"
-            "### FINAL CONSULTANT VERDICT\nAPPROVED"
+            "### CONSULTANT REVIEW: APPROVED\n\n### FINAL CONSULTANT VERDICT\nAPPROVED"
         )
         invoke_messages = []
         summarize_calls = []
@@ -398,8 +395,7 @@ class TestDataFormatEdgeCases:
         mock_llm = Mock()
         mock_response = Mock()
         mock_response.content = (
-            "### CONSULTANT REVIEW: APPROVED\n\n"
-            "### FINAL CONSULTANT VERDICT\nAPPROVED"
+            "### CONSULTANT REVIEW: APPROVED\n\n### FINAL CONSULTANT VERDICT\nAPPROVED"
         )
         invoke_messages = []
         summarize_calls = []
@@ -459,8 +455,7 @@ class TestDataFormatEdgeCases:
         """Assemble a consultant prompt and return it verbatim."""
         mock_response = Mock()
         mock_response.content = (
-            "### CONSULTANT REVIEW: APPROVED\n\n"
-            "### FINAL CONSULTANT VERDICT\nAPPROVED"
+            "### CONSULTANT REVIEW: APPROVED\n\n### FINAL CONSULTANT VERDICT\nAPPROVED"
         )
         invoke_messages: list = []
 
@@ -1343,11 +1338,19 @@ class TestConsultantQuickEnvelope:
 
     def test_default_quick_total_timeout_is_35s(self):
         """The shipped default must be 35s — earlier 60s value hid hung calls.
-        Operators can still override via CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS."""
+        Operators can still override via CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS.
+
+        Reads the declared field default rather than instantiating ``Settings()``:
+        instantiation loads the developer's ``.env``, so an operator who sets the
+        documented override made this test fail on a *correct* configuration.
+        Mirrors ``TestApiRetryAttemptsDefault._field_default``.
+        """
         from src.config import Settings
 
-        settings = Settings()
-        assert settings.consultant_quick_total_timeout_seconds == 35.0
+        default = Settings.model_fields[
+            "consultant_quick_total_timeout_seconds"
+        ].default
+        assert default == 35.0
 
     @pytest.mark.asyncio
     async def test_quick_mode_deadline_flows_into_runtime(self, monkeypatch):

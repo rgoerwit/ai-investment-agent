@@ -654,6 +654,12 @@ def _load_latest_baseline_artifacts(
             if not metadata_path.exists() or not output_path.exists():
                 continue
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            # A run is accepted despite a failed *optional* seat, so per-record
+            # eligibility must be re-checked here: otherwise an empty or failed
+            # valuation/value-trap output becomes the reference that future good
+            # output is judged against.
+            if not metadata.get("usable_for_replay", True):
+                continue
             output = json.loads(output_path.read_text(encoding="utf-8"))
             prompt = metadata.get("prompt", {})
             prompt_key = prompt.get("prompt_key")

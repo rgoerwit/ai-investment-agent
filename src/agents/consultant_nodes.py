@@ -12,10 +12,12 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.types import RunnableConfig
 
+from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
 from src.data_block_utils import unfenced_label
 from src.error_safety import redact_sensitive_text, summarize_exception
 from src.forensic_budget import AuditorBudgetLedger, AuditorBudgetPolicy
+from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import ArtifactStatus, failure_artifact, success_artifact
 from src.runtime_services import get_current_tool_service
 from src.service_tiers import floor_llm_hard_timeout, floor_llm_total_timeout
@@ -165,15 +167,24 @@ async def _invoke_agent_loop_llm(
     messages,
     *,
     context: str,
+    canonical_agent: str | None = None,
+    overall_timeout_seconds: float | None = None,
 ) -> object:
-    """Invoke an agent-loop LLM through the shared retry-aware runtime helper."""
+    """Invoke an agent-loop LLM through the shared retry-aware runtime helper.
+
+    ``canonical_agent`` carries the seat identity when ``context`` is decorated,
+    so the per-call quick budget resolves from the seat rather than the
+    diagnostic label.
+    """
     model_name = getattr(runnable, "model_name", None)
     return await agent_runtime.invoke_with_rate_limit_handling(
         runnable,
         messages,
         context=context,
+        canonical_agent=canonical_agent,
         provider=support.infer_provider_name(runnable),
         model_name=model_name,
+        overall_timeout_seconds=overall_timeout_seconds,
     )
 
 
@@ -805,6 +816,7 @@ then return the complete required JSON assessment. Query terms alone are not fin
                     llm,
                     messages,
                     context=f"{agent_prompt.agent_name}_final_synthesis",
+                    canonical_agent=agent_prompt.agent_name,
                 )
                 response_str = message_utils.extract_string_content(
                     getattr(final_response, "content", "")
@@ -970,7 +982,9 @@ def create_auditor_node(llm, tools: list, *, escalation_llm=None) -> Callable:
     Create the Global Forensic Auditor node.
     """
 
-    async def auditor_node(state: AgentState, config: RunnableConfig) -> dict[str, str]:
+    async def _auditor_workflow(
+        state: AgentState, config: RunnableConfig
+    ) -> dict[str, str]:
         from src.prompts import get_prompt
 
         agent_prompt = get_prompt("global_forensic_auditor")
@@ -1169,6 +1183,7 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                 final_llm,
                 _truncate_messages_for_llm(messages),
                 context=f"{agent_prompt.agent_name}_final_synthesis",
+                canonical_agent=agent_prompt.agent_name,
             )
             content = message_utils.extract_string_content(
                 getattr(final_response, "content", "")
@@ -1406,6 +1421,45 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
             )
             result["sender"] = "global_forensic_auditor"
             result["auditor_budget"] = ledger.telemetry()
+            return result
+
+    async def auditor_node(state: AgentState, config: RunnableConfig) -> dict[str, str]:
+        """Hard-bound wrapper — an optional seat must never cost the ticker.
+
+        A node-scoped *deadline* was not a bound: it excluded the metrics
+        preload, tool batches, escalation and repair, and a call starting just
+        under it could still run a full per-call cap past it. Wrapping the whole
+        workflow is hermetic by construction — every path inside, including the
+        parameter-error fallback that re-enters the loop, shares this one
+        ceiling. Expiry orphans the in-flight call (``run_with_hard_timeout``
+        semantics) and degrades to the structured INSUFFICIENT_DATA artifact, so
+        the ticker survives instead of being SIGTERMed by the Stage-1 watchdog.
+        """
+        if not get_runtime_config(settings_config).quick_mode_active:
+            return await _auditor_workflow(state, config)
+
+        ticker = state.get("company_of_interest", "UNKNOWN")
+        budget = float(settings_config.auditor_quick_total_timeout_seconds)
+        try:
+            return await run_with_hard_timeout(
+                _auditor_workflow(state, config),
+                timeout=budget,
+                label=f"auditor_total:{ticker}",
+            )
+        except TimeoutError:
+            logger.warning(
+                "auditor_total_budget_exhausted",
+                ticker=ticker,
+                budget_seconds=budget,
+            )
+            result = success_artifact(
+                "auditor_report",
+                _budget_exhausted_report(
+                    "total quick-mode auditor wall-clock budget exhausted", ticker
+                ),
+                provider="openai",
+            )
+            result["sender"] = "global_forensic_auditor"
             return result
 
     return auditor_node

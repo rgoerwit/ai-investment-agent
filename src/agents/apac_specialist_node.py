@@ -170,6 +170,7 @@ def create_apac_specialist_node(llm, *, fallback_llm=None) -> Callable:
                     active_llm,
                     messages,
                     context=f"{agent_prompt.agent_name} Direct Retry",
+                    canonical_agent=agent_prompt.agent_name,
                     provider=support.infer_provider_name(active_llm),
                     model_name=support.get_model_name(active_llm),
                     overall_timeout_seconds=240,

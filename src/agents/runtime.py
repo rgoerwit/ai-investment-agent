@@ -43,7 +43,11 @@ APEX_SEAT_CONTEXTS = frozenset({"Fundamentals Analyst", "Portfolio Manager"})
 CROSS_CHECK_SEAT_CONTEXTS = frozenset({"Consultant", "Global Forensic Auditor"})
 
 
-def quick_mode_hard_timeout_seconds(context: str, cfg: Any = settings_config) -> float:
+def quick_mode_hard_timeout_seconds(
+    context: str,
+    cfg: Any = settings_config,
+    canonical_agent: str | None = None,
+) -> float:
     """Per-call hard wall-clock cap for a single ``--quick`` LLM ainvoke.
 
     Three budgets, by why the seat needs one:
@@ -59,15 +63,21 @@ def quick_mode_hard_timeout_seconds(context: str, cfg: Any = settings_config) ->
       ``quick_llm_call_hard_timeout_seconds`` so quick mode still surfaces a hung
       provider quickly.
 
-    The context is canonicalized first. Call sites decorate it — ``(RETRY-HIGH)``,
-    ``_final_synthesis``, ``Escalation`` — and a raw membership test silently
-    missed every decorated variant. That was a live defect, not just a gap for
-    the seats added here: ``"Fundamentals Analyst (RETRY-HIGH)"`` resolved to the
-    60s flat cap, so the deep-model retry of a gate-critical seat ran on a
-    *smaller* per-call budget than its first attempt, inside an outer allowance
-    that had correctly been sized at 180s.
+    Seat identity comes from the explicit ``canonical_agent`` when the call site
+    supplies one, and is otherwise *derived* from the decorated context. Deriving
+    alone is not sufficient and was a live defect twice over: a raw membership
+    test missed ``"Fundamentals Analyst (RETRY-HIGH)"`` (a gate-critical seat's
+    deep-model retry running on a *smaller* per-call budget than its first
+    attempt), and even after canonicalization the free-form correction contexts
+    — ``"Portfolio Manager structure correction"``, ``"pm_verdict_recovery"``,
+    ``"global_forensic_auditor_repair"`` — carry no recognizable suffix and fell
+    back to the 60s flat cap. Those corrections enforce the final
+    recommendation's evidence contract, so they are at least as gate-critical as
+    the first call. Call sites that decorate their context must pass
+    ``canonical_agent``; ``tests/agents/test_runtime_hard_timeout.py::
+    TestSeatBudgetCoversEveryCallSite`` scans the source and fails if one does not.
     """
-    seat = canonical_display_name(context)
+    seat = canonical_display_name(canonical_agent or context)
     if seat in APEX_SEAT_CONTEXTS:
         return float(getattr(cfg, "apex_quick_llm_call_hard_timeout_seconds", 180.0))
     if seat in CROSS_CHECK_SEAT_CONTEXTS:
@@ -415,7 +425,9 @@ async def invoke_with_rate_limit_handling(
 
     runtime_config = get_runtime_config(settings_config)
     if runtime_config.quick_mode_active:
-        hard_timeout = quick_mode_hard_timeout_seconds(context, settings_config)
+        hard_timeout = quick_mode_hard_timeout_seconds(
+            context, settings_config, canonical_agent=canonical_agent
+        )
     else:
         hard_timeout = float(runtime_config.llm_call_hard_timeout_seconds)
     # Flex tier: queued calls may take minutes; floor the hard cap so a

@@ -92,6 +92,7 @@ async def _recover_pm_verdict_metadata(
                 )
             ],
             context="pm_verdict_recovery",
+            canonical_agent="Portfolio Manager",
             provider=support.infer_provider_name(llm),
             model_name=support.get_model_name(llm),
             max_attempts=1,
@@ -1336,6 +1337,7 @@ RISK TEAM DEBATE:
                     llm,
                     [HumanMessage(content=correction_prompt)],
                     context=f"{agent_prompt.agent_name} structure correction",
+                    canonical_agent=agent_prompt.agent_name,
                     provider=support.infer_provider_name(llm),
                     model_name=support.get_model_name(llm),
                 )
@@ -1397,6 +1399,7 @@ RISK TEAM DEBATE:
                         llm,
                         [HumanMessage(content=correction_prompt)],
                         context=f"{agent_prompt.agent_name} trace correction",
+                        canonical_agent=agent_prompt.agent_name,
                         provider=support.infer_provider_name(llm),
                         model_name=support.get_model_name(llm),
                     )

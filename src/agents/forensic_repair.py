@@ -143,6 +143,7 @@ async def repair_forensic_auditor_output(
             HumanMessage(content=invalid_output),
         ],
         context="global_forensic_auditor_repair",
+        canonical_agent="Global Forensic Auditor",
         provider=support.infer_provider_name(llm),
         model_name=support.get_model_name(llm),
     )
