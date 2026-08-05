@@ -258,6 +258,23 @@ def _detect_provider_partial_response(result: Any) -> str | None:
     return None
 
 
+def response_partial_reason(result: Any) -> str | None:
+    """The provider's reason for cutting a response short, if it did.
+
+    Broader than :func:`response_hit_output_cap` on purpose. A caller deciding
+    whether it is holding a *finished answer* cares about every partial the
+    classifier recognizes — ``finish_reason_missing``, ``responses_api_failed``,
+    ``responses_api_incomplete:*`` — not only the token-cap subset. Keying
+    recovery on the cap alone let a nonempty fragment with no finish reason be
+    published as a complete Consultant review.
+
+    Refusals are deliberately excluded upstream (``content_filter``/``SAFETY``
+    return ``None`` from the classifier): those are intentional stops owned by
+    the refusal path, and re-asking an identical prompt would not clear them.
+    """
+    return _detect_provider_partial_response(result)
+
+
 def response_hit_output_cap(result: Any) -> bool:
     """True when the provider says the response stopped at the token cap.
 

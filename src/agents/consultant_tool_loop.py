@@ -28,6 +28,12 @@ class ConsultantLoopResult:
     tool_failure_count: int
     tool_call_count: int = 0
     failed_tools: tuple[str, ...] = ()
+    # Provider-partial reason of the response actually being returned, after any
+    # re-ask. None means the caller is holding a finished answer. The re-ask can
+    # itself come back partial, error, or return nothing — in each case the
+    # original fragment is retained, and without this the node saw only the
+    # required headers and marked a truncated cross-check complete.
+    partial_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -268,15 +274,19 @@ async def run_bounded_consultant_loop(
     # re-ask is strictly additive — any failure (deadline exhausted, provider
     # error) leaves whatever content we already had, so widening the trigger
     # from "empty" to "empty or truncated" cannot lose a usable fragment.
-    truncated = agent_runtime.response_hit_output_cap(response)
-    if (not content_str or truncated) and (
+    # Every recognized partial, not just the token-cap subset: a nonempty
+    # fragment whose response carried provider metadata but no finish_reason is
+    # equally not a finished review, and keying on the cap alone published it.
+    partial_reason = agent_runtime.response_partial_reason(response)
+    if (not content_str or partial_reason) and (
         tools_by_name or policy.max_tool_iterations > 0
     ):
-        if truncated:
+        if partial_reason:
             logger.warning(
-                "consultant_response_truncated_at_cap",
+                "consultant_response_partial",
                 ticker=ticker,
                 agent=agent_name,
+                partial_reason=partial_reason,
                 partial_content_chars=len(content_str),
             )
         retry_content = ""
@@ -304,9 +314,22 @@ async def run_bounded_consultant_loop(
             response = retry_response
             content_str = retry_content
 
+    # Re-evaluate against whatever is actually being returned: the re-ask may
+    # have been partial too, or failed and left the original fragment in place.
+    final_partial_reason = agent_runtime.response_partial_reason(response)
+    if final_partial_reason:
+        logger.warning(
+            "consultant_response_partial_unrecovered",
+            ticker=ticker,
+            agent=agent_name,
+            partial_reason=final_partial_reason,
+            content_chars=len(content_str),
+        )
+
     return ConsultantLoopResult(
         content=content_str,
         response=response,
+        partial_reason=final_partial_reason,
         had_tool_errors=had_tool_errors,
         tool_failure_count=tool_failure_count,
         tool_call_count=tool_call_count,

@@ -1667,3 +1667,101 @@ class TestTruncatedFinalResponse:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestConsultantPartialRecovery:
+    """A provider-partial must never be published as a finished cross-check.
+
+    Header validation cannot catch this: both required headers appear early, so a
+    truncated review passes structurally. The optional artifact fails; the equity
+    analysis still stands.
+    """
+
+    @staticmethod
+    def _partial(content: str):
+        # Provider metadata present, no finish_reason -> classifier says partial.
+        return SimpleNamespace(
+            content=content,
+            tool_calls=[],
+            response_metadata={"model_name": "kimi-k3"},
+        )
+
+    @staticmethod
+    def _clean(content: str):
+        return SimpleNamespace(
+            content=content,
+            tool_calls=[],
+            response_metadata={"finish_reason": "stop"},
+        )
+
+    async def _run(self, responses):
+        from src.agents.consultant_tool_loop import (
+            ConsultantToolLoopPolicy,
+            run_bounded_consultant_loop,
+        )
+
+        seq = iter(responses)
+
+        async def fake_invoke(_llm, _messages):
+            item = next(seq)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        return await run_bounded_consultant_loop(
+            active_llm="active",
+            fallback_llm="fallback",
+            messages=[],
+            tools_by_name={"spot_check_metric": object()},
+            policy=ConsultantToolLoopPolicy(
+                max_tool_iterations=1,
+                max_tool_calls_per_turn=4,
+                deadline=time.monotonic() + 60,
+                total_timeout=60,
+            ),
+            invoke_with_deadline=fake_invoke,
+            agent_name="External Consultant",
+            agent_key="consultant",
+            ticker="1088.HK",
+        )
+
+    HEADERS = (
+        "## CONSULTANT REVIEW\nSpot-checking the decision-critical conflict\n"
+        "## FINAL CONSULTANT VERDICT\n"
+    )
+
+    @pytest.mark.asyncio
+    async def test_partial_followed_by_partial_is_reported_partial(self):
+        """The re-ask can itself be truncated — the fragment is not rescued."""
+        result = await self._run(
+            [self._partial(self.HEADERS), self._partial(self.HEADERS + "more")]
+        )
+        assert result.partial_reason is not None
+
+    @pytest.mark.asyncio
+    async def test_partial_followed_by_retry_error_is_reported_partial(self):
+        """A failed re-ask retains the fragment, which is still not an answer."""
+        result = await self._run(
+            [self._partial(self.HEADERS), RuntimeError("provider down")]
+        )
+        assert result.content  # fragment deliberately retained
+        assert result.partial_reason is not None
+
+    @pytest.mark.asyncio
+    async def test_partial_followed_by_empty_retry_is_reported_partial(self):
+        result = await self._run([self._partial(self.HEADERS), self._partial("")])
+        assert result.partial_reason is not None
+
+    @pytest.mark.asyncio
+    async def test_successful_resynthesis_clears_the_partial_flag(self):
+        """Recovery must actually clear it, or the guard is just a kill switch."""
+        result = await self._run(
+            [self._partial(self.HEADERS), self._clean(self.HEADERS + "full review")]
+        )
+        assert result.partial_reason is None
+        assert "full review" in result.content
+
+    @pytest.mark.asyncio
+    async def test_clean_first_response_needs_no_resynthesis(self):
+        result = await self._run([self._clean(self.HEADERS + "complete")])
+        assert result.partial_reason is None

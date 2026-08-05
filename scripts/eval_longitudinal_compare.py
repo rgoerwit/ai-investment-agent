@@ -48,6 +48,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.pm_decision_parser import parse_final_decision_scores  # noqa: E402
+
 # The 6 tickers with the deepest run history reaching back to the corpus's
 # earliest retained analyses (2025-12-01) -- see scripts/eval_rerun_longitudinal.sh.
 DEFAULT_TICKERS = ["1681.HK", "PINFRA.MX", "AGS.BR", "7740.T", "8002.T", "1088.HK"]
@@ -127,9 +131,36 @@ def extract_row(path: Path) -> RunRow:
         action_m = re.search(r"\*\*Action\*\*:\s*([A-Z_/ ]+)", text)
         verdict = action_m.group(1).strip() if action_m else None
 
+    # Structured first, narrative prose only as legacy fallback. The persisted
+    # prediction_snapshot and the canonical PM parser both carry signed values;
+    # the prose regexes below are unsigned and drop a negative RISK_TALLY (138 of
+    # 4,594 artifacts carry one), besides drifting whenever a heading changes.
+    # Distinct name: `snapshot` is rebound to analysis_snapshot further down, and
+    # _pick is a closure that reads it at call time — reusing the name silently
+    # fed the picker a None.
+    pred_snapshot = d.get("prediction_snapshot")
+    pred_snapshot = pred_snapshot if isinstance(pred_snapshot, dict) else {}
+    canonical = parse_final_decision_scores(text) if text else None
+    canonical = canonical if isinstance(canonical, dict) else {}
+
+    def _pick(key: str, prose_match, cast):
+        for source in (pred_snapshot, canonical):
+            value = source.get(key)
+            if value is not None:
+                try:
+                    return cast(value)
+                except (TypeError, ValueError):
+                    pass
+        if prose_match:
+            try:
+                return cast(prose_match.group(1))
+            except (TypeError, ValueError):
+                return None
+        return None
+
     health_m = re.search(r"Financial Health\*\*:\s*([\d.]+)\s*%", text)
     growth_m = re.search(r"Growth Transition\*\*:\s*([\d.]+)\s*%", text)
-    risk_m = re.search(r"TOTAL RISK COUNT\*\*:\s*([\d.]+)", text)
+    risk_m = re.search(r"TOTAL RISK COUNT\*\*:\s*(-?[\d.]+)", text)
 
     red_flags = d.get("red_flags")
     flag_types: list[str] = []
@@ -180,9 +211,9 @@ def extract_row(path: Path) -> RunRow:
         timestamp=ts,
         path=str(path),
         verdict=verdict,
-        health_adj=float(health_m.group(1)) if health_m else None,
-        growth_adj=float(growth_m.group(1)) if growth_m else None,
-        risk_total=float(risk_m.group(1)) if risk_m else None,
+        health_adj=_pick("health_adj", health_m, float),
+        growth_adj=_pick("growth_adj", growth_m, float),
+        risk_total=_pick("risk_tally", risk_m, float),
         contract_status=contract_status,
         consultant_verdict=run_summary.get("consultant_verdict"),
         auditor_status=run_summary.get("auditor_status"),
@@ -248,7 +279,11 @@ def render_timeline_markdown(ticker: str, rows: list[RunRow]) -> str:
     )
     lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
 
-    prev_flags: set[str] = set()
+    # None until the first retained row is emitted: that row is a *baseline*,
+    # not a change. Seeding with an empty set marked every one of its flags
+    # [NEW], which reads as a regression that never happened — the comparison
+    # window simply starts there.
+    prev_flags: set[str] | None = None
     for i, r in enumerate(rows):
         date_disp = f"{r.timestamp[4:6]}/{r.timestamp[6:8]}"
         if i == len(rows) - 1:
@@ -261,7 +296,9 @@ def render_timeline_markdown(ticker: str, rows: list[RunRow]) -> str:
                 return f"{v:g}{suffix}"
             return f"{v}{suffix}"
 
-        new_flags = set(r.red_flag_types) - prev_flags
+        new_flags = (
+            set(r.red_flag_types) - prev_flags if prev_flags is not None else set()
+        )
         flag_cells = []
         for ft in r.red_flag_types:
             flag_cells.append(f"**{ft}[NEW]**" if ft in new_flags else ft)

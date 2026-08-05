@@ -523,6 +523,30 @@ Provide your independent consultant review."""
                 truncated=trunc_info["truncated"],
                 validation=validation,
             )
+            # A provider-partial that survived the re-ask is not a finished
+            # cross-check, however well-formed its fragment looks. Header
+            # validation cannot see this: the two required headers appear early,
+            # so a truncated review passes structurally. Fail the *optional*
+            # artifact only — consultant_review is optional-publishable, so the
+            # equity analysis still stands, it just loses this counterweight.
+            if loop_result.partial_reason:
+                logger.error(
+                    "consultant_partial_not_recovered",
+                    ticker=ticker,
+                    partial_reason=loop_result.partial_reason,
+                    content_chars=len(content_str),
+                )
+                result = failure_artifact(
+                    "consultant_review",
+                    "Consultant response incomplete "
+                    f"({loop_result.partial_reason}); re-synthesis did not recover it",
+                    provider=support.infer_provider_name(llm),
+                    fallback_content=content_str,
+                )
+                if quick_mode:
+                    result["consultant_quick_profile"] = consultant_profile
+                return result
+
             if should_fail_closed(
                 "consultant",
                 validation=validation,
