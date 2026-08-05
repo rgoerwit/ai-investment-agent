@@ -8,7 +8,6 @@ def test_graph_facade_exports_expected_symbols():
         create_trading_graph,
         fan_out_to_analysts,
         fundamentals_sync_router,
-        route_tools,
         should_continue_analyst,
         sync_check_router,
     )
@@ -17,7 +16,6 @@ def test_graph_facade_exports_expected_symbols():
     assert callable(create_trading_graph)
     assert callable(create_agent_tool_node)
     assert callable(should_continue_analyst)
-    assert callable(route_tools)
     assert callable(fan_out_to_analysts)
     assert callable(fundamentals_sync_router)
     assert callable(sync_check_router)
@@ -37,11 +35,13 @@ def test_graph_facade_exports_expected_symbols():
 @patch("src.graph.components.create_deep_thinking_llm")
 @patch("src.graph.components.get_consultant_llm")
 @patch("src.graph.components.create_auditor_llm")
+@patch("src.graph.components.create_auditor_node")
 @patch("src.graph.components._is_auditor_enabled")
 @patch("src.graph.components.toolkit")
 def test_graph_facade_create_trading_graph_still_compiles(
     mock_toolkit,
     mock_auditor_enabled,
+    mock_auditor_node,
     mock_auditor_llm,
     mock_consultant_llm,
     mock_deep_llm,
@@ -61,9 +61,10 @@ def test_graph_facade_create_trading_graph_still_compiles(
 
     mock_quick_llm.return_value = object()
     mock_deep_llm.return_value = object()
-    mock_auditor_enabled.return_value = False
+    mock_auditor_enabled.return_value = True
     mock_consultant_llm.return_value = None
-    mock_auditor_llm.return_value = None
+    mock_auditor_llm.return_value = object()
+    mock_auditor_node.return_value = lambda s, c: {}
     mock_tool_node.return_value = lambda s, c: {}
     mock_legal_counsel.return_value = lambda s, c: {}
     mock_analyst.return_value = lambda s, c: {}
@@ -83,7 +84,13 @@ def test_graph_facade_create_trading_graph_still_compiles(
     mock_toolkit.get_legal_tools.return_value = []
     mock_toolkit.get_value_trap_tools.return_value = []
     mock_toolkit.get_senior_fundamental_tools.return_value = []
+    mock_toolkit.get_auditor_tools.return_value = []
 
     graph = create_trading_graph(enable_memory=False, max_debate_rounds=1)
 
     assert graph is not None
+    compiled = graph.get_graph()
+    tool_nodes = {node for node in compiled.nodes if node.endswith("_tools")}
+    edge_sources = {edge.source for edge in compiled.edges}
+    assert tool_nodes <= edge_sources
+    assert "auditor_tools" in tool_nodes

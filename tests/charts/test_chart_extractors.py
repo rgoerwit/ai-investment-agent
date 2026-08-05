@@ -15,6 +15,7 @@ from src.charts.extractors.valuation import (
     _extract_params,
     calculate_valuation_targets,
 )
+from src.data_block_utils import extract_block_number_from_text, extract_last_data_block
 
 
 class TestDataBlockExtractor:
@@ -89,6 +90,30 @@ class TestDataBlockExtractor:
         report = "This is a report without any DATA_BLOCK section."
         result = extract_chart_data_from_data_block(report)
         assert result.current_price is None
+
+    def test_extract_signed_numeric_value_via_canonical_path(self):
+        report = "\n".join(
+            [
+                "### --- START DATA_BLOCK ---",
+                "ROA_PERCENT: -12.50",
+                "### --- END DATA_BLOCK ---",
+            ]
+        )
+
+        result = extract_chart_data_from_data_block(report)
+
+        assert result.roa == -12.50
+
+    def test_extract_signed_numeric_value_via_indented_fallback(self):
+        report = """
+        ### --- START DATA_BLOCK ---
+        ROA_PERCENT: -12.50
+        ### --- END DATA_BLOCK ---
+        """
+        data_block = extract_last_data_block(report)
+
+        assert extract_block_number_from_text(data_block, "ROA_PERCENT") is None
+        assert extract_chart_data_from_data_block(report).roa == -12.50
 
     def test_extract_ignores_unparseable_datablock_mentions(self):
         """Plain DATA_BLOCK mentions should not be treated as a structured block."""

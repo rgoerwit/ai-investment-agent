@@ -1322,15 +1322,6 @@ class TestGraphStructure:
             len(destinations) == 7
         )  # Market, Sentiment, News, Junior, Foreign, Legal, Value Trap
 
-    def test_route_tools_includes_foreign_analyst(self):
-        """Test that route_tools handles foreign_language_analyst sender."""
-        from src.graph import route_tools
-
-        state = {"sender": "foreign_language_analyst"}
-        result = route_tools(state)
-
-        assert result == "Foreign Language Analyst"
-
     def test_graph_creates_with_foreign_analyst(self):
         """Test that graph creation includes Foreign Language Analyst node."""
         from src.graph import create_trading_graph

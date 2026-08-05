@@ -59,8 +59,7 @@ _POLICIES: dict[str, GuidanceLocalePolicy] = {
     ".KS": GuidanceLocalePolicy(
         results_terms="최신 실적발표 자료 사업보고서 가이던스 매출 영업이익 당기순이익",
         bridge_terms=(
-            "컨퍼런스콜 질의응답 법인세 세액공제 보조금 규제 변경 "
-            "당기순이익 가이던스"
+            "컨퍼런스콜 질의응답 법인세 세액공제 보조금 규제 변경 당기순이익 가이던스"
         ),
         excerpt_priority_terms=("세액공제", "법인세", "당기순이익", "영업이익"),
         transient_tax_terms=("세액공제", "조세혜택"),

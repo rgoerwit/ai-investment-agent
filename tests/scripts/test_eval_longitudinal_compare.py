@@ -55,6 +55,8 @@ def test_extract_row_surfaces_validity_and_data_quality(tmp_path: Path) -> None:
     rendered = compare.render_timeline_markdown("1681.HK", [row])
     assert "INCOMPLETE: fundamentals_report" in rendered
     assert "coverage 70.5%; growth gaps 2; conflicts 1" in rendered
+    assert "2026-08-02 19:08:54" in rendered
+    assert f"[artifact]({artifact.resolve().as_uri()})" in rendered
 
 
 def _artifact(tmp_path, name, *, decision_text, snapshot):

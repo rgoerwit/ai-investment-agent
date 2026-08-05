@@ -374,6 +374,37 @@ async def test_failing_required_node_still_rejects_at_node_level(tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_node_exception_is_persisted_as_safe_structured_summary(
+    tmp_path, monkeypatch
+):
+    manager = _make_manager(tmp_path, monkeypatch)
+
+    async def raising_node(state, config):
+        raise RuntimeError("request failed for https://user:secret@example.test/data")
+
+    with pytest.raises(RuntimeError):
+        await _run_wrapped(manager, "Fundamentals Analyst", raising_node)
+
+    run_dir = manager.finalize_run(
+        {
+            "analysis_validity": {"publishable": False},
+            "artifact_statuses": {},
+            "run_summary": {},
+        }
+    )
+
+    assert run_dir is not None
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "node_events.jsonl").read_text().splitlines()
+    ]
+    event = next(row for row in rows if row["node_name"] == "Fundamentals Analyst")
+    assert isinstance(event["error"], dict)
+    assert event["error"]["error_type"] == "RuntimeError"
+    assert "user:secret" not in json.dumps(event)
+
+
+@pytest.mark.asyncio
 async def test_failed_optional_artifact_does_not_reject_the_capture(
     tmp_path, monkeypatch
 ):

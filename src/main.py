@@ -894,17 +894,12 @@ def _enable_quiet_runtime_if_needed(args: argparse.Namespace) -> None:
     TokenTracker.set_quiet_mode(True)
     suppress_all_logging()
 
-    tracker = TokenTracker()
-    tracker._quiet_mode = True
-    config.quiet_mode = True
-
 
 def _setup_runtime(
     args: argparse.Namespace, output_targets: cli.OutputTargets
 ) -> tuple[dict[str, dict[str, str]], Any]:
     """Configure logging, runtime paths, and environment validation."""
     _enable_quiet_runtime_if_needed(args)
-    config.images_dir = output_targets.image_dir
     initialize_runtime_environment(config)
 
     provider_preflight = configure_cli_logging(args)
@@ -1471,6 +1466,11 @@ async def run_with_args(
     try:
         cli._validate_cli_args(args)
         output_targets = cli._resolve_output_targets(args)
+        _restore_runtime_config()
+        runtime_config = runtime_config.with_overrides(
+            images_dir=output_targets.image_dir
+        )
+        _restore_runtime_config = bind_runtime_config(runtime_config)
         provider_preflight, runtime_services = _setup_runtime(args, output_targets)
         _warn_quick_timeout_config_drift(args)
         baseline_capture = _create_baseline_capture_manager(args)

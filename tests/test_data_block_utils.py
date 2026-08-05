@@ -350,9 +350,7 @@ def test_normalize_structured_block_boundaries_repairs_two_hash_leading_glue():
 
 
 def test_normalize_structured_block_boundaries_repairs_glued_end_marker():
-    report = (
-        "### --- START DATA_BLOCK ---\n" "SECTOR: Energy### --- END DATA_BLOCK ---\n"
-    )
+    report = "### --- START DATA_BLOCK ---\nSECTOR: Energy### --- END DATA_BLOCK ---\n"
 
     normalized = normalize_structured_block_boundaries(report)
 

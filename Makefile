@@ -108,14 +108,14 @@ lint-fix: ## Run linting and auto-fix issues
 	$(POETRY) run ruff check --fix src/
 	@echo "$(GREEN)Linting complete!$(NC)"
 
-format: ## Format code with Black
+format: ## Format code with Ruff
 	@echo "$(BLUE)Formatting code...$(NC)"
-	$(POETRY) run black src/
+	$(POETRY) run ruff format src/ tests/ scripts/
 	@echo "$(GREEN)Code formatted!$(NC)"
 
 format-check: ## Check code formatting
 	@echo "$(BLUE)Checking code formatting...$(NC)"
-	$(POETRY) run black --check src/
+	$(POETRY) run ruff format --check src/ tests/ scripts/
 
 typecheck: ## Run type checking with MyPy
 	@echo "$(BLUE)Running type checks...$(NC)"

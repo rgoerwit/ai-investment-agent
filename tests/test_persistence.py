@@ -110,8 +110,7 @@ def test_dni_review_candidate_flag_reflects_marker(monkeypatch):
         monkeypatch,
         {
             "final_trade_decision": (
-                "### VERDICT: DO_NOT_INITIATE\n"
-                f"> **{DNI_REVIEW_CANDIDATE_MARKER}** ..."
+                f"### VERDICT: DO_NOT_INITIATE\n> **{DNI_REVIEW_CANDIDATE_MARKER}** ..."
             )
         },
     )

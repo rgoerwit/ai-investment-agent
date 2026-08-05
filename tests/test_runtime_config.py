@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 from src.runtime_config import (
@@ -23,6 +24,8 @@ def _config() -> SimpleNamespace:
         gemini_rpm_limit=1000,
         llm_call_hard_timeout_seconds=600.0,
         quick_mode_active=False,
+        images_dir=Path("images"),
+        quiet_mode=False,
     )
 
 
@@ -63,6 +66,8 @@ def test_build_runtime_config_applies_cli_overrides_without_mutating_base() -> N
         gemini_rpm_limit=360,
         llm_call_hard_timeout_seconds=120.0,
         quick_mode_active=True,
+        images_dir=Path("images"),
+        quiet_mode=False,
     )
     assert base.quick_think_llm == "quick-old"
     assert base.deep_think_llm == "deep-old"
@@ -86,6 +91,22 @@ def test_quick_mode_does_not_raise_tighter_existing_values() -> None:
     assert runtime_config.gemini_rpm_limit == 60
     assert runtime_config.llm_call_hard_timeout_seconds == 45.0
     assert runtime_config.quick_mode_active is True
+
+
+def test_quiet_mode_and_image_directory_are_run_scoped() -> None:
+    base = _config()
+    runtime_config = build_runtime_config(
+        _args(quiet=True),
+        base,
+    ).with_overrides(images_dir=Path("run-images"))
+
+    with use_runtime_config(runtime_config):
+        scoped = get_runtime_config(base)
+        assert scoped.quiet_mode is True
+        assert scoped.images_dir == Path("run-images")
+
+    assert base.quiet_mode is False
+    assert base.images_dir == Path("images")
 
 
 def test_no_quick_mode_does_not_clamp() -> None:

@@ -152,7 +152,7 @@ def extract_chart_data_from_data_block(fundamentals_report: str) -> ChartRawData
     # Extract each field
     # Pattern captures optional markdown/currency chars around numbers
     # e.g., "**$180.00**" or "$1,234.56" or just "180.00"
-    num_pattern = r"[*_`$\s]*([\d,.]+)[*_`]*"
+    num_pattern = r"[*_`$\s]*([-+]?\d[\d,.]*)[*_`]*"
 
     result = ChartRawData(
         current_price=_first_value(

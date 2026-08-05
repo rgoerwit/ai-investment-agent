@@ -17,6 +17,13 @@ Freeze the runtime state model before storage, scheduling, and observability wor
 - No CLI, dashboard, or portfolio behavior changes
 - No attempt to bridge eval `run_id` values into future pipeline `run_id` values in this stage
 
+The current CLI remains restart-only: an interrupted analysis is not resumed from
+an in-flight graph checkpoint. Eval captures are immutable evidence bundles, not
+runtime checkpoints, and do not provide a supported resume mechanism. Any future
+resume implementation must first define node-boundary idempotency, external side
+effect ownership, and checkpoint compatibility before exposing an operator-facing
+resume command.
+
 ## Current Runtime State Map
 
 | Concern | Current source of truth | Current writer | Current readers | Notes |

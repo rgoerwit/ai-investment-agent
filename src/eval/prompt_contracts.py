@@ -210,15 +210,17 @@ PROMPT_CONTRACTS: tuple[PromptContract, ...] = (
         prompt_key="consultant",
         shape=Shape.LABELED_LINE,
         parser=parse_consultant_conditions,
-        success=lambda result: isinstance(result, dict)
-        and "has_mandate_breach" in result,
+        success=lambda result: (
+            isinstance(result, dict) and "has_mandate_breach" in result
+        ),
         line_pattern=r"^\*\*MANDATE_BREACH\*\*:",
         legacy_forms=(
             (
                 "### FINAL CONSULTANT VERDICT\n\n"
                 "**MANDATE_BREACH**: NONE\n**HARD_STOP**: NONE",
-                lambda r: r["has_mandate_breach"] is False
-                and r["has_hard_stop"] is False,
+                lambda r: (
+                    r["has_mandate_breach"] is False and r["has_hard_stop"] is False
+                ),
             ),
             (
                 "MANDATE BREACH: PFIC — company classified as PFIC.",
@@ -235,8 +237,9 @@ PROMPT_CONTRACTS: tuple[PromptContract, ...] = (
         prompt_key="fundamentals_analyst",
         shape=Shape.LABELED_LINE,
         parser=parse_score_breakdown,
-        success=lambda result: isinstance(result, dict)
-        and set(result) == set(HEALTH_SCORE_CRITERIA),
+        success=lambda result: (
+            isinstance(result, dict) and set(result) == set(HEALTH_SCORE_CRITERIA)
+        ),
         line_pattern=r"^HEALTH_SCORE_BREAKDOWN:",
         legacy_forms=(
             (
@@ -244,9 +247,11 @@ PROMPT_CONTRACTS: tuple[PromptContract, ...] = (
                 "DE_RATIO=REMOVED; NET_DEBT_EBITDA=N/A; CURRENT_RATIO=1; "
                 "OCF_POSITIVE=1; FCF_POSITIVE=1; FCF_YIELD=N/A; PE_OR_PEG=1; "
                 "EV_EBITDA=N/A; PB_OR_PS=0",
-                lambda result: isinstance(result, dict)
-                and set(result) == set(HEALTH_SCORE_CRITERIA)
-                and result["DE_RATIO"] == "REMOVED",
+                lambda result: (
+                    isinstance(result, dict)
+                    and set(result) == set(HEALTH_SCORE_CRITERIA)
+                    and result["DE_RATIO"] == "REMOVED"
+                ),
             ),
         ),
     ),

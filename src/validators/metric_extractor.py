@@ -7,7 +7,10 @@ from typing import Any
 
 import structlog
 
-from src.data_block_utils import extract_last_data_block
+from src.data_block_utils import (
+    extract_block_number_from_text,
+    extract_last_data_block,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -291,21 +294,15 @@ def extract_metrics(
         if value != "N/A":
             metrics["profitability_trend"] = value
 
-    roa_match = re.search(r"ROA_PERCENT:\s*(\d+(?:\.\d+)?)%?", data_block)
-    if roa_match:
-        metrics["roa_current"] = float(roa_match.group(1))
-
-    roa_avg_match = re.search(r"ROA_5Y_AVG:\s*(\d+(?:\.\d+)?)%?", data_block)
-    if roa_avg_match:
-        metrics["roa_5y_avg"] = float(roa_avg_match.group(1))
-
-    roe_avg_match = re.search(r"ROE_5Y_AVG:\s*(\d+(?:\.\d+)?)%?", data_block)
-    if roe_avg_match:
-        metrics["roe_5y_avg"] = float(roe_avg_match.group(1))
-
-    peg_match = re.search(r"PEG_RATIO:\s*(\d+(?:\.\d+)?)", data_block)
-    if peg_match:
-        metrics["peg_ratio"] = float(peg_match.group(1))
+    for field_name, metric_name in (
+        ("ROA_PERCENT", "roa_current"),
+        ("ROA_5Y_AVG", "roa_5y_avg"),
+        ("ROE_5Y_AVG", "roe_5y_avg"),
+        ("PEG_RATIO", "peg_ratio"),
+    ):
+        value = extract_block_number_from_text(data_block, field_name)
+        if value is not None:
+            metrics[metric_name] = value
 
     ocf_match = re.search(
         r"OPERATING_CASH_FLOW:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
@@ -605,12 +602,12 @@ def extract_metrics(
 def extract_debt_to_equity(report: str) -> float | None:
     """Extract D/E ratio, converting a ratio to percentage where needed."""
     patterns = [
-        r"(?:^|\n)\s*-?\s*D/E:\s*(\d+(?:\.\d+)?)(%?)",
-        r"(?:^|\n)\s*-?\s*Debt/Equity:\s*(\d+(?:\.\d+)?)(%?)",
-        r"(?:^|\n)\s*-?\s*Debt-to-Equity:\s*(\d+(?:\.\d+)?)(%?)",
-        r"D/E:\s*(\d+(?:\.\d+)?)(%?)",
-        r"Debt/Equity:\s*(\d+(?:\.\d+)?)(%?)",
-        r"DE_RATIO:\s*(\d+(?:\.\d+)?)(%?)",
+        r"(?:^|\n)\s*-?\s*D/E:\s*([-+]?\d+(?:\.\d+)?)(%?)",
+        r"(?:^|\n)\s*-?\s*Debt/Equity:\s*([-+]?\d+(?:\.\d+)?)(%?)",
+        r"(?:^|\n)\s*-?\s*Debt-to-Equity:\s*([-+]?\d+(?:\.\d+)?)(%?)",
+        r"D/E:\s*([-+]?\d+(?:\.\d+)?)(%?)",
+        r"Debt/Equity:\s*([-+]?\d+(?:\.\d+)?)(%?)",
+        r"DE_RATIO:\s*([-+]?\d+(?:\.\d+)?)(%?)",
     ]
     for pattern in patterns:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)

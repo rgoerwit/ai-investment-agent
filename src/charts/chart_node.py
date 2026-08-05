@@ -29,6 +29,8 @@ import structlog
 from langgraph.types import RunnableConfig
 
 from src.charts.base import CurrencyFormat
+from src.config import config as app_config
+from src.runtime_config import get_runtime_config
 from src.thesis_constants import ANALYST_COVERAGE_MAX
 
 logger = structlog.get_logger(__name__)
@@ -169,7 +171,6 @@ def create_chart_generator_node(
                 extract_chart_data_from_data_block,
             )
             from src.charts.extractors.pm_block import extract_pm_block
-            from src.config import config as app_config
 
             ticker = state.get("company_of_interest", "UNKNOWN")
             trade_date = datetime.now().strftime("%Y-%m-%d")
@@ -198,7 +199,9 @@ def create_chart_generator_node(
             )
 
             # Configure chart output
-            output_dir = image_dir if image_dir else app_config.images_dir
+            output_dir = (
+                image_dir if image_dir else get_runtime_config(app_config).images_dir
+            )
             chart_config = ChartConfig(
                 output_dir=output_dir,
                 format=ChartFormat.SVG if chart_format == "svg" else ChartFormat.PNG,

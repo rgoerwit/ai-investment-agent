@@ -21,10 +21,7 @@ from src.agents.decision_nodes import (
 
 _PM_START_MARKER = "#### -- START PM_BLOCK --"
 _PM_WITH_BLOCK = (
-    "Some PM rationale.\n\n"
-    f"{_PM_START_MARKER}\n"
-    "VERDICT: BUY\n"
-    "#### -- END PM_BLOCK --\n"
+    f"Some PM rationale.\n\n{_PM_START_MARKER}\nVERDICT: BUY\n#### -- END PM_BLOCK --\n"
 )
 
 _PM_WITHOUT_BLOCK = "Some PM rationale without a PM_BLOCK fence.\n"

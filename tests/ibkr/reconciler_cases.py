@@ -3672,9 +3672,9 @@ class TestCurrencyAccuracy:
         cost = abs(buys[0].cash_impact_usd)
         # HKD rate ~0.128; $3000 / (58 * 0.128) ≈ 404 shares → round lot 400
         # cost ≈ 400 * 58 * 0.128 ≈ $2969
-        assert 1000 < cost < 5000, (
-            f"HKD buy cost ${cost:.0f} is wrong — " "should be ~$3000, not HK$3000"
-        )
+        assert (
+            1000 < cost < 5000
+        ), f"HKD buy cost ${cost:.0f} is wrong — should be ~$3000, not HK$3000"
 
     def test_saved_fx_rate_takes_precedence_over_fallback(self):
         """If the analysis snapshot has a saved fx_rate, use it — not the fallback table."""

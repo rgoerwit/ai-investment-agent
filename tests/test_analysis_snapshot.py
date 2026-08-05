@@ -770,8 +770,7 @@ def test_score_derivation_requires_complete_coherent_breakdown() -> None:
         _with_structured_metrics(
             {
                 "raw_fundamentals_data": (
-                    '{"trailingPE": 12.5, "revenueGrowth": 0.2, '
-                    '"earningsGrowth": 0.3}'
+                    '{"trailingPE": 12.5, "revenueGrowth": 0.2, "earningsGrowth": 0.3}'
                 )
             }
         )
@@ -953,8 +952,7 @@ def test_canonical_scorecard_replaces_stale_score_detail() -> None:
         _with_structured_metrics(
             {
                 "raw_fundamentals_data": (
-                    '{"revenueGrowth": 0.2, "earningsGrowth": 0.3, '
-                    '"grossMargins": 0.4}'
+                    '{"revenueGrowth": 0.2, "earningsGrowth": 0.3, "grossMargins": 0.4}'
                 )
             }
         )

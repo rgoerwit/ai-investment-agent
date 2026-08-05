@@ -1675,7 +1675,9 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
             )
             raw_metrics = raw_metrics or {}
 
-            quiet_mode = settings_config.quiet_mode
+            from src.runtime_config import get_runtime_config
+
+            quiet_mode = get_runtime_config(settings_config).quiet_mode
 
             if not fundamentals_report:
                 fundamentals_status = get_artifact_status(

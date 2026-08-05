@@ -212,8 +212,7 @@ def compute_portfolio_health(
     for ccy, pct in sorted(currency_weights.items(), key=lambda x: -x[1]):
         if pct > 50:
             flags.append(
-                f"CURRENCY_CONCENTRATION: {pct:.1f}% in {ccy}"
-                " — FX risk amplification"
+                f"CURRENCY_CONCENTRATION: {pct:.1f}% in {ccy} — FX risk amplification"
             )
 
     if positions:
@@ -451,7 +450,7 @@ def compute_portfolio_health(
             demoted = _apply_macro_demotions(
                 reconciliation_items,
                 soft_tag=(
-                    "  [MACRO_WATCH: demoted from SELL — correlated" " event detected]"
+                    "  [MACRO_WATCH: demoted from SELL — correlated event detected]"
                 ),
                 stop_tag_template=(
                     "  [MACRO_PRICE: price-drop review during correlated event"

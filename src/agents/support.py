@@ -853,7 +853,7 @@ def format_red_flag_section(
     narrated TOTAL RISK COUNT falls below it.
     """
     section = (
-        "\n\nRED-FLAG PRE-SCREENING:\n" f"Pre-Screening Result: {pre_screening_result}"
+        f"\n\nRED-FLAG PRE-SCREENING:\nPre-Screening Result: {pre_screening_result}"
     )
     # State can carry a malformed value after a reducer merge; a prompt renderer
     # must degrade rather than take the run down. Non-dict entries are dropped

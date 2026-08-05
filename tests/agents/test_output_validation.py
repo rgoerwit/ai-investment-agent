@@ -527,7 +527,7 @@ def test_auditor_validation_rejects_status_only_stub():
 
 
 def test_auditor_validation_accepts_legacy_forensic_block():
-    content = "FORENSIC_DATA_BLOCK:\n" "STATUS: CLEAN\n" "VERDICT: RELY_ON_DATA_BLOCK\n"
+    content = "FORENSIC_DATA_BLOCK:\nSTATUS: CLEAN\nVERDICT: RELY_ON_DATA_BLOCK\n"
 
     validation = validate_required_output("global_forensic_auditor", content)
 

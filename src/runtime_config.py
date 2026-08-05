@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 
@@ -17,6 +18,8 @@ class RuntimeConfig:
     gemini_rpm_limit: int
     llm_call_hard_timeout_seconds: float
     quick_mode_active: bool
+    images_dir: Path
+    quiet_mode: bool
 
     @classmethod
     def from_config(cls, base_config: Any) -> RuntimeConfig:
@@ -29,6 +32,8 @@ class RuntimeConfig:
             gemini_rpm_limit=base_config.gemini_rpm_limit,
             llm_call_hard_timeout_seconds=base_config.llm_call_hard_timeout_seconds,
             quick_mode_active=getattr(base_config, "quick_mode_active", False),
+            images_dir=Path(base_config.images_dir),
+            quiet_mode=getattr(base_config, "quiet_mode", False),
         )
 
     def with_overrides(self, **changes: Any) -> RuntimeConfig:
@@ -59,6 +64,8 @@ def build_runtime_config(args: Any, base_config: Any) -> RuntimeConfig:
         runtime_config = runtime_config.with_overrides(deep_think_llm=args.deep_model)
     if getattr(args, "no_memory", False):
         runtime_config = runtime_config.with_overrides(enable_memory=False)
+    if getattr(args, "quiet", False) or getattr(args, "brief", False):
+        runtime_config = runtime_config.with_overrides(quiet_mode=True)
     if getattr(args, "enable_langfuse", False) or getattr(
         args, "trace_langfuse", False
     ):

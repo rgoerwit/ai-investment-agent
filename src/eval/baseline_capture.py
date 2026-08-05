@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import structlog
 
+from src.error_safety import summarize_exception
 from src.runtime_diagnostics import get_optional_publishable_artifacts
 
 from .capture_contract import NodeCaptureSpec, get_node_capture_spec
@@ -659,7 +660,9 @@ class BaselineCaptureManager:
                         "eligible": False,
                         "rejected_before": rejected_before,
                         "raised": True,
-                        "error": str(exc),
+                        "error": summarize_exception(
+                            exc, operation=f"baseline node {node_name}"
+                        ),
                         "prompt": normalize_for_json(prompt_info),
                     }
                 )

@@ -420,7 +420,8 @@ async def invoke_with_rate_limit_handling(
     joins; when omitted the token tracker derives it from ``context`` (which may
     carry a round/retry suffix).
     """
-    quiet_mode = settings_config.quiet_mode
+    runtime_config = get_runtime_config(settings_config)
+    quiet_mode = runtime_config.quiet_mode
     resolved_model = model_name or get_model_name(runnable)
     class_name = get_class_name(runnable)
     resolved_provider = provider or infer_provider(
@@ -440,7 +441,6 @@ async def invoke_with_rate_limit_handling(
             overall_timeout_seconds=overall_timeout_seconds,
         )
 
-    runtime_config = get_runtime_config(settings_config)
     if runtime_config.quick_mode_active:
         hard_timeout = quick_mode_hard_timeout_seconds(
             context, settings_config, canonical_agent=canonical_agent

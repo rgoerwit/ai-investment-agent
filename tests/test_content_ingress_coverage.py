@@ -249,10 +249,9 @@ def test_memory_retrieval_has_inspection():
 def test_memory_uses_memory_retrieval_source_kind():
     """memory.py must use SourceKind.memory_retrieval for ChromaDB results."""
     src = _read(_src("memory.py"))
-    assert "SourceKind.memory_retrieval" in src, (
-        "memory.py: ChromaDB retrieval inspection must use "
-        "SourceKind.memory_retrieval."
-    )
+    assert (
+        "SourceKind.memory_retrieval" in src
+    ), "memory.py: ChromaDB retrieval inspection must use SourceKind.memory_retrieval."
 
 
 def test_memory_write_has_inspection():
@@ -285,18 +284,17 @@ def test_research_foreign_search_has_inspection():
 def test_research_uses_web_search_source_kind():
     """tools/research.py must use SourceKind.web_search for foreign search."""
     src = _read(_src("tools/research.py"))
-    assert "SourceKind.web_search" in src, (
-        "tools/research.py: foreign search inspection must use "
-        "SourceKind.web_search."
-    )
+    assert (
+        "SourceKind.web_search" in src
+    ), "tools/research.py: foreign search inspection must use SourceKind.web_search."
 
 
 def test_research_uses_official_filing_source_kind():
     """tools/research.py must use SourceKind.official_filing for filings."""
     src = _read(_src("tools/research.py"))
-    assert "SourceKind.official_filing" in src, (
-        "tools/research.py: filing inspection must use " "SourceKind.official_filing."
-    )
+    assert (
+        "SourceKind.official_filing" in src
+    ), "tools/research.py: filing inspection must use SourceKind.official_filing."
 
 
 def test_macro_context_has_inspection():
@@ -311,10 +309,9 @@ def test_macro_context_has_inspection():
 def test_macro_context_uses_cached_context_source_kind():
     """macro_context.py must use SourceKind.cached_context for cache re-entry."""
     src = _read(_src("macro_context.py"))
-    assert "SourceKind.cached_context" in src, (
-        "macro_context.py: cached brief inspection must use "
-        "SourceKind.cached_context."
-    )
+    assert (
+        "SourceKind.cached_context" in src
+    ), "macro_context.py: cached brief inspection must use SourceKind.cached_context."
 
 
 def test_market_tools_use_financial_api_source_kind():

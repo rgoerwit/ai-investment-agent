@@ -1234,8 +1234,9 @@ class TestMainOrchestration:
         )
         monkeypatch.setattr(
             "src.main.output._emit_start_banner",
-            lambda passed_args, targets, **kwargs: call_order.append("banner")
-            or "banner",
+            lambda passed_args, targets, **kwargs: (
+                call_order.append("banner") or "banner"
+            ),
         )
         monkeypatch.setattr(
             "src.main._execute_analysis",
@@ -1564,7 +1565,7 @@ class TestMainOrchestration:
             company_name,
             report,
             reporter,
-            **kwargs: _async_result(False),
+            **kwargs: (_async_result(False)),
         )
         monkeypatch.setattr(
             "src.main._log_final_summary",

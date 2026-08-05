@@ -175,9 +175,7 @@ def kill_criteria_block(*triggers: str) -> str:
     Bear emits up to 3 triggers; the parser caps at 3.
     """
     body = "\n".join(f"TRIGGER_{i + 1}: {t}" for i, t in enumerate(triggers))
-    return (
-        "### --- START KILL_CRITERIA ---\n" f"{body}\n" "### --- END KILL_CRITERIA ---"
-    )
+    return f"### --- START KILL_CRITERIA ---\n{body}\n### --- END KILL_CRITERIA ---"
 
 
 def bear_history(
@@ -595,8 +593,7 @@ def test_variant_placeholder_is_omitted_from_memo() -> None:
     real content.
     """
     bare_plan = (
-        "### FINAL RECOMMENDATION: BUY\n\n"
-        "### RISKS TO MONITOR:\n- Cyclical demand.\n"
+        "### FINAL RECOMMENDATION: BUY\n\n### RISKS TO MONITOR:\n- Cyclical demand.\n"
     )
     s = State(plan=bare_plan, pm=pm_narrative())
     memo = build_memo(s.runtime())

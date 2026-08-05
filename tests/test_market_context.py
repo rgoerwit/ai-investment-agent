@@ -12,7 +12,7 @@ import pytest
 def _make_hist(prices: list[float], dates: list[str] | None = None) -> pd.DataFrame:
     """Build a minimal yfinance-style history DataFrame."""
     if dates is None:
-        dates = [f"2026-03-0{i+1}" for i in range(len(prices))]
+        dates = [f"2026-03-0{i + 1}" for i in range(len(prices))]
     idx = pd.DatetimeIndex(dates)
     return pd.DataFrame({"Close": prices}, index=idx)
 

@@ -1190,9 +1190,7 @@ class TestGenerateLesson:
 
         mock_response = MagicMock()
         mock_response.content = (
-            "LESSON: Some lesson text.\n"
-            "TYPE: invalid_type\n"
-            "FAILURE_MODE: INVALID_MODE"
+            "LESSON: Some lesson text.\nTYPE: invalid_type\nFAILURE_MODE: INVALID_MODE"
         )
         mock_llm = AsyncMock()
         mock_llm.ainvoke = AsyncMock(return_value=mock_response)

@@ -175,8 +175,7 @@ def render_position_and_risk_sections(
                 else normalize_reason(item.reason)
             )
             lines.append(
-                f"{writer.order_line(item, currency)}  "
-                f"[{writer.sell_type_label(item)}]"
+                f"{writer.order_line(item, currency)}  [{writer.sell_type_label(item)}]"
             )
             writer.append_reason_detail(reason)
             if item.sell_type in ("STOP_BREACH", "HARD_REJECT"):
@@ -213,8 +212,7 @@ def render_position_and_risk_sections(
                 .split("  [MACRO_WATCH:")[0]
             )
             lines.append(
-                f"{writer.order_line(item, currency)}  "
-                f"[{writer.sell_type_label(item)}]"
+                f"{writer.order_line(item, currency)}  [{writer.sell_type_label(item)}]"
             )
             writer.append_reason_detail(reason)
             if item.sell_type == "PROFIT_TAKE":

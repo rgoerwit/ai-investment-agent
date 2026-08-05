@@ -19,6 +19,7 @@ from src.validators.metric_extractor import (
     extract_interest_coverage,
     extract_metrics,
 )
+from src.validators.supplemental_flags import detect_return_quality_fragility_flags
 
 
 def _block(*lines: str) -> str:
@@ -160,3 +161,33 @@ class TestTrailingPeriodNumbers:
         )
         assert m["ocf"] == 13.39e9
         assert m["fcf"] == 1_234.56e6
+
+
+class TestSignedDecisionMetrics:
+    def test_negative_return_metrics_preserve_sign(self):
+        metrics = extract_metrics(
+            _block(
+                "ROA_PERCENT: 13.41%",
+                "ROA_5Y_AVG: -12.88%",
+                "ROE_5Y_AVG: -4.2%",
+                "PEG_RATIO: -0.7",
+            )
+        )
+
+        assert metrics["roa_current"] == 13.41
+        assert metrics["roa_5y_avg"] == -12.88
+        assert metrics["roe_5y_avg"] == -4.2
+        assert metrics["peg_ratio"] == -0.7
+
+    def test_negative_return_metrics_feed_fragility_rule(self):
+        report = _block("ROA_PERCENT: 13.41%", "ROA_5Y_AVG: -12.88%")
+
+        flags = detect_return_quality_fragility_flags(
+            report,
+            base_metrics=extract_metrics(report),
+        )
+
+        assert [flag["type"] for flag in flags] == ["RETURN_QUALITY_FRAGILITY"]
+
+    def test_negative_debt_to_equity_is_signed(self):
+        assert extract_debt_to_equity("D/E: -0.30") == -30.0

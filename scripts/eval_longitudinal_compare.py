@@ -275,9 +275,9 @@ def render_timeline_markdown(ticker: str, rows: list[RunRow]) -> str:
 
     lines = [f"### {ticker}", ""]
     lines.append(
-        "| Date | Outcome | Verdict | Health | Growth | Risk | Data quality | Contract | Consultant | Auditor | Flags |"
+        "| Timestamp | Artifact | Outcome | Verdict | Health | Growth | Risk | Data quality | Contract | Consultant | Auditor | Flags |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
 
     # None until the first retained row is emitted: that row is a *baseline*,
     # not a change. Seeding with an empty set marked every one of its flags
@@ -285,9 +285,11 @@ def render_timeline_markdown(ticker: str, rows: list[RunRow]) -> str:
     # window simply starts there.
     prev_flags: set[str] | None = None
     for i, r in enumerate(rows):
-        date_disp = f"{r.timestamp[4:6]}/{r.timestamp[6:8]}"
+        date_disp = r.dt.strftime("%Y-%m-%d %H:%M:%S") if r.dt else r.timestamp
         if i == len(rows) - 1:
             date_disp += " **(latest)**"
+        artifact_path = Path(r.path).resolve()
+        artifact_disp = f"[artifact]({artifact_path.as_uri()})"
 
         def fmt(v, suffix=""):
             if v is None:
@@ -324,7 +326,7 @@ def render_timeline_markdown(ticker: str, rows: list[RunRow]) -> str:
         quality_disp = "; ".join(quality_parts) or "—"
 
         lines.append(
-            f"| {date_disp} | {outcome} | {fmt(r.verdict)} | "
+            f"| {date_disp} | {artifact_disp} | {outcome} | {fmt(r.verdict)} | "
             f"{fmt(r.health_adj, '%')} | {fmt(r.growth_adj, '%')} | "
             f"{fmt(r.risk_total)} | {quality_disp} | {fmt(r.contract_status)} | "
             f"{fmt(r.consultant_verdict)} | {fmt(r.auditor_status)} | {flags_disp} |"

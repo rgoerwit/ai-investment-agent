@@ -382,6 +382,18 @@ class TestReturnQualityFragility:
             supplemental_flags.detect_return_quality_fragility_flags(block, "X") == []
         )
 
+    def test_negative_historical_roa_with_peak_marker_is_suppressed(self):
+        block = _rqf_block(
+            PROFITABILITY_TREND="IMPROVING",
+            ROA_PERCENT="13.41%",
+            ROA_5Y_AVG="-12.88%",
+            CYCLE_POSITION="PEAK",
+        )
+
+        assert (
+            supplemental_flags.detect_return_quality_fragility_flags(block, "X") == []
+        )
+
     def test_missing_fields_no_flag_no_crash(self):
         block = _rqf_block(PROFITABILITY_TREND="STABLE")
         assert (

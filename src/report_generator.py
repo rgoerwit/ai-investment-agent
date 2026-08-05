@@ -29,6 +29,7 @@ from src.data_block_utils import (
 from src.error_safety import summarize_exception
 from src.pm_decision_parser import canonicalize_pm_verdict
 from src.reporting.state_access import get_effective_red_flags
+from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import (
     build_analysis_validity,
     is_publishable_analysis,
@@ -235,12 +236,12 @@ class QuietModeReporter:
             )
 
         self.valuation_context = f"""VALUATION DATA (from Football Field Chart):
-- Methodology: {methodology or 'P/E Normalization'}
+- Methodology: {methodology or "P/E Normalization"}
 - Target Range: ${target_low:.2f} - ${target_high:.2f}
 - Fair Value (midpoint): ${fair_value:.2f}
 - Current Price: ${current_price:.2f}
 - Price Position: {position_desc}
-- Confidence: {confidence or 'N/A'}
+- Confidence: {confidence or "N/A"}
 
 NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain why in the Valuation section."""
 
@@ -387,7 +388,11 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
 
             # Configure chart generation
             # Use custom image_dir if provided, otherwise fall back to config default
-            output_dir = self.image_dir if self.image_dir else config.images_dir
+            output_dir = (
+                self.image_dir
+                if self.image_dir
+                else get_runtime_config(config).images_dir
+            )
             chart_config = ChartConfig(
                 output_dir=output_dir,
                 format=ChartFormat.SVG
@@ -642,7 +647,11 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             )
 
             # Generate chart
-            output_dir = self.image_dir if self.image_dir else config.images_dir
+            output_dir = (
+                self.image_dir
+                if self.image_dir
+                else get_runtime_config(config).images_dir
+            )
             chart_config = ChartConfig(
                 output_dir=output_dir,
                 format=ChartFormat.SVG
