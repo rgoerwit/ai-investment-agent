@@ -8,6 +8,7 @@ from typing import Any
 
 import structlog
 
+from src.runtime_diagnostics import ArtifactStatus
 from src.validators.financial_rules import contains_transient_strength_marker
 from src.validators.metric_extractor import extract_metrics
 from src.validators.sector_classifier import FINANCIALS_SECTORS, Sector, detect_sector
@@ -226,9 +227,46 @@ def detect_material_operating_signal_flags(
 
 
 def detect_legal_flags(
-    legal_risks: dict[str, Any], ticker: str = "UNKNOWN"
-) -> list[dict]:
-    """Detect legal/tax warning flags from Legal Counsel output."""
+    legal_risks: dict[str, Any],
+    ticker: str = "UNKNOWN",
+    *,
+    artifact_status: ArtifactStatus | None = None,
+) -> list[dict[str, Any]]:
+    """Detect legal/tax flags, treating artifact validity as authoritative.
+
+    A provider failure means the legal dimensions were not assessed. It must
+    not be converted into substantive PFIC, VIE, or CMIC findings merely
+    because fallback content remains publishable for diagnostics.
+    """
+    if artifact_status is not None and not artifact_status.ok:
+        provider = artifact_status.provider or "configured provider"
+        failure_kind = artifact_status.error_kind or "application_error"
+        logger.warning(
+            "legal_counsel_coverage_unavailable",
+            ticker=ticker,
+            provider=provider,
+            error_kind=failure_kind,
+        )
+        return [
+            {
+                "type": "LEGAL_COUNSEL_UNAVAILABLE",
+                "severity": "WARNING",
+                "detail": (
+                    "Legal Counsel did not produce a valid assessment; PFIC, VIE, "
+                    f"CMIC, and capital-structure checks remain unassessed "
+                    f"({provider}, {failure_kind})."
+                ),
+                "action": "REVIEW",
+                "risk_penalty": 0.0,
+                "blocks_buy": True,
+                "rationale": (
+                    "Provider failure is a coverage limitation, not evidence that a "
+                    "specific legal risk exists. Do not add a risk tally, but do not "
+                    "initiate a position until the legal checks complete successfully."
+                ),
+            }
+        ]
+
     warnings: list[dict[str, Any]] = []
 
     pfic_status = legal_risks.get("pfic_status")

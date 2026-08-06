@@ -23,7 +23,7 @@ logger = structlog.get_logger(__name__)
 TOOL_CALL_TIMEOUT_SECONDS = 45.0
 
 ToolSource: TypeAlias = Literal[
-    "toolnode", "consultant", "editor", "legal_counsel", "auditor"
+    "toolnode", "preflight", "consultant", "editor", "legal_counsel", "auditor"
 ]
 
 

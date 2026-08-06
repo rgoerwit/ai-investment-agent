@@ -22,6 +22,7 @@ import glob
 import json
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -85,7 +86,9 @@ class BuyStabilityConfig:
 
 
 def _is_buy(verdict: str | None) -> bool:
-    return bool(verdict) and verdict.strip().upper().replace(" ", "_") == "BUY"
+    if verdict is None:
+        return False
+    return verdict.strip().upper().replace(" ", "_") == "BUY"
 
 
 def assess_buy_stability(
@@ -145,10 +148,9 @@ def _as_flag_set(active_flags: object) -> set[str]:
     """Coerce a flag container (set/list/tuple of str) to a set[str]."""
     if isinstance(active_flags, str):
         return {active_flags}
-    try:
-        return {str(f) for f in active_flags}  # type: ignore[union-attr]
-    except TypeError:
-        return set()
+    if isinstance(active_flags, Iterable):
+        return {str(flag) for flag in active_flags}
+    return set()
 
 
 def load_recent_same_ticker_history(

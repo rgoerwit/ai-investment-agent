@@ -44,9 +44,9 @@ class TestResearchManagerPromptContent:
     def test_structural_tag_present(self):
         """STRUCTURAL tag must be present alongside TRANSIENT for contrast."""
         prompt = get_prompt("research_manager")
-        assert (
-            "STRUCTURAL" in prompt.system_message
-        ), "STRUCTURAL risk-duration tag missing from research_manager prompt."
+        assert "STRUCTURAL" in prompt.system_message, (
+            "STRUCTURAL risk-duration tag missing from research_manager prompt."
+        )
 
     def test_geopolitical_example_present(self):
         """Concrete geopolitical example helps the LLM classify risks correctly."""
@@ -163,9 +163,9 @@ class TestPortfolioManagerPromptContent:
 
     def test_portfolio_manager_prompt_mentions_idle_cash_leniency(self):
         prompt = get_prompt("portfolio_manager")
-        assert (
-            "CAPITAL_PLAN_STATUS" in prompt.system_message
-        ), "PM prompt must distinguish idle cash with no plan from justified cash buffers."
+        assert "CAPITAL_PLAN_STATUS" in prompt.system_message, (
+            "PM prompt must distinguish idle cash with no plan from justified cash buffers."
+        )
 
     def test_portfolio_manager_prompt_blocks_override_on_unproven_strength(self):
         prompt = get_prompt("portfolio_manager")
@@ -232,15 +232,15 @@ class TestFundamentalsEbitdaAnnualization:
 
     def test_net_debt_ebitda_period_field_in_datablock(self):
         prompt = get_prompt("fundamentals_analyst")
-        assert (
-            "NET_DEBT_EBITDA_PERIOD" in prompt.system_message
-        ), "DATA_BLOCK must include NET_DEBT_EBITDA_PERIOD for audit trail of annualization."
+        assert "NET_DEBT_EBITDA_PERIOD" in prompt.system_message, (
+            "DATA_BLOCK must include NET_DEBT_EBITDA_PERIOD for audit trail of annualization."
+        )
 
     def test_net_debt_ebitda_field_in_datablock(self):
         prompt = get_prompt("fundamentals_analyst")
-        assert (
-            "NET_DEBT_EBITDA:" in prompt.system_message
-        ), "DATA_BLOCK must include NET_DEBT_EBITDA field."
+        assert "NET_DEBT_EBITDA:" in prompt.system_message, (
+            "DATA_BLOCK must include NET_DEBT_EBITDA field."
+        )
 
 
 class TestFundamentalsRevenueBacklog:
@@ -261,22 +261,22 @@ class TestFundamentalsRevenueBacklog:
 
     def test_revenue_backlog_field_in_datablock(self):
         prompt = get_prompt("fundamentals_analyst")
-        assert (
-            "REVENUE_BACKLOG:" in prompt.system_message
-        ), "DATA_BLOCK must include REVENUE_BACKLOG field."
+        assert "REVENUE_BACKLOG:" in prompt.system_message, (
+            "DATA_BLOCK must include REVENUE_BACKLOG field."
+        )
 
     def test_backlog_coverage_credits_expansion_point(self):
         """Backlog ≥1.0× trailing revenue must appear adjacent to '1 pt' in the rubric."""
         prompt = get_prompt("fundamentals_analyst")
         msg = prompt.system_message
         backlog_idx = msg.find("REVENUE_BACKLOG_COVERAGE ≥")
-        assert (
-            backlog_idx != -1
-        ), "REVENUE_BACKLOG_COVERAGE threshold must appear in growth scoring rubric."
+        assert backlog_idx != -1, (
+            "REVENUE_BACKLOG_COVERAGE threshold must appear in growth scoring rubric."
+        )
         nearby = msg[backlog_idx : backlog_idx + 60]
-        assert (
-            "1 pt" in nearby
-        ), "Revenue backlog criterion must award 1 pt when coverage ≥1.0× trailing revenue."
+        assert "1 pt" in nearby, (
+            "Revenue backlog criterion must award 1 pt when coverage ≥1.0× trailing revenue."
+        )
 
 
 class TestForeignLanguageOrderBook:
@@ -293,21 +293,21 @@ class TestForeignLanguageOrderBook:
 
     def test_search_e_order_book_present(self):
         prompt = get_prompt("foreign_language_analyst")
-        assert (
-            "order book" in prompt.system_message.lower()
-        ), "Foreign Language Analyst must include Search E for revenue backlog/order book data."
+        assert "order book" in prompt.system_message.lower(), (
+            "Foreign Language Analyst must include Search E for revenue backlog/order book data."
+        )
 
     def test_revenue_backlog_output_block_present(self):
         prompt = get_prompt("foreign_language_analyst")
-        assert (
-            "REVENUE BACKLOG" in prompt.system_message
-        ), "FLA output format must include REVENUE BACKLOG section to pass data downstream."
+        assert "REVENUE BACKLOG" in prompt.system_message, (
+            "FLA output format must include REVENUE BACKLOG section to pass data downstream."
+        )
 
     def test_capital_policy_output_block_present(self):
         prompt = get_prompt("foreign_language_analyst")
-        assert (
-            "CAPITAL POLICY" in prompt.system_message
-        ), "FLA output format must include CAPITAL POLICY so capital-allocation evidence reaches Fundamentals."
+        assert "CAPITAL POLICY" in prompt.system_message, (
+            "FLA output format must include CAPITAL POLICY so capital-allocation evidence reaches Fundamentals."
+        )
 
     def test_ownership_change_search_present(self):
         prompt = get_prompt("foreign_language_analyst")

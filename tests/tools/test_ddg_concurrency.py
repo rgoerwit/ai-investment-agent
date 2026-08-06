@@ -64,25 +64,25 @@ def _fresh_ddg_executor():
 
 def test_ddgs_is_pre_imported_at_module_load():
     """``shared.py`` must eagerly import ddgs and expose DDGS_AVAILABLE."""
-    assert hasattr(
-        shared, "DDGS_AVAILABLE"
-    ), "shared.DDGS_AVAILABLE missing — pre-import guard removed?"
+    assert hasattr(shared, "DDGS_AVAILABLE"), (
+        "shared.DDGS_AVAILABLE missing — pre-import guard removed?"
+    )
 
 
 def test_ddg_init_lock_is_a_threading_lock():
     """Constructor safety is a ``threading.Lock`` (held in the worker thread
     around ``DDGS(...)``), NOT an asyncio.Lock serializing whole calls."""
-    assert hasattr(
-        shared, "_DDG_INIT_LOCK"
-    ), "shared._DDG_INIT_LOCK missing — DDG constructor guard removed?"
+    assert hasattr(shared, "_DDG_INIT_LOCK"), (
+        "shared._DDG_INIT_LOCK missing — DDG constructor guard removed?"
+    )
     # threading.Lock() returns a _thread.lock instance; assert it quacks right.
     assert hasattr(shared._DDG_INIT_LOCK, "acquire") and hasattr(
         shared._DDG_INIT_LOCK, "release"
     ), f"_DDG_INIT_LOCK must be a threading lock, got {type(shared._DDG_INIT_LOCK)}"
     # And it must NOT be an asyncio.Lock (that would serialize network I/O too).
-    assert not isinstance(
-        shared._DDG_INIT_LOCK, asyncio.Lock
-    ), "_DDG_INIT_LOCK must be a threading.Lock, not an asyncio.Lock"
+    assert not isinstance(shared._DDG_INIT_LOCK, asyncio.Lock), (
+        "_DDG_INIT_LOCK must be a threading.Lock, not an asyncio.Lock"
+    )
 
 
 def test_ddg_call_lock_is_gone():
@@ -99,9 +99,9 @@ def test_ddg_executor_is_multi_worker():
     """The DDG executor must have >1 worker so one hung (uncancellable) socket
     read orphans a single thread instead of saturating the pool."""
     executor = shared._get_ddg_executor()
-    assert isinstance(
-        executor, concurrent.futures.ThreadPoolExecutor
-    ), f"DDG executor must be ThreadPoolExecutor, got {type(executor)}"
+    assert isinstance(executor, concurrent.futures.ThreadPoolExecutor), (
+        f"DDG executor must be ThreadPoolExecutor, got {type(executor)}"
+    )
     assert executor._max_workers == shared._DDG_EXECUTOR_MAX_WORKERS
     assert executor._max_workers > 1, (
         f"DDG executor must be multi-worker, got {executor._max_workers}. "
@@ -160,9 +160,9 @@ def test_ddg_search_uses_dedicated_executor_not_default_to_thread():
         "_ddg_search uses asyncio.to_thread — that runs on the shared default "
         "executor and re-opens the concurrent-DDG-init deadlock."
     )
-    assert (
-        uses_run_in_executor_with_ddg_executor
-    ), "_ddg_search must call loop.run_in_executor(_get_ddg_executor(), ...)."
+    assert uses_run_in_executor_with_ddg_executor, (
+        "_ddg_search must call loop.run_in_executor(_get_ddg_executor(), ...)."
+    )
 
 
 # ---------------------------------------------------------------------------

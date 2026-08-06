@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import statistics
 from datetime import date, timedelta
 from typing import Any
@@ -145,7 +146,7 @@ def calculate_cagr_from_latest_series(values_latest_first: list[float]) -> float
     oldest = values_latest_first[3]
     if latest <= 0 or oldest <= 0:
         return None
-    return (latest / oldest) ** (1 / 3) - 1
+    return math.pow(latest / oldest, 1 / 3) - 1
 
 
 def classify_cycle_position(current_roa: float, average_roa: float) -> str:

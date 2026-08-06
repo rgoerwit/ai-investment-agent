@@ -14,6 +14,7 @@ Run with: pytest tests/test_legal_counsel.py -v
 
 import json
 
+from src.runtime_diagnostics import ArtifactStatus
 from src.validators.red_flag_detector import RedFlagDetector
 
 
@@ -160,6 +161,18 @@ class TestLegalRiskExtraction:
         assert risks["cmic_status"] == "FLAGGED"
         assert "NS-CMIC" in risks["cmic_evidence"]
 
+    def test_malformed_json_fallback_recovers_cmic_evidence(self):
+        legal_report = (
+            '{"pfic_status":"N/A","vie_structure":"N/A",'
+            '"cmic_status":"FLAGGED",'
+            '"cmic_evidence":"Company appears on OFAC NS-CMIC list",}'
+        )
+
+        risks = RedFlagDetector.extract_legal_risks(legal_report)
+
+        assert risks["cmic_status"] == "FLAGGED"
+        assert risks["cmic_evidence"] == "Company appears on OFAC NS-CMIC list"
+
     def test_extract_cmic_uncertain(self):
         """Test CMIC UNCERTAIN extraction."""
         legal_report = json.dumps(
@@ -274,6 +287,68 @@ class TestLegalFlagDetection:
         assert warnings[0]["severity"] == "WARNING"
         assert warnings[0]["action"] == "RISK_PENALTY"
         assert warnings[0]["risk_penalty"] == 1.0
+
+    def test_failed_artifact_is_coverage_gap_not_substantive_legal_risk(self):
+        legal_risks = {
+            "pfic_status": "UNCERTAIN",
+            "pfic_evidence": "Fallback text",
+            "vie_structure": "YES",
+            "cmic_status": "FLAGGED",
+            "other_regulatory_risks": [{"risk_type": "SANCTIONS", "severity": "HIGH"}],
+            "capital_structure": {
+                "coverage_status": "SEARCH_FAILED",
+                "classification": "UNRESOLVED",
+            },
+        }
+        status = ArtifactStatus(
+            complete=True,
+            ok=False,
+            content="fallback",
+            error_kind="timeout",
+            provider="google",
+        )
+
+        warnings = RedFlagDetector.detect_legal_flags(
+            legal_risks,
+            "TEST",
+            artifact_status=status,
+        )
+
+        assert [warning["type"] for warning in warnings] == [
+            "LEGAL_COUNSEL_UNAVAILABLE"
+        ]
+        assert warnings[0]["risk_penalty"] == 0.0
+        assert warnings[0]["blocks_buy"] is True
+        assert "google, timeout" in warnings[0]["detail"]
+
+    def test_successful_artifact_preserves_substantive_legal_flags(self):
+        legal_risks = {
+            "pfic_status": "PROBABLE",
+            "pfic_evidence": "Issuer disclosure",
+            "vie_structure": "YES",
+            "vie_evidence": "Contractual control",
+            "cmic_status": "FLAGGED",
+            "cmic_evidence": "Current OFAC match",
+        }
+        status = ArtifactStatus(
+            complete=True,
+            ok=True,
+            content="valid legal report",
+            provider="google",
+        )
+
+        warnings = RedFlagDetector.detect_legal_flags(
+            legal_risks,
+            "TEST",
+            artifact_status=status,
+        )
+
+        assert {warning["type"] for warning in warnings} == {
+            "PFIC_PROBABLE",
+            "VIE_STRUCTURE",
+            "CMIC_FLAGGED",
+        }
+        assert sum(warning["risk_penalty"] for warning in warnings) == 3.5
 
     def test_ordinary_commitment_qualifies_ratios_without_blocking_buy(self):
         legal_risks = {
@@ -775,6 +850,42 @@ class TestLegalJsonFallbackVisibility:
         ]
         assert len(warnings) == 1
         assert "report_prefix" in warnings[0]
+
+    def test_malformed_json_ignores_prefixed_and_suffixed_decoy_keys(self):
+        malformed = """{
+            non_pfic_status: "PROBABLE",
+            pfic_status_note: "UNCERTAIN",
+            previous_vie_structure: "YES",
+            vie_structure_detail: "YES",
+            non_cmic_status: "FLAGGED",
+            cmic_status_source: "UNCERTAIN",
+            non_pfic_evidence: "wrong prefix",
+            pfic_evidence_note: "wrong suffix",
+        }"""
+
+        risks = RedFlagDetector.extract_legal_risks(malformed)
+
+        assert risks["pfic_status"] is None
+        assert risks["vie_structure"] is None
+        assert risks["cmic_status"] is None
+        assert risks["pfic_evidence"] is None
+
+    def test_malformed_json_recovers_exact_keys_after_decoys_and_decodes_escapes(self):
+        malformed = r"""{
+            non_pfic_status: "PROBABLE",
+            pfic_status: "CLEAN",
+            pfic_evidence_note: "wrong field",
+            pfic_evidence: "Issuer said \"not a PFIC\".\nSee filing.",
+            vie_structure: "NO",
+            cmic_status: "CLEAR",
+        }"""
+
+        risks = RedFlagDetector.extract_legal_risks(malformed)
+
+        assert risks["pfic_status"] == "CLEAN"
+        assert risks["pfic_evidence"] == 'Issuer said "not a PFIC".\nSee filing.'
+        assert risks["vie_structure"] == "NO"
+        assert risks["cmic_status"] == "CLEAR"
 
     def test_report_prefix_in_warning_is_redacted(self, monkeypatch):
         from src.validators import supplemental_extractors

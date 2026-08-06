@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Stronger static-analysis gate** — MyPy now checks function bodies that still lack complete signature annotations; the configured 235-file source gate remains clean without blanket ignores.
+- **Evidence provenance** — Deterministic legal and management-guidance preloads have distinct `preflight` provenance, and foreign-language normalization consumes one canonical typed evidence-record contract.
+
+### Fixed
+
+- **Cryptography timing attack** — Pin `cryptography==50.0.0` to remediate the
+  PKCS#7 EnvelopedData decryption finding reported as CVE-2026-69247.
+- **Legal-provider failure semantics** — An unavailable Legal Counsel no longer fabricates PFIC/CMIC uncertainty or adds issuer-risk points; it emits one zero-penalty, BUY-blocking coverage flag and leaves legal dimensions unassessed.
+- **Malformed legal JSON recovery** — Exact key boundaries prevent prefixed or suffixed decoy fields from being recovered as PFIC, VIE, or CMIC evidence.
+
 ## [3.14.0] - 2026-07-30
 
 ### Added

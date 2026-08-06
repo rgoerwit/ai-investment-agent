@@ -904,9 +904,9 @@ class TestSecretStrProtection:
 
             # Verify none of the actual key values appear in repr
             for key_value in test_keys.values():
-                assert (
-                    key_value not in settings_repr
-                ), f"Key value {key_value} exposed in Settings repr!"
+                assert key_value not in settings_repr, (
+                    f"Key value {key_value} exposed in Settings repr!"
+                )
 
             # Verify the masked value appears instead
             assert "**********" in settings_repr
@@ -927,9 +927,9 @@ class TestSecretStrProtection:
 
             # Verify none of the actual key values appear
             for key_value in test_keys.values():
-                assert (
-                    key_value not in settings_str
-                ), f"Key value {key_value} exposed in Settings str!"
+                assert key_value not in settings_str, (
+                    f"Key value {key_value} exposed in Settings str!"
+                )
 
     def test_settings_dict_does_not_expose_keys(self):
         """Test that Settings.model_dump() does not expose API key values in string output."""

@@ -144,12 +144,15 @@ def test_auditor_uses_tool_service():
 
 
 def test_tool_source_includes_legal_counsel_and_auditor():
-    """ToolSource TypeAlias must enumerate legal_counsel and auditor."""
+    """ToolSource enumerates LLM seats and deterministic preflight calls."""
     src = _read(_src("tooling/runtime.py"))
-    assert (
-        '"legal_counsel"' in src
-    ), "tooling/runtime.py: ToolSource must include 'legal_counsel'."
+    assert '"legal_counsel"' in src, (
+        "tooling/runtime.py: ToolSource must include 'legal_counsel'."
+    )
     assert '"auditor"' in src, "tooling/runtime.py: ToolSource must include 'auditor'."
+    assert '"preflight"' in src, (
+        "tooling/runtime.py: deterministic preloads need distinct provenance."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -159,15 +162,15 @@ def test_tool_source_includes_legal_counsel_and_auditor():
 
 def test_config_has_inspection_settings():
     src = _read(_src("config.py"))
-    assert (
-        "untrusted_content_inspection_enabled" in src
-    ), "config.py: missing untrusted_content_inspection_enabled setting."
-    assert (
-        "untrusted_content_inspection_mode" in src
-    ), "config.py: missing untrusted_content_inspection_mode setting."
-    assert (
-        "untrusted_content_fail_policy" in src
-    ), "config.py: missing untrusted_content_fail_policy setting."
+    assert "untrusted_content_inspection_enabled" in src, (
+        "config.py: missing untrusted_content_inspection_enabled setting."
+    )
+    assert "untrusted_content_inspection_mode" in src, (
+        "config.py: missing untrusted_content_inspection_mode setting."
+    )
+    assert "untrusted_content_fail_policy" in src, (
+        "config.py: missing untrusted_content_fail_policy setting."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -177,9 +180,9 @@ def test_config_has_inspection_settings():
 
 def test_main_has_configure_content_inspection():
     src = _read(_src("main.py"))
-    assert (
-        "configure_content_inspection_from_config" in src
-    ), "main.py: configure_content_inspection_from_config() must be called at startup."
+    assert "configure_content_inspection_from_config" in src, (
+        "main.py: configure_content_inspection_from_config() must be called at startup."
+    )
     # Must not be gated inside configure_cli_logging
     # Find the configure_cli_logging function body and ensure inspection is NOT there
     # (it should be in _setup_runtime, independently)
@@ -188,9 +191,9 @@ def test_main_has_configure_content_inspection():
         src,
         re.DOTALL,
     )
-    assert (
-        cli_logging_match is not None
-    ), "Could not locate configure_cli_logging() body."
+    assert cli_logging_match is not None, (
+        "Could not locate configure_cli_logging() body."
+    )
     cli_logging_body = cli_logging_match.group(1)
     assert "configure_content_inspection_from_config" not in cli_logging_body, (
         "configure_content_inspection_from_config must NOT be inside "
@@ -205,9 +208,9 @@ def test_main_has_configure_content_inspection():
 
 def test_inspection_service_singleton_exists():
     src = _read(_src("tooling/inspection_service.py"))
-    assert (
-        "INSPECTION_SERVICE = InspectionService()" in src
-    ), "tooling/inspection_service.py: INSPECTION_SERVICE singleton must be defined."
+    assert "INSPECTION_SERVICE = InspectionService()" in src, (
+        "tooling/inspection_service.py: INSPECTION_SERVICE singleton must be defined."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -249,9 +252,9 @@ def test_memory_retrieval_has_inspection():
 def test_memory_uses_memory_retrieval_source_kind():
     """memory.py must use SourceKind.memory_retrieval for ChromaDB results."""
     src = _read(_src("memory.py"))
-    assert (
-        "SourceKind.memory_retrieval" in src
-    ), "memory.py: ChromaDB retrieval inspection must use SourceKind.memory_retrieval."
+    assert "SourceKind.memory_retrieval" in src, (
+        "memory.py: ChromaDB retrieval inspection must use SourceKind.memory_retrieval."
+    )
 
 
 def test_memory_write_has_inspection():
@@ -284,17 +287,17 @@ def test_research_foreign_search_has_inspection():
 def test_research_uses_web_search_source_kind():
     """tools/research.py must use SourceKind.web_search for foreign search."""
     src = _read(_src("tools/research.py"))
-    assert (
-        "SourceKind.web_search" in src
-    ), "tools/research.py: foreign search inspection must use SourceKind.web_search."
+    assert "SourceKind.web_search" in src, (
+        "tools/research.py: foreign search inspection must use SourceKind.web_search."
+    )
 
 
 def test_research_uses_official_filing_source_kind():
     """tools/research.py must use SourceKind.official_filing for filings."""
     src = _read(_src("tools/research.py"))
-    assert (
-        "SourceKind.official_filing" in src
-    ), "tools/research.py: filing inspection must use SourceKind.official_filing."
+    assert "SourceKind.official_filing" in src, (
+        "tools/research.py: filing inspection must use SourceKind.official_filing."
+    )
 
 
 def test_macro_context_has_inspection():
@@ -309,9 +312,9 @@ def test_macro_context_has_inspection():
 def test_macro_context_uses_cached_context_source_kind():
     """macro_context.py must use SourceKind.cached_context for cache re-entry."""
     src = _read(_src("macro_context.py"))
-    assert (
-        "SourceKind.cached_context" in src
-    ), "macro_context.py: cached brief inspection must use SourceKind.cached_context."
+    assert "SourceKind.cached_context" in src, (
+        "macro_context.py: cached brief inspection must use SourceKind.cached_context."
+    )
 
 
 def test_market_tools_use_financial_api_source_kind():
@@ -373,9 +376,9 @@ def test_analyst_nodes_extra_context_in_human_message():
     """extra_context must be in a HumanMessage, not concatenated into SystemMessage."""
     src = _read(_src("agents/analyst_nodes.py"))
     # The pattern: HumanMessage wrapping format_untrusted_block for extra_context
-    assert (
-        "HumanMessage" in src
-    ), "agents/analyst_nodes.py must use HumanMessage for extra_context."
+    assert "HumanMessage" in src, (
+        "agents/analyst_nodes.py must use HumanMessage for extra_context."
+    )
     tree = ast.parse(src)
     core_assignment = next(
         (
@@ -389,9 +392,9 @@ def test_analyst_nodes_extra_context_in_human_message():
         ),
         None,
     )
-    assert (
-        core_assignment is not None
-    ), "agents/analyst_nodes.py: could not locate core_system_instruction assignment."
+    assert core_assignment is not None, (
+        "agents/analyst_nodes.py: could not locate core_system_instruction assignment."
+    )
     referenced_names = {
         node.id
         for node in ast.walk(core_assignment.value)
@@ -411,9 +414,9 @@ def test_state_artifact_writers_use_cap_state_value():
         "agents/decision_nodes.py",
     ):
         src = _read(_src(rel))
-        assert (
-            "cap_state_value" in src
-        ), f"{rel}: success_artifact writes must use cap_state_value()."
+        assert "cap_state_value" in src, (
+            f"{rel}: success_artifact writes must use cap_state_value()."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -464,12 +467,12 @@ def test_new_inspectors_importable_from_owning_modules():
 
 def test_mcp_runtime_uses_mcp_tool_output_inspection():
     src = _read(_src("mcp/client.py"))
-    assert (
-        "SourceKind.mcp_tool_output" in src
-    ), "mcp/client.py: MCP ingress must use SourceKind.mcp_tool_output."
-    assert _has_inspection_call(
-        src
-    ), "mcp/client.py: MCP tool output must be inspected before prompt reuse."
+    assert "SourceKind.mcp_tool_output" in src, (
+        "mcp/client.py: MCP ingress must use SourceKind.mcp_tool_output."
+    )
+    assert _has_inspection_call(src), (
+        "mcp/client.py: MCP tool output must be inspected before prompt reuse."
+    )
 
 
 # ---------------------------------------------------------------------------

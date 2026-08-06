@@ -381,7 +381,7 @@ def _extract_portfolio_evidence(data: dict[str, Any]) -> PortfolioEvidence:
     run_summary = run_summary if isinstance(run_summary, dict) else {}
     red_flags = data.get("red_flags")
     flags_valid = isinstance(red_flags, list)
-    flags = red_flags if flags_valid else []
+    flags: list[Any] = red_flags if isinstance(red_flags, list) else []
 
     def _types(predicate: Callable[[dict[str, Any]], bool]) -> tuple[str, ...]:
         return tuple(

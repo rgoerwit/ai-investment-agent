@@ -27,6 +27,37 @@ def _alternation(tokens: tuple[str, ...]) -> str:
     return "(" + "|".join(tokens) + ")"
 
 
+def _jsonish_field_prefix(field: str) -> str:
+    """Match one exact quoted or bare JSON-like key followed by a colon.
+
+    Identifier boundaries prevent a recovery for ``pfic_status`` from reading
+    ``non_pfic_status`` or ``pfic_status_note`` after strict JSON parsing fails.
+    """
+    escaped = re.escape(field)
+    return rf'(?<![A-Za-z0-9_])"?{escaped}"?(?![A-Za-z0-9_])\s*:'
+
+
+def _extract_jsonish_string_field(text: str, field: str) -> str | None:
+    """Recover a string field from malformed JSON without parsing prose.
+
+    This is intentionally narrow: the Legal Counsel fallback is only for JSON
+    that failed strict decoding, not for extracting labels from narrative text.
+    """
+    match = re.search(
+        rf'{_jsonish_field_prefix(field)}\s*"(?P<value>(?:\\.|[^"\\])*)"',
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    encoded_value = match.group("value")
+    try:
+        decoded = json.loads(f'"{encoded_value}"')
+    except json.JSONDecodeError:
+        return encoded_value
+    return decoded if isinstance(decoded, str) else None
+
+
 # A large operating-metric decline stated in narrative text. Deliberately
 # limited to operating metrics + decline language so share-price drawdowns and
 # small moves do not match. Threshold applied in the extractor below.
@@ -310,7 +341,8 @@ def extract_legal_risks(legal_report: str) -> dict[str, Any]:
         )
 
     pfic_match = re.search(
-        rf'"?pfic_status"?\s*:\s*"?{_alternation(PFIC_STATUS_TOKENS)}"?',
+        rf'{_jsonish_field_prefix("pfic_status")}\s*"?'
+        rf'{_alternation(PFIC_STATUS_TOKENS)}"?',
         legal_report,
         re.IGNORECASE,
     )
@@ -318,7 +350,8 @@ def extract_legal_risks(legal_report: str) -> dict[str, Any]:
         risks["pfic_status"] = pfic_match.group(1).upper()
 
     vie_match = re.search(
-        rf'"?vie_structure"?\s*:\s*"?{_alternation(VIE_STRUCTURE_TOKENS)}"?',
+        rf'{_jsonish_field_prefix("vie_structure")}\s*"?'
+        rf'{_alternation(VIE_STRUCTURE_TOKENS)}"?',
         legal_report,
         re.IGNORECASE,
     )
@@ -326,12 +359,18 @@ def extract_legal_risks(legal_report: str) -> dict[str, Any]:
         risks["vie_structure"] = vie_match.group(1).upper()
 
     cmic_match = re.search(
-        rf'"?cmic_status"?\s*:\s*"?{_alternation(CMIC_STATUS_TOKENS)}"?',
+        rf'{_jsonish_field_prefix("cmic_status")}\s*"?'
+        rf'{_alternation(CMIC_STATUS_TOKENS)}"?',
         legal_report,
         re.IGNORECASE,
     )
     if cmic_match:
         risks["cmic_status"] = cmic_match.group(1).upper()
+
+    for field in ("pfic_evidence", "vie_evidence", "cmic_evidence"):
+        recovered = _extract_jsonish_string_field(legal_report, field)
+        if recovered is not None:
+            risks[field] = recovered
 
     return risks
 

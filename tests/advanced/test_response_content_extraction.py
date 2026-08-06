@@ -621,9 +621,9 @@ class TestRegressionDetection:
             result = await node(state, config)
 
         # THE CRITICAL ASSERTION: Output must be string, not dict
-        assert (
-            "fundamentals_report" in result
-        ), "Node should set fundamentals_report in output"
+        assert "fundamentals_report" in result, (
+            "Node should set fundamentals_report in output"
+        )
         output_value = result["fundamentals_report"]
 
         assert isinstance(output_value, str), (
@@ -686,9 +686,9 @@ class TestRegressionDetection:
             f"REGRESSION DETECTED: bull_round1 is {type(bull_round1).__name__}, expected str. "
             f"Check that extract_string_content(response.content) is called in create_researcher_node()."
         )
-        assert (
-            "Bull" in bull_round1 or "BULL" in bull_round1
-        ), "Bull analyst name should be in bull_round1"
+        assert "Bull" in bull_round1 or "BULL" in bull_round1, (
+            "Bull analyst name should be in bull_round1"
+        )
 
     @pytest.mark.asyncio
     async def test_portfolio_manager_node_handles_dict_response_REGRESSION(self):
@@ -737,9 +737,9 @@ class TestRegressionDetection:
             f"REGRESSION DETECTED: final_trade_decision is {type(final_decision).__name__}, expected str. "
             f"Check that extract_string_content(response.content) is called in create_portfolio_manager_node()."
         )
-        assert (
-            "BUY" in final_decision or "DECISION" in final_decision
-        ), "Decision content should be preserved"
+        assert "BUY" in final_decision or "DECISION" in final_decision, (
+            "Decision content should be preserved"
+        )
 
     @pytest.mark.asyncio
     async def test_risk_analyst_node_handles_dict_response_REGRESSION(self):
@@ -820,9 +820,9 @@ class TestRegressionDetection:
                 )
             raise
 
-        assert (
-            "pre_screening_result" in result
-        ), "Validator should return pre_screening_result"
+        assert "pre_screening_result" in result, (
+            "Validator should return pre_screening_result"
+        )
 
     def test_extract_string_content_function_exists_REGRESSION(self):
         """

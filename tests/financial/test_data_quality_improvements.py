@@ -51,9 +51,9 @@ class TestPEGCalculationDisabled:
 
         calculated = fetcher._calculate_derived_metrics(test_data, "TEST")
 
-        assert (
-            "_pegRatio_source" not in calculated
-        ), "No source tag should exist since PEG calculation is disabled"
+        assert "_pegRatio_source" not in calculated, (
+            "No source tag should exist since PEG calculation is disabled"
+        )
 
 
 class TestSectorInImportantFields:
@@ -72,9 +72,9 @@ class TestSectorInImportantFields:
         """industry should be in IMPORTANT_FIELDS for sub-classification."""
         fetcher = SmartMarketDataFetcher()
 
-        assert (
-            "industry" in fetcher.IMPORTANT_FIELDS
-        ), "industry must be in IMPORTANT_FIELDS for sector-specific threshold logic"
+        assert "industry" in fetcher.IMPORTANT_FIELDS, (
+            "industry must be in IMPORTANT_FIELDS for sector-specific threshold logic"
+        )
 
     def test_sector_industry_position(self):
         """sector/industry should be early in the list (high priority)."""
@@ -106,12 +106,12 @@ class TestPromptContentUpdates:
         content = data["system_message"]
 
         # Check for precision guidelines
-        assert (
-            "PRECISION GUIDELINES" in content
-        ), "News analyst must include precision guidelines section"
-        assert (
-            "tilde" in content.lower() or "~" in content
-        ), "Precision guidelines must mention tilde (~) for estimates"
+        assert "PRECISION GUIDELINES" in content, (
+            "News analyst must include precision guidelines section"
+        )
+        assert "tilde" in content.lower() or "~" in content, (
+            "Precision guidelines must mention tilde (~) for estimates"
+        )
         assert (
             "whole number" in content.lower() or "nearest whole" in content.lower()
         ), "Precision guidelines must mention rounding to whole numbers"
@@ -126,15 +126,15 @@ class TestPromptContentUpdates:
         content = data["system_message"]
 
         # Check for conservative count rule
-        assert (
-            "DATA SOURCE PRIORITY" in content or "LOWER count" in content
-        ), "Fundamentals analyst must include conservative count rule"
-        assert (
-            "numberOfAnalystOpinions" in content
-        ), "Must reference structured field numberOfAnalystOpinions"
-        assert (
-            "LOWER" in content
-        ), "Must specify using lower count when sources conflict"
+        assert "DATA SOURCE PRIORITY" in content or "LOWER count" in content, (
+            "Fundamentals analyst must include conservative count rule"
+        )
+        assert "numberOfAnalystOpinions" in content, (
+            "Must reference structured field numberOfAnalystOpinions"
+        )
+        assert "LOWER" in content, (
+            "Must specify using lower count when sources conflict"
+        )
 
     def test_junior_analyst_sector_reinforcement(self, prompts_dir):
         """Junior analyst should reinforce sector/industry output requirement."""
@@ -146,36 +146,36 @@ class TestPromptContentUpdates:
         content = data["system_message"]
 
         # Check for sector reinforcement
-        assert (
-            "sector" in content.lower() and "industry" in content.lower()
-        ), "Junior analyst must mention sector and industry"
+        assert "sector" in content.lower() and "industry" in content.lower(), (
+            "Junior analyst must mention sector and industry"
+        )
         # Check for emphasis on including these fields
-        assert (
-            "MUST" in content or "CRITICAL" in content
-        ), "Junior analyst must emphasize sector/industry are required"
+        assert "MUST" in content or "CRITICAL" in content, (
+            "Junior analyst must emphasize sector/industry are required"
+        )
 
     def test_prompt_versions_updated(self, prompts_dir):
         """Verify prompt versions have been updated."""
         # News analyst
         with open(prompts_dir / "news_analyst.json") as f:
             news = json.load(f)
-        assert Version(news["version"]) >= Version(
-            "4.8"
-        ), f"News analyst version should be >= 4.8, got {news['version']}"
+        assert Version(news["version"]) >= Version("4.8"), (
+            f"News analyst version should be >= 4.8, got {news['version']}"
+        )
 
         # Fundamentals analyst
         with open(prompts_dir / "fundamentals_analyst.json") as f:
             fund = json.load(f)
-        assert Version(fund["version"]) >= Version(
-            "8.2"
-        ), f"Fundamentals analyst version should be >= 8.2, got {fund['version']}"
+        assert Version(fund["version"]) >= Version("8.2"), (
+            f"Fundamentals analyst version should be >= 8.2, got {fund['version']}"
+        )
 
         # Junior analyst
         with open(prompts_dir / "junior_fundamentals_analyst.json") as f:
             junior = json.load(f)
-        assert Version(junior["version"]) >= Version(
-            "1.2"
-        ), f"Junior analyst version should be >= 1.2, got {junior['version']}"
+        assert Version(junior["version"]) >= Version("1.2"), (
+            f"Junior analyst version should be >= 1.2, got {junior['version']}"
+        )
 
 
 class TestCalculatedMetricsStillWork:

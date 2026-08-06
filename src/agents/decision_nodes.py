@@ -758,7 +758,12 @@ def _log_risk_tally_reconciliation(
     amount dropped) when the floor is breached, else ``None``. A missing/unparseable
     narrated tally yields ``None`` (cannot reconcile, do not warn).
     """
-    narrated = parse_final_decision_scores(content_str).get("risk_tally")
+    raw_narrated = parse_final_decision_scores(content_str).get("risk_tally")
+    narrated = (
+        float(raw_narrated)
+        if isinstance(raw_narrated, int | float) and not isinstance(raw_narrated, bool)
+        else None
+    )
     if narrated is None or narrated >= code_subtotal - 0.01:
         return None
     dropped = round(code_subtotal - narrated, 2)
@@ -1136,6 +1141,7 @@ NEUTRAL ANALYST (Balanced):
             downside_probability_text = ""
             upside_metrics = scenario_upside_metrics(scenarios, current_price)
             if upside_metrics is not None:
+                assert current_price is not None
                 weighted_upside, downside_probability = upside_metrics
                 weighted_upside_text = (
                     f", implied upside {weighted_upside * 100:.1f}% vs current price "
@@ -1556,6 +1562,8 @@ RISK TEAM DEBATE:
                 if recovered_metadata is not None:
                     pm_metadata = recovered_metadata
                     pm_verdict_recovered = True
+            debate_state = state.get("investment_debate_state")
+            debate_turns = debate_state.get("count", 0) if debate_state else 0
             logger.info(
                 "final_verdict_formed",
                 ticker=ticker,
@@ -1571,10 +1579,7 @@ RISK TEAM DEBATE:
                 pre_screening_result=state.get("pre_screening_result"),
                 direct_pm_inputs_present=present_inputs,
                 direct_pm_inputs_missing=missing_inputs,
-                debate_rounds=(state.get("investment_debate_state") or {}).get(
-                    "count", 0
-                )
-                // 2,
+                debate_rounds=debate_turns // 2,
                 strict_mode=strict_mode,
             )
             result = success_artifact(
@@ -1841,7 +1846,11 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                             leverage_threshold=leverage_threshold,
                         )
                     )
-                legal_warnings = RedFlagDetector.detect_legal_flags(legal_risks, ticker)
+                legal_warnings = RedFlagDetector.detect_legal_flags(
+                    legal_risks,
+                    ticker,
+                    artifact_status=get_artifact_status(state, "legal_report"),
+                )
 
                 if legal_warnings:
                     red_flags.extend(legal_warnings)

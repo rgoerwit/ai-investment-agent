@@ -8,7 +8,7 @@ from src.ibkr.dip_watch import (
     collect_dip_watch_source_items,
     select_dip_watch,
 )
-from src.ibkr.models import PortfolioSummary, ReconciliationItem
+from src.ibkr.models import NormalizedPosition, PortfolioSummary, ReconciliationItem
 from src.ibkr.order_presentation import (
     LiveOrderMatch as LiveOrderMatch,
 )
@@ -70,7 +70,7 @@ from src.ibkr.watchlist_optimization import (
 _DEFAULT_DIP_WATCH_LIMIT = 7
 
 
-def cost_basis_unit_mismatch(position) -> bool:
+def cost_basis_unit_mismatch(position: NormalizedPosition | None) -> bool:
     """Return whether local cost/current prices have a likely 100x unit mismatch."""
     if (
         position is None

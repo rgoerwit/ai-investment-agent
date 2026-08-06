@@ -75,8 +75,10 @@ def _apac_status(state: dict) -> str | None:
 
 
 def _safe_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        return None
     try:
-        return float(value) if value is not None else None
+        return float(value)
     except (TypeError, ValueError):
         return None
 
@@ -116,7 +118,7 @@ def _select_pe_key(raw: dict, display_value: str | None) -> str | None:
 
     market_cap = _safe_float(raw.get("marketCap"))
     net_income = _safe_float(raw.get("netIncomeToCommon"))
-    if market_cap is not None and net_income not in (None, 0):
+    if market_cap is not None and net_income is not None and net_income != 0:
         calculated = market_cap / net_income
         if displayed is None or _relative_match(displayed, calculated):
             return "marketCap/netIncomeToCommon"

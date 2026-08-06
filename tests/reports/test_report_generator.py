@@ -8,7 +8,31 @@ from datetime import datetime
 
 import pytest
 
-from src.report_generator import QuietModeReporter, suppress_logging
+from src.charts.extractors.data_block import ChartRawData
+from src.report_generator import (
+    QuietModeReporter,
+    _calculate_regulatory_score,
+    suppress_logging,
+)
+
+
+class TestRegulatoryScoreAuthority:
+    def test_cmic_ledger_flag_overrides_clear_data_block_relay(self):
+        raw = ChartRawData(cmic_flagged=False)
+        result = {"red_flags": [{"type": "CMIC_FLAGGED"}]}
+
+        assert _calculate_regulatory_score(result, raw) == 65.0
+
+    def test_vie_ledger_flag_overrides_clear_data_block_relay(self):
+        raw = ChartRawData(vie_structure=False)
+        result = {"red_flags": [{"type": "VIE_STRUCTURE"}]}
+
+        assert _calculate_regulatory_score(result, raw) == 75.0
+
+    def test_data_block_remains_fallback_without_ledger_flag(self):
+        raw = ChartRawData(vie_structure=True, cmic_flagged=True)
+
+        assert _calculate_regulatory_score({}, raw) == 40.0
 
 
 class TestNormalizeString:

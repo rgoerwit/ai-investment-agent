@@ -760,13 +760,9 @@ async def invoke_with_rate_limit_handling(
                 )
 
             is_rate_limit = details.kind in {"rate_limit", "quota_error"}
-            is_transient = details.kind in {
-                "dns_resolution",
-                "connect_error",
-                "timeout",
-                "server_error",
-                "provider_partial_response",
-            }
+            # ``classify_failure`` owns retryability. Keep only the distinct
+            # rate-limit branch here because it has a different backoff policy.
+            is_transient = details.retryable and not is_rate_limit
 
             if is_rate_limit and attempt < max_attempts - 1:
                 jitter = random.uniform(1, 10)

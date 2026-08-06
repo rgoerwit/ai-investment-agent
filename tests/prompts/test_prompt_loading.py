@@ -174,9 +174,9 @@ class TestPromptRegistryLoading:
 
             # Check that expected metadata keys are present
             for key in expected_metadata:
-                assert (
-                    key in loaded_prompt.metadata
-                ), f"{prompt_file.name}: metadata key {key!r} not loaded"
+                assert key in loaded_prompt.metadata, (
+                    f"{prompt_file.name}: metadata key {key!r} not loaded"
+                )
 
 
 class TestSpecificPromptFiles:
@@ -192,9 +192,9 @@ class TestSpecificPromptFiles:
             data = json.load(f)
 
         # model_config should be in metadata, not at top level
-        assert (
-            "model_config" not in data
-        ), "model_config should be in metadata, not top level"
+        assert "model_config" not in data, (
+            "model_config should be in metadata, not top level"
+        )
         assert "metadata" in data, "writer.json should have metadata"
         assert "model_config" in data["metadata"], "model_config should be in metadata"
 
@@ -208,13 +208,13 @@ class TestSpecificPromptFiles:
             data = json.load(f)
 
         # user_template should be in metadata, not at top level
-        assert (
-            "user_template" not in data
-        ), "user_template should be in metadata, not top level"
+        assert "user_template" not in data, (
+            "user_template should be in metadata, not top level"
+        )
         assert "metadata" in data, "writer.json should have metadata"
-        assert (
-            "user_template" in data["metadata"]
-        ), "user_template should be in metadata"
+        assert "user_template" in data["metadata"], (
+            "user_template should be in metadata"
+        )
 
     def test_fundamentals_analyst_has_data_block_instructions(self):
         """Verify fundamentals_analyst.json has DATA_BLOCK instructions."""
@@ -226,9 +226,9 @@ class TestSpecificPromptFiles:
             data = json.load(f)
 
         system_message = data.get("system_message", "")
-        assert (
-            "DATA_BLOCK" in system_message
-        ), "fundamentals_analyst should have DATA_BLOCK instructions"
+        assert "DATA_BLOCK" in system_message, (
+            "fundamentals_analyst should have DATA_BLOCK instructions"
+        )
 
     def test_fundamentals_governance_fields(self):
         """`prompts/fundamentals_analyst.json` (the canonical source) must list
@@ -275,16 +275,16 @@ class TestSpecificPromptFiles:
             "[PFIC ASSET-TEST SIGNAL]",
         )
         for phrase in required_phrases:
-            assert (
-                phrase in json_sm
-            ), f"{phrase!r} missing from fundamentals_analyst.json"
+            assert phrase in json_sm, (
+                f"{phrase!r} missing from fundamentals_analyst.json"
+            )
 
         # The prompt must not describe the asset test as an unconditional
         # override of Legal Counsel.
         forbidden = "This quantitative test OVERRIDES Legal Counsel"
-        assert (
-            forbidden not in json_sm
-        ), f"fundamentals_analyst.json still contains stale override framing: {forbidden!r}"
+        assert forbidden not in json_sm, (
+            f"fundamentals_analyst.json still contains stale override framing: {forbidden!r}"
+        )
 
     def test_foreign_language_governance_fields(self):
         """The FLA prompt must require explicit ownership role fields."""
@@ -296,9 +296,9 @@ class TestSpecificPromptFiles:
             json_sm = json.load(f).get("system_message", "")
 
         for field in ("ENTITY_ROLE_OBSERVED:", "Related Listed Tickers:"):
-            assert (
-                field in json_sm
-            ), f"{field} missing from foreign_language_analyst.json"
+            assert field in json_sm, (
+                f"{field} missing from foreign_language_analyst.json"
+            )
 
     def test_foreign_language_active_tender_search(self):
         """FLA must have a structured M&A / tender-offer search step, so the
@@ -322,9 +322,9 @@ class TestSpecificPromptFiles:
             "No active M&A event detected.",
         )
         for needle in required:
-            assert (
-                needle in json_sm
-            ), f"{needle!r} missing from foreign_language_analyst.json"
+            assert needle in json_sm, (
+                f"{needle!r} missing from foreign_language_analyst.json"
+            )
 
     def test_fundamentals_m_and_a_data_block_fields(self):
         """Senior promotes the FLA M&A EVENT section into DATA_BLOCK as
@@ -344,9 +344,9 @@ class TestSpecificPromptFiles:
             "9. **M&A Event from Foreign Language Analyst**",
             "Market {currency}{current} vs. tender",
         ):
-            assert (
-                needle in json_sm
-            ), f"{needle!r} missing from fundamentals_analyst.json"
+            assert needle in json_sm, (
+                f"{needle!r} missing from fundamentals_analyst.json"
+            )
 
     def test_portfolio_manager_event_driven_override_parity(self):
         """The PM must treat `M_AND_A_STATUS: ACTIVE_TENDER` as a
@@ -400,9 +400,9 @@ class TestSpecificPromptFiles:
 
         system_message = data.get("system_message", "")
         # Should mention key thesis elements
-        assert (
-            "Financial Health" in system_message or "HEALTH" in system_message
-        ), "portfolio_manager should reference Financial Health criteria"
+        assert "Financial Health" in system_message or "HEALTH" in system_message, (
+            "portfolio_manager should reference Financial Health criteria"
+        )
         assert "Entity Governance Card metric scope is Senior-derived" in system_message
 
     def test_writer_json_has_valuation_reconciliation_section(self):
@@ -416,13 +416,13 @@ class TestSpecificPromptFiles:
 
         system_message = data.get("system_message", "")
         # Check for the reconciliation section
-        assert (
-            "VALUATION-DECISION RECONCILIATION" in system_message
-        ), "writer.json should have VALUATION-DECISION RECONCILIATION section"
+        assert "VALUATION-DECISION RECONCILIATION" in system_message, (
+            "writer.json should have VALUATION-DECISION RECONCILIATION section"
+        )
         # Check for key instructions within that section
-        assert (
-            "narrative tension" in system_message.lower()
-        ), "writer.json should mention 'narrative tension' in reconciliation section"
+        assert "narrative tension" in system_message.lower(), (
+            "writer.json should mention 'narrative tension' in reconciliation section"
+        )
         assert (
             "above" in system_message.lower() and "fair value" in system_message.lower()
         ), "writer.json should describe handling price above fair value"
@@ -437,13 +437,13 @@ class TestSpecificPromptFiles:
             data = json.load(f)
 
         user_template = data.get("metadata", {}).get("user_template", "")
-        assert (
-            "{valuation_context}" in user_template
-        ), "writer.json user_template should include {valuation_context} placeholder"
+        assert "{valuation_context}" in user_template, (
+            "writer.json user_template should include {valuation_context} placeholder"
+        )
         # Check that valuation context section exists (XML tag or header)
-        assert (
-            "valuation_context" in user_template.lower()
-        ), "writer.json user_template should have valuation context section"
+        assert "valuation_context" in user_template.lower(), (
+            "writer.json user_template should have valuation context section"
+        )
 
     def test_writer_json_has_large_drawdown_completeness_rule(self):
         """Writer should include the low and avoid false undiscovered framing."""
@@ -470,20 +470,20 @@ class TestSpecificPromptFiles:
 
         system_message = data.get("system_message", "")
         # Check for INSIDER_CONCENTRATION section
-        assert (
-            "INSIDER/FAMILY CONCENTRATION" in system_message
-        ), "value_trap_detector should have INSIDER/FAMILY CONCENTRATION section"
+        assert "INSIDER/FAMILY CONCENTRATION" in system_message, (
+            "value_trap_detector should have INSIDER/FAMILY CONCENTRATION section"
+        )
         # Check for explicit thresholds
-        assert (
-            ">50%" in system_message and "HIGH" in system_message
-        ), "value_trap_detector should have >50% HIGH threshold"
+        assert ">50%" in system_message and "HIGH" in system_message, (
+            "value_trap_detector should have >50% HIGH threshold"
+        )
         assert "30-50%" in system_message or (
             "30" in system_message and "MODERATE" in system_message
         ), "value_trap_detector should have 30-50% MODERATE threshold"
         # Check for key insight about family control
-        assert (
-            "does NOT equal alignment" in system_message
-        ), "value_trap_detector should clarify family control != minority alignment"
+        assert "does NOT equal alignment" in system_message, (
+            "value_trap_detector should clarify family control != minority alignment"
+        )
 
     def test_value_trap_detector_has_latin_america_terminology(self):
         """Verify value_trap_detector.json has Latin America terminology section."""
@@ -496,13 +496,13 @@ class TestSpecificPromptFiles:
 
         system_message = data.get("system_message", "")
         # Check for LATIN AMERICA section
-        assert (
-            "LATIN AMERICA" in system_message
-        ), "value_trap_detector should have LATIN AMERICA terminology section"
+        assert "LATIN AMERICA" in system_message, (
+            "value_trap_detector should have LATIN AMERICA terminology section"
+        )
         # Check for key Spanish terms
-        assert (
-            "Empresa familiar" in system_message
-        ), "value_trap_detector should include 'Empresa familiar' term"
+        assert "Empresa familiar" in system_message, (
+            "value_trap_detector should include 'Empresa familiar' term"
+        )
         assert (
             "Accionista mayoritario" in system_message
             or "controlador" in system_message
@@ -519,9 +519,9 @@ class TestSpecificPromptFiles:
 
         system_message = data.get("system_message", "")
         # Check output format includes the new field
-        assert (
-            "INSIDER_CONCENTRATION: [HIGH | MODERATE | LOW]" in system_message
-        ), "value_trap_detector output format should include INSIDER_CONCENTRATION field"
+        assert "INSIDER_CONCENTRATION: [HIGH | MODERATE | LOW]" in system_message, (
+            "value_trap_detector output format should include INSIDER_CONCENTRATION field"
+        )
 
 
 class TestAgentPromptDataclass:
@@ -616,9 +616,9 @@ class TestPromptVersionTracking:
                 documented_prompts.append(prompt_file.name)
 
         # At least some prompts should have documentation
-        assert (
-            len(documented_prompts) > 0
-        ), "At least one prompt should have change documentation in metadata"
+        assert len(documented_prompts) > 0, (
+            "At least one prompt should have change documentation in metadata"
+        )
 
 
 class TestCatalystGuardrails:

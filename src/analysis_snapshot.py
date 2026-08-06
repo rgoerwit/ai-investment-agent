@@ -166,7 +166,7 @@ class AnalysisSnapshot:
             conflicts=list(conflicts),
             stage=d.get("stage"),
             commentary_status=d.get("commentary_status"),
-            scorecards=scorecards,
+            scorecards=dict(scorecards) if scorecards is not None else None,
         )
 
 
@@ -264,25 +264,24 @@ def _raw_metrics_contract_status(
     }
     if not registered.intersection(payload):
         return "INVALID", "RAW_METRICS_PAYLOAD_HAS_NO_REGISTERED_FIELDS"
-    analytic_policies = tuple(
-        policy
+    analytic_fields = tuple(
+        (policy.raw_field, policy.value_format)
         for policy in MATERIAL_CLAIM_POLICIES.values()
         if policy.source == "RAW_METRICS"
         and policy.raw_field
         and policy.raw_field not in {"currentPrice", "marketCap"}
     )
     usable = {
-        policy.raw_field
-        for policy in analytic_policies
-        if policy.raw_field in payload
+        raw_field
+        for raw_field, value_format in analytic_fields
+        if raw_field in payload
         and (
             (
-                isinstance(payload.get(policy.raw_field), str)
-                and str(payload.get(policy.raw_field)).strip().upper()
-                not in _UNKNOWN_VALUES
+                isinstance(payload.get(raw_field), str)
+                and str(payload.get(raw_field)).strip().upper() not in _UNKNOWN_VALUES
             )
-            if policy.value_format == "TEXT"
-            else _is_finite_number(payload.get(policy.raw_field))
+            if value_format == "TEXT"
+            else _is_finite_number(payload.get(raw_field))
         )
     }
     if not usable:

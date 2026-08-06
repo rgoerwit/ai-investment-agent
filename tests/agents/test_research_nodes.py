@@ -229,9 +229,9 @@ async def test_lessons_injection_skipped_when_no_memory(monkeypatch):
         )
         await node(_base_state(), {})
 
-    assert (
-        not create_lessons_memory_called
-    ), "lessons_learned access should be gated on config.enable_memory"
+    assert not create_lessons_memory_called, (
+        "lessons_learned access should be gated on config.enable_memory"
+    )
     # The prompt should not contain the lessons block.
     assert "RETROSPECTIVE LESSONS" not in captured["prompt"]
 

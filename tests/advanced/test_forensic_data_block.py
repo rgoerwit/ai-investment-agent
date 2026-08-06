@@ -21,9 +21,9 @@ class TestAuditorForensicDataBlock:
         assert auditor is not None, "Auditor prompt not found"
 
         system_msg = auditor.system_message
-        assert (
-            "FORENSIC_DATA_BLOCK:" in system_msg
-        ), "FORENSIC_DATA_BLOCK template missing"
+        assert "FORENSIC_DATA_BLOCK:" in system_msg, (
+            "FORENSIC_DATA_BLOCK template missing"
+        )
         assert "META:" in system_msg, "META field missing from template"
         assert "EARNINGS_QUALITY:" in system_msg, "EARNINGS_QUALITY field missing"
         assert "CASH_CYCLE:" in system_msg, "CASH_CYCLE field missing"
@@ -116,9 +116,9 @@ class TestConsultantForensicValidation:
         assert consultant is not None, "Consultant prompt not found"
 
         system_msg = consultant.system_message
-        assert (
-            "FORENSIC VALIDATION" in system_msg
-        ), "FORENSIC VALIDATION section missing"
+        assert "FORENSIC VALIDATION" in system_msg, (
+            "FORENSIC VALIDATION section missing"
+        )
         assert "state contains FORENSIC_DATA_BLOCK" in system_msg
 
     def test_consultant_checks_report_date(self):
@@ -256,12 +256,12 @@ class TestPortfolioManagerForensicPenalties:
             ]
 
             # Should not have HARD FAIL or MANDATORY SELL in forensic section
-            assert (
-                "HARD FAIL" not in forensic_section
-            ), "Forensic should not trigger HARD FAIL"
-            assert (
-                "MANDATORY SELL" not in forensic_section
-            ), "Forensic should not trigger MANDATORY SELL"
+            assert "HARD FAIL" not in forensic_section, (
+                "Forensic should not trigger HARD FAIL"
+            )
+            assert "MANDATORY SELL" not in forensic_section, (
+                "Forensic should not trigger MANDATORY SELL"
+            )
 
     def test_pm_version_updated(self):
         """Verify PM version was incremented."""

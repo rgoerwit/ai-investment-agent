@@ -230,9 +230,9 @@ async def test_failing_optional_node_does_not_reject_the_capture(tmp_path, monke
         )
 
     await _run_wrapped(manager, "Auditor", failing_auditor_node)
-    assert (
-        manager.rejected is False
-    ), "a failed optional seat must not reject the run at node level"
+    assert manager.rejected is False, (
+        "a failed optional seat must not reject the run at node level"
+    )
 
     llm = StaticRunnable(AIMessage(content="investment plan body"))
 

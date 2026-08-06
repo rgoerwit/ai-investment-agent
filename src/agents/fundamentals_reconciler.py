@@ -272,7 +272,7 @@ def reconcile_high_risk_fields(
             updated = replace_or_append_block_line(updated, datablock_key, "N/A")
             changed_growth = True
 
-    for datablock_key, raw_key, formatter, threshold in (
+    for datablock_key, raw_key, value_formatter, threshold in (
         ("SECTOR_MEDIAN_PE", "sectorMedianPE", format_ratio, 0.01),
         ("PE_VS_SECTOR", "peVsSector", format_ratio, 0.01),
         ("REVENUE_CAGR_3Y", "revenue_cagr_3y", format_percent_from_ratio, 0.1),
@@ -283,7 +283,7 @@ def reconcile_high_risk_fields(
             datablock_key,
             as_float(payload.get(raw_key)),
             threshold=threshold,
-            formatter=formatter,
+            formatter=value_formatter,
         )
         changed_growth = changed_growth or changed
 
@@ -379,7 +379,14 @@ def reconcile_high_risk_fields(
         ("NET_MARGIN", "profitMargins", 100.0, format_percent, 0.20, False),
     )
     pe_quarantined = bool(payload.get("_pe_low_anomaly_quarantined"))
-    for datablock_key, raw_key, scale, formatter, rel, is_pe in valuation_specs:
+    for (
+        datablock_key,
+        raw_key,
+        scale,
+        valuation_formatter,
+        rel,
+        is_pe,
+    ) in valuation_specs:
         if is_pe and pe_quarantined:
             # Leave PE_RATIO_TTM to the downstream quarantine -> N/A path.
             continue
@@ -390,7 +397,7 @@ def reconcile_high_risk_fields(
             datablock_key,
             value,
             rel_threshold=rel,
-            formatter=formatter,
+            formatter=valuation_formatter,
         )
         changed_valuation = changed_valuation or changed
 

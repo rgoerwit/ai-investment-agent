@@ -530,9 +530,9 @@ def test_scenarios_reject_known_bad_inputs(build_kwargs: dict, reason: str) -> N
     val = valuation_params(**build_kwargs)
     fundamentals = data_block()
     eps = resolve_eps_ttm(fundamentals)
-    assert (
-        extract_valuation_scenarios(val, eps) is None
-    ), f"scenarios should reject: {reason}"
+    assert extract_valuation_scenarios(val, eps) is None, (
+        f"scenarios should reject: {reason}"
+    )
 
 
 def test_scenarios_with_unicode_drivers_survive() -> None:

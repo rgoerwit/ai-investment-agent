@@ -55,9 +55,9 @@ OUTER_WRAPPED_ALLOWLIST: dict[str, str] = {
     # IBKR services: the ib_async client has its own per-request timeouts and
     # an outer connection-level timeout; sync wrappers are short and CPU-bound
     # rather than blocking on a remote socket read with no library timeout.
-    "src/ibkr/account_service.py:51": "ib_async has its own request timeout",
-    "src/ibkr/account_service.py:54": "ib_async has its own request timeout",
-    "src/ibkr/account_service.py:62": "ib_async has its own request timeout",
+    "src/ibkr/account_service.py:65": "ib_async has its own request timeout",
+    "src/ibkr/account_service.py:68": "ib_async has its own request timeout",
+    "src/ibkr/account_service.py:76": "ib_async has its own request timeout",
     "src/ibkr/portfolio_data_service.py:94": "ib_async has its own request timeout",
     "src/ibkr/portfolio_data_service.py:106": "ib_async has its own request timeout",
     "src/ibkr/portfolio_data_service.py:118": "ib_async has its own request timeout",

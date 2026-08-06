@@ -461,9 +461,9 @@ class TestPanicMode:
         # The panic mode call passes IMPORTANT_FIELDS (15 fields) + REQUIRED_BASICS (3 fields)
         # That's ~18 fields passed to _fetch_tavily_gaps
         # After filtering dangerous fields internally, safe fields remain
-        assert (
-            len(requested_fields) >= 10
-        ), f"Expected panic mode to request many fields (IMPORTANT_FIELDS + REQUIRED_BASICS), got: {len(requested_fields)}"
+        assert len(requested_fields) >= 10, (
+            f"Expected panic mode to request many fields (IMPORTANT_FIELDS + REQUIRED_BASICS), got: {len(requested_fields)}"
+        )
 
         # Verify rescue was successful for safe fields
         # The mock returns these fields, and they should appear in the final data

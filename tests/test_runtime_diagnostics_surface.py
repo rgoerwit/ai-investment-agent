@@ -82,9 +82,9 @@ PRIVATE_NAMES = (
 @pytest.mark.parametrize("name", sorted(HISTORICAL_PUBLIC_NAMES))
 def test_historical_name_importable(name: str) -> None:
     module = importlib.import_module("src.runtime_diagnostics")
-    assert hasattr(
-        module, name
-    ), f"{name} no longer importable from runtime_diagnostics"
+    assert hasattr(module, name), (
+        f"{name} no longer importable from runtime_diagnostics"
+    )
 
 
 def test_all_matches_historical_surface() -> None:

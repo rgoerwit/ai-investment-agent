@@ -115,9 +115,14 @@ def macro_regime_price_multiplier(item: ReconciliationItem) -> float:
     if analysis is None:
         return 1.0
     regime = getattr(analysis, "macro_regime", None) or {}
+    if not isinstance(regime, dict):
+        return 1.0
     if not regime.get("present") or regime.get("confidence") == "LOW":
         return 1.0
-    return _DIP_POSTURE_PRICE_MULTIPLIERS.get(regime.get("dip_posture"), 1.0)
+    dip_posture = regime.get("dip_posture")
+    if not isinstance(dip_posture, str):
+        return 1.0
+    return _DIP_POSTURE_PRICE_MULTIPLIERS.get(dip_posture, 1.0)
 
 
 def compute_dip_score(

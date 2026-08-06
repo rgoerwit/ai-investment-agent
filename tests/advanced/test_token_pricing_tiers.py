@@ -363,9 +363,9 @@ class TestUnknownModelWarning:
     def test_retired_models_are_absent_from_table(self):
         # Deliberate policy: retired/deprecated models are not carried
         for retired in ("gpt-4-turbo", "gpt-4-32k", "gemini-2.0-flash-exp"):
-            assert not any(
-                retired == key for key in MODEL_PRICING_PER_1M
-            ), f"{retired} should not have a pricing entry"
+            assert not any(retired == key for key in MODEL_PRICING_PER_1M), (
+                f"{retired} should not have a pricing entry"
+            )
 
 
 class TestServiceTierExtraction:

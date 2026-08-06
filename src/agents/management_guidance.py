@@ -93,7 +93,10 @@ _NUMBER_TOKEN_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 def _matching_source_evidence(evidence: str, source_url: str) -> str:
     if not source_url:
         return ""
-    for block in re.findall(r"(?is)<result\b[^>]*>(.*?)</result>", evidence or ""):
+    blocks: list[str] = re.findall(
+        r"(?is)<result\b[^>]*>(.*?)</result>", evidence or ""
+    )
+    for block in blocks:
         if source_url in block:
             return block
     return ""
@@ -338,7 +341,7 @@ async def _preload_management_guidance_evidence(
             ("statutory_filing_api", get_official_filings, {"ticker": ticker}),
         ],
         agent_key="foreign_language_analyst",
-        source="toolnode",
+        source="preflight",
         ticker=ticker,
         failure_event="management_guidance_preflight_call_failed",
         logger=logger,
@@ -363,7 +366,7 @@ async def _preload_management_guidance_evidence(
             )
         ],
         agent_key="foreign_language_analyst",
-        source="toolnode",
+        source="preflight",
         ticker=ticker,
         failure_event="management_guidance_preflight_call_failed",
         logger=logger,
@@ -398,7 +401,7 @@ async def _preload_management_guidance_evidence(
                 for index, url in enumerate(official_candidate_urls)
             ],
             agent_key="foreign_language_analyst",
-            source="toolnode",
+            source="preflight",
             ticker=ticker,
             failure_event="management_guidance_preflight_call_failed",
             logger=logger,
@@ -428,7 +431,7 @@ async def _preload_management_guidance_evidence(
                     for index, url in enumerate(child_urls)
                 ],
                 agent_key="foreign_language_analyst",
-                source="toolnode",
+                source="preflight",
                 ticker=ticker,
                 failure_event="management_guidance_preflight_call_failed",
                 logger=logger,
@@ -464,7 +467,7 @@ async def _preload_management_guidance_evidence(
                 )
             ],
             agent_key="foreign_language_analyst",
-            source="toolnode",
+            source="preflight",
             ticker=ticker,
             failure_event="management_guidance_preflight_call_failed",
             logger=logger,

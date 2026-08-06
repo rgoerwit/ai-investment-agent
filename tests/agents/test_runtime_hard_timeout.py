@@ -32,6 +32,7 @@ from langchain_core.messages import AIMessage
 
 from src.agents import invoke_with_rate_limit_handling
 from src.config import config as settings_config
+from src.runtime_diagnostics import FailureDetails
 
 
 @pytest.fixture(autouse=True)
@@ -791,6 +792,38 @@ class TestProviderPartialResponseDetection:
 
 
 class TestProviderPartialResponseRetry:
+    @pytest.mark.asyncio
+    async def test_runtime_obeys_classifier_retryable_flag(self):
+        """The classifier, not a second runtime kind list, owns retryability."""
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(
+            side_effect=[RuntimeError("first"), AIMessage(content="recovered")]
+        )
+        details = FailureDetails(
+            kind="model_not_found",
+            provider="unknown",
+            host=None,
+            error_type="RuntimeError",
+            root_cause_type="RuntimeError",
+            retryable=True,
+            message="first",
+        )
+
+        with (
+            patch("src.agents.runtime.classify_failure", return_value=details),
+            patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            result = await invoke_with_rate_limit_handling(
+                runnable,
+                {"input": "x"},
+                max_attempts=2,
+                max_transient_attempts=2,
+                context="ClassifierRetryAuthority",
+            )
+
+        assert runnable.ainvoke.await_count == 2
+        assert result.content == "recovered"
+
     @pytest.mark.asyncio
     async def test_partial_response_triggers_retry_and_recovers(self):
         """First call returns a partial; second returns a clean stop."""

@@ -35,9 +35,9 @@ jobs:
       run: |
         poetry install --no-interaction --all-extras
 
-    - name: Run tests
+    - name: Run deterministic quality and test gates
       run: |
-        poetry run pytest tests/ -v --tb=short -m "not integration"
+        make check-all test-ci
       env:
         # Provide dummy keys for tests that need them
         GOOGLE_API_KEY: "test-key-for-ci"

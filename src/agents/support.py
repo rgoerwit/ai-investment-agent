@@ -7,7 +7,6 @@ from typing import Any, Literal
 
 import structlog
 from langchain_core.messages import ToolMessage
-from langgraph.types import RunnableConfig
 
 from src.data_block_utils import (
     BLOCK_SHAPES,
@@ -53,7 +52,7 @@ def get_model_name(runnable: Any) -> str | None:
     return _get_model_name(runnable)
 
 
-def get_context_from_config(config: RunnableConfig) -> Any | None:
+def get_context_from_config(config: Mapping[str, Any]) -> Any | None:
     """Extract TradingContext from RunnableConfig.configurable dict."""
     try:
         configurable = config.get("configurable", {})

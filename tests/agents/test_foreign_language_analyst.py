@@ -270,6 +270,8 @@ LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND
             evidence = await _preload_management_guidance_evidence("6745.T", "ホーチキ")
 
         assert len(calls) == 3
+        assert {call.source for call in calls} == {"preflight"}
+        assert {call.agent_key for call in calls} == {"foreign_language_analyst"}
         assert "#### results_package\nSTATUS: COMPLETED" in evidence
         assert "#### earnings_bridge\nSTATUS: COMPLETED" in evidence
         assert "#### statutory_filing_api\nSTATUS: COMPLETED" in evidence

@@ -261,9 +261,9 @@ class TestFormatReportMacroStopReview:
             (i for i, ln in enumerate(lines) if "SELL RECOMMENDATIONS" in ln), None
         )
         # Mechanical STOP BREACHED section must be absent (no items with action=SELL)
-        assert (
-            stop_breach_idx is None
-        ), "Mechanical STOP BREACHED section should not appear"
+        assert stop_breach_idx is None, (
+            "Mechanical STOP BREACHED section should not appear"
+        )
 
     def test_demoted_stop_not_in_regular_reviews_section(self):
         """REVIEW + STOP_BREACH must not appear in the regular REVIEWS section."""

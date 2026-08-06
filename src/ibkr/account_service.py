@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from src.ibkr.client import IbkrClient
 from src.ibkr.models import PortfolioSummary
@@ -13,6 +13,20 @@ from src.ibkr.session_manager import get_ibkr_session_manager
 
 def _account_id(value: object) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _validated_account_ids(payload: object) -> list[str]:
+    if not isinstance(payload, list):
+        raise TypeError("IBKR get_accounts returned a non-list payload")
+    if any(not isinstance(account, str) for account in payload):
+        raise TypeError("IBKR get_accounts returned a non-string account ID")
+    return cast(list[str], payload)
+
+
+def _validated_ledger(payload: object) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise TypeError("IBKR get_ledger returned a non-mapping payload")
+    return cast(dict[str, Any], payload)
 
 
 @dataclass
@@ -89,12 +103,12 @@ class IbkrAccountService:
 
     def _fetch_account_ids_sync(self) -> list[str]:
         client, _config = self._build_client()
-        return client.get_accounts()
+        return _validated_account_ids(client.get_accounts())
 
     def _fetch_ledger_sync(self, account_id: str | None = None) -> dict[str, Any]:
         client, config = self._build_client()
         acct = account_id or _account_id(getattr(config, "ibkr_account_id", ""))
-        return client.get_ledger(acct)
+        return _validated_ledger(client.get_ledger(acct))
 
     def _verify_connection_sync(
         self,
@@ -113,8 +127,8 @@ class IbkrAccountService:
         acct = account_id or _account_id(getattr(config, "ibkr_account_id", ""))
         # Pool handles the prompt-for-missing-secret callback at connect time.
         client, _config = self._build_client()
-        accounts = client.get_accounts()
-        ledger = client.get_ledger(acct)
+        accounts = _validated_account_ids(client.get_accounts())
+        ledger = _validated_ledger(client.get_ledger(acct))
         raw_positions = client.get_positions(acct)
 
         summary = self._build_portfolio_summary_fn(ledger, [], acct)

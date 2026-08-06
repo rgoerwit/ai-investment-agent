@@ -801,7 +801,7 @@ def _normalize_structured_output(
             if not record.blocked
         ]
         ledger_records = [
-            (record.tool_name, record.content, set(record.urls))
+            message_utils.evidence_record_to_tool_evidence(record)
             for record in evidence_records
         ]
         guidance_normalized = normalize_management_guidance_output(

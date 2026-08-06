@@ -1,10 +1,43 @@
 # Codebase Memory
 
-Last updated: 2026-07-28
+Last updated: 2026-08-05
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
 If this file and the repo disagree, trust the repo.
+
+## Current Quality Baseline (August 2026)
+
+- Ruff format and lint cover `src/`, `tests/`, and `scripts/`.
+- `poetry run mypy src/` is a blocking gate and has no errors across the 235
+  source files. The previous baseline was 52 errors across 31 files; fixes were
+  made at owning boundaries without blanket ignores or retyping the intentionally
+  shallow `AnalysisSnapshot` claims payload. The configured gate now includes
+  `check_untyped_defs = true`, so typed errors inside legacy unannotated functions
+  are checked. Full annotation completeness (`disallow_untyped_defs`) remains a
+  separate migration: the 2026-08-05 baseline is 190 errors across 55 files.
+- `make test-ci` is the deterministic, credential-free test surface. It excludes
+  tests marked `slow`, `integration`, `llm`, or `api`.
+- `make ci` runs installation, all static gates, and `test-ci`; `make ci-full`
+  additionally runs the complete suite and may require external services.
+- GitHub CI uses the same `check-all` and `test-ci` targets as local development.
+- `SNYK-PYTHON-CRYPTOGRAPHY-18516621`, `CVE-2026-69247`, and
+  `GHSA-g6cj-pr64-35w5` identify the same PKCS#7 EnvelopedData decryption
+  finding; the JWT rationale in commit `9658029` is superseded. The repository
+  does not call the affected `pkcs7_decrypt_*` APIs, but pins the fixed
+  `cryptography==50.0.0`. Its seven-day release cooldown was explicitly waived
+  on 2026-08-05 after applicability review and owner approval.
+
+Legal/regulatory authority is ledger-first: report scoring consumes effective
+red flags for PFIC, VIE, and CMIC before falling back to the Senior Fundamentals
+DATA_BLOCK. Artifact validity is authoritative: an unavailable Legal Counsel
+leaves PFIC/VIE/CMIC unassessed and emits one zero-penalty,
+BUY-blocking `LEGAL_COUNSEL_UNAVAILABLE` coverage flag; provider failure is never
+converted into a substantive legal finding. Retryability is owned by
+`runtime_diagnostics.classify_failure()` / `FailureDetails.retryable`; the agent
+runtime only retains a separate rate-limit branch because its backoff policy
+differs. Consultant timeout floors use the inferred provider rather than assuming
+OpenAI-compatible seats are OpenAI.
 
 ## What This Repo Is
 
@@ -121,6 +154,12 @@ empty or unusable agent output still fails closed.
 Foreign-language ownership and exact capacity claims are normalized by
 `src/agents/foreign_language_evidence.py` against that agent's own
 `ToolMessage` evidence before Senior Fundamentals can consume them. The
+normalizer accepts the canonical `ToolEvidenceRecord` only; both the live agent
+path and the fundamentals barrier convert run-scoped ledger records through
+`message_utils.evidence_record_to_tool_evidence()`, preserving inspection status
+and source authority. Deterministic evidence preloads use `ToolSource="preflight"`
+while retaining the responsible seat in `agent_key`, so audit provenance does not
+conflate code-owned retrieval with LLM-requested calls. The
 `EntityGovernanceCard` keeps largest shareholder, controlling shareholder,
 control status/basis, and ownership provenance separate. A minority stake or
 equity-method relationship does not establish control; sub-50% control requires

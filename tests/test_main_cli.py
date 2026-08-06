@@ -1155,9 +1155,9 @@ class TestMainOrchestration:
 
         args = SimpleNamespace(quiet=True, brief=False, no_memory=True)
         assert asyncio.run(_run_retrospective_only(args)) == 0
-        assert (
-            called["count"] == 0
-        ), "run_retrospective must NOT be called when --no-memory is set"
+        assert called["count"] == 0, (
+            "run_retrospective must NOT be called when --no-memory is set"
+        )
 
     def test_retrospective_only_returns_early(self, monkeypatch):
         from src.cli import OutputTargets
@@ -1264,13 +1264,9 @@ class TestMainOrchestration:
         )
         monkeypatch.setattr(
             "src.main.output._maybe_generate_article",
-            lambda result,
-            passed_args,
-            targets,
-            company_name,
-            report,
-            reporter,
-            **kwargs: (fake_async("article", False)),
+            lambda result, passed_args, targets, company_name, report, reporter, **kwargs: (
+                fake_async("article", False)
+            ),
         )
         monkeypatch.setattr(
             "src.main._log_final_summary",
@@ -1559,13 +1555,9 @@ class TestMainOrchestration:
         )
         monkeypatch.setattr(
             "src.main.output._maybe_generate_article",
-            lambda result,
-            passed_args,
-            targets,
-            company_name,
-            report,
-            reporter,
-            **kwargs: (_async_result(False)),
+            lambda result, passed_args, targets, company_name, report, reporter, **kwargs: (
+                _async_result(False)
+            ),
         )
         monkeypatch.setattr(
             "src.main._log_final_summary",
@@ -2585,9 +2577,9 @@ class TestSavedFileBannerRemoval:
             welcome_banner,
         )
         content = output_file.read_text()
-        assert not content.startswith(
-            self.BANNER_SENTINEL
-        ), "Saved file must not start with the startup banner"
+        assert not content.startswith(self.BANNER_SENTINEL), (
+            "Saved file must not start with the startup banner"
+        )
 
     def test_saved_markdown_starts_with_report_title(self, tmp_path):
         """First non-blank line of the saved file must be the report title (# TICKER ...)."""
@@ -2615,9 +2607,9 @@ class TestSavedFileBannerRemoval:
         first_non_blank = next(
             (line for line in content.splitlines() if line.strip()), ""
         )
-        assert first_non_blank.startswith(
-            "# "
-        ), f"First non-blank line should be a markdown title, got: {first_non_blank!r}"
+        assert first_non_blank.startswith("# "), (
+            f"First non-blank line should be a markdown title, got: {first_non_blank!r}"
+        )
 
     def test_brief_mode_saved_file_no_banner(self, tmp_path):
         """Brief mode with --output also writes report-only (no banner)."""

@@ -178,12 +178,12 @@ class TestToolFilteringLogic:
         # Verify the tool message is for get_technical_indicators, not get_sentiment
         tool_msg = messages[0]
         assert isinstance(tool_msg, ToolMessage)
-        assert (
-            tool_msg.tool_call_id == "market-1"
-        ), f"Should process market tool, got {tool_msg.tool_call_id}"
-        assert (
-            "RSI" in tool_msg.content
-        ), f"Should have technical indicator data, got: {tool_msg.content}"
+        assert tool_msg.tool_call_id == "market-1", (
+            f"Should process market tool, got {tool_msg.tool_call_id}"
+        )
+        assert "RSI" in tool_msg.content, (
+            f"Should have technical indicator data, got: {tool_msg.content}"
+        )
 
     @pytest.mark.asyncio
     async def test_handles_no_matching_tools(self):
@@ -278,9 +278,9 @@ class TestToolFilteringLogic:
 
         messages_out = result.get("messages", [])
         assert len(messages_out) > 0
-        assert (
-            messages_out[0].tool_call_id == "f1"
-        ), "Should find fundamentals tool call, not news (which was last)"
+        assert messages_out[0].tool_call_id == "f1", (
+            "Should find fundamentals tool call, not news (which was last)"
+        )
 
 
 # --- Integration Tests for Parallel Tool Execution ---
@@ -363,18 +363,18 @@ class TestParallelToolIsolation:
         fund_result = await fund_node({"messages": all_messages}, {})
 
         # Verify each got the correct tool results
-        assert (
-            market_result["messages"][0].tool_call_id == "mkt-1"
-        ), "Market node should process market tools"
-        assert (
-            sentiment_result["messages"][0].tool_call_id == "sent-1"
-        ), "Sentiment node should process sentiment tools"
-        assert (
-            news_result["messages"][0].tool_call_id == "news-1"
-        ), "News node should process news tools"
-        assert (
-            fund_result["messages"][0].tool_call_id == "fund-1"
-        ), "Fundamentals node should process fundamentals tools"
+        assert market_result["messages"][0].tool_call_id == "mkt-1", (
+            "Market node should process market tools"
+        )
+        assert sentiment_result["messages"][0].tool_call_id == "sent-1", (
+            "Sentiment node should process sentiment tools"
+        )
+        assert news_result["messages"][0].tool_call_id == "news-1", (
+            "News node should process news tools"
+        )
+        assert fund_result["messages"][0].tool_call_id == "fund-1", (
+            "Fundamentals node should process fundamentals tools"
+        )
 
     @pytest.mark.asyncio
     async def test_tool_results_contain_expected_data(self):
@@ -415,21 +415,21 @@ class TestParallelToolIsolation:
 
         # Market should have RSI/MACD, NOT sentiment data
         market_content = market_result["messages"][0].content
-        assert (
-            "RSI" in market_content or "MACD" in market_content
-        ), f"Market should have technical data, got: {market_content}"
-        assert (
-            "Sentiment" not in market_content
-        ), f"Market should NOT have sentiment data, got: {market_content}"
+        assert "RSI" in market_content or "MACD" in market_content, (
+            f"Market should have technical data, got: {market_content}"
+        )
+        assert "Sentiment" not in market_content, (
+            f"Market should NOT have sentiment data, got: {market_content}"
+        )
 
         # Sentiment should have sentiment data, NOT technical
         sentiment_content = sentiment_result["messages"][0].content
-        assert (
-            "Sentiment" in sentiment_content or "Bullish" in sentiment_content
-        ), f"Sentiment should have sentiment data, got: {sentiment_content}"
-        assert (
-            "RSI" not in sentiment_content
-        ), f"Sentiment should NOT have RSI, got: {sentiment_content}"
+        assert "Sentiment" in sentiment_content or "Bullish" in sentiment_content, (
+            f"Sentiment should have sentiment data, got: {sentiment_content}"
+        )
+        assert "RSI" not in sentiment_content, (
+            f"Sentiment should NOT have RSI, got: {sentiment_content}"
+        )
 
 
 # --- Edge Case Tests ---
@@ -563,9 +563,9 @@ class TestParallelExecutionRegression:
 
         # CRITICAL: Must process market's tool, NOT sentiment's
         assert len(result["messages"]) > 0, "Should have results"
-        assert (
-            result["messages"][0].tool_call_id == "market-tool-1"
-        ), "REGRESSION: market_node processed wrong agent's tool_calls"
+        assert result["messages"][0].tool_call_id == "market-tool-1", (
+            "REGRESSION: market_node processed wrong agent's tool_calls"
+        )
 
     @pytest.mark.asyncio
     async def test_interleaved_messages_from_parallel_agents(self):
@@ -645,9 +645,9 @@ class TestParallelExecutionRegression:
             result = await node({"messages": messages}, {})
             actual_id = result["messages"][0].tool_call_id
             expected_id = expected_ids[agent_type]
-            assert (
-                actual_id == expected_id
-            ), f"REGRESSION: {agent_type}_node got {actual_id}, expected {expected_id}"
+            assert actual_id == expected_id, (
+                f"REGRESSION: {agent_type}_node got {actual_id}, expected {expected_id}"
+            )
 
 
 # --- Tests using actual create_agent_tool_node from graph.py ---

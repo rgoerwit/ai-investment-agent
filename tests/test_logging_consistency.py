@@ -120,9 +120,9 @@ def test_preview_kwargs_redacted_at_operator_levels():
         for kw in node.keywords
         if kw.arg and PREVIEW_KWARG_PATTERN.search(kw.arg) and not is_redacted(kw.value)
     ]
-    assert (
-        not violations
-    ), f"unredacted preview kwarg at operator-visible level: {violations}"
+    assert not violations, (
+        f"unredacted preview kwarg at operator-visible level: {violations}"
+    )
 
 
 def test_no_positional_args_after_event_name():
@@ -150,6 +150,6 @@ def test_log_event_names_are_snake_case():
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
             if not EVENT_NAME_PATTERN.match(arg.value):
                 violations.append(f"{rel}:{node.lineno} {arg.value[:50]!r}")
-    assert (
-        not violations
-    ), f"non-snake_case log event names (use event_name style): {violations}"
+    assert not violations, (
+        f"non-snake_case log event names (use event_name style): {violations}"
+    )

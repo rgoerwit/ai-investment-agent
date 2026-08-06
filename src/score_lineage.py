@@ -273,6 +273,7 @@ def add_validated_derivations(
             or abs(float(score_match.group()) - reported_pct) > SCORE_PCT_TOLERANCE
         ):
             continue
+        assert reported_available > 0
 
         criterion_dependencies: dict[str, tuple[str, ...]] = {}
         for criterion in numeric_awards:
@@ -325,10 +326,8 @@ def add_validated_derivations(
             numeric_awards[criterion] for criterion in advisory_only_awards
         )
         advisory_pct = reported_pct
-        decision_pct = decision_earned / available * 100.0 if available else None
-        decision_eligible = (
-            not suspect and not lineage_gaps and decision_pct is not None
-        )
+        decision_pct = decision_earned / available * 100.0
+        decision_eligible = not suspect and not lineage_gaps
 
         score_claim_id = claim_id(score_field, None)
         lineage_id = f"derived:score_reconciler:{kind.lower()}"

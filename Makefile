@@ -1,7 +1,7 @@
 # Multi-Agent Investment Analysis System - Makefile
 # Convenient commands for development and deployment
 
-.PHONY: help install test security-tests test-prompts replay eval-semantic lint format clean docker-build docker-run run-quick run-deep refresh-injection-corpus refresh-judge-fixtures
+.PHONY: help install install-dev test test-ci test-cov test-watch security-tests test-prompts replay eval-semantic lint lint-fix format format-check typecheck check-all clean docker-build docker-run run-quick run-deep refresh-injection-corpus refresh-judge-fixtures pre-commit ci ci-full
 
 # Default target
 .DEFAULT_GOAL := help
@@ -73,6 +73,10 @@ test: ## Run tests
 	@echo "$(BLUE)Running tests...$(NC)"
 	$(POETRY) run pytest -v
 
+test-ci: ## Run deterministic tests without network or provider credentials
+	@echo "$(BLUE)Running deterministic CI tests...$(NC)"
+	$(POETRY) run pytest tests/ -v -m "not slow and not integration and not llm and not api"
+
 security-tests: ## Run adversarial prompt-injection/security tests
 	@echo "$(BLUE)Running adversarial security tests...$(NC)"
 	$(POETRY) run pytest -m security -v
@@ -100,12 +104,12 @@ test-watch: ## Run tests in watch mode
 
 lint: ## Run linting checks
 	@echo "$(BLUE)Running linting checks...$(NC)"
-	$(POETRY) run ruff check src/
+	$(POETRY) run ruff check src/ tests/ scripts/
 	@echo "$(GREEN)Linting complete!$(NC)"
 
 lint-fix: ## Run linting and auto-fix issues
 	@echo "$(BLUE)Running linting with auto-fix...$(NC)"
-	$(POETRY) run ruff check --fix src/
+	$(POETRY) run ruff check --fix src/ tests/ scripts/
 	@echo "$(GREEN)Linting complete!$(NC)"
 
 format: ## Format code with Ruff
@@ -205,8 +209,11 @@ security-check: ## Run security vulnerability checks
 	$(POETRY) run bandit -r src/
 	@echo "$(GREEN)Security checks complete!$(NC)"
 
-pre-commit: check-all test ## Run all pre-commit checks
+pre-commit: check-all test-ci ## Run deterministic pre-commit checks
 	@echo "$(GREEN)Pre-commit checks passed!$(NC)"
 
-ci: install check-all test ## Run CI pipeline locally
+ci: install check-all test-ci ## Run credential-free CI pipeline locally
 	@echo "$(GREEN)CI pipeline completed successfully!$(NC)"
+
+ci-full: install check-all test ## Run full local pipeline including external tests
+	@echo "$(GREEN)Full CI pipeline completed successfully!$(NC)"

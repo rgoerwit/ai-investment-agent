@@ -49,9 +49,9 @@ class TestAgentStateTypeDefinitions:
                 # This is an Annotated type - verify take_last is in metadata
                 from src.agents import take_last
 
-                assert (
-                    take_last in annotation.__metadata__
-                ), f"{field} must use Annotated[str, take_last] to prevent list accumulation"
+                assert take_last in annotation.__metadata__, (
+                    f"{field} must use Annotated[str, take_last] to prevent list accumulation"
+                )
             else:
                 # If it's just 'str', it will use default list accumulation (BAD)
                 pytest.fail(
@@ -80,9 +80,9 @@ class TestAgentStateTypeDefinitions:
             annotation = annotations[field]
 
             # All complex fields should be Annotated
-            assert hasattr(
-                annotation, "__metadata__"
-            ), f"{field} should use Annotated[Type, reducer] for explicit state management"
+            assert hasattr(annotation, "__metadata__"), (
+                f"{field} should use Annotated[Type, reducer] for explicit state management"
+            )
 
 
 class TestStatePropagationTypes:
@@ -134,9 +134,9 @@ class TestStatePropagationTypes:
             # CRITICAL: fundamentals_report must be a STRING, not a list
             fundamentals_report = result_state.get("fundamentals_report")
 
-            assert (
-                fundamentals_report is not None
-            ), "fundamentals_report should be populated"
+            assert fundamentals_report is not None, (
+                "fundamentals_report should be populated"
+            )
             assert isinstance(fundamentals_report, str), (
                 f"fundamentals_report must be str, got {type(fundamentals_report)}. "
                 f"If it's a list, AgentState needs 'Annotated[str, take_last]' annotation."
@@ -201,12 +201,12 @@ class TestStatePropagationTypes:
 
                 # Check output field type
                 output_value = result.get(output_field)
-                assert (
-                    output_value is not None
-                ), f"{output_field} should be populated by {agent_name}"
-                assert isinstance(
-                    output_value, str
-                ), f"{output_field} from {agent_name} must be str, got {type(output_value)}"
+                assert output_value is not None, (
+                    f"{output_field} should be populated by {agent_name}"
+                )
+                assert isinstance(output_value, str), (
+                    f"{output_field} from {agent_name} must be str, got {type(output_value)}"
+                )
 
 
 class TestStateFieldTypesInPractice:
@@ -349,9 +349,9 @@ class TestTypeAnnotationConsistency:
         ]
 
         for field in required_fields:
-            assert (
-                field in annotations
-            ), f"Required field {field} missing from AgentState"
+            assert field in annotations, (
+                f"Required field {field} missing from AgentState"
+            )
 
     def test_no_plain_string_annotations_for_reports(self):
         """Ensure no report fields use plain 'str' without Annotated."""

@@ -38,9 +38,9 @@ async def test_metrics_inflight_cleared_when_task_raises():
 
     # Allow the done-callback (scheduled on the loop) to run.
     await asyncio.sleep(0)
-    assert (
-        "AAPL" not in fetcher._metrics_inflight
-    ), "inflight slot must be cleared even when the task raised"
+    assert "AAPL" not in fetcher._metrics_inflight, (
+        "inflight slot must be cleared even when the task raised"
+    )
 
 
 @pytest.mark.asyncio
@@ -68,6 +68,6 @@ async def test_metrics_inflight_cleared_when_task_cancelled():
         await caller
 
     await asyncio.sleep(0)
-    assert (
-        "AAPL" not in fetcher._metrics_inflight
-    ), "inflight slot must be cleared on cancellation"
+    assert "AAPL" not in fetcher._metrics_inflight, (
+        "inflight slot must be cleared on cancellation"
+    )

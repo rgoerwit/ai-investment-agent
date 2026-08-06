@@ -239,9 +239,9 @@ class TestSpotCheckMetricAlt:
             if r.levelno >= logging.WARNING
             and "spot_check_alt_subscription_unavailable" in r.message
         ]
-        assert (
-            warning_events == []
-        ), "FMPSubscriptionUnavailableError should log at debug, not warning"
+        assert warning_events == [], (
+            "FMPSubscriptionUnavailableError should log at debug, not warning"
+        )
 
     @pytest.mark.asyncio
     async def test_fmp_generic_failure_returns_endpoint_details(self):

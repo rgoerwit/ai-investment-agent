@@ -11,6 +11,7 @@ from typing import Any
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.types import RunnableConfig
+from pydantic import SecretStr
 
 from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
@@ -142,7 +143,7 @@ async def _invoke_consultant_with_deadline(
     # per-call cap (the shrinking `remaining` budget still bounds the loop).
     per_call_cap = floor_llm_hard_timeout(
         CONSULTANT_CALL_TIMEOUT_SECONDS,
-        provider="openai",
+        provider=provider,
         label="consultant_call_timeout",
     )
     timeout_s = min(per_call_cap, remaining)
@@ -197,12 +198,12 @@ def _build_legal_fallback_report(
 ) -> str:
     return json.dumps(
         {
-            "pfic_status": "UNCERTAIN",
+            "pfic_status": None,
             "pfic_evidence": f"Legal counsel unavailable for {ticker}: {reason}",
-            "vie_structure": "N/A",
-            "vie_evidence": None,
-            "cmic_status": "N/A",
-            "cmic_evidence": None,
+            "vie_structure": None,
+            "vie_evidence": f"Legal counsel unavailable for {ticker}: {reason}",
+            "cmic_status": None,
+            "cmic_evidence": f"Legal counsel unavailable for {ticker}: {reason}",
             "other_regulatory_risks": [],
             "capital_structure": {
                 "coverage_status": "SEARCH_FAILED",
@@ -275,21 +276,31 @@ def _create_openai_responses_fallback_llm(llm):
 
     from langchain_openai import ChatOpenAI
 
-    kwargs: dict[str, object] = {
-        "model": support.get_model_name(llm),
-        "timeout": 120,
-        "max_retries": 3,
-        "streaming": False,
-        "api_key": settings_config.get_openai_api_key(),
-    }
+    model_name = support.get_model_name(llm)
+    if not model_name:
+        raise ValueError("OpenAI Responses fallback requires a configured model name")
+    raw_api_key = settings_config.get_openai_api_key()
+    api_key = SecretStr(raw_api_key) if raw_api_key else None
     base_url = settings_config.get_openai_api_base()
     if isinstance(base_url, str) and base_url:
         # Custom OpenAI-compatible endpoint (e.g. Kimi): Chat Completions only.
-        kwargs["base_url"] = base_url
-    else:
-        kwargs["use_responses_api"] = True
-        kwargs["output_version"] = "responses/v1"
-    return ChatOpenAI(**kwargs)
+        return ChatOpenAI(
+            model=model_name,
+            timeout=120,
+            max_retries=3,
+            streaming=False,
+            api_key=api_key,
+            base_url=base_url,
+        )
+    return ChatOpenAI(
+        model=model_name,
+        timeout=120,
+        max_retries=3,
+        streaming=False,
+        api_key=api_key,
+        use_responses_api=True,
+        output_version="responses/v1",
+    )
 
 
 def create_consultant_node(
@@ -462,7 +473,7 @@ Provide your independent consultant review."""
                 settings_config.consultant_quick_total_timeout_seconds
                 if quick_mode
                 else CONSULTANT_TOTAL_TIMEOUT_SECONDS,
-                provider="openai",
+                provider=support.infer_provider_name(active_llm),
                 label="consultant_total_timeout",
             )
             consultant_deadline = time.monotonic() + total_timeout
@@ -1481,7 +1492,7 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                 _budget_exhausted_report(
                     "total quick-mode auditor wall-clock budget exhausted", ticker
                 ),
-                provider="openai",
+                provider=support.infer_provider_name(llm),
             )
             result["sender"] = "global_forensic_auditor"
             return result

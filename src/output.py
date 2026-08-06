@@ -673,7 +673,9 @@ def _load_company_name_for_output(
             if not info:
                 continue
             raw_name = info.get("longName") or info.get("shortName")
-            if _is_valid_company_name(raw_name, lookup_ticker):
+            if isinstance(raw_name, str) and _is_valid_company_name(
+                raw_name, lookup_ticker
+            ):
                 # Return canonical (un-normalized) — markdown report headers and
                 # the writer downstream both want the full legal name.
                 return raw_name.strip()

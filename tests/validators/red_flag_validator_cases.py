@@ -1132,9 +1132,9 @@ ADJUSTED_HEALTH_SCORE: 55%
 SECTOR: {name}
 ### --- END DATA_BLOCK ---
 """
-            assert (
-                RedFlagDetector.detect_sector(report) == expected
-            ), f"Failed for {name}"
+            assert RedFlagDetector.detect_sector(report) == expected, (
+                f"Failed for {name}"
+            )
 
         # Test fallback to INDUSTRIALS when no sector field
         report_no_sector = """
@@ -1171,9 +1171,9 @@ SECTOR: Energy
 SECTOR: {old_name}
 ### --- END DATA_BLOCK ---
 """
-            assert (
-                RedFlagDetector.detect_sector(report) == expected
-            ), f"Failed backward compat for {old_name}"
+            assert RedFlagDetector.detect_sector(report) == expected, (
+                f"Failed backward compat for {old_name}"
+            )
 
 
 class TestRealWorldSectorExamples:
@@ -4107,9 +4107,9 @@ Net Income: ¥500M
         assert metrics["debt_to_equity"] == pytest.approx(6.92)
         flags, result = RedFlagDetector.detect_red_flags(metrics, "6489.T")
         leverage_flags = [f for f in flags if f["type"] == "EXTREME_LEVERAGE"]
-        assert (
-            len(leverage_flags) == 0
-        ), f"6.92% D/E incorrectly triggered EXTREME_LEVERAGE: {leverage_flags}"
+        assert len(leverage_flags) == 0, (
+            f"6.92% D/E incorrectly triggered EXTREME_LEVERAGE: {leverage_flags}"
+        )
 
     def test_ratio_without_percent_triggers_leverage_flag(self):
         """Sanity check: D/E: 6.92 (no %, treated as 6.92x = 692%) DOES trigger EXTREME_LEVERAGE."""
@@ -4175,9 +4175,9 @@ class TestUnreliablePEGHighGrowth:
         metrics = self._metrics(peg_ratio=0.01, revenue_growth_ttm=124.0)
         flags, _ = RedFlagDetector.detect_red_flags(metrics, "CADLR.OL")
         peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
-        assert (
-            len(peg_flags) == 0
-        ), "UNRELIABLE_PEG should not fire when revenue growth explains PEG"
+        assert len(peg_flags) == 0, (
+            "UNRELIABLE_PEG should not fire when revenue growth explains PEG"
+        )
 
     def test_low_peg_with_exactly_50pct_growth_no_flag(self):
         """PEG 0.01 + revenue_growth_ttm exactly 50% → boundary: flag suppressed."""
@@ -4206,9 +4206,9 @@ class TestUnreliablePEGHighGrowth:
         metrics = self._metrics(peg_ratio=0.0, revenue_growth_ttm=200.0)
         flags, _ = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
         peg_flags = [f for f in flags if f["type"] == "UNRELIABLE_PEG"]
-        assert (
-            len(peg_flags) == 1
-        ), "PEG=0 must always be flagged (undefined denominator)"
+        assert len(peg_flags) == 1, (
+            "PEG=0 must always be flagged (undefined denominator)"
+        )
 
     def test_peg_above_threshold_no_flag(self):
         """PEG 0.06 (above 0.05 threshold) → no flag regardless of growth."""

@@ -687,8 +687,9 @@ class _TieredChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
         return super()._prepare_request(*args, **kwargs)
 
     def _effective_tier(self, kwargs: dict[str, Any]) -> str | None:
-        if kwargs.get("service_tier") is not None:
-            return kwargs["service_tier"]
+        requested_tier = kwargs.get("service_tier")
+        if isinstance(requested_tier, str):
+            return requested_tier
         if self.service_tier == "flex" and is_flex_unsupported(self.model):
             return None
         return self.service_tier
@@ -756,10 +757,10 @@ class _TieredChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
         return result
 
 
-_flex_fallback_chat_openai_cls: type | None = None
+_flex_fallback_chat_openai_cls: type[BaseChatModel] | None = None
 
 
-def _get_flex_fallback_chat_openai_cls() -> type:
+def _get_flex_fallback_chat_openai_cls() -> type[BaseChatModel]:
     """Lazily define the flex-capable ChatOpenAI subclass.
 
     Defined inside a factory because ``langchain_openai`` is an optional
@@ -781,8 +782,9 @@ def _get_flex_fallback_chat_openai_cls() -> type:
         flex_fallback_to_standard: bool = True
 
         def _effective_tier(self, kwargs: dict[str, Any]) -> str | None:
-            if kwargs.get("service_tier") is not None:
-                return kwargs["service_tier"]
+            requested_tier = kwargs.get("service_tier")
+            if isinstance(requested_tier, str):
+                return requested_tier
             if self.service_tier == "flex" and is_flex_unsupported(self.model_name):
                 return "auto"
             return self.service_tier

@@ -208,10 +208,13 @@ async def _ensure_public_hostname(url: str) -> None:
         raise DocumentExtractionError("DOCUMENT_HOST_INVALID")
 
     def _resolve() -> set[str]:
-        return {
-            item[4][0]
-            for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-        }
+        addresses: set[str] = set()
+        for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM):
+            raw_address = item[4][0]
+            if not isinstance(raw_address, str):
+                raise TypeError("DNS resolver returned a non-string address")
+            addresses.add(raw_address)
+        return addresses
 
     try:
         addresses = await run_blocking_call(_DNS_POLICY, _resolve)

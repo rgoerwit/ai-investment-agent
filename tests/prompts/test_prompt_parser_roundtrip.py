@@ -116,9 +116,9 @@ def test_contract_template_roundtrips(contract: PromptContract):
 )
 def test_contract_legacy_forms_still_parse(contract: PromptContract):
     for raw, predicate in contract.legacy_forms:
-        assert predicate(
-            contract.parser(raw)
-        ), f"{contract.name}: tolerated legacy form {raw!r} no longer parses"
+        assert predicate(contract.parser(raw)), (
+            f"{contract.name}: tolerated legacy form {raw!r} no longer parses"
+        )
 
 
 def test_rm_recommendation_header_classifies():

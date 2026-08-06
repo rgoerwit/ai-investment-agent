@@ -329,6 +329,8 @@ async def test_preflight_runs_bounded_searches_and_official_document_extraction(
     assert [call.name for call in calls].count("search_foreign_sources") == 2
     assert [call.name for call in calls].count("get_official_filings") == 1
     assert [call.name for call in calls].count("get_official_document") == 1
+    assert {call.source for call in calls} == {"preflight"}
+    assert {call.agent_key for call in calls} == {"legal_counsel"}
     assert "CODE-OWNED CAPITAL STRUCTURE PREFLIGHT" in evidence
     assert "債務保証" in calls[1].args["priority_terms"]
 

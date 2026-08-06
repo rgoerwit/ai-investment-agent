@@ -32,12 +32,12 @@ class TestCompanyNameExtraction:
         short_name = info.get("shortName", "")
 
         # Should contain "CATHAY" not "CHINA RES BEER"
-        assert (
-            "CATHAY" in long_name.upper() or "CATHAY" in short_name.upper()
-        ), f"Expected Cathay Pacific, got: {long_name} / {short_name}"
-        assert (
-            "BEER" not in long_name.upper() and "BEER" not in short_name.upper()
-        ), f"Should not contain 'BEER', got: {long_name} / {short_name}"
+        assert "CATHAY" in long_name.upper() or "CATHAY" in short_name.upper(), (
+            f"Expected Cathay Pacific, got: {long_name} / {short_name}"
+        )
+        assert "BEER" not in long_name.upper() and "BEER" not in short_name.upper(), (
+            f"Should not contain 'BEER', got: {long_name} / {short_name}"
+        )
 
     def test_0291_hk_correct_name(self):
         """Verify 0291.HK resolves to China Resources Beer."""
@@ -50,9 +50,9 @@ class TestCompanyNameExtraction:
 
         # Should contain "CHINA" or "RES" or "BEER"
         combined = (long_name + " " + short_name).upper()
-        assert any(
-            word in combined for word in ["CHINA", "RES", "BEER"]
-        ), f"Expected China Resources Beer, got: {long_name} / {short_name}"
+        assert any(word in combined for word in ["CHINA", "RES", "BEER"]), (
+            f"Expected China Resources Beer, got: {long_name} / {short_name}"
+        )
 
     @pytest.mark.asyncio
     async def test_extract_company_name_async_0293(self):
@@ -66,12 +66,12 @@ class TestCompanyNameExtraction:
         company_name = await extract_company_name_async(ticker_obj)
 
         assert company_name == "Cathay Pacific Airways"
-        assert (
-            "CATHAY" in company_name.upper()
-        ), f"Expected Cathay Pacific, got: {company_name}"
-        assert (
-            "BEER" not in company_name.upper()
-        ), f"Should not contain BEER, got: {company_name}"
+        assert "CATHAY" in company_name.upper(), (
+            f"Expected Cathay Pacific, got: {company_name}"
+        )
+        assert "BEER" not in company_name.upper(), (
+            f"Should not contain BEER, got: {company_name}"
+        )
 
     @pytest.mark.asyncio
     async def test_extract_company_name_object_path_rejects_identifier_csv(
@@ -171,9 +171,9 @@ class TestMemoryIsolation:
         )
 
         # Should return EMPTY (no 0291.HK data should leak)
-        assert (
-            len(results) == 0
-        ), f"CONTAMINATION DETECTED: Found {len(results)} results from 0291.HK in 0293.HK memory"
+        assert len(results) == 0, (
+            f"CONTAMINATION DETECTED: Found {len(results)} results from 0291.HK in 0293.HK memory"
+        )
 
     @pytest.mark.asyncio
     async def test_semantic_search_without_filter_does_not_cross_collections(self):
@@ -203,9 +203,9 @@ class TestMemoryIsolation:
         )
 
         # Should be empty because it's a different collection
-        assert (
-            len(results) == 0
-        ), "Collection isolation FAILED: 0293 collection contains 0291 data"
+        assert len(results) == 0, (
+            "Collection isolation FAILED: 0293 collection contains 0291 data"
+        )
 
 
 class TestTickerSanitization:
@@ -216,9 +216,9 @@ class TestTickerSanitization:
         ticker_0291 = sanitize_ticker_for_collection("0291.HK")
         ticker_0293 = sanitize_ticker_for_collection("0293.HK")
 
-        assert (
-            ticker_0291 != ticker_0293
-        ), "Similar tickers should sanitize to different collection names"
+        assert ticker_0291 != ticker_0293, (
+            "Similar tickers should sanitize to different collection names"
+        )
 
         assert ticker_0291 == "0291_HK"
         assert ticker_0293 == "0293_HK"
@@ -328,9 +328,9 @@ class TestLLMHallucinationPrevention:
             result = await get_financial_metrics.ainvoke({"ticker": "0293.HK"})
 
         # Result should contain the ticker
-        assert (
-            "0293" in result or "HK" in result
-        ), "Tool output should contain ticker reference"
+        assert "0293" in result or "HK" in result, (
+            "Tool output should contain ticker reference"
+        )
 
         # Ideally should contain company name (but current implementation may not)
         # This test documents the gap

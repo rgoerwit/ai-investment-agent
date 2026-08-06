@@ -182,9 +182,9 @@ class TestIbkrDisplaySymbol:
                 ibkr_position=pos,
             )
             report = format_report([item], _make_portfolio())
-            assert (
-                "exchange" not in report.lower() or "exchange" not in report
-            ), f"Unexpected exchange warning in HOLDS for currency={currency}"
+            assert "exchange" not in report.lower() or "exchange" not in report, (
+                f"Unexpected exchange warning in HOLDS for currency={currency}"
+            )
 
     def test_review_suffix_warning_when_ticker_bare(self):
         """REVIEWS run command shows suffix warning when the ticker has no exchange suffix."""

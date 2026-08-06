@@ -1,15 +1,48 @@
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import ToolMessage
 
-from src.agents.consultant_nodes import create_auditor_node, create_legal_counsel_node
+from src.agents.consultant_nodes import (
+    _invoke_consultant_with_deadline,
+    create_auditor_node,
+    create_legal_counsel_node,
+)
+from src.agents.verdict_policy import maybe_demote_buy_on_blocking_flags
+from src.runtime_diagnostics import get_artifact_status
 from src.validators.red_flag_detector import RedFlagDetector
 
 
 class TestArtifactFallbacks:
+    @pytest.mark.asyncio
+    async def test_consultant_call_timeout_floor_uses_actual_provider(self):
+        response = object()
+        with (
+            patch(
+                "src.agents.consultant_nodes.floor_llm_hard_timeout",
+                return_value=90.0,
+            ) as floor,
+            patch(
+                "src.agents.runtime.invoke_with_rate_limit_handling",
+                new=AsyncMock(return_value=response),
+            ),
+        ):
+            result = await _invoke_consultant_with_deadline(
+                object(),
+                [],
+                context="External Consultant",
+                provider="google",
+                model_name="gemini-test",
+                ticker="TEST",
+                deadline=time.monotonic() + 30.0,
+            )
+
+        assert result is response
+        assert floor.call_args.kwargs["provider"] == "google"
+
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")
     async def test_legal_counsel_binds_tools_and_preserves_third_pass_failure(
@@ -97,7 +130,7 @@ class TestArtifactFallbacks:
 
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")
-    async def test_legal_counsel_failure_preserves_conservative_fallback(
+    async def test_legal_counsel_failure_preserves_unassessed_fallback(
         self, mock_get_prompt
     ):
         mock_get_prompt.return_value = SimpleNamespace(
@@ -126,8 +159,35 @@ class TestArtifactFallbacks:
 
         assert status["complete"] is True
         assert status["ok"] is False
-        assert risks["pfic_status"] == "UNCERTAIN"
+        assert risks["pfic_status"] is None
         assert "Legal counsel unavailable" in risks["pfic_evidence"]
+        assert risks["vie_structure"] is None
+        assert risks["cmic_status"] is None
+        assert "Legal counsel unavailable" in risks["cmic_evidence"]
+
+        flags = RedFlagDetector.detect_legal_flags(
+            risks,
+            "TOTL.JK",
+            artifact_status=get_artifact_status(result, "legal_report"),
+        )
+        assert [flag["type"] for flag in flags] == ["LEGAL_COUNSEL_UNAVAILABLE"]
+        assert flags[0]["risk_penalty"] == 0.0
+        assert flags[0]["blocks_buy"] is True
+        assert "PFIC, VIE, CMIC" in flags[0]["detail"]
+
+        pm_output = """# PORTFOLIO MANAGER VERDICT: BUY
+Actual Decision: BUY
+<PM_BLOCK>
+VERDICT: BUY
+</PM_BLOCK>"""
+        demoted, changed = maybe_demote_buy_on_blocking_flags(
+            pm_output,
+            red_flags=flags,
+            ticker="TOTL.JK",
+        )
+        assert changed is True
+        assert "VERDICT: HOLD" in demoted
+        assert "LEGAL_COUNSEL_UNAVAILABLE" in demoted
 
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")

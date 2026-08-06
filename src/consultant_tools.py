@@ -561,7 +561,7 @@ async def spot_check_metric_alt(
             retryable=details.retryable,
             error_type=details.error_type,
             message_preview=redact_sensitive_text(
-                safe_payload.get("message_preview"), max_chars=200
+                str(safe_payload.get("message_preview") or ""), max_chars=200
             ),
         )
         return json.dumps(safe_payload)

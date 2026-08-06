@@ -13,6 +13,7 @@ import structlog
 from src.data_block_utils import replace_or_append_block_line
 
 from .evidence_preflight import (
+    PreflightCall,
     PreflightOutcome,
     run_preflight_calls,
     skipped_preflight_outcome,
@@ -209,7 +210,7 @@ async def preload_capital_structure_evidence(
     filing_tool = tools_by_name.get("get_official_filings")
     search_tool = tools_by_name.get("search_foreign_sources")
     document_tool = tools_by_name.get("get_official_document")
-    calls = []
+    calls: list[PreflightCall] = []
     if filing_tool is not None:
         calls.append(("statutory_filing_api", filing_tool, {"ticker": ticker}))
     if search_tool is not None:
@@ -238,7 +239,7 @@ async def preload_capital_structure_evidence(
     outcomes, durations = await run_preflight_calls(
         calls,
         agent_key="legal_counsel",
-        source="legal_counsel_preflight",
+        source="preflight",
         ticker=ticker,
         failure_event="capital_structure_preflight_call_failed",
         logger=logger,
@@ -277,7 +278,7 @@ async def preload_capital_structure_evidence(
         document_outcomes, document_durations = await run_preflight_calls(
             document_calls,
             agent_key="legal_counsel",
-            source="legal_counsel_preflight",
+            source="preflight",
             ticker=ticker,
             failure_event="capital_structure_preflight_call_failed",
             logger=logger,
@@ -375,7 +376,9 @@ def _source_context(evidence: str, source_url: str) -> str:
     """Return the bounded preflight section that actually contains the URL."""
     if not source_url or source_url.upper() in {"N/A", "UNKNOWN"}:
         return ""
-    result_blocks = re.findall(r"(?is)<result\b[^>]*>.*?</result>", evidence or "")
+    result_blocks: list[str] = re.findall(
+        r"(?is)<result\b[^>]*>.*?</result>", evidence or ""
+    )
     for block in result_blocks:
         if source_url in block:
             return block

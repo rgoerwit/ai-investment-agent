@@ -68,9 +68,9 @@ class TestFinancialPatternExtractor:
             val = result.get("marketCap")
             assert val is not None, f"Failed to extract market cap from '{text}'"
             # Allow small float error
-            assert (
-                abs(val - expected) < 1000
-            ), f"Value mismatch for '{text}': got {val}, expected {expected}"
+            assert abs(val - expected) < 1000, (
+                f"Value mismatch for '{text}': got {val}, expected {expected}"
+            )
 
     def test_analyst_coverage_patterns(self, extractor):
         """Test Analyst Coverage count extraction with varied phrasing."""
@@ -86,9 +86,9 @@ class TestFinancialPatternExtractor:
 
         for text, expected in scenarios:
             result = extractor.extract_from_text(text)
-            assert (
-                result.get("numberOfAnalystOpinions") == expected
-            ), f"Failed to match: '{text}'"
+            assert result.get("numberOfAnalystOpinions") == expected, (
+                f"Failed to match: '{text}'"
+            )
 
     def test_international_formats(self, extractor):
         """Test specific international number formatting (comma decimal)."""

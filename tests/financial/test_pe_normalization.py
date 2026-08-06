@@ -377,9 +377,9 @@ class TestDataDivergenceDetection:
         }
 
         disconnect_ratio = abs(metrics["fcf"] / metrics["net_income"])
-        assert (
-            2.0 < disconnect_ratio < 4.0
-        ), f"Ratio should be 2-4x, got {disconnect_ratio:.2f}x"
+        assert 2.0 < disconnect_ratio < 4.0, (
+            f"Ratio should be 2-4x, got {disconnect_ratio:.2f}x"
+        )
 
         red_flags, result = RedFlagDetector.detect_red_flags(metrics, ticker="7937.T")
 

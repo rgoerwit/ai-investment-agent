@@ -304,9 +304,9 @@ class TestAgentMemoryIsolation:
         # Verify memory keys are different (no overlap)
         hsbc_set = set(hsbc_keys)
         canon_set = set(canon_keys)
-        assert (
-            len(hsbc_set.intersection(canon_set)) == 0
-        ), "Memory keys should not overlap between tickers"
+        assert len(hsbc_set.intersection(canon_set)) == 0, (
+            "Memory keys should not overlap between tickers"
+        )
 
         # Verify correct naming convention
         assert "0005_HK_bull_memory" in hsbc_keys

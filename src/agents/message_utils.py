@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,6 +16,7 @@ from langchain_core.messages import (
 
 from src.tooling.evidence_recorder import (
     EvidenceAuthority,
+    EvidenceRecord,
     EvidenceStatus,
     classify_evidence_value,
     normalize_http_url,
@@ -47,6 +48,47 @@ class ToolEvidenceRecord:
 _URL_RE = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
 
 
+def make_tool_evidence_record(
+    *,
+    tool_name: str | None,
+    content: str,
+    urls: Iterable[str],
+    evidence_status: EvidenceStatus | None = None,
+) -> ToolEvidenceRecord:
+    """Build the canonical agent-facing view of inspected tool evidence."""
+    normalized_urls = {
+        normalized
+        for url in urls
+        if (normalized := normalize_http_url(url)) is not None
+    }
+    _, classified_status, _, bounded = classify_evidence_value(
+        tool_name or "",
+        content,
+    )
+    status = evidence_status or classified_status
+    return ToolEvidenceRecord(
+        tool_name=tool_name,
+        content=bounded,
+        urls=normalized_urls,
+        evidence_status=status,
+        authority=resolve_evidence_authority(
+            tool_name=tool_name or "",
+            evidence_status=status,
+            urls=tuple(sorted(normalized_urls)),
+        ),
+    )
+
+
+def evidence_record_to_tool_evidence(record: EvidenceRecord) -> ToolEvidenceRecord:
+    """Convert one run-scoped ledger record without weakening its status."""
+    return make_tool_evidence_record(
+        tool_name=record.tool_name,
+        content=record.content,
+        urls=record.urls,
+        evidence_status=record.evidence_status,
+    )
+
+
 def tool_evidence_records(
     messages: Sequence[BaseMessage],
 ) -> list[ToolEvidenceRecord]:
@@ -57,27 +99,11 @@ def tool_evidence_records(
         if not isinstance(message, ToolMessage):
             continue
         content = extract_string_content(message.content)
-        urls = {
-            normalized
-            for match in _URL_RE.finditer(content)
-            if (normalized := normalize_http_url(match.group(0)))
-        }
-        _, evidence_status, _, _ = classify_evidence_value(
-            message.name or "",
-            content,
-        )
-        url_tuple = tuple(sorted(urls))
         records.append(
-            ToolEvidenceRecord(
+            make_tool_evidence_record(
                 tool_name=message.name,
                 content=content,
-                urls=urls,
-                evidence_status=evidence_status,
-                authority=resolve_evidence_authority(
-                    tool_name=message.name or "",
-                    evidence_status=evidence_status,
-                    urls=url_tuple,
-                ),
+                urls=(match.group(0) for match in _URL_RE.finditer(content)),
             )
         )
     return records

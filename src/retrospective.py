@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 import structlog
 
@@ -43,6 +43,15 @@ from src.tooling.inspector import InspectionEnvelope, SourceKind
 logger = structlog.get_logger(__name__)
 
 _get_capture_manager: Any
+
+
+class _RetrospectiveMarketData(TypedDict, total=False):
+    start_adj_close: float
+    end_adj_close: float
+    bench_start: float
+    bench_end: float
+    benchmark_fallback: str
+
 
 try:
     from src.eval import get_active_capture_manager
@@ -637,8 +646,8 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     try:
         import yfinance as yf
 
-        def _fetch_current_data():
-            result = {}
+        def _fetch_current_data() -> _RetrospectiveMarketData:
+            result: _RetrospectiveMarketData = {}
 
             # Current stock price (adjusted close for total return)
             try:
@@ -656,9 +665,8 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
                     current = info.get("currentPrice") or info.get("regularMarketPrice")
                     if current:
                         result["end_adj_close"] = float(current)
-                        result["start_adj_close"] = (
-                            float(snapshot_price) if snapshot_price else None
-                        )
+                        if snapshot_price:
+                            result["start_adj_close"] = float(snapshot_price)
             except Exception as e:
                 logger.debug("stock_fetch_failed", ticker=ticker, error=str(e))
 

@@ -60,7 +60,10 @@ def prompt_text(prompt_key: str) -> str:
     for json_file in sorted(_PROMPTS_DIR.glob("*.json")):
         data = json.loads(json_file.read_text(encoding="utf-8"))
         if data.get("agent_key") == prompt_key:
-            return data["system_message"]
+            system_message = data.get("system_message")
+            if not isinstance(system_message, str):
+                raise ValueError(f"{json_file} has a non-string system_message")
+            return system_message
     raise KeyError(f"no prompt with agent_key={prompt_key!r} under {_PROMPTS_DIR}")
 
 

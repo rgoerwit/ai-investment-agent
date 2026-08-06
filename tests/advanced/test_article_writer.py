@@ -40,9 +40,9 @@ class TestArticleWriterInit:
         assert config["agent_key"] == "article_writer"
         assert "system_message" in config
         # Version should be a valid numeric string (e.g., "1.5", "2.0")
-        assert re.match(
-            r"^\d+\.\d+$", config["version"]
-        ), f"Invalid version: {config['version']}"
+        assert re.match(r"^\d+\.\d+$", config["version"]), (
+            f"Invalid version: {config['version']}"
+        )
         # user_template and model_config are nested in metadata for AgentPrompt compatibility
         metadata = config["metadata"]
         assert "user_template" in metadata
@@ -185,9 +185,9 @@ class TestVoiceSampleProfilePriority:
 
         # The prompt's exact marker must appear as a standalone line
         marker_lines = [line for line in samples.split("\n") if line.strip() == marker]
-        assert (
-            len(marker_lines) == 1
-        ), "Marker should appear exactly once on its own line"
+        assert len(marker_lines) == 1, (
+            "Marker should appear exactly once on its own line"
+        )
 
     def test_profile_appears_first(self, tmp_path):
         """Profile block appears before raw writing samples."""

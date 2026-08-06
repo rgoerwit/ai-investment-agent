@@ -1,12 +1,17 @@
 """Regression tests for deterministic FLA ownership/capacity provenance."""
 
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, ToolMessage
 
 from src.agents.foreign_language_evidence import normalize_foreign_language_evidence
+from src.agents.message_utils import (
+    ToolEvidenceRecord,
+    evidence_record_to_tool_evidence,
+    make_tool_evidence_record,
+)
 from src.graph.builder import _reconcile_fundamentals_evidence
+from src.tooling.evidence_recorder import EvidenceRecord
 from src.validators.entity_governance_card import build_card
 from tests.helpers.frozen_regressions import load_frozen_regression
 
@@ -46,6 +51,19 @@ FACILITY_BUILDOUT_STATUS: AT_CAPACITY
 
 def _tool(content: str, *, name: str = "web_search") -> ToolMessage:
     return ToolMessage(content=content, tool_call_id="call-1", name=name)
+
+
+def _record(
+    content: str,
+    *,
+    name: str = "web_search",
+    urls: set[str] | tuple[str, ...] = (),
+) -> ToolEvidenceRecord:
+    return make_tool_evidence_record(
+        tool_name=name,
+        content=content,
+        urls=urls,
+    )
 
 
 def _latest_results_report(
@@ -172,14 +190,14 @@ def test_relationship_only_evidence_preserves_influence_without_inventing_stake(
         [],
         ticker="6782.TW",
         additional_records=[
-            (
-                "search_foreign_sources",
+            _record(
                 "<result><url>https://noise.example/story</url>"
                 "<summary>Unrelated market commentary.</summary></result>"
                 f"<result><url>{source}</url>"
                 "<summary>BenQ Materials Corp. is the entity with significant "
                 "influence over the group.</summary></result>",
-                {source, "https://noise.example/story"},
+                name="search_foreign_sources",
+                urls={source, "https://noise.example/story"},
             )
         ],
     )
@@ -218,15 +236,22 @@ def test_fundamentals_barrier_reconciles_legal_evidence_idempotently():
         ticker="6782.TW",
     )
     response = AIMessage(content=raw_report, name="foreign_language_analyst")
-    record = SimpleNamespace(
+    record = EvidenceRecord(
+        sequence=1,
         agent_key="legal_counsel",
         tool_name="search_foreign_sources",
+        source="legal_counsel",
         content=(
             "BenQ Materials Corp. is the entity with significant influence "
             f"over the group. {source}"
         ),
+        content_sha256="test",
+        requested_urls=(),
         urls=(source,),
         blocked=False,
+        findings=(),
+        execution_status="SUCCEEDED",
+        evidence_status="RESULTS_FOUND",
     )
     state = {
         "messages": [response],
@@ -522,16 +547,42 @@ def test_latest_results_accepts_post_inspection_ledger_record():
         [],
         ticker="TEST",
         additional_records=[
-            (
-                "get_official_document",
+            _record(
                 _latest_results_evidence(source),
-                {source},
+                name="get_official_document",
+                urls={source},
             )
         ],
     )
 
     assert "LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY" in normalized
     assert "LATEST_RESULTS_EARNINGS_GROWTH_YOY: 102.5%" in normalized
+
+
+def test_ledger_conversion_preserves_failure_status_and_normalizes_urls():
+    record = EvidenceRecord(
+        sequence=1,
+        agent_key="foreign_language_analyst",
+        tool_name="get_official_document",
+        source="toolnode",
+        content="A non-empty provider error body",
+        content_sha256="test",
+        requested_urls=("https://issuer.example/report/",),
+        urls=("https://issuer.example/report/", "not-a-url"),
+        blocked=False,
+        findings=(),
+        execution_status="FAILED",
+        evidence_status="AUTH_ERROR",
+        reason="FORBIDDEN",
+    )
+
+    converted = evidence_record_to_tool_evidence(record)
+
+    assert converted.tool_name == "get_official_document"
+    assert converted.content == "A non-empty provider error body"
+    assert converted.urls == {"https://issuer.example/report"}
+    assert converted.evidence_status == "AUTH_ERROR"
+    assert converted.authority == "UNSUPPORTED"
 
 
 def test_search_result_cannot_be_promoted_as_primary_latest_results():

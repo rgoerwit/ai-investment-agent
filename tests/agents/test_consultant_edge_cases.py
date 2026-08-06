@@ -788,7 +788,7 @@ class TestConfigurationEdgeCases:
 
         _, kwargs = fake_cls.call_args
         assert kwargs["base_url"] == "https://api.moonshot.cn/v1"
-        assert kwargs["api_key"] == "k"
+        assert kwargs["api_key"].get_secret_value() == "k"
         assert "use_responses_api" not in kwargs
         assert "output_version" not in kwargs
 
@@ -810,6 +810,7 @@ class TestConfigurationEdgeCases:
 
         _, kwargs = fake_cls.call_args
         assert "base_url" not in kwargs
+        assert kwargs["api_key"].get_secret_value() == "k"
         assert kwargs["use_responses_api"] is True
         assert kwargs["output_version"] == "responses/v1"
 

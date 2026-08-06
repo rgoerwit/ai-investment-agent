@@ -13,7 +13,7 @@ from src.tooling.evidence_recorder import (
     ExecutionStatus,
     classify_evidence_value,
 )
-from src.tooling.runtime import ToolInvocation
+from src.tooling.runtime import ToolInvocation, ToolSource
 
 PreflightCall = tuple[str, Any, dict[str, Any]]
 
@@ -67,7 +67,7 @@ async def run_preflight_calls(
     calls: list[PreflightCall],
     *,
     agent_key: str,
-    source: str,
+    source: ToolSource,
     ticker: str,
     failure_event: str,
     logger: Any,

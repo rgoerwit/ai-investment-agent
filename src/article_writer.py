@@ -782,7 +782,7 @@ class ArticleWriter:
                 fallback_class = ""
                 try:
                     tier_llm = tier.build()  # lazy: construct only when attempted
-                    fallback_model = get_model_name(tier_llm)
+                    fallback_model = get_model_name(tier_llm) or ""
                     fallback_provider = infer_provider(
                         model_name=fallback_model,
                         class_name=type(tier_llm).__name__,

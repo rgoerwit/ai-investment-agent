@@ -805,9 +805,9 @@ class TestBrazilConfigInvariants:
                 continue
             exclude = ex.get("params", {}).get("exclude_filter", {})
             for col in ("Symbol", "Papel"):
-                assert (
-                    exclude.get(col) != "3[2-9]$"
-                ), f"{ex['exchange_name']}: must not carry Brazil's BDR exclude_filter on {col!r}"
+                assert exclude.get(col) != "3[2-9]$", (
+                    f"{ex['exchange_name']}: must not carry Brazil's BDR exclude_filter on {col!r}"
+                )
 
 
 # ============================================================
@@ -2358,12 +2358,12 @@ class TestHandleScrapeHtmlPagination:
         assert len(found) == len(targets), f"Missing configs: {targets - set(found)}"
 
         for name, ex in found.items():
-            assert (
-                ex["params"].get("paginate_max_pages", 1) > 1
-            ), f"{name} missing paginate_max_pages > 1"
-            assert (
-                ex.get("min_expected_rows", 0) >= 700
-            ), f"{name} min_expected_rows too low: {ex.get('min_expected_rows')}"
+            assert ex["params"].get("paginate_max_pages", 1) > 1, (
+                f"{name} missing paginate_max_pages > 1"
+            )
+            assert ex.get("min_expected_rows", 0) >= 700, (
+                f"{name} min_expected_rows too low: {ex.get('min_expected_rows')}"
+            )
 
 
 class TestRequestTimeouts:

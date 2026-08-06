@@ -391,6 +391,7 @@ class TokenTracker:
 
     _instance: "TokenTracker | None" = None
     _instance_lock = threading.Lock()
+    _initialized: bool = False
     _quiet_mode: bool = False
 
     def __new__(cls):
