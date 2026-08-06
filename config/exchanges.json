@@ -332,11 +332,10 @@
       "exchange_name": "ASX",
       "enabled": true,
       "method": "download_csv",
-      "source_url": "https://www.asx.com.au/asx/research/ASXListedCompanies.csv",
+      "source_url": "https://asx.api.markitdigital.com/asx-research/1.0/companies/directory/file",
       "yahoo_suffix": ".AX",
       "min_expected_rows": 500,
       "params": {
-        "skip_rows": 1,
         "ticker_col": "ASX code",
         "name_col": "Company name"
       }

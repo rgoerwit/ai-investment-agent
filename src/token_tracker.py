@@ -18,10 +18,10 @@ from src.llm_usage import extract_token_usage_breakdown
 
 logger = structlog.get_logger(__name__)
 
-# LLM pricing per 1M tokens, standard/interactive tier (July 2026).
+# LLM pricing per 1M tokens, standard/interactive tier (August 2026).
 # Sources: ai.google.dev/gemini-api/docs/pricing, developers.openai.com/api/docs/pricing,
 # platform.claude.com/docs/en/pricing, docs.z.ai/guides/overview/pricing,
-# api-docs.deepseek.com/quick_start/pricing.
+# api-docs.deepseek.com/quick_start/pricing, kimi.com/help/kimi-api/api-pricing.
 # Matched by exact key first, then longest-prefix-wins (see
 # ``_lookup_model_pricing``) — so insertion order does NOT matter and a
 # more-specific variant (mini/lite/preview) always beats its parent regardless
@@ -66,11 +66,10 @@ MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     "glm-5.2": {"prompt": 1.40, "cached_prompt": 0.26, "completion": 4.40},
     # --- DeepSeek (APAC regional specialist) ---
     "deepseek-v4": {"prompt": 0.435, "completion": 0.87},
-    # --- Moonshot Kimi (APAC regional specialist) ---
-    # kimi-k3 has no separately published SKU yet; anchored to the latest
-    # published Kimi (K2.6, Apr 2026): $0.95 cache-miss input / $0.16 cache-hit /
-    # $4.00 output per 1M. CONFIRM against Moonshot's kimi-k3 rate once published.
-    "kimi-k3": {"prompt": 0.95, "cached_prompt": 0.16, "completion": 4.00},
+    # --- Moonshot Kimi (consultant/auditor) ---
+    # Official K3 API rates: $3.00 cache-miss input / $0.30 cache-hit input /
+    # $15.00 output per 1M tokens.
+    "kimi-k3": {"prompt": 3.00, "cached_prompt": 0.30, "completion": 15.00},
 }
 
 # Fallback for models missing from the table (Flash-class assumption).

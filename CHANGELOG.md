@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **ASX screener universe** — Replace the retired listed-companies CSV with the
+  current ASX directory feed and remove the obsolete leading-row skip.
+- **Kimi K3 cost accounting** — Replace the temporary K2.6 proxy with Kimi's
+  published K3 rates for cached input, uncached input, and output tokens.
 - **Cryptography timing attack** — Pin `cryptography==50.0.0` to remediate the
   PKCS#7 EnvelopedData decryption finding reported as CVE-2026-69247.
 - **Legal-provider failure semantics** — An unavailable Legal Counsel no longer fabricates PFIC/CMIC uncertainty or adds issuer-risk points; it emits one zero-penalty, BUY-blocking coverage flag and leaves legal dimensions unassessed.
