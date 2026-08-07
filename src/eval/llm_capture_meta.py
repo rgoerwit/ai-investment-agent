@@ -5,13 +5,31 @@ from typing import Any
 from src.llm_usage import extract_token_usage_breakdown
 
 
+def gemini_thinking_level(runnable: Any) -> str | None:
+    """Read Gemini's thinking level across adapter field-name revisions.
+
+    ``langchain-google-genai`` 4.3+ stores the constructor's
+    ``thinking_level`` input in the canonical ``reasoning_effort`` field while
+    retaining ``thinking_level`` as a Pydantic alias.  Pydantic aliases do not
+    provide attribute access, so readers must support both names.  The
+    ``model_kwargs`` fallback preserves compatibility with lightweight test
+    doubles and older wrapper behavior.
+    """
+    model_kwargs = getattr(runnable, "model_kwargs", None) or {}
+    for name in ("reasoning_effort", "thinking_level"):
+        value = getattr(runnable, name, None)
+        if value is None:
+            value = model_kwargs.get(name)
+        if value is not None:
+            return str(value)
+    return None
+
+
 def normalize_reasoning_level(runnable: Any, model_name: str | None) -> str | None:
     """Normalize provider-specific reasoning configuration into coarse buckets."""
     model_kwargs = getattr(runnable, "model_kwargs", None) or {}
 
-    raw_level = getattr(runnable, "thinking_level", None) or model_kwargs.get(
-        "thinking_level"
-    )
+    raw_level = gemini_thinking_level(runnable)
     if raw_level:
         value = str(raw_level).lower()
         return value if value in {"low", "medium", "high"} else "adaptive"
@@ -41,8 +59,11 @@ def extract_vendor_reasoning_config(
     """Capture the raw provider-specific reasoning/thinking config for provenance."""
     model_kwargs = getattr(runnable, "model_kwargs", None) or {}
 
-    thinking_level = getattr(runnable, "thinking_level", None) or model_kwargs.get(
-        "thinking_level"
+    thinking_level = (
+        gemini_thinking_level(runnable)
+        if provider == "google"
+        else getattr(runnable, "thinking_level", None)
+        or model_kwargs.get("thinking_level")
     )
     if thinking_level is not None:
         return {

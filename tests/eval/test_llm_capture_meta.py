@@ -1,6 +1,56 @@
+from types import SimpleNamespace
 from unittest.mock import Mock
 
-from src.eval.llm_capture_meta import extract_token_usage
+from src.eval.llm_capture_meta import (
+    extract_token_usage,
+    extract_vendor_reasoning_config,
+    gemini_thinking_level,
+    normalize_reasoning_level,
+)
+
+
+def test_gemini_thinking_level_reads_legacy_attribute():
+    runnable = SimpleNamespace(thinking_level="high", model_kwargs={})
+
+    assert gemini_thinking_level(runnable) == "high"
+
+
+def test_gemini_thinking_level_reads_new_reasoning_effort_attribute():
+    runnable = SimpleNamespace(reasoning_effort="medium", model_kwargs={})
+
+    assert gemini_thinking_level(runnable) == "medium"
+
+
+def test_gemini_thinking_level_preserves_model_kwargs_fallback():
+    runnable = SimpleNamespace(model_kwargs={"reasoning_effort": "low"})
+
+    assert gemini_thinking_level(runnable) == "low"
+
+
+def test_gemini_reasoning_provenance_keeps_canonical_thinking_level_name():
+    runnable = SimpleNamespace(reasoning_effort="high", model_kwargs={})
+
+    assert extract_vendor_reasoning_config(runnable, "google") == {
+        "provider": "google",
+        "name": "thinking_level",
+        "value": "high",
+    }
+
+
+def test_non_gemini_reasoning_provenance_keeps_reasoning_effort_name():
+    runnable = SimpleNamespace(reasoning_effort="high", model_kwargs={})
+
+    assert extract_vendor_reasoning_config(runnable, "openai") == {
+        "provider": "openai",
+        "name": "reasoning_effort",
+        "value": "high",
+    }
+
+
+def test_normalize_reasoning_level_supports_new_gemini_attribute():
+    runnable = SimpleNamespace(reasoning_effort="medium", model_kwargs={})
+
+    assert normalize_reasoning_level(runnable, "gemini-3.5-flash") == "medium"
 
 
 def test_extract_token_usage_delegates_to_shared_parser_for_gemini():

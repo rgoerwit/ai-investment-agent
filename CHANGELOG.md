@@ -9,10 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Cooled dependency refresh (August 2026)** — Move the LangChain, LangGraph,
+  Gemini/OpenAI/Anthropic, LangSmith/Langfuse, yfinance, scientific, optional
+  OpenTelemetry, and development-tool dependencies to deliberately reviewed
+  releases meeting the repository's 14-day routine cooldown. The mypy 2.3
+  transitive requirements `ast-serialize` and `librt` are explicitly held at
+  cooled versions, and previously unbounded integrations now have major-safe
+  ranges.
+
 - **Stronger static-analysis gate** — MyPy now checks function bodies that still lack complete signature annotations; the configured 235-file source gate remains clean without blanket ignores.
 - **Evidence provenance** — Deterministic legal and management-guidance preloads have distinct `preflight` provenance, and foreign-language normalization consumes one canonical typed evidence-record contract.
 
 ### Fixed
+
+- **Gemini reasoning provenance across adapter versions** — Read the configured
+  thinking level through both the legacy `thinking_level` attribute and the
+  4.3+ `reasoning_effort` field, while removing the obsolete post-construction
+  attribute assignment.
 
 - **ASX screener universe** — Replace the retired listed-companies CSV with the
   current ASX directory feed and remove the obsolete leading-row skip.
@@ -22,6 +35,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PKCS#7 EnvelopedData decryption finding reported as CVE-2026-69247.
 - **Legal-provider failure semantics** — An unavailable Legal Counsel no longer fabricates PFIC/CMIC uncertainty or adds issuer-risk points; it emits one zero-penalty, BUY-blocking coverage flag and leaves legal dimensions unassessed.
 - **Malformed legal JSON recovery** — Exact key boundaries prevent prefixed or suffixed decoy fields from being recovered as PFIC, VIE, or CMIC evidence.
+
+### Security
+
+- **Deferred h2 advisory** — OSV reports GHSA-6hr6-w5qg-qmwg / CVE-2026-71554
+  for locked `h2` 4.3.0. The fixed 4.4.1 release remains inside the seven-day
+  security cooldown; the repository does not enable HTTP/2, so the affected
+  downgrade/request-smuggling path is not reachable by the current client or
+  local HTTP/1.1 dashboard. Recheck after 2026-08-10 and upgrade when the
+  cooldown is satisfied.
 
 ## [3.14.0] - 2026-07-30
 
