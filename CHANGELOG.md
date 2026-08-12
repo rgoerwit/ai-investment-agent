@@ -38,12 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **Deferred h2 advisory** — OSV reports GHSA-6hr6-w5qg-qmwg / CVE-2026-71554
-  for locked `h2` 4.3.0. The fixed 4.4.1 release remains inside the seven-day
-  security cooldown; the repository does not enable HTTP/2, so the affected
-  downgrade/request-smuggling path is not reachable by the current client or
-  local HTTP/1.1 dashboard. Recheck after 2026-08-10 and upgrade when the
-  cooldown is satisfied.
+- **h2 and pypdf security findings** — Update `h2` to 4.4.1 after its seven-day
+  security cooldown. Update `pypdf` to 6.15.0 as an owner-approved five-day
+  exception: Snyk reported excessive-iteration and excessive-memory-allocation
+  flaws, and the Auditor parses externally retrieved PDF documents. The latter
+  update is intentionally earlier than the normal cooldown because the exposed
+  parser path makes the denial-of-service risk material.
 
 ## [3.14.0] - 2026-07-30
 

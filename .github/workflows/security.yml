@@ -637,7 +637,7 @@ jobs:
 
       # Analyze dependency changes introduced in the PR
       - name: Dependency Review
-        uses: actions/dependency-review-action@v4
+        uses: actions/dependency-review-action@v5
         with:
           # Fail if vulnerabilities are introduced with these severities
           fail-on-severity: critical
@@ -669,7 +669,10 @@ jobs:
           #   "BSD-3-Clause AND LicenseRef-scancode-protobuf" (scancode surfaced the
           #   Google protobuf license ref on the 6->7 bump). Same permissive license as
           #   6.x carried; scoped exception rather than globally allowing the scancode ref.
-          allow-dependencies-licenses: pkg:pypi/aiohappyeyeballs, pkg:pypi/et-xmlfile, pkg:pypi/frozendict, pkg:pypi/lxml, pkg:pypi/matplotlib, pkg:pypi/parso, pkg:pypi/protobuf, pkg:pypi/pycryptodome, pkg:pypi/python-dateutil, pkg:pypi/regex, pkg:pypi/structlog, pkg:pypi/typing-extensions, pkg:pypi/xlrd
+          # - langfuse: PyPI and upstream declare MIT, but dependency review reports
+          #   "MIT AND Zlib". Both are permissive; scope the review exception rather
+          #   than globally accepting a license expression not otherwise observed here.
+          allow-dependencies-licenses: pkg:pypi/aiohappyeyeballs, pkg:pypi/et-xmlfile, pkg:pypi/frozendict, pkg:pypi/langfuse, pkg:pypi/lxml, pkg:pypi/matplotlib, pkg:pypi/parso, pkg:pypi/protobuf, pkg:pypi/pycryptodome, pkg:pypi/python-dateutil, pkg:pypi/regex, pkg:pypi/structlog, pkg:pypi/typing-extensions, pkg:pypi/xlrd
           # Comment on PR with dependency changes
           comment-summary-in-pr: always
           # GitHub can lag when producing dependency graph snapshots for the PR
