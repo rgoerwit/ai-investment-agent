@@ -641,6 +641,15 @@ def extract_capital_efficiency_signals(fundamentals_report: str) -> dict[str, An
         if value != "N/A":
             signals["capital_plan_status"] = value
 
+    cash_persistence_match = re.search(
+        r"CASH_EXCESS_PERSISTENCE:\s*"
+        r"(PERSISTENT_EXCESS|NOT_PERSISTENT|UNKNOWN)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if cash_persistence_match:
+        signals["cash_excess_persistence"] = cash_persistence_match.group(1).upper()
+
     plan_strength_match = re.search(
         r"VALUE_UP_PLAN_STRENGTH:\s*(STRONG|MODERATE|WEAK|NONE|UNKNOWN|N/A)",
         data_block,

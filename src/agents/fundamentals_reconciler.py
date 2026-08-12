@@ -432,6 +432,20 @@ def reconcile_high_risk_fields(
     market_cap = as_float(payload.get("marketCap"))
     total_assets = as_float(payload.get("totalAssets"))
     capital_cash_to_assets = as_float(payload.get("capital_cashToAssets"))
+    raw_cash_excess_persistence = payload.get("capital_cashExcessPersistence")
+    if raw_cash_excess_persistence is not None:
+        cash_excess_persistence = str(raw_cash_excess_persistence).upper()
+        if cash_excess_persistence not in {
+            "PERSISTENT_EXCESS",
+            "NOT_PERSISTENT",
+            "UNKNOWN",
+        }:
+            cash_excess_persistence = "UNKNOWN"
+        updated = replace_or_append_block_line(
+            updated,
+            "CASH_EXCESS_PERSISTENCE",
+            cash_excess_persistence,
+        )
 
     net_debt_ebitda = (
         (total_debt - cash_and_short_term) / ebitda

@@ -1011,6 +1011,7 @@ def detect_capital_efficiency_flags(
     roe_roic_ratio = metrics.get("roe_roic_ratio")
     net_cash_to_mc = metrics.get("net_cash_to_market_cap")
     cash_to_assets = metrics.get("cash_to_assets")
+    cash_excess_persistence = metrics.get("cash_excess_persistence")
     capex_to_da_status = metrics.get("capex_to_da_status")
     revenue_backlog_coverage = metrics.get("revenue_backlog_coverage")
     payout_ratio = base_metrics.get("payout_ratio")
@@ -1155,7 +1156,8 @@ def detect_capital_efficiency_flags(
     )
     mitigated = deployment_mitigated or capex_to_da_status == "GROWTH_INVESTING"
     severe_idle_cash = (
-        net_cash_to_mc is not None
+        cash_excess_persistence != "NOT_PERSISTENT"
+        and net_cash_to_mc is not None
         and net_cash_to_mc >= config.idle_cash_severe_net_cash_to_mc_threshold
         and roic_quality in {"WEAK", "DESTRUCTIVE"}
         and capital_plan_status == "NONE"
@@ -1182,9 +1184,11 @@ def detect_capital_efficiency_flags(
             ticker=ticker,
             net_cash_to_market_cap=net_cash_to_mc,
             cash_to_assets=cash_to_assets,
+            cash_excess_persistence=cash_excess_persistence,
         )
     elif (
         excess_cash
+        and cash_excess_persistence != "NOT_PERSISTENT"
         and weak_deployment
         and weak_shareholder_return
         and capital_plan_status == "NONE"
@@ -1205,6 +1209,7 @@ def detect_capital_efficiency_flags(
             ticker=ticker,
             net_cash_to_market_cap=net_cash_to_mc,
             cash_to_assets=cash_to_assets,
+            cash_excess_persistence=cash_excess_persistence,
         )
 
     return flags

@@ -138,6 +138,62 @@ def _statement_sum_series(
     return values
 
 
+def _cash_and_short_term_investments_value(
+    balance_sheet: pd.DataFrame,
+    col: int,
+) -> float | None:
+    """Return one period's cash balance without double-counting investments."""
+    combined = statement_value(
+        balance_sheet,
+        "cash_and_short_term_investments",
+        col=col,
+    )
+    if combined is not None:
+        return combined
+
+    cash = statement_value(balance_sheet, "cash_only", col=col)
+    if cash is None:
+        return None
+    short_term_investments = statement_value(
+        balance_sheet,
+        "short_term_investments",
+        col=col,
+    )
+    return cash + (short_term_investments or 0.0)
+
+
+def classify_cash_excess_persistence(
+    balance_sheet: pd.DataFrame,
+    *,
+    threshold: float,
+) -> str:
+    """Classify excess cash across the three latest paired annual periods."""
+    required_periods = 3
+    if balance_sheet.empty or len(balance_sheet.columns) < required_periods:
+        return "UNKNOWN"
+
+    cash_to_assets: list[float] = []
+    for col in range(required_periods):
+        cash = _cash_and_short_term_investments_value(balance_sheet, col)
+        total_assets = statement_value(balance_sheet, "total_assets", col=col)
+        if (
+            cash is None
+            or not math.isfinite(cash)
+            or cash < 0
+            or total_assets is None
+            or not math.isfinite(total_assets)
+            or total_assets <= 0
+        ):
+            return "UNKNOWN"
+        cash_to_assets.append(cash / total_assets)
+
+    return (
+        "PERSISTENT_EXCESS"
+        if all(ratio >= threshold for ratio in cash_to_assets)
+        else "NOT_PERSISTENT"
+    )
+
+
 def calculate_cagr_from_latest_series(values_latest_first: list[float]) -> float | None:
     """Return CAGR from annual values ordered newest to oldest."""
     if len(values_latest_first) < 4:
@@ -846,6 +902,10 @@ def calculate_capital_efficiency_signals(
                     tax_rate = float(val)
 
         if not balance_sheet.empty and len(balance_sheet.columns) > 0:
+            signals["capital_cashExcessPersistence"] = classify_cash_excess_persistence(
+                balance_sheet,
+                threshold=config.idle_cash_cash_to_assets_threshold,
+            )
             if "Invested Capital" in balance_sheet.index:
                 val = balance_sheet.loc["Invested Capital"].iloc[0]
                 if pd.notna(val) and val > 0:
@@ -869,28 +929,7 @@ def calculate_capital_efficiency_signals(
                 if pd.notna(val):
                     total_assets = float(val)
             if cash is None:
-                used_combined_cash_row = False
-                for cash_row in [
-                    "Cash And Short Term Investments",
-                    "Cash And Cash Equivalents",
-                    "Cash",
-                ]:
-                    if cash_row in balance_sheet.index:
-                        val = balance_sheet.loc[cash_row].iloc[0]
-                        if pd.notna(val):
-                            cash = float(val)
-                            used_combined_cash_row = (
-                                cash_row == "Cash And Short Term Investments"
-                            )
-                            break
-                if (
-                    cash is not None
-                    and not used_combined_cash_row
-                    and "Short Term Investments" in balance_sheet.index
-                ):
-                    sti = balance_sheet.loc["Short Term Investments"].iloc[0]
-                    if pd.notna(sti):
-                        cash += float(sti)
+                cash = _cash_and_short_term_investments_value(balance_sheet, 0)
 
         if cashflow is not None and not cashflow.empty and len(cashflow.columns) > 0:
             if "Capital Expenditure" in cashflow.index:

@@ -372,6 +372,25 @@ CASH_TO_ASSETS: 33.1%
     assert "BALANCE_SHEET_DATA_QUALITY_NOTE:" in sanitized
 
 
+def test_sanitize_fundamentals_output_promotes_cash_excess_persistence() -> None:
+    content = """### --- START DATA_BLOCK ---
+CASH_TO_ASSETS: 28.0%
+CASH_EXCESS_PERSISTENCE: PERSISTENT_EXCESS
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "capital_cashToAssets": 0.28,
+            "capital_cashExcessPersistence": "NOT_PERSISTENT",
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "TEST")
+
+    assert "CASH_EXCESS_PERSISTENCE: NOT_PERSISTENT" in sanitized
+    assert "CASH_EXCESS_PERSISTENCE: PERSISTENT_EXCESS" not in sanitized
+
+
 def test_sanitize_fundamentals_output_extracts_non_first_tool_payload() -> None:
     content = """### --- START DATA_BLOCK ---
 NET_DEBT_EBITDA: -0.01
