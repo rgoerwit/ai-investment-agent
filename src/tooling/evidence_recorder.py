@@ -300,8 +300,36 @@ class EvidenceRecorder:
 
     def __init__(self) -> None:
         self._records: list[EvidenceRecord] = []
-        self._dedupe_keys: set[tuple[str | None, str, str]] = set()
+        self._dedupe_keys: set[tuple[str | None, str, str, tuple[str, ...]]] = set()
         self._content_chars = 0
+        self._overflowed = False
+
+    def _record_overflow(self) -> None:
+        """Append a single durable marker when the ledger hits its capacity.
+
+        Without this the recorder silently drops evidence past the cap, leaving
+        no trace that the ledger is incomplete. Idempotent — one marker per run.
+        """
+        if self._overflowed:
+            return
+        self._overflowed = True
+        self._records.append(
+            EvidenceRecord(
+                sequence=len(self._records) + 1,
+                agent_key=None,
+                tool_name="__ledger_overflow__",
+                source="evidence_recorder",
+                content="",
+                content_sha256="",
+                requested_urls=(),
+                urls=(),
+                blocked=False,
+                findings=("EVIDENCE_LEDGER_CAPACITY_REACHED",),
+                execution_status="SKIPPED",
+                evidence_status="UNAVAILABLE",
+                reason="LEDGER_OVERFLOW",
+            )
+        )
 
     async def before(self, call: ToolInvocation) -> ToolInvocation:
         return call
@@ -314,13 +342,18 @@ class EvidenceRecorder:
             blocked=result.blocked,
         )
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        dedupe_key = (call.agent_key, call.name, digest)
+        requested_urls = _requested_urls(call.args)
+        # Include the requested-URL identity in the dedupe key: byte-identical
+        # content fetched from two DIFFERENT source URLs is two corroborating
+        # sources, not a duplicate, and must keep both identities.
+        dedupe_key = (call.agent_key, call.name, digest, requested_urls)
         if dedupe_key in self._dedupe_keys:
             return result
         if (
             len(self._records) >= _MAX_RECORDS
             or self._content_chars + len(content) > _MAX_TOTAL_CONTENT_CHARS
         ):
+            self._record_overflow()
             return result
         self._dedupe_keys.add(dedupe_key)
         urls = tuple(
@@ -338,7 +371,7 @@ class EvidenceRecorder:
                 source=call.source,
                 content=content,
                 content_sha256=digest,
-                requested_urls=_requested_urls(call.args),
+                requested_urls=requested_urls,
                 urls=urls,
                 blocked=result.blocked,
                 findings=tuple(result.findings or ()),

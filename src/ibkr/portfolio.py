@@ -204,9 +204,12 @@ def normalize_positions(
             _position_field(raw, "avgCost", "avgPrice")
         )
         raw_unrealized_pnl_value = raw.get("unrealizedPnl")
-        raw_unrealized_pnl, pnl_valid = _parse_position_number(raw_unrealized_pnl_value)
-        if raw_unrealized_pnl_value is None:
-            raw_unrealized_pnl = None
+        parsed_unrealized_pnl, pnl_valid = _parse_position_number(
+            raw_unrealized_pnl_value
+        )
+        raw_unrealized_pnl = (
+            None if raw_unrealized_pnl_value is None else parsed_unrealized_pnl
+        )
         numeric_validity = {
             "quantity": quantity_valid,
             "market_value": market_value_valid,
@@ -329,8 +332,10 @@ def _parse_conid(raw_conid: object) -> int | None:
     """Return a valid IBKR conid, or None when the raw payload is not usable."""
     if isinstance(raw_conid, bool):
         return None
+    if not isinstance(raw_conid, str | int | float):
+        return None
     try:
-        conid = int(raw_conid)  # type: ignore[arg-type]
+        conid = int(raw_conid)
     except (TypeError, ValueError):
         return None
     return conid if conid > 0 else None

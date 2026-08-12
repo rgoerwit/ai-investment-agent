@@ -4,6 +4,11 @@ from unittest.mock import Mock, patch
 import pytest
 
 from src.agents.forensic_repair import canonicalize_forensic_auditor_output
+from src.agents.management_guidance import (
+    GUIDANCE_PROMOTION_FIELDS,
+    _build_unresolved_guidance_block,
+    backfill_guidance_contract,
+)
 from src.agents.output_validation import (
     extract_completion_tokens,
     get_configured_output_cap,
@@ -11,6 +16,13 @@ from src.agents.output_validation import (
     log_truncation_diagnostic,
     should_fail_closed,
     validate_required_output,
+)
+from src.data_block_utils import extract_block_text_value
+from src.earnings_baseline import (
+    REQUIRED_GUIDANCE_CONTRACT_ENUMS,
+    REQUIRED_GUIDANCE_CONTRACT_FIELDS,
+    guidance_contract_value_is_uninterpretable,
+    requires_eps_growth_withholding,
 )
 
 
@@ -57,6 +69,148 @@ GUIDANCE_BRIDGE_STATUS: NOT_APPLICABLE
     assert validation["missing"] == []
 
 
+def test_every_required_guidance_field_has_a_code_owned_producer():
+    """A validator-required field the code cannot produce is an unfixable rejection.
+
+    GUIDANCE_BRIDGE_STATUS became unconditionally required while appearing in zero
+    prompts and having no Senior-side producer, so any run whose Foreign Language
+    Analyst degraded lost its entire Portfolio Manager verdict. This asserts the
+    structural property that made that possible can never recur: every required
+    field must be promotable *and* emitted by the conservative fallback block.
+    """
+    required = set(REQUIRED_GUIDANCE_CONTRACT_FIELDS)
+
+    assert required == set(REQUIRED_GUIDANCE_CONTRACT_ENUMS), (
+        "REQUIRED_GUIDANCE_CONTRACT_FIELDS and _ENUMS disagree; both are consumed "
+        "by _promoted_management_guidance_issue"
+    )
+    assert required <= set(GUIDANCE_PROMOTION_FIELDS.values()), (
+        "a required guidance field is not promotable from the FLA block: "
+        f"{sorted(required - set(GUIDANCE_PROMOTION_FIELDS.values()))}"
+    )
+
+    fallback = _build_unresolved_guidance_block({}, "")
+    for source_field, target_field in GUIDANCE_PROMOTION_FIELDS.items():
+        if target_field not in required:
+            continue
+        value = extract_block_text_value(fallback, source_field)
+        assert value, f"{target_field} has no conservative fallback value"
+        assert (
+            value.strip().upper() in REQUIRED_GUIDANCE_CONTRACT_ENUMS[target_field]
+        ), f"{target_field} fallback {value!r} is outside its own enum"
+
+
+def test_absent_foreign_language_analyst_still_yields_a_valid_contract():
+    """The SAP.DE-class failure: a degraded FLA must not destroy the analysis."""
+    body = "SECTOR: Financials\nPE_RATIO_TTM: 13.30"
+
+    updated, backfilled = backfill_guidance_contract(body, "")
+    content = f"### --- START DATA_BLOCK ---\n{updated}\n### --- END DATA_BLOCK ---\n"
+
+    assert set(backfilled) == set(REQUIRED_GUIDANCE_CONTRACT_FIELDS)
+    assert validate_required_output("fundamentals_analyst", content)["ok"] is True
+    # Conservative, not merely valid: trailing EPS growth must stay unusable.
+    assert "GUIDANCE_BRIDGE_STATUS: UNRESOLVED" in updated
+    assert "GUIDANCE_COVERAGE_STATUS: SEARCH_FAILED" in updated
+    assert requires_eps_growth_withholding("UNKNOWN", "UNRESOLVED") is True
+
+
+def test_backfill_never_overwrites_promoted_guidance():
+    """Filling an absent field must never downgrade a sourced one."""
+    promoted = (
+        "GUIDANCE_COVERAGE_STATUS: FOUND\n"
+        "MATERIAL_NONOPERATING_DRIVER: NO\n"
+        "EARNINGS_BASELINE_STATUS: DURABLE\n"
+        "NORMALIZED_EARNINGS_AVAILABLE: YES\n"
+        "GUIDANCE_BRIDGE_STATUS: RECONCILED"
+    )
+
+    updated, backfilled = backfill_guidance_contract(promoted, "")
+
+    assert backfilled == ()
+    assert updated == promoted
+
+
+def test_backfill_replaces_an_out_of_enum_guidance_value():
+    """Models emit tokens the contract does not define; uninterpretable == absent.
+
+    Measured on the persisted corpus: five runs (6831.HK, AGS.BR, 6782.TW, GTT.PA,
+    2458.TW, all 2026-07-28) lost their Portfolio Manager to a literal
+    `GUIDANCE_COVERAGE_STATUS: MISSING` — present, so an absence-only predicate
+    skipped it, and out-of-enum, so the validator rejected it.
+    """
+    emitted = (
+        "GUIDANCE_COVERAGE_STATUS: MISSING\n"
+        "MATERIAL_NONOPERATING_DRIVER: UNKNOWN\n"
+        "EARNINGS_BASELINE_STATUS: UNKNOWN\n"
+        "NORMALIZED_EARNINGS_AVAILABLE: UNKNOWN\n"
+        "GUIDANCE_BRIDGE_STATUS: UNRESOLVED"
+    )
+
+    updated, backfilled = backfill_guidance_contract(emitted, "")
+    content = f"### --- START DATA_BLOCK ---\n{updated}\n### --- END DATA_BLOCK ---\n"
+
+    assert backfilled == ("GUIDANCE_COVERAGE_STATUS",)
+    assert "GUIDANCE_COVERAGE_STATUS: SEARCH_FAILED" in updated
+    assert "MISSING" not in updated
+    assert validate_required_output("fundamentals_analyst", content)["ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        # Null tokens the validator folds to UNKNOWN must survive untouched.
+        ("MATERIAL_NONOPERATING_DRIVER", "N/A"),
+        ("EARNINGS_BASELINE_STATUS", "N/A"),
+        # N/A is a first-class member of this field's enum.
+        ("NORMALIZED_EARNINGS_AVAILABLE", "N/A"),
+    ],
+)
+def test_backfill_preserves_values_the_validator_accepts(field: str, value: str):
+    """Replacement may only add meaning, never overwrite an acceptable value."""
+    assert guidance_contract_value_is_uninterpretable(field, value) is False
+
+
+def test_backfill_fills_only_the_missing_guidance_field():
+    """The retry path emits the four fields its correction names, and not the fifth."""
+    partial = (
+        "GUIDANCE_COVERAGE_STATUS: FOUND\n"
+        "MATERIAL_NONOPERATING_DRIVER: YES\n"
+        "EARNINGS_BASELINE_STATUS: TEMPORARILY_BOOSTED\n"
+        "NORMALIZED_EARNINGS_AVAILABLE: NO"
+    )
+
+    updated, backfilled = backfill_guidance_contract(partial, "")
+
+    assert backfilled == ("GUIDANCE_BRIDGE_STATUS",)
+    assert "GUIDANCE_COVERAGE_STATUS: FOUND" in updated
+    assert "EARNINGS_BASELINE_STATUS: TEMPORARILY_BOOSTED" in updated
+    assert "GUIDANCE_BRIDGE_STATUS: UNRESOLVED" in updated
+
+
+def test_backfill_reports_a_completed_search_without_inventing_one():
+    """Coverage status must reflect whether a search actually ran."""
+    ran = """
+### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
+SEARCHES_COMPLETED: results_package=SUCCEEDED/RESULTS_FOUND; earnings_bridge=SUCCEEDED/NO_RESULTS
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+    prose = """
+### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SEARCHES_COMPLETED: everything imaginable
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+
+    ran_body, _ = backfill_guidance_contract("SECTOR: Industrials", ran)
+    prose_body, _ = backfill_guidance_contract("SECTOR: Industrials", prose)
+
+    assert "GUIDANCE_COVERAGE_STATUS: UNRESOLVED_AFTER_TARGETED_SEARCH" in ran_body
+    # A self-attested prose value is not evidence a search ran.
+    assert "GUIDANCE_COVERAGE_STATUS: SEARCH_FAILED" in prose_body
+
+
 def test_fundamentals_validation_rejects_silently_dropped_guidance_fields():
     content = """
 ### --- START DATA_BLOCK ---
@@ -97,14 +251,16 @@ def _guidance_data_block(
     normalized_available: str,
     *,
     coverage: str = "NOT_DISCLOSED_AFTER_TARGETED_SEARCH",
+    material_driver: str = "UNKNOWN",
+    baseline_status: str = "UNKNOWN",
 ) -> str:
     return f"""
 ### --- START DATA_BLOCK ---
 RAW_HEALTH_SCORE: 7/12
 ADJUSTED_HEALTH_SCORE: 58%
 GUIDANCE_COVERAGE_STATUS: {coverage}
-MATERIAL_NONOPERATING_DRIVER: UNKNOWN
-EARNINGS_BASELINE_STATUS: UNKNOWN
+MATERIAL_NONOPERATING_DRIVER: {material_driver}
+EARNINGS_BASELINE_STATUS: {baseline_status}
 NORMALIZED_EARNINGS_AVAILABLE: {normalized_available}
 GUIDANCE_BRIDGE_STATUS: NOT_APPLICABLE
 ### --- END DATA_BLOCK ---
@@ -137,6 +293,19 @@ def test_guidance_validation_accepts_valid_normalized_earnings_tokens(token):
 def test_guidance_validation_normalizes_na_case_and_whitespace(token):
     validation = validate_required_output(
         "fundamentals_analyst", _guidance_data_block(token)
+    )
+
+    assert validation["ok"] is True
+
+
+def test_guidance_validation_accepts_na_as_semantically_unknown():
+    validation = validate_required_output(
+        "fundamentals_analyst",
+        _guidance_data_block(
+            "N/A",
+            material_driver="N/A",
+            baseline_status="N/A",
+        ),
     )
 
     assert validation["ok"] is True
@@ -358,7 +527,7 @@ def test_auditor_validation_rejects_status_only_stub():
 
 
 def test_auditor_validation_accepts_legacy_forensic_block():
-    content = "FORENSIC_DATA_BLOCK:\n" "STATUS: CLEAN\n" "VERDICT: RELY_ON_DATA_BLOCK\n"
+    content = "FORENSIC_DATA_BLOCK:\nSTATUS: CLEAN\nVERDICT: RELY_ON_DATA_BLOCK\n"
 
     validation = validate_required_output("global_forensic_auditor", content)
 

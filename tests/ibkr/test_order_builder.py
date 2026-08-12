@@ -55,6 +55,19 @@ R:R: 0:1
 SPECIAL: $162 avg daily turnover makes this security uninvestable.
 """
 
+    DO_NOT_INITIATE = """
+TRADE_BLOCK:
+ACTION: DO_NOT_INITIATE
+SIZE: 0.0%
+CONVICTION: High
+ENTRY: N/A (Thesis fail)
+STOP: N/A
+TARGET_1: N/A
+TARGET_2: N/A
+HORIZON: N/A
+SPECIAL: Growth gate failed; no initiation.
+"""
+
     CODE_FENCED = """
 Here is the trade plan:
 
@@ -101,6 +114,25 @@ SPECIAL: HKD exposure; board lot 400 shares.
         assert result.entry_price is None
         assert result.stop_price is None
         assert result.target_1_price is None
+
+    def test_do_not_initiate(self):
+        """The current vocabulary (trader.json v4.3 retired SELL/REJECT for this)."""
+        result = parse_trade_block(self.DO_NOT_INITIATE)
+        assert result is not None
+        assert result.action == "DO_NOT_INITIATE"
+        assert result.size_pct == 0.0
+        assert result.entry_price is None
+
+    def test_do_not_initiate_with_parenthetical_qualifier(self):
+        """The qualifier must be stripped, as it is for BUY/HOLD/REJECT.
+
+        Without DO_NOT_INITIATE in PARSEABLE_TRADE_ACTIONS the fallback branch kept
+        the whole string, and serializers.py passes .action verbatim to the dashboard.
+        """
+        text = "TRADE_BLOCK:\nACTION: DO_NOT_INITIATE (Mandate fail)\nSIZE: 0.0%\n"
+        result = parse_trade_block(text)
+        assert result is not None
+        assert result.action == "DO_NOT_INITIATE"
 
     def test_code_fenced(self):
         result = parse_trade_block(self.CODE_FENCED)

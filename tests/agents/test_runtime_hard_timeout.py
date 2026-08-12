@@ -32,6 +32,7 @@ from langchain_core.messages import AIMessage
 
 from src.agents import invoke_with_rate_limit_handling
 from src.config import config as settings_config
+from src.runtime_diagnostics import FailureDetails
 
 
 @pytest.fixture(autouse=True)
@@ -115,6 +116,186 @@ class TestApexQuickHardTimeout:
             settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
         )
         assert quick_mode_hard_timeout_seconds("News Analyst", settings_config) == 60.0
+
+    def test_decorated_context_still_resolves_to_its_seat_budget(self, monkeypatch):
+        """Call sites decorate the context; a raw membership test missed them all.
+
+        Live defect this pins: the deep-model retry of a gate-critical seat is
+        invoked as "Fundamentals Analyst (RETRY-HIGH)", which resolved to the 60s
+        flat cap — a *smaller* per-call budget than its own first attempt, inside
+        an outer allowance that had correctly been sized at 180s.
+        """
+        from src.agents.runtime import quick_mode_hard_timeout_seconds
+
+        monkeypatch.setattr(
+            settings_config, "apex_quick_llm_call_hard_timeout_seconds", 180.0
+        )
+        monkeypatch.setattr(
+            settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
+        )
+        for context in (
+            "Fundamentals Analyst (RETRY-HIGH)",
+            "Portfolio Manager (RETRY-HIGH)",
+        ):
+            assert quick_mode_hard_timeout_seconds(context, settings_config) == 180.0
+        # Decoration must not promote a cheap agent.
+        assert (
+            quick_mode_hard_timeout_seconds("Bull Researcher R2", settings_config)
+            == 60.0
+        )
+
+    def test_cross_check_seats_get_the_vendor_latency_budget(self, monkeypatch):
+        """Consultant + Auditor are budgeted for vendor latency, not criticality.
+
+        Both can be pointed at an OpenAI-compatible endpoint whose reasoning model
+        outruns the flat cap: on 2026-08-03 kimi-k3 blew the 60s quick cap on 6/6
+        smoke-suite tickers and every baseline capture was rejected.
+        """
+        from src.agents.runtime import (
+            CROSS_CHECK_SEAT_CONTEXTS,
+            quick_mode_hard_timeout_seconds,
+        )
+
+        monkeypatch.setattr(
+            settings_config, "cross_check_quick_llm_call_hard_timeout_seconds", 180.0
+        )
+        monkeypatch.setattr(
+            settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
+        )
+        for context in CROSS_CHECK_SEAT_CONTEXTS:
+            assert quick_mode_hard_timeout_seconds(context, settings_config) == 180.0
+        # The real, decorated call-site spellings must resolve too.
+        for context in (
+            "Global Forensic Accountant",
+            "Global Forensic Accountant_final_synthesis",
+            "Global Forensic Auditor Escalation",
+            "External Consultant",
+            "External Consultant_final_synthesis",
+        ):
+            assert quick_mode_hard_timeout_seconds(context, settings_config) == 180.0
+
+    def test_cross_check_budget_is_independent_of_the_apex_budget(self, monkeypatch):
+        """Separate knobs: tuning one must not silently starve the other."""
+        from src.agents.runtime import quick_mode_hard_timeout_seconds
+
+        monkeypatch.setattr(
+            settings_config, "apex_quick_llm_call_hard_timeout_seconds", 90.0
+        )
+        monkeypatch.setattr(
+            settings_config, "cross_check_quick_llm_call_hard_timeout_seconds", 240.0
+        )
+        monkeypatch.setattr(
+            settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
+        )
+        assert (
+            quick_mode_hard_timeout_seconds("Portfolio Manager", settings_config)
+            == 90.0
+        )
+        assert quick_mode_hard_timeout_seconds("Consultant", settings_config) == 240.0
+
+    def test_every_gate_critical_call_site_resolves_to_its_seat_budget(
+        self, monkeypatch
+    ):
+        """Source-driven: enumerate real call sites instead of hand-picked strings.
+
+        The previous test listed spellings by hand and therefore could not catch
+        an omission — which is exactly how "Portfolio Manager structure
+        correction", "Portfolio Manager trace correction", "pm_verdict_recovery"
+        and "global_forensic_auditor_repair" all silently kept the 60s flat cap
+        while enforcing the final recommendation's evidence contract.
+
+        Any invoke call site whose ``context`` is a decorated or free-form string
+        must pass an explicit ``canonical_agent``; this scans ``src/agents`` and
+        fails if a gate-critical/cross-check seat is left to derivation.
+        """
+        from src.agents.runtime import (
+            APEX_SEAT_CONTEXTS,
+            CROSS_CHECK_SEAT_CONTEXTS,
+            quick_mode_hard_timeout_seconds,
+        )
+
+        monkeypatch.setattr(
+            settings_config, "apex_quick_llm_call_hard_timeout_seconds", 180.0
+        )
+        monkeypatch.setattr(
+            settings_config, "cross_check_quick_llm_call_hard_timeout_seconds", 180.0
+        )
+        monkeypatch.setattr(
+            settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
+        )
+
+        big_seats = set(APEX_SEAT_CONTEXTS) | set(CROSS_CHECK_SEAT_CONTEXTS)
+        agents_dir = Path(__file__).resolve().parents[2] / "src" / "agents"
+        offenders: list[str] = []
+
+        for path in sorted(agents_dir.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                kwargs = {
+                    kw.arg: kw.value for kw in node.keywords if kw.arg is not None
+                }
+                if "context" not in kwargs:
+                    continue
+                ctx, canon = kwargs["context"], kwargs.get("canonical_agent")
+                # A plain literal is self-describing; derivation handles it.
+                if isinstance(ctx, ast.Constant) and isinstance(ctx.value, str):
+                    if quick_mode_hard_timeout_seconds(ctx.value) == 60.0 and any(
+                        seat.lower().split()[0] in ctx.value.lower()
+                        or ctx.value.lower().startswith(("pm_", "global_forensic"))
+                        for seat in big_seats
+                    ):
+                        if canon is None:
+                            offenders.append(f"{path.name}: context={ctx.value!r}")
+                    continue
+                # An f-string context decorates a seat name -> must be explicit.
+                if isinstance(ctx, ast.JoinedStr) and canon is None:
+                    literal = "".join(
+                        part.value
+                        for part in ctx.values
+                        if isinstance(part, ast.Constant)
+                    )
+                    if literal.strip():
+                        offenders.append(f"{path.name}: decorated context {literal!r}")
+
+        assert not offenders, (
+            "invoke call sites must pass canonical_agent so seat budgets apply:\n  "
+            + "\n  ".join(offenders)
+        )
+
+    def test_explicit_canonical_agent_overrides_a_freeform_context(self, monkeypatch):
+        """The corrections that enforce the PM's evidence contract get 180s."""
+        from src.agents.runtime import quick_mode_hard_timeout_seconds
+
+        monkeypatch.setattr(
+            settings_config, "apex_quick_llm_call_hard_timeout_seconds", 180.0
+        )
+        monkeypatch.setattr(
+            settings_config, "cross_check_quick_llm_call_hard_timeout_seconds", 180.0
+        )
+        monkeypatch.setattr(
+            settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
+        )
+        for context, seat in (
+            ("pm_verdict_recovery", "Portfolio Manager"),
+            ("Portfolio Manager structure correction", "Portfolio Manager"),
+            ("Portfolio Manager trace correction", "Portfolio Manager"),
+            ("Fundamentals Analyst structure correction", "Fundamentals Analyst"),
+            ("global_forensic_auditor_repair", "Global Forensic Auditor"),
+        ):
+            assert (
+                quick_mode_hard_timeout_seconds(
+                    context, settings_config, canonical_agent=seat
+                )
+                == 180.0
+            ), context
+        # Without the explicit identity these free-form contexts are unrecognizable,
+        # which is precisely why the call sites must supply it.
+        assert (
+            quick_mode_hard_timeout_seconds("pm_verdict_recovery", settings_config)
+            == 60.0
+        )
 
     def test_apex_seat_contexts_match_prompt_agent_names(self):
         # APEX_SEAT_CONTEXTS must equal the on-disk agent_name of the two APEX
@@ -611,6 +792,38 @@ class TestProviderPartialResponseDetection:
 
 
 class TestProviderPartialResponseRetry:
+    @pytest.mark.asyncio
+    async def test_runtime_obeys_classifier_retryable_flag(self):
+        """The classifier, not a second runtime kind list, owns retryability."""
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(
+            side_effect=[RuntimeError("first"), AIMessage(content="recovered")]
+        )
+        details = FailureDetails(
+            kind="model_not_found",
+            provider="unknown",
+            host=None,
+            error_type="RuntimeError",
+            root_cause_type="RuntimeError",
+            retryable=True,
+            message="first",
+        )
+
+        with (
+            patch("src.agents.runtime.classify_failure", return_value=details),
+            patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            result = await invoke_with_rate_limit_handling(
+                runnable,
+                {"input": "x"},
+                max_attempts=2,
+                max_transient_attempts=2,
+                context="ClassifierRetryAuthority",
+            )
+
+        assert runnable.ainvoke.await_count == 2
+        assert result.content == "recovered"
+
     @pytest.mark.asyncio
     async def test_partial_response_triggers_retry_and_recovers(self):
         """First call returns a partial; second returns a clean stop."""

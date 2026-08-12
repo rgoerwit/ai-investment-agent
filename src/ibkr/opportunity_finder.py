@@ -94,7 +94,7 @@ def find_opportunities(
             prior_verdicts = load_recent_same_ticker_verdicts(
                 ticker,
                 lookback_days=stability_cfg.lookback_days,
-                results_dir=config.results_dir,
+                results_dir=str(config.results_dir),
                 exclude_path=analysis.file_path or None,
             )
             withhold_reason = assess_buy_stability(
@@ -102,6 +102,7 @@ def find_opportunities(
                 prior_verdicts,
                 risk_tally=analysis.risk_tally,
                 active_flags=analysis.quality_flag_types,
+                flags_available=analysis.quality_flags_available,
                 cfg=stability_cfg,
             )
             if withhold_reason:

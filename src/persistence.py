@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -317,6 +318,28 @@ def build_run_summary(
     # content — the same parser the PM uses to raise CONSULTANT_* flags — so the
     # memo/source-confidence renderers can branch on a single ready value.
     consultant_verdict = _derive_consultant_verdict(consultant_status)
+    consultant_review_status = (
+        "NOT_RUN"
+        if consultant_verdict == "NOT_RUN"
+        else "SKIPPED"
+        if consultant_verdict == "SKIPPED"
+        else "FAILED"
+        if consultant_verdict == "ERROR"
+        else "UNPARSED"
+        if consultant_verdict == "UNPARSED"
+        else "COMPLETED"
+    )
+    auditor_review_status = (
+        "NOT_RUN"
+        if not auditor_finished
+        else "FAILED"
+        if not auditor_status.get("ok")
+        else "UNPARSED"
+        if auditor_report_status is None
+        else "LIMITED"
+        if auditor_report_status in _AUDITOR_CAVEATED_STATUSES
+        else "COMPLETED"
+    )
 
     summary = {
         "quick_mode": quick_mode,
@@ -347,8 +370,12 @@ def build_run_summary(
         "auditor_finished": auditor_finished,
         "consultant_successful": bool(consultant_status.get("ok")),
         "consultant_verdict": consultant_verdict,
+        "consultant_review_status": consultant_review_status,
+        "consultant_review_scope": "BOUNDED_CROSS_CHECK_NOT_FACTUAL_PROOF",
         "auditor_successful": auditor_successful,
         "auditor_status": auditor_report_status,
+        "auditor_review_status": auditor_review_status,
+        "auditor_review_scope": "BOUNDED_FORENSIC_REVIEW_NOT_AUDIT_OPINION",
         "apac_specialist_completed": apac_finished,
         "apac_specialist_successful": bool(apac_status.get("ok")),
         "apac_specialist_status": (
@@ -411,8 +438,16 @@ def attach_run_summary(
     ``build_analysis_validity`` is imported lazily to avoid a module-level import
     cycle (``runtime_diagnostics`` imports from this module at call time).
     """
-    from src.runtime_diagnostics import build_analysis_validity
+    from src.runtime_diagnostics import (
+        build_analysis_validity,
+        stamp_provenance_contract,
+    )
 
+    # Any result reaching this enrichment chokepoint is a live analysis (main
+    # analyzer or portfolio_manager refresh) and is held to the fail-closed
+    # provenance contract. Idempotent with the main.py stamp; sets (not
+    # setdefault) so a stale/lower version cannot survive.
+    stamp_provenance_contract(result)
     result["analysis_validity"] = build_analysis_validity(result)
     result["run_summary"] = build_run_summary(
         result,
@@ -483,7 +518,8 @@ def save_results_to_file(
 
     `strict_mode` is recorded in the prediction_snapshot so retrospectives
     can weight strict-mode rejections differently from normal-mode ones
-    (strict mode rejects valid REIT/PFIC/VIE candidates at the gate).
+    (strict mode rejects valid REIT/ETF and earnings-quality candidates at the
+    gate; PFIC/VIE stay risk-penalty warnings in every mode).
     """
     from src.error_safety import summarize_exception
     from src.memory import get_ticker_memory_stats
@@ -501,6 +537,7 @@ def save_results_to_file(
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_id = trace_id or uuid.uuid4().hex
     filename = f"{ticker}_{timestamp}_analysis.json"
     filepath = results_dir / filename
 
@@ -541,6 +578,8 @@ def save_results_to_file(
     save_data = {
         "metadata": {
             "ticker": ticker,
+            "run_id": run_id,
+            "trace_id": trace_id,
             "company_name": result.get("company_name"),
             "company_name_resolved": bool(result.get("company_name_resolved", False)),
             "timestamp": timestamp,
@@ -656,6 +695,7 @@ def save_results_to_file(
         "structured_inputs": result.get("structured_inputs", {}),
         "analysis_snapshot": result.get("analysis_snapshot", {}),
         "decision_trace": result.get("decision_trace", {}),
+        "provenance_contract_version": result.get("provenance_contract_version"),
         "agent_attribution": _build_agent_attribution(
             result, (token_stats or {}).get("agents", {}) or {}
         ),

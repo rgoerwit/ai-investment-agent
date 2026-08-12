@@ -6,6 +6,7 @@ country-specific implementations like EDINET, DART, Companies House).
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -84,13 +85,18 @@ class FilingResult:
         sections.append("**OWNERSHIP STRUCTURE**")
         largest_shareholder = None
         if self.major_shareholders:
+
+            def shareholder_percent(shareholder: dict[Any, Any]) -> float:
+                value = shareholder.get("percent")
+                return (
+                    float(value)
+                    if isinstance(value, int | float) and not isinstance(value, bool)
+                    else -1.0
+                )
+
             largest_shareholder = max(
                 self.major_shareholders,
-                key=lambda shareholder: (
-                    shareholder.get("percent")
-                    if isinstance(shareholder.get("percent"), int | float)
-                    else -1
-                ),
+                key=shareholder_percent,
             )
             for sh in self.major_shareholders:
                 name = sh.get("name", "Unknown")

@@ -7,7 +7,9 @@ preload failure yields an unmodified first message and the prompt's fallback
 tool budget covers it.
 """
 
+import asyncio
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -468,3 +470,102 @@ class TestAuditorNodeWithPreload:
         assert telemetry["forced_synthesis_used"] is True
         assert telemetry["failed_tools"] == ["custom_forensic_check"]
         assert telemetry["synthesis_evidence_chars"] > 0
+
+
+class TestAuditorTotalBudget:
+    """An optional seat must never cost the ticker.
+
+    The auditor's preload, loop, tools, parameter-error fallback, escalation and
+    repair together can outlast the 600s Stage-1 watchdog, which SIGTERMs the
+    process and discards a valid analysis. A node-scoped *deadline* was not a
+    bound (it excluded preload/tools/escalation/repair, and a call starting just
+    under it could still run a full per-call cap past it), so the whole workflow
+    is hard-wrapped instead.
+    """
+
+    def _prompt(self):
+        return SimpleNamespace(
+            system_message="auditor prompt", agent_name="Forensic Auditor"
+        )
+
+    async def _run_with_budget(self, budget, node_body_delay):
+        """Drive the node with a slow inner workflow and a finite quick budget."""
+        from src.agents import consultant_nodes as cn
+        from src.runtime_config import RuntimeConfig, bind_runtime_config
+
+        mock_llm = SimpleNamespace(
+            model_name="gpt-5-mini",
+            bind_tools=MagicMock(return_value=SimpleNamespace(model_name="gpt-5-mini")),
+        )
+
+        async def slow_preload(*_a, **_k):
+            await asyncio.sleep(node_body_delay)
+            return ""
+
+        rc = RuntimeConfig.from_config(cn.settings_config)
+        object.__setattr__(rc, "quick_mode_active", True)
+        bind_runtime_config(rc)
+        try:
+            with (
+                patch.object(
+                    cn.settings_config, "auditor_quick_total_timeout_seconds", budget
+                ),
+                patch.object(cn, "_preload_metrics_snapshot", new=slow_preload),
+                patch(
+                    "src.agents.consultant_nodes.validate_required_output",
+                    return_value={"ok": True, "missing": []},
+                ),
+            ):
+                node = create_auditor_node(mock_llm, [])
+                return await node(
+                    {
+                        "company_of_interest": "2503.T",
+                        "company_name": "Kirin Holdings",
+                        "company_name_resolved": True,
+                    },
+                    {},
+                )
+        finally:
+            bind_runtime_config(RuntimeConfig.from_config(cn.settings_config))
+
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_work_that_crosses_the_deadline_is_cut_off(self, mock_get_prompt):
+        """The real failure mode: an operation that *starts* before expiry.
+
+        A budget-0 test only proves nothing begins; it cannot catch work that
+        overruns. Here the preload — which the earlier deadline did not even
+        cover — starts inside the budget and runs past it.
+        """
+        mock_get_prompt.return_value = self._prompt()
+        result = await self._run_with_budget(budget=0.05, node_body_delay=5.0)
+
+        report = result.get("auditor_report", "")
+        assert "INSUFFICIENT_DATA" in report
+        assert "budget" in report.lower()
+        assert result.get("sender") == "global_forensic_auditor"
+
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_node_returns_promptly_rather_than_awaiting_orphaned_work(
+        self, mock_get_prompt
+    ):
+        """The watchdog is protected by *returning*, not by the work finishing."""
+        mock_get_prompt.return_value = self._prompt()
+        started = time.monotonic()
+        await self._run_with_budget(budget=0.05, node_body_delay=10.0)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 5.0, (
+            f"node blocked {elapsed:.1f}s on orphaned work; the hard wrap must "
+            "return as soon as the budget expires"
+        )
+
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_full_mode_is_unbounded(self, mock_get_prompt):
+        """The budget is a quick-tier screening guard, not a full-mode ceiling."""
+        from src.agents import consultant_nodes as cn
+
+        mock_get_prompt.return_value = self._prompt()
+        assert cn.get_runtime_config(cn.settings_config).quick_mode_active is False

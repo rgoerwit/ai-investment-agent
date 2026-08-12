@@ -187,9 +187,9 @@ class TestHonestFallbackEventNames:
             for event in self._logger_event_names(_REPO_ROOT / rel):
                 if self._FALLBACK.search(event) and self._FAMILY.search(event):
                     offenders.append((rel, event))
-        assert (
-            offenders == []
-        ), f"Fallback-path event names must not hardcode a model family: {offenders}"
+        assert offenders == [], (
+            f"Fallback-path event names must not hardcode a model family: {offenders}"
+        )
 
     def test_old_hardcoded_gemini_fallback_event_gone(self):
         old_event = "claude_writer_failed_falling_back_to_gemini"

@@ -175,6 +175,275 @@ async def _create_accepted_rm_capture(tmp_path: Path, monkeypatch) -> Path:
     return run_dir
 
 
+async def _finalize_with_statuses(tmp_path, monkeypatch, statuses: dict) -> Path | None:
+    """Run one clean node, then finalize with a caller-supplied status set."""
+    manager = _make_manager(tmp_path, monkeypatch)
+    llm = StaticRunnable(AIMessage(content="investment plan body"))
+
+    async def fake_rm_node(state, config):
+        await invoke_with_rate_limit_handling(
+            llm,
+            [HumanMessage(content="Provide Investment Plan.")],
+            context="Research Manager",
+            provider="google",
+            model_name="test-model",
+        )
+        return success_artifact(
+            "investment_plan", "Investment plan body", provider="google"
+        )
+
+    await _run_wrapped(manager, "Research Manager", fake_rm_node)
+    return manager.finalize_run(
+        {
+            "analysis_validity": {"publishable": True},
+            "artifact_statuses": {
+                "investment_plan": _artifact_status(True),
+                **statuses,
+            },
+            "run_summary": {
+                "quick_model": "gemini-2.5-flash",
+                "deep_model": "gemini-2.5-pro",
+                "llm_provider": "google",
+                "llm_providers_used": ["google"],
+            },
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_failing_optional_node_does_not_reject_the_capture(tmp_path, monkeypatch):
+    """The live path: a *wrapped* optional node that actually fails.
+
+    Node-level invalidation runs first and latches, so exempting optional
+    artifacts only at finalization is dead code. Every 2026-08-03 capture
+    recorded ``first_rejection_stage='Auditor'`` — not 'finalize'. This test
+    wraps a genuinely failing Auditor rather than injecting a failed status at
+    the end, which is what the finalize-only test could not catch.
+    """
+    manager = _make_manager(tmp_path, monkeypatch)
+
+    async def failing_auditor_node(state, config):
+        return failure_artifact(
+            "auditor_report",
+            "'llm:Global Forensic Accountant:openai:kimi-k3' exceeded hard timeout",
+            provider="openai",
+        )
+
+    await _run_wrapped(manager, "Auditor", failing_auditor_node)
+    assert manager.rejected is False, (
+        "a failed optional seat must not reject the run at node level"
+    )
+
+    llm = StaticRunnable(AIMessage(content="investment plan body"))
+
+    async def fake_rm_node(state, config):
+        await invoke_with_rate_limit_handling(
+            llm,
+            [HumanMessage(content="Provide Investment Plan.")],
+            context="Research Manager",
+            provider="google",
+            model_name="test-model",
+        )
+        return success_artifact(
+            "investment_plan", "Investment plan body", provider="google"
+        )
+
+    await _run_wrapped(manager, "Research Manager", fake_rm_node)
+    run_dir = manager.finalize_run(
+        {
+            "analysis_validity": {"publishable": True},
+            "artifact_statuses": {
+                "investment_plan": _artifact_status(True),
+                "auditor_report": _artifact_status(False),
+            },
+            "run_summary": {
+                "quick_model": "gemini-2.5-flash",
+                "deep_model": "gemini-2.5-pro",
+                "llm_provider": "google",
+                "llm_providers_used": ["google"],
+            },
+        }
+    )
+
+    assert run_dir is not None
+    manifest = _read_json(run_dir / "run_manifest.json")
+    assert manifest["capture_status"] == "accepted"
+    assert "/accepted/" in str(run_dir)
+
+
+@pytest.mark.asyncio
+async def test_optional_failure_text_does_not_reject_via_error_marker_scan(
+    tmp_path, monkeypatch
+):
+    """Skipping artifact_failed is not enough on its own.
+
+    The generic recursive scan still reaches the optional artifact's body and its
+    status message, so a failure rendered with a "TOOL_ERROR:" prefix — which the
+    auditor/consultant loops emit verbatim — re-latches the rejection through a
+    different door.
+    """
+    manager = _make_manager(tmp_path, monkeypatch)
+
+    async def failing_auditor_node(state, config):
+        return failure_artifact(
+            "auditor_report",
+            "TOOL_ERROR: TimeoutError",
+            provider="openai",
+        )
+
+    await _run_wrapped(manager, "Auditor", failing_auditor_node)
+    assert manager.rejected is False
+
+
+@pytest.mark.asyncio
+async def test_unrelated_error_marker_still_rejects(tmp_path, monkeypatch):
+    """The exemption is path-scoped, not a blanket disabling of the scan."""
+    manager = _make_manager(tmp_path, monkeypatch)
+
+    async def poisoned_rm_node(state, config):
+        return {
+            **success_artifact(
+                "investment_plan", "[SYSTEM ERROR] upstream", provider="google"
+            ),
+            "investment_plan": "[SYSTEM ERROR] upstream",
+        }
+
+    await _run_wrapped(manager, "Research Manager", poisoned_rm_node)
+    assert manager.rejected is True
+
+
+@pytest.mark.asyncio
+async def test_failed_optional_record_is_not_replay_eligible(tmp_path, monkeypatch):
+    """Accepting the run must not promote a failed seat to reference material."""
+    manager = _make_manager(tmp_path, monkeypatch)
+
+    async def failing_auditor_node(state, config):
+        return failure_artifact("auditor_report", "timed out", provider="openai")
+
+    await _run_wrapped(manager, "Auditor", failing_auditor_node)
+
+    llm = StaticRunnable(AIMessage(content="investment plan body"))
+
+    async def fake_rm_node(state, config):
+        await invoke_with_rate_limit_handling(
+            llm,
+            [HumanMessage(content="Provide Investment Plan.")],
+            context="Research Manager",
+            provider="google",
+            model_name="test-model",
+        )
+        return success_artifact(
+            "investment_plan", "Investment plan body", provider="google"
+        )
+
+    await _run_wrapped(manager, "Research Manager", fake_rm_node)
+    run_dir = manager.finalize_run(
+        {
+            "analysis_validity": {"publishable": True},
+            "artifact_statuses": {
+                "investment_plan": _artifact_status(True),
+                "auditor_report": _artifact_status(False),
+            },
+            "run_summary": {
+                "quick_model": "gemini-2.5-flash",
+                "deep_model": "gemini-2.5-pro",
+                "llm_provider": "google",
+                "llm_providers_used": ["google"],
+            },
+        }
+    )
+
+    assert run_dir is not None
+    auditor_meta = _read_json(run_dir / "agents" / "auditor" / "metadata.json")
+    rm_meta = _read_json(run_dir / "agents" / "research_manager" / "metadata.json")
+    assert auditor_meta["usable_for_replay"] is False
+    assert auditor_meta["replay_ineligible_reason"] == "artifact_failed"
+    assert rm_meta["usable_for_replay"] is True
+
+
+@pytest.mark.asyncio
+async def test_failing_required_node_still_rejects_at_node_level(tmp_path, monkeypatch):
+    """The exemption is scoped: a required seat failing still latches a rejection."""
+    manager = _make_manager(tmp_path, monkeypatch)
+
+    async def failing_fundamentals(state, config):
+        return failure_artifact("fundamentals_report", "boom", provider="google")
+
+    await _run_wrapped(manager, "Fundamentals Analyst", failing_fundamentals)
+    assert manager.rejected is True
+
+
+@pytest.mark.asyncio
+async def test_node_exception_is_persisted_as_safe_structured_summary(
+    tmp_path, monkeypatch
+):
+    manager = _make_manager(tmp_path, monkeypatch)
+
+    async def raising_node(state, config):
+        raise RuntimeError("request failed for https://user:secret@example.test/data")
+
+    with pytest.raises(RuntimeError):
+        await _run_wrapped(manager, "Fundamentals Analyst", raising_node)
+
+    run_dir = manager.finalize_run(
+        {
+            "analysis_validity": {"publishable": False},
+            "artifact_statuses": {},
+            "run_summary": {},
+        }
+    )
+
+    assert run_dir is not None
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "node_events.jsonl").read_text().splitlines()
+    ]
+    event = next(row for row in rows if row["node_name"] == "Fundamentals Analyst")
+    assert isinstance(event["error"], dict)
+    assert event["error"]["error_type"] == "RuntimeError"
+    assert "user:secret" not in json.dumps(event)
+
+
+@pytest.mark.asyncio
+async def test_failed_optional_artifact_does_not_reject_the_capture(
+    tmp_path, monkeypatch
+):
+    """An artifact the pipeline publishes without must not veto its capture.
+
+    On 2026-08-03 all six smoke-suite tickers produced publishable analyses and
+    all six captures were rejected for `artifact_failed:auditor_report` alone —
+    the optional cross-check seat timing out made a clean corpus uncapturable.
+    """
+    run_dir = await _finalize_with_statuses(
+        tmp_path,
+        monkeypatch,
+        {
+            "auditor_report": _artifact_status(False),
+            "consultant_review": _artifact_status(False),
+        },
+    )
+
+    assert run_dir is not None
+    manifest = _read_json(run_dir / "run_manifest.json")
+    assert manifest["capture_status"] == "accepted"
+    assert "/accepted/" in str(run_dir)
+
+
+@pytest.mark.asyncio
+async def test_failed_required_artifact_still_rejects_the_capture(
+    tmp_path, monkeypatch
+):
+    """The relaxation is scoped: a required artifact's failure is still fatal."""
+    run_dir = await _finalize_with_statuses(
+        tmp_path, monkeypatch, {"fundamentals_report": _artifact_status(False)}
+    )
+
+    assert run_dir is not None
+    manifest = _read_json(run_dir / "run_manifest.json")
+    assert manifest["capture_status"] == "rejected"
+    assert "artifact_failed:fundamentals_report" in manifest["rejection_reasons"]
+
+
 def test_node_capture_contract_covers_live_prompt_nodes():
     expected_eligible = {
         "Market Analyst",
@@ -691,13 +960,16 @@ async def test_parallel_wrapped_nodes_keep_event_links_isolated(tmp_path, monkey
 async def test_capture_rejected_after_invalidating_error_and_downstream_bundles_skipped(
     tmp_path, monkeypatch
 ):
+    # Uses a *required* seat: an optional one (Consultant/Auditor) deliberately
+    # no longer invalidates, since the pipeline publishes without it. The
+    # downstream-skip machinery under test is unchanged.
     manager = _make_manager(tmp_path, monkeypatch)
 
-    async def failing_consultant(state, config):
+    async def failing_fundamentals(state, config):
         return failure_artifact(
-            "consultant_review",
+            "fundamentals_report",
             "tooling failure",
-            provider="openai",
+            provider="google",
         )
 
     async def clean_rm_node(state, config):
@@ -707,14 +979,14 @@ async def test_capture_rejected_after_invalidating_error_and_downstream_bundles_
             provider="google",
         )
 
-    await _run_wrapped(manager, "Consultant", failing_consultant)
+    await _run_wrapped(manager, "Fundamentals Analyst", failing_fundamentals)
     await _run_wrapped(manager, "Research Manager", clean_rm_node)
 
     run_dir = manager.finalize_run(
         {
             "analysis_validity": {"publishable": False},
             "artifact_statuses": {
-                "consultant_review": _artifact_status(False),
+                "fundamentals_report": _artifact_status(False),
                 "investment_plan": _artifact_status(True),
             },
             "run_summary": {},

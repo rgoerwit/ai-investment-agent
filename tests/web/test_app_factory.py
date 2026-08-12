@@ -123,6 +123,6 @@ def test_dashboard_defaults_match_ibkr_config_defaults():
         ("cash_buffer", "ibkr_cash_buffer_pct"),
     ]
     for dash_name, ibkr_name in pairs:
-        assert (
-            dashboard_fields[dash_name].default == ibkr_fields[ibkr_name].default
-        ), f"{dash_name} drifted from {ibkr_name}"
+        assert dashboard_fields[dash_name].default == ibkr_fields[ibkr_name].default, (
+            f"{dash_name} drifted from {ibkr_name}"
+        )

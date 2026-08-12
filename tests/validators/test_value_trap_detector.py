@@ -624,15 +624,6 @@ VERDICT: TRAP
 class TestGraphIntegration:
     """Test Value Trap Detector integration with graph."""
 
-    def test_route_tools_for_value_trap_detector(self):
-        """Test route_tools handles value_trap_detector sender."""
-        from src.graph import route_tools
-
-        state = {"sender": "value_trap_detector"}
-        result = route_tools(state)
-
-        assert result == "Value Trap Detector"
-
     @patch("src.graph.routing._is_auditor_enabled")
     def test_fan_out_includes_value_trap_detector(self, mock_auditor):
         """Test fan_out_to_analysts includes Value Trap Detector."""

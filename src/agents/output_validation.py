@@ -16,10 +16,12 @@ from src.data_block_utils import (
     unfenced_label,
 )
 from src.earnings_baseline import (
-    EARNINGS_BASELINE_STATUSES,
     GUIDANCE_BRIDGE_STATUSES,
     GUIDANCE_COVERAGE_STATUSES,
+    REQUIRED_GUIDANCE_CONTRACT_ENUMS,
+    REQUIRED_GUIDANCE_CONTRACT_FIELDS,
     canonical_enum,
+    canonical_guidance_enum,
 )
 from src.llm_usage import extract_token_usage_breakdown
 
@@ -163,11 +165,20 @@ def _promoted_management_guidance_issue(content: str) -> str | None:
     coverage_status = canonical_enum(
         extract_block_field(content, "DATA_BLOCK", "GUIDANCE_COVERAGE_STATUS")
     )
-    material_driver = canonical_enum(
-        extract_block_field(content, "DATA_BLOCK", "MATERIAL_NONOPERATING_DRIVER")
+    data_block = extract_last_data_block(content)
+    material_driver = canonical_guidance_enum(
+        "MATERIAL_NONOPERATING_DRIVER",
+        extract_block_field_from_text_raw(
+            data_block,
+            "MATERIAL_NONOPERATING_DRIVER",
+        ),
     )
-    baseline_status = canonical_enum(
-        extract_block_field(content, "DATA_BLOCK", "EARNINGS_BASELINE_STATUS")
+    baseline_status = canonical_guidance_enum(
+        "EARNINGS_BASELINE_STATUS",
+        extract_block_field_from_text_raw(
+            data_block,
+            "EARNINGS_BASELINE_STATUS",
+        ),
     )
     # Read this field raw: its allowed set includes the literal "N/A", but the
     # normalized reader (extract_block_field) strips null tokens to None, which
@@ -176,41 +187,27 @@ def _promoted_management_guidance_issue(content: str) -> str | None:
     # genuinely absent field still yields None -> "" and still fails.
     normalized_available = canonical_enum(
         extract_block_field_from_text_raw(
-            extract_last_data_block(content),
+            data_block,
             "NORMALIZED_EARNINGS_AVAILABLE",
         )
     )
     bridge_status = canonical_enum(
         extract_block_field(content, "DATA_BLOCK", "GUIDANCE_BRIDGE_STATUS")
     )
-    enum_checks = (
-        (
-            "GUIDANCE_COVERAGE_STATUS",
-            coverage_status,
-            GUIDANCE_COVERAGE_STATUSES,
-        ),
-        (
-            "MATERIAL_NONOPERATING_DRIVER",
-            material_driver,
-            frozenset({"YES", "NO", "UNKNOWN"}),
-        ),
-        (
-            "EARNINGS_BASELINE_STATUS",
-            baseline_status,
-            EARNINGS_BASELINE_STATUSES,
-        ),
-        (
-            "NORMALIZED_EARNINGS_AVAILABLE",
-            normalized_available,
-            frozenset({"YES", "NO", "UNKNOWN", "N/A"}),
-        ),
-        (
-            "GUIDANCE_BRIDGE_STATUS",
-            bridge_status,
-            GUIDANCE_BRIDGE_STATUSES,
-        ),
-    )
-    for field, actual, allowed in enum_checks:
+    # Each field is read with the reader its own contract requires (raw vs
+    # normalized); the required set and its enums are canonical in
+    # src/earnings_baseline.py so a field with no code-owned producer cannot be
+    # added here unnoticed.
+    observed = {
+        "GUIDANCE_COVERAGE_STATUS": coverage_status,
+        "MATERIAL_NONOPERATING_DRIVER": material_driver,
+        "EARNINGS_BASELINE_STATUS": baseline_status,
+        "NORMALIZED_EARNINGS_AVAILABLE": normalized_available,
+        "GUIDANCE_BRIDGE_STATUS": bridge_status,
+    }
+    for field in REQUIRED_GUIDANCE_CONTRACT_FIELDS:
+        actual = observed[field]
+        allowed = REQUIRED_GUIDANCE_CONTRACT_ENUMS[field]
         if actual not in allowed:
             expected = ", ".join(sorted(allowed))
             return f"{field}={actual or '<missing>'}; expected one of: {expected}"

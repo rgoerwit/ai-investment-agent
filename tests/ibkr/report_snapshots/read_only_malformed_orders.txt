@@ -20,6 +20,12 @@
   → Run: ./scripts/run_pipeline.sh
 
 ══════════════════════════════════════════════════════
+  DIP WATCH  (existing positions — consider adding)
+══════════════════════════════════════════════════════
+
+  No dip-buy candidates this run.
+
+══════════════════════════════════════════════════════
   WATCHLIST ADDITION REVIEW  (no watchlist loaded; additions evaluated without membership changes)
 ══════════════════════════════════════════════════════
 

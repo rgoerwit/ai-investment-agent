@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from src.ibkr.dip_watch import dip_watch_source
 from src.ibkr.models import PortfolioSummary, ReconciliationItem
 from src.ibkr.order_presentation import build_live_order_note
 from src.ibkr.portfolio_action_plan import PortfolioActionPlan
@@ -71,13 +70,20 @@ class PortfolioReportContext:
 def select_report_dip_candidates(
     plan: PortfolioActionPlan,
 ) -> tuple[ReconciliationItem, ...]:
-    """Return dip candidates the report may display under the current regime."""
-    return tuple(
-        item
-        for item in plan.groups.dip_candidates
-        if dip_watch_source(item) == "held_buy_pullback"
-        or (plan.macro_event_active and dip_watch_source(item) == "macro_review")
-    )
+    """Return dip candidates the report may display under the current regime.
+
+    ``plan.groups.dip_candidates`` is already the fully screened set: it was
+    built by ``group_portfolio_actions()`` using this exact same
+    ``plan.macro_event_active`` value (``build_portfolio_action_plan()``
+    threads one ``macro_event_active`` into both). So per-source regime
+    checks (e.g. gating ``macro_review`` on an active macro event) belong in
+    ``dip_watch.py``'s eligibility policy, not duplicated here — a second
+    allowlist here previously silently dropped the ``held_thesis_dip`` class
+    for months after it was added upstream, because nothing kept the two
+    lists in sync. Don't reintroduce a source filter in this function; add
+    new source classes' regime rules to ``is_dip_watch_eligible`` instead.
+    """
+    return tuple(plan.groups.dip_candidates)
 
 
 def _item_currency(item: ReconciliationItem) -> str | None:

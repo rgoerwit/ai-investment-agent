@@ -96,8 +96,7 @@ def test_short_report_returned_as_is() -> None:
 def test_no_double_injection_when_block_in_head_window() -> None:
     """If the kept head already contains the block, it isn't re-appended."""
     kill_block = (
-        "### --- START KILL_CRITERIA ---\n"
-        "TRIGGER_1: x\n### --- END KILL_CRITERIA ---"
+        "### --- START KILL_CRITERIA ---\nTRIGGER_1: x\n### --- END KILL_CRITERIA ---"
     )
     # Put the block near the start (within retained head) so we can verify dedup.
     report = kill_block + "\n\n" + "\n\n".join(f"P{i}: {_PADDING}" for i in range(40))

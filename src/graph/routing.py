@@ -60,42 +60,6 @@ def should_continue_analyst(
     return result
 
 
-def route_tools(state: AgentState) -> str:
-    """
-    Route back to the agent that called the tool.
-    Uses the 'sender' field from the state.
-    """
-    sender = state.get("sender", "")
-
-    agent_map = {
-        "market_analyst": "Market Analyst",
-        "sentiment_analyst": "Sentiment Analyst",
-        "news_analyst": "News Analyst",
-        "junior_fundamentals_analyst": "Junior Fundamentals Analyst",
-        "foreign_language_analyst": "Foreign Language Analyst",
-        "legal_counsel": "Legal Counsel",
-        "global_forensic_auditor": "Auditor",
-        "value_trap_detector": "Value Trap Detector",
-    }
-
-    node_name = agent_map.get(sender)
-
-    if node_name is None:
-        logger.warning(
-            "tool_routing_unknown_sender",
-            sender=sender,
-            fallback="Market Analyst",
-            known_agents=list(agent_map.keys()),
-            message="Unknown sender in route_tools - defaulting to Market Analyst. "
-            "If a new agent was added, update agent_map in route_tools().",
-        )
-        node_name = "Market Analyst"
-
-    logger.debug("tool_routing", sender=sender, routing_to=node_name)
-
-    return node_name
-
-
 def _is_auditor_enabled() -> bool:
     """
     Check if auditor node should be enabled.
@@ -282,7 +246,11 @@ _GATE_BLOCKING_RED_FLAGS = frozenset(
         "SEGMENT_DETERIORATION",
         "OCF_SOURCE_DISCREPANCY",
         "NO_CATALYST_DETECTED",
-        "CMIC_LISTED",
+        # Must match what detect_legal_flags actually emits: the old "CMIC_LISTED"
+        # entry was a dead string produced by nothing in src/, so a genuine
+        # NS-CMIC hit never kept the Consultant active through this gate.
+        "CMIC_FLAGGED",
+        "CMIC_UNCERTAIN",
     }
 )
 

@@ -350,6 +350,35 @@ def test_screen_keeps_star3_dip_in_overweight_exchange():
     assert score_dip_watch_item(item) >= DIP_CONCENTRATION_MIN_SCORE
 
 
+def test_select_dip_watch_returns_kept_and_withheld_in_one_pass():
+    from src.ibkr.dip_watch import DipWatchSelection, select_dip_watch
+
+    keep = _held_buy_dip(ticker="7203.T", health=75, growth=72)  # ★★★
+    withhold = _held_buy_dip(ticker="6758.T", health=60, growth=60)  # sub-★★★
+
+    selection = select_dip_watch([keep, withhold], exchange_weights={"T": 45.0})
+
+    assert isinstance(selection, DipWatchSelection)
+    assert list(selection.kept) == [keep]
+    assert list(selection.withheld) == [withhold]
+    # The thin list wrapper agrees with the kept slice.
+    assert select_dip_watch_candidates(
+        [keep, withhold], exchange_weights={"T": 45.0}
+    ) == [keep]
+
+
+def test_group_portfolio_actions_exposes_dip_withheld():
+    from src.ibkr.portfolio_presentation import group_portfolio_actions
+
+    keep = _held_buy_dip(ticker="7203.T", health=75, growth=72)
+    withhold = _held_buy_dip(ticker="6758.T", health=60, growth=60)
+
+    groups = group_portfolio_actions([keep, withhold], exchange_weights={"T": 45.0})
+
+    assert list(groups.dip_candidates) == [keep]
+    assert list(groups.dip_withheld) == [withhold]
+
+
 def test_screen_inactive_without_weights():
     item = _held_buy_dip(health=60, growth=60)
     for weights in (None, {}):

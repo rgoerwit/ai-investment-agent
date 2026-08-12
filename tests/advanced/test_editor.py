@@ -274,9 +274,9 @@ class TestEditorPromptLoading:
         # Version should be a valid numeric string (e.g., "1.0", "2.1")
         import re
 
-        assert re.match(
-            r"^\d+\.\d+$", prompt.version
-        ), f"Invalid version: {prompt.version}"
+        assert re.match(r"^\d+\.\d+$", prompt.version), (
+            f"Invalid version: {prompt.version}"
+        )
         # V2.0 enabled tools for reference verification
         assert prompt.requires_tools is True
 
@@ -904,7 +904,7 @@ class TestMainPyIntegration:
         assert _article_is_publishable(
             "# Article",
             feedback,
-            decision_trace={"status": "VALID"},
+            decision_trace={"status": "VALID", "verdict": "BUY"},
             require_decision_trace=True,
         )
 
@@ -1730,12 +1730,12 @@ class TestCreateWriterLLM:
             payload = llm._get_request_payload(
                 [HumanMessage(content="test")], stop=None
             )
-            assert (
-                "output_config" in payload
-            ), "effort=high must produce output_config in the API payload"
-            assert (
-                payload["output_config"].get("effort") == "high"
-            ), f"output_config must contain effort='high', got: {payload['output_config']}"
+            assert "output_config" in payload, (
+                "effort=high must produce output_config in the API payload"
+            )
+            assert payload["output_config"].get("effort") == "high", (
+                f"output_config must contain effort='high', got: {payload['output_config']}"
+            )
 
     def test_model_kwargs_are_valid_api_params(self):
         """Regression: all model_kwargs must be valid Anthropic Messages.create() params.

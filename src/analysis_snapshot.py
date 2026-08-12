@@ -7,7 +7,9 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, ClassVar
+
+import structlog
 
 from src.claim_policy import (
     MATERIAL_CLAIM_POLICIES,
@@ -24,8 +26,14 @@ from src.data_block_utils import (
     extract_last_data_block,
     replace_or_append_block_line,
 )
+from src.provenance_schema import (
+    SchemaDecodeError,
+    require_schema_compatible,
+)
 from src.tooling.evidence_recorder import bind_fetched_evidence
 from src.tooling.structured_ingress import get_structured_ingress_payload
+
+logger = structlog.get_logger(__name__)
 
 _FIELD_RE = re.compile(r"(?m)^\s*(?:[-*]\s*)?([A-Z][A-Z0-9_]{2,})\s*:\s*(.*?)\s*$")
 _UNKNOWN_VALUES = frozenset({"", "N/A", "NA", "NONE", "UNKNOWN", "NOT FOUND"})
@@ -49,6 +57,139 @@ class ClaimRecord:
     source_provider: str | None = None
     lineage_ids: tuple[str, ...] = ()
     derived_from: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisSnapshot:
+    """Shallow, versioned wire codec for the canonical analysis snapshot.
+
+    Deliberately shallow: ``claims`` and ``conflicts`` stay in their existing
+    dict wire form (``claims`` is already ``asdict(ClaimRecord)``), so this is a
+    single typed definition of the snapshot's key set + schema versioning + a
+    fail-closed loader — not a re-typing of every claim. The dataclass is
+    ``frozen`` (no field reassignment) but shallow: ``to_dict`` returns the same
+    ``claims``/``conflicts`` objects the model holds, so it is a transient wire
+    adapter, not a deep-immutable value.
+
+    ``stage`` / ``commentary_status`` / ``scorecards`` are None-omitted by
+    ``to_dict`` so the reduced INVALID snapshot shape is reproduced exactly (it
+    carries neither ``stage`` nor ``commentary_status``). ``schema_version`` is
+    appended last; nothing else in the wire shape changes.
+
+    Only the two primary builders (``_snapshot_from_fields`` and the reduced
+    INVALID form) serialize through this codec. ``add_validated_derivations`` and
+    ``refresh_analysis_snapshot`` keep their ``{**snapshot, ...}`` spreads: a
+    spread cannot add or drop a key, so it inherits this canonical shape (incl.
+    ``schema_version``) from its codec-produced input — drift is structurally
+    impossible without re-serializing (which would risk dropping an unknown key).
+    """
+
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    version: int
+    contract_status: str
+    contract_reason: str | None
+    claims: dict[str, Any]
+    conflicts: list[Any]
+    stage: str | None = None
+    commentary_status: str | None = None
+    scorecards: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"version": self.version}
+        if self.stage is not None:
+            payload["stage"] = self.stage
+        payload["contract_status"] = self.contract_status
+        payload["contract_reason"] = self.contract_reason
+        payload["claims"] = self.claims
+        payload["conflicts"] = self.conflicts
+        if self.commentary_status is not None:
+            payload["commentary_status"] = self.commentary_status
+        if self.scorecards is not None:
+            payload["scorecards"] = self.scorecards
+        payload["schema_version"] = self.SCHEMA_VERSION
+        return payload
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> AnalysisSnapshot:
+        if not isinstance(d, Mapping):
+            raise SchemaDecodeError(
+                f"analysis_snapshot must be a mapping, got {type(d).__name__}"
+            )
+        require_schema_compatible(
+            "AnalysisSnapshot", d.get("schema_version"), cls.SCHEMA_VERSION
+        )
+        contract_status = d.get("contract_status")
+        if contract_status is None:
+            # Match the historical coercion (missing status → INVALID); a
+            # present-but-wrong-type status is a genuine corruption → fail closed.
+            contract_status = "INVALID"
+        elif not isinstance(contract_status, str):
+            raise SchemaDecodeError(
+                "analysis_snapshot.contract_status must be a string, got "
+                f"{type(contract_status).__name__}"
+            )
+        # Guard collection coercions so a scalar wire value fails closed with a
+        # SchemaDecodeError rather than a raw TypeError (which would escape the
+        # boundary's except and crash build_analysis_validity).
+        claims = d.get("claims")
+        if claims is None:
+            claims = {}
+        elif not isinstance(claims, Mapping):
+            raise SchemaDecodeError(
+                f"analysis_snapshot.claims must be a mapping, got {type(claims).__name__}"
+            )
+        conflicts = d.get("conflicts")
+        if conflicts is None:
+            conflicts = []
+        elif not isinstance(conflicts, list | tuple):
+            raise SchemaDecodeError(
+                "analysis_snapshot.conflicts must be a list, got "
+                f"{type(conflicts).__name__}"
+            )
+        scorecards = d.get("scorecards")
+        if scorecards is not None and not isinstance(scorecards, Mapping):
+            raise SchemaDecodeError(
+                "analysis_snapshot.scorecards must be a mapping, got "
+                f"{type(scorecards).__name__}"
+            )
+        version = d.get("version")
+        return cls(
+            version=(
+                version
+                if isinstance(version, int) and not isinstance(version, bool)
+                else 1
+            ),
+            contract_status=contract_status,
+            contract_reason=d.get("contract_reason"),
+            claims=dict(claims),
+            conflicts=list(conflicts),
+            stage=d.get("stage"),
+            commentary_status=d.get("commentary_status"),
+            scorecards=dict(scorecards) if scorecards is not None else None,
+        )
+
+
+def decoded_contract_status(snapshot: Any) -> str | None:
+    """Contract status via the typed codec, fail-closed on a corrupt/future shape.
+
+    The single reader of ``contract_status`` for every consumer that acts on
+    snapshot authority. Reading the raw string instead lets two consumers reach
+    opposite verdicts on one payload — a future-schema snapshot literally
+    claiming ``"VALID"`` would be trusted by one and rejected by another.
+
+    ``None`` when no snapshot is present (grandfathered legacy path). A
+    ``SchemaDecodeError`` (future schema_version, or a type-corrupt
+    contract_status) yields ``DECODE_FAILED``, so a payload current code cannot
+    safely read is never treated as VALID.
+    """
+    if not isinstance(snapshot, Mapping):
+        return None
+    try:
+        return AnalysisSnapshot.from_dict(snapshot).contract_status or "INVALID"
+    except SchemaDecodeError as exc:
+        logger.warning("analysis_snapshot_schema_decode_failed", reason=str(exc))
+        return "DECODE_FAILED"
 
 
 def _normalize_authority(value: str | None, *, default: Authority) -> Authority:
@@ -123,25 +264,24 @@ def _raw_metrics_contract_status(
     }
     if not registered.intersection(payload):
         return "INVALID", "RAW_METRICS_PAYLOAD_HAS_NO_REGISTERED_FIELDS"
-    analytic_policies = tuple(
-        policy
+    analytic_fields = tuple(
+        (policy.raw_field, policy.value_format)
         for policy in MATERIAL_CLAIM_POLICIES.values()
         if policy.source == "RAW_METRICS"
         and policy.raw_field
         and policy.raw_field not in {"currentPrice", "marketCap"}
     )
     usable = {
-        policy.raw_field
-        for policy in analytic_policies
-        if policy.raw_field in payload
+        raw_field
+        for raw_field, value_format in analytic_fields
+        if raw_field in payload
         and (
             (
-                isinstance(payload.get(policy.raw_field), str)
-                and str(payload.get(policy.raw_field)).strip().upper()
-                not in _UNKNOWN_VALUES
+                isinstance(payload.get(raw_field), str)
+                and str(payload.get(raw_field)).strip().upper() not in _UNKNOWN_VALUES
             )
-            if policy.value_format == "TEXT"
-            else _is_finite_number(payload.get(policy.raw_field))
+            if value_format == "TEXT"
+            else _is_finite_number(payload.get(raw_field))
         )
     }
     if not usable:
@@ -261,15 +401,15 @@ def _snapshot_from_fields(
         )
         claims[record.id] = asdict(record)
 
-    return {
-        "version": version,
-        "stage": stage,
-        "contract_status": contract_status,
-        "contract_reason": contract_reason,
-        "claims": claims,
-        "conflicts": conflicts,
-        "commentary_status": "NON_AUTHORITATIVE_UNLESS_CLAIM_REFERENCED",
-    }
+    return AnalysisSnapshot(
+        version=version,
+        stage=stage,
+        contract_status=contract_status,
+        contract_reason=contract_reason,
+        claims=claims,
+        conflicts=conflicts,
+        commentary_status="NON_AUTHORITATIVE_UNLESS_CLAIM_REFERENCED",
+    ).to_dict()
 
 
 def build_analysis_snapshot(
@@ -285,13 +425,13 @@ def build_analysis_snapshot(
         fundamentals if isinstance(fundamentals, str) else ""
     )
     if not block:
-        return {
-            "version": version,
-            "contract_status": "INVALID",
-            "contract_reason": "DATA_BLOCK_MISSING_OR_UNPARSEABLE",
-            "claims": {},
-            "conflicts": [],
-        }
+        return AnalysisSnapshot(
+            version=version,
+            contract_status="INVALID",
+            contract_reason="DATA_BLOCK_MISSING_OR_UNPARSEABLE",
+            claims={},
+            conflicts=[],
+        ).to_dict()
 
     fields: dict[str, str] = {
         match.group(1): match.group(2).strip() for match in _FIELD_RE.finditer(block)

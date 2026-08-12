@@ -281,7 +281,7 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 records,
             )
 
-        result = {"messages": result_messages}
+        result: dict[str, Any] = {"messages": result_messages}
         if structured_inputs:
             result["structured_inputs"] = structured_inputs
 

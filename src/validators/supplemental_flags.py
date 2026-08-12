@@ -8,6 +8,7 @@ from typing import Any
 
 import structlog
 
+from src.runtime_diagnostics import ArtifactStatus
 from src.validators.financial_rules import contains_transient_strength_marker
 from src.validators.metric_extractor import extract_metrics
 from src.validators.sector_classifier import FINANCIALS_SECTORS, Sector, detect_sector
@@ -226,9 +227,46 @@ def detect_material_operating_signal_flags(
 
 
 def detect_legal_flags(
-    legal_risks: dict[str, Any], ticker: str = "UNKNOWN"
-) -> list[dict]:
-    """Detect legal/tax warning flags from Legal Counsel output."""
+    legal_risks: dict[str, Any],
+    ticker: str = "UNKNOWN",
+    *,
+    artifact_status: ArtifactStatus | None = None,
+) -> list[dict[str, Any]]:
+    """Detect legal/tax flags, treating artifact validity as authoritative.
+
+    A provider failure means the legal dimensions were not assessed. It must
+    not be converted into substantive PFIC, VIE, or CMIC findings merely
+    because fallback content remains publishable for diagnostics.
+    """
+    if artifact_status is not None and not artifact_status.ok:
+        provider = artifact_status.provider or "configured provider"
+        failure_kind = artifact_status.error_kind or "application_error"
+        logger.warning(
+            "legal_counsel_coverage_unavailable",
+            ticker=ticker,
+            provider=provider,
+            error_kind=failure_kind,
+        )
+        return [
+            {
+                "type": "LEGAL_COUNSEL_UNAVAILABLE",
+                "severity": "WARNING",
+                "detail": (
+                    "Legal Counsel did not produce a valid assessment; PFIC, VIE, "
+                    f"CMIC, and capital-structure checks remain unassessed "
+                    f"({provider}, {failure_kind})."
+                ),
+                "action": "REVIEW",
+                "risk_penalty": 0.0,
+                "blocks_buy": True,
+                "rationale": (
+                    "Provider failure is a coverage limitation, not evidence that a "
+                    "specific legal risk exists. Do not add a risk tally, but do not "
+                    "initiate a position until the legal checks complete successfully."
+                ),
+            }
+        ]
+
     warnings: list[dict[str, Any]] = []
 
     pfic_status = legal_risks.get("pfic_status")
@@ -290,6 +328,12 @@ def detect_legal_flags(
                 "detail": f"Company appears on NS-CMIC list. {cmic_evidence[:80]}",
                 "action": "RISK_PENALTY",
                 "risk_penalty": 2.0,
+                # A US person is legally prohibited from initiating this position.
+                # Without this the flag carried strictly less mechanical force than
+                # a score-arithmetic warning: a 2.0 penalty the PM could still
+                # reason past. blocks_buy routes it through the existing
+                # maybe_demote_buy_on_blocking_flags chain — no new machinery.
+                "blocks_buy": True,
                 "rationale": "US Executive Orders prohibit US persons from investing in NS-CMIC listed companies. Verify current OFAC status before investing. Restrictions may be modified by future executive orders.",
             }
         )
@@ -967,6 +1011,7 @@ def detect_capital_efficiency_flags(
     roe_roic_ratio = metrics.get("roe_roic_ratio")
     net_cash_to_mc = metrics.get("net_cash_to_market_cap")
     cash_to_assets = metrics.get("cash_to_assets")
+    cash_excess_persistence = metrics.get("cash_excess_persistence")
     capex_to_da_status = metrics.get("capex_to_da_status")
     revenue_backlog_coverage = metrics.get("revenue_backlog_coverage")
     payout_ratio = base_metrics.get("payout_ratio")
@@ -1111,7 +1156,8 @@ def detect_capital_efficiency_flags(
     )
     mitigated = deployment_mitigated or capex_to_da_status == "GROWTH_INVESTING"
     severe_idle_cash = (
-        net_cash_to_mc is not None
+        cash_excess_persistence != "NOT_PERSISTENT"
+        and net_cash_to_mc is not None
         and net_cash_to_mc >= config.idle_cash_severe_net_cash_to_mc_threshold
         and roic_quality in {"WEAK", "DESTRUCTIVE"}
         and capital_plan_status == "NONE"
@@ -1138,9 +1184,11 @@ def detect_capital_efficiency_flags(
             ticker=ticker,
             net_cash_to_market_cap=net_cash_to_mc,
             cash_to_assets=cash_to_assets,
+            cash_excess_persistence=cash_excess_persistence,
         )
     elif (
         excess_cash
+        and cash_excess_persistence != "NOT_PERSISTENT"
         and weak_deployment
         and weak_shareholder_return
         and capital_plan_status == "NONE"
@@ -1161,6 +1209,7 @@ def detect_capital_efficiency_flags(
             ticker=ticker,
             net_cash_to_market_cap=net_cash_to_mc,
             cash_to_assets=cash_to_assets,
+            cash_excess_persistence=cash_excess_persistence,
         )
 
     return flags

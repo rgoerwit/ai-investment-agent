@@ -180,6 +180,24 @@ def test_trade_block_present_requires_parseable_action():
     assert reason == "TRADE_BLOCK missing or ACTION not parseable"
 
 
+def test_trade_block_present_accepts_the_current_trader_vocabulary():
+    """trader.json v4.3 emits DO_NOT_INITIATE; this check rejected it, failing 6/6."""
+    for action in ("BUY", "HOLD", "DO_NOT_INITIATE"):
+        passed, reason = pc.check_trade_block_present(
+            f"TRADE_BLOCK:\nACTION: {action}\nSIZE: 0.0%\n"
+        )
+        assert passed is True, f"{action} rejected: {reason}"
+
+
+def test_trade_block_present_still_accepts_archived_actions():
+    """Persisted pre-v4.3 analyses must stay evaluable."""
+    for action in ("SELL", "REJECT"):
+        passed, reason = pc.check_trade_block_present(
+            f"TRADE_BLOCK:\nACTION: {action}\nSIZE: 0.0%\n"
+        )
+        assert passed is True, f"{action} rejected: {reason}"
+
+
 def test_raw_data_wrapper_complete_requires_both_sections_and_end_marker():
     passed, _ = pc.check_raw_data_wrapper_complete(VALID_RAW_WRAPPER)
     assert passed is True
@@ -260,6 +278,34 @@ def test_run_prompt_checks_on_outputs_skips_optional_consultant():
     )
     assert consultant_report.skipped is True
     assert consultant_report.passed is True
+
+
+def test_optional_nodes_follow_the_publication_contract():
+    """The evaluator's optional set is derived, not hand-maintained.
+
+    It had drifted to `{"consultant"}` while the pipeline also publishes without
+    the Auditor and Valuation Calculator — so a run with the OpenAI cross-check
+    plane switched off (supported: consultant and auditor share one gate) reported
+    the Auditor as a suite failure rather than an absence.
+    """
+    from src.eval.capture_contract import NODE_CAPTURE_SPECS
+    from src.runtime_diagnostics import OPTIONAL_PUBLISHABLE_ARTIFACTS
+
+    expected = {
+        spec.prompt_key
+        for spec in NODE_CAPTURE_SPECS.values()
+        if spec.prompt_key
+        and spec.artifact_fields
+        and set(spec.artifact_fields) <= OPTIONAL_PUBLISHABLE_ARTIFACTS
+    }
+    assert pc._OPTIONAL_PROMPT_KEYS == expected
+    # Regression anchors: the drifted member, plus the two it was missing.
+    assert "consultant" in pc._OPTIONAL_PROMPT_KEYS
+    assert "global_forensic_auditor" in pc._OPTIONAL_PROMPT_KEYS
+    # A required node must never be swept in by the derivation.
+    assert "fundamentals_analyst" not in pc._OPTIONAL_PROMPT_KEYS
+    assert "portfolio_manager" not in pc._OPTIONAL_PROMPT_KEYS
+    assert "trader" not in pc._OPTIONAL_PROMPT_KEYS
 
 
 @pytest.mark.asyncio

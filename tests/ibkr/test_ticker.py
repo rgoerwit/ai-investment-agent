@@ -523,9 +523,9 @@ class TestBrazilBDRTranslation:
             assert t.yf == expected_yf, f"{label}: expected {expected_yf}, got {t.yf}"
             assert t.ibkr == sym, f"{label}: ibkr display lost"
             # Round-trip yf → ibkr → yf must be identity
-            assert (
-                Ticker.from_yf(t.yf).yf == expected_yf
-            ), f"{label}: yf round-trip not identity"
+            assert Ticker.from_yf(t.yf).yf == expected_yf, (
+                f"{label}: yf round-trip not identity"
+            )
 
     def test_portfolio_manager_display_contract_for_brazilian_positions(self):
         """Documents the contract scripts/portfolio_manager.py:_display_ticker depends on.
@@ -537,10 +537,10 @@ class TestBrazilBDRTranslation:
         for sym in ("PETR4", "ADBE34", "A1GI34", "KNRI11", "B3SA3"):
             t = Ticker.from_ibkr(sym, "BVMF", "BRL")
             assert t.ibkr == sym, f"{sym}: display value must equal IBKR symbol"
-            assert (
-                t.yf == f"{sym}.SA"
-            ), f"{sym}: run-command value must carry .SA suffix"
+            assert t.yf == f"{sym}.SA", (
+                f"{sym}: run-command value must carry .SA suffix"
+            )
             assert t.has_suffix, f"{sym}: must be flagged as international"
-            assert (
-                t.exchange_resolved
-            ), f"{sym}: BVMF must resolve, no ⚠ warning expected"
+            assert t.exchange_resolved, (
+                f"{sym}: BVMF must resolve, no ⚠ warning expected"
+            )

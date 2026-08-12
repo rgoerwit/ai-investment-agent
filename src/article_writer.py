@@ -275,7 +275,7 @@ class ArticleWriter:
         """
         self.prompts_dir = prompts_dir or config.prompts_dir
         self.samples_dir = samples_dir or self._find_samples_dir()
-        self.images_dir = images_dir or config.images_dir
+        self.images_dir = images_dir or get_runtime_config(config).images_dir
         self.use_github_urls = use_github_urls
         self._callbacks = callbacks or []
         self._tracing_metadata = dict(tracing_metadata or {})
@@ -782,7 +782,7 @@ class ArticleWriter:
                 fallback_class = ""
                 try:
                     tier_llm = tier.build()  # lazy: construct only when attempted
-                    fallback_model = get_model_name(tier_llm)
+                    fallback_model = get_model_name(tier_llm) or ""
                     fallback_provider = infer_provider(
                         model_name=fallback_model,
                         class_name=type(tier_llm).__name__,
@@ -1044,8 +1044,7 @@ class ArticleWriter:
                     else:
                         related = (
                             "; ".join(
-                                f"{e.get('ticker','?')} "
-                                f"({e.get('relationship','?')})"
+                                f"{e.get('ticker', '?')} ({e.get('relationship', '?')})"
                                 for e in card_obj.related_listed
                             )
                             or "operating subsidiaries"
@@ -1514,8 +1513,7 @@ class ArticleEditor:
 
         if valuation_context:
             context_parts.append(
-                "=== VALUATION CONTEXT (as given to writer) ===\n"
-                f"{valuation_context}"
+                f"=== VALUATION CONTEXT (as given to writer) ===\n{valuation_context}"
             )
 
         if governance_context:

@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 import structlog
 
@@ -43,6 +43,15 @@ from src.tooling.inspector import InspectionEnvelope, SourceKind
 logger = structlog.get_logger(__name__)
 
 _get_capture_manager: Any
+
+
+class _RetrospectiveMarketData(TypedDict, total=False):
+    start_adj_close: float
+    end_adj_close: float
+    bench_start: float
+    bench_end: float
+    benchmark_fallback: str
+
 
 try:
     from src.eval import get_active_capture_manager
@@ -304,10 +313,7 @@ def extract_snapshot(
 
     # Exchange/currency/benchmark mapping
     from src.currency_resolver import resolve_local_trading_currency
-    from src.fx_normalization import (
-        FALLBACK_RATES_TO_USD,
-        normalize_minor_unit_currency,
-    )
+    from src.fx_normalization import get_fx_rate_fallback
 
     suffix = get_ticker_suffix(ticker)
 
@@ -342,11 +348,11 @@ def extract_snapshot(
     # FX rate at analysis time (synchronous fallback only — no async in snapshot).
     # Saved here so the reconciler has an at-analysis-time rate to use for cost
     # calculations without needing a live FX fetch.
-    fx_rate = None
-    if currency:
-        normalized_currency, scale = normalize_minor_unit_currency(currency)
-        major_rate = FALLBACK_RATES_TO_USD.get(normalized_currency or "")
-        fx_rate = major_rate * scale if major_rate is not None else None
+    # get_fx_rate_fallback is the canonical fallback-table conversion (minor-unit
+    # scaling + USD anchoring); deliberately the table, not live/cache, because
+    # this reconstructs the at-analysis-time rate (see the FX section in
+    # CLAUDE.md). Do not switch this to a live fetch.
+    fx_rate = get_fx_rate_fallback(currency, "USD") if currency else None
     if currency and fx_rate is None:
         logger.warning(
             "snapshot_fx_rate_unknown",
@@ -414,8 +420,8 @@ def extract_snapshot(
         "quick_model": get_runtime_config(config).quick_think_llm,
         "is_quick_mode": is_quick_mode,
         # `is_strict_mode` records whether `--strict` was active during
-        # analysis. Strict gates reject some valid candidates (REIT, PFIC,
-        # VIE) at the screening layer, so a non-BUY verdict in strict mode
+        # analysis. Strict gates auto-reject some valid candidates (REIT/ETF,
+        # earnings quality) at the screening layer, so a non-BUY in strict mode
         # carries different signal than the same verdict in normal mode —
         # downstream lesson weighting can use this to discount strict-mode
         # rejections.
@@ -640,8 +646,8 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     try:
         import yfinance as yf
 
-        def _fetch_current_data():
-            result = {}
+        def _fetch_current_data() -> _RetrospectiveMarketData:
+            result: _RetrospectiveMarketData = {}
 
             # Current stock price (adjusted close for total return)
             try:
@@ -659,9 +665,8 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
                     current = info.get("currentPrice") or info.get("regularMarketPrice")
                     if current:
                         result["end_adj_close"] = float(current)
-                        result["start_adj_close"] = (
-                            float(snapshot_price) if snapshot_price else None
-                        )
+                        if snapshot_price:
+                            result["start_adj_close"] = float(snapshot_price)
             except Exception as e:
                 logger.debug("stock_fetch_failed", ticker=ticker, error=str(e))
 
@@ -907,18 +912,18 @@ async def generate_lesson(
     """
     prompt = f"""Given this past equity analysis and its actual outcome, generate ONE generalizable lesson.
 
-ANALYSIS ({comparison.get('analysis_date', 'unknown')}):
-Ticker: {comparison.get('ticker')} | Sector: {comparison.get('sector', 'Unknown')} | Exchange: {comparison.get('exchange', 'Unknown')} | Currency: {comparison.get('currency', 'USD')}
-Verdict: {comparison.get('verdict')} (Position: {comparison.get('position_size', 'N/A')}%) | Zone: {comparison.get('zone', 'N/A')}
-Health: {comparison.get('health_adj', 'N/A')} | Growth: {comparison.get('growth_adj', 'N/A')} | P/E: {comparison.get('pe_ratio', 'N/A')} | PEG: {comparison.get('peg_ratio', 'N/A')}
-Valuation references: Fair entry {comparison.get('entry_price') or 'N/A'} | Base {comparison.get('target_1_price') or 'N/A'} | Stretch {comparison.get('target_2_price') or 'N/A'} | Downside review {comparison.get('stop_price') or 'N/A'} | Horizon: {comparison.get('investment_horizon') or 'N/A'}
-Key bear risks: {comparison.get('bear_risks_excerpt', 'N/A')[:300]}
+ANALYSIS ({comparison.get("analysis_date", "unknown")}):
+Ticker: {comparison.get("ticker")} | Sector: {comparison.get("sector", "Unknown")} | Exchange: {comparison.get("exchange", "Unknown")} | Currency: {comparison.get("currency", "USD")}
+Verdict: {comparison.get("verdict")} (Position: {comparison.get("position_size", "N/A")}%) | Zone: {comparison.get("zone", "N/A")}
+Health: {comparison.get("health_adj", "N/A")} | Growth: {comparison.get("growth_adj", "N/A")} | P/E: {comparison.get("pe_ratio", "N/A")} | PEG: {comparison.get("peg_ratio", "N/A")}
+Valuation references: Fair entry {comparison.get("entry_price") or "N/A"} | Base {comparison.get("target_1_price") or "N/A"} | Stretch {comparison.get("target_2_price") or "N/A"} | Downside review {comparison.get("stop_price") or "N/A"} | Horizon: {comparison.get("investment_horizon") or "N/A"}
+Key bear risks: {comparison.get("bear_risks_excerpt", "N/A")[:300]}
 
-OUTCOME ({comparison.get('days_elapsed', 0)} days later):
-Price: {comparison.get('start_price', 'N/A')} → {comparison.get('end_price', 'N/A')} ({comparison.get('price_return_pct', 0):+.1f}%)
-Benchmark ({comparison.get('benchmark_used', 'N/A')}): {comparison.get('benchmark_return_pct', 0):+.1f}%
-Excess return: {comparison.get('excess_return_pct', 0):+.1f}%
-FX ({comparison.get('currency', 'USD')}/USD): {comparison.get('fx_delta_pct', 0):+.1f}%
+OUTCOME ({comparison.get("days_elapsed", 0)} days later):
+Price: {comparison.get("start_price", "N/A")} → {comparison.get("end_price", "N/A")} ({comparison.get("price_return_pct", 0):+.1f}%)
+Benchmark ({comparison.get("benchmark_used", "N/A")}): {comparison.get("benchmark_return_pct", 0):+.1f}%
+Excess return: {comparison.get("excess_return_pct", 0):+.1f}%
+FX ({comparison.get("currency", "USD")}/USD): {comparison.get("fx_delta_pct", 0):+.1f}%
 
 Rules:
 - Lesson must be GENERAL (applicable to similar stocks), not specific to this ticker
@@ -1147,8 +1152,8 @@ async def save_rejection_record(
         document += f"\nBear risks excerpt: {bear_risks}"
 
     # 4. Build metadata (extends existing schema)
-    # Strict-mode rejections are softer signal: strict gates reject some
-    # valid candidates (REIT/PFIC/VIE) at the screening layer, so a non-BUY
+    # Strict-mode rejections are softer signal: strict gates auto-reject some
+    # valid candidates (REIT/ETF, earnings quality) at the screening layer, so a non-BUY
     # in strict mode is partly an artifact of the gates rather than a pure
     # quality signal. Multiplicatively discount the existing quick-mode
     # weight by 0.7 for strict rejections.

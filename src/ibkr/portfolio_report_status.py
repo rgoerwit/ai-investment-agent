@@ -292,13 +292,13 @@ def _append_analysis_freshness(
                 current.days_until_due if current.days_until_due is not None else 9999
             ),
         ):
-            details: list[str] = []
+            due_details: list[str] = []
             if row.expires_date:
-                details.append(f"expires {row.expires_date}")
+                due_details.append(f"expires {row.expires_date}")
             if row.days_until_due is not None:
-                details.append(f"{row.days_until_due}d remaining")
+                due_details.append(f"{row.days_until_due}d remaining")
             lines.append(
-                f"    {row.display_ticker:<12} {'  ·  '.join(details)}"
+                f"    {row.display_ticker:<12} {'  ·  '.join(due_details)}"
                 f"  →  {analysis_command(row.run_ticker)}"
             )
     else:

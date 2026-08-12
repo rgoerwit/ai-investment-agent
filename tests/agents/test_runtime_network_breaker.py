@@ -85,9 +85,9 @@ class TestNetworkBreakerWireIn:
                     max_attempts=1,
                     context="AnalystAgent5",
                 )
-            assert (
-                runnable.ainvoke.call_count == calls_before
-            ), "Network breaker must short-circuit before ainvoke is called"
+            assert runnable.ainvoke.call_count == calls_before, (
+                "Network breaker must short-circuit before ainvoke is called"
+            )
 
     @pytest.mark.asyncio
     async def test_successful_call_closes_breaker(self):

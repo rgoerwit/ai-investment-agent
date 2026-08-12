@@ -43,10 +43,17 @@ from src.data_block_utils import (
     replace_or_append_block_line,
 )
 from src.pm_decision_parser import canonicalize_pm_verdict
+from src.provenance_schema import DecisionTrace, Scorecard
 
 logger = structlog.get_logger(__name__)
 
 _TRACE_FIELDS = ("DECISION_FACTS", "DECISION_GATES")
+# SUPPORT-role claims that are *incidental* — true but not thesis-bearing. A BUY
+# citing only these (e.g. the current price) has no valuation/growth/guidance/
+# quality claim behind it and must not satisfy the trace. Every other SUPPORT
+# field (valuation multiples, growth rates, guidance, latest results) is a real
+# thesis claim, so a small denylist is both sufficient and robust to new metrics.
+_INCIDENTAL_SUPPORT_FIELDS = frozenset({"CURRENT_PRICE"})
 _SOURCE_SENSITIVE_FAMILIES: dict[str, tuple[str, ...]] = {
     "CAPACITY": ("CAPACITY_UTILIZATION",),
     "GUIDANCE": ("GUIDANCE_REVENUE", "GUIDANCE_NET_INCOME"),
@@ -150,8 +157,10 @@ def render_decision_trace_instruction(
             "=== DECISION TRACE CONTRACT ===",
             (
                 "DECISION_FACTS may contain only the eligible claim IDs below. "
-                "A BUY must cite at least one role=SUPPORT claim; GATE_INPUT claims "
-                "may constrain a decision but cannot independently support BUY. "
+                "A BUY must cite at least one thesis-bearing role=SUPPORT claim "
+                "(valuation, growth, guidance, or quality) — the current price "
+                "alone is not a thesis; GATE_INPUT claims may constrain a decision "
+                "but cannot independently support BUY. "
                 "Uncited source-sensitive information may be discussed only as an "
                 "explicitly qualified evidence gap; it is not decision support."
             ),
@@ -177,16 +186,12 @@ def validate_decision_trace(
         extract_block_field_from_text_raw(block, "VERDICT") if block else None
     )
     if not block:
-        return {
-            "status": "INVALID",
-            "verdict": verdict,
-            "decision_facts": [],
-            "decision_gates": [],
-            "invalid_facts": [],
-            "invalid_gates": [],
-            "missing_gates": list(_active_gate_ids(red_flags)),
-            "reason": "PM_BLOCK_MISSING",
-        }
+        return DecisionTrace(
+            status="INVALID",
+            verdict=verdict,
+            missing_gates=tuple(_active_gate_ids(red_flags)),
+            reason="PM_BLOCK_MISSING",
+        ).to_dict()
 
     facts = _parse_trace_ids(extract_block_field_from_text_raw(block, "DECISION_FACTS"))
     gates = _parse_trace_ids(extract_block_field_from_text_raw(block, "DECISION_GATES"))
@@ -201,11 +206,26 @@ def validate_decision_trace(
         for claim_id in facts
         if claim_id in eligible and eligible[claim_id].get("decision_role") == "SUPPORT"
     ]
+    # A BUY requires a THESIS-bearing support claim, not merely any SUPPORT claim:
+    # citing only the current price is not a thesis.
+    thesis_support_facts = [
+        claim_id
+        for claim_id in support_facts
+        if str(eligible[claim_id].get("field")) not in _INCIDENTAL_SUPPORT_FIELDS
+    ]
     missing_fields = [
         field
         for field in _TRACE_FIELDS
         if extract_block_field_from_text_raw(block, field) is None
     ]
+    # Source-sensitive prose (guidance/capacity/latest results) that cites no
+    # backing eligible claim is surfaced as an advisory signal only. It is
+    # deliberately NOT promoted to a structural failure: the classifier is a
+    # loose marker match that intentionally also flags *negated*/contextual
+    # mentions ("not management guidance") for observability (see
+    # test_negated_guidance_mention_is_advisory_not_structural_failure), so
+    # invalidating on it would false-positive on benign prose. The precise
+    # uncited-overclaim defense is the 2b provenance gate below.
     untraced_source_families = _untraced_source_families(
         pm_output,
         facts,
@@ -218,22 +238,22 @@ def validate_decision_trace(
         or missing_gates
         or not (facts or gates)
         or verdict == "UNPARSEABLE"
-        or (verdict == "BUY" and not support_facts)
+        or (verdict == "BUY" and not thesis_support_facts)
     )
-    return {
-        "status": "INVALID" if structurally_invalid else "VALID",
-        "verdict": verdict,
-        "decision_facts": facts,
-        "decision_gates": gates,
-        "support_facts": support_facts,
-        "invalid_facts": invalid_facts,
-        "invalid_gates": invalid_gates,
-        "missing_gates": missing_gates,
-        "missing_fields": missing_fields,
-        "untraced_source_families": untraced_source_families,
-        "advisory_source_families": untraced_source_families,
-        "reason": "TRACE_CONTRACT_VIOLATION" if structurally_invalid else None,
-    }
+    return DecisionTrace(
+        status="INVALID" if structurally_invalid else "VALID",
+        verdict=verdict,
+        decision_facts=tuple(facts),
+        decision_gates=tuple(gates),
+        support_facts=tuple(support_facts),
+        thesis_support_facts=tuple(thesis_support_facts),
+        invalid_facts=tuple(invalid_facts),
+        invalid_gates=tuple(invalid_gates),
+        missing_gates=tuple(missing_gates),
+        missing_fields=tuple(missing_fields),
+        source_families=tuple(untraced_source_families),
+        reason="TRACE_CONTRACT_VIOLATION" if structurally_invalid else None,
+    ).to_dict()
 
 
 def reconcile_final_decision_trace(
@@ -270,12 +290,12 @@ def reconcile_final_decision_trace(
         ("HEALTH", "HEALTH_ADJ"),
         ("GROWTH", "GROWTH_ADJ"),
     ):
-        scorecard = scorecards.get(kind)
         if not snapshot or snapshot.get("contract_status") != "VALID":
             continue
+        card = Scorecard.decode_or_none(scorecards.get(kind))
         value = (
-            str(round(float(scorecard["percentage"])))
-            if isinstance(scorecard, Mapping) and scorecard.get("decision_eligible")
+            str(round(float(card.percentage)))
+            if card is not None and card.decision_eligible
             else "N/A"
         )
         updated = replace_or_append_block_line(updated, field, value)

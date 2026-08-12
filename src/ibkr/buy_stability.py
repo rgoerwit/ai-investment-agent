@@ -22,6 +22,7 @@ import glob
 import json
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -85,7 +86,9 @@ class BuyStabilityConfig:
 
 
 def _is_buy(verdict: str | None) -> bool:
-    return bool(verdict) and verdict.strip().upper().replace(" ", "_") == "BUY"
+    if verdict is None:
+        return False
+    return verdict.strip().upper().replace(" ", "_") == "BUY"
 
 
 def assess_buy_stability(
@@ -94,6 +97,7 @@ def assess_buy_stability(
     *,
     risk_tally: float | None = None,
     active_flags: object = (),
+    flags_available: bool = True,
     cfg: BuyStabilityConfig,
 ) -> str | None:
     """Return a withhold reason if a BUY is unstable/marginal, else None.
@@ -104,6 +108,9 @@ def assess_buy_stability(
       (tally >= margin) carrying an unresolved peak/transient flag is also
       withheld. When unavailable (e.g. the analysis index does not persist the
       tally) the reproducibility check still applies.
+    - ``flags_available``: False when flag evidence could not be loaded at all.
+      An empty ``active_flags`` then means "unknown", not "clean", so a marginal
+      BUY is withheld rather than passed on absent evidence.
 
     Never mutates inputs. Returns an advisory string; the caller decides how to
     act (typically: do not emit the BUY recommendation; surface for REVIEW).
@@ -123,6 +130,11 @@ def assess_buy_stability(
     # not initiate on a single run.
     unresolved = bool(set(_as_flag_set(active_flags)) & PEAK_OR_TRANSIENT_FLAGS)
     marginal = risk_tally is not None and risk_tally >= cfg.margin_tally
+    if marginal and not flags_available:
+        return (
+            "BUY at marginal risk tally with quality-flag evidence unavailable — "
+            "withhold pending stability"
+        )
     if unresolved and marginal:
         return (
             "BUY at marginal risk tally with an unresolved peak/transient flag — "
@@ -136,10 +148,9 @@ def _as_flag_set(active_flags: object) -> set[str]:
     """Coerce a flag container (set/list/tuple of str) to a set[str]."""
     if isinstance(active_flags, str):
         return {active_flags}
-    try:
-        return {str(f) for f in active_flags}  # type: ignore[union-attr]
-    except TypeError:
-        return set()
+    if isinstance(active_flags, Iterable):
+        return {str(flag) for flag in active_flags}
+    return set()
 
 
 def load_recent_same_ticker_history(

@@ -27,7 +27,6 @@ from src.reporting.state_access import (
     get_apac_regional_report,
     get_auditor_report,
     get_consultant_review,
-    get_effective_red_flags,
     get_fundamentals_report,
     get_raw_fundamentals_data,
 )
@@ -75,17 +74,11 @@ def _apac_status(state: dict) -> str | None:
     return "RAN"
 
 
-def _has_effective_flag(state: dict, flag_type: str) -> bool:
-    target = flag_type.upper()
-    return any(
-        isinstance(flag, dict) and str(flag.get("type", "")).upper() == target
-        for flag in get_effective_red_flags(state)
-    )
-
-
 def _safe_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        return None
     try:
-        return float(value) if value is not None else None
+        return float(value)
     except (TypeError, ValueError):
         return None
 
@@ -125,7 +118,7 @@ def _select_pe_key(raw: dict, display_value: str | None) -> str | None:
 
     market_cap = _safe_float(raw.get("marketCap"))
     net_income = _safe_float(raw.get("netIncomeToCommon"))
-    if market_cap is not None and net_income not in (None, 0):
+    if market_cap is not None and net_income is not None and net_income != 0:
         calculated = market_cap / net_income
         if displayed is None or _relative_match(displayed, calculated):
             return "marketCap/netIncomeToCommon"
@@ -244,19 +237,7 @@ def build_source_confidence_rows(state: dict) -> list[SourceRow]:
         .strip()
         .upper()
     )
-    if (
-        ocf_source == "FILING"
-        and ocf_reason == "DISCREPANCY"
-        and _has_effective_flag(state, "OCF_PERIOD_MISMATCH_RESOLVED")
-    ):
-        rows.append(
-            (
-                "Core financials",
-                "Filing OCF corroborated; API difference appears period mismatch",
-                "MEDIUM",
-            )
-        )
-    elif ocf_source == "FILING" and ocf_reason == "DISCREPANCY":
+    if ocf_source == "FILING" and ocf_reason == "DISCREPANCY":
         # Filing and aggregator OCF materially diverged: not "ground truth".
         # Verify against the actual cash-flow statement line (KTY.WA 2026-06-27).
         rows.append(
@@ -311,7 +292,13 @@ def build_source_confidence_rows(state: dict) -> list[SourceRow]:
     # the legacy "ran ok → HIGH" path only for pre-change saved JSON (verdict None).
     verdict = summary.get("consultant_verdict")
     if verdict == "CLEAN" or (verdict is None and summary.get("consultant_successful")):
-        rows.append(("Cross-model review", "Consultant (gpt-5.4)", "HIGH"))
+        rows.append(
+            (
+                "Cross-model review",
+                "Consultant — no material concerns in bounded review",
+                "HIGH",
+            )
+        )
     elif verdict == "CONDITIONAL":
         rows.append(("Cross-model review", "Consultant — conditional", "MEDIUM"))
     elif verdict == "MAJOR_CONCERNS":

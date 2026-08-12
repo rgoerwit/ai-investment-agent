@@ -70,7 +70,10 @@ def test_build_rows_filing_ocf_discrepancy_downgraded() -> None:
     assert "ground truth" not in source.lower()
 
 
-def test_build_rows_resolved_ocf_period_mismatch_wording() -> None:
+def test_build_rows_ocf_discrepancy_is_never_downgraded_by_consultant_prose() -> None:
+    """The "corroborated / period mismatch" row is gone with the suppression it
+    depended on: consultant prose alone cannot upgrade a filing/API OCF conflict
+    into a corroborated figure."""
     block = (
         "### --- START DATA_BLOCK ---\n"
         "OPERATING_CASH_FLOW: 151.97M PLN\n"
@@ -91,8 +94,8 @@ def test_build_rows_resolved_ocf_period_mismatch_wording() -> None:
     )
     _, source, conf = _claim(rows, "Core financials")
     assert conf == "MEDIUM"
-    assert "corroborated" in source
-    assert "period mismatch" in source
+    assert "Filing/API OCF conflict" in source
+    assert "corroborated" not in source
 
 
 def test_build_rows_major_concerns_do_not_resolve_ocf_period_mismatch() -> None:

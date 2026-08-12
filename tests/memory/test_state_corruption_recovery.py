@@ -870,9 +870,9 @@ class TestEndToEndInformationFlow:
                 assert len(result["final_trade_decision"]) > 0
 
                 # Verify portfolio manager was invoked
-                assert (
-                    len(pm_invoke_calls) > 0
-                ), "Portfolio manager should have been invoked"
+                assert len(pm_invoke_calls) > 0, (
+                    "Portfolio manager should have been invoked"
+                )
 
                 # Extract the context passed to portfolio manager
                 pm_context = pm_invoke_calls[0][1][0].content
@@ -900,23 +900,23 @@ class TestEndToEndInformationFlow:
                     raise AssertionError(error_msg)
 
                 # Verify specific critical sections are present
-                assert (
-                    "FUNDAMENTALS ANALYST REPORT" in pm_context
-                ), "Fundamentals section missing"
+                assert "FUNDAMENTALS ANALYST REPORT" in pm_context, (
+                    "Fundamentals section missing"
+                )
                 assert "MARKET ANALYST REPORT" in pm_context, "Market section missing"
                 assert "NEWS ANALYST REPORT" in pm_context, "News section missing"
-                assert (
-                    "SENTIMENT ANALYST REPORT" in pm_context
-                ), "Sentiment section missing"
-                assert (
-                    "RESEARCH MANAGER RECOMMENDATION" in pm_context
-                ), "Research manager section missing"
-                assert (
-                    "EXTERNAL CONSULTANT REVIEW" in pm_context
-                ), "Consultant section missing"
-                assert (
-                    "POSITION PLANNER PROPOSAL" in pm_context
-                ), "Position Planner section missing"
+                assert "SENTIMENT ANALYST REPORT" in pm_context, (
+                    "Sentiment section missing"
+                )
+                assert "RESEARCH MANAGER RECOMMENDATION" in pm_context, (
+                    "Research manager section missing"
+                )
+                assert "EXTERNAL CONSULTANT REVIEW" in pm_context, (
+                    "Consultant section missing"
+                )
+                assert "POSITION PLANNER PROPOSAL" in pm_context, (
+                    "Position Planner section missing"
+                )
                 assert "RISK TEAM DEBATE" in pm_context, "Risk section missing"
 
     @pytest.mark.asyncio
@@ -1002,17 +1002,17 @@ class TestEndToEndInformationFlow:
 
                 # Verify ALL red-flag information is preserved
                 assert "850%" in pm_context, "D/E ratio red flag missing"
-                assert (
-                    "Negative FCF" in pm_context or "-$120M" in pm_context
-                ), "FCF red flag missing"
-                assert (
-                    "Interest coverage" in pm_context or "1.2x" in pm_context
-                ), "Interest coverage red flag missing"
+                assert "Negative FCF" in pm_context or "-$120M" in pm_context, (
+                    "FCF red flag missing"
+                )
+                assert "Interest coverage" in pm_context or "1.2x" in pm_context, (
+                    "Interest coverage red flag missing"
+                )
 
                 # Verify fundamentals report (which contains red flags) is present
                 assert "FUNDAMENTALS ANALYST REPORT" in pm_context
 
                 # Even in fast-fail, PM should have access to the rejection reason
-                assert (
-                    "DATA_BLOCK" in pm_context
-                ), "Structured data section missing in fast-fail path"
+                assert "DATA_BLOCK" in pm_context, (
+                    "Structured data section missing in fast-fail path"
+                )

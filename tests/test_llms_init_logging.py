@@ -129,9 +129,9 @@ class TestOpenAIRateLimiter:
                     factory(**kwargs)
 
         call_kwargs = MockChatOpenAI.call_args.kwargs
-        assert (
-            "rate_limiter" in call_kwargs
-        ), f"{factory_name}: rate_limiter not passed to ChatOpenAI"
+        assert "rate_limiter" in call_kwargs, (
+            f"{factory_name}: rate_limiter not passed to ChatOpenAI"
+        )
         assert call_kwargs["rate_limiter"] is mock_rl
 
     @pytest.mark.parametrize("factory_name,kwargs", _OPENAI_FACTORIES)
@@ -150,9 +150,9 @@ class TestOpenAIRateLimiter:
                 factory(**kwargs)
 
         call_kwargs = MockChatOpenAI.call_args.kwargs
-        assert (
-            "rate_limiter" not in call_kwargs
-        ), f"{factory_name}: rate_limiter should not be set when OPENAI_RPM_LIMIT unset"
+        assert "rate_limiter" not in call_kwargs, (
+            f"{factory_name}: rate_limiter should not be set when OPENAI_RPM_LIMIT unset"
+        )
 
     @pytest.mark.parametrize("factory_name,kwargs", _OPENAI_FACTORIES)
     def test_unthrottled_warning_emitted_once(
@@ -173,9 +173,9 @@ class TestOpenAIRateLimiter:
             for c in mock_logger.debug.call_args_list
             if c.args and c.args[0] == "openai_llm_unthrottled"
         ]
-        assert (
-            len(debug_calls) == 1
-        ), f"{factory_name}: expected 1 unthrottled debug log, got {len(debug_calls)}"
+        assert len(debug_calls) == 1, (
+            f"{factory_name}: expected 1 unthrottled debug log, got {len(debug_calls)}"
+        )
 
     def test_shared_limiter_across_factories(self, reset_openai_rl):
         """All three factories share the same InMemoryRateLimiter instance."""
@@ -197,9 +197,9 @@ class TestOpenAIRateLimiter:
                     llms_mod.create_editor_llm()
 
         assert len(captured) == 3
-        assert all(
-            rl is mock_rl for rl in captured
-        ), "All factories must share the same rate limiter instance"
+        assert all(rl is mock_rl for rl in captured), (
+            "All factories must share the same rate limiter instance"
+        )
 
     def test_gemini_still_uses_global_rate_limiter(self):
         """Gemini factory is unaffected — it still passes GLOBAL_RATE_LIMITER."""

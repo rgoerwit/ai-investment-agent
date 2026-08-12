@@ -15,6 +15,18 @@ from src.agents.verdict_policy import (
     maybe_tag_dni_review_candidate,
 )
 from src.charts.extractors.pm_block import extract_pm_block
+from src.decision_inputs import DecisionInputs
+from src.validators.metric_extractor import extract_metrics
+
+
+def _inputs(fundamentals_report: str, snapshot: dict | None = None) -> DecisionInputs:
+    """Build the typed decision inputs the floor now consumes."""
+    return DecisionInputs.from_metrics_and_snapshot(
+        extract_metrics(fundamentals_report or ""),
+        None,
+        snapshot,
+        ticker="TEST",
+    )
 
 
 def _pm_output(verdict_display: str, verdict_block: str) -> str:
@@ -76,7 +88,7 @@ KTY_BLOCK = _data_block(67, 20.54, 33, -2.5)
 def test_floor_normalizes_chart_control_fields():
     out, floored = maybe_floor_verdict_to_hold(
         _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
-        fundamentals_report=APR_BLOCK,
+        decision_inputs=_inputs(APR_BLOCK),
         red_flags=[],
         code_subtotal=1.0,
         pre_screening_result="PASS",
@@ -102,7 +114,7 @@ def test_floor_normalizes_chart_control_fields():
 def test_apr_floored_to_hold():
     out, floored = maybe_floor_verdict_to_hold(
         _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
-        fundamentals_report=APR_BLOCK,
+        decision_inputs=_inputs(APR_BLOCK),
         red_flags=[{"type": "VALUE_TRAP_MODERATE_RISK", "risk_penalty": 0.5}],
         code_subtotal=1.0,
         pre_screening_result="PASS",
@@ -120,7 +132,7 @@ def test_apr_floored_to_hold():
 def test_kty_not_floored_pe_and_negative_cagr():
     out, floored = maybe_floor_verdict_to_hold(
         _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
-        fundamentals_report=KTY_BLOCK,
+        decision_inputs=_inputs(KTY_BLOCK),
         red_flags=[],
         code_subtotal=1.0,
         pre_screening_result="PASS",
@@ -133,7 +145,7 @@ def test_kty_not_floored_pe_and_negative_cagr():
 def test_not_floored_when_subtotal_at_zone1():
     _, floored = maybe_floor_verdict_to_hold(
         _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
-        fundamentals_report=APR_BLOCK,
+        decision_inputs=_inputs(APR_BLOCK),
         red_flags=[],
         code_subtotal=2.0,
         pre_screening_result="PASS",
@@ -145,7 +157,7 @@ def test_not_floored_when_subtotal_at_zone1():
 def test_not_floored_with_auto_reject_flag():
     _, floored = maybe_floor_verdict_to_hold(
         _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
-        fundamentals_report=APR_BLOCK,
+        decision_inputs=_inputs(APR_BLOCK),
         red_flags=[{"type": "EXTREME_LEVERAGE", "action": "AUTO_REJECT"}],
         code_subtotal=1.0,
         pre_screening_result="PASS",
@@ -157,7 +169,7 @@ def test_not_floored_with_auto_reject_flag():
 def test_not_floored_when_prescreen_reject():
     _, floored = maybe_floor_verdict_to_hold(
         _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
-        fundamentals_report=APR_BLOCK,
+        decision_inputs=_inputs(APR_BLOCK),
         red_flags=[],
         code_subtotal=1.0,
         pre_screening_result="REJECT",
@@ -169,7 +181,7 @@ def test_not_floored_when_prescreen_reject():
 def test_not_floored_when_low_health():
     _, floored = maybe_floor_verdict_to_hold(
         _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
-        fundamentals_report=_data_block(55, 14.0, 33, 16.0),
+        decision_inputs=_inputs(_data_block(55, 14.0, 33, 16.0)),
         red_flags=[],
         code_subtotal=1.0,
         pre_screening_result="PASS",
@@ -182,7 +194,7 @@ def test_non_dni_verdict_untouched():
     src = _pm_output("HOLD", "HOLD")
     out, floored = maybe_floor_verdict_to_hold(
         src,
-        fundamentals_report=APR_BLOCK,
+        decision_inputs=_inputs(APR_BLOCK),
         red_flags=[],
         code_subtotal=1.0,
         pre_screening_result="PASS",
@@ -195,7 +207,7 @@ def test_non_dni_verdict_untouched():
 def test_sell_verdict_not_upgraded():
     out, floored = maybe_floor_verdict_to_hold(
         _pm_output("SELL", "SELL"),
-        fundamentals_report=APR_BLOCK,
+        decision_inputs=_inputs(APR_BLOCK),
         red_flags=[],
         code_subtotal=1.0,
         pre_screening_result="PASS",
@@ -211,7 +223,7 @@ def test_reject_synonym_is_floored():
     # Use the canonical-marker PM_BLOCK (the production format extract_pm_block parses).
     out, floored = maybe_floor_verdict_to_hold(
         _full_pm_output("REJECT", "REJECT"),
-        fundamentals_report=APR_BLOCK,
+        decision_inputs=_inputs(APR_BLOCK),
         red_flags=[],
         code_subtotal=1.0,
         pre_screening_result="PASS",
@@ -234,7 +246,7 @@ def test_not_floored_when_growth_score_unparseable():
     )
     _, floored = maybe_floor_verdict_to_hold(
         _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
-        fundamentals_report=db,
+        decision_inputs=_inputs(db),
         red_flags=[],
         code_subtotal=1.0,
         pre_screening_result="PASS",
@@ -644,7 +656,7 @@ class TestDniReviewCandidate:
         pm = _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE")
         floored, did_floor = maybe_floor_verdict_to_hold(
             pm,
-            fundamentals_report=APR_BLOCK,
+            decision_inputs=_inputs(APR_BLOCK),
             red_flags=[],
             code_subtotal=1.0,
             pre_screening_result="PASS",
@@ -653,3 +665,105 @@ class TestDniReviewCandidate:
         out, tagged = maybe_tag_dni_review_candidate(floored, red_flags=[])
         assert tagged is False
         assert out == floored
+
+
+class TestFloorScoreAuthority:
+    """The floor may only upgrade a verdict on scores the canonical layer owns."""
+
+    _BLOCK = _data_block(75, 14.0, 33, 16.0)
+
+    def _valid_snapshot(self, health: float, growth: float) -> dict:
+        return {
+            "contract_status": "VALID",
+            "scorecards": {
+                "HEALTH": {"percentage": health, "decision_eligible": True},
+                "GROWTH": {"percentage": growth, "decision_eligible": True},
+            },
+        }
+
+    def test_valid_snapshot_still_floors(self):
+        _, floored = maybe_floor_verdict_to_hold(
+            _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+            decision_inputs=_inputs(self._BLOCK, self._valid_snapshot(75.0, 33.0)),
+            red_flags=[],
+            code_subtotal=1.0,
+            pre_screening_result="PASS",
+            ticker="TEST",
+        )
+        assert floored is True
+
+    def test_snapshot_wins_over_data_block_scores(self):
+        """DATA_BLOCK says the growth gate failed (33%); the canonical scorecard
+        says it passed (70%). The floor's growth-failure precondition must be
+        judged on the canonical value, so no floor is applied."""
+        _, floored = maybe_floor_verdict_to_hold(
+            _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+            decision_inputs=_inputs(self._BLOCK, self._valid_snapshot(75.0, 70.0)),
+            red_flags=[],
+            code_subtotal=1.0,
+            pre_screening_result="PASS",
+            ticker="TEST",
+        )
+        assert floored is False
+
+    def test_ineligible_scorecard_blocks_the_floor(self):
+        """A VALID contract that marks the score unusable yields an authoritative
+        None — an absent score must never create the mitigation."""
+        snapshot = self._valid_snapshot(75.0, 33.0)
+        snapshot["scorecards"]["GROWTH"]["decision_eligible"] = False
+        _, floored = maybe_floor_verdict_to_hold(
+            _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+            decision_inputs=_inputs(self._BLOCK, snapshot),
+            red_flags=[],
+            code_subtotal=1.0,
+            pre_screening_result="PASS",
+            ticker="TEST",
+        )
+        assert floored is False
+
+    def test_invalid_contract_blocks_the_floor(self):
+        """Step-2 linkage: a non-VALID contract marks both scores SUSPECT, and an
+        untrusted score cannot lift a DO_NOT_INITIATE to HOLD."""
+        _, floored = maybe_floor_verdict_to_hold(
+            _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+            decision_inputs=_inputs(self._BLOCK, {"contract_status": "INVALID"}),
+            red_flags=[],
+            code_subtotal=1.0,
+            pre_screening_result="PASS",
+            ticker="TEST",
+        )
+        assert floored is False
+
+    def test_suspect_data_block_score_blocks_the_floor(self):
+        """The same guard fires on the pre-existing rubric-arithmetic SUSPECT
+        marker, independent of any snapshot."""
+        inputs = DecisionInputs.from_metrics_and_snapshot(
+            {
+                **extract_metrics(self._BLOCK),
+                "growth_score_consistency": "SUSPECT",
+            },
+            None,
+            None,
+            ticker="TEST",
+        )
+        _, floored = maybe_floor_verdict_to_hold(
+            _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+            decision_inputs=inputs,
+            red_flags=[],
+            code_subtotal=1.0,
+            pre_screening_result="PASS",
+            ticker="TEST",
+        )
+        assert floored is False
+
+
+def test_verdict_policy_owns_no_private_score_regex():
+    """Guard: scores reach the verdict tail through DecisionInputs / the PM
+    parser, never a module-private DATA_BLOCK regex re-implementation."""
+    import inspect
+
+    import src.agents.verdict_policy as vp
+
+    source = inspect.getsource(vp)
+    assert "ADJUSTED_GROWTH_SCORE" not in source
+    assert "ADJUSTED_HEALTH_SCORE" not in source

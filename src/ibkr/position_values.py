@@ -93,10 +93,11 @@ def normalize_position_values(
     market_value_usd = _to_usd(raw_market_value, market_basis, fx_rate)
 
     lacks_pnl_context = quantity == 0 or current_price_local <= 0 or avg_cost_local <= 0
+    pnl_basis: ValueBasis | None
     if raw_unrealized_pnl is None or (
         normalized_currency != "USD" and lacks_pnl_context
     ):
-        pnl_basis: ValueBasis = "UNAVAILABLE"
+        pnl_basis = "UNAVAILABLE"
         unrealized_pnl_usd = 0.0
     elif normalized_currency == "USD" and lacks_pnl_context:
         pnl_basis = "BROKER_USD"

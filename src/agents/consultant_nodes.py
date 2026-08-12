@@ -11,11 +11,14 @@ from typing import Any
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.types import RunnableConfig
+from pydantic import SecretStr
 
+from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
 from src.data_block_utils import unfenced_label
 from src.error_safety import redact_sensitive_text, summarize_exception
 from src.forensic_budget import AuditorBudgetLedger, AuditorBudgetPolicy
+from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import ArtifactStatus, failure_artifact, success_artifact
 from src.runtime_services import get_current_tool_service
 from src.service_tiers import floor_llm_hard_timeout, floor_llm_total_timeout
@@ -140,7 +143,7 @@ async def _invoke_consultant_with_deadline(
     # per-call cap (the shrinking `remaining` budget still bounds the loop).
     per_call_cap = floor_llm_hard_timeout(
         CONSULTANT_CALL_TIMEOUT_SECONDS,
-        provider="openai",
+        provider=provider,
         label="consultant_call_timeout",
     )
     timeout_s = min(per_call_cap, remaining)
@@ -165,15 +168,24 @@ async def _invoke_agent_loop_llm(
     messages,
     *,
     context: str,
+    canonical_agent: str | None = None,
+    overall_timeout_seconds: float | None = None,
 ) -> object:
-    """Invoke an agent-loop LLM through the shared retry-aware runtime helper."""
+    """Invoke an agent-loop LLM through the shared retry-aware runtime helper.
+
+    ``canonical_agent`` carries the seat identity when ``context`` is decorated,
+    so the per-call quick budget resolves from the seat rather than the
+    diagnostic label.
+    """
     model_name = getattr(runnable, "model_name", None)
     return await agent_runtime.invoke_with_rate_limit_handling(
         runnable,
         messages,
         context=context,
+        canonical_agent=canonical_agent,
         provider=support.infer_provider_name(runnable),
         model_name=model_name,
+        overall_timeout_seconds=overall_timeout_seconds,
     )
 
 
@@ -186,12 +198,12 @@ def _build_legal_fallback_report(
 ) -> str:
     return json.dumps(
         {
-            "pfic_status": "UNCERTAIN",
+            "pfic_status": None,
             "pfic_evidence": f"Legal counsel unavailable for {ticker}: {reason}",
-            "vie_structure": "N/A",
-            "vie_evidence": None,
-            "cmic_status": "N/A",
-            "cmic_evidence": None,
+            "vie_structure": None,
+            "vie_evidence": f"Legal counsel unavailable for {ticker}: {reason}",
+            "cmic_status": None,
+            "cmic_evidence": f"Legal counsel unavailable for {ticker}: {reason}",
             "other_regulatory_risks": [],
             "capital_structure": {
                 "coverage_status": "SEARCH_FAILED",
@@ -234,10 +246,18 @@ def _consultant_context_budget(section: str, *, profile: str) -> int:
 
 
 def _build_decision_critical_evidence_index(state: AgentState) -> str:
-    lines: list[str] = []
-    for flag in (state.get("red_flags") or [])[:5]:
-        lines.append(str(flag))
+    """Quick-mode salience index for signals the summarized reports can bury.
 
+    Deliberately carries no red flags: they are rendered once, in full, by
+    ``support.format_red_flag_section``. This function used to repeat the first
+    five as ``str(flag)`` clipped to 220 chars — and since ``detail`` and
+    ``rationale`` are long strings ordered ahead of the numeric keys, the clip
+    dropped ``risk_penalty`` first, which is precisely the weight this index
+    existed to raise the salience of. (``blocks_buy`` was also clipped, but no
+    prompt renderer surfaces it to any seat: it is enforced deterministically by
+    ``maybe_demote_buy_on_blocking_flags`` after the PM speaks.)
+    """
+    lines: list[str] = []
     plan_upper = str(state.get("investment_plan") or "").upper()
     for marker in ("PFIC", "CMIC", "VALUE TRAP", "LIQUIDITY", "LEVERAGE"):
         if marker in plan_upper:
@@ -256,21 +276,31 @@ def _create_openai_responses_fallback_llm(llm):
 
     from langchain_openai import ChatOpenAI
 
-    kwargs: dict[str, object] = {
-        "model": support.get_model_name(llm),
-        "timeout": 120,
-        "max_retries": 3,
-        "streaming": False,
-        "api_key": settings_config.get_openai_api_key(),
-    }
+    model_name = support.get_model_name(llm)
+    if not model_name:
+        raise ValueError("OpenAI Responses fallback requires a configured model name")
+    raw_api_key = settings_config.get_openai_api_key()
+    api_key = SecretStr(raw_api_key) if raw_api_key else None
     base_url = settings_config.get_openai_api_base()
     if isinstance(base_url, str) and base_url:
         # Custom OpenAI-compatible endpoint (e.g. Kimi): Chat Completions only.
-        kwargs["base_url"] = base_url
-    else:
-        kwargs["use_responses_api"] = True
-        kwargs["output_version"] = "responses/v1"
-    return ChatOpenAI(**kwargs)
+        return ChatOpenAI(
+            model=model_name,
+            timeout=120,
+            max_retries=3,
+            streaming=False,
+            api_key=api_key,
+            base_url=base_url,
+        )
+    return ChatOpenAI(
+        model=model_name,
+        timeout=120,
+        max_retries=3,
+        streaming=False,
+        api_key=api_key,
+        use_responses_api=True,
+        output_version="responses/v1",
+    )
 
 
 def create_consultant_node(
@@ -354,6 +384,15 @@ def create_consultant_node(
         evidence_index = (
             _build_decision_critical_evidence_index(state) if quick_mode else ""
         )
+        # The same renderer the PM consumes. Previously this section interpolated
+        # the raw list[dict], i.e. Python repr as a prompt serialization format —
+        # which is how the consultant's own documented veto trigger (CMIC_FLAGGED
+        # -> "HARD STOP: RESTRICTED") reached it, buried inside a dict literal.
+        flag_section, _flag_subtotal = support.format_red_flag_section(
+            str(state.get("pre_screening_result", "UNKNOWN")),
+            state.get("red_flags") or [],
+            audience="consultant",
+        )
 
         all_context = f"""
 {evidence_index}\
@@ -388,9 +427,7 @@ FUNDAMENTALS ANALYST REPORT:
 {support.summarize_for_pm(value_trap, "value_trap", _consultant_context_budget("value_trap", profile=consultant_profile)) if value_trap != "N/A" else "N/A"}
 
 === RED FLAGS (Pre-Screening Results) ===
-
-Red Flags Detected: {state.get("red_flags", [])}
-Pre-Screening Result: {state.get("pre_screening_result", "UNKNOWN")}
+{flag_section}
 
 === INDEPENDENT FORENSIC AUDIT ===
 {support.summarize_for_pm(auditor, "auditor", _consultant_context_budget("auditor", profile=consultant_profile)) if auditor != "N/A" else "N/A"}
@@ -436,7 +473,7 @@ Provide your independent consultant review."""
                 settings_config.consultant_quick_total_timeout_seconds
                 if quick_mode
                 else CONSULTANT_TOTAL_TIMEOUT_SECONDS,
-                provider="openai",
+                provider=support.infer_provider_name(active_llm),
                 label="consultant_total_timeout",
             )
             consultant_deadline = time.monotonic() + total_timeout
@@ -497,6 +534,30 @@ Provide your independent consultant review."""
                 truncated=trunc_info["truncated"],
                 validation=validation,
             )
+            # A provider-partial that survived the re-ask is not a finished
+            # cross-check, however well-formed its fragment looks. Header
+            # validation cannot see this: the two required headers appear early,
+            # so a truncated review passes structurally. Fail the *optional*
+            # artifact only — consultant_review is optional-publishable, so the
+            # equity analysis still stands, it just loses this counterweight.
+            if loop_result.partial_reason:
+                logger.error(
+                    "consultant_partial_not_recovered",
+                    ticker=ticker,
+                    partial_reason=loop_result.partial_reason,
+                    content_chars=len(content_str),
+                )
+                result = failure_artifact(
+                    "consultant_review",
+                    "Consultant response incomplete "
+                    f"({loop_result.partial_reason}); re-synthesis did not recover it",
+                    provider=support.infer_provider_name(llm),
+                    fallback_content=content_str,
+                )
+                if quick_mode:
+                    result["consultant_quick_profile"] = consultant_profile
+                return result
+
             if should_fail_closed(
                 "consultant",
                 validation=validation,
@@ -790,6 +851,7 @@ then return the complete required JSON assessment. Query terms alone are not fin
                     llm,
                     messages,
                     context=f"{agent_prompt.agent_name}_final_synthesis",
+                    canonical_agent=agent_prompt.agent_name,
                 )
                 response_str = message_utils.extract_string_content(
                     getattr(final_response, "content", "")
@@ -955,7 +1017,9 @@ def create_auditor_node(llm, tools: list, *, escalation_llm=None) -> Callable:
     Create the Global Forensic Auditor node.
     """
 
-    async def auditor_node(state: AgentState, config: RunnableConfig) -> dict[str, str]:
+    async def _auditor_workflow(
+        state: AgentState, config: RunnableConfig
+    ) -> dict[str, str]:
         from src.prompts import get_prompt
 
         agent_prompt = get_prompt("global_forensic_auditor")
@@ -1154,6 +1218,7 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                 final_llm,
                 _truncate_messages_for_llm(messages),
                 context=f"{agent_prompt.agent_name}_final_synthesis",
+                canonical_agent=agent_prompt.agent_name,
             )
             content = message_utils.extract_string_content(
                 getattr(final_response, "content", "")
@@ -1391,6 +1456,45 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
             )
             result["sender"] = "global_forensic_auditor"
             result["auditor_budget"] = ledger.telemetry()
+            return result
+
+    async def auditor_node(state: AgentState, config: RunnableConfig) -> dict[str, str]:
+        """Hard-bound wrapper — an optional seat must never cost the ticker.
+
+        A node-scoped *deadline* was not a bound: it excluded the metrics
+        preload, tool batches, escalation and repair, and a call starting just
+        under it could still run a full per-call cap past it. Wrapping the whole
+        workflow is hermetic by construction — every path inside, including the
+        parameter-error fallback that re-enters the loop, shares this one
+        ceiling. Expiry orphans the in-flight call (``run_with_hard_timeout``
+        semantics) and degrades to the structured INSUFFICIENT_DATA artifact, so
+        the ticker survives instead of being SIGTERMed by the Stage-1 watchdog.
+        """
+        if not get_runtime_config(settings_config).quick_mode_active:
+            return await _auditor_workflow(state, config)
+
+        ticker = state.get("company_of_interest", "UNKNOWN")
+        budget = float(settings_config.auditor_quick_total_timeout_seconds)
+        try:
+            return await run_with_hard_timeout(
+                _auditor_workflow(state, config),
+                timeout=budget,
+                label=f"auditor_total:{ticker}",
+            )
+        except TimeoutError:
+            logger.warning(
+                "auditor_total_budget_exhausted",
+                ticker=ticker,
+                budget_seconds=budget,
+            )
+            result = success_artifact(
+                "auditor_report",
+                _budget_exhausted_report(
+                    "total quick-mode auditor wall-clock budget exhausted", ticker
+                ),
+                provider=support.infer_provider_name(llm),
+            )
+            result["sender"] = "global_forensic_auditor"
             return result
 
     return auditor_node

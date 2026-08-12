@@ -42,7 +42,10 @@ from src.runtime_config import (
     get_runtime_config,
     quick_runtime_clamp_changes,
 )
-from src.runtime_diagnostics import build_analysis_validity
+from src.runtime_diagnostics import (
+    build_analysis_validity,
+    stamp_provenance_contract,
+)
 from src.runtime_init import initialize_runtime_environment
 
 # IMPORTANT: Don't import get_tracker here - it instantiates the singleton immediately
@@ -480,7 +483,8 @@ async def run_analysis(
     Args:
         ticker: Stock ticker symbol
         quick_mode: If True, use faster/cheaper models and skip some steps
-        strict_mode: If True, apply tighter quality gates and reject REITs/PFIC/VIE
+        strict_mode: If True, apply tighter quality gates and auto-reject
+            REITs/ETFs and earnings-quality failures (PFIC/VIE stay warnings)
         chart_format: Chart output format ('png' or 'svg')
         transparent_charts: Whether to use transparent chart backgrounds
         image_dir: Directory for chart output (None = use config default)
@@ -825,6 +829,10 @@ async def run_analysis(
                 )
 
             if isinstance(result, dict):
+                # Stamp the provenance contract before any validity computation so
+                # this live run is held to fail-closed publication (snapshot + trace
+                # must be present and VALID). Legacy artifacts carry no stamp.
+                stamp_provenance_contract(result)
                 result["macro_context_report"] = macro_context_report
                 result["macro_context_region"] = macro_context_region
                 result["macro_context_status"] = macro_context_status
@@ -886,17 +894,12 @@ def _enable_quiet_runtime_if_needed(args: argparse.Namespace) -> None:
     TokenTracker.set_quiet_mode(True)
     suppress_all_logging()
 
-    tracker = TokenTracker()
-    tracker._quiet_mode = True
-    config.quiet_mode = True
-
 
 def _setup_runtime(
     args: argparse.Namespace, output_targets: cli.OutputTargets
 ) -> tuple[dict[str, dict[str, str]], Any]:
     """Configure logging, runtime paths, and environment validation."""
     _enable_quiet_runtime_if_needed(args)
-    config.images_dir = output_targets.image_dir
     initialize_runtime_environment(config)
 
     provider_preflight = configure_cli_logging(args)
@@ -1463,6 +1466,11 @@ async def run_with_args(
     try:
         cli._validate_cli_args(args)
         output_targets = cli._resolve_output_targets(args)
+        _restore_runtime_config()
+        runtime_config = runtime_config.with_overrides(
+            images_dir=output_targets.image_dir
+        )
+        _restore_runtime_config = bind_runtime_config(runtime_config)
         provider_preflight, runtime_services = _setup_runtime(args, output_targets)
         _warn_quick_timeout_config_drift(args)
         baseline_capture = _create_baseline_capture_manager(args)

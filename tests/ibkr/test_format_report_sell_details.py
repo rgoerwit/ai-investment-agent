@@ -445,9 +445,9 @@ class TestOrderAnnotation:
             live_orders=[order],
             watchlist_name="TestWatchlist",
         )
-        assert (
-            "ORDER ALREADY SUBMITTED" in report
-        ), "HK BUY order with IBKR symbol '5' should match yf ticker '0005.HK'"
+        assert "ORDER ALREADY SUBMITTED" in report, (
+            "HK BUY order with IBKR symbol '5' should match yf ticker '0005.HK'"
+        )
 
     def test_ibkr_symbol_from_position_used_for_sell_match(self):
         """When a position exists, pos.symbol (IBKR-native) is the authoritative symbol

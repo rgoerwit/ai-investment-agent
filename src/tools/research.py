@@ -113,7 +113,7 @@ async def search_foreign_sources(
         return f"""STATUS: RESULTS_FOUND
 ### Foreign Source Search Results
 Query: {search_query}
-Ticker: {ticker} ({company_name if company_resolved else 'UNVERIFIED COMPANY'})
+Ticker: {ticker} ({company_name if company_resolved else "UNVERIFIED COMPANY"})
 {source_note}
 
 Note: Verify dates and currencies in the source data.

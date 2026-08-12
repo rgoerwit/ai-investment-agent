@@ -236,6 +236,41 @@ class TestCapitalEfficiencyCalculation:
         assert signals["capital_capexToDaRatio"] == pytest.approx(1.5, rel=0.01)
         assert signals["capital_capexToDaStatus"] == "GROWTH_INVESTING"
 
+    @pytest.mark.parametrize(
+        ("cash", "assets", "expected"),
+        [
+            ([250, 240, 230], [1_000, 1_000, 1_000], "PERSISTENT_EXCESS"),
+            ([260, 170, 150], [1_000, 1_000, 1_000], "NOT_PERSISTENT"),
+            ([260, None, 230], [1_000, 1_000, 1_000], "UNKNOWN"),
+        ],
+    )
+    def test_cash_excess_persistence_uses_three_paired_annual_periods(
+        self,
+        cash: list[float | None],
+        assets: list[float],
+        expected: str,
+    ) -> None:
+        """Stable excess counts; a recent spike and incomplete pairs do not."""
+        from src.data.fetcher import SmartMarketDataFetcher
+
+        balance_sheet = pd.DataFrame(
+            {
+                "2025": [cash[0], assets[0]],
+                "2024": [cash[1], assets[1]],
+                "2023": [cash[2], assets[2]],
+            },
+            index=["Cash And Short Term Investments", "Total Assets"],
+        )
+
+        signals = SmartMarketDataFetcher()._calculate_capital_efficiency_signals(
+            pd.DataFrame(),
+            balance_sheet,
+            {},
+            "TEST",
+        )
+
+        assert signals["capital_cashExcessPersistence"] == expected
+
 
 class TestCapitalEfficiencyExtraction:
     """Test DATA_BLOCK extraction for capital efficiency."""
@@ -357,6 +392,7 @@ class TestCapitalEfficiencyExtraction:
         CAPEX_TO_DA: 0.80
         CAPEX_TO_DA_STATUS: MAINTENANCE
         CAPITAL_PLAN_STATUS: NONE
+        CASH_EXCESS_PERSISTENCE: PERSISTENT_EXCESS
         REVENUE_BACKLOG_COVERAGE: 1.3 yrs
         ### --- END DATA_BLOCK ---
         """
@@ -368,6 +404,7 @@ class TestCapitalEfficiencyExtraction:
         assert metrics["capex_to_da"] == pytest.approx(0.80, rel=0.01)
         assert metrics["capex_to_da_status"] == "MAINTENANCE"
         assert metrics["capital_plan_status"] == "NONE"
+        assert metrics["cash_excess_persistence"] == "PERSISTENT_EXCESS"
         assert metrics["revenue_backlog_coverage"] == pytest.approx(1.3, rel=0.01)
 
 
@@ -557,6 +594,66 @@ class TestCapitalEfficiencyFlagDetection:
         )
         assert severe_flag["risk_penalty"] == 1.0
         assert all(flag["type"] != "CAPITAL_IDLE_CASH_RISK" for flag in flags)
+
+    @pytest.mark.parametrize(
+        ("roic_quality", "net_cash", "expected_flag"),
+        [
+            ("WEAK", 30, "CAPITAL_IDLE_CASH_RISK"),
+            ("DESTRUCTIVE", 45, "CAPITAL_IDLE_CASH_SEVERE"),
+        ],
+    )
+    def test_nonpersistent_cash_suppresses_idle_cash_flags(
+        self,
+        roic_quality: str,
+        net_cash: int,
+        expected_flag: str,
+    ) -> None:
+        report = f"""
+        ### --- START DATA_BLOCK ---
+        ROIC_PERCENT: 5.00%
+        ROIC_QUALITY: {roic_quality}
+        LEVERAGE_QUALITY: GENUINE
+        NET_CASH_TO_MARKET_CAP: {net_cash}%
+        CASH_TO_ASSETS: 28%
+        CASH_EXCESS_PERSISTENCE: NOT_PERSISTENT
+        CAPEX_TO_DA_STATUS: MAINTENANCE
+        PAYOUT_RATIO: 0%
+        CAPITAL_PLAN_STATUS: NONE
+        ### --- END DATA_BLOCK ---
+        """
+
+        flag_types = {
+            flag["type"]
+            for flag in RedFlagDetector.detect_capital_efficiency_flags(report, "TEST")
+        }
+
+        assert expected_flag not in flag_types
+
+    @pytest.mark.parametrize("status", ["PERSISTENT_EXCESS", "UNKNOWN"])
+    def test_persistent_or_unknown_history_preserves_idle_cash_rule(
+        self,
+        status: str,
+    ) -> None:
+        report = f"""
+        ### --- START DATA_BLOCK ---
+        ROIC_PERCENT: 5.00%
+        ROIC_QUALITY: WEAK
+        LEVERAGE_QUALITY: GENUINE
+        NET_CASH_TO_MARKET_CAP: 30%
+        CASH_TO_ASSETS: 22%
+        CASH_EXCESS_PERSISTENCE: {status}
+        CAPEX_TO_DA_STATUS: MAINTENANCE
+        PAYOUT_RATIO: 5%
+        CAPITAL_PLAN_STATUS: NONE
+        ### --- END DATA_BLOCK ---
+        """
+
+        flag_types = {
+            flag["type"]
+            for flag in RedFlagDetector.detect_capital_efficiency_flags(report, "TEST")
+        }
+
+        assert "CAPITAL_IDLE_CASH_RISK" in flag_types
 
     def test_idle_cash_not_flagged_when_explicit_plan_or_reinvestment_exists(self):
         """High cash alone should not be penalized when deployment is clearly justified."""

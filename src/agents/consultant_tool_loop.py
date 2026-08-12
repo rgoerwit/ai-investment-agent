@@ -15,6 +15,7 @@ from src.runtime_services import get_current_tool_service
 from src.tooling.runtime import ToolInvocation
 
 from . import message_utils
+from . import runtime as agent_runtime
 
 logger = structlog.get_logger(__name__)
 
@@ -27,6 +28,12 @@ class ConsultantLoopResult:
     tool_failure_count: int
     tool_call_count: int = 0
     failed_tools: tuple[str, ...] = ()
+    # Provider-partial reason of the response actually being returned, after any
+    # re-ask. None means the caller is holding a finished answer. The re-ask can
+    # itself come back partial, error, or return nothing — in each case the
+    # original fragment is retained, and without this the node saw only the
+    # required headers and marked a truncated cross-check complete.
+    partial_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -256,15 +263,73 @@ async def run_bounded_consultant_loop(
             )
             break
 
-    if not content_str and (tools_by_name or policy.max_tool_iterations > 0):
-        response = await invoke_with_deadline(fallback_llm, messages)
-        content_str = message_utils.extract_string_content(
-            getattr(response, "content", "")
+    # A response the provider cut off at the token cap is a fragment, not a
+    # review — and a fragment is truthy, so the emptiness check above cannot
+    # see it. Re-ask once (tool-free) so the model spends its budget on the
+    # answer instead of on reasoning it already did.
+    #
+    # Cost is bounded to exactly one extra call: this runs once, after the
+    # loop, and the consultant invokes with ``max_transient_attempts=1``, so
+    # the runtime does not separately retry a partial before we get here. The
+    # re-ask is strictly additive — any failure (deadline exhausted, provider
+    # error) leaves whatever content we already had, so widening the trigger
+    # from "empty" to "empty or truncated" cannot lose a usable fragment.
+    # Every recognized partial, not just the token-cap subset: a nonempty
+    # fragment whose response carried provider metadata but no finish_reason is
+    # equally not a finished review, and keying on the cap alone published it.
+    partial_reason = agent_runtime.response_partial_reason(response)
+    if (not content_str or partial_reason) and (
+        tools_by_name or policy.max_tool_iterations > 0
+    ):
+        if partial_reason:
+            logger.warning(
+                "consultant_response_partial",
+                ticker=ticker,
+                agent=agent_name,
+                partial_reason=partial_reason,
+                partial_content_chars=len(content_str),
+            )
+        retry_content = ""
+        retry_response: object | None = None
+        try:
+            retry_response = await invoke_with_deadline(fallback_llm, messages)
+            retry_content = message_utils.extract_string_content(
+                getattr(retry_response, "content", "")
+            )
+        except Exception as synthesis_exc:
+            if not content_str:
+                raise
+            logger.warning(
+                "consultant_truncation_resynthesis_failed",
+                ticker=ticker,
+                agent=agent_name,
+                partial_content_chars=len(content_str),
+                **summarize_exception(
+                    synthesis_exc, operation="consultant_truncation_resynthesis"
+                ),
+            )
+        # Never trade usable text for nothing: keep the fragment when the
+        # re-ask comes back empty.
+        if retry_content or not content_str:
+            response = retry_response
+            content_str = retry_content
+
+    # Re-evaluate against whatever is actually being returned: the re-ask may
+    # have been partial too, or failed and left the original fragment in place.
+    final_partial_reason = agent_runtime.response_partial_reason(response)
+    if final_partial_reason:
+        logger.warning(
+            "consultant_response_partial_unrecovered",
+            ticker=ticker,
+            agent=agent_name,
+            partial_reason=final_partial_reason,
+            content_chars=len(content_str),
         )
 
     return ConsultantLoopResult(
         content=content_str,
         response=response,
+        partial_reason=final_partial_reason,
         had_tool_errors=had_tool_errors,
         tool_failure_count=tool_failure_count,
         tool_call_count=tool_call_count,

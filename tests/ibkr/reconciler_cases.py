@@ -679,9 +679,9 @@ class TestWatchlistSuffixDedup:
         )
         # Must NOT produce a Phase 2 (non-watchlist) BUY for "WDO.TO"
         phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
-        assert (
-            not phase2_buys
-        ), f"Unexpected Phase 2 BUY: {[i.ticker.yf for i in phase2_buys]}"
+        assert not phase2_buys, (
+            f"Unexpected Phase 2 BUY: {[i.ticker.yf for i in phase2_buys]}"
+        )
         # Watchlist item must use the suffixed ticker and BUY verdict
         wl = [i for i in items if i.is_watchlist]
         assert len(wl) == 1
@@ -703,9 +703,9 @@ class TestWatchlistSuffixDedup:
             watchlist_tickers={"WDO"},
         )
         phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
-        assert (
-            not phase2_buys
-        ), f"Unexpected Phase 2 BUY: {[i.ticker.yf for i in phase2_buys]}"
+        assert not phase2_buys, (
+            f"Unexpected Phase 2 BUY: {[i.ticker.yf for i in phase2_buys]}"
+        )
         wl = [i for i in items if i.is_watchlist and i.action == "BUY"]
         assert len(wl) == 1
         assert wl[0].ticker.yf == "WDO.TO"
@@ -735,7 +735,9 @@ class TestWatchlistSuffixDedup:
             watchlist_tickers={"5434"},
         )
         phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
-        assert not phase2_buys, f"Numeric watchlist produced false candidate: {[i.ticker.yf for i in phase2_buys]}"
+        assert not phase2_buys, (
+            f"Numeric watchlist produced false candidate: {[i.ticker.yf for i in phase2_buys]}"
+        )
         wl = [i for i in items if i.is_watchlist and i.action == "BUY"]
         assert len(wl) == 1
         assert wl[0].ticker.yf == "5434.TW"
@@ -779,7 +781,9 @@ class TestHeldPositionBlocksCandidate:
             portfolio=self._make_port(),
         )
         phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
-        assert not phase2_buys, f"Held position produced false candidate: {[i.ticker.yf for i in phase2_buys]}"
+        assert not phase2_buys, (
+            f"Held position produced false candidate: {[i.ticker.yf for i in phase2_buys]}"
+        )
 
     def test_alpha_held_bare_blocks_suffixed_candidate(self):
         """Held bare 'WDO' (alphabetic, no exchange resolved) must block 'WDO.TO' in Phase 2.
@@ -797,7 +801,9 @@ class TestHeldPositionBlocksCandidate:
             portfolio=self._make_port(),
         )
         phase2_buys = [i for i in items if i.action == "BUY" and not i.is_watchlist]
-        assert not phase2_buys, f"Held position produced false candidate: {[i.ticker.yf for i in phase2_buys]}"
+        assert not phase2_buys, (
+            f"Held position produced false candidate: {[i.ticker.yf for i in phase2_buys]}"
+        )
 
     def test_suffixed_held_still_blocks_same_key(self):
         """Held '5434.TW' (suffix already resolved) blocks the same analysis normally."""
@@ -2214,9 +2220,9 @@ class TestExchangeFromPosition:
         portfolio = _make_portfolio(value=1000, cash=860)
         reconcile([pos], {"MEGP": analysis}, portfolio)
 
-        assert (
-            "KL" in portfolio.exchange_weights
-        ), "Malaysian position must be KL, not US"
+        assert "KL" in portfolio.exchange_weights, (
+            "Malaysian position must be KL, not US"
+        )
         assert "US" not in portfolio.exchange_weights, "Must not be misclassified as US"
 
 
@@ -3673,7 +3679,7 @@ class TestCurrencyAccuracy:
         # HKD rate ~0.128; $3000 / (58 * 0.128) ≈ 404 shares → round lot 400
         # cost ≈ 400 * 58 * 0.128 ≈ $2969
         assert 1000 < cost < 5000, (
-            f"HKD buy cost ${cost:.0f} is wrong — " "should be ~$3000, not HK$3000"
+            f"HKD buy cost ${cost:.0f} is wrong — should be ~$3000, not HK$3000"
         )
 
     def test_saved_fx_rate_takes_precedence_over_fallback(self):
@@ -3688,9 +3694,9 @@ class TestCurrencyAccuracy:
         cost = abs(buys[0].cash_impact_usd)
         qty = buys[0].suggested_quantity
         # Check that the saved rate (0.100) was used: qty should be exactly 300
-        assert (
-            qty == 300
-        ), f"qty={qty} suggests fallback rate was used instead of saved rate 0.100"
+        assert qty == 300, (
+            f"qty={qty} suggests fallback rate was used instead of saved rate 0.100"
+        )
 
 
 class TestResolveFx:
@@ -3756,9 +3762,9 @@ class TestResolveFx:
         a = self._analysis("SEK", None)
         fx = _resolve_fx(a)
         cost = 3 * 104.50 * fx
-        assert (
-            cost < 100
-        ), f"Cost ${cost:.2f} is too high — FX rate is wrong (1.0 fallback?)"
+        assert cost < 100, (
+            f"Cost ${cost:.2f} is too high — FX rate is wrong (1.0 fallback?)"
+        )
         assert cost > 10, f"Cost ${cost:.2f} is suspiciously low"
 
     def test_legacy_1_overridden_for_sek(self):
@@ -3920,9 +3926,9 @@ class TestAlphaBaseLookup:
         items = reconcile([pos], analyses, portfolio)
         # Should NOT be REVIEW with "no evaluator analysis found"
         non_hold = [i for i in items if i.action != "HOLD"]
-        assert not any(
-            "no evaluator analysis found" in i.reason for i in non_hold
-        ), "Base-symbol fallback should have found the MEGP analysis"
+        assert not any("no evaluator analysis found" in i.reason for i in non_hold), (
+            "Base-symbol fallback should have found the MEGP analysis"
+        )
 
     def test_numeric_ticker_does_not_use_base_lookup(self):
         """Numeric IBKR symbol (e.g. '7203') must NOT cross-match across exchanges."""
@@ -3967,9 +3973,9 @@ class TestAlphaBaseLookup:
         portfolio = _make_portfolio()
         items = reconcile([pos], analyses, portfolio)
         # Should find the BUY (suffixed) analysis, not the SELL (bare) analysis
-        assert not any(
-            i.action == "SELL" for i in items
-        ), "Suffixed MEGP.L analysis (BUY) should take priority over bare MEGP (SELL)"
+        assert not any(i.action == "SELL" for i in items), (
+            "Suffixed MEGP.L analysis (BUY) should take priority over bare MEGP (SELL)"
+        )
 
     def test_bare_position_with_both_bare_and_suffixed_analyses_uses_suffixed(self):
         """CEK-style: position yf_ticker='CEK' (bare), analyses has both 'CEK' (bare,
@@ -4000,15 +4006,15 @@ class TestAlphaBaseLookup:
         portfolio = _make_portfolio()
         items = reconcile([pos], analyses, portfolio)
         # Reconciler must use the suffixed analysis (BUY), not the bare one (SELL)
-        assert not any(
-            i.action == "SELL" for i in items
-        ), "Alpha-base lookup must prefer suffixed 'CEK.DE' over bare 'CEK'"
+        assert not any(i.action == "SELL" for i in items), (
+            "Alpha-base lookup must prefer suffixed 'CEK.DE' over bare 'CEK'"
+        )
         # The reconciled item's ticker must be the canonical suffixed form
         cek_items = [i for i in items if "CEK" in i.ticker.yf]
         assert cek_items, "Expected a reconciliation item for CEK"
-        assert (
-            cek_items[0].ticker.yf == "CEK.DE"
-        ), f"Expected ticker.yf='CEK.DE', got '{cek_items[0].ticker.yf}'"
+        assert cek_items[0].ticker.yf == "CEK.DE", (
+            f"Expected ticker.yf='CEK.DE', got '{cek_items[0].ticker.yf}'"
+        )
 
 
 class TestMacroEventTriggersJune2026:

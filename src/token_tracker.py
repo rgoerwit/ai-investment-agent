@@ -18,10 +18,10 @@ from src.llm_usage import extract_token_usage_breakdown
 
 logger = structlog.get_logger(__name__)
 
-# LLM pricing per 1M tokens, standard/interactive tier (July 2026).
+# LLM pricing per 1M tokens, standard/interactive tier (August 2026).
 # Sources: ai.google.dev/gemini-api/docs/pricing, developers.openai.com/api/docs/pricing,
 # platform.claude.com/docs/en/pricing, docs.z.ai/guides/overview/pricing,
-# api-docs.deepseek.com/quick_start/pricing.
+# api-docs.deepseek.com/quick_start/pricing, kimi.com/help/kimi-api/api-pricing.
 # Matched by exact key first, then longest-prefix-wins (see
 # ``_lookup_model_pricing``) — so insertion order does NOT matter and a
 # more-specific variant (mini/lite/preview) always beats its parent regardless
@@ -66,11 +66,10 @@ MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     "glm-5.2": {"prompt": 1.40, "cached_prompt": 0.26, "completion": 4.40},
     # --- DeepSeek (APAC regional specialist) ---
     "deepseek-v4": {"prompt": 0.435, "completion": 0.87},
-    # --- Moonshot Kimi (APAC regional specialist) ---
-    # kimi-k3 has no separately published SKU yet; anchored to the latest
-    # published Kimi (K2.6, Apr 2026): $0.95 cache-miss input / $0.16 cache-hit /
-    # $4.00 output per 1M. CONFIRM against Moonshot's kimi-k3 rate once published.
-    "kimi-k3": {"prompt": 0.95, "cached_prompt": 0.16, "completion": 4.00},
+    # --- Moonshot Kimi (consultant/auditor) ---
+    # Official K3 API rates: $3.00 cache-miss input / $0.30 cache-hit input /
+    # $15.00 output per 1M tokens.
+    "kimi-k3": {"prompt": 3.00, "cached_prompt": 0.30, "completion": 15.00},
 }
 
 # Fallback for models missing from the table (Flash-class assumption).
@@ -96,6 +95,25 @@ GPT56_LONG_CONTEXT_INPUT_THRESHOLD = 272_000
 GPT56_LONG_CONTEXT_PROMPT_MULTIPLIER = 2.0
 GPT56_LONG_CONTEXT_COMPLETION_MULTIPLIER = 1.5
 CACHE_WRITE_PROMPT_MULTIPLIER = 1.25
+
+# Diagnostic-only, and an ASSUMPTION — not a confirmed fact for the model this
+# repo actually runs. Google documents a minimum cacheable-prefix floor for
+# implicit caching, but the published value differs per family and has moved
+# between generations; 4,096 is the conservative figure assumed here for the
+# Gemini Flash seats and has NOT been verified for `gemini-3.6-flash`. Model
+# and prefix length are confounded in the persisted corpus (every seat below
+# this figure reports zero cached tokens, but those are also the seats with the
+# smallest prompts), so the corpus cannot confirm it either — only the live
+# repeated-request canary can. Other vendors publish different floors, which is
+# why the derived flag is emitted for Google models only. Used solely to
+# annotate the `prompt_cache_diagnostics` DEBUG event — never for pricing,
+# routing, or any decision.
+GEMINI_ASSUMED_CACHE_MIN_PREFIX_TOKENS = 4096
+
+# Rough bytes-per-token used only to turn a measured character count into an
+# order-of-magnitude token estimate for the diagnostic above. Provider token
+# counts in the artifact remain the authoritative numbers.
+_DIAGNOSTIC_CHARS_PER_TOKEN = 4
 
 _warned_unknown_pricing_models: set[str] = set()
 
@@ -372,6 +390,7 @@ class TokenTracker:
 
     _instance: "TokenTracker | None" = None
     _instance_lock = threading.Lock()
+    _initialized: bool = False
     _quiet_mode: bool = False
 
     def __new__(cls):
@@ -826,20 +845,84 @@ class TokenTrackingCallback(BaseCallbackHandler):
         self.api_output_token_cap = output_token_cap
         self.reasoning_reserve_tokens = 0
         self._run_starts: dict[str, float] = {}
+        # Per-run (stable_prefix_chars, total_request_chars). Sizes only — the
+        # request text itself is never stored or logged.
+        self._run_shapes: dict[str, tuple[int, int]] = {}
+
+    @staticmethod
+    def _run_key(kwargs: dict[str, Any]) -> str:
+        run_id = kwargs.get("run_id")
+        return str(run_id) if run_id is not None else "__default__"
+
+    def _record_request_shape(
+        self, key: str, stable_prefix_chars: int, total_chars: int
+    ) -> None:
+        """Store request *sizes* for the cache-eligibility diagnostic.
+
+        Fail-open: a diagnostic must never break a run, and callbacks receive
+        arbitrary provider/test objects.
+        """
+        try:
+            self._run_shapes[key] = (int(stable_prefix_chars), int(total_chars))
+        except (TypeError, ValueError):
+            pass
 
     def on_llm_start(
         self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any
     ) -> None:
         """Remember per-run start time so callback usage records include latency."""
-        run_id = kwargs.get("run_id")
-        key = str(run_id) if run_id is not None else "__default__"
+        key = self._run_key(kwargs)
         self._run_starts[key] = time.monotonic()
+        try:
+            texts = [p for p in prompts if isinstance(p, str)]
+            # A completion-style request has no separable system turn; the whole
+            # first prompt is the best available stable-prefix proxy.
+            self._record_request_shape(
+                key,
+                len(texts[0]) if texts else 0,
+                sum(len(text) for text in texts),
+            )
+        except (TypeError, AttributeError):
+            pass
+
+    def on_chat_model_start(
+        self, serialized: dict[str, Any], messages: Any, **kwargs: Any
+    ) -> None:
+        """Chat-model entry point (the path every agent seat actually takes).
+
+        Measures the leading system turn: the largest span this callback can
+        see that is stable across runs. It is a lower bound on the cacheable
+        prefix, not the whole of it — bound tool schemas and the provider's own
+        serialization are stable too but are not visible here.
+        """
+        key = self._run_key(kwargs)
+        self._run_starts[key] = time.monotonic()
+        try:
+            batch = messages[0] if messages else []
+            stable_prefix_chars = 0
+            total_chars = 0
+            in_prefix = True
+            for message in batch:
+                content = getattr(message, "content", None)
+                if not isinstance(content, str):
+                    in_prefix = False
+                    continue
+                total_chars += len(content)
+                # The stable prefix ends at the first non-system turn; anything
+                # after it carries per-ticker content and cannot be reused.
+                if in_prefix and getattr(message, "type", None) == "system":
+                    stable_prefix_chars += len(content)
+                else:
+                    in_prefix = False
+            self._record_request_shape(key, stable_prefix_chars, total_chars)
+        except (TypeError, AttributeError, IndexError, KeyError):
+            pass
 
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
         """Drop the start timestamp on error so failed runs don't leak entries."""
-        run_id = kwargs.get("run_id")
-        key = str(run_id) if run_id is not None else "__default__"
+        key = self._run_key(kwargs)
         self._run_starts.pop(key, None)
+        self._run_shapes.pop(key, None)
 
     @staticmethod
     def _extract_service_tier(response: LLMResult) -> str | None:
@@ -864,14 +947,78 @@ class TokenTrackingCallback(BaseCallbackHandler):
                     return tier
         return None
 
+    def _log_cache_diagnostics(
+        self,
+        *,
+        model_name: str,
+        prompt_tokens: int,
+        cached_prompt_tokens: int,
+        cache_write_prompt_tokens: int,
+        service_tier: str | None,
+        request_shape: tuple[int, int] | None,
+    ) -> None:
+        """Emit the per-call prompt-cache diagnostic (DEBUG only).
+
+        Answers the one question the persisted artifact cannot: how large the
+        leading system-message span of this request was, next to whether the
+        provider reported a cache hit for it. Sizes and provider-reported
+        counts only — no prompt text, no ticker-specific content.
+
+        Scope: the measurement is a **lower bound** on the reusable prefix. It
+        counts leading system-message *characters* only — not bound tool
+        schemas, not the provider's full wire serialization, and not whatever
+        framing langchain adds. Those are also stable across runs and sit in
+        the same prefix, so the real cacheable span is larger than reported.
+        The bound is adequate for the six target seats (system-message-dominated
+        prompts); measure tool schemas separately if a seat's cacheability turns
+        on them.
+        """
+        if TokenTracker._quiet_mode:
+            return
+        stable_prefix_chars, total_chars = request_shape or (0, 0)
+        estimated_prefix_tokens = stable_prefix_chars // _DIAGNOSTIC_CHARS_PER_TOKEN
+        # The floor is Google-specific and assumed; other vendors publish
+        # different minimums, so annotating their calls with it would be a lie.
+        meets_assumed_floor: bool | None = None
+        if request_shape and _provider_for_model(model_name) == "google":
+            meets_assumed_floor = (
+                estimated_prefix_tokens >= GEMINI_ASSUMED_CACHE_MIN_PREFIX_TOKENS
+            )
+        logger.debug(
+            "prompt_cache_diagnostics",
+            agent=self.agent_name,
+            model=model_name,
+            service_tier=service_tier,
+            prompt_tokens=prompt_tokens,
+            cached_prompt_tokens=cached_prompt_tokens,
+            cache_write_prompt_tokens=cache_write_prompt_tokens,
+            cache_hit_ratio=(
+                round(cached_prompt_tokens / prompt_tokens, 4)
+                if prompt_tokens
+                else None
+            ),
+            stable_prefix_chars=stable_prefix_chars,
+            total_request_chars=total_chars,
+            estimated_stable_prefix_tokens=estimated_prefix_tokens,
+            # Heuristic annotation, Google-only, and against an *assumed* floor
+            # — see GEMINI_ASSUMED_CACHE_MIN_PREFIX_TOKENS. None means "not
+            # applicable to this vendor" or "no request shape recorded".
+            prefix_meets_assumed_cache_floor=meets_assumed_floor,
+        )
+
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
         """Called when LLM completes a generation."""
         model_name = "unknown"
         run_id = kwargs.get("run_id")
         key = str(run_id) if run_id is not None else "__default__"
         started = self._run_starts.pop(key, None)
+        request_shape = self._run_shapes.pop(key, None)
         if started is None and run_id is None and len(self._run_starts) == 1:
-            _, started = self._run_starts.popitem()
+            # The start was recorded under a real run_id but the end arrived
+            # without one. Both maps are keyed identically, so the shape must
+            # be released under the same key or it leaks for the process life.
+            fallback_key, started = self._run_starts.popitem()
+            request_shape = self._run_shapes.pop(fallback_key, request_shape)
         elapsed_seconds = (
             round(time.monotonic() - started, 4) if started is not None else None
         )
@@ -915,6 +1062,14 @@ class TokenTrackingCallback(BaseCallbackHandler):
                 service_tier=service_tier,
                 cached_prompt_tokens=cached_prompt_tokens,
                 cache_write_prompt_tokens=cache_write_prompt_tokens,
+            )
+            self._log_cache_diagnostics(
+                model_name=model_name,
+                prompt_tokens=prompt_tokens,
+                cached_prompt_tokens=cached_prompt_tokens,
+                cache_write_prompt_tokens=cache_write_prompt_tokens,
+                service_tier=service_tier,
+                request_shape=request_shape,
             )
             if self.output_token_cap and completion_tokens > 0:
                 intent_utilization = (

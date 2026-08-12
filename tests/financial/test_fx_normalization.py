@@ -94,6 +94,22 @@ class TestFXRateFetching:
         rate = get_fx_rate_fallback("GBX", "USD")
         assert rate == pytest.approx(FALLBACK_RATES_TO_USD["GBP"] * 0.01)
 
+    def test_get_fx_rate_fallback_cross_rate_for_non_usd_target(self):
+        """A non-USD target is a cross-rate through the USD-anchored table,
+        not a mislabeled from->USD rate — EUR->GBP must differ from EUR->USD."""
+        eur_to_usd = get_fx_rate_fallback("EUR", "USD")
+        eur_to_gbp = get_fx_rate_fallback("EUR", "GBP")
+        assert eur_to_gbp is not None
+        assert eur_to_gbp != pytest.approx(eur_to_usd)
+        assert eur_to_gbp == pytest.approx(
+            FALLBACK_RATES_TO_USD["EUR"] / FALLBACK_RATES_TO_USD["GBP"]
+        )
+
+    def test_get_fx_rate_fallback_cross_rate_unknown_target_returns_none(self):
+        """An unresolvable target must fail closed, never silently answer
+        with the from->USD rate under the wrong label."""
+        assert get_fx_rate_fallback("EUR", "ZZZ") is None
+
     @pytest.mark.asyncio
     async def test_get_fx_rate_unified_yfinance_success(self):
         """Test unified interface uses yfinance when available."""
@@ -661,6 +677,93 @@ class TestFXNormalizationPerformance:
         assert len(results) == len(test_stocks)
         assert len(results) == 10
         assert all(r["_currency_normalized"] for r in results)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TIER 4: FxRateCache — cache-key correctness across distinct to_currency pairs
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFxRateCacheKeying:
+    """The cache is keyed by (from_currency, to_currency), not from_currency
+    alone — every current production caller only ever resolves to USD, but
+    the public API accepts an arbitrary to_currency, and a from-currency-only
+    key would let an EUR->USD lookup silently answer an EUR->GBP one."""
+
+    @pytest.mark.asyncio
+    async def test_same_source_currency_different_targets_do_not_collide(self):
+        from src.fx_normalization import FxRateCache
+
+        cache = FxRateCache()
+        with patch(
+            "src.fx_normalization.get_fx_rate",
+            side_effect=lambda frm, to: {
+                ("EUR", "USD"): (1.1, "yfinance"),
+                ("EUR", "GBP"): (0.85, "yfinance"),
+            }[(frm, to)],
+        ):
+            usd_rate, _ = await cache.get_rate("EUR", "USD")
+            gbp_rate, _ = await cache.get_rate("EUR", "GBP")
+
+        assert usd_rate == pytest.approx(1.1)
+        assert gbp_rate == pytest.approx(0.85)
+        # Re-fetching the USD leg must still return the USD rate, not a value
+        # clobbered by the later EUR->GBP resolution.
+        assert cache.peek_cached_rate("EUR", "USD") == (pytest.approx(1.1), "yfinance")
+        assert cache.peek_cached_rate("EUR", "GBP") == (pytest.approx(0.85), "yfinance")
+
+    @pytest.mark.asyncio
+    async def test_get_rates_one_pair_fallback_does_not_downgrade_others(self):
+        """A single currency falling to the fallback table must not force other
+        currencies onto fallback — each pair resolves independently."""
+        from src.fx_normalization import FxRateCache
+
+        cache = FxRateCache()
+        with patch(
+            "src.fx_normalization.get_fx_rate",
+            side_effect=lambda frm, to: {
+                "JPY": (0.0067, "fallback"),  # live failed → fallback for JPY only
+                "EUR": (1.10, "yfinance"),
+                "GBP": (1.27, "yfinance"),
+            }[frm],
+        ):
+            results = await cache.get_rates(["JPY", "EUR", "GBP"], to_currency="USD")
+
+        assert results["JPY"] == (pytest.approx(0.0067), "fallback")
+        # These stayed on the live source despite JPY's fallback.
+        assert results["EUR"] == (pytest.approx(1.10), "yfinance")
+        assert results["GBP"] == (pytest.approx(1.27), "yfinance")
+
+    @pytest.mark.asyncio
+    async def test_get_rates_batch_keeps_targets_independent(self):
+        from src.fx_normalization import FxRateCache
+
+        cache = FxRateCache()
+        with patch(
+            "src.fx_normalization.get_fx_rate",
+            side_effect=lambda frm, to: {
+                ("JPY", "USD"): (0.0067, "yfinance"),
+            }[(frm, to)],
+        ):
+            usd_results = await cache.get_rates(["JPY"], to_currency="USD")
+        with patch(
+            "src.fx_normalization.get_fx_rate",
+            side_effect=lambda frm, to: {
+                ("JPY", "EUR"): (0.0058, "yfinance"),
+            }[(frm, to)],
+        ):
+            eur_results = await cache.get_rates(["JPY"], to_currency="EUR")
+
+        assert usd_results["JPY"] == (pytest.approx(0.0067), "yfinance")
+        assert eur_results["JPY"] == (pytest.approx(0.0058), "yfinance")
+        assert cache.peek_cached_rate("JPY", "USD") == (
+            pytest.approx(0.0067),
+            "yfinance",
+        )
+        assert cache.peek_cached_rate("JPY", "EUR") == (
+            pytest.approx(0.0058),
+            "yfinance",
+        )
 
 
 if __name__ == "__main__":

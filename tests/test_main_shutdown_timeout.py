@@ -75,13 +75,9 @@ def _patch_main_success_path(monkeypatch, args):
     )
     monkeypatch.setattr(
         "src.main.output._maybe_generate_article",
-        lambda result,
-        passed_args,
-        targets,
-        company_name,
-        report,
-        reporter,
-        **kwargs: _async_result(False),
+        lambda result, passed_args, targets, company_name, report, reporter, **kwargs: (
+            _async_result(False)
+        ),
     )
     monkeypatch.setattr(
         "src.main._log_final_summary",

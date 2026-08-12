@@ -24,19 +24,11 @@ from typing import Any
 
 from src.claim_policy import RAW_FINANCIAL_METRICS_INPUT
 from src.tooling.structured_ingress import render_structured_ingress_payload
-from src.validators.financial_rules import reconcile_ocf_period_mismatch_flags
-from src.validators.supplemental_extractors import parse_consultant_conditions
 
 
 def _safe(source: Any) -> dict:
     """Coerce non-dict inputs to an empty dict to keep callers branch-free."""
     return source if isinstance(source, dict) else {}
-
-
-def _artifact_ok(source: Any, field: str) -> bool:
-    """Return False only when artifact status explicitly marks a field invalid."""
-    status = (_safe(source).get("artifact_statuses") or {}).get(field)
-    return not (isinstance(status, dict) and status.get("ok") is False)
 
 
 def get_pm_output(source: Any) -> str:
@@ -140,21 +132,14 @@ def get_red_flags(source: Any) -> list[dict[str, Any]]:
 
 
 def get_effective_red_flags(source: Any) -> list[dict[str, Any]]:
-    """Return red flags after deterministic report-stage reconciliation."""
-    s = _safe(source)
-    ticker = (
-        s.get("company_of_interest")
-        or (s.get("metadata") or {}).get("ticker")
-        or "UNKNOWN"
-    )
-    consultant_review = (
-        get_consultant_review(s) if _artifact_ok(s, "consultant_review") else ""
-    )
-    return reconcile_ocf_period_mismatch_flags(
-        get_red_flags(s),
-        fundamentals_report=get_fundamentals_report(s),
-        consultant_review=consultant_review,
-        auditor_report=get_auditor_report(s),
-        ticker=str(ticker),
-        consultant_conditions=parse_consultant_conditions(consultant_review),
-    )
+    """Return red flags after deterministic report-stage reconciliation.
+
+    No reconciliation is applied today. The OCF period-mismatch suppression that
+    used to live here was retired: it could only ever *remove* a risk flag, its
+    comparability contract was weaker than the flag-raising path it mirrored
+    (bare floats, so no period/currency/scope guard ran), and it never once fired
+    across the persisted artifact history. Kept as the named seam any future
+    report-stage reconciliation should hang from, so the nine call sites do not
+    have to move again.
+    """
+    return get_red_flags(_safe(source))

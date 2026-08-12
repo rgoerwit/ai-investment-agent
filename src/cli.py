@@ -108,9 +108,11 @@ Examples:
         default=False,
         help=(
             "Apply stricter financial health criteria: tighter D/E and coverage thresholds, "
-            "auto-reject REITs/ETFs, PFIC, and VIE structures, escalate value-trap warnings "
-            "to rejects, and require higher conviction for BUY. Reduces BUY count and saves "
-            "tokens by rejecting candidates before Bull/Bear debate. Composable with --quick."
+            "auto-reject REITs/ETFs and positive-income/negative-FCF earnings-quality "
+            "failures, and require higher conviction for BUY. Reduces BUY count and saves "
+            "tokens by rejecting candidates before Bull/Bear debate. Composable with --quick. "
+            "Note: PFIC/VIE remain risk-penalty warnings in every mode — they are US tax and "
+            "structure classifications, not viability failures."
         ),
     )
 

@@ -379,8 +379,7 @@ def evaluate_positions(
                     f"level {analysis.stop_price:.2f}"
                 )
             reject_reason = (
-                f"Verdict → {analysis.verdict}  "
-                f"({analysis.analysis_date}) — {detail}"
+                f"Verdict → {analysis.verdict}  ({analysis.analysis_date}) — {detail}"
             )
             if disposition.action == "SELL":
                 if not identity_verified:

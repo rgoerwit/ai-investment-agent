@@ -12,10 +12,6 @@ import structlog
 from langchain_core.messages import BaseMessage
 
 from src.data_block_utils import replace_or_append_block_line
-from src.tooling.evidence_recorder import (
-    classify_evidence_value,
-    resolve_evidence_authority,
-)
 
 from .message_utils import (
     ToolEvidenceRecord,
@@ -143,30 +139,6 @@ def _split_search_result_records(
                     )
                 )
     return split_records
-
-
-def _coerce_tool_evidence_record(record: object) -> ToolEvidenceRecord:
-    if isinstance(record, ToolEvidenceRecord):
-        return record
-    tool_name, content, urls = record  # type: ignore[misc]
-    _, evidence_status, _, bounded = classify_evidence_value(
-        str(tool_name or ""),
-        content,
-    )
-    normalized_urls = {
-        normalized for url in urls if (normalized := normalize_http_url(str(url)))
-    }
-    return ToolEvidenceRecord(
-        tool_name=tool_name,
-        content=bounded,
-        urls=normalized_urls,
-        evidence_status=evidence_status,
-        authority=resolve_evidence_authority(
-            tool_name=str(tool_name or ""),
-            evidence_status=evidence_status,
-            urls=tuple(sorted(normalized_urls)),
-        ),
-    )
 
 
 def _replace_or_add_field(
@@ -493,14 +465,14 @@ def _validated_control_status(
         return "UNKNOWN", "UNKNOWN"
 
     normalized_basis = basis.strip().upper().replace(" ", "_")
-    terms = _CONTROL_BASIS_TERMS.get(normalized_basis)
-    if not terms:
+    control_terms = _CONTROL_BASIS_TERMS.get(normalized_basis)
+    if not control_terms:
         return "UNKNOWN", "UNKNOWN"
 
     corroborating_records = [
         record
         for record in supporting_records
-        if any(term in record[1].casefold() for term in terms)
+        if any(term in record[1].casefold() for term in control_terms)
     ]
     official_support = any(
         _is_primary_evidence(record) for record in corroborating_records
@@ -868,7 +840,7 @@ def normalize_foreign_language_evidence(
     records = _split_search_result_records(
         [
             *tool_evidence_records(evidence_messages),
-            *(_coerce_tool_evidence_record(record) for record in additional_records),
+            *additional_records,
         ]
     )
     normalized = _normalize_ownership(report, records, ticker=ticker)

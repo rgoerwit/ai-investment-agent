@@ -648,6 +648,8 @@ async def resolve_company_name(
         for source_name, resolver in sources:
             try:
                 raw_candidate = await resolver(lookup_ticker)
+                raw_name: str | None
+                website: str | None
                 if (
                     isinstance(raw_candidate, tuple)
                     and len(raw_candidate) == 2

@@ -18,6 +18,7 @@ from typing import Any
 
 import structlog
 
+from src.charts.extractors.data_block import ChartRawData
 from src.charts.extractors.pm_block import extract_pm_block
 from src.charts.extractors.valuation import format_iv
 from src.data_block_utils import (
@@ -29,6 +30,7 @@ from src.data_block_utils import (
 from src.error_safety import summarize_exception
 from src.pm_decision_parser import canonicalize_pm_verdict
 from src.reporting.state_access import get_effective_red_flags
+from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import (
     build_analysis_validity,
     is_publishable_analysis,
@@ -96,7 +98,7 @@ def _strip_fenced_pm_machine_block(text: str) -> str:
     (e.g. DECISION LOGIC) are left untouched.
     """
 
-    def _repl(match: re.Match) -> str:
+    def _repl(match: re.Match[str]) -> str:
         body = match.group("body")
         if "START PM_BLOCK" in body and "END PM_BLOCK" in body:
             return ""
@@ -111,6 +113,48 @@ def _strip_fenced_pm_machine_block(text: str) -> str:
 # form here never drifts from the underscore form used elsewhere (e.g.
 # retrospective.py uses "DO_NOT_INITIATE").
 _NON_EXECUTABLE_VERDICTS = ("HOLD", "DO NOT INITIATE", "SELL")
+
+
+def _calculate_regulatory_score(result: dict[str, Any], raw: ChartRawData) -> float:
+    """Score regulatory risk from the canonical flag ledger, then DATA_BLOCK.
+
+    Legal Counsel flags are the authoritative record when they identify a risk.
+    The Senior Fundamentals DATA_BLOCK remains a compatibility fallback when no
+    corresponding flag was emitted.
+    """
+    regulatory = 100.0
+    effective_flag_types = {
+        str(flag.get("type", "")).upper() for flag in get_effective_red_flags(result)
+    }
+
+    legal_pfic_status = None
+    if "PFIC_PROBABLE" in effective_flag_types:
+        legal_pfic_status = "PROBABLE"
+    elif "PFIC_UNCERTAIN" in effective_flag_types:
+        legal_pfic_status = "UNCERTAIN"
+
+    from src.agents.decision_nodes import resolve_pfic_display_status
+
+    canonical_pfic, _pfic_note = resolve_pfic_display_status(
+        legal_pfic_status, raw.pfic_risk
+    )
+    if canonical_pfic:
+        risk_upper = canonical_pfic.upper()
+        if "HIGH" in risk_upper:
+            regulatory -= 40
+        elif "MEDIUM" in risk_upper or "UNCERTAIN" in risk_upper:
+            regulatory -= 20
+
+    if "VIE_STRUCTURE" in effective_flag_types or raw.vie_structure is True:
+        regulatory -= 25
+    if "CMIC_FLAGGED" in effective_flag_types or raw.cmic_flagged is True:
+        regulatory -= 35
+
+    if raw.adr_impact and "MODERATE_CONCERN" in raw.adr_impact.upper():
+        regulatory -= 10
+
+    return max(0.0, min(100.0, regulatory))
+
 
 _ENTRY_EXIT_SUBSECTION_PATTERN = re.compile(
     # Matches both the legacy header and the v4.11 retail-framing rename.
@@ -235,12 +279,12 @@ class QuietModeReporter:
             )
 
         self.valuation_context = f"""VALUATION DATA (from Football Field Chart):
-- Methodology: {methodology or 'P/E Normalization'}
+- Methodology: {methodology or "P/E Normalization"}
 - Target Range: ${target_low:.2f} - ${target_high:.2f}
 - Fair Value (midpoint): ${fair_value:.2f}
 - Current Price: ${current_price:.2f}
 - Price Position: {position_desc}
-- Confidence: {confidence or 'N/A'}
+- Confidence: {confidence or "N/A"}
 
 NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain why in the Valuation section."""
 
@@ -387,7 +431,11 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
 
             # Configure chart generation
             # Use custom image_dir if provided, otherwise fall back to config default
-            output_dir = self.image_dir if self.image_dir else config.images_dir
+            output_dir = (
+                self.image_dir
+                if self.image_dir
+                else get_runtime_config(config).images_dir
+            )
             chart_config = ChartConfig(
                 output_dir=output_dir,
                 format=ChartFormat.SVG
@@ -526,47 +574,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             undiscovered = max(0.0, min(100.0, undiscovered))
 
             # 5. Regulatory Score (PFIC, VIE, CMIC, ADR risks)
-            # Start at 100 (no regulatory concerns), subtract for each risk
-            regulatory = 100.0
-
-            # Canonicalize PFIC status: Legal Counsel overrides DATA_BLOCK heuristic.
-            legal_pfic_status = None
-            for flag in get_effective_red_flags(result):
-                flag_type = str(flag.get("type", "")).upper()
-                if flag_type == "PFIC_PROBABLE":
-                    legal_pfic_status = "PROBABLE"
-                    break
-                if flag_type == "PFIC_UNCERTAIN":
-                    legal_pfic_status = "UNCERTAIN"
-            from src.agents.decision_nodes import resolve_pfic_display_status
-
-            canonical_pfic, _pfic_note = resolve_pfic_display_status(
-                legal_pfic_status, raw.pfic_risk
-            )
-
-            # PFIC Penalty (passive foreign investment company)
-            if canonical_pfic:
-                risk_upper = canonical_pfic.upper()
-                if "HIGH" in risk_upper:
-                    regulatory -= 40  # Major tax/reporting burden
-                elif "MEDIUM" in risk_upper or "UNCERTAIN" in risk_upper:
-                    regulatory -= 20
-
-            # VIE Structure Penalty (Variable Interest Entity - China risk)
-            if raw.vie_structure is True:
-                regulatory -= 25  # Significant structural risk
-
-            # CMIC Penalty (Chinese Military-Industrial Complex list)
-            if raw.cmic_flagged is True:
-                regulatory -= 35  # Investment restrictions risk
-
-            # ADR Thesis Impact Penalty (Sponsored ADR = more discovered)
-            if raw.adr_impact:
-                impact_upper = raw.adr_impact.upper()
-                if "MODERATE_CONCERN" in impact_upper:
-                    regulatory -= 10  # Minor thesis concern
-
-            regulatory = max(0.0, min(100.0, regulatory))
+            regulatory = _calculate_regulatory_score(result, raw)
 
             # 6. Jurisdiction Score (Country/Exchange stability)
             # Start at 100, subtract for risky jurisdictions
@@ -642,7 +650,11 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
             )
 
             # Generate chart
-            output_dir = self.image_dir if self.image_dir else config.images_dir
+            output_dir = (
+                self.image_dir
+                if self.image_dir
+                else get_runtime_config(config).images_dir
+            )
             chart_config = ChartConfig(
                 output_dir=output_dir,
                 format=ChartFormat.SVG

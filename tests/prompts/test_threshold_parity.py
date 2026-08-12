@@ -19,6 +19,7 @@ import pytest
 
 from src import thesis_constants as tc
 from src.charts.extractors import data_block as _db
+from src.ibkr import order_builder as _ob
 from src.validators import supplemental_extractors as _se
 
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
@@ -284,6 +285,29 @@ def test_material_events_enum_matches_parser():
     assert advertised == set(_se.MATERIAL_EVENTS_TOKENS), (
         "MATERIAL_EVENTS_90D tokens drifted between news_analyst.json and "
         "supplemental_extractors.MATERIAL_EVENTS_TOKENS"
+    )
+
+
+def test_trader_action_enum_matches_parser():
+    """trader.json TRADE_BLOCK ACTION enum ≡ order_builder.CURRENT_TRADE_ACTIONS.
+
+    The v4.3 retail alignment retired SELL/REJECT for DO_NOT_INITIATE and the
+    consuming parsers were not updated, which failed the whole eval smoke suite on
+    every ticker. The L1 round-trip cannot catch this: TRADE_BLOCK is an
+    UNFENCED_BLOCK, so its placeholder resolver takes the *first* enum member and
+    always feeds ACTION: BUY regardless of the rest of the vocabulary.
+    """
+    msg = _system_message("trader.json")
+    m = re.search(r"^ACTION:\s*\[([^\]]+)\]\s*$", msg, re.MULTILINE)
+    assert m, "ACTION enum line missing from the trader.json TRADE_BLOCK template"
+    advertised = {token.strip() for token in m.group(1).split("/")}
+    assert advertised == set(_ob.CURRENT_TRADE_ACTIONS), (
+        "TRADE_BLOCK ACTION tokens drifted between trader.json and "
+        "order_builder.CURRENT_TRADE_ACTIONS"
+    )
+    assert not advertised & set(_ob.LEGACY_TRADE_ACTIONS), (
+        "a retired action token reappeared in trader.json; LEGACY_TRADE_ACTIONS is "
+        "for parsing archived analyses only"
     )
 
 

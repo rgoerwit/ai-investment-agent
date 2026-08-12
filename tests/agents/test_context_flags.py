@@ -59,7 +59,7 @@ def test_large_drawdown_unexplained_when_causes_not_near_decline() -> None:
 def test_unresolved_related_tickers_extracts_unknown_entries() -> None:
     fundamentals = _fundamentals(
         RELATED_LISTED_TICKERS=(
-            "035420.KS:Strategic_Partner:Unknown; " "1234.T:Parent:42%"
+            "035420.KS:Strategic_Partner:Unknown; 1234.T:Parent:42%"
         )
     )
     assert unresolved_related_tickers(fundamentals) == [

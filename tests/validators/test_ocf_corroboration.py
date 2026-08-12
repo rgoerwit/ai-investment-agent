@@ -18,9 +18,7 @@ from src.validators.financial_rules import (
     extract_auditor_ocf,
     extract_auditor_ocf_observation,
     extract_datablock_ocf_observation,
-    is_ocf_period_mismatch_resolved,
     parse_ocf_amount,
-    reconcile_ocf_period_mismatch_flags,
 )
 
 
@@ -210,134 +208,6 @@ AUDITOR_SIGNATURE_DATE=2025-06-20
         assert observation.auditor_signature_date == date(2025, 6, 20)
 
 
-_APR_DATA_BLOCK = """
-### --- START DATA_BLOCK ---
-OPERATING_CASH_FLOW: 151.97M PLN
-OPERATING_CASH_FLOW_SOURCE: FILING
-OCF_FILING_REASON: DISCREPANCY
-### --- END DATA_BLOCK ---
-"""
-
-_APR_CONSULTANT = """
-| SPOT_CHECK operatingCashflow | DATA_BLOCK 151.97m PLN (FY2025);
-FMP MCP 178.06m PLN (TTM/Q1) | PERIOD MISMATCH, not a data conflict |
-
-- Research Manager overstates OCF risk: the key cash-flow number in DATA_BLOCK
-  matches both the foreign-language filing extract and forensic audit.
-"""
-
-_APR_AUDITOR = "Observed FY2025 figures used:\n- Operating cash flow: PLN 151.967m\n"
-
-
-class TestResolveOcfPeriodMismatch:
-    def test_apr_style_period_mismatch_resolves_source_discrepancy(self):
-        assert is_ocf_period_mismatch_resolved(
-            _APR_DATA_BLOCK,
-            _APR_CONSULTANT,
-            _APR_AUDITOR,
-            ticker="APR.WA",
-        )
-
-    def test_reconcile_replaces_only_ocf_source_discrepancy(self):
-        flags = [
-            {
-                "type": "OCF_SOURCE_DISCREPANCY",
-                "severity": "WARNING",
-                "detail": "OCF differs",
-                "action": "RISK_PENALTY",
-                "risk_penalty": 0.5,
-            },
-            {"type": "LOCAL_COVERAGE_HIGH", "detail": "x", "risk_penalty": 0.25},
-        ]
-        reconciled = reconcile_ocf_period_mismatch_flags(
-            flags,
-            _APR_DATA_BLOCK,
-            _APR_CONSULTANT,
-            _APR_AUDITOR,
-            ticker="APR.WA",
-        )
-        types = [flag["type"] for flag in reconciled]
-        assert "OCF_SOURCE_DISCREPANCY" not in types
-        assert "OCF_PERIOD_MISMATCH_RESOLVED" in types
-        assert "LOCAL_COVERAGE_HIGH" in types
-        resolved = next(
-            flag
-            for flag in reconciled
-            if flag["type"] == "OCF_PERIOD_MISMATCH_RESOLVED"
-        )
-        assert resolved["severity"] == "INFO"
-        assert resolved["action"] == "NOTE"
-        assert resolved["risk_penalty"] == 0.0
-
-    def test_missing_consultant_keeps_warning(self):
-        assert not is_ocf_period_mismatch_resolved(
-            _APR_DATA_BLOCK,
-            "",
-            _APR_AUDITOR,
-            ticker="APR.WA",
-        )
-
-    def test_missing_auditor_keeps_warning(self):
-        assert not is_ocf_period_mismatch_resolved(
-            _APR_DATA_BLOCK,
-            _APR_CONSULTANT,
-            "",
-            ticker="APR.WA",
-        )
-
-    def test_auditor_divergence_keeps_warning(self):
-        assert not is_ocf_period_mismatch_resolved(
-            _APR_DATA_BLOCK,
-            _APR_CONSULTANT,
-            "Operating cash flow: PLN 120m",
-            ticker="APR.WA",
-        )
-
-    def test_unresolved_or_wrong_line_language_keeps_warning(self):
-        consultant = (
-            "SPOT_CHECK operatingCashflow: period mismatch possible, but the wrong "
-            "statement line remains unresolved."
-        )
-        assert not is_ocf_period_mismatch_resolved(
-            _APR_DATA_BLOCK,
-            consultant,
-            _APR_AUDITOR,
-            ticker="APR.WA",
-        )
-
-    def test_unresolved_language_wins_inside_same_ocf_window(self):
-        consultant = (
-            "SPOT_CHECK operatingCashflow: DATA_BLOCK 151.97m PLN FY2025; "
-            "FMP 178.06m PLN TTM/Q1 — PERIOD MISMATCH, not a data conflict; "
-            "however the same OCF check also says the wrong statement line remains "
-            "unresolved and not reconciled."
-        )
-        assert not is_ocf_period_mismatch_resolved(
-            _APR_DATA_BLOCK,
-            consultant,
-            _APR_AUDITOR,
-            ticker="APR.WA",
-        )
-
-    def test_close_numbers_without_period_resolution_text_keeps_warning(self):
-        consultant = "SPOT_CHECK operatingCashflow: values are close enough to review."
-        assert not is_ocf_period_mismatch_resolved(
-            _APR_DATA_BLOCK,
-            consultant,
-            _APR_AUDITOR,
-            ticker="APR.WA",
-        )
-
-    def test_major_concerns_conditions_block_resolution(self):
-        assert not is_ocf_period_mismatch_resolved(
-            _APR_DATA_BLOCK,
-            _APR_CONSULTANT,
-            _APR_AUDITOR,
-            ticker="APR.WA",
-            consultant_conditions={"verdict": "MAJOR_CONCERNS"},
-        )
-
-
 class TestRedFlagDetectorFacade:
     """The PM node calls these through the RedFlagDetector facade (call convention
     parity with the other detectors), while the logic stays in financial_rules."""
@@ -352,6 +222,39 @@ class TestRedFlagDetectorFacade:
         )
         flag = RedFlagDetector.detect_ocf_corroboration_flag(1.148e9, 971e6, "KTY.WA")
         assert flag is not None and flag["type"] == "OCF_FILING_VALUE_UNCORROBORATED"
-        assert RedFlagDetector.is_ocf_period_mismatch_resolved(
-            _APR_DATA_BLOCK, _APR_CONSULTANT, _APR_AUDITOR
-        )
+
+
+class TestSuppressionPathIsRetired:
+    """The period-mismatch suppression could only ever REMOVE a risk flag, ran on
+    bare floats (so no period/currency/scope guard applied), and never fired once
+    across the persisted artifact history. It must not come back by accident."""
+
+    def test_no_suppression_symbols_remain(self):
+        import src.validators.financial_rules as fr
+        from src.validators.red_flag_detector import RedFlagDetector
+
+        for name in (
+            "is_ocf_period_mismatch_resolved",
+            "reconcile_ocf_period_mismatch_flags",
+            "_consultant_resolves_ocf_period_mismatch",
+        ):
+            assert not hasattr(fr, name), f"{name} must stay retired"
+            assert not hasattr(RedFlagDetector, name), f"{name} must stay retired"
+
+    def test_report_stage_no_longer_reconciles_flags(self):
+        """get_effective_red_flags is now a passthrough: an OCF_SOURCE_DISCREPANCY
+        survives rendering rather than being swapped for a zero-penalty note."""
+        from src.reporting.state_access import get_effective_red_flags
+
+        flags = [
+            {"type": "OCF_SOURCE_DISCREPANCY", "risk_penalty": 0.5},
+            {"type": "LOCAL_COVERAGE_HIGH", "risk_penalty": 0.25},
+        ]
+        assert get_effective_red_flags({"red_flags": flags}) == flags
+
+    def test_report_stage_tolerates_missing_state(self):
+        from src.reporting.state_access import get_effective_red_flags
+
+        assert get_effective_red_flags({}) == []
+        assert get_effective_red_flags(None) == []
+        assert get_effective_red_flags({"red_flags": "corrupt"}) == []

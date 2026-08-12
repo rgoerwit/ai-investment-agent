@@ -172,6 +172,68 @@ async def test_second_glm_1301_failure_is_not_retried_again(monkeypatch):
     assert out[APAC_REPORT_FIELD] == APAC_UNAVAILABLE_SENTINEL
 
 
+@pytest.mark.asyncio
+async def test_non_glm_content_block_also_retries_without_thinking(monkeypatch):
+    """The re-issue is deliberately vendor-agnostic (Aug 2026).
+
+    Its hypothesis — the block fired on the reasoning stream, so the same request
+    with thinking disabled may pass — is a property of reasoning models, not of
+    GLM. This seat talks to whichever single OpenAI-compatible vendor
+    APAC_SPECIALIST_BASE_URL names, and that defaults to DeepSeek, so a GLM-only
+    predicate left the default vendor with no re-issue for arbitrary reasons.
+    """
+    invoke = AsyncMock(
+        side_effect=[
+            RuntimeError(
+                "Error code: 400 - {'error': {'message': 'Content Exists Risk'}}"
+            ),
+            AIMessage(content=APAC_NO_MATERIAL_SENTINEL),
+        ]
+    )
+    monkeypatch.setattr(
+        "src.agents.apac_specialist_node.agent_runtime.invoke_with_rate_limit_handling",
+        invoke,
+    )
+    node = create_apac_specialist_node(Mock(), fallback_llm=Mock())
+
+    out = await node({"company_of_interest": "AGS.SI"}, {"configurable": {}})
+
+    assert invoke.await_count == 2
+    assert out[APAC_REPORT_FIELD] == APAC_NO_MATERIAL_SENTINEL
+
+
+@pytest.mark.asyncio
+async def test_retry_telemetry_does_not_assert_a_vendor_code(monkeypatch):
+    """The event used to hardcode provider_code=1301, which became a lie the
+    moment the branch stopped being GLM-only."""
+    import src.agents.apac_specialist_node as mod
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        mod.logger, "warning", lambda evt, **kw: events.append((evt, kw))
+    )
+    invoke = AsyncMock(
+        side_effect=[
+            RuntimeError(
+                "Error code: 400 - {'error': {'code': 'data_inspection_failed'}}"
+            ),
+            AIMessage(content=APAC_NO_MATERIAL_SENTINEL),
+        ]
+    )
+    monkeypatch.setattr(
+        "src.agents.apac_specialist_node.agent_runtime.invoke_with_rate_limit_handling",
+        invoke,
+    )
+    node = create_apac_specialist_node(Mock(), fallback_llm=Mock())
+
+    await node({"company_of_interest": "AGS.SI"}, {"configurable": {}})
+
+    retry = [kw for evt, kw in events if evt == "apac_policy_block_direct_retry"]
+    assert retry, "the re-issue must still be logged"
+    assert "provider_code" not in retry[0]
+    assert "payload_sha256" in retry[0]  # payload stays hashed, never logged
+
+
 def test_specialist_prompt_loads_with_required_terms():
     from src.prompts import get_prompt
 

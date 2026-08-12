@@ -15,6 +15,7 @@ from src.charts.extractors.valuation import (
     _extract_params,
     calculate_valuation_targets,
 )
+from src.data_block_utils import extract_block_number_from_text, extract_last_data_block
 
 
 class TestDataBlockExtractor:
@@ -89,6 +90,30 @@ class TestDataBlockExtractor:
         report = "This is a report without any DATA_BLOCK section."
         result = extract_chart_data_from_data_block(report)
         assert result.current_price is None
+
+    def test_extract_signed_numeric_value_via_canonical_path(self):
+        report = "\n".join(
+            [
+                "### --- START DATA_BLOCK ---",
+                "ROA_PERCENT: -12.50",
+                "### --- END DATA_BLOCK ---",
+            ]
+        )
+
+        result = extract_chart_data_from_data_block(report)
+
+        assert result.roa == -12.50
+
+    def test_extract_signed_numeric_value_via_indented_fallback(self):
+        report = """
+        ### --- START DATA_BLOCK ---
+        ROA_PERCENT: -12.50
+        ### --- END DATA_BLOCK ---
+        """
+        data_block = extract_last_data_block(report)
+
+        assert extract_block_number_from_text(data_block, "ROA_PERCENT") is None
+        assert extract_chart_data_from_data_block(report).roa == -12.50
 
     def test_extract_ignores_unparseable_datablock_mentions(self):
         """Plain DATA_BLOCK mentions should not be treated as a structured block."""
@@ -857,3 +882,45 @@ class TestCalculateValuationTargets:
 
         result = calculate_valuation_targets(report)
         assert result.low is None
+
+
+class TestSignedRiskTally:
+    """RISK_TALLY goes negative when moat/capital-efficiency bonuses subtract.
+
+    The unsigned pattern dropped every negative value: 138 of 4,594 persisted
+    artifacts carried one and all 138 lost it from the prediction snapshot,
+    retrospective, and chart annotations.
+    """
+
+    @staticmethod
+    def _block(tally: str) -> str:
+        return (
+            "### --- START PM_BLOCK ---\n"
+            "VERDICT: BUY\n"
+            "HEALTH_ADJ: 92\n"
+            "GROWTH_ADJ: 67\n"
+            f"RISK_TALLY: {tally}\n"
+            "ZONE: LOW\n"
+            "### --- END PM_BLOCK ---\n"
+        )
+
+    def test_negative_tally_is_parsed(self):
+        from src.charts.extractors.pm_block import extract_pm_block
+
+        assert extract_pm_block(self._block("-0.5")).risk_tally == -0.5
+
+    def test_positive_tally_is_unchanged(self):
+        from src.charts.extractors.pm_block import extract_pm_block
+
+        assert extract_pm_block(self._block("6.00")).risk_tally == 6.0
+
+    def test_sign_class_matches_the_canonical_parser(self):
+        """Two parsers for one field must agree; they had silently diverged."""
+        from src.charts.extractors.pm_block import extract_pm_block
+        from src.pm_decision_parser import parse_final_decision_scores
+
+        for tally in ("-1.25", "-0.17", "0", "2.5"):
+            text = self._block(tally)
+            assert extract_pm_block(text).risk_tally == pytest.approx(
+                parse_final_decision_scores(text)["risk_tally"]
+            ), tally

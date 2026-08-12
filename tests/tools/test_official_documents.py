@@ -211,6 +211,28 @@ async def test_dns_check_rejects_private_resolution(monkeypatch) -> None:
     assert exc_info.value.reason == "DOCUMENT_PRIVATE_ADDRESS"
 
 
+@pytest.mark.asyncio
+async def test_dns_check_rejects_non_string_resolution(monkeypatch) -> None:
+    monkeypatch.setattr(
+        documents.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (
+                documents.socket.AF_INET,
+                documents.socket.SOCK_STREAM,
+                6,
+                "",
+                (2130706433, 443),
+            )
+        ],
+    )
+
+    with pytest.raises(documents.DocumentExtractionError) as exc_info:
+        await documents._ensure_public_hostname("https://issuer.example/report.pdf")
+
+    assert exc_info.value.reason == "DOCUMENT_DNS_FAILED"
+
+
 def test_page_selection_prefers_financial_pages_and_honors_cap() -> None:
     pages = [
         "cover",

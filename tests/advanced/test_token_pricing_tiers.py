@@ -70,7 +70,7 @@ class TestCurrentModelPricing:
             ("claude-opus-4-6", 5.00 + 25.00),
             ("glm-5.2", 1.40 + 4.40),
             ("deepseek-v4-pro", 0.435 + 0.87),
-            ("kimi-k3", 0.95 + 4.00),
+            ("kimi-k3", 3.00 + 15.00),
         ],
     )
     def test_standard_tier_cost(self, model, expected):
@@ -237,6 +237,13 @@ class TestCachedPromptPricing:
             expected
         )
 
+    def test_kimi_k3_uses_published_cached_input_rate(self):
+        # 1M prompt (600k cached) + 1M completion
+        expected = 0.4 * 3.00 + 0.6 * 0.30 + 15.00
+        assert _usage("kimi-k3", cached=600_000).estimated_cost_usd == pytest.approx(
+            expected
+        )
+
     def test_cached_exceeding_prompt_clamps(self):
         # Defensive: a provider quirk reporting cached > prompt must not
         # produce a negative uncached component.
@@ -363,9 +370,9 @@ class TestUnknownModelWarning:
     def test_retired_models_are_absent_from_table(self):
         # Deliberate policy: retired/deprecated models are not carried
         for retired in ("gpt-4-turbo", "gpt-4-32k", "gemini-2.0-flash-exp"):
-            assert not any(
-                retired == key for key in MODEL_PRICING_PER_1M
-            ), f"{retired} should not have a pricing entry"
+            assert not any(retired == key for key in MODEL_PRICING_PER_1M), (
+                f"{retired} should not have a pricing entry"
+            )
 
 
 class TestServiceTierExtraction:

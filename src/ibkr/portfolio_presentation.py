@@ -6,9 +6,9 @@ from dataclasses import dataclass
 
 from src.ibkr.dip_watch import (
     collect_dip_watch_source_items,
-    select_dip_watch_candidates,
+    select_dip_watch,
 )
-from src.ibkr.models import PortfolioSummary, ReconciliationItem
+from src.ibkr.models import NormalizedPosition, PortfolioSummary, ReconciliationItem
 from src.ibkr.order_presentation import (
     LiveOrderMatch as LiveOrderMatch,
 )
@@ -70,7 +70,7 @@ from src.ibkr.watchlist_optimization import (
 _DEFAULT_DIP_WATCH_LIMIT = 7
 
 
-def cost_basis_unit_mismatch(position) -> bool:
+def cost_basis_unit_mismatch(position: NormalizedPosition | None) -> bool:
     """Return whether local cost/current prices have a likely 100x unit mismatch."""
     if (
         position is None
@@ -198,6 +198,9 @@ class PortfolioActionGroups:
     holds_watch: tuple[ReconciliationItem, ...]
     reviews: tuple[ReconciliationItem, ...]
     dip_candidates: tuple[ReconciliationItem, ...]
+    # Names the concentration screen withheld from dip_candidates — computed in
+    # the SAME pass as dip_candidates so the policy is evaluated exactly once.
+    dip_withheld: tuple[ReconciliationItem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -460,16 +463,14 @@ def group_portfolio_actions(
         for item in buys_offwatch
         if base_ticker(item) not in (action_bases | held_bases | watchlist_bases)
     )
-    dip_candidates = tuple(
-        select_dip_watch_candidates(
-            collect_dip_watch_source_items(items),
-            macro_event_active=macro_event_active,
-            limit=dip_watch_limit,
-            exchange_weights=exchange_weights,
-            sector_weights=sector_weights,
-            exchange_limit_pct=exchange_limit_pct,
-            sector_limit_pct=sector_limit_pct,
-        )
+    dip_selection = select_dip_watch(
+        collect_dip_watch_source_items(items),
+        macro_event_active=macro_event_active,
+        limit=dip_watch_limit,
+        exchange_weights=exchange_weights,
+        sector_weights=sector_weights,
+        exchange_limit_pct=exchange_limit_pct,
+        sector_limit_pct=sector_limit_pct,
     )
 
     return PortfolioActionGroups(
@@ -488,7 +489,8 @@ def group_portfolio_actions(
         holds_real=holds_real,
         holds_watch=holds_watch,
         reviews=reviews,
-        dip_candidates=dip_candidates,
+        dip_candidates=dip_selection.kept,
+        dip_withheld=dip_selection.withheld,
     )
 
 

@@ -9,7 +9,15 @@ from __future__ import annotations
 
 from src.agents.support import format_red_flag_section
 from src.agents.verdict_policy import maybe_floor_verdict_to_hold
+from src.decision_inputs import DecisionInputs
 from src.validators.red_flag_detector import RedFlagDetector
+
+
+def _floor_inputs(data_block: str) -> DecisionInputs:
+    """Typed decision inputs for the floor (no snapshot: the legacy path)."""
+    return DecisionInputs.from_metrics_and_snapshot(
+        RedFlagDetector.extract_metrics(data_block), None, None, ticker="TEST"
+    )
 
 
 def _data_block(**f: str) -> str:
@@ -103,7 +111,7 @@ def test_apr_verdict_floored_to_hold():
     _, subtotal = _assemble(APR_DB, _value_trap(35, "TRAP"))
     out, floored = maybe_floor_verdict_to_hold(
         _pm_dni(),
-        fundamentals_report=APR_DB,
+        decision_inputs=_floor_inputs(APR_DB),
         red_flags=_assemble(APR_DB, _value_trap(35, "TRAP"))[0],
         code_subtotal=subtotal,
         pre_screening_result="PASS",
@@ -122,7 +130,7 @@ def test_kty_value_trap_not_downgraded():
 def test_kty_not_floored_pe_and_negative_cagr():
     out, floored = maybe_floor_verdict_to_hold(
         _pm_dni(),
-        fundamentals_report=KTY_DB,
+        decision_inputs=_floor_inputs(KTY_DB),
         red_flags=[],
         code_subtotal=1.0,
         pre_screening_result="PASS",

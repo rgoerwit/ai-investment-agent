@@ -272,6 +272,7 @@ Only use data explicitly related to {ticker} ({company_name}).{governance_block(
                 llm,
                 [HumanMessage(content=prompt)],
                 context=f"{agent_prompt.agent_name} R{round_num}",
+                canonical_agent=agent_prompt.agent_name,
                 provider=support.infer_provider_name(llm),
                 model_name=support.get_model_name(llm),
             )

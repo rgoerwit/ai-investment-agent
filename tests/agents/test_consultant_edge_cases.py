@@ -6,6 +6,7 @@ to ensure the consultant doesn't break existing functionality under stress.
 """
 
 import asyncio
+import copy
 import json
 import time
 from types import SimpleNamespace
@@ -194,9 +195,7 @@ class TestDataFormatEdgeCases:
 
     def test_auditor_output_normalizes_block_and_status_labels(self):
         content = (
-            "FORENSIC BLOCK:\n"
-            "STATUS: **UNAVAILABLE**\n"
-            "META: CONTEXT_LIMIT_EXCEEDED\n"
+            "FORENSIC BLOCK:\nSTATUS: **UNAVAILABLE**\nMETA: CONTEXT_LIMIT_EXCEEDED\n"
         )
 
         normalized = canonicalize_forensic_auditor_output(content)
@@ -302,8 +301,7 @@ class TestDataFormatEdgeCases:
         mock_llm = Mock()
         mock_response = Mock()
         mock_response.content = (
-            "### CONSULTANT REVIEW: APPROVED\n\n"
-            "### FINAL CONSULTANT VERDICT\nAPPROVED"
+            "### CONSULTANT REVIEW: APPROVED\n\n### FINAL CONSULTANT VERDICT\nAPPROVED"
         )
         invoke_messages = []
         summarize_calls = []
@@ -397,8 +395,7 @@ class TestDataFormatEdgeCases:
         mock_llm = Mock()
         mock_response = Mock()
         mock_response.content = (
-            "### CONSULTANT REVIEW: APPROVED\n\n"
-            "### FINAL CONSULTANT VERDICT\nAPPROVED"
+            "### CONSULTANT REVIEW: APPROVED\n\n### FINAL CONSULTANT VERDICT\nAPPROVED"
         )
         invoke_messages = []
         summarize_calls = []
@@ -453,6 +450,158 @@ class TestDataFormatEdgeCases:
         assert ("fundamentals", 3600) in summarize_calls
         assert ("research", 2200) in summarize_calls
         assert result["consultant_quick_profile"] == "quick_expanded"
+
+    async def _consultant_prompt(self, state: dict, *, quick_mode: bool) -> str:
+        """Assemble a consultant prompt and return it verbatim."""
+        mock_response = Mock()
+        mock_response.content = (
+            "### CONSULTANT REVIEW: APPROVED\n\n### FINAL CONSULTANT VERDICT\nAPPROVED"
+        )
+        invoke_messages: list = []
+
+        async def mock_invoke(_llm, messages, **kwargs):
+            invoke_messages.extend(messages)
+            return mock_response
+
+        with (
+            patch(
+                "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+            ),
+            patch("src.prompts.get_prompt") as mock_get_prompt,
+        ):
+            mock_prompt = Mock()
+            mock_prompt.system_message = "You are a consultant."
+            mock_prompt.agent_name = "External Consultant"
+            mock_get_prompt.return_value = mock_prompt
+
+            node = create_consultant_node(
+                Mock(), "consultant", tools=[], quick_mode=quick_mode
+            )
+            await node(
+                {
+                    "company_of_interest": "TEST",
+                    "company_name": "Test Co",
+                    "investment_debate_state": {"history": "Debate"},
+                    **state,
+                },
+                RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")}),
+            )
+        return invoke_messages[0].content
+
+
+class TestConsultantRedFlagRendering:
+    """The consultant reads flags through the canonical renderer, not dict repr.
+
+    ``prompts/consultant.json`` grants this seat veto authority keyed on the
+    literal token ``CMIC_FLAGGED``, which is a red-flag ``type`` value. It used to
+    arrive only inside a Python ``repr`` of ``list[dict]`` — and, in quick mode,
+    inside a copy clipped at 220 chars that dropped ``risk_penalty`` and
+    ``blocks_buy`` first, because ``detail``/``rationale`` are long strings
+    ordered ahead of them.
+    """
+
+    CMIC_FLAG = {
+        "type": "CMIC_FLAGGED",
+        "severity": "HIGH",
+        "detail": "Company appears on NS-CMIC list. Named in an OFAC listing.",
+        "action": "RISK_PENALTY",
+        "risk_penalty": 2.0,
+        "blocks_buy": True,
+        "rationale": "US Executive Orders prohibit US persons from investing in "
+        "NS-CMIC listed companies. Verify current OFAC status before investing. "
+        "Restrictions may be modified by future executive orders.",
+    }
+
+    @pytest.mark.asyncio
+    async def test_veto_token_is_legible_with_its_penalty(self):
+        prompt = await TestDataFormatEdgeCases()._consultant_prompt(
+            {"red_flags": [self.CMIC_FLAG], "pre_screening_result": "PASS"},
+            quick_mode=False,
+        )
+        assert "CMIC_FLAGGED [risk_penalty +2.00]" in prompt
+        assert "Company appears on NS-CMIC list." in prompt
+
+    @pytest.mark.asyncio
+    async def test_no_python_dict_repr_reaches_the_prompt(self):
+        prompt = await TestDataFormatEdgeCases()._consultant_prompt(
+            {"red_flags": [self.CMIC_FLAG], "pre_screening_result": "PASS"},
+            quick_mode=False,
+        )
+        assert "{'type':" not in prompt
+        assert "'blocks_buy'" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_quick_mode_renders_the_flag_set_once(self):
+        """Counts the *rendered* flag line, not the bare token.
+
+        These tests mock the system message, so a whole-prompt token count would
+        not measure the real prompt — `prompts/consultant.json` itself names
+        `CMIC_FLAGGED` once in its veto rule, so the real assembled prompt
+        legitimately contains the token twice (rule + rendered flag). What must
+        not recur is the flag *rendering*, which quick mode used to duplicate.
+        """
+        prompt = await TestDataFormatEdgeCases()._consultant_prompt(
+            {
+                "red_flags": [self.CMIC_FLAG],
+                "pre_screening_result": "PASS",
+                "investment_plan": "HOLD",
+            },
+            quick_mode=True,
+        )
+        assert prompt.count("CMIC_FLAGGED [risk_penalty") == 1
+
+    @pytest.mark.asyncio
+    async def test_consultant_is_not_given_the_pm_tally_contract(self):
+        """`TOTAL RISK COUNT` is a Portfolio Manager output field.
+
+        `prompts/consultant.json` never mentions it, so shipping the PM's tally
+        instruction here would ask this seat to produce a field it does not own.
+        """
+        prompt = await TestDataFormatEdgeCases()._consultant_prompt(
+            {"red_flags": [self.CMIC_FLAG], "pre_screening_result": "PASS"},
+            quick_mode=False,
+        )
+        assert "CODE-COMPUTED RISK SUBTOTAL" in prompt
+        assert "TOTAL RISK COUNT" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_penalties_survive_a_long_flag_list(self):
+        """The truncation regression: every penalty must reach the model."""
+        flags = [
+            {
+                "type": f"FLAG_{i}",
+                "detail": "d" * 400,
+                "rationale": "r" * 400,
+                "risk_penalty": 0.5,
+            }
+            for i in range(8)
+        ]
+        prompt = await TestDataFormatEdgeCases()._consultant_prompt(
+            {"red_flags": flags, "pre_screening_result": "PASS"}, quick_mode=True
+        )
+        for i in range(8):
+            assert f"FLAG_{i} [risk_penalty +0.50]" in prompt
+        assert (
+            "CODE-COMPUTED RISK SUBTOTAL (deterministic, already weighted): +4.00"
+            in (prompt)
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("red_flags", [None, [], "not-a-list", [None, 3]])
+    async def test_malformed_flags_still_produce_a_prompt(self, red_flags):
+        prompt = await TestDataFormatEdgeCases()._consultant_prompt(
+            {"red_flags": red_flags, "pre_screening_result": "PASS"}, quick_mode=False
+        )
+        assert "RED FLAGS (Pre-Screening Results)" in prompt
+
+    @pytest.mark.asyncio
+    async def test_state_red_flags_are_not_mutated(self):
+        flags = [dict(self.CMIC_FLAG)]
+        snapshot = copy.deepcopy(flags)
+        await TestDataFormatEdgeCases()._consultant_prompt(
+            {"red_flags": flags, "pre_screening_result": "PASS"}, quick_mode=False
+        )
+        assert flags == snapshot
 
     @pytest.mark.asyncio
     async def test_consultant_handles_missing_debate_state(self):
@@ -639,7 +788,7 @@ class TestConfigurationEdgeCases:
 
         _, kwargs = fake_cls.call_args
         assert kwargs["base_url"] == "https://api.moonshot.cn/v1"
-        assert kwargs["api_key"] == "k"
+        assert kwargs["api_key"].get_secret_value() == "k"
         assert "use_responses_api" not in kwargs
         assert "output_version" not in kwargs
 
@@ -661,6 +810,7 @@ class TestConfigurationEdgeCases:
 
         _, kwargs = fake_cls.call_args
         assert "base_url" not in kwargs
+        assert kwargs["api_key"].get_secret_value() == "k"
         assert kwargs["use_responses_api"] is True
         assert kwargs["output_version"] == "responses/v1"
 
@@ -1189,11 +1339,19 @@ class TestConsultantQuickEnvelope:
 
     def test_default_quick_total_timeout_is_35s(self):
         """The shipped default must be 35s — earlier 60s value hid hung calls.
-        Operators can still override via CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS."""
+        Operators can still override via CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS.
+
+        Reads the declared field default rather than instantiating ``Settings()``:
+        instantiation loads the developer's ``.env``, so an operator who sets the
+        documented override made this test fail on a *correct* configuration.
+        Mirrors ``TestApiRetryAttemptsDefault._field_default``.
+        """
         from src.config import Settings
 
-        settings = Settings()
-        assert settings.consultant_quick_total_timeout_seconds == 35.0
+        default = Settings.model_fields[
+            "consultant_quick_total_timeout_seconds"
+        ].default
+        assert default == 35.0
 
     @pytest.mark.asyncio
     async def test_quick_mode_deadline_flows_into_runtime(self, monkeypatch):
@@ -1289,5 +1447,322 @@ class TestConsultantQuickEnvelope:
         assert seen_timeouts[0] <= 10.0
 
 
+class TestTruncatedFinalResponse:
+    """1088.HK 2026-08-02: a review cut off at the token cap is a fragment.
+
+    The model burned its whole completion budget on hidden reasoning and
+    returned 46 characters of preamble. A fragment is truthy, so the existing
+    empty-content fallback could not see it and the fragment was persisted as a
+    complete consultant review (``ok=True``). The provider says so in
+    ``finish_reason``; the loop now reads it.
+    """
+
+    @staticmethod
+    def _loop_kwargs(fake_invoke, **overrides):
+        from src.agents.consultant_tool_loop import ConsultantToolLoopPolicy
+
+        kwargs = {
+            "active_llm": "active",
+            "fallback_llm": "fallback",
+            "messages": [],
+            "tools_by_name": {"spot_check_metric": object()},
+            "policy": ConsultantToolLoopPolicy(
+                max_tool_iterations=1,
+                max_tool_calls_per_turn=4,
+                deadline=time.monotonic() + 60,
+                total_timeout=60,
+            ),
+            "invoke_with_deadline": fake_invoke,
+            "agent_name": "External Consultant",
+            "agent_key": "consultant",
+            "ticker": "1088.HK",
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            {"finish_reason": "length"},
+            {"status": "incomplete", "incomplete_details": {"reason": "max_tokens"}},
+        ],
+    )
+    async def test_capped_fragment_is_replaced_by_a_forced_synthesis(self, metadata):
+        from src.agents.consultant_tool_loop import run_bounded_consultant_loop
+
+        fragment = SimpleNamespace(
+            content="I'll spot-check the decision-critical conflict",
+            tool_calls=[],
+            response_metadata=metadata,
+        )
+        synthesis = SimpleNamespace(
+            content="FINAL CONSULTANT VERDICT: CONDITIONAL APPROVAL",
+            tool_calls=[],
+            response_metadata={"finish_reason": "stop"},
+        )
+        invoked = []
+
+        async def fake_invoke(llm, _messages):
+            invoked.append(llm)
+            return fragment if llm == "active" else synthesis
+
+        result = await run_bounded_consultant_loop(**self._loop_kwargs(fake_invoke))
+
+        assert invoked == ["active", "fallback"]
+        assert result.content == "FINAL CONSULTANT VERDICT: CONDITIONAL APPROVAL"
+
+    @pytest.mark.asyncio
+    async def test_fragment_is_kept_when_the_retry_returns_nothing(self):
+        """Never trade a usable fragment for an empty response."""
+        from src.agents.consultant_tool_loop import run_bounded_consultant_loop
+
+        fragment = SimpleNamespace(
+            content="Partial review text",
+            tool_calls=[],
+            response_metadata={"finish_reason": "length"},
+        )
+        empty = SimpleNamespace(
+            content="", tool_calls=[], response_metadata={"finish_reason": "stop"}
+        )
+
+        async def fake_invoke(llm, _messages):
+            return fragment if llm == "active" else empty
+
+        result = await run_bounded_consultant_loop(**self._loop_kwargs(fake_invoke))
+
+        assert result.content == "Partial review text"
+
+    @pytest.mark.asyncio
+    async def test_clean_finish_does_not_pay_for_a_second_call(self):
+        from src.agents.consultant_tool_loop import run_bounded_consultant_loop
+
+        clean = SimpleNamespace(
+            content="FINAL CONSULTANT VERDICT: APPROVED",
+            tool_calls=[],
+            response_metadata={"finish_reason": "stop"},
+        )
+        invoked = []
+
+        async def fake_invoke(llm, _messages):
+            invoked.append(llm)
+            return clean
+
+        result = await run_bounded_consultant_loop(**self._loop_kwargs(fake_invoke))
+
+        assert invoked == ["active"]
+        assert result.content == "FINAL CONSULTANT VERDICT: APPROVED"
+
+    @pytest.mark.asyncio
+    async def test_failed_resynthesis_keeps_the_fragment(self):
+        """The re-ask is strictly additive — it must not cost us the fragment.
+
+        Widening the trigger from "empty" to "empty or truncated" means a
+        deadline-exhausted re-ask could otherwise turn a degraded-but-usable
+        review into a failed artifact.
+        """
+        from src.agents.consultant_tool_loop import run_bounded_consultant_loop
+
+        fragment = SimpleNamespace(
+            content="Partial but usable review",
+            tool_calls=[],
+            response_metadata={"finish_reason": "length"},
+        )
+
+        async def fake_invoke(llm, _messages):
+            if llm == "active":
+                return fragment
+            raise TimeoutError("consultant deadline exhausted")
+
+        result = await run_bounded_consultant_loop(**self._loop_kwargs(fake_invoke))
+
+        assert result.content == "Partial but usable review"
+
+    @pytest.mark.asyncio
+    async def test_failed_resynthesis_still_raises_when_there_is_no_content(self):
+        """The pre-existing empty-content path keeps propagating failures."""
+        from src.agents.consultant_tool_loop import run_bounded_consultant_loop
+
+        empty = SimpleNamespace(content="", tool_calls=[], response_metadata={})
+
+        async def fake_invoke(llm, _messages):
+            if llm == "active":
+                return empty
+            raise TimeoutError("consultant deadline exhausted")
+
+        with pytest.raises(TimeoutError):
+            await run_bounded_consultant_loop(**self._loop_kwargs(fake_invoke))
+
+    @pytest.mark.asyncio
+    async def test_provider_response_object_is_appended_verbatim(self):
+        """Tool turns must replay the provider's own message object.
+
+        Vendor-specific fields (Kimi's ``reasoning_content``, any future
+        equivalent) live on the response object. Reconstructing a message from
+        ``content`` + ``tool_calls`` would silently drop them, so the contract
+        this loop owns is: append what the provider returned, unmodified.
+        """
+        from src.agents.consultant_tool_loop import run_bounded_consultant_loop
+
+        tool_turn = SimpleNamespace(
+            content="",
+            tool_calls=[
+                {"name": "spot_check_metric", "args": {"ticker": "X"}, "id": "call_1"}
+            ],
+            response_metadata={"finish_reason": "tool_calls"},
+            reasoning_content="hidden chain of thought",
+        )
+        final = SimpleNamespace(
+            content="FINAL CONSULTANT VERDICT: APPROVED",
+            tool_calls=[],
+            response_metadata={"finish_reason": "stop"},
+        )
+        responses = iter((tool_turn, final))
+        seen_messages = []
+
+        async def fake_invoke(_llm, loop_messages):
+            seen_messages.append(list(loop_messages))
+            return next(responses)
+
+        class _Tool:
+            async def ainvoke(self, _args):
+                return "42"
+
+        class PassthroughService:
+            async def execute(self, invocation, runner):
+                return SimpleNamespace(value=await runner(invocation.args))
+
+        result = await run_bounded_consultant_loop(
+            **self._loop_kwargs(
+                fake_invoke,
+                tools_by_name={"spot_check_metric": _Tool()},
+                tool_service_getter=lambda: PassthroughService(),
+            )
+        )
+
+        assert result.content == "FINAL CONSULTANT VERDICT: APPROVED"
+        second_turn = seen_messages[1]
+        assert tool_turn in second_turn, "assistant turn was not replayed"
+        replayed = second_turn[second_turn.index(tool_turn)]
+        assert replayed is tool_turn
+        assert replayed.reasoning_content == "hidden chain of thought"
+        assert replayed.tool_calls == tool_turn.tool_calls
+
+    @pytest.mark.asyncio
+    async def test_metadata_free_response_is_not_treated_as_truncated(self):
+        """Synthetic AIMessages (tests, non-streaming providers) stay clean."""
+        from src.agents.consultant_tool_loop import run_bounded_consultant_loop
+
+        bare = SimpleNamespace(content="A complete review.", tool_calls=[])
+        invoked = []
+
+        async def fake_invoke(llm, _messages):
+            invoked.append(llm)
+            return bare
+
+        result = await run_bounded_consultant_loop(**self._loop_kwargs(fake_invoke))
+
+        assert invoked == ["active"]
+        assert result.content == "A complete review."
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestConsultantPartialRecovery:
+    """A provider-partial must never be published as a finished cross-check.
+
+    Header validation cannot catch this: both required headers appear early, so a
+    truncated review passes structurally. The optional artifact fails; the equity
+    analysis still stands.
+    """
+
+    @staticmethod
+    def _partial(content: str):
+        # Provider metadata present, no finish_reason -> classifier says partial.
+        return SimpleNamespace(
+            content=content,
+            tool_calls=[],
+            response_metadata={"model_name": "kimi-k3"},
+        )
+
+    @staticmethod
+    def _clean(content: str):
+        return SimpleNamespace(
+            content=content,
+            tool_calls=[],
+            response_metadata={"finish_reason": "stop"},
+        )
+
+    async def _run(self, responses):
+        from src.agents.consultant_tool_loop import (
+            ConsultantToolLoopPolicy,
+            run_bounded_consultant_loop,
+        )
+
+        seq = iter(responses)
+
+        async def fake_invoke(_llm, _messages):
+            item = next(seq)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        return await run_bounded_consultant_loop(
+            active_llm="active",
+            fallback_llm="fallback",
+            messages=[],
+            tools_by_name={"spot_check_metric": object()},
+            policy=ConsultantToolLoopPolicy(
+                max_tool_iterations=1,
+                max_tool_calls_per_turn=4,
+                deadline=time.monotonic() + 60,
+                total_timeout=60,
+            ),
+            invoke_with_deadline=fake_invoke,
+            agent_name="External Consultant",
+            agent_key="consultant",
+            ticker="1088.HK",
+        )
+
+    HEADERS = (
+        "## CONSULTANT REVIEW\nSpot-checking the decision-critical conflict\n"
+        "## FINAL CONSULTANT VERDICT\n"
+    )
+
+    @pytest.mark.asyncio
+    async def test_partial_followed_by_partial_is_reported_partial(self):
+        """The re-ask can itself be truncated — the fragment is not rescued."""
+        result = await self._run(
+            [self._partial(self.HEADERS), self._partial(self.HEADERS + "more")]
+        )
+        assert result.partial_reason is not None
+
+    @pytest.mark.asyncio
+    async def test_partial_followed_by_retry_error_is_reported_partial(self):
+        """A failed re-ask retains the fragment, which is still not an answer."""
+        result = await self._run(
+            [self._partial(self.HEADERS), RuntimeError("provider down")]
+        )
+        assert result.content  # fragment deliberately retained
+        assert result.partial_reason is not None
+
+    @pytest.mark.asyncio
+    async def test_partial_followed_by_empty_retry_is_reported_partial(self):
+        result = await self._run([self._partial(self.HEADERS), self._partial("")])
+        assert result.partial_reason is not None
+
+    @pytest.mark.asyncio
+    async def test_successful_resynthesis_clears_the_partial_flag(self):
+        """Recovery must actually clear it, or the guard is just a kill switch."""
+        result = await self._run(
+            [self._partial(self.HEADERS), self._clean(self.HEADERS + "full review")]
+        )
+        assert result.partial_reason is None
+        assert "full review" in result.content
+
+    @pytest.mark.asyncio
+    async def test_clean_first_response_needs_no_resynthesis(self):
+        result = await self._run([self._clean(self.HEADERS + "complete")])
+        assert result.partial_reason is None

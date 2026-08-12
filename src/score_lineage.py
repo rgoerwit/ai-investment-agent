@@ -17,6 +17,10 @@ from src.data_block_utils import (
     extract_last_data_block,
     replace_or_append_block_line,
 )
+from src.provenance_schema import (
+    Scorecard,
+    ScorecardCriterion,
+)
 
 _FIELD_RE = re.compile(r"(?m)^\s*(?:[-*]\s*)?([A-Z][A-Z0-9_]{2,})\s*:\s*(.*?)\s*$")
 _SCORE_CRITERION_DEPENDENCIES: dict[
@@ -71,7 +75,7 @@ def _replace_report_section(report: str, heading: str, replacement: str) -> str:
 
 def _render_score_detail(
     kind: str,
-    scorecard: Mapping[str, Any],
+    scorecard: Scorecard,
     claims: Mapping[str, Any],
 ) -> str:
     title = (
@@ -80,35 +84,42 @@ def _render_score_detail(
     lines = [
         f"### {title}",
         (
-            f"**Score**: {float(scorecard['earned']):g}/"
-            f"{float(scorecard['rubric_total']):g} "
-            f"(Adjusted: {float(scorecard['percentage']):.1f}%)"
+            f"**Score**: {float(scorecard.earned):g}/"
+            f"{float(scorecard.rubric_total):g} "
+            f"(Adjusted: {float(scorecard.percentage):.1f}%)"
         ),
         "",
         "**Canonical rubric projection**:",
     ]
-    criteria = scorecard.get("criteria", {})
-    for criterion, component in criteria.items():
-        award = str(component.get("award") or "N/A")
-        dependencies = tuple(component.get("derived_from") or ())
+    for criterion, component in scorecard.criteria:
+        award = str(component.award or "N/A")
         support = []
-        for dependency_id in dependencies:
+        for dependency_id in component.derived_from:
             claim = claims.get(dependency_id)
             if isinstance(claim, Mapping):
                 support.append(f"{claim.get('field')}={claim.get('value')}")
         support_text = "; ".join(support) if support else "lineage unavailable"
         lines.append(
-            f"- {criterion}: {award}/{float(component['max_points']):g} — "
-            f"{support_text}"
+            f"- {criterion}: {award}/{float(component.max_points):g} — {support_text}"
         )
-    lines.append(
-        "- Decision use: "
-        + (
-            "eligible; every included criterion has canonical lineage."
-            if scorecard.get("decision_eligible")
-            else "advisory only; score consistency validation failed."
+    advisory_only = scorecard.advisory_only_awards
+    if advisory_only:
+        advisory_pct = float(scorecard.advisory_percentage)
+        lines.append(
+            "- Advisory-only (no evidence producer; excluded from the decision "
+            f"score): {', '.join(advisory_only)} — model's raw score "
+            f"{advisory_pct:.1f}%"
         )
-    )
+    if not scorecard.decision_eligible:
+        decision_use = "advisory only; score consistency validation failed."
+    elif advisory_only:
+        decision_use = (
+            "decision-score eligible; advisory-only criteria excluded from the "
+            "score (see above), every scored criterion has canonical lineage."
+        )
+    else:
+        decision_use = "eligible; every included criterion has canonical lineage."
+    lines.append(f"- Decision use: {decision_use}")
     return "\n".join(lines)
 
 
@@ -125,10 +136,16 @@ def project_analysis_report(
         return report
 
     projected, _ = reconcile_data_block_projection(block, snapshot)
-    scorecards = snapshot.get("scorecards", {})
+    raw_scorecards = snapshot.get("scorecards", {})
+    # Decode each scorecard once, fail-closed: a future-schema or corrupt
+    # scorecard becomes None and is treated exactly like a missing one (N/A).
+    decoded: dict[str, Scorecard | None] = {
+        kind: Scorecard.decode_or_none(raw_scorecards.get(kind))
+        for kind in ("HEALTH", "GROWTH")
+    }
     for kind in ("HEALTH", "GROWTH"):
-        scorecard = scorecards.get(kind)
-        if not isinstance(scorecard, Mapping):
+        scorecard = decoded[kind]
+        if scorecard is None:
             projected = replace_or_append_block_line(
                 projected,
                 f"ADJUSTED_{kind}_SCORE",
@@ -140,10 +157,9 @@ def project_analysis_report(
                 "MISSING",
             )
             continue
-        criteria = scorecard.get("criteria", {})
         breakdown = "; ".join(
-            f"{criterion}={component.get('award', 'N/A')}"
-            for criterion, component in criteria.items()
+            f"{criterion}={component.award}"
+            for criterion, component in scorecard.criteria
         )
         projected = replace_or_append_block_line(
             projected,
@@ -153,22 +169,22 @@ def project_analysis_report(
         projected = replace_or_append_block_line(
             projected,
             f"RAW_{kind}_SCORE",
-            f"{float(scorecard['earned']):g}/{float(scorecard['rubric_total']):g}",
+            f"{float(scorecard.earned):g}/{float(scorecard.rubric_total):g}",
         )
         projected = replace_or_append_block_line(
             projected,
             f"ADJUSTED_{kind}_SCORE",
             "N/A"
-            if not scorecard.get("decision_eligible")
+            if not scorecard.decision_eligible
             else (
-                f"{float(scorecard['percentage']):.1f}% "
-                f"(based on {float(scorecard['available']):g} available points)"
+                f"{float(scorecard.percentage):.1f}% "
+                f"(based on {float(scorecard.available):g} available points)"
             ),
         )
         projected = replace_or_append_block_line(
             projected,
             f"{kind}_SCORE_LINEAGE_STATUS",
-            "COMPLETE" if scorecard.get("decision_eligible") else "ADVISORY",
+            "COMPLETE" if scorecard.decision_eligible else "ADVISORY",
         )
 
     block_index = report.rfind(block_with_markers)
@@ -179,8 +195,8 @@ def project_analysis_report(
     )
     claims = snapshot.get("claims", {})
     for kind in ("HEALTH", "GROWTH"):
-        scorecard = scorecards.get(kind)
-        if isinstance(scorecard, Mapping):
+        scorecard = decoded[kind]
+        if scorecard is not None:
             heading = (
                 "FINANCIAL HEALTH DETAIL"
                 if kind == "HEALTH"
@@ -257,6 +273,7 @@ def add_validated_derivations(
             or abs(float(score_match.group()) - reported_pct) > SCORE_PCT_TOLERANCE
         ):
             continue
+        assert reported_available > 0
 
         criterion_dependencies: dict[str, tuple[str, ...]] = {}
         for criterion in numeric_awards:
@@ -288,9 +305,28 @@ def add_validated_derivations(
             and criterion not in criterion_dependencies
             and _SCORE_CRITERION_DEPENDENCIES[kind].get(criterion, ()) != ()
         )
+        # Class-1 "advisory" criteria: a positive award on a criterion that has NO
+        # configured evidence producer at all (GLOBAL_EXPANSION,
+        # R_AND_D_CAPEX_BACKLOG). Such credit is not decision-evidence, so it is
+        # excluded from the *decision* score numerator while the full rubric stays
+        # the denominator (conservative — an unbacked award can only lower the
+        # decision score, never lift it across the 50% gate). The model's raw
+        # percentage is preserved as advisory_percentage. Class-2 criteria
+        # (configured dependency, unresolved this run) still veto eligibility via
+        # lineage_gaps — unchanged, so a genuine lineage gap remains N/A.
+        advisory_only_awards = tuple(
+            criterion
+            for criterion, award in numeric_awards.items()
+            if award > 0
+            and _SCORE_CRITERION_DEPENDENCIES[kind].get(criterion, ()) == ()
+        )
         available = reported_available
-        earned = sum(numeric_awards.values())
-        expected_pct = reported_pct
+        raw_earned = sum(numeric_awards.values())
+        decision_earned = raw_earned - sum(
+            numeric_awards[criterion] for criterion in advisory_only_awards
+        )
+        advisory_pct = reported_pct
+        decision_pct = decision_earned / available * 100.0
         decision_eligible = not suspect and not lineage_gaps
 
         score_claim_id = claim_id(score_field, None)
@@ -301,24 +337,29 @@ def add_validated_derivations(
             for dependency_id in criterion_dependencies.get(criterion, ())
         )
         normalized_value = (
-            f"{expected_pct:.1f}% (based on {available:g} available points)"
+            f"{decision_pct:.1f}% (based on {available:g} available points)"
         )
-        scorecards[kind] = {
-            "criteria": {
-                criterion: {
-                    "award": breakdown[criterion],
-                    "max_points": criteria[criterion],
-                    "derived_from": list(criterion_dependencies.get(criterion, ())),
-                }
+        scorecards[kind] = Scorecard(
+            criteria=tuple(
+                (
+                    criterion,
+                    ScorecardCriterion(
+                        award=breakdown[criterion],
+                        max_points=criteria[criterion],
+                        derived_from=tuple(criterion_dependencies.get(criterion, ())),
+                    ),
+                )
                 for criterion in criteria
-            },
-            "earned": earned,
-            "available": available,
-            "rubric_total": sum(criteria.values()),
-            "percentage": round(expected_pct, 1),
-            "decision_eligible": decision_eligible,
-            "lineage_gaps": list(lineage_gaps),
-        }
+            ),
+            earned=raw_earned,
+            available=available,
+            rubric_total=sum(criteria.values()),
+            percentage=round(decision_pct, 1),
+            advisory_percentage=round(advisory_pct, 1),
+            advisory_only_awards=tuple(advisory_only_awards),
+            decision_eligible=decision_eligible,
+            lineage_gaps=tuple(lineage_gaps),
+        ).to_dict()
         record = ClaimRecord(
             id=score_claim_id,
             field=score_field,

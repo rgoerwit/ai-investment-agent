@@ -7,6 +7,7 @@ import signal
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlparse
 
 import pandas as pd
 import pytest
@@ -805,9 +806,36 @@ class TestBrazilConfigInvariants:
                 continue
             exclude = ex.get("params", {}).get("exclude_filter", {})
             for col in ("Symbol", "Papel"):
-                assert (
-                    exclude.get(col) != "3[2-9]$"
-                ), f"{ex['exchange_name']}: must not carry Brazil's BDR exclude_filter on {col!r}"
+                assert exclude.get(col) != "3[2-9]$", (
+                    f"{ex['exchange_name']}: must not carry Brazil's BDR exclude_filter on {col!r}"
+                )
+
+
+# ============================================================
+# TestASXConfigInvariants — locks the current directory-feed contract
+# ============================================================
+class TestASXConfigInvariants:
+    """Guard the production ASX source shape without making a network call."""
+
+    def test_asx_uses_current_directory_feed_without_legacy_header_skip(self):
+        with open(_CONFIG_PATH) as f:
+            cfg = json.load(f)
+        exchange = next(
+            (ex for ex in cfg["exchanges"] if ex.get("exchange_name") == "ASX"),
+            None,
+        )
+        assert exchange is not None, "ASX entry missing from config/exchanges.json"
+
+        parsed = urlparse(exchange["source_url"])
+        assert parsed.scheme == "https"
+        assert parsed.hostname == "asx.api.markitdigital.com"
+        assert parsed.path == "/asx-research/1.0/companies/directory/file"
+        assert parsed.query == ""
+
+        params = exchange["params"]
+        assert "skip_rows" not in params
+        assert params["ticker_col"] == "ASX code"
+        assert params["name_col"] == "Company name"
 
 
 # ============================================================
@@ -2358,12 +2386,12 @@ class TestHandleScrapeHtmlPagination:
         assert len(found) == len(targets), f"Missing configs: {targets - set(found)}"
 
         for name, ex in found.items():
-            assert (
-                ex["params"].get("paginate_max_pages", 1) > 1
-            ), f"{name} missing paginate_max_pages > 1"
-            assert (
-                ex.get("min_expected_rows", 0) >= 700
-            ), f"{name} min_expected_rows too low: {ex.get('min_expected_rows')}"
+            assert ex["params"].get("paginate_max_pages", 1) > 1, (
+                f"{name} missing paginate_max_pages > 1"
+            )
+            assert ex.get("min_expected_rows", 0) >= 700, (
+                f"{name} min_expected_rows too low: {ex.get('min_expected_rows')}"
+            )
 
 
 class TestRequestTimeouts:

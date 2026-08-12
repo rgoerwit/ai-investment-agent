@@ -39,6 +39,13 @@ HORIZON_FIELD_RAW_KEYS = (
     ("GROWTH_TRAJECTORY", "growth_trajectory"),
 )
 
+_PERIOD_COMPARABLE_GROWTH_FIELDS = (
+    ("REVENUE_GROWTH_TTM", "revenueGrowth_TTM"),
+    ("REVENUE_GROWTH_MRQ", "revenueGrowth_MRQ"),
+    ("EARNINGS_GROWTH_TTM", "earningsGrowth_TTM"),
+    ("EARNINGS_GROWTH_MRQ", "earningsGrowth_MRQ"),
+)
+
 
 def _growth_source_label(
     payload: dict[str, Any],
@@ -265,7 +272,7 @@ def reconcile_high_risk_fields(
             updated = replace_or_append_block_line(updated, datablock_key, "N/A")
             changed_growth = True
 
-    for datablock_key, raw_key, formatter, threshold in (
+    for datablock_key, raw_key, value_formatter, threshold in (
         ("SECTOR_MEDIAN_PE", "sectorMedianPE", format_ratio, 0.01),
         ("PE_VS_SECTOR", "peVsSector", format_ratio, 0.01),
         ("REVENUE_CAGR_3Y", "revenue_cagr_3y", format_percent_from_ratio, 0.1),
@@ -276,7 +283,7 @@ def reconcile_high_risk_fields(
             datablock_key,
             as_float(payload.get(raw_key)),
             threshold=threshold,
-            formatter=formatter,
+            formatter=value_formatter,
         )
         changed_growth = changed_growth or changed
 
@@ -372,7 +379,14 @@ def reconcile_high_risk_fields(
         ("NET_MARGIN", "profitMargins", 100.0, format_percent, 0.20, False),
     )
     pe_quarantined = bool(payload.get("_pe_low_anomaly_quarantined"))
-    for datablock_key, raw_key, scale, formatter, rel, is_pe in valuation_specs:
+    for (
+        datablock_key,
+        raw_key,
+        scale,
+        valuation_formatter,
+        rel,
+        is_pe,
+    ) in valuation_specs:
         if is_pe and pe_quarantined:
             # Leave PE_RATIO_TTM to the downstream quarantine -> N/A path.
             continue
@@ -383,7 +397,7 @@ def reconcile_high_risk_fields(
             datablock_key,
             value,
             rel_threshold=rel,
-            formatter=formatter,
+            formatter=valuation_formatter,
         )
         changed_valuation = changed_valuation or changed
 
@@ -418,6 +432,20 @@ def reconcile_high_risk_fields(
     market_cap = as_float(payload.get("marketCap"))
     total_assets = as_float(payload.get("totalAssets"))
     capital_cash_to_assets = as_float(payload.get("capital_cashToAssets"))
+    raw_cash_excess_persistence = payload.get("capital_cashExcessPersistence")
+    if raw_cash_excess_persistence is not None:
+        cash_excess_persistence = str(raw_cash_excess_persistence).upper()
+        if cash_excess_persistence not in {
+            "PERSISTENT_EXCESS",
+            "NOT_PERSISTENT",
+            "UNKNOWN",
+        }:
+            cash_excess_persistence = "UNKNOWN"
+        updated = replace_or_append_block_line(
+            updated,
+            "CASH_EXCESS_PERSISTENCE",
+            cash_excess_persistence,
+        )
 
     net_debt_ebitda = (
         (total_debt - cash_and_short_term) / ebitda
@@ -511,6 +539,31 @@ def reconcile_high_risk_fields(
             "GROWTH_DATA_QUALITY_NOTE",
             "Growth horizons and provenance reconciled to raw metrics; unavailable "
             "TTM/MRQ values were not backfilled from FY data.",
+        )
+    missing_growth_fields = [
+        label
+        for label, raw_key in _PERIOD_COMPARABLE_GROWTH_FIELDS
+        if payload.get(raw_key) is None
+    ]
+    if missing_growth_fields:
+        existing_note = extract_block_text_value(
+            updated,
+            "GROWTH_DATA_QUALITY_NOTE",
+        )
+        missing_note = (
+            "Missing period-comparable growth inputs: "
+            f"{', '.join(missing_growth_fields)}. Their absence is a data gap, "
+            "not evidence of acceleration, deceleration, or structural contraction."
+        )
+        combined_note = (
+            f"{existing_note} {missing_note}".strip()
+            if missing_note not in existing_note
+            else existing_note
+        )
+        updated = replace_or_append_block_line(
+            updated,
+            "GROWTH_DATA_QUALITY_NOTE",
+            combined_note,
         )
     # yfinance can lag a full fiscal year for some ex-US names: the latest annual
     # statements predate the most recent completed FY, so any FY-based growth may be

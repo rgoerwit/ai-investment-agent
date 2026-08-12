@@ -35,6 +35,6 @@ def test_chart_module_imports_cleanly_first(module: str):
         # Apple's atfork handler on macOS. See CLAUDE.md (macOS-Specific Issues).
         close_fds=False,
     )
-    assert (
-        proc.returncode == 0
-    ), f"importing {module} first failed (circular import?):\n{proc.stderr[-800:]}"
+    assert proc.returncode == 0, (
+        f"importing {module} first failed (circular import?):\n{proc.stderr[-800:]}"
+    )

@@ -21,7 +21,12 @@ from src.data_block_utils import (
     normalize_structured_block_boundaries,
     replace_or_append_block_line,
 )
-from src.earnings_baseline import GUIDANCE_COVERAGE_STATUSES
+from src.earnings_baseline import (
+    GUIDANCE_COVERAGE_STATUSES,
+    REQUIRED_GUIDANCE_CONTRACT_FIELDS,
+    canonical_guidance_enum,
+    guidance_contract_value_is_uninterpretable,
+)
 from src.guidance_vocabulary import guidance_locale_policy
 
 from .evidence_preflight import (
@@ -88,7 +93,10 @@ _NUMBER_TOKEN_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 def _matching_source_evidence(evidence: str, source_url: str) -> str:
     if not source_url:
         return ""
-    for block in re.findall(r"(?is)<result\b[^>]*>(.*?)</result>", evidence or ""):
+    blocks: list[str] = re.findall(
+        r"(?is)<result\b[^>]*>(.*?)</result>", evidence or ""
+    )
+    for block in blocks:
         if source_url in block:
             return block
     return ""
@@ -333,7 +341,7 @@ async def _preload_management_guidance_evidence(
             ("statutory_filing_api", get_official_filings, {"ticker": ticker}),
         ],
         agent_key="foreign_language_analyst",
-        source="toolnode",
+        source="preflight",
         ticker=ticker,
         failure_event="management_guidance_preflight_call_failed",
         logger=logger,
@@ -358,7 +366,7 @@ async def _preload_management_guidance_evidence(
             )
         ],
         agent_key="foreign_language_analyst",
-        source="toolnode",
+        source="preflight",
         ticker=ticker,
         failure_event="management_guidance_preflight_call_failed",
         logger=logger,
@@ -393,7 +401,7 @@ async def _preload_management_guidance_evidence(
                 for index, url in enumerate(official_candidate_urls)
             ],
             agent_key="foreign_language_analyst",
-            source="toolnode",
+            source="preflight",
             ticker=ticker,
             failure_event="management_guidance_preflight_call_failed",
             logger=logger,
@@ -423,7 +431,7 @@ async def _preload_management_guidance_evidence(
                     for index, url in enumerate(child_urls)
                 ],
                 agent_key="foreign_language_analyst",
-                source="toolnode",
+                source="preflight",
                 ticker=ticker,
                 failure_event="management_guidance_preflight_call_failed",
                 logger=logger,
@@ -459,7 +467,7 @@ async def _preload_management_guidance_evidence(
                 )
             ],
             agent_key="foreign_language_analyst",
-            source="toolnode",
+            source="preflight",
             ticker=ticker,
             failure_event="management_guidance_preflight_call_failed",
             logger=logger,
@@ -568,7 +576,9 @@ def normalize_management_guidance_output(
         value = extract_block_text_value(block_body, field)
         if value:
             block_body = replace_or_append_block_line(
-                block_body, field, value.strip().upper()
+                block_body,
+                field,
+                canonical_guidance_enum(field, value),
             )
 
     if execution_statuses:
@@ -826,6 +836,65 @@ def _is_missing_guidance_value(value: str) -> bool:
     return not bool(re.search(r"\d", normalized))
 
 
+def _execution_statuses_from_searches_completed(value: str) -> dict[str, str]:
+    """Recover per-search execution statuses from a rendered SEARCHES_COMPLETED line.
+
+    Inverse of ``_format_searches_completed``. Anything that does not match the
+    ``label=EXECUTION/EVIDENCE`` shape is ignored rather than guessed at, so a
+    prose value degrades to "no search ran" instead of inventing a success.
+    """
+    statuses: dict[str, str] = {}
+    for entry in value.split(";"):
+        label, _, outcome = entry.strip().partition("=")
+        execution, _, _evidence = outcome.partition("/")
+        label = label.strip()
+        execution = execution.strip().upper()
+        if label and execution:
+            statuses[label] = execution
+    return statuses
+
+
+def backfill_guidance_contract(
+    body: str, foreign_data: str
+) -> tuple[str, tuple[str, ...]]:
+    """Supply code-owned conservative values for absent guidance-contract fields.
+
+    The Senior DATA_BLOCK must carry the full guidance contract or the whole
+    fundamentals artifact fails closed, taking the Portfolio Manager with it. When
+    the Foreign Language Analyst produced no usable MANAGEMENT_GUIDANCE block there
+    is nothing to promote, so the deterministic layer states the absence explicitly
+    rather than leaving the fields missing. Only fields that are *absent* are
+    filled — a promoted, sourced value is never overwritten, because turning
+    missing evidence into negative evidence is the failure mode this guards.
+    """
+    missing = tuple(
+        field
+        for field in REQUIRED_GUIDANCE_CONTRACT_FIELDS
+        if guidance_contract_value_is_uninterpretable(
+            field, extract_block_text_value(body, field)
+        )
+    )
+    if not missing:
+        return body, ()
+
+    guidance = extract_last_fenced_block(foreign_data, "MANAGEMENT_GUIDANCE") or ""
+    execution_statuses = _execution_statuses_from_searches_completed(
+        extract_block_text_value(guidance, "SEARCHES_COMPLETED")
+    )
+    fallback = _build_unresolved_guidance_block(
+        execution_statuses,
+        _format_searches_completed(execution_statuses, {}),
+    )
+    updated = body
+    for source_field, target_field in GUIDANCE_PROMOTION_FIELDS.items():
+        if target_field not in missing:
+            continue
+        value = extract_block_text_value(fallback, source_field)
+        if value:
+            updated = replace_or_append_block_line(updated, target_field, value)
+    return updated, missing
+
+
 def promote_management_guidance(body: str, foreign_data: str) -> tuple[str, bool]:
     """Copy the validated FLA guidance block into Senior DATA_BLOCK fields."""
     guidance = extract_last_fenced_block(foreign_data, "MANAGEMENT_GUIDANCE")
@@ -837,6 +906,10 @@ def promote_management_guidance(body: str, foreign_data: str) -> tuple[str, bool
         value = extract_block_text_value(guidance, source_field)
         if not value:
             continue
-        updated = replace_or_append_block_line(updated, target_field, value)
+        updated = replace_or_append_block_line(
+            updated,
+            target_field,
+            canonical_guidance_enum(source_field, value),
+        )
         promoted = True
     return updated, promoted

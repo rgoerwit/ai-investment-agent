@@ -204,9 +204,9 @@ class TestBackwardsCompatibility:
             assert fallback_rate is not None, f"Missing fallback rate for {currency}"
 
             diff_pct = abs(fallback_rate - old_rate) / old_rate
-            assert (
-                diff_pct < 0.15
-            ), f"{currency}: Fallback rate {fallback_rate} differs too much from old static {old_rate} ({diff_pct:.1%})"
+            assert diff_pct < 0.15, (
+                f"{currency}: Fallback rate {fallback_rate} differs too much from old static {old_rate} ({diff_pct:.1%})"
+            )
 
     @pytest.mark.asyncio
     async def test_usd_stocks_unchanged(self):

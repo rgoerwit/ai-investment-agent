@@ -4,6 +4,7 @@ import asyncio
 import random
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 
 import structlog
@@ -20,11 +21,13 @@ from src.llm_usage import extract_token_usage_breakdown
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import (
     classify_failure,
+    get_base_url,
     get_class_name,
     get_model_name,
     infer_provider,
 )
 from src.service_tiers import floor_llm_hard_timeout, provider_flex_active
+from src.token_tracker import canonical_display_name
 
 logger = structlog.get_logger(__name__)
 
@@ -35,19 +38,52 @@ logger = structlog.get_logger(__name__)
 # data-gathering agents. Kept in lockstep with APEX_SEATS in src/llms.py via
 # tests/agents/test_runtime_hard_timeout.py (the seats' prompt agent_name).
 APEX_SEAT_CONTEXTS = frozenset({"Fundamentals Analyst", "Portfolio Manager"})
+# Canonical display names — see canonical_display_name() below on why these are
+# not the raw context strings.
+CROSS_CHECK_SEAT_CONTEXTS = frozenset({"Consultant", "Global Forensic Auditor"})
 
 
-def quick_mode_hard_timeout_seconds(context: str, cfg: Any = settings_config) -> float:
+def quick_mode_hard_timeout_seconds(
+    context: str,
+    cfg: Any = settings_config,
+    canonical_agent: str | None = None,
+) -> float:
     """Per-call hard wall-clock cap for a single ``--quick`` LLM ainvoke.
 
-    Gate-critical APEX seats (Senior Fundamentals, Portfolio Manager) get the
-    larger ``apex_quick_llm_call_hard_timeout_seconds`` budget so the tight quick
-    cap can't guillotine the DATA_BLOCK / PM_BLOCK the hard gates depend on;
-    every other (cheap, fast) agent keeps ``quick_llm_call_hard_timeout_seconds``
-    so quick mode still surfaces a hung provider quickly.
+    Three budgets, by why the seat needs one:
+
+    * Gate-critical APEX seats (Senior Fundamentals, Portfolio Manager) get
+      ``apex_quick_llm_call_hard_timeout_seconds`` so the tight quick cap can't
+      guillotine the DATA_BLOCK / PM_BLOCK the hard gates depend on.
+    * The OpenAI cross-check plane (Consultant, Forensic Auditor) gets
+      ``cross_check_quick_llm_call_hard_timeout_seconds`` — a *vendor-latency*
+      allowance, not a criticality one, because these seats can be pointed at an
+      OpenAI-compatible endpoint whose reasoning model exceeds the flat cap.
+    * Everything else (cheap, fast flash agents) keeps
+      ``quick_llm_call_hard_timeout_seconds`` so quick mode still surfaces a hung
+      provider quickly.
+
+    Seat identity comes from the explicit ``canonical_agent`` when the call site
+    supplies one, and is otherwise *derived* from the decorated context. Deriving
+    alone is not sufficient and was a live defect twice over: a raw membership
+    test missed ``"Fundamentals Analyst (RETRY-HIGH)"`` (a gate-critical seat's
+    deep-model retry running on a *smaller* per-call budget than its first
+    attempt), and even after canonicalization the free-form correction contexts
+    — ``"Portfolio Manager structure correction"``, ``"pm_verdict_recovery"``,
+    ``"global_forensic_auditor_repair"`` — carry no recognizable suffix and fell
+    back to the 60s flat cap. Those corrections enforce the final
+    recommendation's evidence contract, so they are at least as gate-critical as
+    the first call. Call sites that decorate their context must pass
+    ``canonical_agent``; ``tests/agents/test_runtime_hard_timeout.py::
+    TestSeatBudgetCoversEveryCallSite`` scans the source and fails if one does not.
     """
-    if context in APEX_SEAT_CONTEXTS:
+    seat = canonical_display_name(canonical_agent or context)
+    if seat in APEX_SEAT_CONTEXTS:
         return float(getattr(cfg, "apex_quick_llm_call_hard_timeout_seconds", 180.0))
+    if seat in CROSS_CHECK_SEAT_CONTEXTS:
+        return float(
+            getattr(cfg, "cross_check_quick_llm_call_hard_timeout_seconds", 180.0)
+        )
     return float(getattr(cfg, "quick_llm_call_hard_timeout_seconds", 60.0))
 
 
@@ -222,12 +258,131 @@ def _detect_provider_partial_response(result: Any) -> str | None:
     return None
 
 
+def response_partial_reason(result: Any) -> str | None:
+    """The provider's reason for cutting a response short, if it did.
+
+    Broader than :func:`response_hit_output_cap` on purpose. A caller deciding
+    whether it is holding a *finished answer* cares about every partial the
+    classifier recognizes — ``finish_reason_missing``, ``responses_api_failed``,
+    ``responses_api_incomplete:*`` — not only the token-cap subset. Keying
+    recovery on the cap alone let a nonempty fragment with no finish reason be
+    published as a complete Consultant review.
+
+    Refusals are deliberately excluded upstream (``content_filter``/``SAFETY``
+    return ``None`` from the classifier): those are intentional stops owned by
+    the refusal path, and re-asking an identical prompt would not clear them.
+    """
+    return _detect_provider_partial_response(result)
+
+
+def response_hit_output_cap(result: Any) -> bool:
+    """True when the provider says the response stopped at the token cap.
+
+    Derived from the one partial-response classifier above so there is a single
+    definition of "the provider cut this off". The retry loop already raises on
+    a partial, but the *final* attempt returns the truncated message as-is —
+    callers that publish an artifact need to know they are holding a fragment
+    rather than a finished answer. Fragments are truthy, so an emptiness check
+    alone cannot see this (the 1088.HK consultant "review" of 46 characters).
+    """
+    reason = _detect_provider_partial_response(result)
+    if reason is None:
+        return False
+    lowered = reason.lower()
+    return any(
+        marker in lowered for marker in ("length", "max_tokens", "max_output_tokens")
+    )
+
+
 class ProviderPartialResponseError(RuntimeError):
     """Raised when an LLM call returned successfully but the response
     looks like a provider-side partial (no finish_reason, length cap,
     etc). The marker `provider_partial_response` in the message routes
     the failure to the transient-retry branch in
     `invoke_with_rate_limit_handling`."""
+
+
+@dataclass(frozen=True)
+class RefusalSignal:
+    """A recognized provider safety/content-policy block on a returned
+    response. ``reason_code`` is a stable lowercase token
+    (``content_filter``/``safety``/``recitation``/``prohibited_content``/
+    ``refusal``/``prompt_blocked:<x>``); ``stage`` is ``"response"`` (the
+    model produced output that was blocked/refused) or ``"request"`` (the
+    prompt itself was blocked before generation)."""
+
+    reason_code: str
+    stage: str
+
+
+class ProviderRefusalError(RuntimeError):
+    """Raised when an LLM call returned a provider safety block / content
+    refusal instead of a usable response. The message carries the marker
+    `provider_safety_block` so `classify_failure` maps it to the
+    ``provider_safety_block`` kind — which is in neither the rate-limit nor
+    the transient-retry set, so it is non-retryable by construction and
+    degrades through the node-level `except -> failure_artifact` wrapper."""
+
+    def __init__(self, signal: RefusalSignal):
+        self.reason_code = signal.reason_code
+        self.stage = signal.stage
+        super().__init__(
+            f"provider_safety_block: {signal.reason_code} (stage={signal.stage})"
+        )
+
+
+def _detect_provider_refusal(result: Any) -> RefusalSignal | None:
+    """Return a `RefusalSignal` iff *result* is a provider safety block /
+    content-policy refusal — otherwise None.
+
+    Metadata-only by design: this inspects `finish_reason`/`stop_reason`,
+    the OpenAI Responses-API `incomplete_details.reason`, the OpenAI Chat
+    structured `.refusal` field, and Gemini `prompt_feedback.block_reason`.
+    It never matches on the model's prose — a keyword scan of output text
+    would false-positive on legitimate financial content (e.g. a report that
+    discusses "safety") and kill a good run. Callers must short-circuit
+    active tool-call turns before calling this (an empty content on a
+    tool_calls turn is normal, not a refusal)."""
+    response_metadata = getattr(result, "response_metadata", None)
+    if not isinstance(response_metadata, dict):
+        response_metadata = {}
+
+    # OpenAI Responses API: an incomplete status names the reason.
+    if response_metadata.get("status") == "incomplete":
+        details = response_metadata.get("incomplete_details") or {}
+        reason = details.get("reason") if isinstance(details, dict) else None
+        if reason in ("content_filter", "refusal"):
+            return RefusalSignal(reason, "response")
+
+    finish_reason = response_metadata.get("finish_reason") or response_metadata.get(
+        "stop_reason"
+    )
+    if finish_reason == "content_filter":
+        return RefusalSignal("content_filter", "response")
+    if finish_reason == "SAFETY":
+        return RefusalSignal("safety", "response")
+    if finish_reason == "RECITATION":
+        return RefusalSignal("recitation", "response")
+    if finish_reason in ("PROHIBITED_CONTENT", "SPII", "BLOCKLIST"):
+        return RefusalSignal(str(finish_reason).lower(), "response")
+    if finish_reason == "refusal":  # Anthropic stop_reason
+        return RefusalSignal("refusal", "response")
+
+    # OpenAI Chat Completions structured refusal (langchain surfaces it in
+    # additional_kwargs; the response text is empty in this case).
+    additional_kwargs = getattr(result, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict) and additional_kwargs.get("refusal"):
+        return RefusalSignal("refusal", "response")
+
+    # Gemini prompt-level block, when the wrapper surfaces prompt_feedback
+    # (best-effort — not currently exposed by every langchain-google version).
+    prompt_feedback = response_metadata.get("prompt_feedback")
+    if isinstance(prompt_feedback, dict) and prompt_feedback.get("block_reason"):
+        return RefusalSignal(
+            f"prompt_blocked:{prompt_feedback['block_reason']}", "request"
+        )
+
+    return None
 
 
 def _timeout_failure_origin(exc: BaseException) -> str | None:
@@ -265,7 +420,8 @@ async def invoke_with_rate_limit_handling(
     joins; when omitted the token tracker derives it from ``context`` (which may
     carry a round/retry suffix).
     """
-    quiet_mode = settings_config.quiet_mode
+    runtime_config = get_runtime_config(settings_config)
+    quiet_mode = runtime_config.quiet_mode
     resolved_model = model_name or get_model_name(runnable)
     class_name = get_class_name(runnable)
     resolved_provider = provider or infer_provider(
@@ -285,9 +441,10 @@ async def invoke_with_rate_limit_handling(
             overall_timeout_seconds=overall_timeout_seconds,
         )
 
-    runtime_config = get_runtime_config(settings_config)
     if runtime_config.quick_mode_active:
-        hard_timeout = quick_mode_hard_timeout_seconds(context, settings_config)
+        hard_timeout = quick_mode_hard_timeout_seconds(
+            context, settings_config, canonical_agent=canonical_agent
+        )
     else:
         hard_timeout = float(runtime_config.llm_call_hard_timeout_seconds)
     # Flex tier: queued calls may take minutes; floor the hard cap so a
@@ -341,6 +498,35 @@ async def invoke_with_rate_limit_handling(
                 timeout=effective_timeout,
                 label=f"llm:{context}:{resolved_provider}:{resolved_model}",
             )
+            # Refusal / provider safety block: a returned response that the
+            # provider blocked or refused (finish_reason SAFETY/content_filter,
+            # Anthropic stop_reason=refusal, OpenAI structured .refusal, Gemini
+            # prompt block). An active tool-call turn is never a refusal, so
+            # skip the check there. On a hit, emit the dedicated event (safe
+            # metadata only — no prompt contents) and raise; the generic
+            # `except` below records the single ledger failure via
+            # classify_failure -> provider_safety_block (non-retryable).
+            _tool_calls = getattr(result, "tool_calls", None)
+            if not (isinstance(_tool_calls, list) and _tool_calls):
+                refusal = _detect_provider_refusal(result)
+                if refusal is not None:
+                    _content = getattr(result, "content", "") or ""
+                    logger.warning(
+                        "llm_refusal_detected",
+                        context=context,
+                        provider=resolved_provider,
+                        model=resolved_model,
+                        stage=refusal.stage,
+                        reason_code=refusal.reason_code,
+                        output_len=len(_content) if isinstance(_content, str) else None,
+                        input_messages=(
+                            len(input_data["messages"])
+                            if isinstance(input_data, dict)
+                            and isinstance(input_data.get("messages"), list)
+                            else None
+                        ),
+                    )
+                    raise ProviderRefusalError(refusal)
             # Inspect finish_reason: providers occasionally return a "200 OK"
             # with truncated content and no finish_reason under load. Raise
             # the marker exception so the existing transient-retry branch
@@ -486,6 +672,11 @@ async def invoke_with_rate_limit_handling(
                 provider=resolved_provider,
                 model_name=resolved_model,
                 class_name=class_name,
+                # `provider` names the transport family, which is "openai" for
+                # every OpenAI-compatible endpoint. The endpoint host is what
+                # identifies the vendor that actually served (or refused) the
+                # call, and it needs no vendor lookup table to do so.
+                base_url=get_base_url(runnable),
             )
             elapsed_seconds = time.monotonic() - attempt_started
             # Quick-mode flex latency timeout: a queued flex call the transport
@@ -500,7 +691,15 @@ async def invoke_with_rate_limit_handling(
                 and runtime_config.quick_mode_active
                 and provider_flex_active(resolved_provider, settings_config)
             )
-            if breaker is not None and not flex_latency_timeout_quick:
+            # A provider safety block / content refusal is content-specific, not
+            # evidence the provider or model is unhealthy — exclude it from the
+            # circuit breakers so a run's repeated refusals cannot trip them and
+            # fast-fail unrelated sibling agents. (Same rationale as the flex
+            # queue-event exclusion above.)
+            exclude_from_breakers = (
+                flex_latency_timeout_quick or details.kind == "provider_safety_block"
+            )
+            if breaker is not None and not exclude_from_breakers:
                 breaker.record_outcome(
                     agent_name=context,
                     provider=resolved_provider,
@@ -508,7 +707,7 @@ async def invoke_with_rate_limit_handling(
                     ok=False,
                     failure_kind=details.kind,
                 )
-            if network_breaker is not None and not flex_latency_timeout_quick:
+            if network_breaker is not None and not exclude_from_breakers:
                 network_breaker.record_outcome(ok=False, failure_kind=details.kind)
             with _accounting_hook("capture_manager_failure"):
                 capture_manager = _get_capture_manager()
@@ -537,6 +736,7 @@ async def invoke_with_rate_limit_handling(
                             "error_type": details.error_type,
                             "root_cause_type": details.root_cause_type,
                             "host": details.host,
+                            "endpoint_host": details.endpoint_host,
                             "error_message": details.message,
                         }
                     )
@@ -560,13 +760,9 @@ async def invoke_with_rate_limit_handling(
                 )
 
             is_rate_limit = details.kind in {"rate_limit", "quota_error"}
-            is_transient = details.kind in {
-                "dns_resolution",
-                "connect_error",
-                "timeout",
-                "server_error",
-                "provider_partial_response",
-            }
+            # ``classify_failure`` owns retryability. Keep only the distinct
+            # rate-limit branch here because it has a different backoff policy.
+            is_transient = details.retryable and not is_rate_limit
 
             if is_rate_limit and attempt < max_attempts - 1:
                 jitter = random.uniform(1, 10)

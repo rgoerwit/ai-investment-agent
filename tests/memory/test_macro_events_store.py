@@ -402,9 +402,9 @@ class TestChromaDbNumericWhereClause:
         for condition in where["$and"]:
             for _field, op in condition.items():
                 for _operator, value in op.items():
-                    assert isinstance(
-                        value, int
-                    ), f"Expected int, got {type(value)}: {value}"
+                    assert isinstance(value, int), (
+                        f"Expected int, got {type(value)}: {value}"
+                    )
 
     # --- stored metadata ---
 

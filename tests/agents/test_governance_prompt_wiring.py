@@ -275,7 +275,7 @@ async def test_research_manager_uses_structured_coverage_not_raw_fla(monkeypatch
     state = _state_with_card()
     state["fundamentals_report"] = state["fundamentals_report"].replace(
         "### --- END DATA_BLOCK ---",
-        "CAPITAL_PLAN_STATUS: NOT_DISCLOSED\n" "### --- END DATA_BLOCK ---",
+        "CAPITAL_PLAN_STATUS: NOT_DISCLOSED\n### --- END DATA_BLOCK ---",
     )
     state["foreign_language_report"] = (
         "RAW_FLA_SENTINEL: No mid-term plan published as of 2026-05."

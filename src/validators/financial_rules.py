@@ -201,26 +201,6 @@ _OCF_LINE_RE = re.compile(
     r"(?im)^[^\n]*\b(?:operating cash flow|cash flow from operations|"
     r"net cash from operating activities|cfo)\b[^\n]*$"
 )
-_OCF_CONSULTANT_CONTEXT_RE = re.compile(
-    r"\b(?:OCF|operating\s+cash\s+flow|operatingCashflow|cash[- ]flow)\b",
-    re.IGNORECASE,
-)
-_OCF_PERIOD_MISMATCH_RE = re.compile(
-    r"\b(?:period\s+mismatch|period\s+normali[sz]ation|"
-    r"TTM(?:/Q[1-4])?\s*(?:vs\.?|versus|/)\s*FY|"
-    r"FY\s*\d{4}\s*(?:vs\.?|versus|/)\s*TTM|not\s+comparable)\b",
-    re.IGNORECASE,
-)
-_OCF_RESOLVED_RE = re.compile(
-    r"\b(?:not\s+(?:a\s+)?data\s+conflict|not\s+(?:a\s+)?data\s+error|"
-    r"not\s+comparable|resolved|reconciled|corroborated|matches)\b",
-    re.IGNORECASE,
-)
-_OCF_UNRESOLVED_RE = re.compile(
-    r"\b(?:unresolved|wrong\s+(?:statement\s+)?line|currency\s+mismatch|"
-    r"data\s+conflict\s+remains|not\s+reconciled)\b",
-    re.IGNORECASE,
-)
 _OCF_META_FIELD_RE = re.compile(
     r"(?i)\b(REPORT_DATE|PERIOD_END|PERIOD_START|PERIOD|CURRENCY|SCOPE|"
     r"AUDITOR_SIGNATURE_DATE|AUDIT_STATUS)\s*[:=]\s*([^|\n]+)"
@@ -525,136 +505,21 @@ def detect_ocf_corroboration_flag(
     }
 
 
-def _consultant_resolves_ocf_period_mismatch(
-    consultant_review: str | None,
-    consultant_conditions: dict[str, Any] | None = None,
-) -> bool:
-    """Conservatively detect consultant text resolving OCF as period mismatch.
-
-    Numeric auditor corroboration is the load-bearing gate elsewhere. This text gate
-    only confirms the subtype: period mismatch, not currency/wrong-line conflict.
-    """
-    if not consultant_review:
-        return False
-    conditions = consultant_conditions or {}
-    if conditions.get("has_hard_stop") or conditions.get("has_mandate_breach"):
-        return False
-    if conditions.get("verdict") == "MAJOR_CONCERNS":
-        return False
-
-    for match in _OCF_CONSULTANT_CONTEXT_RE.finditer(consultant_review):
-        start = max(0, match.start() - 280)
-        end = min(len(consultant_review), match.end() + 280)
-        window = consultant_review[start:end]
-        if _OCF_UNRESOLVED_RE.search(window):
-            return False
-        if _OCF_PERIOD_MISMATCH_RE.search(window) and _OCF_RESOLVED_RE.search(window):
-            return True
-    return False
-
-
-def is_ocf_period_mismatch_resolved(
-    fundamentals_report: str | None,
-    consultant_review: str | None,
-    auditor_report: str | None,
-    ticker: str = "UNKNOWN",
-    *,
-    consultant_conditions: dict[str, Any] | None = None,
-    threshold: float = 0.15,
-) -> bool:
-    """True when a filing/API OCF discrepancy is resolved as period mismatch.
-
-    This is intentionally post-research: the independent auditor report is only
-    available after the Senior DATA_BLOCK has already emitted OCF_SOURCE_DISCREPANCY.
-    """
-    ocf_source = (
-        (
-            extract_data_block_field(fundamentals_report, "OPERATING_CASH_FLOW_SOURCE")
-            or ""
-        )
-        .strip()
-        .upper()
-    )
-    ocf_reason = (
-        (extract_data_block_field(fundamentals_report, "OCF_FILING_REASON") or "")
-        .strip()
-        .upper()
-    )
-    if ocf_source != "FILING" or ocf_reason != "DISCREPANCY":
-        return False
-
-    datablock_ocf = parse_ocf_amount(
-        extract_data_block_field(fundamentals_report, "OPERATING_CASH_FLOW")
-    )
-    auditor_ocf = extract_auditor_ocf(auditor_report)
-    if not datablock_ocf or not auditor_ocf:
-        return False
-
-    if detect_ocf_corroboration_flag(
-        datablock_ocf, auditor_ocf, ticker=ticker, threshold=threshold
-    ):
-        return False
-
-    return _consultant_resolves_ocf_period_mismatch(
-        consultant_review, consultant_conditions=consultant_conditions
-    )
-
-
-def reconcile_ocf_period_mismatch_flags(
-    red_flags: list[dict[str, Any]] | None,
-    fundamentals_report: str | None,
-    consultant_review: str | None,
-    auditor_report: str | None,
-    ticker: str = "UNKNOWN",
-    *,
-    consultant_conditions: dict[str, Any] | None = None,
-    threshold: float = 0.15,
-) -> list[dict[str, Any]]:
-    """Replace resolved OCF_SOURCE_DISCREPANCY with a risk-neutral note."""
-    flags = list(red_flags or [])
-    if not any(flag.get("type") == "OCF_SOURCE_DISCREPANCY" for flag in flags):
-        return flags
-    if not is_ocf_period_mismatch_resolved(
-        fundamentals_report,
-        consultant_review,
-        auditor_report,
-        ticker=ticker,
-        consultant_conditions=consultant_conditions,
-        threshold=threshold,
-    ):
-        return flags
-
-    resolved_flag = {
-        "type": "OCF_PERIOD_MISMATCH_RESOLVED",
-        "severity": "INFO",
-        "detail": (
-            "Filing/API OCF difference appears to be a FY-vs-TTM period mismatch; "
-            "filing OCF is corroborated by the forensic auditor."
-        ),
-        "action": "NOTE",
-        "risk_penalty": 0.0,
-        "rationale": (
-            "The original OCF discrepancy warning is neutralized only because the "
-            "consultant identified a period mismatch and the forensic auditor's "
-            "independent OCF is within the existing corroboration band."
-        ),
-    }
-    reconciled = [
-        resolved_flag if flag.get("type") == "OCF_SOURCE_DISCREPANCY" else flag
-        for flag in flags
-    ]
-    logger.info("ocf_period_mismatch_resolved", ticker=ticker)
-    return reconciled
-
-
 def detect_red_flags(
-    metrics: dict[str, Any],
+    metrics: Any,
     ticker: str = "UNKNOWN",
     sector: Sector = Sector.INDUSTRIALS,
     strict_mode: bool = False,
     entity_role: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Apply sector-aware threshold-based red-flag detection logic."""
+    """Apply sector-aware threshold-based red-flag detection logic.
+
+    Accepts either a parsed metrics dict or a typed ``DecisionInputs`` (whose
+    ``decision_metrics`` carries the snapshot-authoritative scores). The typed
+    input is the canonical production contract; the dict path is retained for
+    the deterministic golden tests and any snapshot-free caller.
+    """
+    metrics = getattr(metrics, "decision_metrics", metrics)
     red_flags: list[dict[str, Any]] = []
 
     leverage_threshold, coverage_threshold, coverage_de_threshold = (

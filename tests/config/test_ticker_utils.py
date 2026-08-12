@@ -61,9 +61,9 @@ def test_normalize_does_not_leave_trailing_comma():
     ]
     for raw, expected in cases:
         result = normalize_company_name(raw)
-        assert not result.endswith(
-            ","
-        ), f"normalize_company_name({raw!r}) left trailing comma: {result!r}"
+        assert not result.endswith(","), (
+            f"normalize_company_name({raw!r}) left trailing comma: {result!r}"
+        )
         assert result == expected, f"Expected {expected!r}, got {result!r}"
 
 

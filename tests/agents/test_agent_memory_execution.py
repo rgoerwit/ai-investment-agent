@@ -153,17 +153,17 @@ class TestResearcherMemoryIsolation:
         if hsbc_data:
             hsbc_docs = [item["documents"] for item in hsbc_data]
             hsbc_text = str(hsbc_docs).lower()
-            assert (
-                "toyota" not in hsbc_text
-            ), "HSBC memory should not contain Toyota data"
+            assert "toyota" not in hsbc_text, (
+                "HSBC memory should not contain Toyota data"
+            )
 
         # Verify isolation: Toyota data should not mention HSBC
         if toyota_data:
             toyota_docs = [item["documents"] for item in toyota_data]
             toyota_text = str(toyota_docs).lower()
-            assert (
-                "hsbc" not in toyota_text
-            ), "Toyota memory should not contain HSBC data"
+            assert "hsbc" not in toyota_text, (
+                "Toyota memory should not contain HSBC data"
+            )
 
         # Verify correct metadata was stored
         if hsbc_data:
@@ -258,9 +258,9 @@ class TestResearcherMetadataFiltering:
         assert len(query_calls) > 0, "Memory query should have been called"
         last_query = query_calls[-1]
         assert last_query["where"] is not None, "Query should include metadata filter"
-        assert (
-            last_query["where"]["ticker"] == ticker
-        ), f"Filter should be for ticker {ticker}"
+        assert last_query["where"]["ticker"] == ticker, (
+            f"Filter should be for ticker {ticker}"
+        )
 
         # Verify results only contain correct ticker data
         for result in results:
@@ -358,12 +358,12 @@ class TestCrossTickerContamination:
         # Verify HSBC query didn't return Toyota semiconductor data
         for result in hsbc_results:
             result_text = result.get("content", "").lower()
-            assert (
-                "semiconductor" not in result_text
-            ), "HSBC analysis should not retrieve Toyota semiconductor issues"
-            assert (
-                "toyota" not in result_text
-            ), "HSBC analysis should not contain Toyota data"
+            assert "semiconductor" not in result_text, (
+                "HSBC analysis should not retrieve Toyota semiconductor issues"
+            )
+            assert "toyota" not in result_text, (
+                "HSBC analysis should not contain Toyota data"
+            )
 
 
 class TestMemoryCollectionNaming:
@@ -412,16 +412,16 @@ class TestMemoryCollectionNaming:
 
             # Verify all memory keys use expected sanitized ticker
             for key in memories.keys():
-                assert key.startswith(
-                    expected_safe
-                ), f"Memory key '{key}' should start with '{expected_safe}' for ticker '{ticker}'"
+                assert key.startswith(expected_safe), (
+                    f"Memory key '{key}' should start with '{expected_safe}' for ticker '{ticker}'"
+                )
 
             # Verify collection names are valid (no special chars)
             for collection_name in created_collections:
                 # ChromaDB collection names must be alphanumeric + underscore
-                assert all(
-                    c.isalnum() or c == "_" for c in collection_name
-                ), f"Collection name '{collection_name}' contains invalid characters"
+                assert all(c.isalnum() or c == "_" for c in collection_name), (
+                    f"Collection name '{collection_name}' contains invalid characters"
+                )
 
             created_collections.clear()
 

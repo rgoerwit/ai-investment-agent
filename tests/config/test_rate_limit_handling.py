@@ -224,9 +224,9 @@ class TestNonRateLimitErrors:
         first_wait = mock_sleep.call_args_list[0][0][0]
         second_wait = mock_sleep.call_args_list[1][0][0]
         assert 5 <= first_wait <= 10, f"First wait {first_wait} not in expected range"
-        assert (
-            10 <= second_wait <= 15
-        ), f"Second wait {second_wait} not in expected range"
+        assert 10 <= second_wait <= 15, (
+            f"Second wait {second_wait} not in expected range"
+        )
 
     @pytest.mark.asyncio
     async def test_transfer_encoding_400_reset_is_retried_as_transport_error(self):

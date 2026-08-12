@@ -365,12 +365,40 @@ CASH_TO_ASSETS: 33.1%
     assert "NET_DEBT_EBITDA: 1.95" in sanitized
     assert "CASH_TO_ASSETS: 3.3%" in sanitized
     assert "GROWTH_DATA_QUALITY_NOTE:" in sanitized
+    assert "Missing period-comparable growth inputs:" in sanitized
+    assert "not evidence of acceleration, deceleration, or structural contraction" in (
+        sanitized
+    )
     assert "BALANCE_SHEET_DATA_QUALITY_NOTE:" in sanitized
+
+
+def test_sanitize_fundamentals_output_promotes_cash_excess_persistence() -> None:
+    content = """### --- START DATA_BLOCK ---
+CASH_TO_ASSETS: 28.0%
+CASH_EXCESS_PERSISTENCE: PERSISTENT_EXCESS
+### --- END DATA_BLOCK ---
+"""
+    raw_data = json.dumps(
+        {
+            "capital_cashToAssets": 0.28,
+            "capital_cashExcessPersistence": "NOT_PERSISTENT",
+        }
+    )
+
+    sanitized = _sanitize_fundamentals_output(content, raw_data, "TEST")
+
+    assert "CASH_EXCESS_PERSISTENCE: NOT_PERSISTENT" in sanitized
+    assert "CASH_EXCESS_PERSISTENCE: PERSISTENT_EXCESS" not in sanitized
 
 
 def test_sanitize_fundamentals_output_extracts_non_first_tool_payload() -> None:
     content = """### --- START DATA_BLOCK ---
 NET_DEBT_EBITDA: -0.01
+GUIDANCE_COVERAGE_STATUS: SEARCH_FAILED
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+NORMALIZED_EARNINGS_AVAILABLE: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: UNRESOLVED
 ### --- END DATA_BLOCK ---
 """
     raw_data = "### TOOL 2: get_financial_metrics\n" + json.dumps(
@@ -389,6 +417,11 @@ NET_DEBT_EBITDA: -0.01
 def test_sanitize_fundamentals_output_ignores_unmarked_json() -> None:
     content = """### --- START DATA_BLOCK ---
 NET_DEBT_EBITDA: -0.01
+GUIDANCE_COVERAGE_STATUS: SEARCH_FAILED
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+NORMALIZED_EARNINGS_AVAILABLE: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: UNRESOLVED
 ### --- END DATA_BLOCK ---
 """
     raw_data = (
@@ -404,6 +437,11 @@ NET_DEBT_EBITDA: -0.01
 def test_sanitize_fundamentals_output_skips_malformed_marked_payload() -> None:
     content = """### --- START DATA_BLOCK ---
 NET_DEBT_EBITDA: -0.01
+GUIDANCE_COVERAGE_STATUS: SEARCH_FAILED
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+NORMALIZED_EARNINGS_AVAILABLE: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: UNRESOLVED
 ### --- END DATA_BLOCK ---
 """
     raw_data = "### TOOL 1: get_financial_metrics\n{not valid json"
@@ -416,6 +454,11 @@ NET_DEBT_EBITDA: -0.01
 def test_sanitize_fundamentals_output_handles_zero_ebitda() -> None:
     content = """### --- START DATA_BLOCK ---
 NET_DEBT_EBITDA: -0.01
+GUIDANCE_COVERAGE_STATUS: SEARCH_FAILED
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+NORMALIZED_EARNINGS_AVAILABLE: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: UNRESOLVED
 ### --- END DATA_BLOCK ---
 """
     raw_data = json.dumps(
@@ -837,6 +880,11 @@ ADR_TYPE: SPONSORED
 ADR_TICKER: EXMPY
 ADR_EXCHANGE: OTC-OTCQX
 ADR_THESIS_IMPACT: MODERATE_CONCERN
+GUIDANCE_COVERAGE_STATUS: SEARCH_FAILED
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+NORMALIZED_EARNINGS_AVAILABLE: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: UNRESOLVED
 ### --- END DATA_BLOCK ---
 """
     raw_data = (
@@ -856,6 +904,11 @@ ADR_TYPE: SPONSORED
 ADR_TICKER: ABEV
 ADR_EXCHANGE: NYSE
 ADR_THESIS_IMPACT: MODERATE_CONCERN
+GUIDANCE_COVERAGE_STATUS: SEARCH_FAILED
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+NORMALIZED_EARNINGS_AVAILABLE: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: UNRESOLVED
 ### --- END DATA_BLOCK ---
 """
     raw_data = "Generic profile text only."
@@ -872,6 +925,11 @@ ADR_TYPE: UNCERTAIN
 ADR_TICKER: BOLSY
 ADR_EXCHANGE: OTC-OTCQX
 ADR_THESIS_IMPACT: UNCERTAIN
+GUIDANCE_COVERAGE_STATUS: SEARCH_FAILED
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+EARNINGS_BASELINE_STATUS: UNKNOWN
+NORMALIZED_EARNINGS_AVAILABLE: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: UNRESOLVED
 ### --- END DATA_BLOCK ---
 """
     raw_data = "Generic OTC profile text only."

@@ -56,6 +56,7 @@ from .fundamentals_reconciler import (
 )
 from .management_guidance import (
     _preload_management_guidance_evidence,
+    backfill_guidance_contract,
     normalize_management_guidance_output,
     promote_management_guidance,
 )
@@ -82,9 +83,14 @@ Inside DATA_BLOCK, use plain KEY: VALUE lines only.
 Do NOT use markdown tables inside DATA_BLOCK.
 Promote the Foreign Language Analyst MANAGEMENT_GUIDANCE result into DATA_BLOCK.
 At minimum emit GUIDANCE_COVERAGE_STATUS, MATERIAL_NONOPERATING_DRIVER,
-EARNINGS_BASELINE_STATUS, and NORMALIZED_EARNINGS_AVAILABLE. If coverage is FOUND,
-also emit GUIDANCE_SOURCE_URL and OPERATING_VS_NET_DIRECTION. Use explicit UNKNOWN/N/A
-values when evidence is absent; never omit these fields.
+EARNINGS_BASELINE_STATUS, NORMALIZED_EARNINGS_AVAILABLE, and GUIDANCE_BRIDGE_STATUS.
+If coverage is FOUND, also emit GUIDANCE_SOURCE_URL and OPERATING_VS_NET_DIRECTION.
+Use explicit UNKNOWN/N/A values when evidence is absent; never omit these fields.
+Two fields have narrower vocabularies than that:
+MATERIAL_NONOPERATING_DRIVER must be YES, NO, or UNKNOWN (never N/A), and
+GUIDANCE_BRIDGE_STATUS must be RECONCILED, UNRESOLVED, or NOT_APPLICABLE
+(never UNKNOWN or N/A) — copy it from the Foreign Language Analyst block, or emit
+UNRESOLVED if that block is unavailable.
 """.format(
     start_marker=fenced_start("DATA_BLOCK"),
     end_marker=fenced_end("DATA_BLOCK"),
@@ -451,6 +457,26 @@ def _sanitize_fundamentals_output(
     if guidance_promoted:
         logger.info("management_guidance_promoted", ticker=ticker)
 
+    # A degraded or absent Foreign Language Analyst leaves the guidance contract
+    # incomplete, which fails the whole fundamentals artifact closed and skips the
+    # Portfolio Manager. State the absence deterministically instead: the analysis
+    # survives, and the conservative values withhold EPS-growth credit and block
+    # BUY on their own terms.
+    updated_body, guidance_backfilled = backfill_guidance_contract(
+        updated_body,
+        foreign_data,
+    )
+    if guidance_backfilled:
+        logger.warning(
+            "management_guidance_backfilled",
+            ticker=ticker,
+            fields=list(guidance_backfilled),
+            reason=(
+                "Foreign Language Analyst guidance contract unavailable; "
+                "conservative code-owned values applied"
+            ),
+        )
+
     updated_body, growth_evidence_promoted = promote_foreign_growth_evidence(
         updated_body,
         foreign_data,
@@ -737,8 +763,20 @@ def _sanitize_fundamentals_output(
     warning = _authoritative_metric_warning(narrative, updated_body)
     if updated_body == block_body and not warning:
         return content
+    # `extract_last_data_block(include_markers=True)` consumes the newline that
+    # follows the END marker, but `build_fenced_block` does not re-emit one — so a
+    # naive rebuild deletes it and nudges the block toward the glued-boundary form
+    # that _repair_glued_datablock_boundary exists to undo. Restore exactly what was
+    # consumed so modifying the block cannot alter anything outside it.
+    block_suffix = "\n" if block_with_markers.endswith("\n") else ""
     updated_block = build_fenced_block("DATA_BLOCK", updated_body.rstrip())
-    return content_before_block + warning + updated_block + content_after_block
+    return (
+        content_before_block
+        + warning
+        + updated_block
+        + block_suffix
+        + content_after_block
+    )
 
 
 def _normalize_structured_output(
@@ -763,7 +801,7 @@ def _normalize_structured_output(
             if not record.blocked
         ]
         ledger_records = [
-            (record.tool_name, record.content, set(record.urls))
+            message_utils.evidence_record_to_tool_evidence(record)
             for record in evidence_records
         ]
         guidance_normalized = normalize_management_guidance_output(
@@ -1095,7 +1133,7 @@ def create_analyst_node(
 
                 if raw_data:
                     extra_context = (
-                        "\n\n### CODE-OWNED RAW FINANCIAL METRICS" f"\n{raw_data}\n"
+                        f"\n\n### CODE-OWNED RAW FINANCIAL METRICS\n{raw_data}\n"
                     )
                 else:
                     logger.warning(
@@ -1330,6 +1368,7 @@ def create_analyst_node(
                             retry_runnable,
                             {"messages": retry_messages},
                             context=f"{agent_prompt.agent_name} (RETRY-HIGH)",
+                            canonical_agent=agent_prompt.agent_name,
                             provider=support.infer_provider_name(retry_llm),
                             model_name=support.get_model_name(retry_llm),
                             # Floor for flex: an un-floored overall budget

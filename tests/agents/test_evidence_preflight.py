@@ -42,7 +42,7 @@ async def test_preflight_separates_execution_from_evidence(value, expected):
         outcomes, _ = await run_preflight_calls(
             [("search", tool, {})],
             agent_key="test",
-            source="toolnode",
+            source="preflight",
             ticker="TEST",
             failure_event="test_failure",
             logger=MagicMock(),
@@ -56,3 +56,6 @@ async def test_preflight_separates_execution_from_evidence(value, expected):
     ) == expected
     assert f"EXECUTION_STATUS: {expected[0]}" in outcome.render()
     assert f"EVIDENCE_STATUS: {expected[1]}" in outcome.render()
+    invocation = service.execute.await_args.args[0]
+    assert invocation.source == "preflight"
+    assert invocation.agent_key == "test"

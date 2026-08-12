@@ -473,23 +473,23 @@ class TestGenerateFootballField:
 
             # Facecolor should be transparent (alpha = 0 or "none")
             # to_rgba("none") returns (0.0, 0.0, 0.0, 0.0)
-            assert (
-                facecolor[3] == 0.0
-            ), f"Legend facecolor should be transparent (alpha=0), got alpha={facecolor[3]}"
+            assert facecolor[3] == 0.0, (
+                f"Legend facecolor should be transparent (alpha=0), got alpha={facecolor[3]}"
+            )
 
             # Edgecolor should be visible (not transparent)
             expected_edge = to_rgba(text_color)
-            assert (
-                edgecolor[3] > 0
-            ), f"Legend edgecolor should be visible (alpha>0), got alpha={edgecolor[3]}"
+            assert edgecolor[3] > 0, (
+                f"Legend edgecolor should be visible (alpha>0), got alpha={edgecolor[3]}"
+            )
             # Check it's the right color (RGB, ignoring alpha)
             assert abs(edgecolor[0] - expected_edge[0]) < 0.01, "Edgecolor red mismatch"
-            assert (
-                abs(edgecolor[1] - expected_edge[1]) < 0.01
-            ), "Edgecolor green mismatch"
-            assert (
-                abs(edgecolor[2] - expected_edge[2]) < 0.01
-            ), "Edgecolor blue mismatch"
+            assert abs(edgecolor[1] - expected_edge[1]) < 0.01, (
+                "Edgecolor green mismatch"
+            )
+            assert abs(edgecolor[2] - expected_edge[2]) < 0.01, (
+                "Edgecolor blue mismatch"
+            )
 
             plt.close(fig)
 

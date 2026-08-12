@@ -7,7 +7,6 @@ from typing import Any, Literal
 
 import structlog
 from langchain_core.messages import ToolMessage
-from langgraph.types import RunnableConfig
 
 from src.data_block_utils import (
     BLOCK_SHAPES,
@@ -53,7 +52,7 @@ def get_model_name(runnable: Any) -> str | None:
     return _get_model_name(runnable)
 
 
-def get_context_from_config(config: RunnableConfig) -> Any | None:
+def get_context_from_config(config: Mapping[str, Any]) -> Any | None:
     """Extract TradingContext from RunnableConfig.configurable dict."""
     try:
         configurable = config.get("configurable", {})
@@ -805,8 +804,36 @@ def format_conflict_table(messages: list) -> str:
     return ("\n".join(lines) + "\n") if lines else ""
 
 
+_DEFAULT_FLAG_AUDIENCE = "portfolio_manager"
+_AUDIENCE_INSTRUCTIONS: dict[str, str] = {
+    # The PM owns the risk rubric and narrates a TOTAL RISK COUNT that
+    # decision_nodes reconciles against this subtotal. Byte-identical to the
+    # single instruction this function carried before it gained an audience.
+    "portfolio_manager": (
+        " These flags are ALREADY scored — do NOT re-score them "
+        "from the rubric and do NOT omit them. Your TOTAL RISK COUNT = this subtotal "
+        "+ any qualitative risks NOT listed above that the rubric requires (e.g. "
+        "jurisdiction risk, family-control concentration, turnaround-exception "
+        "penalty, ADR/data-integrity tiers)."
+    ),
+    # The consultant has no risk rubric and no TOTAL RISK COUNT in its output
+    # contract (`prompts/consultant.json` never mentions it), so instructing it to
+    # produce one asks for a field it does not own. What it does own is a veto
+    # keyed on these flag *type* tokens.
+    "consultant": (
+        " These flags are deterministic findings that the pipeline has already "
+        "detected and weighted; treat them as established, do not re-derive or "
+        "omit them, and apply any mandate rule your instructions attach to a flag "
+        "type listed above."
+    ),
+}
+
+
 def format_red_flag_section(
-    pre_screening_result: str, red_flags: list[dict[str, Any]]
+    pre_screening_result: str,
+    red_flags: list[dict[str, Any]],
+    *,
+    audience: str = _DEFAULT_FLAG_AUDIENCE,
 ) -> tuple[str, float]:
     """Render pre-screen flags WITH their numeric penalties + a deterministic subtotal.
 
@@ -815,19 +842,29 @@ def format_red_flag_section(
     synthesis model's burden of recalling each weight from the rubric and summing by
     hand — the failure mode behind silently dropped penalties on weaker models.
 
+    ``audience`` selects the closing instruction only; the rendered flag lines and
+    the returned subtotal are identical for every audience. The split exists
+    because the tally instruction is part of the *PM's* output contract — shipping
+    it verbatim to another seat asks that seat for a field it does not define.
+
     Returns ``(section_text, code_subtotal)``. The subtotal is the deterministic floor
     the PM must build on; ``decision_nodes`` logs a reconciliation warning when the PM's
     narrated TOTAL RISK COUNT falls below it.
     """
     section = (
-        "\n\nRED-FLAG PRE-SCREENING:\n" f"Pre-Screening Result: {pre_screening_result}"
+        f"\n\nRED-FLAG PRE-SCREENING:\nPre-Screening Result: {pre_screening_result}"
     )
-    if not red_flags:
+    # State can carry a malformed value after a reducer merge; a prompt renderer
+    # must degrade rather than take the run down. Non-dict entries are dropped
+    # because there is no honest way to render a penalty they do not carry.
+    candidates = red_flags if isinstance(red_flags, list) else []
+    flags = [flag for flag in candidates if isinstance(flag, dict)]
+    if not flags:
         return section + "\nRed Flags Detected: None", 0.0
 
     lines = []
     code_subtotal = 0.0
-    for flag in red_flags:
+    for flag in flags:
         penalty = flag.get("risk_penalty")
         if isinstance(penalty, int | float) and not isinstance(penalty, bool):
             code_subtotal += float(penalty)
@@ -839,13 +876,12 @@ def format_red_flag_section(
         )
 
     section += "\nRed Flags/Warnings Detected:\n" + "\n".join(lines)
+    instruction = _AUDIENCE_INSTRUCTIONS.get(
+        audience, _AUDIENCE_INSTRUCTIONS[_DEFAULT_FLAG_AUDIENCE]
+    )
     section += (
         f"\n\nCODE-COMPUTED RISK SUBTOTAL (deterministic, already weighted): "
-        f"{code_subtotal:+.2f}. These flags are ALREADY scored — do NOT re-score them "
-        f"from the rubric and do NOT omit them. Your TOTAL RISK COUNT = this subtotal "
-        f"+ any qualitative risks NOT listed above that the rubric requires (e.g. "
-        f"jurisdiction risk, family-control concentration, turnaround-exception "
-        f"penalty, ADR/data-integrity tiers)."
+        f"{code_subtotal:+.2f}.{instruction}"
     )
     return section, code_subtotal
 

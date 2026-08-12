@@ -558,9 +558,9 @@ class TestCrossAgentToolUsage:
         # If this assertion fails, the test setup is invalid
         shared_tool = "get_news"
         assert shared_tool in news_tool_names, f"{shared_tool} not in news_tools"
-        assert (
-            shared_tool in value_trap_tool_names
-        ), f"{shared_tool} not in value_trap_tools"
+        assert shared_tool in value_trap_tool_names, (
+            f"{shared_tool} not in value_trap_tools"
+        )
 
         # This confirms the bug scenario: two different agents use the same tool
         # The fix ensures each agent's tool node only processes its own AIMessages
@@ -694,9 +694,9 @@ class TestAllAgentToolCombinations:
             result = await tool_node(state, {"configurable": {}})
 
             # Should return empty, not execute wrong agent's tools
-            assert result == {
-                "messages": []
-            }, f"{agent_key} tool node accepted wrong agent's message"
+            assert result == {"messages": []}, (
+                f"{agent_key} tool node accepted wrong agent's message"
+            )
 
 
 class TestToolCallTimeout:

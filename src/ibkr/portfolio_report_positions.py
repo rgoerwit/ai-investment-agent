@@ -46,9 +46,16 @@ def _render_dip_watch(
         "  DIP WATCH  (existing positions — consider adding)",
         DIVIDER,
         "",
-        "  Ranked by fundamental quality × dip depth × valuation upside:",
-        "",
     ]
+    if not candidates:
+        lines.extend(("  No dip-buy candidates this run.", ""))
+        return tuple(lines)
+    lines.extend(
+        (
+            "  Ranked by fundamental quality × dip depth × valuation upside:",
+            "",
+        )
+    )
     for item in candidates:
         analysis = item.analysis
         pos = item.ibkr_position
@@ -168,8 +175,7 @@ def render_position_and_risk_sections(
                 else normalize_reason(item.reason)
             )
             lines.append(
-                f"{writer.order_line(item, currency)}  "
-                f"[{writer.sell_type_label(item)}]"
+                f"{writer.order_line(item, currency)}  [{writer.sell_type_label(item)}]"
             )
             writer.append_reason_detail(reason)
             if item.sell_type in ("STOP_BREACH", "HARD_REJECT"):
@@ -206,8 +212,7 @@ def render_position_and_risk_sections(
                 .split("  [MACRO_WATCH:")[0]
             )
             lines.append(
-                f"{writer.order_line(item, currency)}  "
-                f"[{writer.sell_type_label(item)}]"
+                f"{writer.order_line(item, currency)}  [{writer.sell_type_label(item)}]"
             )
             writer.append_reason_detail(reason)
             if item.sell_type == "PROFIT_TAKE":
@@ -230,10 +235,7 @@ def render_position_and_risk_sections(
             lines.append("")
 
     dip_candidates = list(select_report_dip_candidates(context.plan))
-    if dip_candidates:
-        lines.extend(
-            _render_dip_watch(dip_candidates, analysis_command=analysis_command)
-        )
+    lines.extend(_render_dip_watch(dip_candidates, analysis_command=analysis_command))
     withheld_dips = context.plan.concentration_withheld_dips
     if withheld_dips:
         count = len(withheld_dips)

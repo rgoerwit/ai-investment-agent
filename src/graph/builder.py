@@ -29,13 +29,12 @@ def _reconcile_fundamentals_evidence(state: AgentState) -> dict[str, Any]:
     """Revalidate the original FLA response against all barrier-complete evidence."""
     from src.agents.foreign_language_evidence import normalize_foreign_language_evidence
     from src.agents.management_guidance import normalize_management_guidance_output
-    from src.agents.message_utils import ToolEvidenceRecord, latest_agent_text
+    from src.agents.message_utils import (
+        evidence_record_to_tool_evidence,
+        latest_agent_text,
+    )
     from src.runtime_diagnostics import get_valid_artifact_content
     from src.runtime_services import get_current_evidence_records
-    from src.tooling.evidence_recorder import (
-        classify_evidence_value,
-        resolve_evidence_authority,
-    )
 
     valid_report = get_valid_artifact_content(
         state,
@@ -62,27 +61,7 @@ def _reconcile_fundamentals_evidence(state: AgentState) -> dict[str, Any]:
         guidance_evidence,
         source_records,
     )
-    records: list[ToolEvidenceRecord] = []
-    for record in source_records:
-        evidence_status = getattr(record, "evidence_status", None)
-        if evidence_status is None:
-            _, evidence_status, _, _ = classify_evidence_value(
-                record.tool_name,
-                record.content,
-            )
-        records.append(
-            ToolEvidenceRecord(
-                tool_name=record.tool_name,
-                content=record.content,
-                urls=set(record.urls),
-                evidence_status=evidence_status,
-                authority=resolve_evidence_authority(
-                    tool_name=record.tool_name,
-                    evidence_status=evidence_status,
-                    urls=record.urls,
-                ),
-            )
-        )
+    records = [evidence_record_to_tool_evidence(record) for record in source_records]
     reconciled = normalize_foreign_language_evidence(
         guidance_normalized,
         [],

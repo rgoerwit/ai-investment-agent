@@ -34,6 +34,7 @@ from src.data_block_utils import (
     has_parseable_data_block,
     unfenced_label,
 )
+from src.decision_inputs import DecisionInputs
 from src.error_safety import summarize_exception
 
 # Verdict canonicalization lives in the neutral, dependency-free parser (it used
@@ -91,6 +92,7 @@ async def _recover_pm_verdict_metadata(
                 )
             ],
             context="pm_verdict_recovery",
+            canonical_agent="Portfolio Manager",
             provider=support.infer_provider_name(llm),
             model_name=support.get_model_name(llm),
             max_attempts=1,
@@ -756,7 +758,12 @@ def _log_risk_tally_reconciliation(
     amount dropped) when the floor is breached, else ``None``. A missing/unparseable
     narrated tally yields ``None`` (cannot reconcile, do not warn).
     """
-    narrated = parse_final_decision_scores(content_str).get("risk_tally")
+    raw_narrated = parse_final_decision_scores(content_str).get("risk_tally")
+    narrated = (
+        float(raw_narrated)
+        if isinstance(raw_narrated, int | float) and not isinstance(raw_narrated, bool)
+        else None
+    )
     if narrated is None or narrated >= code_subtotal - 0.01:
         return None
     dropped = round(code_subtotal - narrated, 2)
@@ -1134,6 +1141,7 @@ NEUTRAL ANALYST (Balanced):
             downside_probability_text = ""
             upside_metrics = scenario_upside_metrics(scenarios, current_price)
             if upside_metrics is not None:
+                assert current_price is not None
                 weighted_upside, downside_probability = upside_metrics
                 weighted_upside_text = (
                     f", implied upside {weighted_upside * 100:.1f}% vs current price "
@@ -1224,15 +1232,6 @@ NEUTRAL ANALYST (Balanced):
             }
             red_flags.append(valuation_flag)
             pm_generated_red_flags.append(valuation_flag)
-
-        red_flags = RedFlagDetector.reconcile_ocf_period_mismatch_flags(
-            red_flags,
-            fundamentals_report=fundamentals,
-            consultant_review=consultant_review,
-            auditor_report=auditor_report,
-            ticker=ticker,
-            consultant_conditions=consultant_conditions,
-        )
 
         red_flag_section, code_risk_subtotal = support.format_red_flag_section(
             pre_screening_result, red_flags
@@ -1344,6 +1343,7 @@ RISK TEAM DEBATE:
                     llm,
                     [HumanMessage(content=correction_prompt)],
                     context=f"{agent_prompt.agent_name} structure correction",
+                    canonical_agent=agent_prompt.agent_name,
                     provider=support.infer_provider_name(llm),
                     model_name=support.get_model_name(llm),
                 )
@@ -1405,6 +1405,7 @@ RISK TEAM DEBATE:
                         llm,
                         [HumanMessage(content=correction_prompt)],
                         context=f"{agent_prompt.agent_name} trace correction",
+                        canonical_agent=agent_prompt.agent_name,
                         provider=support.infer_provider_name(llm),
                         model_name=support.get_model_name(llm),
                     )
@@ -1492,9 +1493,18 @@ RISK TEAM DEBATE:
                 red_flags.append(trace_flag)
                 pm_generated_red_flags.append(trace_flag)
 
+            # Same authority resolver the pre-screening validator uses, so the
+            # floor cannot upgrade a verdict on a score the canonical contract
+            # would not stand behind (a non-VALID snapshot marks both unreliable).
+            floor_inputs = DecisionInputs.from_metrics_and_snapshot(
+                RedFlagDetector.extract_metrics(fundamentals or "", ticker=ticker),
+                RedFlagDetector.detect_sector(fundamentals) if fundamentals else None,
+                state.get("analysis_snapshot"),
+                ticker=ticker,
+            )
             content_str, verdict_floored = maybe_floor_verdict_to_hold(
                 content_str,
-                fundamentals_report=fundamentals,
+                decision_inputs=floor_inputs,
                 red_flags=red_flags,
                 code_subtotal=code_risk_subtotal,
                 pre_screening_result=pre_screening_result,
@@ -1552,6 +1562,8 @@ RISK TEAM DEBATE:
                 if recovered_metadata is not None:
                     pm_metadata = recovered_metadata
                     pm_verdict_recovered = True
+            debate_state = state.get("investment_debate_state")
+            debate_turns = debate_state.get("count", 0) if debate_state else 0
             logger.info(
                 "final_verdict_formed",
                 ticker=ticker,
@@ -1567,10 +1579,7 @@ RISK TEAM DEBATE:
                 pre_screening_result=state.get("pre_screening_result"),
                 direct_pm_inputs_present=present_inputs,
                 direct_pm_inputs_missing=missing_inputs,
-                debate_rounds=(state.get("investment_debate_state") or {}).get(
-                    "count", 0
-                )
-                // 2,
+                debate_rounds=debate_turns // 2,
                 strict_mode=strict_mode,
             )
             result = success_artifact(
@@ -1671,7 +1680,9 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
             )
             raw_metrics = raw_metrics or {}
 
-            quiet_mode = settings_config.quiet_mode
+            from src.runtime_config import get_runtime_config
+
+            quiet_mode = get_runtime_config(settings_config).quiet_mode
 
             if not fundamentals_report:
                 fundamentals_status = get_artifact_status(
@@ -1797,8 +1808,19 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                     **summarize_exception(card_exc, operation="entity_governance_card"),
                 )
 
+            # Typed, snapshot-authoritative decision inputs (Stage 5): the
+            # red-flag engine consumes DecisionInputs, whose health/growth
+            # decision scores come from the canonical scorecard when the contract
+            # is VALID (the snapshot value wins over the text reparse). The
+            # analyst-judgment fields (segment flags, ROIC quality, cycle
+            # position, …) legitimately ride the parsed DATA_BLOCK — they are the
+            # Senior analyst's output, not a competing canonical store.
+            decision_inputs = DecisionInputs.from_metrics_and_snapshot(
+                metrics, sector, analysis_snapshot, ticker=ticker
+            )
+
             red_flags, pre_screening_result = RedFlagDetector.detect_red_flags(
-                metrics,
+                decision_inputs,
                 ticker,
                 sector,
                 strict_mode=strict_mode,
@@ -1824,7 +1846,11 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                             leverage_threshold=leverage_threshold,
                         )
                     )
-                legal_warnings = RedFlagDetector.detect_legal_flags(legal_risks, ticker)
+                legal_warnings = RedFlagDetector.detect_legal_flags(
+                    legal_risks,
+                    ticker,
+                    artifact_status=get_artifact_status(state, "legal_report"),
+                )
 
                 if legal_warnings:
                     red_flags.extend(legal_warnings)
@@ -1935,14 +1961,16 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                 ticker=ticker,
                 **summarize_exception(exc, operation="financial_health_validator"),
             )
+            from src.analysis_snapshot import AnalysisSnapshot
+
             return {
-                "analysis_snapshot": {
-                    "version": 1,
-                    "contract_status": "INVALID",
-                    "contract_reason": "VALIDATOR_CRASHED",
-                    "claims": {},
-                    "conflicts": [],
-                },
+                "analysis_snapshot": AnalysisSnapshot(
+                    version=1,
+                    contract_status="INVALID",
+                    contract_reason="VALIDATOR_CRASHED",
+                    claims={},
+                    conflicts=[],
+                ).to_dict(),
                 "red_flags": [
                     {
                         "type": "VALIDATOR_EXECUTION_FAILED",

@@ -73,7 +73,53 @@ async def test_fetch_account_ids_uses_read_only_connection():
 
 
 @pytest.mark.asyncio
+async def test_fetch_account_ids_rejects_malformed_account_entries():
+    class MalformedAccountsClient(FakeClient):
+        def get_accounts(self) -> list[object]:
+            assert self.connected is True
+            return ["U123456", {"account_id": "U654321"}]
+
+    service = IbkrAccountService(
+        config=FakeConfig(), client_cls=MalformedAccountsClient
+    )
+
+    with pytest.raises(TypeError, match="non-string account ID"):
+        await service.fetch_account_ids()
+
+    with pytest.raises(TypeError, match="non-string account ID"):
+        await service.verify_connection()
+
+
+@pytest.mark.asyncio
+async def test_fetch_account_ids_rejects_non_list_payload():
+    class MalformedAccountsClient(FakeClient):
+        def get_accounts(self):
+            assert self.connected is True
+            return {"account_id": "U123456"}
+
+    service = IbkrAccountService(
+        config=FakeConfig(), client_cls=MalformedAccountsClient
+    )
+
+    with pytest.raises(TypeError, match="non-list payload"):
+        await service.fetch_account_ids()
+
+
+@pytest.mark.asyncio
 async def test_fetch_ledger_uses_configured_account():
     service = IbkrAccountService(config=FakeConfig(), client_cls=FakeClient)
     ledger = await service.fetch_ledger()
     assert ledger["BASE"]["cashbalance"] == 1000.0
+
+
+@pytest.mark.asyncio
+async def test_fetch_ledger_rejects_non_mapping_payload():
+    class MalformedLedgerClient(FakeClient):
+        def get_ledger(self, account_id: str):
+            assert account_id == "U123456"
+            return ["not", "a", "ledger"]
+
+    service = IbkrAccountService(config=FakeConfig(), client_cls=MalformedLedgerClient)
+
+    with pytest.raises(TypeError, match="non-mapping payload"):
+        await service.fetch_ledger()

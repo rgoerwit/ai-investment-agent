@@ -21,6 +21,9 @@ AGENT_OUTPUT_BUDGET_FRACTIONS: dict[str, Fraction] = {
     "Safe Analyst": Fraction(1, 8),
     "Neutral Analyst": Fraction(1, 8),
     "Consultant": Fraction(1, 8),
+    # Editorial review is structured JSON feedback, not long-form prose — the
+    # article writer's own long-form budget is set separately.
+    "Article Editor": Fraction(1, 4),
     "Bull Researcher": Fraction(3, 16),
     "Bear Researcher": Fraction(3, 16),
     "Research Manager": Fraction(1, 4),

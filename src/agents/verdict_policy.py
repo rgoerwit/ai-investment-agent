@@ -27,9 +27,9 @@ import structlog
 
 from src.agents.pm_verdict_metadata import pm_verdict_metadata_from_text
 from src.charts.extractors.valuation import is_weak_buy_asymmetry
+from src.decision_inputs import DecisionInputs
 from src.pm_decision_parser import parse_final_decision_scores
 from src.thesis_constants import GROWTH_MIN_PCT, HEALTH_MIN_PCT
-from src.validators.metric_extractor import extract_metrics
 
 logger = structlog.get_logger(__name__)
 
@@ -39,7 +39,6 @@ HEALTH_FLOOR_MIN = 65.0
 PE_FLOOR_MAX = 18.0
 GROWTH_FAIL_MAX = 50.0
 
-_GROWTH_SCORE_RE = re.compile(r"ADJUSTED_GROWTH_SCORE:\s*([0-9]+(?:\.[0-9]+)?)\s*%")
 # REJECT canonicalizes to DO_NOT_INITIATE (src.pm_decision_parser), so the gate accepts
 # a "VERDICT: REJECT" block; the rewrite must therefore match it too, or the floor
 # silently no-ops on a REJECT-worded healthy name.
@@ -254,6 +253,13 @@ def maybe_tag_dni_review_candidate(
     construction, covers future flags with novel names), and the legal/mandate
     category prefixes which disqualify even at 0.5 penalty.
 
+    Scores are read from the PM's own decision text, NOT from ``DecisionInputs``
+    — deliberately, and unlike `maybe_floor_verdict_to_hold`. This tag describes
+    what the PM asserted about its own gates, so the PM text is the authoritative
+    source for it; swapping in the canonical score would answer a different
+    question (what the gates *should* have said) and make the tag disagree with
+    the document it annotates. Do not "fix" this to use DecisionInputs.
+
     Conservative and idempotent. Returns ``(content_str, tagged)``.
     """
     if pm_verdict_metadata_from_text(content_str).verdict != "DO_NOT_INITIATE":
@@ -299,23 +305,23 @@ def _has_hard_flag(red_flags: list[dict]) -> bool:
     )
 
 
-def _parse_growth_score(fundamentals_report: str | None) -> float | None:
-    if not fundamentals_report:
-        return None
-    match = _GROWTH_SCORE_RE.search(fundamentals_report)
-    return float(match.group(1)) if match else None
-
-
 def maybe_floor_verdict_to_hold(
     content_str: str,
     *,
-    fundamentals_report: str | None,
+    decision_inputs: DecisionInputs,
     red_flags: list[dict],
     code_subtotal: float | None,
     pre_screening_result: str | None,
     ticker: str = "UNKNOWN",
 ) -> tuple[str, bool]:
     """Floor a soft-point DO_NOT_INITIATE to HOLD for a healthy, data-limited name.
+
+    Scores come from ``DecisionInputs`` — the one authority resolver — not from a
+    private reparse of the DATA_BLOCK. Under a VALID canonical contract that is
+    the projected value either way; the difference shows when the contract did
+    NOT validate, where the parsed score is unprojected model arithmetic and
+    ``*_score_reliable`` is False. An upgrade of the verdict must never rest on a
+    score the canonical layer would not stand behind.
 
     Returns ``(content_str, floored)``. When ``floored`` is True the returned text has the
     PM_BLOCK verdict + header rewritten to HOLD and a note appended; the caller re-derives
@@ -329,12 +335,21 @@ def maybe_floor_verdict_to_hold(
         return content_str, False
     if code_subtotal is None or code_subtotal >= ZONE_1_THRESHOLD:
         return content_str, False
+    if not (
+        decision_inputs.health_score_reliable and decision_inputs.growth_score_reliable
+    ):
+        logger.info(
+            "verdict_floor_skipped_unreliable_scores",
+            ticker=ticker,
+            snapshot_status=decision_inputs.snapshot_status,
+        )
+        return content_str, False
 
-    metrics = extract_metrics(fundamentals_report or "")
-    health = metrics.get("adjusted_health_score")
+    metrics = decision_inputs.decision_metrics
+    health = decision_inputs.health_decision_pct
+    growth = decision_inputs.growth_decision_pct
     pe = metrics.get("pe_ratio")
     cagr = metrics.get("revenue_cagr_3y")
-    growth = _parse_growth_score(fundamentals_report)
 
     if health is None or health < HEALTH_FLOOR_MIN:
         return content_str, False

@@ -167,7 +167,13 @@ def extract_pm_block(pm_output: str) -> PMBlockData:
         verdict=verdict,
         health_adj=_extract_int(r"HEALTH_ADJ:\s*(\d+)", pm_block),
         growth_adj=_extract_int(r"GROWTH_ADJ:\s*(\d+)", pm_block),
-        risk_tally=_extract_float(r"RISK_TALLY:\s*([\d.]+)", pm_block),
+        # Signed: capital-efficiency and moat bonuses can drive the tally below
+        # zero. The unsigned form silently dropped every negative value — 138 of
+        # 4,594 persisted artifacts (~3%) carried one, and all 138 lost it from
+        # the prediction snapshot, retrospective, and chart annotations. Keep the
+        # sign class identical to the canonical parser
+        # (`pm_decision_parser.parse_final_decision_scores`).
+        risk_tally=_extract_float(r"RISK_TALLY:\s*(-?[\d.]+)", pm_block),
         zone=zone,
         show_valuation_chart=show_valuation_chart,
         valuation_discount=valuation_discount,

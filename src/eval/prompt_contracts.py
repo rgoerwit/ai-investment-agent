@@ -60,7 +60,10 @@ def prompt_text(prompt_key: str) -> str:
     for json_file in sorted(_PROMPTS_DIR.glob("*.json")):
         data = json.loads(json_file.read_text(encoding="utf-8"))
         if data.get("agent_key") == prompt_key:
-            return data["system_message"]
+            system_message = data.get("system_message")
+            if not isinstance(system_message, str):
+                raise ValueError(f"{json_file} has a non-string system_message")
+            return system_message
     raise KeyError(f"no prompt with agent_key={prompt_key!r} under {_PROMPTS_DIR}")
 
 
@@ -168,6 +171,7 @@ PROMPT_CONTRACTS: tuple[PromptContract, ...] = (
         parser=parse_trade_block,
         success=_trade_ok,
         block_name="TRADE_BLOCK",
+        required_fields=("action",),
     ),
     PromptContract(
         name="auditor_status",
@@ -209,15 +213,17 @@ PROMPT_CONTRACTS: tuple[PromptContract, ...] = (
         prompt_key="consultant",
         shape=Shape.LABELED_LINE,
         parser=parse_consultant_conditions,
-        success=lambda result: isinstance(result, dict)
-        and "has_mandate_breach" in result,
+        success=lambda result: (
+            isinstance(result, dict) and "has_mandate_breach" in result
+        ),
         line_pattern=r"^\*\*MANDATE_BREACH\*\*:",
         legacy_forms=(
             (
                 "### FINAL CONSULTANT VERDICT\n\n"
                 "**MANDATE_BREACH**: NONE\n**HARD_STOP**: NONE",
-                lambda r: r["has_mandate_breach"] is False
-                and r["has_hard_stop"] is False,
+                lambda r: (
+                    r["has_mandate_breach"] is False and r["has_hard_stop"] is False
+                ),
             ),
             (
                 "MANDATE BREACH: PFIC — company classified as PFIC.",
@@ -234,8 +240,9 @@ PROMPT_CONTRACTS: tuple[PromptContract, ...] = (
         prompt_key="fundamentals_analyst",
         shape=Shape.LABELED_LINE,
         parser=parse_score_breakdown,
-        success=lambda result: isinstance(result, dict)
-        and set(result) == set(HEALTH_SCORE_CRITERIA),
+        success=lambda result: (
+            isinstance(result, dict) and set(result) == set(HEALTH_SCORE_CRITERIA)
+        ),
         line_pattern=r"^HEALTH_SCORE_BREAKDOWN:",
         legacy_forms=(
             (
@@ -243,9 +250,11 @@ PROMPT_CONTRACTS: tuple[PromptContract, ...] = (
                 "DE_RATIO=REMOVED; NET_DEBT_EBITDA=N/A; CURRENT_RATIO=1; "
                 "OCF_POSITIVE=1; FCF_POSITIVE=1; FCF_YIELD=N/A; PE_OR_PEG=1; "
                 "EV_EBITDA=N/A; PB_OR_PS=0",
-                lambda result: isinstance(result, dict)
-                and set(result) == set(HEALTH_SCORE_CRITERIA)
-                and result["DE_RATIO"] == "REMOVED",
+                lambda result: (
+                    isinstance(result, dict)
+                    and set(result) == set(HEALTH_SCORE_CRITERIA)
+                    and result["DE_RATIO"] == "REMOVED"
+                ),
             ),
         ),
     ),

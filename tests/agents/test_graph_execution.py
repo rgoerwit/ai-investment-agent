@@ -91,29 +91,6 @@ class TestGraphRouting:
         result = should_continue_analyst(state, config)
         assert result == "continue"
 
-    def test_route_tools_with_sender(self):
-        """Test tool routing with sender field."""
-        from src.graph import route_tools
-
-        state = {"sender": "market_analyst"}
-
-        result = route_tools(state)
-        assert result == "Market Analyst"
-
-    def test_route_tools_fallback(self):
-        """Test tool routing fallback logic."""
-        from src.graph import route_tools
-
-        state = {
-            "sender": "",
-            "messages": [],
-            "market_report": None,
-            "sentiment_report": "exists",
-        }
-
-        result = route_tools(state)
-        assert result == "Market Analyst"  # Fallback to missing report
-
 
 class TestDebateRouter:
     """Test debate routing logic."""
@@ -380,14 +357,6 @@ class TestAuditorIntegration:
         result = sync_check_router(state, {})
         assert isinstance(result, list)
         assert "Bull Researcher R1" in result
-
-    def test_route_tools_for_auditor(self):
-        """Test route_tools returns correct node for auditor."""
-        from src.graph import route_tools
-
-        state = {"sender": "global_forensic_auditor"}
-        result = route_tools(state)
-        assert result == "Auditor"
 
 
 class TestAuditorLLMConfiguration:

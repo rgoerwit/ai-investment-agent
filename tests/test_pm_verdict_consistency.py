@@ -48,5 +48,5 @@ def test_no_local_pm_verdict_alias_maps_or_normalizers() -> None:
                 violations.append(f"{rel}:{node.lineno} defines verdict alias map")
 
     assert not violations, (
-        "Use src.pm_decision_parser.canonicalize_pm_verdict instead: " f"{violations}"
+        f"Use src.pm_decision_parser.canonicalize_pm_verdict instead: {violations}"
     )

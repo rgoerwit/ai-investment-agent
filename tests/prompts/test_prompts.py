@@ -585,9 +585,9 @@ class TestNewsAnalystPrompt:
         return json.loads(path.read_text())
 
     def test_version_is_supported(self, prompt):
-        assert re.match(
-            r"^(?:5|6)\.\d+$", prompt["version"]
-        ), f"Expected 5.x or 6.x, got {prompt['version']}"
+        assert re.match(r"^(?:5|6)\.\d+$", prompt["version"]), (
+            f"Expected 5.x or 6.x, got {prompt['version']}"
+        )
 
     def test_macro_detection_block_in_system_message(self, prompt):
         assert "MACRO_DETECTION" in prompt["system_message"]
