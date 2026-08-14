@@ -132,14 +132,25 @@ Examples:
         "--quick-model",
         type=str,
         default=None,
-        help=f"Model to use for quick analysis (default: {config.quick_think_llm})",
+        help=(
+            "Model for the base group's fast/data-gathering seats for this run "
+            f"(default: {config.quick_think_llm}). Under multi-provider bindings "
+            "it must belong to LLM_BASE_PROVIDER; it does not touch the review, "
+            "writer, or operational groups."
+        ),
     )
 
     parser.add_argument(
         "--deep-model",
         type=str,
         default=None,
-        help=f"Model to use for deep analysis (default: {config.deep_think_llm})",
+        help=(
+            "Model for the base group's reasoning seats (researchers, risk, "
+            f"research manager) for this run (default: {config.deep_think_llm}). "
+            "Maps to the 'reasoning' intent ONLY — the gate-critical Senior "
+            "Fundamentals and Portfolio Manager seats are 'critical' and keep "
+            "their own binding; pin those with LLM_SEAT_MODEL_OVERRIDES."
+        ),
     )
 
     parser.add_argument(
@@ -320,8 +331,9 @@ def resolve_article_path(args, ticker: str) -> Path | None:
     return None
 
 
-def _validate_cli_args(args: argparse.Namespace) -> None:
+def _validate_cli_args(args: argparse.Namespace, *, settings=config) -> None:
     """Validate incompatible flag combinations."""
+    del settings  # binding-schema validation now happens in the resolver
     if not args.quick:
         return
 

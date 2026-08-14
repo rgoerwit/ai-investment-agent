@@ -8,9 +8,17 @@ from urllib.parse import urlsplit
 
 from src.error_safety import redact_sensitive_text
 
-ProviderName = Literal["google", "openai", "anthropic", "deepseek", "unknown"]
+ProviderName = Literal[
+    "google",
+    "openai",
+    "anthropic",
+    "deepseek",
+    "zai",
+    "moonshot",
+    "unknown",
+]
 _PROVIDER_NAMES: frozenset[str] = frozenset(
-    {"google", "openai", "anthropic", "deepseek", "unknown"}
+    {"google", "openai", "anthropic", "deepseek", "zai", "moonshot", "unknown"}
 )
 FailureKind = Literal[
     "dns_resolution",
@@ -221,26 +229,38 @@ def _extract_host(message: str) -> str | None:
 def infer_provider(
     model_name: str | None = None, class_name: str | None = None
 ) -> ProviderName:
-    """Name the *transport family* serving a call — the SDK, not the billing vendor.
+    """Infer provider identity for legacy or externally constructed clients.
 
-    Deliberately not extended with the OpenAI-compatible vendors (Moonshot, Z.AI,
-    …): everything reachable through ``OPENAI_API_BASE`` uses ``ChatOpenAI`` with
-    an OpenAI-shaped model name, and this value keys the circuit breakers and the
-    flex-tier gate, both of which are transport concerns. "Which vendor actually
-    served this?" is answered by ``FailureDetails.endpoint_host``, which needs no
-    vendor table and so covers vendors we have never seen. Billing vendor is a
-    third question, owned by ``token_tracker._provider_for_model``.
+    Registry-built clients use :func:`get_runtime_provider`, whose stamped
+    identity takes precedence over this model/class-name fallback. This keeps an
+    OpenAI-compatible SDK transport from inheriting OpenAI-only runtime policy.
     """
     haystack = " ".join(part for part in (model_name, class_name) if part).lower()
     if "gemini" in haystack or "google" in haystack:
         return "google"
     if "deepseek" in haystack:
         return "deepseek"
+    if "kimi" in haystack or "moonshot" in haystack:
+        return "moonshot"
+    if "glm" in haystack or "zai" in haystack or "z.ai" in haystack:
+        return "zai"
     if "gpt" in haystack or "openai" in haystack:
         return "openai"
     if "claude" in haystack or "anthropic" in haystack:
         return "anthropic"
     return "unknown"
+
+
+def get_runtime_provider(runnable: Any) -> ProviderName:
+    """Return the bound provider policy identity, falling back for legacy clients."""
+
+    stamped = getattr(runnable, "_llm_runtime_provider", None)
+    if isinstance(stamped, str) and stamped in _PROVIDER_NAMES:
+        return cast(ProviderName, stamped)
+    return infer_provider(
+        model_name=get_model_name(runnable),
+        class_name=get_class_name(runnable),
+    )
 
 
 def get_base_url(runnable: Any) -> str | None:

@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 from langchain_core.rate_limiters import BaseRateLimiter
 
 from src.error_safety import redact_sensitive_text
+from src.llm_runtime.rate_limits import create_process_rate_limiter
 from src.tooling.inspection_service import INSPECTION_SERVICE, InspectionService
 from src.tooling.inspector import ContentInspector
 from src.tooling.runtime import TOOL_SERVICE, ToolExecutionService, ToolHook
@@ -30,11 +31,38 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
+class ProviderRuntimeKey:
+    """Throttle/failure identity; endpoint paths and credentials never participate."""
+
+    vendor_id: str
+    endpoint_host: str | None = None
+
+
+@dataclass(frozen=True)
 class ProviderRuntime:
-    """Long-lived provider/runtime dependencies owned by a process or run."""
+    """Long-lived provider/runtime dependencies owned by a process or run.
+
+    ``rate_limiter`` remains as the legacy Google/default limiter until all
+    construction paths request a named binding. Named entries isolate vendors
+    and endpoints without changing existing call behavior.
+    """
 
     fetcher: SmartMarketDataFetcher
     rate_limiter: BaseRateLimiter
+    rate_limiters: dict[ProviderRuntimeKey, BaseRateLimiter] = field(
+        default_factory=dict
+    )
+
+    def limiter_for(
+        self, vendor_id: str, endpoint_host: str | None = None
+    ) -> BaseRateLimiter | None:
+        key = ProviderRuntimeKey(vendor_id, endpoint_host)
+        if key in self.rate_limiters:
+            return self.rate_limiters[key]
+        vendor_default = ProviderRuntimeKey(vendor_id, None)
+        if vendor_default in self.rate_limiters:
+            return self.rate_limiters[vendor_default]
+        return self.rate_limiter if vendor_id == "google" else None
 
 
 @dataclass
@@ -169,6 +197,9 @@ def build_provider_runtime(
     *,
     fetcher: SmartMarketDataFetcher | None = None,
     rate_limiter: BaseRateLimiter | None = None,
+    rate_limiters: dict[ProviderRuntimeKey, BaseRateLimiter] | None = None,
+    settings=None,
+    google_rpm_override: int | None = None,
     explicit: bool = False,
 ) -> ProviderRuntime:
     """Build a provider runtime for the current process.
@@ -186,17 +217,58 @@ def build_provider_runtime(
 
             fetcher = get_fetcher()
 
+    if settings is None:
+        from src.config import config as settings
+
     if rate_limiter is None:
         if explicit:
-            from src.llms import create_process_rate_limiter
-
-            rate_limiter = create_process_rate_limiter()
+            configured_google_rpm = (
+                settings.google_rpm_limit
+                if settings.llm_base_provider is not None
+                else settings.gemini_rpm_limit
+            )
+            rate_limiter = create_process_rate_limiter(
+                rpm=google_rpm_override or configured_google_rpm
+            )
         else:
             from src.llms import GLOBAL_RATE_LIMITER
 
             rate_limiter = GLOBAL_RATE_LIMITER
 
-    return ProviderRuntime(fetcher=fetcher, rate_limiter=rate_limiter)
+    resolved_limiters = dict(rate_limiters or {})
+    resolved_limiters.setdefault(ProviderRuntimeKey("google"), rate_limiter)
+    for vendor_id, field_name in (
+        ("openai", "openai_rpm_limit"),
+        ("anthropic", "anthropic_rpm_limit"),
+        ("deepseek", "deepseek_rpm_limit"),
+        ("zai", "zai_rpm_limit"),
+        ("moonshot", "moonshot_rpm_limit"),
+    ):
+        rpm = getattr(settings, field_name, None)
+        key = ProviderRuntimeKey(vendor_id)
+        if rpm is not None and key not in resolved_limiters:
+            resolved_limiters[key] = create_process_rate_limiter(rpm=int(rpm))
+
+    return ProviderRuntime(
+        fetcher=fetcher,
+        rate_limiter=rate_limiter,
+        rate_limiters=resolved_limiters,
+    )
+
+
+def validate_llm_bindings(settings) -> None:
+    """Fail fast on an unusable LLM binding configuration.
+
+    Raises ``BindingConfigurationError`` listing every problem at once. Non-
+    ``Settings`` objects (test doubles, legacy config protocols) are skipped.
+    """
+    from src.config import Settings
+
+    if not isinstance(settings, Settings):
+        return
+    from src.llm_runtime.bindings import resolve_binding_plan
+
+    resolve_binding_plan(settings)
 
 
 def build_runtime_services_from_config(
@@ -206,13 +278,23 @@ def build_runtime_services_from_config(
     provider_runtime: ProviderRuntime | None = None,
     logger=None,
 ) -> RuntimeServices:
-    """Build runtime services from the active config object."""
+    """Build runtime services from the active config object.
+
+    Resolving the binding plan here makes an unusable LLM configuration a
+    *startup* failure for every process that builds services (analyzer, dashboard,
+    worker, smoke scripts) rather than a surprise at first model construction.
+    ``resolve_binding_plan`` is pure and cheap; the plan is intentionally not
+    cached, because ``Settings`` is mutable and a stale plan is worse than a
+    re-resolve. Test doubles that are not real ``Settings`` are skipped.
+    """
     from src.tooling.audit import LoggingToolAuditHook
     from src.tooling.evidence_recorder import EvidenceRecorder
     from src.tooling.inspection_hook import ContentInspectionHook
     from src.tooling.inspector import NullInspector
     from src.tooling.runtime import ToolExecutionService
     from src.tooling.tool_argument_policy import ToolArgumentPolicyHook
+
+    validate_llm_bindings(config)
 
     inspection_service = InspectionService()
     evidence_recorder = EvidenceRecorder()

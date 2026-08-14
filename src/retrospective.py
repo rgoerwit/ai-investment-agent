@@ -935,10 +935,11 @@ TYPE: missed_risk | false_positive | missed_opportunity | correct_call
 FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | REGULATORY_SHIFT | MACRO_REGIME | DISRUPTION | VALUATION_TRAP | ACCOUNTING_FRAUD | GEOPOLITICAL | LIQUIDITY_CRISIS | DEAD_MONEY"""
 
     try:
-        from src.llms import create_quick_thinking_llm
+        from src.llm_runtime.construction import build_required_model_for_seat
+        from src.llm_runtime.seats import SeatId
         from src.observability import build_langchain_config
 
-        llm = create_quick_thinking_llm()
+        llm = build_required_model_for_seat(SeatId.RETROSPECTIVE)
         from langchain_core.messages import HumanMessage
 
         invoke_config = build_langchain_config(

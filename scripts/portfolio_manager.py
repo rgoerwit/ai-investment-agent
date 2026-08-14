@@ -875,7 +875,8 @@ def _characterize_macro_event(
     except Exception as e:
         logger.warning("macro_news_search_failed", error=str(e))
 
-    # Primary: Deep LLM classification (reads DEEP_MODEL from env)
+    # Primary: reasoning-tier classification. The seat registry selects the
+    # provider-scoped reasoning model (or the legacy DEEP_MODEL).
     impact, event_type = "UNCERTAIN", "UNKNOWN"
     if headline != "unknown":
         try:
@@ -884,9 +885,10 @@ def _characterize_macro_event(
             from langchain_core.messages import HumanMessage as _HM
 
             from src.agents import extract_string_content
-            from src.llms import create_deep_thinking_llm
+            from src.llm_runtime.construction import build_required_model_for_seat
+            from src.llm_runtime.seats import SeatId
 
-            _llm = create_deep_thinking_llm()
+            _llm = build_required_model_for_seat(SeatId.PORTFOLIO_MACRO_CLASSIFIER)
             _valid_types = (
                 "TARIFF_TRADE|LIQUIDITY_PANIC|CONTAGION_SPREAD|POLITICAL_EVENT|"
                 "MONETARY_PIVOT|COMMODITY_SHOCK|GEOPOLITICAL|REGULATORY_SHIFT|"
@@ -1648,6 +1650,17 @@ def _install_ibkr_session_teardown(args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     _configure_logging(args.debug)
+    # This entry point builds LLMs (macro-event classifier, refresh re-analysis)
+    # without going through build_runtime_services_from_config, so validate the
+    # bindings here rather than discovering a bad configuration mid-run.
+    from src.config import config as analyzer_config
+    from src.runtime_services import validate_llm_bindings
+
+    try:
+        validate_llm_bindings(analyzer_config)
+    except ValueError as exc:
+        print(f"LLM configuration error: {exc}", file=sys.stderr)
+        sys.exit(1)
     _install_ibkr_session_teardown(args)
     refresh_policy = _resolve_refresh_policy(args)
 

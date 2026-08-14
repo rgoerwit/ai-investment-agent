@@ -1073,6 +1073,28 @@ class TestWriterFallbackChainRuntime:
         assert writer.writer_fell_back is False
 
     @patch("src.article_writer.create_writer_llm")
+    def test_new_schema_non_anthropic_primary_uses_provider_neutral_chain(
+        self, mock_create_writer
+    ):
+        primary = _mock_llm("gpt-5.4", error=ValueError("OpenAI unavailable"))
+        fallback = _mock_llm("gemini-3.1-pro-preview", "# Article\n\nContent.")
+        writer = self._writer(mock_create_writer, primary)
+        plan = MagicMock(schema="new")
+
+        with (
+            patch("src.article_writer.resolve_binding_plan", return_value=plan),
+            patch(
+                "src.article_writer.writer_fallback_chain",
+                return_value=[_tier("base_group", fallback)],
+            ),
+        ):
+            result = writer._invoke_writer([MagicMock()])
+
+        assert result == "# Article\n\nContent."
+        assert writer.llm is fallback
+        assert writer.writer_fell_back is True
+
+    @patch("src.article_writer.create_writer_llm")
     def test_winning_tier_cached_for_subsequent_calls(self, mock_create_writer):
         """After recovery the winning tier is cached — Claude is not retried."""
         primary = _mock_llm("claude-opus-4-8", error=_billing_error())

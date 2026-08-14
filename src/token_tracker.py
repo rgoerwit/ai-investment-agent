@@ -58,6 +58,9 @@ MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     "gemini-2.5-flash-lite": {"prompt": 0.10, "completion": 0.40},
     "gemini-2.5-flash": {"prompt": 0.30, "completion": 2.50},
     "gemini-2.5-pro": {"prompt": 1.25, "completion": 10.00},
+    # --- Embeddings (input-only paid-tier rates) ---
+    "gemini-embedding-001": {"prompt": 0.15, "completion": 0.0},
+    "text-embedding-3-small": {"prompt": 0.02, "completion": 0.0},
     # --- Anthropic (article writer) ---
     "claude-opus-4": {"prompt": 5.00, "completion": 25.00},
     "claude-sonnet-4": {"prompt": 3.00, "completion": 15.00},
@@ -72,10 +75,10 @@ MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     "kimi-k3": {"prompt": 3.00, "cached_prompt": 0.30, "completion": 15.00},
 }
 
-# Fallback for models missing from the table (Flash-class assumption).
-# Every fallback hit logs unknown_model_pricing once — a silent fallback is
-# how three months of 3-4x cost underreporting happened (July 2026).
-DEFAULT_PRICING_PER_1M: dict[str, float] = {"prompt": 0.30, "completion": 2.50}
+# Sentinel for models missing from the table. Unknown spend is reported as
+# unpriced with a zero dollar estimate; a generic rate would fabricate precision.
+# The old public name remains during the compatibility window.
+DEFAULT_PRICING_PER_1M: dict[str, float] = {"prompt": 0.0, "completion": 0.0}
 
 # Flex/batch service tiers are billed at 50% of standard rates on both
 # Gemini and OpenAI (July 2026 published pricing).
@@ -217,8 +220,7 @@ def _lookup_model_pricing(model_name: str) -> dict[str, float]:
         logger.warning(
             "unknown_model_pricing",
             model=model_name,
-            assumed_prompt_per_1m=DEFAULT_PRICING_PER_1M["prompt"],
-            assumed_completion_per_1m=DEFAULT_PRICING_PER_1M["completion"],
+            cost_status="unpriced",
             note="add this model to MODEL_PRICING_PER_1M in src/token_tracker.py",
         )
     return DEFAULT_PRICING_PER_1M
@@ -259,6 +261,12 @@ class TokenUsage:
     cached_prompt_tokens: int = 0
     # Cache-miss tokens written into the prompt cache, also inside prompt_tokens.
     cache_write_prompt_tokens: int = 0
+    seat_id: str | None = None
+    binding_group: str | None = None
+    vendor_id: str | None = None
+    model_lineage: str | None = None
+    adapter_kind: str | None = None
+    endpoint_host: str | None = None
 
     @property
     def estimated_cost_usd(self) -> float:
@@ -431,6 +439,12 @@ class TokenTracker:
         service_tier: str | None = None,
         cached_prompt_tokens: int = 0,
         cache_write_prompt_tokens: int = 0,
+        seat_id: str | None = None,
+        binding_group: str | None = None,
+        vendor_id: str | None = None,
+        model_lineage: str | None = None,
+        adapter_kind: str | None = None,
+        endpoint_host: str | None = None,
     ):
         """Record token usage for a specific agent."""
         usage = TokenUsage(
@@ -444,6 +458,12 @@ class TokenTracker:
             service_tier=service_tier,
             cached_prompt_tokens=cached_prompt_tokens,
             cache_write_prompt_tokens=cache_write_prompt_tokens,
+            seat_id=seat_id,
+            binding_group=binding_group,
+            vendor_id=vendor_id,
+            model_lineage=model_lineage,
+            adapter_kind=adapter_kind,
+            endpoint_host=endpoint_host,
         )
 
         with self._lock:
@@ -562,14 +582,22 @@ class TokenTracker:
             # flex capacity it falls back to standard, so this rollup makes the
             # variable "flex-unavailable → paid full rate" cost visible.
             by_tier: dict[str, dict[str, float]] = {}
+            by_seat: dict[str, dict[str, float]] = {}
+            by_group: dict[str, dict[str, float]] = {}
+            binding_usage: dict[tuple[str, ...], dict[str, Any]] = {}
             unpriced: set[str] = set()
             for usage in self.all_usages:
                 if not _is_model_priced(usage.model_name):
                     unpriced.add(usage.model_name)
                 for bucket, key in (
                     (by_model, usage.model_name),
-                    (by_provider, _provider_for_model(usage.model_name)),
+                    (
+                        by_provider,
+                        usage.vendor_id or _provider_for_model(usage.model_name),
+                    ),
                     (by_tier, usage.service_tier or "unspecified"),
+                    (by_seat, usage.seat_id or "legacy_or_external"),
+                    (by_group, usage.binding_group or "legacy_or_external"),
                 ):
                     row = bucket.setdefault(
                         key, {"calls": 0, "tokens": 0, "cost_usd": 0.0}
@@ -577,6 +605,36 @@ class TokenTracker:
                     row["calls"] += 1
                     row["tokens"] += usage.total_tokens
                     row["cost_usd"] += usage.estimated_cost_usd
+                if usage.seat_id:
+                    identity_key = (
+                        usage.seat_id,
+                        usage.binding_group or "unknown",
+                        usage.vendor_id or "unknown",
+                        usage.model_lineage or "unknown",
+                        usage.adapter_kind or "unknown",
+                        usage.endpoint_host or "",
+                        usage.model_name,
+                        usage.service_tier or "unspecified",
+                    )
+                    identity_row = binding_usage.setdefault(
+                        identity_key,
+                        {
+                            "seat_id": usage.seat_id,
+                            "binding_group": usage.binding_group,
+                            "vendor": usage.vendor_id,
+                            "lineage": usage.model_lineage,
+                            "adapter": usage.adapter_kind,
+                            "endpoint_host": usage.endpoint_host,
+                            "model": usage.model_name,
+                            "service_tier": usage.service_tier,
+                            "calls": 0,
+                            "tokens": 0,
+                            "cost_usd": 0.0,
+                        },
+                    )
+                    identity_row["calls"] += 1
+                    identity_row["tokens"] += usage.total_tokens
+                    identity_row["cost_usd"] += usage.estimated_cost_usd
 
             return {
                 "failed_attempts": len(self.failed_attempts),
@@ -611,6 +669,9 @@ class TokenTracker:
                 "by_provider": by_provider,
                 "by_model": by_model,
                 "by_tier": by_tier,
+                "by_seat": by_seat,
+                "by_binding_group": by_group,
+                "binding_usage": list(binding_usage.values()),
                 "unpriced_models": sorted(unpriced),
                 "failed_by_provider": self._count_failures("provider"),
                 "failed_by_kind": self._count_failures("failure_kind"),
@@ -844,10 +905,35 @@ class TokenTrackingCallback(BaseCallbackHandler):
         self.output_token_cap = output_token_cap
         self.api_output_token_cap = output_token_cap
         self.reasoning_reserve_tokens = 0
+        self.seat_id: str | None = None
+        self.binding_group: str | None = None
+        self.vendor_id: str | None = None
+        self.model_lineage: str | None = None
+        self.adapter_kind: str | None = None
+        self.endpoint_host: str | None = None
         self._run_starts: dict[str, float] = {}
         # Per-run (stable_prefix_chars, total_request_chars). Sizes only — the
         # request text itself is never stored or logged.
         self._run_shapes: dict[str, tuple[int, int]] = {}
+
+    def bind_identity(
+        self,
+        *,
+        seat_id: str,
+        binding_group: str,
+        vendor_id: str,
+        model_lineage: str,
+        adapter_kind: str,
+        endpoint_host: str | None,
+    ) -> None:
+        """Attach the resolved application identity before model construction."""
+
+        self.seat_id = seat_id
+        self.binding_group = binding_group
+        self.vendor_id = vendor_id
+        self.model_lineage = model_lineage
+        self.adapter_kind = adapter_kind
+        self.endpoint_host = endpoint_host
 
     @staticmethod
     def _run_key(kwargs: dict[str, Any]) -> str:
@@ -1062,6 +1148,12 @@ class TokenTrackingCallback(BaseCallbackHandler):
                 service_tier=service_tier,
                 cached_prompt_tokens=cached_prompt_tokens,
                 cache_write_prompt_tokens=cache_write_prompt_tokens,
+                seat_id=self.seat_id,
+                binding_group=self.binding_group,
+                vendor_id=self.vendor_id,
+                model_lineage=self.model_lineage,
+                adapter_kind=self.adapter_kind,
+                endpoint_host=self.endpoint_host,
             )
             self._log_cache_diagnostics(
                 model_name=model_name,

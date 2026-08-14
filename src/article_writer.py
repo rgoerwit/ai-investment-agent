@@ -27,9 +27,19 @@ from src.article_audit import (
 from src.config import config, get_env_value
 from src.data_block_utils import extract_last_data_block
 from src.error_safety import redact_sensitive_text, summarize_exception
-from src.llms import create_writer_llm, writer_fallback_chain
+from src.llm_runtime.bindings import resolve_binding_plan
+from src.llm_runtime.construction import (
+    build_model_for_seat,
+    build_required_model_for_seat,
+    writer_seat_fallback_chain,
+)
+from src.llm_runtime.seats import SeatId
 from src.runtime_config import get_runtime_config
-from src.runtime_diagnostics import classify_failure, get_model_name, infer_provider
+from src.runtime_diagnostics import (
+    classify_failure,
+    get_model_name,
+    get_runtime_provider,
+)
 from src.runtime_services import get_current_tool_service
 from src.tavily_utils import search_tavily_sync_inspected
 from src.token_tracker import TokenTrackingCallback, get_tracker
@@ -45,6 +55,36 @@ STYLE_PROFILE_FILENAME = "style_profile.md"
 RAW_SAMPLES_WHEN_PROFILE_PRESENT = 3
 
 logger = structlog.get_logger(__name__)
+
+
+def create_writer_llm(**kwargs: Any):
+    """Compatibility patch seam backed by the canonical writer seat."""
+
+    callbacks = kwargs.get("callbacks") or []
+    plan = resolve_binding_plan(config)
+    if plan.schema == "new" and not plan.statuses[SeatId.ARTICLE_WRITER].enabled:
+        tiers = writer_seat_fallback_chain(
+            settings=config,
+            callbacks=callbacks,
+            plan=plan,
+        )
+        if not tiers:
+            raise RuntimeError("no configured article-writer tier is available")
+        return tiers[0].build()
+    return build_required_model_for_seat(
+        SeatId.ARTICLE_WRITER,
+        settings=config,
+        plan=plan,
+        callbacks=callbacks,
+        output_tokens=16_384,
+    )
+
+
+def writer_fallback_chain(**kwargs: Any):
+    """Compatibility patch seam returning lazy configured fallback seats."""
+
+    return writer_seat_fallback_chain(callbacks=kwargs.get("callbacks") or [])
+
 
 # Default fallback prompt config if prompts/writer.json is missing
 DEFAULT_PROMPT_CONFIG = {
@@ -286,13 +326,7 @@ class ArticleWriter:
         # that happened at construction (no CLAUDE_KEY → fallback chain) or
         # later at runtime — this stamp feeds run_summary.article_writer_fell_back,
         # the surface operators check before judging article voice.
-        self.writer_fell_back = (
-            infer_provider(
-                model_name=get_model_name(self.llm),
-                class_name=type(self.llm).__name__,
-            )
-            != "anthropic"
-        )
+        self.writer_fell_back = get_runtime_provider(self.llm) != "anthropic"
 
         logger.info(
             "articlewriter_initialized",
@@ -347,9 +381,8 @@ class ArticleWriter:
     def _create_llm(self):
         """Create the LLM for article generation.
 
-        Uses Claude (Anthropic) when CLAUDE_KEY is configured; otherwise
-        create_writer_llm() resolves the first available tier of the writer
-        fallback chain (EDITOR_MODEL/OpenAI, then DEEP_MODEL/Gemini floor).
+        Uses the configured Writer binding when available; otherwise resolves
+        the first available Review-group or Base-group fallback tier.
 
         Note: use_quick_model in model_config is ignored — the writer model
         is --quick-invariant. To use a cheaper Claude model, set
@@ -373,9 +406,7 @@ class ArticleWriter:
         model_name = get_model_name(llm)
         logger.info(
             "creating_articlewriter_llm",
-            provider=infer_provider(
-                model_name=model_name, class_name=type(llm).__name__
-            ),
+            provider=get_runtime_provider(llm),
             model=model_name,
         )
         return llm
@@ -693,16 +724,13 @@ class ArticleWriter:
     def _invoke_with_fallback(self, messages: list):
         """Invoke the writer LLM, walking the fallback chain on Claude API errors.
 
-        Chain order (from writer_fallback_chain): EDITOR_MODEL (OpenAI, when
-        lib+key+ENABLE_CONSULTANT allow) → DEEP_MODEL (Gemini floor). First
-        tier to succeed is cached on self.llm; non-Anthropic primary errors
-        propagate without falling back; if every tier fails, the last
-        exception is raised.
+        New-schema order is Review group then Base group. The first tier to
+        succeed is cached on ``self.llm``; if every tier fails, the final
+        exception is raised. Old-only configuration retains its legacy rule
+        that only Anthropic primary failures enter the fallback chain.
         """
         primary_model = get_model_name(self.llm)
-        primary_provider = infer_provider(
-            model_name=primary_model, class_name=type(self.llm).__name__
-        )
+        primary_provider = get_runtime_provider(self.llm)
         try:
             logger.info(
                 "llm_call_start",
@@ -749,7 +777,8 @@ class ArticleWriter:
                 mod = type(e).__module__ or ""
                 is_anthropic_error = "anthropic" in mod
 
-            if not is_anthropic_error:
+            new_binding_schema = resolve_binding_plan(config).schema == "new"
+            if not is_anthropic_error and not new_binding_schema:
                 logger.error(
                     "llm_call_failed",
                     context="article_writer_primary",
@@ -768,7 +797,12 @@ class ArticleWriter:
                 raise  # Not a Claude error — propagate
 
             logger.warning(
-                "claude_writer_primary_failed",
+                (
+                    "writer_primary_failed_using_fallback_chain"
+                    if new_binding_schema
+                    else "claude_writer_primary_failed"
+                ),
+                provider=primary_failure.provider,
                 failure_kind=primary_failure.kind,
                 host=primary_failure.host,
                 error_type=primary_failure.error_type,
@@ -783,10 +817,7 @@ class ArticleWriter:
                 try:
                     tier_llm = tier.build()  # lazy: construct only when attempted
                     fallback_model = get_model_name(tier_llm) or ""
-                    fallback_provider = infer_provider(
-                        model_name=fallback_model,
-                        class_name=type(tier_llm).__name__,
-                    )
+                    fallback_provider = get_runtime_provider(tier_llm)
                     fallback_class = type(tier_llm).__name__
                     logger.info(
                         "writer_fallback_attempt",
@@ -1373,9 +1404,10 @@ class ArticleEditor:
     """
     Editor-in-Chief that reviews and improves articles generated by the Writer.
 
-    Uses GPT to fact-check against ground truth data and tighten prose
+    Uses the Review-group model to fact-check against ground truth data and tighten prose
     while preserving the author's distinctive voice. The cross-model design
-    (Claude writes, GPT edits) is intentional — it reduces single-model bias.
+    (Writer and Review groups are independently bindable) is intentional — it
+    reduces single-model bias.
     """
 
     # Maximum revision iterations to prevent infinite loops
@@ -1395,11 +1427,11 @@ class ArticleEditor:
     ):
         """Initialize the ArticleEditor."""
         from src.editor_tools import get_editor_tools
-        from src.llms import create_editor_llm
 
         self._callbacks = callbacks or []
         self._tracing_metadata = dict(tracing_metadata or {})
-        self.llm = create_editor_llm(
+        self.llm = build_model_for_seat(
+            SeatId.EDITOR,
             callbacks=[
                 TokenTrackingCallback("Article Editor", get_tracker()),
                 *self._callbacks,

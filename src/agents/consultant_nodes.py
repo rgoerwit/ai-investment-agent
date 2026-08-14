@@ -11,7 +11,6 @@ from typing import Any
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.types import RunnableConfig
-from pydantic import SecretStr
 
 from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
@@ -274,33 +273,12 @@ def _create_openai_responses_fallback_llm(llm):
     if support.infer_provider_name(llm) != "openai":
         raise ValueError("OpenAI Responses fallback requires an OpenAI primary LLM")
 
-    from langchain_openai import ChatOpenAI
+    from src.llm_runtime.factory import SeatModelFactory
 
     model_name = support.get_model_name(llm)
     if not model_name:
         raise ValueError("OpenAI Responses fallback requires a configured model name")
-    raw_api_key = settings_config.get_openai_api_key()
-    api_key = SecretStr(raw_api_key) if raw_api_key else None
-    base_url = settings_config.get_openai_api_base()
-    if isinstance(base_url, str) and base_url:
-        # Custom OpenAI-compatible endpoint (e.g. Kimi): Chat Completions only.
-        return ChatOpenAI(
-            model=model_name,
-            timeout=120,
-            max_retries=3,
-            streaming=False,
-            api_key=api_key,
-            base_url=base_url,
-        )
-    return ChatOpenAI(
-        model=model_name,
-        timeout=120,
-        max_retries=3,
-        streaming=False,
-        api_key=api_key,
-        use_responses_api=True,
-        output_version="responses/v1",
-    )
+    return SeatModelFactory().build_openai_transport_fallback(model_name)
 
 
 def create_consultant_node(

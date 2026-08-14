@@ -2,7 +2,7 @@
 
 This repository is a multi-agent equity research system that targets under-followed small- and mid-cap value stocks outside the US that present few or no regulatory and tax risks to US investors, and that appear poised for growth. It can analyze single tickers, run broader screening pipelines, and optionally reconcile saved results against an Interactive Brokers portfolio through either a CLI workflow or a local Flask dashboard.
 
-You need Python 3.12+, Poetry, and working API keys. For the default CLI path, set Gemini, Finnhub, and Tavily keys.
+You need Python 3.12+, Poetry, and working API keys. The default binding uses Google for base analysis, OpenAI for adversarial review, a separately bindable regional provider, and Anthropic for prose; Finnhub and Tavily are also required by the normal CLI path.
 
 I've gone to a lot of trouble to make this work with inexpensive/free services, at the cost of some code complexity. But practically speaking, search, LLM, and data-service keys are needed to get truly useful results. See the `.env.example` file.
 
@@ -138,7 +138,113 @@ poetry install
 cp .env.example .env
 ```
 
-Edit `.env` next. For the normal CLI path, set `GOOGLE_API_KEY`, `FINNHUB_API_KEY`, and `TAVILY_API_KEY`. For better international data or optional consultant paths, add keys such as EODHD, FMP, or OpenAI where your workflow needs them. The exact knobs live in `.env.example`.
+Edit `.env` next. `FINNHUB_API_KEY` and `TAVILY_API_KEY` are always required. `GOOGLE_API_KEY` is required for the shipped default bindings, and startup derives that from the binding plan rather than assuming it — a configuration with no seat bound to Google does not demand one. Add a provider key for each group you bind (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `MOONSHOT_API_KEY`, `DEEPSEEK_API_KEY`, `ZAI_API_KEY`), plus EODHD or FMP for better international data. The exact knobs live in `.env.example`.
+
+## LLM Provider Architecture
+
+LLMs bind to named application seats through six groups. `base` owns the main
+research/debate/decision fleet, including both Bull and Bear. `review` owns the
+Consultant, Forensic Auditor, and Editor so those seats form one vendor-level
+adversary. `regional` owns the separately bindable APAC specialist. Writer,
+operational helpers, and the semantic judge have independent groups.
+
+Model names remain plain provider model IDs. The runtime does not use or require
+LangChain's `provider:model` notation. Startup validates `.env`; graph construction
+resolves and injects an immutable per-run binding plan covering credentials, model
+identity, seat capabilities, and review/regional independence boundaries, then
+constructs clients through provider adapters.
+
+The normal grouping is:
+
+```dotenv
+LLM_BASE_PROVIDER=google
+LLM_REVIEW_PROVIDER=openai
+LLM_REGIONAL_PROVIDER=deepseek
+LLM_WRITER_PROVIDER=anthropic
+LLM_OPERATIONAL_PROVIDER=google
+LLM_JUDGE_PROVIDER=google
+```
+
+To reverse base analysis and adversarial review, change the group selectors and
+leave Bull and Bear together:
+
+```dotenv
+LLM_BASE_PROVIDER=openai
+LLM_REVIEW_PROVIDER=google
+```
+
+Provider-scoped model keys such as `OPENAI_LLM_FAST_MODEL` and
+`GOOGLE_LLM_REASONING_MODEL` supply each intent tier. Advanced operators can pin
+individual seats with JSON in `LLM_SEAT_MODEL_OVERRIDES` and
+`LLM_SEAT_QUICK_MODEL_OVERRIDES`. Reviewed provider-specific reasoning values
+can be pinned per seat with `LLM_SEAT_REASONING_OVERRIDES` and
+`LLM_SEAT_QUICK_REASONING_OVERRIDES`. Optional seats use independent
+`required|auto|off` modes. Collapsing base and review/regional identity requires
+turning off the matching `LLM_REQUIRE_*_INDEPENDENCE` setting and recording a
+non-empty waiver reason; there is no second contradictory “allow collapse” flag.
+
+`--quick-model` and `--deep-model` work under both schemas. Under provider-scoped
+bindings they are run-scoped overrides of the **base group only**: `--quick-model`
+drives the `fast` intent and `--deep-model` the `reasoning` intent (researchers,
+risk analysts, research manager). `--deep-model` deliberately does **not** reach
+the `critical` intent, so the two gate-critical APEX seats keep their configured
+binding — mirroring the legacy schema, where `APEX_MODEL` already superseded
+`DEEP_MODEL` for them. Pin those with `LLM_SEAT_MODEL_OVERRIDES`. The flags never
+touch the review, regional, writer, operational, or judge groups, and a model
+belonging to another vendor is rejected at startup naming the seat and both
+vendors. Quick mode disables APAC and the analyst high-reasoning retry as explicit
+seat policy, and persisted binding telemetry records those mode-specific
+availability reasons.
+
+Provider throttles are isolated: `GOOGLE_RPM_LIMIT`, `OPENAI_RPM_LIMIT`,
+`ANTHROPIC_RPM_LIMIT`, `DEEPSEEK_RPM_LIMIT`, `ZAI_RPM_LIMIT`, and
+`MOONSHOT_RPM_LIMIT` create separate
+runtime buckets. Shipped settings use conservative application-side ceilings,
+including for direct construction outside the graph; raise them only after checking
+the provider account's actual quota.
+
+The OpenAI-compatible transport is deliberately restricted. A compatible URL does
+not establish tool calling, structured output, or reasoning-control capability.
+The current z.ai/DeepSeek path is qualified only for the no-tool APAC seat. Google
+and OpenAI have offline construction/contract coverage in both base and review
+roles. Claude profiles record their actual version-specific transport features,
+including an explicit adaptive-thinking profile for Claude Opus 4.8; unknown later
+Claude versions fail closed until reviewed. Anthropic remains
+application-qualified only for the writer group. Production
+qualification still requires credential-gated live tool,
+structured-output, and multi-ticker runs with a fixed semantic judge. See
+`docs/LLM_PROVIDERS.md`.
+
+Old-only `.env` files remain supported during the compatibility window, but old
+and new binding schemas cannot be mixed. Generate a separate migration candidate:
+
+```bash
+poetry run python scripts/llm_env_migrate.py .env --output scratch/.env.multi-provider
+```
+
+The command refuses to overwrite its source, derives APAC vendor identity from the
+endpoint host, and fails rather than silently promoting an unqualified compatible
+review endpoint.
+
+Under provider-scoped settings, `OPENAI_API_BASE` is accepted only when its host
+is validated as OpenAI-owned and is passed through without disabling the Responses
+API. Moonshot uses `MOONSHOT_API_BASE`.
+
+A service tier and a client timeout are separate concerns, in **both** schemas. A
+compatible vendor sells no service tier, so `OPENAI_SERVICE_TIER` is ignored
+whenever `OPENAI_API_BASE` names a non-OpenAI host — it no longer sets the tier,
+the flex fallback, or the timeout there. How long a compatible client may wait is
+`OPENAI_COMPATIBLE_CLIENT_TIMEOUT_SECONDS` (default 300), read by the legacy
+consultant/auditor/editor path and the provider-scoped compatible adapter alike.
+Legacy compatible OpenAI-base configurations continue to use Chat Completions
+during the compatibility window.
+
+Embeddings are selected independently with `EMBEDDING_PROVIDER` and
+`EMBEDDING_MODEL`, and are **not** routed by `OPENAI_API_BASE` — that setting
+selects the review chat plane's compatible vendor, and those vendors serve no
+embeddings API. Provider/model/dimension/schema changes create a fingerprinted
+Chroma collection; initialization never deletes the legacy collection. Inspect or
+initialize exact targets with `scripts/embedding_collections.py`.
 
 Run a fast smoke test (you can use a ticker other than 7203.T, if you want):
 
@@ -188,7 +294,7 @@ Practical notes:
 - Analysis can prefetch a cached regional macro brief before the graph runs; it lives under `results/.macro_context_cache/` with a 12-hour TTL, is generated by `Macro Context Analyst`, and is injected only into News Analyst as regime background.
 - Projected token cost includes this pre-graph macro summarizer when it executes.
 - Free-tier Gemini works, but it is slow for larger batches. Paid tiers mostly improve throughput and reduce retry friction (foundation model vendors are getting more restrictive about free tiers).
-- Rough paid-tier ballpark with the default-on optional agents (consultant + forensic auditor, both gated on `ENABLE_CONSULTANT` and an OpenAI key): about **$0.12 per `--quick` run** and **$0.22 per full run** per ticker. The APAC Regional Specialist is off by default (`ENABLE_APAC_SPECIALIST=false`) and adds further cost when enabled. Disabling optional agents, enabling flex service tiers (`GEMINI_SERVICE_TIER=flex` / `OPENAI_SERVICE_TIER=flex`, roughly half the token cost in exchange for higher, queued latency), or routing through free-tier providers cuts this materially; see `token_usage.total_cost_usd` in the saved `results/*_analysis.json` for the actual per-run number.
+- Cost depends on the resolved seat plan. Optional review seats use independent `LLM_*_MODE` settings, and APAC is off by default. Saved JSON records `llm_bindings`, effective per-call identity, unpriced models, and cost rollups by seat, group, vendor, model, and service tier. Unknown custom models are visibly unpriced and contribute no fabricated dollar estimate.
 
 ### Interpreting Reports and Articles
 
@@ -428,6 +534,10 @@ src/cli.py                   CLI parsing and output-path resolution
 src/persistence.py           Analysis artifact building and persistence helpers
 src/output.py                CLI/banner/report/article output helpers
 src/runtime_services.py      Runtime-scoped tool, inspection, and provider ownership
+src/runtime_config.py        Run-scoped CLI overrides (ContextVar, not global mutation)
+src/llm_runtime/             Seat registry, provider bindings, and transport adapters
+src/llms.py                  Legacy-schema construction facade and tiered transports
+src/embeddings.py            Provider-selectable embeddings and collection fingerprints
 src/macro_context.py         Pre-graph macro brief generation and cache
 src/graph/                   Graph assembly, routing, barriers
 src/agents/                  Node logic and shared agent state
@@ -451,7 +561,8 @@ How the pieces connect:
 - `src/cli.py` owns CLI parsing, flag validation, and output/article path resolution.
 - `src/persistence.py` owns saved artifact assembly, JSON persistence, and rejection-record helpers.
 - `src/output.py` owns banners, CLI/report rendering, and optional article generation.
-- `src/runtime_services.py` owns runtime-scoped tool execution, content inspection, and long-lived provider dependencies for the CLI, worker, and dashboard processes.
+- `src/runtime_services.py` owns runtime-scoped tool execution, content inspection, and long-lived provider dependencies for the CLI, worker, and dashboard processes. It also validates the LLM binding plan, so an unusable provider configuration fails at startup rather than at first model construction.
+- `src/llm_runtime/` is the single construction path for every LLM in the repo: `seats.py` (the canonical seat registry and per-seat execution policy), `bindings.py` (group → provider resolution, capability checks, independence enforcement), `profiles.py` (reviewed vendor facts), `provider_policy.py` (what this repo has *evidence* for, as opposed to what a transport supports), and `adapters/`. `src/llms.py` remains the legacy-schema facade and owns the incident-tested tiered transports the adapters delegate to.
 - `src/macro_context.py` builds and caches the pre-graph regional regime brief that is injected into News Analyst context.
 - `src/graph/` wires the workflow, `src/agents/` owns node logic and state handling, and `src/tools/` plus `src/tools/registry.py` provide the tool surface used by agent tool nodes.
 - `src/tooling/` owns the execution plane around those tools: inspection, audit hooks, and argument-policy enforcement.

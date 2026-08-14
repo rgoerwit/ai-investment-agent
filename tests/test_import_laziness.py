@@ -32,7 +32,6 @@ def test_src_llms_import_does_not_construct_default_models(monkeypatch):
 
 
 def test_src_llms_import_does_not_construct_global_rate_limiter(monkeypatch):
-    rate_limiters = importlib.import_module("langchain_core.rate_limiters")
     init_calls = []
 
     class StubInMemoryRateLimiter:
@@ -48,8 +47,9 @@ def test_src_llms_import_does_not_construct_global_rate_limiter(monkeypatch):
         async def aacquire(self, *, blocking=True):
             return True
 
+    provider_rate_limits = importlib.import_module("src.llm_runtime.rate_limits")
     monkeypatch.setattr(
-        rate_limiters,
+        provider_rate_limits,
         "InMemoryRateLimiter",
         StubInMemoryRateLimiter,
     )

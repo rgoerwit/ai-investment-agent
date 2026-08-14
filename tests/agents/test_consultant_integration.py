@@ -1589,6 +1589,8 @@ class TestConsultantQuickMode:
             callbacks=None,
             quick_mode=True,
             max_completion_tokens=2048,
+            model=None,
+            settings=mock_config,
         )
 
     def test_get_consultant_llm_does_not_reuse_wrong_mode_instance(self):

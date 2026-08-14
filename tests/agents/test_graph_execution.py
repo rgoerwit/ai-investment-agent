@@ -747,7 +747,7 @@ class TestQuickModeGraphContracts:
         assert "APAC Regional Specialist" in full.nodes
         assert quick.apac_specialist_enabled is False
         assert "APAC Regional Specialist" not in quick.nodes
-        assert [call["quick_mode"] for call in calls] == [False, False, True]
+        assert [call["quick_mode"] for call in calls] == [False, False]
         assert calls[0].get("thinking_enabled", True) is True
         assert calls[1]["thinking_enabled"] is False
 
@@ -794,6 +794,117 @@ class TestQuickModeGraphContracts:
     def test_no_thinking_bump_in_quick_mode(self, monkeypatch):
         """Quick mode: no quick-tier agent receives the bump (cheap screening)."""
         assert self._count_thinking_bumps(monkeypatch, quick_mode=True) == 0
+
+    def test_non_google_base_keeps_retry_and_value_trap_adjustment(self, monkeypatch):
+        """Provider swaps must not silently disable the full-mode quality paths."""
+        from src.config import Settings
+        from src.graph.components import build_graph_components
+        from src.llm_runtime.bindings import resolve_binding_plan
+        from src.llm_runtime.seats import SeatId
+
+        components = _stub_graph_component_dependencies(monkeypatch)
+        analyst_kwargs = []
+
+        def analyst_node(*args, **kwargs):
+            analyst_kwargs.append(kwargs)
+            return lambda state, config: {}
+
+        monkeypatch.setattr(components, "create_analyst_node", analyst_node)
+        plan = resolve_binding_plan(
+            Settings(
+                _env_file=None,
+                llm_base_provider="openai",
+                llm_review_provider="google",
+                llm_regional_provider="deepseek",
+                google_api_key="g",
+                openai_api_key="o",
+                claude_api_key="a",
+                deepseek_api_key="d",
+                llm_consultant_mode="off",
+                llm_auditor_mode="off",
+                llm_editor_mode="off",
+                llm_apac_mode="off",
+            )
+        )
+        requests = []
+
+        class RecordingFactory:
+            def build(self, request):
+                requests.append(request)
+                return Mock(name=request.seat.seat_id.value)
+
+        build_graph_components(
+            max_debate_rounds=2,
+            enable_memory=False,
+            ticker="TEST",
+            cleanup_previous=False,
+            quick_mode=False,
+            strict_mode=False,
+            chart_format="png",
+            transparent_charts=False,
+            image_dir=None,
+            skip_charts=True,
+            binding_plan=plan,
+            model_factory=RecordingFactory(),
+        )
+
+        by_seat = {request.seat.seat_id: request for request in requests}
+        assert by_seat[SeatId.ANALYST_RETRY].binding.provider == "openai"
+        assert by_seat[SeatId.VALUE_TRAP].reasoning_value == "medium"
+        assert analyst_kwargs
+        assert all(kwargs["allow_retry"] is True for kwargs in analyst_kwargs)
+        assert all(kwargs["retry_llm"] is not None for kwargs in analyst_kwargs)
+
+    def test_legacy_pre_gemini_3_floor_keeps_retry_disabled(self, monkeypatch):
+        """The compatibility bridge must preserve the old retry eligibility gate."""
+        from types import SimpleNamespace
+
+        from src.config import Settings
+        from src.graph.components import build_graph_components
+        from src.llm_runtime.bindings import resolve_binding_plan
+
+        components = _stub_graph_component_dependencies(monkeypatch)
+        analyst_kwargs = []
+
+        def analyst_node(*args, **kwargs):
+            analyst_kwargs.append(kwargs)
+            return lambda state, config: {}
+
+        monkeypatch.setattr(components, "create_analyst_node", analyst_node)
+        monkeypatch.setattr(
+            components,
+            "get_runtime_config",
+            lambda settings: SimpleNamespace(
+                quick_think_llm="gemini-2.5-flash",
+                deep_think_llm="gemini-2.5-pro",
+            ),
+        )
+        plan = resolve_binding_plan(
+            Settings(
+                _env_file=None,
+                google_api_key="g",
+                quick_think_llm="gemini-2.5-flash",
+                deep_think_llm="gemini-2.5-pro",
+            )
+        )
+
+        build_graph_components(
+            max_debate_rounds=2,
+            enable_memory=False,
+            ticker="TEST",
+            cleanup_previous=False,
+            quick_mode=False,
+            strict_mode=False,
+            chart_format="png",
+            transparent_charts=False,
+            image_dir=None,
+            skip_charts=True,
+            binding_plan=plan,
+        )
+
+        assert analyst_kwargs
+        assert all(kwargs["allow_retry"] is False for kwargs in analyst_kwargs)
+        assert all(kwargs["retry_llm"] is None for kwargs in analyst_kwargs)
 
 
 class TestTradingContext:

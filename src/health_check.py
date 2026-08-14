@@ -154,16 +154,14 @@ async def check_llm_connectivity() -> bool:
     """Test basic LLM connectivity with Gemini."""
     try:
         from src.config import config
-        from src.llms import create_gemini_model
+        from src.llm_runtime.construction import build_required_model_for_seat
+        from src.llm_runtime.seats import SeatId
 
         runtime_config = get_runtime_config(config)
         logger.info("testing_llm_connectivity", model=runtime_config.quick_think_llm)
 
-        llm = create_gemini_model(
-            runtime_config.quick_think_llm,
-            temperature=0.0,
-            timeout=10,
-            max_retries=1,
+        llm = build_required_model_for_seat(
+            SeatId.HEALTH_CHECK,
             service_tier="standard",
         )
 
@@ -217,9 +215,9 @@ async def run_comprehensive_health_check() -> bool:
 
     # Check internal project imports to ensure no lingering OpenAI references break imports
     try:
-        from src.llms import quick_thinking_llm
+        from src.llm_runtime import construction
 
-        logger.info("llms_import_ok")
+        logger.info("llms_import_ok", module=construction.__name__)
     except ImportError as e:
         logger.error(
             "llms_import_failed",

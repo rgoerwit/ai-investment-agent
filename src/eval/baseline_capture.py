@@ -469,10 +469,16 @@ class BaselineCaptureManager:
         return sources
 
     def _config_snapshot(self, config: Any) -> dict[str, Any]:
+        from src.config import config as settings
+        from src.llm_runtime.bindings import resolve_binding_plan
+
         configurable = {}
         if isinstance(config, dict):
             configurable = config.get("configurable", {})
-        return {"configurable": normalize_for_json(configurable)}
+        return {
+            "configurable": normalize_for_json(configurable),
+            "llm_bindings": resolve_binding_plan(settings).telemetry(settings),
+        }
 
     def _prompt_info(self, spec: NodeCaptureSpec) -> dict[str, Any] | None:
         prompt_key = spec.prompt_key

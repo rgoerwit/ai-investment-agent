@@ -22,6 +22,8 @@ def _config() -> SimpleNamespace:
         langfuse_enabled=False,
         api_retry_attempts=5,
         gemini_rpm_limit=1000,
+        google_rpm_limit=2000,
+        llm_base_provider=None,
         llm_call_hard_timeout_seconds=600.0,
         quick_mode_active=False,
         images_dir=Path("images"),
@@ -63,11 +65,16 @@ def test_build_runtime_config_applies_cli_overrides_without_mutating_base() -> N
         enable_memory=False,
         langfuse_enabled=True,
         api_retry_attempts=2,
-        gemini_rpm_limit=360,
+        google_rpm_limit=360,
         llm_call_hard_timeout_seconds=120.0,
         quick_mode_active=True,
         images_dir=Path("images"),
         quiet_mode=False,
+        # Each model flag drives both schemas: the legacy `*_think_llm` snapshot
+        # and the provider-scoped `*_override`, which is what lets the binding
+        # resolver tell a CLI request apart from a configured default.
+        base_fast_model_override="quick-new",
+        base_reasoning_model_override="deep-new",
     )
     assert base.quick_think_llm == "quick-old"
     assert base.deep_think_llm == "deep-old"
@@ -88,9 +95,23 @@ def test_quick_mode_does_not_raise_tighter_existing_values() -> None:
     runtime_config = build_runtime_config(_args(quick=True), base)
 
     assert runtime_config.api_retry_attempts == 1
-    assert runtime_config.gemini_rpm_limit == 60
+    assert runtime_config.google_rpm_limit == 60
     assert runtime_config.llm_call_hard_timeout_seconds == 45.0
     assert runtime_config.quick_mode_active is True
+
+
+def test_new_schema_quick_mode_clamps_provider_scoped_google_rpm() -> None:
+    base = _config()
+    base.llm_base_provider = "google"
+    base.gemini_rpm_limit = 15
+    base.google_rpm_limit = 1000
+
+    runtime_config = build_runtime_config(_args(quick=True), base)
+
+    assert runtime_config.google_rpm_limit == 360
+    assert quick_runtime_clamp_changes(_args(quick=True), base, runtime_config)[
+        "google_rpm_limit"
+    ] == {"from": 1000, "to": 360}
 
 
 def test_quiet_mode_and_image_directory_are_run_scoped() -> None:
@@ -115,7 +136,7 @@ def test_no_quick_mode_does_not_clamp() -> None:
     runtime_config = build_runtime_config(_args(quick=False), base)
 
     assert runtime_config.api_retry_attempts == 5
-    assert runtime_config.gemini_rpm_limit == 1000
+    assert runtime_config.google_rpm_limit == 1000
     assert runtime_config.llm_call_hard_timeout_seconds == 600.0
     assert runtime_config.quick_mode_active is False
 
@@ -137,7 +158,7 @@ def test_clamp_change_summary_only_reports_lowered_values() -> None:
 
     assert quick_runtime_clamp_changes(_args(quick=True), base, runtime_config) == {
         "api_retry_attempts": {"from": 5, "to": 2},
-        "gemini_rpm_limit": {"from": 1000, "to": 360},
+        "google_rpm_limit": {"from": 1000, "to": 360},
         "llm_call_hard_timeout_seconds": {"from": 600.0, "to": 120.0},
     }
 

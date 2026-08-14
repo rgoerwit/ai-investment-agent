@@ -19,7 +19,7 @@ from src.data_block_utils import (
 )
 from src.macro_regime import parse_macro_regime
 from src.runtime_diagnostics import get_model_name as _get_model_name
-from src.runtime_diagnostics import infer_provider
+from src.runtime_diagnostics import get_runtime_provider
 
 from .fundamentals_reconciler import (
     extract_raw_metrics_payload,
@@ -41,10 +41,7 @@ _MACRO_SECTION_CAP_DECISION = 1200
 
 def infer_provider_name(runnable: Any) -> str:
     """Infer provider name from model instance for diagnostics logging."""
-    return infer_provider(
-        model_name=_get_model_name(runnable),
-        class_name=type(runnable).__name__,
-    )
+    return get_runtime_provider(runnable)
 
 
 def get_model_name(runnable: Any) -> str | None:

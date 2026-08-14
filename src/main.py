@@ -945,13 +945,14 @@ def _setup_runtime(
 
     # Content inspection is configured independently of logging verbosity.
     try:
-        from src.llms import create_process_rate_limiter
+        from src.llm_runtime.rate_limits import create_process_rate_limiter
         from src.runtime_services import build_provider_runtime
 
         provider_runtime = build_provider_runtime(
+            settings=config,
             rate_limiter=create_process_rate_limiter(
-                rpm=runtime_config.gemini_rpm_limit
-            )
+                rpm=runtime_config.google_rpm_limit
+            ),
         )
         runtime_services = build_runtime_services_from_config(
             enable_tool_audit=enable_tool_audit,
@@ -1367,8 +1368,18 @@ def _warn_quick_timeout_config_drift(args: argparse.Namespace) -> None:
         drift["LLM_CALL_HARD_TIMEOUT_SECONDS"] = config.llm_call_hard_timeout_seconds
     if config.api_retry_attempts > 2:
         drift["API_RETRY_ATTEMPTS"] = config.api_retry_attempts
-    if config.gemini_rpm_limit > 360:
-        drift["GEMINI_RPM_LIMIT"] = config.gemini_rpm_limit
+    configured_google_rpm = (
+        config.google_rpm_limit
+        if config.llm_base_provider is not None
+        else config.gemini_rpm_limit
+    )
+    if configured_google_rpm > 360:
+        key = (
+            "GOOGLE_RPM_LIMIT"
+            if config.llm_base_provider is not None
+            else "GEMINI_RPM_LIMIT"
+        )
+        drift[key] = configured_google_rpm
 
     if not drift:
         return
@@ -1382,7 +1393,7 @@ def _warn_quick_timeout_config_drift(args: argparse.Namespace) -> None:
             "QUICK_LLM_API_TIMEOUT_SECONDS": 120,
             "LLM_CALL_HARD_TIMEOUT_SECONDS": 120,
             "API_RETRY_ATTEMPTS": 2,
-            "GEMINI_RPM_LIMIT": "15-360",
+            "GOOGLE_RPM_LIMIT": "15-360",
         },
     )
 

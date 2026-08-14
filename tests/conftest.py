@@ -69,6 +69,16 @@ def setup_test_env():
         "OPENAI_SERVICE_TIER": "auto",
         "FLEX_FALLBACK_TO_STANDARD": "true",
         "FLEX_LLM_TIMEOUT_SECONDS": "900",
+        # Same rationale, one layer down: an operator .env pointing
+        # OPENAI_API_BASE at a compatible vendor makes every OpenAI-plane seat
+        # take the compatible path — no service tier, no Responses API, and the
+        # OPENAI_COMPATIBLE_CLIENT_TIMEOUT_SECONDS client timeout. Tests for the
+        # compatible path set the base explicitly (tests/test_llms_openai_base.py).
+        "OPENAI_API_BASE": "",
+        # NOTE: the LLM_*_PROVIDER schema selectors are deliberately NOT pinned
+        # here. A process env var beats `_env_file`, which would break the tests
+        # that load a purpose-built new-schema .env fixture. They are pinned on
+        # the config singleton instead — see `_pin_legacy_binding_schema` below.
         # Pin the APEX-tier knobs to unset: an operator .env with APEX_MODEL
         # flips the llms.py construction path for the Senior Fundamentals and
         # PM seats (dedicated deep-tier instance instead of the quick/deep
@@ -141,6 +151,36 @@ def _pin_config_singleton_identity():
     else:
         if src.config.config is not baseline:
             src.config.config = baseline
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _pin_legacy_binding_schema(monkeypatch):
+    """Keep the config singleton on the legacy LLM binding schema.
+
+    Same hazard as the pinned service tiers and APEX models, one layer wider: a
+    single ``LLM_*_PROVIDER`` selector in an operator's ``.env`` switches EVERY
+    seat from the legacy factories to the provider-scoped adapters. Mock-based
+    unit tests that patch a legacy facade (``components.get_consultant_llm``,
+    ``create_apex_llm``, …) then observe no calls at all, and fail only on the
+    machine whose ``.env`` has been migrated.
+
+    Pinned on the singleton rather than via ``os.environ`` on purpose: a process
+    env var outranks ``_env_file``, which would break the tests that load a
+    purpose-built new-schema ``.env`` fixture. Multi-provider behavior is tested
+    with explicit ``Settings(...)`` objects, which this fixture does not touch.
+    """
+    import src.config
+
+    for field in (
+        "llm_base_provider",
+        "llm_review_provider",
+        "llm_regional_provider",
+        "llm_writer_provider",
+        "llm_operational_provider",
+        "llm_judge_provider",
+    ):
+        monkeypatch.setattr(src.config.config, field, None, raising=False)
     yield
 
 

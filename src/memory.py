@@ -15,10 +15,9 @@ allowing agents to learn from past analyses and decisions.
 import re
 import threading
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import structlog
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -28,6 +27,12 @@ from tenacity import (
 
 from src.async_utils import run_with_hard_timeout
 from src.config import config
+from src.embeddings import (
+    build_embeddings,
+    embedding_credential,
+    fingerprinted_collection_name,
+    resolve_embedding_binding,
+)
 from src.error_safety import (
     redact_sensitive_text,
     safe_error_payload,
@@ -38,6 +43,15 @@ from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
 
 logger = structlog.get_logger(__name__)
+
+
+def GoogleGenerativeAIEmbeddings(**kwargs: Any) -> Any:
+    """Legacy test patch seam; the Google SDK import remains lazy."""
+
+    from langchain_google_genai import GoogleGenerativeAIEmbeddings as implementation
+
+    return implementation(**kwargs)
+
 
 _active_capture_manager: Any = None
 try:
@@ -79,6 +93,7 @@ class FinancialSituationMemory:
     - Ticker-specific isolation to prevent cross-contamination
     """
 
+    # Compatibility aliases for callers that inspect the historical defaults.
     _EMBEDDING_MODEL = "gemini-embedding-001"
     _EMBEDDING_DIMENSION = 768
     # google-genai passes timeout=None per-request when HttpOptions.timeout is
@@ -87,9 +102,9 @@ class FinancialSituationMemory:
     # 2026-07-11 full-suite pytest run). Both embedding paths are bounded here.
     _HEALTHCHECK_TIMEOUT_SECONDS = 15.0
     _EMBEDDING_CALL_TIMEOUT_SECONDS = 30.0
-    _shared_embeddings: GoogleGenerativeAIEmbeddings | None = None
+    _shared_embeddings: Any | None = None
     _shared_embeddings_available: bool = False
-    _shared_embeddings_key: tuple[str | None, str, int] | None = None
+    _shared_embeddings_key: tuple[str, str, int | None, str] | None = None
     _shared_chroma_client: Any | None = None
     _shared_chroma_key: str | None = None
 
@@ -101,18 +116,24 @@ class FinancialSituationMemory:
             name: Unique identifier for this memory collection (e.g., "0005_HK_bull_memory")
         """
         self.name = name
+        self.embedding_binding = resolve_embedding_binding(config)
+        self.collection_name = fingerprinted_collection_name(
+            name, self.embedding_binding
+        )
         self.available = False
         self.situation_collection: Any = None
         self.chroma_client: Any = None
-        self.embeddings: GoogleGenerativeAIEmbeddings | None = None
+        self.embeddings: Any | None = None
         self.embeddings_available = False
         self.chroma_available = False
 
         # Check for API key via config
-        api_key = config.get_google_api_key()
+        api_key = embedding_credential(config, self.embedding_binding.provider)
         if not api_key:
             logger.warning(
-                "memory_disabled", reason="GOOGLE_API_KEY not set", collection=name
+                "memory_disabled",
+                reason=f"{self.embedding_binding.provider} embedding credential not set",
+                collection=name,
             )
             return
 
@@ -127,34 +148,19 @@ class FinancialSituationMemory:
             if self.chroma_client is None:
                 return
 
-            # Check if collection exists with stale embedding model
-            existing_collections = self.chroma_client.list_collections()
-            collection_names = [c.name for c in existing_collections]
-
-            if self.name in collection_names:
-                existing = self.chroma_client.get_collection(name=self.name)
-                existing_model = existing.metadata.get("embedding_model", "unknown")
-
-                if existing_model != self._EMBEDDING_MODEL:
-                    # Model mismatch - delete and recreate to avoid incompatible embeddings
-                    logger.warning(
-                        "stale_embedding_model_detected",
-                        collection=self.name,
-                        old_model=existing_model,
-                        new_model=self._EMBEDDING_MODEL,
-                        action="recreating_collection",
-                    )
-                    self.chroma_client.delete_collection(name=self.name)
-
-            # Create or get collection
+            # Fingerprinted names isolate provider/model/dimension changes. This
+            # initialization path never deletes or mutates a legacy collection.
             self.situation_collection = self.chroma_client.get_or_create_collection(
-                name=self.name,
+                name=self.collection_name,
                 metadata={
                     "description": f"Financial debate memory for {name}",
-                    "embedding_model": self._EMBEDDING_MODEL,
-                    "embedding_dimension": self._EMBEDDING_DIMENSION,
+                    "embedding_provider": self.embedding_binding.provider,
+                    "embedding_model": self.embedding_binding.model,
+                    "embedding_dimension": self.embedding_binding.dimension,
+                    "embedding_schema_version": self.embedding_binding.schema_version,
+                    "legacy_base_name": self.name,
                     "created_at": datetime.now().isoformat(),
-                    "version": "2.0",
+                    "version": "3.0",
                 },
             )
 
@@ -195,11 +201,10 @@ class FinancialSituationMemory:
         cls._shared_chroma_key = None
 
     @classmethod
-    def _get_shared_embeddings(
-        cls, collection_name: str
-    ) -> GoogleGenerativeAIEmbeddings | None:
-        api_key = config.get_google_api_key()
-        cache_key = (api_key, cls._EMBEDDING_MODEL, cls._EMBEDDING_DIMENSION)
+    def _get_shared_embeddings(cls, collection_name: str) -> Any | None:
+        binding = resolve_embedding_binding(config)
+        api_key = embedding_credential(config, binding.provider)
+        cache_key = (binding.provider, binding.model, binding.dimension, api_key)
         if cls._shared_embeddings_key != cache_key:
             cls._shared_embeddings = None
             cls._shared_embeddings_available = False
@@ -209,13 +214,15 @@ class FinancialSituationMemory:
             return cls._shared_embeddings
 
         try:
-            embedding_kwargs: dict[str, Any] = {
-                "model": f"models/{cls._EMBEDDING_MODEL}",
-                "google_api_key": api_key,
-                "task_type": "retrieval_document",
-                "output_dimensionality": cls._EMBEDDING_DIMENSION,
-            }
-            embeddings = GoogleGenerativeAIEmbeddings(**embedding_kwargs)
+            if binding.provider == "google":
+                embeddings = GoogleGenerativeAIEmbeddings(
+                    model=f"models/{binding.model}",
+                    google_api_key=api_key,
+                    task_type="retrieval_document",
+                    output_dimensionality=binding.dimension,
+                )
+            else:
+                embeddings = build_embeddings(binding, config)
             try:
                 # Daemon thread + join(timeout): a hung probe is orphaned (it
                 # cannot block process exit) and lands in the existing
@@ -224,7 +231,7 @@ class FinancialSituationMemory:
                 error_box: list[BaseException] = []
 
                 def _probe(
-                    emb: GoogleGenerativeAIEmbeddings = embeddings,
+                    emb: Any = embeddings,
                 ) -> None:
                     try:
                         result_box.append(emb.embed_query("initialization test"))
@@ -252,7 +259,8 @@ class FinancialSituationMemory:
                 cls._shared_embeddings_available = True
                 logger.debug(
                     "embeddings_initialized",
-                    model=cls._EMBEDDING_MODEL,
+                    model=binding.model,
+                    provider=binding.provider,
                     collection=collection_name,
                     shared=True,
                 )
@@ -261,15 +269,15 @@ class FinancialSituationMemory:
                 cls._shared_embeddings_available = False
                 details = classify_failure(
                     e,
-                    provider="google",
-                    model_name=cls._EMBEDDING_MODEL,
+                    provider=binding.provider,
+                    model_name=binding.model,
                     class_name=type(embeddings).__name__,
                 )
                 logger.warning(
                     "embeddings_healthcheck_failed",
                     collection=collection_name,
                     provider=details.provider,
-                    model=cls._EMBEDDING_MODEL,
+                    model=binding.model,
                     failure_kind=details.kind,
                     host=details.host,
                     error_type=details.error_type,
@@ -359,8 +367,8 @@ class FinancialSituationMemory:
             # Catch all exceptions to handle import errors, attribute errors, type errors, etc.
             details = classify_failure(
                 exc,
-                provider="google",
-                model_name=self._EMBEDDING_MODEL,
+                provider=self.embedding_binding.provider,
+                model_name=self.embedding_binding.model,
                 class_name=(
                     type(self.embeddings).__name__
                     if self.embeddings is not None
@@ -371,7 +379,7 @@ class FinancialSituationMemory:
                 "embedding_rate_limiter_fallback",
                 collection=self.name,
                 provider=details.provider,
-                model=self._EMBEDDING_MODEL,
+                model=self.embedding_binding.model,
                 failure_kind=details.kind,
                 host=details.host,
                 error_type=details.error_type,
@@ -390,7 +398,7 @@ class FinancialSituationMemory:
         if not embedding or len(embedding) == 0:
             raise ValueError("Empty embedding returned")
 
-        return embedding
+        return cast(list[float], embedding)
 
     async def add_situations(
         self, situations: list[str], metadata: list[dict[str, Any]] | None = None
@@ -477,10 +485,8 @@ class FinancialSituationMemory:
             # Prepare IDs (use timestamp + index)
             ids = [f"{timestamp}_{i}" for i in range(len(approved_situations))]
 
-            # Add to collection. The cached `situation_collection` handle can
-            # become stale across processes if the model-mismatch deletion
-            # path (lines ~113-129) ran in a concurrent process. Re-fetch
-            # once on NotFoundError before giving up — this turns the
+            # Add to collection. The cached handle can become stale after an
+            # explicit operator cleanup. Re-fetch once on NotFoundError — this turns the
             # `add_situations_failed` + `rejection_record_storage_failed`
             # noise pair (May 2026 2099.HK incident) into a single recovered
             # write.
@@ -506,13 +512,34 @@ class FinancialSituationMemory:
                     message_preview=redact_sensitive_text(str(exc), max_chars=120),
                 )
                 self.situation_collection = self.chroma_client.get_or_create_collection(
-                    name=self.name,
+                    name=getattr(self, "collection_name", self.name),
                     metadata={
                         "description": f"Financial debate memory for {self.name}",
-                        "embedding_model": self._EMBEDDING_MODEL,
-                        "embedding_dimension": self._EMBEDDING_DIMENSION,
+                        "embedding_provider": getattr(
+                            getattr(self, "embedding_binding", None),
+                            "provider",
+                            "google",
+                        ),
+                        "embedding_model": getattr(
+                            getattr(self, "embedding_binding", None),
+                            "model",
+                            self._EMBEDDING_MODEL,
+                        ),
+                        "embedding_dimension": getattr(
+                            getattr(self, "embedding_binding", None),
+                            "dimension",
+                            self._EMBEDDING_DIMENSION,
+                        ),
+                        "embedding_schema_version": (
+                            getattr(
+                                getattr(self, "embedding_binding", None),
+                                "schema_version",
+                                1,
+                            )
+                        ),
+                        "legacy_base_name": self.name,
                         "created_at": datetime.now().isoformat(),
-                        "version": "2.0",
+                        "version": "3.0",
                     },
                 )
                 self.situation_collection.add(

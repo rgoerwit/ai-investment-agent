@@ -234,8 +234,7 @@ class TestUnpricedModelsSurfaced:
         _record(tracker, "Mystery", "totally-unknown-model-7")
         stats = tracker.get_total_stats()
         assert stats["unpriced_models"] == ["totally-unknown-model-7"]
-        # It still gets a (default-priced) cost, so the total is non-zero — the
-        # point is visibility, not exclusion.
+        # Known usage is still costed; the unknown row itself contributes zero.
         assert stats["total_cost_usd"] > 0
 
     def test_default_priced_model_flagged(self):
@@ -249,3 +248,23 @@ class TestUnpricedModelsSurfaced:
         assert (
             _lookup_model_pricing("totally-unknown-model-7") is DEFAULT_PRICING_PER_1M
         )
+
+    def test_resolved_identity_drives_vendor_seat_and_group_rollups(self, tracker):
+        tracker.record_usage(
+            "Consultant",
+            "custom-compatible-model",
+            100,
+            20,
+            seat_id="consultant",
+            binding_group="review",
+            vendor_id="moonshot",
+            model_lineage="kimi",
+            adapter_kind="openai_compatible",
+            endpoint_host="api.moonshot.cn",
+        )
+        stats = tracker.get_total_stats()
+        assert stats["by_provider"]["moonshot"]["calls"] == 1
+        assert stats["by_seat"]["consultant"]["calls"] == 1
+        assert stats["by_binding_group"]["review"]["calls"] == 1
+        assert stats["binding_usage"][0]["endpoint_host"] == "api.moonshot.cn"
+        assert stats["binding_usage"][0]["cost_usd"] == 0.0

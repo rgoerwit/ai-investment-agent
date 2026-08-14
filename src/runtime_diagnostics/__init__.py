@@ -45,6 +45,7 @@ from src.runtime_diagnostics.failure_classification import (
     get_class_name,
     get_endpoint_host,
     get_model_name,
+    get_runtime_provider,
     infer_provider,
     is_provider_content_block,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "infer_provider",
     "is_provider_content_block",
     "get_model_name",
+    "get_runtime_provider",
     "get_class_name",
     "get_base_url",
     "get_endpoint_host",

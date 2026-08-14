@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Literal
 
 import structlog
-from pydantic import Field, SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Note: Pydantic Settings handles .env loading natively via env_file in SettingsConfigDict.
@@ -283,10 +283,26 @@ def validate_environment_variables() -> None:
     # Use the config singleton to check API keys (loaded via Pydantic Settings)
     # This avoids dependency on load_dotenv() polluting os.environ
     required_checks = [
-        ("GOOGLE_API_KEY", config.get_google_api_key),
         ("FINNHUB_API_KEY", config.get_finnhub_api_key),
         ("TAVILY_API_KEY", config.get_tavily_api_key),
     ]
+    if isinstance(config, Settings):
+        from src.llm_runtime.bindings import resolve_binding_plan
+
+        binding_plan = resolve_binding_plan(config)
+        if binding_plan.schema == "legacy":
+            logger.warning(
+                "Legacy LLM configuration is active; generate a multi-provider "
+                "candidate with scripts/llm_env_migrate.py. Mixed schemas are rejected."
+            )
+        if binding_plan.schema == "legacy" or any(
+            binding.identity.vendor_id == "google"
+            for binding in binding_plan.reachable_bindings()
+        ):
+            required_checks.insert(0, ("GOOGLE_API_KEY", config.get_google_api_key))
+    else:
+        # Compatibility for tests/integrations supplying the old config protocol.
+        required_checks.insert(0, ("GOOGLE_API_KEY", config.get_google_api_key))
 
     # Check for EODHD key (Optional but recommended)
     if not config.get_eodhd_api_key():
@@ -339,6 +355,18 @@ class Settings(BaseSettings):
         validation_alias="CHROMA_PERSIST_DIR",
         description="Directory for ChromaDB vector storage",
     )
+    embedding_provider: Literal["google", "openai"] = Field(
+        default="google", validation_alias="EMBEDDING_PROVIDER"
+    )
+    embedding_model: str = Field(
+        default="gemini-embedding-001", validation_alias="EMBEDDING_MODEL"
+    )
+    embedding_dimension: int = Field(
+        default=768, ge=1, validation_alias="EMBEDDING_DIMENSION"
+    )
+    embedding_schema_version: int = Field(
+        default=1, ge=1, validation_alias="EMBEDDING_SCHEMA_VERSION"
+    )
     images_dir: Path = Field(
         default=Path("images"),
         validation_alias="IMAGES_DIR",
@@ -361,6 +389,126 @@ class Settings(BaseSettings):
         default="gemini-3-flash-preview",
         validation_alias="QUICK_MODEL",
         description="Model for quick thinking/data gathering agents",
+    )
+    # New multi-provider schema. ``None`` provider selectors preserve the legacy
+    # configuration path during the compatibility window. Supplying any selector
+    # opts into the new schema; the binding resolver rejects mixed old/new keys.
+    llm_base_provider: str | None = Field(
+        default=None, validation_alias="LLM_BASE_PROVIDER"
+    )
+    llm_review_provider: str | None = Field(
+        default=None, validation_alias="LLM_REVIEW_PROVIDER"
+    )
+    llm_regional_provider: str | None = Field(
+        default=None, validation_alias="LLM_REGIONAL_PROVIDER"
+    )
+    llm_writer_provider: str | None = Field(
+        default=None, validation_alias="LLM_WRITER_PROVIDER"
+    )
+    llm_operational_provider: str | None = Field(
+        default=None, validation_alias="LLM_OPERATIONAL_PROVIDER"
+    )
+    llm_judge_provider: str | None = Field(
+        default=None, validation_alias="LLM_JUDGE_PROVIDER"
+    )
+    llm_seat_model_overrides: dict[str, str] = Field(
+        default_factory=dict, validation_alias="LLM_SEAT_MODEL_OVERRIDES"
+    )
+    llm_seat_quick_model_overrides: dict[str, str] = Field(
+        default_factory=dict, validation_alias="LLM_SEAT_QUICK_MODEL_OVERRIDES"
+    )
+    llm_seat_reasoning_overrides: dict[str, str] = Field(
+        default_factory=dict, validation_alias="LLM_SEAT_REASONING_OVERRIDES"
+    )
+    llm_seat_quick_reasoning_overrides: dict[str, str] = Field(
+        default_factory=dict,
+        validation_alias="LLM_SEAT_QUICK_REASONING_OVERRIDES",
+    )
+    google_llm_fast_model: str = Field(
+        default="gemini-3-flash-preview", validation_alias="GOOGLE_LLM_FAST_MODEL"
+    )
+    google_llm_reasoning_model: str = Field(
+        default="gemini-3.1-pro-preview",
+        validation_alias="GOOGLE_LLM_REASONING_MODEL",
+    )
+    google_llm_critical_model: str = Field(
+        default="gemini-3.1-pro-preview",
+        validation_alias="GOOGLE_LLM_CRITICAL_MODEL",
+    )
+    openai_llm_fast_model: str = Field(
+        default="gpt-5.4-mini", validation_alias="OPENAI_LLM_FAST_MODEL"
+    )
+    openai_llm_reasoning_model: str = Field(
+        default="gpt-5.4", validation_alias="OPENAI_LLM_REASONING_MODEL"
+    )
+    openai_llm_critical_model: str = Field(
+        default="gpt-5.4", validation_alias="OPENAI_LLM_CRITICAL_MODEL"
+    )
+    openai_llm_escalation_model: str = Field(
+        default="gpt-5.6-sol", validation_alias="OPENAI_LLM_ESCALATION_MODEL"
+    )
+    moonshot_llm_fast_model: str = Field(
+        default="kimi-k3", validation_alias="MOONSHOT_LLM_FAST_MODEL"
+    )
+    moonshot_llm_reasoning_model: str = Field(
+        default="kimi-k3", validation_alias="MOONSHOT_LLM_REASONING_MODEL"
+    )
+    moonshot_llm_critical_model: str = Field(
+        default="kimi-k3", validation_alias="MOONSHOT_LLM_CRITICAL_MODEL"
+    )
+    moonshot_llm_escalation_model: str = Field(
+        default="kimi-k3", validation_alias="MOONSHOT_LLM_ESCALATION_MODEL"
+    )
+    moonshot_api_key: SecretStr = Field(
+        default=SecretStr(""), validation_alias="MOONSHOT_API_KEY"
+    )
+    moonshot_api_base: str = Field(
+        default="https://api.moonshot.ai/v1", validation_alias="MOONSHOT_API_BASE"
+    )
+    anthropic_llm_prose_model: str = Field(
+        default="claude-opus-4-6", validation_alias="ANTHROPIC_LLM_PROSE_MODEL"
+    )
+    deepseek_llm_reasoning_model: str = Field(
+        default="deepseek-v4-pro", validation_alias="DEEPSEEK_LLM_REASONING_MODEL"
+    )
+    deepseek_api_key: SecretStr = Field(
+        default=SecretStr(""), validation_alias="DEEPSEEK_API_KEY"
+    )
+    deepseek_api_base: str = Field(
+        default="https://api.deepseek.com", validation_alias="DEEPSEEK_API_BASE"
+    )
+    zai_llm_reasoning_model: str = Field(
+        default="glm-5.2", validation_alias="ZAI_LLM_REASONING_MODEL"
+    )
+    zai_api_key: SecretStr = Field(
+        default=SecretStr(""), validation_alias="ZAI_API_KEY"
+    )
+    zai_api_base: str = Field(
+        default="https://api.z.ai/api/paas/v4/", validation_alias="ZAI_API_BASE"
+    )
+    llm_consultant_mode: Literal["required", "auto", "off"] = Field(
+        default="auto", validation_alias="LLM_CONSULTANT_MODE"
+    )
+    llm_auditor_mode: Literal["required", "auto", "off"] = Field(
+        default="auto", validation_alias="LLM_AUDITOR_MODE"
+    )
+    llm_editor_mode: Literal["required", "auto", "off"] = Field(
+        default="auto", validation_alias="LLM_EDITOR_MODE"
+    )
+    llm_apac_mode: Literal["required", "auto", "off"] = Field(
+        default="off", validation_alias="LLM_APAC_MODE"
+    )
+    llm_require_review_independence: bool = Field(
+        default=True, validation_alias="LLM_REQUIRE_REVIEW_INDEPENDENCE"
+    )
+    llm_review_independence_waiver_reason: str = Field(
+        default="", validation_alias="LLM_REVIEW_INDEPENDENCE_WAIVER_REASON"
+    )
+    llm_require_regional_independence: bool = Field(
+        default=True, validation_alias="LLM_REQUIRE_REGIONAL_INDEPENDENCE"
+    )
+    llm_regional_independence_waiver_reason: str = Field(
+        default="", validation_alias="LLM_REGIONAL_INDEPENDENCE_WAIVER_REASON"
     )
     # APEX tier: one pin for the two gate-critical seats — Senior Fundamentals
     # (rubric arithmetic feeding the hard <50% health/growth gates) and the
@@ -560,7 +708,7 @@ class Settings(BaseSettings):
     # --- Writer Configuration (Anthropic/Claude) ---
     claude_api_key: SecretStr | None = Field(
         default=None,
-        validation_alias="CLAUDE_KEY",
+        validation_alias=AliasChoices("ANTHROPIC_API_KEY", "CLAUDE_KEY"),
         description="Anthropic API key for article writer (optional, falls back to Gemini)",
     )
     writer_model: str = Field(
@@ -650,6 +798,11 @@ class Settings(BaseSettings):
         validation_alias="GEMINI_SERVICE_TIER",
         description="Gemini inference tier: standard, or flex (50% cost, higher latency)",
     )
+    google_service_tier: Literal["standard", "flex"] = Field(
+        default="standard",
+        validation_alias="GOOGLE_SERVICE_TIER",
+        description="Google inference tier for the new multi-provider schema",
+    )
     openai_service_tier: Literal["auto", "flex"] = Field(
         default="auto",
         validation_alias="OPENAI_SERVICE_TIER",
@@ -687,6 +840,20 @@ class Settings(BaseSettings):
         ge=1,
         validation_alias="API_TIMEOUT",
         description="API request timeout in seconds",
+    )
+    # An OpenAI-compatible vendor (Moonshot/Kimi, and anything else reachable via
+    # OPENAI_API_BASE) has its own latency profile and no service tiers. This is
+    # the one knob for how long its client may wait — do NOT reach for
+    # OPENAI_SERVICE_TIER=flex to stretch it, which is a pricing/queueing product
+    # the vendor does not sell and which is now ignored for a non-OpenAI base.
+    openai_compatible_client_timeout_seconds: int = Field(
+        default=300,
+        ge=1,
+        validation_alias="OPENAI_COMPATIBLE_CLIENT_TIMEOUT_SECONDS",
+        description=(
+            "SDK client timeout for OpenAI-compatible (non-api.openai.com) "
+            "endpoints on the review plane"
+        ),
     )
     # Quick-mode screening should not inherit a 5-minute SDK socket/read
     # timeout. The outer runtime helper still enforces the hard wall-clock cap;
@@ -897,13 +1064,43 @@ class Settings(BaseSettings):
         validation_alias="GEMINI_RPM_LIMIT",
         description="Gemini API rate limit (requests per minute)",
     )
-    # OpenAI RPM limit for consultant/auditor/editor LLMs. None (default) means
-    # no rate limiter is attached — set OPENAI_RPM_LIMIT in .env to enable.
+    # Conservative application-side ceilings. Provider accounts may permit more;
+    # operators can raise these explicitly after checking their actual quota.
     openai_rpm_limit: int | None = Field(
-        default=None,
+        default=120,
         ge=1,
         validation_alias="OPENAI_RPM_LIMIT",
-        description="OpenAI API rate limit (requests per minute); unset = no throttle",
+        description="OpenAI application rate limit (requests per minute)",
+    )
+    google_rpm_limit: int = Field(
+        default=15,
+        ge=1,
+        validation_alias="GOOGLE_RPM_LIMIT",
+        description="Google API rate limit for the new multi-provider schema",
+    )
+    anthropic_rpm_limit: int | None = Field(
+        default=60,
+        ge=1,
+        validation_alias="ANTHROPIC_RPM_LIMIT",
+        description="Anthropic application rate limit (requests per minute)",
+    )
+    deepseek_rpm_limit: int | None = Field(
+        default=30,
+        ge=1,
+        validation_alias="DEEPSEEK_RPM_LIMIT",
+        description="DeepSeek application rate limit (requests per minute)",
+    )
+    zai_rpm_limit: int | None = Field(
+        default=30,
+        ge=1,
+        validation_alias="ZAI_RPM_LIMIT",
+        description="Z.AI application rate limit (requests per minute)",
+    )
+    moonshot_rpm_limit: int | None = Field(
+        default=60,
+        ge=1,
+        validation_alias="MOONSHOT_RPM_LIMIT",
+        description="Moonshot application rate limit (requests per minute)",
     )
 
     # --- Token Management ---
@@ -1139,9 +1336,10 @@ class Settings(BaseSettings):
         default="",
         validation_alias="OPENAI_API_BASE",
         description=(
-            "Custom OpenAI-compatible base URL (optional; e.g. Kimi/Moonshot). "
-            "Empty uses the default OpenAI endpoint. A custom base uses the Chat "
-            "Completions API rather than the OpenAI-only Responses API."
+            "Optional OpenAI API base override. Provider-scoped configuration "
+            "accepts only reviewed OpenAI-owned endpoints and preserves Responses "
+            "API behavior. Legacy configuration may use a compatible endpoint "
+            "and falls back to Chat Completions."
         ),
     )
     langsmith_api_key: SecretStr = Field(

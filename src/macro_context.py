@@ -253,7 +253,8 @@ async def _summarize(
 
     from src.agents.message_utils import extract_string_content
     from src.agents.runtime import invoke_with_rate_limit_handling
-    from src.llms import create_quick_thinking_llm
+    from src.llm_runtime.construction import build_required_model_for_seat
+    from src.llm_runtime.seats import SeatId
     from src.prompts import get_prompt
 
     prompt = get_prompt("macro_context_analyst")
@@ -261,9 +262,9 @@ async def _summarize(
         logger.warning("macro_context_prompt_missing")
         return "", False, None
 
-    llm = create_quick_thinking_llm(
-        temperature=0.1,
-        max_output_tokens=900,
+    llm = build_required_model_for_seat(
+        SeatId.MACRO_CONTEXT,
+        output_tokens=900,
         callbacks=_merge_macro_callbacks(callbacks),
     )
     response = await invoke_with_rate_limit_handling(

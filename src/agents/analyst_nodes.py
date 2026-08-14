@@ -1048,8 +1048,10 @@ def create_analyst_node(
                 "version": agent_prompt.version,
             }
 
-            filtered_messages = message_utils.filter_messages_for_gemini(
-                state.get("messages", []), agent_key=agent_key
+            from src.llm_runtime.messages import prepare_messages_for_model
+
+            filtered_messages = prepare_messages_for_model(
+                llm, state.get("messages", []), agent_key=agent_key
             )
             msg_types = [type(message).__name__ for message in filtered_messages]
             msg_has_tool_calls = [

@@ -29,12 +29,13 @@ _SOURCE_ARTIFACT_MAX_CHARS = 50_000
 
 
 # Maps each saved-JSON artifact field to its originating graph agent and the
-# TokenTrackingCallback display name(s) used in src/graph/components.py.
+# TokenTrackingCallback display name(s) owned by the seat registry and used in
+# src/graph/components.py.
 # A single artifact can have multiple contributing token-agents (e.g.,
 # investment_plan is synthesized from research_manager but pulls work done by
 # bull/bear researchers; risk_debate_state aggregates three risk analysts).
-# The Stage 1 AST drift test (tests/test_agent_attribution.py) verifies
-# every name listed here appears at a tracked_callbacks(...) call site.
+# The drift test in tests/test_agent_attribution.py verifies every name here is
+# reachable from a graph seat or an explicit callback call site.
 _ARTIFACT_AGENT_MAP: list[tuple[str, str, tuple[str, ...]]] = [
     ("market_report", "market_analyst", ("Market Analyst",)),
     ("sentiment_report", "sentiment_analyst", ("Sentiment Analyst",)),
@@ -230,6 +231,7 @@ def build_run_summary(
     """Build a compact summary for saved artifacts and end-of-run logs."""
     from langchain_core.messages import ToolMessage
 
+    from src.llm_runtime.bindings import resolve_binding_plan
     from src.token_tracker import get_tracker
 
     def _tool_message_failed(content: object) -> bool:
@@ -273,6 +275,7 @@ def build_run_summary(
     )
 
     tracker_stats = get_tracker().get_total_stats()
+    binding_telemetry = resolve_binding_plan(config).telemetry(config)
     messages = result.get("messages", []) or []
     tool_messages = [msg for msg in messages if isinstance(msg, ToolMessage)]
     tool_failures = manual_tool_failures + sum(
@@ -346,6 +349,7 @@ def build_run_summary(
         "quick_model": runtime_config.quick_think_llm,
         "deep_model": runtime_config.deep_think_llm,
         "provider_preflight": provider_preflight or {},
+        "llm_bindings": binding_telemetry,
         "pre_screening_result": result.get("pre_screening_result", ""),
         # `count` tallies debate *turns* (one Bull + one Bear per round → even), so
         # actual rounds = count // 2 (quick=1, full=2). `debate_turns` keeps the raw value.
@@ -522,6 +526,7 @@ def save_results_to_file(
     gate; PFIC/VIE stay risk-penalty warnings in every mode).
     """
     from src.error_safety import summarize_exception
+    from src.llm_runtime.bindings import resolve_binding_plan
     from src.memory import get_ticker_memory_stats
     from src.prompts import get_all_prompts
 
@@ -599,6 +604,10 @@ def save_results_to_file(
             ),
         },
         "token_usage": token_stats,
+        "llm_bindings": (
+            (result.get("run_summary", {}) or {}).get("llm_bindings")
+            or resolve_binding_plan(config).telemetry(config)
+        ),
         "macro_context": _normalize_macro_context_metadata(
             result,
             cache_dir=results_dir / ".macro_context_cache",
