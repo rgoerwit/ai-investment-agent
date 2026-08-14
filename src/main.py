@@ -1272,6 +1272,51 @@ def _print_capture_preflight_messages(
             console.print(f"[yellow]{message}[/yellow]")
 
 
+def _print_degradation_notice(
+    result: dict[str, Any],
+    *,
+    quiet: bool,
+    brief: bool,
+) -> None:
+    """Report optional-seat degradation on the console.
+
+    An optional artifact failing is publishable by design, which for one day also
+    made it invisible: bound to an unfunded provider, three full-mode tickers ran
+    with no cross-check at all and reported success (2026-08-14). The analytical
+    consequence points the wrong way -- several risk flags are produced by those
+    very agents, so losing them lowers the risk tally and the stock reads *safer*.
+
+    ``--quiet``/``--brief`` reduce this to one plain line but never suppress it:
+    verbosity is about noise, not about hiding a run that produced no cross-check.
+    Reads only already-persisted fields and never raises -- a diagnostic must not
+    be able to break an otherwise successful run.
+    """
+
+    run_summary = result.get("run_summary")
+    failures = (run_summary or {}).get("optional_failures") or []
+    if not isinstance(failures, list) or not failures:
+        return
+    statuses = result.get("artifact_statuses")
+    statuses = statuses if isinstance(statuses, dict) else {}
+    parts: list[str] = []
+    for name in sorted(str(field) for field in failures):
+        status = statuses.get(name)
+        kind = (status or {}).get("error_kind") if isinstance(status, dict) else None
+        parts.append(f"{name} ({kind or 'unknown'})")
+    detail = ", ".join(parts)
+    if quiet or brief:
+        print(f"DEGRADED: {detail}")
+        return
+    console.print(
+        f"[bold yellow]⚠ Degraded run[/bold yellow] — optional cross-checks "
+        f"unavailable: {detail}"
+    )
+    console.print(
+        "[yellow]  The analysis is publishable but less corroborated; "
+        "risk flags from these agents are absent.[/yellow]"
+    )
+
+
 def _print_capture_result(
     args: argparse.Namespace,
     baseline_capture: BaselineCaptureManager | None,
@@ -1612,6 +1657,9 @@ async def run_with_args(
                     return 1
 
                 _attach_run_summary(result, args, provider_preflight)
+                _print_degradation_notice(
+                    result, quiet=bool(args.quiet), brief=bool(args.brief)
+                )
                 _score_analysis_trace(result, trace_context)
                 capture_path = _finalize_baseline_capture(baseline_capture, result)
                 _print_capture_result(args, baseline_capture, capture_path)

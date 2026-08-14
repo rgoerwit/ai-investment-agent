@@ -14,9 +14,14 @@ Read-only. Two independent things it can do, run either or both:
 2. **Run-log scan** (``--run-log``) — greps a batch run's log for the specific
    patterns worth separating from real regressions: the sandbox TLS/keychain
    warning, per-host DNS resolution failures (broken out by host/operation,
-   not just a bare count), and consultant/auditor structural failures
-   (``consultant_invalid_structure``, ``agent_output_truncated``,
-   ``consultant_review_partial``).
+   not just a bare count), every classified ``failure_kind`` grouped by provider
+   and event (auth/timeout/refusal/server errors), and consultant/auditor
+   structural failures (``consultant_invalid_structure``,
+   ``agent_output_truncated``, ``consultant_review_partial``).
+
+   Point this at the log the analyses actually wrote. ``eval_rerun_longitudinal.sh``
+   writes ``<OUT_DIR>/run.log``; a file you ``tee`` the script itself into holds only
+   its own progress lines and contains no ``event=`` records at all.
 
 This intentionally stops at the deterministic/structural layer. It will not
 tell you whether a verdict flip was *justified* -- that still needs a human
@@ -357,6 +362,19 @@ _RE_CONSULTANT_PARTIAL = re.compile(
     r"event='consultant_review_partial' ticker='([^']+)'.*?"
     r"tool_failure_count=(\d+) tool_call_count=(\d+)"
 )
+# Classified-failure rollup. The three patterns above name specific *events*, which
+# is why a provider auth failure once produced "No consultant/auditor structural
+# failures detected" over a log carrying 14 of them (2026-08-14, xAI 403s). Keying
+# on ``failure_kind`` instead uses the vocabulary ``classify_failure`` already
+# guarantees for every classified failure, so auth_error / timeout /
+# provider_safety_block / server_error -- and any kind added later -- are picked up
+# without enumerating event names here.
+_RE_FAILURE_KIND = re.compile(r"event='(?P<event>\w+)'.*?failure_kind='(?P<kind>\w+)'")
+_RE_PROVIDER_ATTR = re.compile(r"provider='([^']+)'")
+# Node-level failure events carry ``host`` but no ``provider``; the sanitized
+# endpoint host is the repo's log-safe vendor identifier, so it completes the
+# attribution rather than leaving those rows as "unknown".
+_RE_HOST_ATTR = re.compile(r"host='([^']+)'")
 
 
 def scan_run_log(log_path: Path) -> str:
@@ -374,6 +392,21 @@ def scan_run_log(log_path: Path) -> str:
         host_hint = m.group("host") or "?"
         key = (op, host_hint)
         dns_by_host_op[key] = dns_by_host_op.get(key, 0) + 1
+
+    # dns_resolution is excluded: it keeps the dedicated per-host breakout above,
+    # and counting it here too would report the same lines in two sections.
+    failure_kinds: dict[tuple[str, str, str], int] = {}
+    for line in text.splitlines():
+        match = _RE_FAILURE_KIND.search(line)
+        if not match or match.group("kind") == "dns_resolution":
+            continue
+        provider_match = _RE_PROVIDER_ATTR.search(line) or _RE_HOST_ATTR.search(line)
+        key = (
+            match.group("kind"),
+            provider_match.group(1) if provider_match else "unknown",
+            match.group("event"),
+        )
+        failure_kinds[key] = failure_kinds.get(key, 0) + 1
 
     consultant_invalid = _RE_CONSULTANT_INVALID.findall(text)
     truncated = [
@@ -396,6 +429,13 @@ def scan_run_log(log_path: Path) -> str:
     else:
         out.append("- DNS resolution failures: none")
 
+    if failure_kinds:
+        out.append("- Classified LLM/tool failures, by kind (provider / event):")
+        for (kind, provider, event), count in sorted(
+            failure_kinds.items(), key=lambda kv: -kv[1]
+        ):
+            out.append(f"  - `{kind}` (`{provider}` / `{event}`): {count}")
+
     if consultant_invalid:
         out.append(
             f"- `consultant_invalid_structure` (empty/unparseable consultant output): "
@@ -409,7 +449,7 @@ def scan_run_log(log_path: Path) -> str:
         out.append("- `consultant_review_partial` (some tool calls failed mid-review):")
         for ticker, failed, total in partial:
             out.append(f"  - {ticker}: {failed}/{total} tool calls failed")
-    if not consultant_invalid and not truncated and not partial:
+    if not consultant_invalid and not truncated and not partial and not failure_kinds:
         out.append("- No consultant/auditor structural failures detected")
 
     out.append("")

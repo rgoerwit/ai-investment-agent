@@ -234,7 +234,19 @@ def check_fresh_ticker_output(
             path=record.path,
             detail="; ".join(validity_failures),
         )
-    return FreshOutputCheck("PUBLISHABLE", path=record.path)
+    # A publishable run can still be degraded -- an optional cross-check seat that
+    # failed (consultant/auditor provider error) leaves required artifacts intact.
+    # ``detect_anomalies`` already found those; returning them in ``detail`` rather
+    # than discarding them is what lets the batch print "OK (degraded)" instead of a
+    # bare "OK". Status and exit code stay PUBLISHABLE/0 on purpose: the publication
+    # contract is correct, only its reporting was silent, and a degraded-but-
+    # publishable run must not start failing batches.
+    residual = [anomaly for anomaly in anomalies if anomaly not in validity_failures]
+    return FreshOutputCheck(
+        "PUBLISHABLE",
+        path=record.path,
+        detail="; ".join(residual),
+    )
 
 
 def scan(

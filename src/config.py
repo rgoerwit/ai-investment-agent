@@ -465,6 +465,24 @@ class Settings(BaseSettings):
     moonshot_api_base: str = Field(
         default="https://api.moonshot.ai/v1", validation_alias="MOONSHOT_API_BASE"
     )
+    # xAI exposes no separate escalation model field on purpose: `bindings.py`
+    # maps ModelIntent.ESCALATION to the "critical" suffix for every non-OpenAI
+    # provider, so an XAI_LLM_ESCALATION_MODEL would never be read.
+    xai_llm_fast_model: str = Field(
+        default="grok-4.6", validation_alias="XAI_LLM_FAST_MODEL"
+    )
+    xai_llm_reasoning_model: str = Field(
+        default="grok-4.6", validation_alias="XAI_LLM_REASONING_MODEL"
+    )
+    xai_llm_critical_model: str = Field(
+        default="grok-4.6", validation_alias="XAI_LLM_CRITICAL_MODEL"
+    )
+    xai_api_key: SecretStr = Field(
+        default=SecretStr(""), validation_alias="XAI_API_KEY"
+    )
+    xai_api_base: str = Field(
+        default="https://api.x.ai/v1", validation_alias="XAI_API_BASE"
+    )
     anthropic_llm_prose_model: str = Field(
         default="claude-opus-4-6", validation_alias="ANTHROPIC_LLM_PROSE_MODEL"
     )
@@ -1138,6 +1156,12 @@ class Settings(BaseSettings):
         ge=1,
         validation_alias="MOONSHOT_RPM_LIMIT",
         description="Moonshot application rate limit (requests per minute)",
+    )
+    xai_rpm_limit: int | None = Field(
+        default=60,
+        ge=1,
+        validation_alias="XAI_RPM_LIMIT",
+        description="xAI application rate limit (requests per minute)",
     )
 
     # --- Token Management ---

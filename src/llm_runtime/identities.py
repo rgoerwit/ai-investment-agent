@@ -9,6 +9,7 @@ KNOWN_ENDPOINT_VENDORS = {
     "api.z.ai": "zai",
     "api.moonshot.cn": "moonshot",
     "api.moonshot.ai": "moonshot",
+    "api.x.ai": "xai",
 }
 
 

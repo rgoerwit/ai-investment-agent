@@ -205,6 +205,11 @@ _PROVIDER_MODEL_FIELDS = {
     ("moonshot", "reasoning"): "moonshot_llm_reasoning_model",
     ("moonshot", "critical"): "moonshot_llm_critical_model",
     ("moonshot", "escalation"): "moonshot_llm_escalation_model",
+    # No ("xai", "escalation") row: the suffix map below routes ESCALATION to
+    # "critical" for every non-OpenAI provider, so such a row would be dead.
+    ("xai", "fast"): "xai_llm_fast_model",
+    ("xai", "reasoning"): "xai_llm_reasoning_model",
+    ("xai", "critical"): "xai_llm_critical_model",
     ("anthropic", "prose"): "anthropic_llm_prose_model",
     ("deepseek", "reasoning"): "deepseek_llm_reasoning_model",
     ("zai", "reasoning"): "zai_llm_reasoning_model",

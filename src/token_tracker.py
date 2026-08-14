@@ -21,12 +21,15 @@ logger = structlog.get_logger(__name__)
 # LLM pricing per 1M tokens, standard/interactive tier (August 2026).
 # Sources: ai.google.dev/gemini-api/docs/pricing, developers.openai.com/api/docs/pricing,
 # platform.claude.com/docs/en/pricing, docs.z.ai/guides/overview/pricing,
-# api-docs.deepseek.com/quick_start/pricing, kimi.com/help/kimi-api/api-pricing.
+# api-docs.deepseek.com/quick_start/pricing, kimi.com/help/kimi-api/api-pricing,
+# docs.x.ai/developers/pricing.
 # Matched by exact key first, then longest-prefix-wins (see
 # ``_lookup_model_pricing``) — so insertion order does NOT matter and a
 # more-specific variant (mini/lite/preview) always beats its parent regardless
-# of where it appears. Gemini >200k-context rate differences are not modeled
-# (single blended rate per model). Provider-specific cached-input rates use
+# of where it appears. Gemini >200k-context and xAI >=200k-context rate
+# differences are not modeled (single blended rate per model; for xAI the higher
+# tier applies to every token in such a request, including output and cached).
+# Provider-specific cached-input rates use
 # ``cached_prompt`` when present; otherwise they use CACHED_PROMPT_MULTIPLIER
 # below.
 MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
@@ -46,6 +49,9 @@ MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     "gpt-4o-mini": {"prompt": 0.15, "completion": 0.60},
     "gpt-4o": {"prompt": 2.50, "completion": 10.00},
     # --- Gemini 3.x (paid tier) ---
+    # Rates hold through 2026-12-31 and double on 2027-01-01; cached input is
+    # 10% of prompt, which CACHED_PROMPT_MULTIPLIER already supplies.
+    "gemini-3.7-flash": {"prompt": 0.75, "completion": 3.75},
     "gemini-3.6-flash": {"prompt": 1.50, "completion": 7.50},
     "gemini-3.5-flash": {"prompt": 1.50, "completion": 9.00},
     "gemini-3.1-flash-lite": {"prompt": 0.25, "completion": 1.50},
@@ -73,6 +79,8 @@ MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     # Official K3 API rates: $3.00 cache-miss input / $0.30 cache-hit input /
     # $15.00 output per 1M tokens.
     "kimi-k3": {"prompt": 3.00, "cached_prompt": 0.30, "completion": 15.00},
+    # Below xAI's 200k-prompt threshold; see the tier note above.
+    "grok-4.6": {"prompt": 2.00, "cached_prompt": 0.50, "completion": 6.00},
 }
 
 # Sentinel for models missing from the table. Unknown spend is reported as
@@ -175,6 +183,8 @@ def _provider_for_model(model_name: str) -> str:
         return "moonshot"
     if name.startswith("glm") or "zhipu" in name:
         return "zhipu"
+    if name.startswith("grok") or "xai" in name:
+        return "xai"
     if name.startswith(("gpt", "o1", "o3", "o4")) or "openai" in name:
         return "openai"
     return "unknown"

@@ -98,9 +98,21 @@ for ticker in "${TICKERS[@]}"; do
         if VALIDITY_RESULT="$("${PYTHON_CMD[@]}" scripts/scan_batch_health.py \
                 --modified-since "$ANALYSIS_STARTED_AT" \
                 --require-publishable-ticker "$ticker" 2>> "$LOG_FILE")"; then
-            echo "OK: $ticker" | tee -a "$LOG_FILE"
+            # A publishable run can still be degraded (a failed optional
+            # cross-check seat). scan_batch_health reports that in `detail`;
+            # surfacing it here is what keeps a silent provider outage from
+            # reading as a clean batch. Status stays OK -- this is not a failure.
+            DEGRADED="$(printf '%s' "$VALIDITY_RESULT" | "${PYTHON_CMD[@]}" -c \
+                'import json,sys; print(json.load(sys.stdin).get("detail","") or "")' \
+                2>/dev/null || true)"
+            if [[ -n "$DEGRADED" ]]; then
+                echo "OK (degraded): $ticker — $DEGRADED" | tee -a "$LOG_FILE"
+                echo "| $ticker | OK (degraded) | [$ticker.md](./${ticker}.md); $DEGRADED |" >> "$SUMMARY_FILE"
+            else
+                echo "OK: $ticker" | tee -a "$LOG_FILE"
+                echo "| $ticker | OK | [$ticker.md](./${ticker}.md) |" >> "$SUMMARY_FILE"
+            fi
             echo "$VALIDITY_RESULT" >> "$LOG_FILE"
-            echo "| $ticker | OK | [$ticker.md](./${ticker}.md) |" >> "$SUMMARY_FILE"
         else
             echo "INCOMPLETE: $ticker (diagnostic output retained)" | tee -a "$LOG_FILE"
             echo "$VALIDITY_RESULT" >> "$LOG_FILE"

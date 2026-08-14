@@ -255,6 +255,26 @@ MODEL_PROFILES: tuple[ModelProfile, ...] = (
         temperature_policy=TemperaturePolicy.OMIT,
         pricing_key="kimi-k3",
     ),
+    ModelProfile(
+        # Prefix is version-specific, not the bare "grok-4" family: 4.5 documents
+        # only low|medium|high, so a family-wide row would promise ``xhigh`` on a
+        # model that rejects it. An unregistered Grok therefore fails closed at
+        # capability validation rather than inheriting 4.6's ladder.
+        #
+        # The ladder is load-bearing rather than descriptive. xAI documents that
+        # reasoning_effort defaults to "high" and that reasoning *cannot be
+        # disabled*, while `budgets.resolve_generation_budget` enables a
+        # reasoning reserve only when an effort was resolved. An empty ladder
+        # would therefore pair guaranteed deep reasoning with zero reserve --
+        # the 1088.HK Consultant starvation, as a certainty rather than a risk.
+        prefix="grok-4.6",
+        identity=ModelIdentity("xai", "grok", "openai_compatible"),
+        capabilities=_NATIVE_ANALYSIS,
+        reasoning_ladder=("low", "medium", "high", "xhigh"),
+        token_parameter=TokenParameter.MAX_COMPLETION_TOKENS,
+        temperature_policy=TemperaturePolicy.OMIT,
+        pricing_key="grok-4.6",
+    ),
 )
 
 

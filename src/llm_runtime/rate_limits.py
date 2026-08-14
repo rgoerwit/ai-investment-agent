@@ -15,6 +15,7 @@ _PROVIDER_RPM_FIELDS = {
     "deepseek": "deepseek_rpm_limit",
     "zai": "zai_rpm_limit",
     "moonshot": "moonshot_rpm_limit",
+    "xai": "xai_rpm_limit",
 }
 _FALLBACK_LIMITERS: dict[tuple[str, str | None, int], BaseRateLimiter] = {}
 _FALLBACK_LIMITERS_LOCK = Lock()

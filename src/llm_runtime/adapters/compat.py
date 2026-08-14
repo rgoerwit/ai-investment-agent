@@ -7,9 +7,16 @@ from langchain_core.language_models import BaseChatModel
 from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.budgets import resolve_generation_budget, stamp_budget_metadata
 from src.llm_runtime.profiles import resolve_sampling_temperature
-from src.llm_runtime.provider_policy import is_provider_qualified
+from src.llm_runtime.provider_policy import (
+    is_provider_qualified,
+    provider_default_headers,
+)
 from src.llm_runtime.rate_limits import limiter_for_binding
 from src.llm_runtime.seats import SeatId, SeatSpec
+
+# Providers whose effort comes from the seat's resolved intent rather than an
+# explicit per-binding override.
+_SEAT_RESOLVED_EFFORT_PROVIDERS = frozenset({"moonshot", "xai"})
 
 
 class CompatibleAdapter:
@@ -48,11 +55,17 @@ class CompatibleAdapter:
             "deepseek": (settings.deepseek_api_base, settings.deepseek_api_key),
             "zai": (settings.zai_api_base, settings.zai_api_key),
             "moonshot": (settings.moonshot_api_base, settings.moonshot_api_key),
+            "xai": (settings.xai_api_base, settings.xai_api_key),
         }[provider]
         thinking = seat_id is SeatId.APAC
+        # Review-plane providers take the seat-resolved effort; the APAC pair
+        # keeps its explicit override. xAI must be in this set: its documented
+        # default is "high" and reasoning cannot be disabled, so sending no
+        # effort would pair the deepest-but-one reasoning with the *default*
+        # reserve rather than the deep one.
         reasoning_value = (
             request.reasoning_value
-            if provider == "moonshot"
+            if provider in _SEAT_RESOLVED_EFFORT_PROVIDERS
             else request.binding.reasoning_value_override
         )
         if thinking and reasoning_value is None:
@@ -92,6 +105,9 @@ class CompatibleAdapter:
             kwargs["extra_body"] = {
                 "thinking": {"type": "enabled" if thinking else "disabled"}
             }
+        default_headers = provider_default_headers(provider)
+        if default_headers:
+            kwargs["default_headers"] = default_headers
         if reasoning_value is not None:
             kwargs["reasoning_effort"] = reasoning_value
         temperature = resolve_sampling_temperature(

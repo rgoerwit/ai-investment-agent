@@ -291,6 +291,78 @@ class TestFreshOutputCheck:
         assert check.publishable is False
 
 
+class TestDegradedButPublishable:
+    """A failed optional cross-check seat leaves required artifacts intact, so the
+    run is publishable -- and used to report as an unqualified success. The 2026-08-14
+    xAI outage ran three full-mode tickers with no cross-check at all and printed
+    'OK' each time. ``detect_anomalies`` had already found it; the result was being
+    discarded one line before use."""
+
+    def _degraded(self, results_dir: Path) -> Path:
+        artifact = _write(
+            results_dir,
+            "AGS.BR",
+            "20260814",
+            "174832",
+            publishable=True,
+            llm_failures=2,
+            consultant_verdict="ERROR",
+            optional_failures=["auditor_report", "consultant_review"],
+        )
+        os.utime(artifact, (5000, 5000))
+        return artifact
+
+    def test_optional_failures_are_reported_in_detail(self, tmp_path: Path):
+        artifact = self._degraded(tmp_path)
+
+        check = sbh.check_fresh_ticker_output(tmp_path, "AGS.BR", 3000)
+
+        assert check.status == "PUBLISHABLE"
+        assert check.path == artifact
+        assert "optional failures" in check.detail
+        assert "consultant_review" in check.detail
+        assert "auditor_report" in check.detail
+
+    def test_degradation_does_not_change_status_or_publishability(self, tmp_path: Path):
+        # The publication contract is correct as written -- only its reporting was
+        # silent. A degraded run must not start failing batches.
+        self._degraded(tmp_path)
+
+        check = sbh.check_fresh_ticker_output(tmp_path, "AGS.BR", 3000)
+
+        assert check.status == "PUBLISHABLE"
+        assert check.publishable is True
+
+    def test_clean_run_reports_no_detail(self, tmp_path: Path):
+        # The regression that matters most: if every run carried detail, the batch
+        # would print "(degraded)" for all of them and the signal would be worthless.
+        artifact = _write(tmp_path, "X.T", "20260712", "120000")
+        os.utime(artifact, (5000, 5000))
+
+        check = sbh.check_fresh_ticker_output(tmp_path, "X.T", 3000)
+
+        assert check.status == "PUBLISHABLE"
+        assert check.detail == ""
+
+    def test_incomplete_run_still_reports_only_validity_failures(self, tmp_path: Path):
+        artifact = _write(
+            tmp_path,
+            "1681.HK",
+            "20260712",
+            "120000",
+            publishable=False,
+            required_failures=["fundamentals_report"],
+            optional_failures=["consultant_review"],
+        )
+        os.utime(artifact, (5000, 5000))
+
+        check = sbh.check_fresh_ticker_output(tmp_path, "1681.HK", 3000)
+
+        assert check.status == "INCOMPLETE"
+        assert "not publishable" in check.detail
+        assert "optional failures" not in check.detail
+
+
 class TestMainArgHandling:
     def test_run_date_and_modified_since_mutually_exclusive(self):
         with pytest.raises(SystemExit):

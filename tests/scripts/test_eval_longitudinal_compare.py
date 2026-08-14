@@ -121,3 +121,92 @@ def test_absent_or_malformed_snapshot_does_not_crash(tmp_path):
             snapshot=snapshot,
         )
         assert extract_row(p).risk_total == -0.5
+
+
+# Real lines from scratch/eval_rerun_20260814_173135/run.log, the batch whose
+# review plane was 100% dead (xAI 403s) and which this scanner reported clean.
+_AUTH_LOG = (
+    "2026-08-14 event='llm_call_failed' context='External Consultant' "
+    "provider='xai' model='grok-4.6' runnable_class='_ChatModelBinding' attempt=1 "
+    "max_attempts=3 failure_kind='auth_error' host='api.x.ai' retryable=False "
+    "error_type='PermissionDeniedError'\n"
+    "2026-08-14 event='consultant_node_error' ticker='1681.HK' "
+    "operation='consultant_node_error' error_type='PermissionDeniedError' "
+    "root_cause_type='HTTPStatusError' failure_kind='auth_error' retryable=False "
+    "host='api.x.ai' message_preview=\n"
+    "2026-08-14 event='auditor_error' ticker='1681.HK' operation='auditor_error' "
+    "error_type='PermissionDeniedError' root_cause_type='HTTPStatusError' "
+    "failure_kind='auth_error' retryable=False host='api.x.ai' message_preview=\n"
+)
+
+
+class TestRunLogFailureKindScan:
+    """The scanner knew three event names, so a provider failure matched none and
+    it printed 'No consultant/auditor structural failures detected' over a log with
+    14 auth errors. Keying on ``failure_kind`` uses the vocabulary that
+    ``classify_failure`` guarantees for every classified failure."""
+
+    def _scan(self, tmp_path: Path, text: str) -> str:
+        log = tmp_path / "run.log"
+        log.write_text(text)
+        return compare.scan_run_log(log)
+
+    def test_provider_auth_failures_are_reported(self, tmp_path: Path) -> None:
+        out = self._scan(tmp_path, _AUTH_LOG)
+        assert "auth_error" in out
+        assert "llm_call_failed" in out
+
+    def test_the_false_all_clear_is_gone(self, tmp_path: Path) -> None:
+        # The specific regression: a confidently wrong answer is worse than none.
+        out = self._scan(tmp_path, _AUTH_LOG)
+        assert "No consultant/auditor structural failures detected" not in out
+
+    def test_vendor_is_attributed_from_provider_or_host(self, tmp_path: Path) -> None:
+        # llm_call_failed carries provider=; the node-level events carry only host=.
+        out = self._scan(tmp_path, _AUTH_LOG)
+        assert "xai" in out
+        assert "api.x.ai" in out
+
+    def test_clean_log_still_reports_the_all_clear(self, tmp_path: Path) -> None:
+        out = self._scan(
+            tmp_path, "2026-08-14 event='analysis_complete' ticker='X.T'\n"
+        )
+        assert "No consultant/auditor structural failures detected" in out
+
+    def test_dns_failures_are_not_double_counted(self, tmp_path: Path) -> None:
+        # dns_resolution keeps its dedicated per-host breakout; counting it in the
+        # kind rollup too would report the same line in two sections.
+        dns = (
+            "2026-08-14 event='tool_call_failed' operation='stocktwits_fetch' "
+            "failure_kind='dns_resolution' "
+            "message_preview='Cannot connect to host api.stocktwits.com'\n"
+        )
+        out = self._scan(tmp_path, dns)
+        assert "DNS resolution failures, by operation" in out
+        assert "`dns_resolution` (" not in out
+
+    def test_unrelated_kinds_are_still_surfaced(self, tmp_path: Path) -> None:
+        # Generality is the point: kinds the scanner was never taught must appear.
+        out = self._scan(
+            tmp_path,
+            "2026-08-14 event='llm_call_failed' provider='google' "
+            "failure_kind='provider_safety_block' host='generativelanguage.googleapis.com'\n",
+        )
+        assert "provider_safety_block" in out
+
+    def test_line_without_failure_kind_is_skipped_not_raised(
+        self, tmp_path: Path
+    ) -> None:
+        out = self._scan(
+            tmp_path,
+            "2026-08-14 event='llm_call_failed' provider='xai' truncated-mid-l\n",
+        )
+        assert "No consultant/auditor structural failures detected" in out
+
+    def test_legacy_event_patterns_still_report(self, tmp_path: Path) -> None:
+        out = self._scan(
+            tmp_path,
+            "2026-08-14 event='consultant_invalid_structure' ticker='7740.T'\n",
+        )
+        assert "consultant_invalid_structure" in out
+        assert "7740.T" in out

@@ -42,6 +42,31 @@ writer-only until analytical-seat qualification is recorded. An arbitrary custom
 OpenAI-compatible endpoint never inherits OpenAI or Kimi capability claims from
 its wire shape.
 
+xAI Grok 4.6 is registered for the review plane at **level 1, constructible**, and
+is the current example of the gap between the levels: its capability row is drawn
+from vendor documentation, and no live evidence exists. Capability sources are
+xAI's [model page](https://docs.x.ai/developers/grok-4-6),
+[reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning),
+[structured-output](https://docs.x.ai/developers/model-capabilities/text/structured-outputs),
+and [pricing](https://docs.x.ai/developers/pricing) contracts, verified
+2026-08-14; as with the Claude entries, those citations are **not** qualification
+evidence. Run the procedure below before describing Grok as review-qualified in
+any stronger sense.
+
+One xAI fact deserves restating because it inverts the usual failure mode:
+`reasoning_effort` defaults to `high` and **reasoning cannot be disabled**. Since
+`budgets.resolve_generation_budget` enables a reasoning reserve only when an
+effort was resolved, a Grok profile with an empty `reasoning_ladder` would pair
+guaranteed deep reasoning with zero reserve — reproducing the 1088.HK Consultant
+starvation deterministically. The registered ladder is load-bearing, and a Grok
+version without a reviewed profile (4.5, which documents no `xhigh`) is expected
+to fail closed rather than inherit 4.6's.
+
+Grok also wants a cache-affinity hint. Without an `x-grok-conv-id` header, xAI
+documents that related requests reach cache-cold servers and bill full input rate
+instead of the cached rate; `provider_policy.provider_default_headers` supplies a
+per-process token for this, and it is a cache hint only — never a correlation key.
+
 ## Live qualification procedure
 
 Use a fixed `LLM_JUDGE_PROVIDER` and model for both comparison arms. For each newly
@@ -71,6 +96,31 @@ judge:
   provider: google
   model: gemini-3.1-pro-preview
 limitations: []
+```
+
+### Recorded evidence
+
+```yaml
+provider: xai
+level: constructible          # capability row from vendor docs; no live runs yet
+verified_on: 2026-08-14
+models: [grok-4.6]
+endpoint_host: api.x.ai
+seats: [consultant, forensic_auditor, forensic_auditor_escalation,
+        article_editor, article_writer_review_fallback]
+commands:
+  - poetry run pytest tests/llm_runtime/test_xai_review_plane.py
+artifact_refs: []
+judge:
+  provider: google
+  model: gemini-3.1-pro-preview
+limitations:
+  - No live API evidence; steps 2-5 of the qualification procedure are unrun.
+  - Cost is modeled at the <200k-prompt tier only. xAI's >=200k tier doubles
+    every token in the request, including output and cached, and the flat
+    pricing table cannot express it.
+  - Verbose-output reputation is unmeasured against this repo's per-seat
+    budgets; watch consultant_review length on the first runs.
 ```
 
 ## Binding telemetry and cost

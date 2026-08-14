@@ -15,10 +15,20 @@ ProviderName = Literal[
     "deepseek",
     "zai",
     "moonshot",
+    "xai",
     "unknown",
 ]
 _PROVIDER_NAMES: frozenset[str] = frozenset(
-    {"google", "openai", "anthropic", "deepseek", "zai", "moonshot", "unknown"}
+    {
+        "google",
+        "openai",
+        "anthropic",
+        "deepseek",
+        "zai",
+        "moonshot",
+        "xai",
+        "unknown",
+    }
 )
 FailureKind = Literal[
     "dns_resolution",
@@ -244,6 +254,8 @@ def infer_provider(
         return "moonshot"
     if "glm" in haystack or "zai" in haystack or "z.ai" in haystack:
         return "zai"
+    if "grok" in haystack or "x.ai" in haystack or "xai" in haystack:
+        return "xai"
     if "gpt" in haystack or "openai" in haystack:
         return "openai"
     if "claude" in haystack or "anthropic" in haystack:
