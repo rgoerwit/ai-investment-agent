@@ -37,11 +37,13 @@ from src.runtime_config import get_runtime_config
 from src.runtime_services import get_current_provider_runtime
 from src.service_tiers import (
     flex_attempt_client_timeout,
+    flex_degraded,
     gemini_flex_active,
     is_flex_unsupported,
     is_flex_unsupported_error,
     mark_flex_unsupported,
     normalize_model_name,
+    note_flex_fallback,
     openai_flex_active,
 )
 
@@ -702,16 +704,25 @@ class _TieredChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
         if (
             self.service_tier is not None
             and "service_tier" not in kwargs
-            and not is_flex_unsupported(self.model)
+            and not self._flex_ineligible()
         ):
             kwargs["service_tier"] = self.service_tier
         return super()._prepare_request(*args, **kwargs)
+
+    def _flex_ineligible(self) -> bool:
+        """Whether this call must not request flex — capability or health.
+
+        Capability is permanent and model-scoped; health is a cool-off and
+        provider-scoped (models share a vendor's queue). One predicate so the
+        request builder and the tier resolver cannot disagree.
+        """
+        return is_flex_unsupported(self.model) or flex_degraded("google")
 
     def _effective_tier(self, kwargs: dict[str, Any]) -> str | None:
         requested_tier = kwargs.get("service_tier")
         if isinstance(requested_tier, str):
             return requested_tier
-        if self.service_tier == "flex" and is_flex_unsupported(self.model):
+        if self.service_tier == "flex" and self._flex_ineligible():
             return None
         return self.service_tier
 
@@ -732,16 +743,19 @@ class _TieredChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
                 model=self.model,
                 **summarize_exception(exc, operation="gemini_flex_capacity"),
             )
+            note_flex_fallback("google", reason="capacity", model=self.model)
             return "standard"
         if self.flex_fallback_to_standard and _is_flex_latency_timeout(exc):
-            # Queued-too-long: the flex attempt exceeded its (short, quick-mode)
-            # SDK client timeout. Re-issue at standard rather than re-queue at
-            # flex. Not cached — the queue is transient.
+            # Queued-too-long: the flex attempt exceeded its SDK client timeout.
+            # Re-issue at standard rather than re-queue at flex, and record it —
+            # past the threshold the provider stops being asked for the cool-off,
+            # so one run cannot pay this wait once per call.
             logger.warning(
                 "flex_fallback_to_standard",
                 model=self.model,
                 **summarize_exception(exc, operation="gemini_flex_latency"),
             )
+            note_flex_fallback("google", reason="latency", model=self.model)
             return "standard"
         return None
 
@@ -802,21 +816,30 @@ def _get_flex_fallback_chat_openai_cls() -> type[BaseChatModel]:
     class _FlexFallbackChatOpenAI(ChatOpenAI):
         flex_fallback_to_standard: bool = True
 
+        def _flex_ineligible(self) -> bool:
+            """Whether this call must not request flex — capability or health.
+
+            Mirror of the Gemini transport's predicate: capability is permanent
+            and model-scoped, health is a cool-off and provider-scoped.
+            """
+            return is_flex_unsupported(self.model_name) or flex_degraded("openai")
+
         def _effective_tier(self, kwargs: dict[str, Any]) -> str | None:
             requested_tier = kwargs.get("service_tier")
             if isinstance(requested_tier, str):
                 return requested_tier
-            if self.service_tier == "flex" and is_flex_unsupported(self.model_name):
+            if self.service_tier == "flex" and self._flex_ineligible():
                 return "auto"
             return self.service_tier
 
         def _payload_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
-            # A model learned to be flex-incapable must not send "flex" from
-            # the constructor field; invoke kwargs override _default_params.
+            # A model learned to be flex-incapable — or a provider learned to be
+            # congested — must not send "flex" from the constructor field; invoke
+            # kwargs override _default_params.
             if (
                 self.service_tier == "flex"
                 and "service_tier" not in kwargs
-                and is_flex_unsupported(self.model_name)
+                and self._flex_ineligible()
             ):
                 return {**kwargs, "service_tier": "auto"}
             return kwargs
@@ -836,15 +859,18 @@ def _get_flex_fallback_chat_openai_cls() -> type[BaseChatModel]:
                     model=self.model_name,
                     **summarize_exception(exc, operation="openai_flex_capacity"),
                 )
+                note_flex_fallback("openai", reason="capacity", model=self.model_name)
                 return "auto"
             if self.flex_fallback_to_standard and _is_flex_latency_timeout(exc):
                 # Queued-too-long: re-issue at standard (auto) rather than
-                # re-queue at flex. Not cached — the queue is transient.
+                # re-queue at flex, and record it — past the threshold the
+                # provider stops being asked for the cool-off.
                 logger.warning(
                     "flex_fallback_to_standard",
                     model=self.model_name,
                     **summarize_exception(exc, operation="openai_flex_latency"),
                 )
+                note_flex_fallback("openai", reason="latency", model=self.model_name)
                 return "auto"
             return None
 

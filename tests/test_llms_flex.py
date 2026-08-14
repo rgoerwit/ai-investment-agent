@@ -508,3 +508,154 @@ class TestOpenAIFlexLatencyFallback:
             pytest.raises(TimeoutError),
         ):
             await llm._agenerate([HumanMessage(content="hi")])
+
+
+class TestFlexHealthGatesTheTransports:
+    """A degraded provider must stop *requesting* flex, on both transports."""
+
+    @staticmethod
+    def _degrade(provider: str) -> None:
+        """Degrade a provider on the *real* monotonic clock.
+
+        The transports call ``flex_degraded()`` with no ``now``, so synthetic
+        timestamps would place the cool-off in the distant past and read as
+        already expired. Unit tests of the state machine itself inject both
+        sides of the clock (see tests/test_service_tiers.py).
+        """
+        import time
+
+        from src.config import Settings
+        from src.service_tiers import note_flex_fallback
+
+        cfg = Settings(_env_file=None, flex_degrade_threshold=2)
+        base = time.monotonic()
+        note_flex_fallback(provider, reason="latency", now=base, cfg=cfg)
+        note_flex_fallback(provider, reason="latency", now=base + 0.1, cfg=cfg)
+
+    def test_gemini_stops_injecting_service_tier_once_degraded(self):
+        model = llms_mod._TieredChatGoogleGenerativeAI(
+            model="gemini-3.6-flash", google_api_key="k", service_tier="flex"
+        )
+        assert model._effective_tier({}) == "flex"
+
+        self._degrade("google")
+
+        assert model._effective_tier({}) is None
+        assert model._flex_ineligible() is True
+
+    def test_openai_falls_back_to_auto_once_degraded(self):
+        cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        model = cls(model="gpt-5.4", api_key="k", service_tier="flex")
+        assert model._effective_tier({}) == "flex"
+
+        self._degrade("openai")
+
+        assert model._effective_tier({}) == "auto"
+        assert model._payload_kwargs({}) == {"service_tier": "auto"}
+
+    def test_degrading_one_provider_leaves_the_other_alone(self):
+        """The review plane must not be downgraded by base-plane congestion."""
+        gemini = llms_mod._TieredChatGoogleGenerativeAI(
+            model="gemini-3.6-flash", google_api_key="k", service_tier="flex"
+        )
+        openai_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        openai = openai_cls(model="gpt-5.4", api_key="k", service_tier="flex")
+
+        self._degrade("google")
+
+        assert gemini._effective_tier({}) is None
+        assert openai._effective_tier({}) == "flex"
+
+    def test_capability_downgrade_still_wins_and_stays_permanent(self):
+        """Health is a cool-off; capability is forever. They must not collide."""
+        from src.service_tiers import mark_flex_unsupported
+
+        model = llms_mod._TieredChatGoogleGenerativeAI(
+            model="gemini-3.6-flash", google_api_key="k", service_tier="flex"
+        )
+        mark_flex_unsupported("gemini-3.6-flash")
+
+        assert model._flex_ineligible() is True
+        # No cool-off can restore a model the vendor rejects.
+        assert model._effective_tier({}) is None
+
+    def test_latency_fallback_records_the_failure(self):
+        from src.service_tiers import flex_degradation_snapshot
+
+        model = llms_mod._TieredChatGoogleGenerativeAI(
+            model="gemini-3.6-flash", google_api_key="k", service_tier="flex"
+        )
+        exc = TimeoutError("Deadline expired before operation could complete")
+        assert llms_mod._is_flex_latency_timeout(exc) is True
+
+        for _ in range(2):
+            model._flex_retry_tier(exc, {})
+
+        assert flex_degradation_snapshot()["google"]["degraded"] is True
+
+    def test_eligibility_is_independent_of_the_fallback_setting(self):
+        """`flex_fallback_to_standard=false` is about recovery, not about asking.
+
+        A provider already known to be degraded must stop requesting flex even
+        when per-call fallback is disabled -- otherwise the operator who turned
+        fallback off pays the full queue wait on every call, forever.
+        """
+        model = llms_mod._TieredChatGoogleGenerativeAI(
+            model="gemini-3.6-flash",
+            google_api_key="k",
+            service_tier="flex",
+            flex_fallback_to_standard=False,
+        )
+        self._degrade("google")
+
+        assert model._effective_tier({}) is None
+
+
+def test_per_call_tier_resolvers_consult_both_caches():
+    """Every per-call flex gate must check capability AND health.
+
+    A hand-maintained list of call sites structurally cannot catch a seventh one
+    added later, so this scans the source. The two *construction-time* sites are
+    excluded deliberately: `_resolve_gemini_service_tier` and
+    `_apply_openai_service_tier` run once per seat at graph-build time and only
+    choose which transport class to build. They cannot observe a degradation that
+    happens mid-run, and gating them too would create a second source of truth
+    for the same question -- `_effective_tier` is consulted per call and is what
+    actually decides.
+    """
+    import ast
+    from pathlib import Path
+
+    _CONSTRUCTION_TIME_SITES = {
+        "_resolve_gemini_service_tier",
+        "_apply_openai_service_tier",
+    }
+
+    source = Path("src/llms.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    def _calls(node: ast.AST) -> set[str]:
+        return {
+            child.func.id
+            for child in ast.walk(node)
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+        }
+
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        called = _calls(node)
+        if "is_flex_unsupported" not in called:
+            continue
+        if node.name in _CONSTRUCTION_TIME_SITES:
+            continue
+        if "flex_degraded" not in called:
+            offenders.append(node.name)
+
+    assert not offenders, (
+        f"per-call flex gates consult is_flex_unsupported but not flex_degraded: "
+        f"{offenders}. Either add the health check, or -- if this is a "
+        f"construction-time site -- add it to _CONSTRUCTION_TIME_SITES with the "
+        f"reason."
+    )

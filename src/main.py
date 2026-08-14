@@ -26,7 +26,7 @@ import src.cli as cli
 import src.output as output
 import src.persistence as persistence
 from src.async_utils import run_with_hard_timeout
-from src.config import config, validate_environment_variables
+from src.config import Settings, config, validate_environment_variables
 from src.error_safety import format_error_message, summarize_exception
 from src.eval import (
     CURRENT_CAPTURE_SCHEMA_VERSION,
@@ -197,16 +197,39 @@ def _resolve_langfuse_session_id(default_session_id: str) -> str:
 
 
 def _build_analysis_trace_tags(quick_mode: bool) -> list[str]:
-    """Return stable tags for an analysis trace."""
+    """Return stable tags for an analysis trace.
+
+    Seat availability comes from the binding plan, not from ``ENABLE_CONSULTANT``
+    /``AUDITOR_MODEL``: those are retired under the multi-provider schema, so a
+    migrated ``.env`` (where both are commented out) would tag every run
+    ``consultant:on auditor:off`` regardless of what actually ran.
+    """
     runtime_config = get_runtime_config(config)
+    consultant_on = config.enable_consultant
+    auditor_on = bool(config.auditor_model)
+    quick_model = runtime_config.quick_think_llm
+    deep_model = runtime_config.deep_think_llm
+    if isinstance(config, Settings):
+        from src.llm_runtime.bindings import resolve_binding_plan
+        from src.llm_runtime.seats import SeatId
+
+        plan = resolve_binding_plan(config)
+        if plan.schema == "new":
+            consultant_on = plan.status_for(
+                SeatId.CONSULTANT, quick_mode=quick_mode
+            ).enabled
+            auditor_on = plan.status_for(SeatId.AUDITOR, quick_mode=quick_mode).enabled
+            bindings = plan.quick_bindings if quick_mode else plan.bindings
+            quick_model = bindings[SeatId.MARKET].model
+            deep_model = bindings[SeatId.RESEARCH_MANAGER].model
     return [
         "analysis",
         "quick" if quick_mode else "full",
-        f"quick-model:{runtime_config.quick_think_llm}",
-        f"deep-model:{runtime_config.deep_think_llm}",
+        f"quick-model:{quick_model}",
+        f"deep-model:{deep_model}",
         f"memory:{'on' if runtime_config.enable_memory else 'off'}",
-        f"consultant:{'on' if config.enable_consultant else 'off'}",
-        f"auditor:{'on' if bool(config.auditor_model) else 'off'}",
+        f"consultant:{'on' if consultant_on else 'off'}",
+        f"auditor:{'on' if auditor_on else 'off'}",
     ]
 
 

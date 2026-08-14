@@ -232,6 +232,7 @@ def build_run_summary(
     from langchain_core.messages import ToolMessage
 
     from src.llm_runtime.bindings import resolve_binding_plan
+    from src.service_tiers import flex_degradation_snapshot
     from src.token_tracker import get_tracker
 
     def _tool_message_failed(content: object) -> bool:
@@ -258,9 +259,14 @@ def build_run_summary(
 
     def _collect_used_providers() -> list[str]:
         providers: set[str] = set()
-        configured = str(config.llm_provider or "").strip()
-        if configured:
-            providers.add(configured)
+        # LLM_PROVIDER is a retired, metadata-only key. Seeding from it under the
+        # multi-provider schema asserts a vendor that may not have served a single
+        # call (it defaults to "google" even in an all-OpenAI configuration); the
+        # per-artifact provider stamps below are the real evidence.
+        if binding_telemetry.get("schema") != "new":
+            configured = str(config.llm_provider or "").strip()
+            if configured:
+                providers.add(configured)
         artifact_statuses = result.get("artifact_statuses", {}) or {}
         for status in artifact_statuses.values():
             provider = str((status or {}).get("provider") or "").strip()
@@ -350,6 +356,11 @@ def build_run_summary(
         "deep_model": runtime_config.deep_think_llm,
         "provider_preflight": provider_preflight or {},
         "llm_bindings": binding_telemetry,
+        # Why a run was slow and expensive. `token_usage.by_tier` already shows
+        # that calls fell back to the standard tier; this names the cause, so a
+        # 2-hour artifact explains itself without anyone reading the logs.
+        # Empty mapping on a healthy run — an absent key would be ambiguous.
+        "service_tier_downgrades": flex_degradation_snapshot(),
         "pre_screening_result": result.get("pre_screening_result", ""),
         # `count` tallies debate *turns* (one Bull + one Bear per round → even), so
         # actual rounds = count // 2 (quick=1, full=2). `debate_turns` keeps the raw value.

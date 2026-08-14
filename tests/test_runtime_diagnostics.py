@@ -1,5 +1,7 @@
 import socket
 
+import pytest
+
 from src.runtime_diagnostics import (
     FUNDAMENTALS_SYNC_FIELDS,
     OPTIONAL_PUBLISHABLE_ARTIFACTS,
@@ -454,3 +456,62 @@ class TestArtifactPolicy:
             "valuation_params",
             "value_trap_report",
         }
+
+
+class TestCancelledIsTransient:
+    """499/CANCELLED is a mid-flight abort, not a client error.
+
+    Observed 2026-08-13 on 8002.T: the Portfolio Manager's only call came back
+    `499 CANCELLED`, classified `unknown_provider_error` / non-retryable, so it
+    was never retried and the ticker lost its verdict on an otherwise clean
+    six-ticker batch. Same shape as the Cloudflare-520 incident this module
+    already documents.
+    """
+
+    _REAL_MESSAGE = (
+        "Error calling model 'gemini-3.1-pro-preview' (CANCELLED): 499 CANCELLED. "
+        "{'error': {'code': 499, 'message': 'The operation was cancelled.', "
+        "'status': 'CANCELLED'}}"
+    )
+
+    def test_real_499_payload_is_retryable(self) -> None:
+        details = classify_failure(
+            Exception(self._REAL_MESSAGE), provider="google", model_name="m"
+        )
+
+        assert details.kind == "server_error"
+        assert details.retryable is True
+
+    def test_grpc_cancelled_enum_without_a_number_is_retryable(self) -> None:
+        details = classify_failure(
+            Exception("StatusCode.CANCELLED: operation aborted upstream"),
+            provider="google",
+            model_name="m",
+        )
+
+        assert details.retryable is True
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "revenue was 499 million and the buyback was cancelled by the board",
+            "the operation was cancelled after the regulator objected",
+            "management cancelled the dividend; guidance was withdrawn",
+        ],
+    )
+    def test_equity_prose_about_cancellation_is_not_a_provider_failure(
+        self, message: str
+    ) -> None:
+        """The reason a bare "cancelled" substring must never be matched.
+
+        This system's exception text quotes financial prose, where cancelled
+        orders, contracts and dividends are ordinary vocabulary — the same trap as
+        "403" inside "executive order 14032". Matching the word alone reclassified
+        all three of these as retryable server errors.
+        """
+        details = classify_failure(
+            Exception(message), provider="google", model_name="m"
+        )
+
+        assert details.kind != "server_error"
+        assert details.retryable is False

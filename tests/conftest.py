@@ -39,6 +39,23 @@ def _reset_ibkr_session_manager():
     reset_ibkr_session_manager()
 
 
+@pytest.fixture(autouse=True)
+def _reset_flex_health():
+    """Reset the process-wide flex-health cache between tests.
+
+    Same hazard as the IBKR pool: a degradation recorded by one test silently
+    changes the tier another test's model is constructed with, and the failure
+    only appears under full-suite ordering. The sibling capability cache
+    (``_flex_unsupported_models``) has the same shape; tests that touch it reset
+    it explicitly.
+    """
+    from src.service_tiers import _reset_flex_health_for_tests
+
+    _reset_flex_health_for_tests()
+    yield
+    _reset_flex_health_for_tests()
+
+
 # Capture real API key if present (for integration tests)
 _REAL_GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 

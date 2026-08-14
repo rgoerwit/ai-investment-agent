@@ -64,13 +64,30 @@ def _is_auditor_enabled() -> bool:
     """
     Check if auditor node should be enabled.
 
-    Must match the logic in create_auditor_llm() to avoid graph/router mismatch.
-    ENABLE_CONSULTANT currently gates the shared OpenAI cross-check plane, so
-    it applies to the auditor path too even though the setting name is narrower.
-    Returns True only if:
-    - ENABLE_CONSULTANT is True
-    - OPENAI_API_KEY is available
+    Must match the seat the graph actually built, or the node is wired and never
+    dispatched to — a *silent* loss of the cross-check, since an undispatched
+    node raises nothing. Under the multi-provider schema the authority is the
+    binding plan, exactly as in ``graph/components.build_graph_components``:
+    gating on ``OPENAI_API_KEY`` there would disable the auditor for every
+    non-OpenAI review binding (observed on a Moonshot review plane, where the
+    OpenAI key is legitimately absent because the vendor key is
+    ``MOONSHOT_API_KEY``).
+
+    Legacy schema is unchanged: ENABLE_CONSULTANT gates the shared OpenAI
+    cross-check plane, so it applies to the auditor path too even though the
+    setting name is narrower, and the OpenAI key must be present.
     """
+    from src.config import Settings
+
+    # Same guard as validate_environment_variables/validate_llm_bindings: a test
+    # double is not a Settings, and the resolver reads ~30 typed fields off it.
+    if isinstance(config, Settings):
+        from src.llm_runtime.bindings import resolve_binding_plan
+        from src.llm_runtime.seats import SeatId
+
+        plan = resolve_binding_plan(config)
+        if plan.schema == "new":
+            return plan.statuses[SeatId.AUDITOR].enabled
     if not config.enable_consultant:
         return False
     return is_openai_consultant_available()

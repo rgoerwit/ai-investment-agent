@@ -1295,3 +1295,84 @@ class TestPostResearchSync:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestAuditorGateFollowsTheBindingPlan:
+    """The router and the graph builder must agree on the auditor seat.
+
+    The pre-existing guard only catches the *loud* direction — routing enabled
+    while creation returns None raises. The opposite direction is **silent**: the
+    node gets wired and simply never receives control, so the cross-check
+    disappears with no error and only `auditor_review_status='NOT_RUN'` in the
+    saved artifact to show for it. That is what happened on a migrated Moonshot
+    review plane, where OPENAI_API_KEY is legitimately absent because the vendor
+    key is MOONSHOT_API_KEY.
+    """
+
+    @staticmethod
+    def _new_schema_settings(**over):
+        from src.config import Settings
+
+        return Settings(
+            _env_file=None,
+            google_api_key="g",
+            moonshot_api_key="m",
+            finnhub_api_key="f",
+            tavily_api_key="t",
+            llm_base_provider="google",
+            llm_review_provider="moonshot",
+            **over,
+        )
+
+    def test_auditor_enabled_on_a_non_openai_review_plane(self, monkeypatch):
+        from src.graph import routing
+
+        settings = self._new_schema_settings()
+        monkeypatch.setattr(routing, "config", settings)
+        # The legacy predicate would say no: there is no OpenAI key to find.
+        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: False)
+
+        assert routing._is_auditor_enabled() is True
+        assert "Auditor" in routing.dispatch_destinations(
+            include_auditor=routing._is_auditor_enabled()
+        )
+
+    def test_auditor_disabled_when_the_seat_mode_is_off(self, monkeypatch):
+        from src.graph import routing
+
+        settings = self._new_schema_settings(llm_auditor_mode="off")
+        monkeypatch.setattr(routing, "config", settings)
+
+        assert routing._is_auditor_enabled() is False
+
+    def test_auditor_disabled_when_the_review_credential_is_missing(self, monkeypatch):
+        from src.config import Settings
+        from src.graph import routing
+
+        settings = Settings(
+            _env_file=None,
+            google_api_key="g",
+            finnhub_api_key="f",
+            tavily_api_key="t",
+            llm_base_provider="google",
+            llm_review_provider="moonshot",
+        )
+        monkeypatch.setattr(routing, "config", settings)
+
+        assert routing._is_auditor_enabled() is False
+
+    def test_legacy_schema_still_requires_the_openai_key(self, monkeypatch):
+        from src.config import Settings
+        from src.graph import routing
+
+        legacy = Settings(
+            _env_file=None,
+            google_api_key="g",
+            finnhub_api_key="f",
+            tavily_api_key="t",
+            enable_consultant=True,
+        )
+        monkeypatch.setattr(routing, "config", legacy)
+        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: False)
+
+        assert routing._is_auditor_enabled() is False

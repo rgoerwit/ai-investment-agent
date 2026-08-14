@@ -825,6 +825,43 @@ class Settings(BaseSettings):
             "calls; floors SDK timeouts and hard-timeout caps when flex is active"
         ),
     )
+    # A degraded flex pool costs time AND money: each queued call burns up to
+    # flex_llm_timeout_seconds before falling back, and the fallback is billed at
+    # the standard rate. Without a memory the run re-learns that per call (8002.T,
+    # 2026-08-14: 134 min, four fallbacks, $0.90 vs a $0.48-0.66 norm). These
+    # bound how often a run is willing to re-discover it.
+    flex_degrade_enabled: bool = Field(
+        default=True,
+        validation_alias="FLEX_DEGRADE_ENABLED",
+        description=(
+            "Stop requesting the flex tier from a provider whose pool has "
+            "repeatedly failed to serve, until the cool-off expires"
+        ),
+    )
+    flex_degrade_threshold: int = Field(
+        default=2,
+        ge=1,
+        validation_alias="FLEX_DEGRADE_THRESHOLD",
+        description=(
+            "Flex fallbacks (latency or capacity) within the window before a "
+            "provider is downgraded; 1 while on post-cool-off probation"
+        ),
+    )
+    flex_degrade_window_seconds: float = Field(
+        default=900.0,
+        gt=0,
+        validation_alias="FLEX_DEGRADE_WINDOW_SECONDS",
+        description=(
+            "Sliding-window length (s) for counting flex fallbacks; matches the "
+            "flex floor, so the threshold means 'twice in one attempt's waiting'"
+        ),
+    )
+    flex_degrade_cool_off_seconds: float = Field(
+        default=1800.0,
+        gt=0,
+        validation_alias="FLEX_DEGRADE_COOL_OFF_SECONDS",
+        description=("How long (s) to use the standard tier before probing flex again"),
+    )
 
     # --- Logging ---
     log_level: str = Field(

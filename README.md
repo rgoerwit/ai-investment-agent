@@ -80,7 +80,7 @@ graph TB
     ResearchManager -.-> APACSpecialist["APAC Regional Specialist<br/>(Regional Audit)<br/>Optional"]
     ResearchManager -.-> Consultant["External Consultant<br/>(Cross-Validation)"]
     APACSpecialist -.-> Consultant
-    Auditor -.->|Independent Forensic Report| Consultant
+    Auditor -.->|"Independent Forensic Report"| Consultant
 
     ValuationCalc --> PostSync["Post-Research Sync<br/>(Fan-In Barrier)"]
     Consultant -.-> PostSync
@@ -284,6 +284,23 @@ poetry run python -m src.main --ticker 0005.HK --no-memory --output results/0005
 # Also generate an edited, citation-checked article
 poetry run python -m src.main --ticker 0005.HK --output results/0005.HK.md --article
 ```
+
+**How long a run takes.** Measured over 19 full-mode single-ticker runs on this repo's longitudinal basket, with `GOOGLE_SERVICE_TIER=flex`:
+
+| Mode | Typical | Observed range |
+|---|---|---|
+| `--quick` | ~4 min | 2–6 min |
+| full | ~11–12 min | 5 min – **2h14m** |
+
+The spread is vendor queueing, not machine speed — the *same ticker on the same code* has taken 5 min and 12 min hours apart. If runs feel slow, check the tier before suspecting a regression; saved artifacts carry a `token_usage.by_tier` breakdown showing how many calls actually queued.
+
+**The tail is the reason to think about the tier, and it is worse than the median suggests.** One 8002.T run took **134 minutes**, of which ~121 were spent waiting on four queued flex calls that never returned (38, 27, 19 and 37 minutes each) before timing out and falling back to the standard tier. In full mode the flex floors deliberately raise the SDK client timeout to `FLEX_LLM_TIMEOUT_SECONDS` (900 s) so a legitimately-queued call is not killed — which is correct, and also means each failed flex attempt can burn up to 15 minutes before the fallback fires.
+
+Note what that does to the economics: **a degraded flex tier costs both time and money.** Those fallback calls are re-issued at the standard tier and billed at full rate, so the 50% discount evaporates precisely when the queue is worst. That run cost **$0.90** against a $0.48–0.66 norm.
+
+**A run now learns this for itself.** After `FLEX_DEGRADE_THRESHOLD` (2) flex fallbacks — latency or capacity — within `FLEX_DEGRADE_WINDOW_SECONDS` (900), that *provider* is asked for the standard tier until `FLEX_DEGRADE_COOL_OFF_SECONDS` (1800) elapses, then probed again; one failure on the probe re-degrades it. The scope is the provider, not the model, because models share a vendor's queue — in the run above two different Gemini models timed out and model-scoped memory would have re-learned the same outage twice. State is in-process, so a fresh run always re-probes. `run_summary.service_tier_downgrades` records any degradation, so a slow artifact explains itself. Set `FLEX_DEGRADE_ENABLED=false` to restore the old always-retry behavior.
+
+`GOOGLE_SERVICE_TIER=standard` removes the variance and the fallback churn entirely, at roughly +$0.24/ticker versus a *healthy* flex run. It changes no model or parameter, so it cannot affect output quality. Flex is the right default for unattended batch work where wall-clock is free; standard is the right choice when you are waiting on the result.
 
 Practical notes:
 
@@ -631,7 +648,29 @@ poetry run python -m src.web.ibkr_dashboard.worker
 
 - Check `.env` first.
 - Free-tier Gemini works, but rate limits and retries are normal.
-- If you have a paid tier, make sure the API key belongs to the right project and that your RPM settings in `.env` make sense.
+- If you have a paid tier, make sure the API key belongs to the right project and that your per-provider RPM ceilings (`GOOGLE_RPM_LIMIT`, `OPENAI_RPM_LIMIT`, `ANTHROPIC_RPM_LIMIT`, `DEEPSEEK_RPM_LIMIT`, `ZAI_RPM_LIMIT`, `MOONSHOT_RPM_LIMIT`) match the account's real quota. Each provider gets an independent bucket, so raising one does not affect the others.
+
+**LLM binding configuration errors at startup**
+
+Binding problems fail before any model is built, listing every problem at once rather than one per run. The message names the seat and the setting; the common ones:
+
+| Message | Cause and fix |
+|---|---|
+| `new and legacy LLM keys are mixed: …` | Both schemas are populated. Pick one — generate a candidate with `scripts/llm_env_migrate.py` and comment out the legacy keys it lists. |
+| `provider 'X' is not application-qualified for binding group 'Y'` | The provider's transport works, but this repo has no evidence for it in that role. See the qualification levels in [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md). |
+| `<seat>: model 'X' belongs to 'Y', not 'Z'` | A model name from one vendor under another vendor's group — often a stale `LLM_SEAT_MODEL_OVERRIDES` pin left behind after flipping a provider, or a `--quick-model`/`--deep-model` flag naming a model outside `LLM_BASE_PROVIDER`. |
+| `model 'X' has no reviewed capability profile` | The model family is not in `src/llm_runtime/profiles.py`. Unknown models fail closed by design; add a reviewed profile rather than looking for a bypass flag. |
+| `<seat>: missing credential for provider 'X'` | The group is bound to a provider whose key is unset. A seat at `auto` degrades with a log line instead; only `required` fails startup. |
+| `<seat>: endpoint host 'H' belongs to 'Y', not 'Z'` | A `*_API_BASE` points at a different vendor than its group. Note `OPENAI_API_BASE` accepts only an OpenAI-owned host — compatible vendors use their own key (`MOONSHOT_API_BASE`, …). |
+| `… independence waiver reason is required …` | `LLM_REQUIRE_*_INDEPENDENCE=false` needs a non-empty `LLM_*_INDEPENDENCE_WAIVER_REASON`. Turning enforcement off is a recorded decision, not a silent toggle. |
+| `<seat> binding must differ from base in vendor and model lineage` | Base and review collapsed onto one vendor, defeating the cross-check. Rebind one, or waive it explicitly as above. |
+
+To see what a configuration actually resolves to without running an analysis, read the binding telemetry from any saved artifact:
+
+```bash
+jq -r '.run_summary.llm_bindings.seats | to_entries[] | select(.value.enabled)
+       | "\(.key)\t\(.value.vendor)/\(.value.model)"' results/<TICKER>_<STAMP>_analysis.json
+```
 
 **`portfolio_manager.py` or analysis index rebuild is unexpectedly slow on macOS**
 

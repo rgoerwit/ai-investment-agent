@@ -399,11 +399,31 @@ def classify_failure(
     elif "provider_partial_response" in combined:
         kind = "provider_partial_response"
         retryable = True
-    elif statuses & {"500", "502", "503", "504", "520", "521", "522", "523", "524"} or (
-        # "internalservererror" catches the OpenAI SDK class name (raised for
-        # any >=500, including Cloudflare 52x bodies that name no 50x code the
-        # status match would find); 520-524 are Cloudflare origin errors.
-        "internal server error" in combined or "internalservererror" in combined
+    elif (
+        statuses
+        & {"499", "500", "502", "503", "504", "520", "521", "522", "523", "524"}
+        or (
+            # "internalservererror" catches the OpenAI SDK class name (raised for
+            # any >=500, including Cloudflare 52x bodies that name no 50x code the
+            # status match would find); 520-524 are Cloudflare origin errors.
+            "internal server error" in combined or "internalservererror" in combined
+        )
+        # 499/CANCELLED is a 4xx by number but a mid-flight abort in substance —
+        # the upstream dropped the operation, so it is transient and retryable,
+        # exactly like the 52x family folded in above. It landed in
+        # `unknown_provider_error` (non-retryable) until Aug 2026, which cost the
+        # 8002.T Portfolio Manager its only attempt and the whole ticker its
+        # verdict on an otherwise clean run. Our *own* cancellation surfaces as
+        # `TimeoutError` from `run_with_hard_timeout`, not as a 499 response body,
+        # so this cannot mask a self-inflicted timeout.
+        #
+        # The numeric 499 above carries this on its own, via the same introducer
+        # discipline as every other status. A bare "cancelled" substring must NOT
+        # be added: this system's exception text quotes financial prose, where
+        # cancelled orders/contracts/dividends are ordinary vocabulary — the same
+        # trap as "403" inside "executive order 14032". Only the gRPC enum, which
+        # cannot occur in prose, is matched as a token.
+        or "statuscode.cancelled" in combined
     ):
         kind = "server_error"
         retryable = True

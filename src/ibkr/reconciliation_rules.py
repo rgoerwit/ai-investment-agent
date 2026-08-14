@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from typing import TYPE_CHECKING, Literal
 import structlog
 
 from src.exchange_metadata import IBKR_TO_YFINANCE
-from src.fx_normalization import get_fx_rate_cache
+from src.fx_normalization import get_fx_rate_cache, get_fx_rate_fallback
 from src.ibkr.models import ActionBasis, AnalysisRecord, NormalizedPosition
 from src.ibkr.portfolio_defaults import (
     DEFAULT_DRIFT_PCT,
@@ -31,14 +32,28 @@ def _fx_rate_for_currency(currency: str) -> float | None:
     Serves a cache hit (already resolved elsewhere this run, e.g. during
     position normalization) with no I/O; a cache miss pays one live-first
     lookup and warms the cache for every later call in the same process.
+
+    A cache miss *inside a running event loop* degrades to the static table
+    instead. ``resolve_rates_sync`` is ``asyncio.run`` and raises there by its
+    own documented contract, and this sync helper is reached from
+    ``recommendation_service.build_bundle``, which the CLI drives under
+    ``asyncio.run``. The miss is normally impossible because
+    ``normalize_positions`` batch-warms every held currency first — but a
+    ``--read-only`` run has no positions to normalize, so an opportunity in an
+    unseen currency arrives cold and used to abort the whole report.
     """
     cache = get_fx_rate_cache()
     cached = cache.peek_cached_rate(currency)
     if cached is not None:
         return cached[0]
-    resolved = cache.resolve_rates_sync([currency])
-    rate_info = resolved.get(currency.strip().upper())
-    return rate_info[0] if rate_info else None
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        resolved = cache.resolve_rates_sync([currency])
+        rate_info = resolved.get(currency.strip().upper())
+        return rate_info[0] if rate_info else None
+    logger.debug("fx_static_fallback_inside_event_loop", currency=currency)
+    return get_fx_rate_fallback(currency)
 
 
 def _resolve_fx(analysis: AnalysisRecord) -> float | None:

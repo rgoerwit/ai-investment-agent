@@ -580,3 +580,29 @@ def test_patch_saved_run_summary_missing_file_fails_open(tmp_path):
 
     logger.warning.assert_called_once()
     assert logger.warning.call_args.args[0] == "saved_sections_patch_failed"
+
+
+def test_service_tier_downgrades_are_recorded(monkeypatch):
+    """A slow, expensive run must explain itself from the artifact alone.
+
+    `token_usage.by_tier` already shows that calls ran at the standard tier; this
+    names the cause. Empty mapping on a healthy run rather than an absent key,
+    so a consumer can tell "no degradation" from "old artifact".
+    """
+    import time
+
+    from src.config import Settings
+    from src.service_tiers import note_flex_fallback
+
+    clean = _min_summary(monkeypatch, {})
+    assert clean["service_tier_downgrades"] == {}
+
+    cfg = Settings(_env_file=None, flex_degrade_threshold=2)
+    base = time.monotonic()
+    note_flex_fallback("google", reason="latency", now=base, cfg=cfg)
+    note_flex_fallback("google", reason="latency", now=base + 0.1, cfg=cfg)
+
+    degraded = _min_summary(monkeypatch, {})
+    entry = degraded["service_tier_downgrades"]["google"]
+    assert entry["episodes"] == 1
+    assert entry["degraded"] is True
