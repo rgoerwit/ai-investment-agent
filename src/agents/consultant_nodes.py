@@ -50,8 +50,10 @@ from .state import AgentState
 
 logger = structlog.get_logger(__name__)
 
-CONSULTANT_CALL_TIMEOUT_SECONDS = 90.0
-CONSULTANT_TOTAL_TIMEOUT_SECONDS = 240.0
+# Seeded from config so the full-mode budgets sit beside their quick-mode
+# sibling; kept as module constants because that is the seam tests patch.
+CONSULTANT_CALL_TIMEOUT_SECONDS = settings_config.consultant_call_timeout_seconds
+CONSULTANT_TOTAL_TIMEOUT_SECONDS = settings_config.consultant_total_timeout_seconds
 # A completed review with a minority of failed verification calls is degraded,
 # not worthless: above this failed/executed ratio the review is excluded from
 # PM inputs (previous all-or-nothing behavior); at or below it the review
@@ -296,8 +298,13 @@ def create_consultant_node(
     """
     Create external consultant node for cross-validation.
     """
-    max_tool_iterations = 1 if quick_mode else 3
-    max_tool_calls_per_turn = 2 if quick_mode else 4
+    # Deadline/total are per-invocation, so build the shape here and stamp the
+    # runtime budget in at call time (see ConsultantToolLoopPolicy.from_settings).
+    loop_shape = ConsultantToolLoopPolicy.from_settings(
+        quick_mode=quick_mode, deadline=0.0, total_timeout=0.0
+    )
+    max_tool_iterations = loop_shape.max_tool_iterations
+    max_tool_calls_per_turn = loop_shape.max_tool_calls_per_turn
     tools_enabled = bool(tools) and (
         not quick_mode or settings_config.consultant_tools_in_quick
     )

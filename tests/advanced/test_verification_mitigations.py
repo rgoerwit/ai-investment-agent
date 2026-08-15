@@ -667,17 +667,9 @@ class TestConsultantToolLoop:
         final_response.tool_calls = []
 
         mock_llm = AsyncMock()
-        # MAX_TOOL_ITERATIONS=3: iterations 0,1,2 return tool calls, iteration 3 hits
-        # the max and extracts content from that response
-        mock_llm.ainvoke = AsyncMock(
-            side_effect=[
-                tool_response,
-                tool_response,
-                tool_response,
-                tool_response,
-                final_response,
-            ]
-        )
+        # A model that never stops asking for tools: every call returns tool
+        # calls, so only the loop's own ceiling can end it.
+        mock_llm.ainvoke = AsyncMock(side_effect=[tool_response] * 8 + [final_response])
         mock_llm.bind_tools = MagicMock(return_value=mock_llm)
 
         mock_tool = AsyncMock()
@@ -703,7 +695,11 @@ class TestConsultantToolLoop:
 
         result = await node(state, MagicMock())
         assert "consultant_review" in result
-        # MAX_TOOL_ITERATIONS=3: iterations 0, 1, 2 each produce tool calls,
-        # iteration 3 == MAX extracts content from that response.
-        # Total LLM calls: 4
-        assert mock_llm.ainvoke.call_count == 4
+        # Iterations 0..N-1 each produce tool calls; iteration N == the ceiling
+        # extracts content from that response. Total LLM calls: N + 1. Derived
+        # from config so reshaping the loop budget cannot silently widen the
+        # ceiling this test exists to pin.
+        from src.config import config
+
+        expected_calls = config.consultant_max_tool_iterations + 1
+        assert mock_llm.ainvoke.call_count == expected_calls

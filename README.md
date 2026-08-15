@@ -415,6 +415,18 @@ FMP_API_KEY=...
 
 Keep secrets in `.env`, not in the JSON registry. `scripts/mcp_smoke.py` verifies that the MCP path works without putting an LLM in the loop. See [docs/MCP.md](docs/MCP.md) for setup and smoke-testing details.
 
+#### Turning a service off — comment the key, or disable the server
+
+A credential for a service you do not want called should be **commented out in `.env`**, not left dangling. A key that is present is a key that gets used: the service is contacted on every run, and if it cannot serve your tickers you pay the latency and the failed-call accounting for nothing.
+
+For MCP specifically, know which switch you are throwing:
+
+- **Commenting out the key** of a server that is still `"enabled": true` fails the **entire MCP runtime** at startup (`mcp_runtime_init_failed`), not just that one server. The consultant's MCP wrappers are then never exposed — `_mcp_wrapper_available` returns false — so no calls are attempted and nothing is counted as a failed verification. Effective, all-or-nothing, and it logs a warning every run.
+- **Setting `"enabled": false`** in `config/mcp_servers.json` is the per-server switch, and the right one when another server is (or may later be) enabled — a disabled server skips credential resolution entirely, so one retired key cannot take the others down with it.
+- **`MCP_ENABLED=false`** is the only fully silent off switch. `load_registry(..., required=True)` rejects a registry with *no* enabled servers, so disabling your last one trades the missing-key warning for a no-enabled-servers warning. Turn the feature off at the flag instead.
+
+Coverage is a separate question from availability. FMP's MCP surface answers for US listings and is thin for ex-US ones; a live, correctly-authenticated call can still come back with no data. The consultant reports that as `COVERAGE_GAP` and does not downgrade the stock for it — but each miss still counts toward `CONSULTANT_PARTIAL_TOOL_FAILURE_RATIO` (0.5), past which the **whole review is discarded** and the Portfolio Manager loses the cross-check. On an ex-US-only universe, a spot-check vendor with no ex-US coverage is worth disabling rather than tolerating.
+
 ### Langfuse Tracing
 
 Langfuse is opt-in tracing for runs where you want observability beyond local logs.

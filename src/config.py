@@ -638,6 +638,45 @@ class Settings(BaseSettings):
         validation_alias="CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS",
         description="Total wall-clock Consultant budget in --quick mode",
     )
+    # Full-mode siblings of the quick budget above. Measured 2026-08-14: the
+    # slowest single Consultant call was 87s (grok-4.6) and 77s (kimi-k3)
+    # against a 90s per-call cap, and 3 calls at ~85s already exceed a 240s
+    # total before any tool time. Both are ceilings, not waits — unused
+    # headroom costs nothing, while a cap crossed mid-loop discards the review.
+    consultant_call_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0.0,
+        validation_alias="CONSULTANT_CALL_TIMEOUT_SECONDS",
+        description="Wall-clock cap for a single Consultant LLM call in full mode",
+    )
+    consultant_total_timeout_seconds: float = Field(
+        default=300.0,
+        gt=0.0,
+        validation_alias="CONSULTANT_TOTAL_TIMEOUT_SECONDS",
+        description="Total wall-clock Consultant budget in full mode",
+    )
+    # Loop shape. The Consultant prompt mandates plan-then-batch, so the whole
+    # verification set lands in one round: 2 rounds leaves a follow-up plus
+    # synthesis (3 LLM calls), where the old 4-per-turn x 3-iteration shape was
+    # sized for a sequential prober and cost 4. The executed-tool ceiling is
+    # unchanged at 12.
+    consultant_max_tool_iterations: int = Field(
+        default=2,
+        ge=1,
+        le=4,
+        validation_alias="CONSULTANT_MAX_TOOL_ITERATIONS",
+        description="Consultant tool rounds in full mode (quick mode is always 1)",
+    )
+    consultant_max_tool_calls_per_turn: int = Field(
+        default=6,
+        ge=1,
+        validation_alias="CONSULTANT_MAX_TOOL_CALLS_PER_TURN",
+        description=(
+            "Fan-out bound for one Consultant turn. Unlike the Auditor, the "
+            "Consultant has no per-tool budget, so this cap is its only guard "
+            "against a runaway plan — raise it, do not remove it."
+        ),
+    )
     consultant_quick_max_completion_tokens: int = Field(
         default=4096,
         ge=1024,
@@ -982,7 +1021,7 @@ class Settings(BaseSettings):
     # baseline capture was rejected. Kept distinct from the APEX knob so tuning
     # one cannot silently starve the other.
     # Scope note: in practice this governs the **Auditor**. The Consultant passes
-    # its own `overall_timeout_seconds` = min(CONSULTANT_CALL_TIMEOUT_SECONDS=90,
+    # its own `overall_timeout_seconds` = min(CONSULTANT_CALL_TIMEOUT_SECONDS,
     # remaining-of-CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS), which overrides this
     # cap — so raising this alone does not lengthen a Consultant call. Tune the
     # consultant via those two knobs instead.
