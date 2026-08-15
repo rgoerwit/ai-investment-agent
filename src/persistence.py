@@ -327,6 +327,21 @@ def build_run_summary(
     # content — the same parser the PM uses to raise CONSULTANT_* flags — so the
     # memo/source-confidence renderers can branch on a single ready value.
     consultant_verdict = _derive_consultant_verdict(consultant_status)
+    # A review whose verification tool calls partly failed is usable but not whole,
+    # and it reported as COMPLETED to every operator-facing surface (7740.T,
+    # 2026-08-14: 1 of 4 calls failed, PM was told via the in-text tag, the human
+    # was not). Reuse the auditor's existing LIMITED vocabulary rather than minting
+    # a parallel token -- both mean "ran, usable, less than full verification".
+    # Read from the machine-written marker, never recomputed, so the status cannot
+    # disagree with the review the PM actually received.
+    # Local import: this module keeps the heavy agent/LLM stack off the CLI's
+    # import path, the same reason `parse_consultant_conditions` and
+    # `parse_auditor_status` are imported inside their call sites.
+    from src.agents.consultant_nodes import CONSULTANT_PARTIAL_REVIEW_MARKER
+
+    consultant_partial = CONSULTANT_PARTIAL_REVIEW_MARKER in (
+        consultant_status.get("content") or ""
+    )
     consultant_review_status = (
         "NOT_RUN"
         if consultant_verdict == "NOT_RUN"
@@ -336,6 +351,8 @@ def build_run_summary(
         if consultant_verdict == "ERROR"
         else "UNPARSED"
         if consultant_verdict == "UNPARSED"
+        else "LIMITED"
+        if consultant_partial
         else "COMPLETED"
     )
     auditor_review_status = (

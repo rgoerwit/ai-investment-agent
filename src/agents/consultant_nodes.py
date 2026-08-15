@@ -58,6 +58,11 @@ CONSULTANT_TOTAL_TIMEOUT_SECONDS = 240.0
 # reaches the PM tagged PARTIAL. The 3393.T 2026-07-03 run lost the entire
 # +2.0 confirmed-risk counterweight to a single 1-of-4 tool failure.
 CONSULTANT_PARTIAL_TOOL_FAILURE_RATIO = 0.5
+# Machine-written marker opening a partially-verified review. Shared with
+# `persistence.py` so the writer and the reader cannot drift, mirroring
+# `DNI_REVIEW_CANDIDATE_MARKER`: the run summary reports the state that *actually
+# occurred* rather than recomputing a predicate that could disagree with the text.
+CONSULTANT_PARTIAL_REVIEW_MARKER = "[PARTIAL REVIEW:"
 # Cap for the aggregator-metrics snapshot injected into the auditor's first
 # message (the loop's ToolMessage truncation cap is far larger at 63.5k).
 _AUDITOR_SNAPSHOT_MAX_CHARS = 8_000
@@ -587,7 +592,8 @@ Provide your independent consultant review."""
                         else ""
                     )
                     partial_content = (
-                        f"[PARTIAL REVIEW: {tool_failure_count} of {executed} "
+                        f"{CONSULTANT_PARTIAL_REVIEW_MARKER} {tool_failure_count} "
+                        f"of {executed} "
                         f"verification tool calls failed{failed_tools_note}. "
                         "Claims depending on the failed verification remain "
                         "unverified — weight accordingly.]\n\n" + content_str

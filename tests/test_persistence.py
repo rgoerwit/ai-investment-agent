@@ -606,3 +606,103 @@ def test_service_tier_downgrades_are_recorded(monkeypatch):
     entry = degraded["service_tier_downgrades"]["google"]
     assert entry["episodes"] == 1
     assert entry["degraded"] is True
+
+
+class TestConsultantPartialVerificationStatus:
+    """A review whose verification tool calls partly failed is usable but not
+    whole. Before this, it reported COMPLETED to every operator-facing surface
+    (7740.T, 2026-08-14: 1 of 4 calls failed; only the PM was told, via the
+    in-text tag). It reuses the auditor's LIMITED vocabulary rather than minting
+    a parallel token."""
+
+    # Verbatim shape of a real approved review (7740.T, 2026-08-14) -- the verdict
+    # must actually parse, or the chain returns UNPARSED before reaching LIMITED.
+    VERDICT_BLOCK = (
+        "### FINAL CONSULTANT VERDICT\n\n"
+        "**Overall Assessment**: APPROVED\n\n"
+        "**MANDATE_BREACH**: NONE\n"
+        "**HARD_STOP**: NONE\n"
+    )
+
+    @staticmethod
+    def _summary(consultant_content: str, **overrides):
+        from src.persistence import build_run_summary
+
+        result = {
+            "artifact_statuses": {
+                "consultant_review": {
+                    "complete": True,
+                    "ok": True,
+                    "content": consultant_content,
+                    **overrides,
+                },
+            },
+            "messages": [],
+        }
+        return build_run_summary(result, quick_mode=False, article_requested=False)
+
+    def test_partial_marker_yields_limited(self, monkeypatch):
+        from src.agents.consultant_nodes import CONSULTANT_PARTIAL_REVIEW_MARKER
+
+        summary = self._summary(
+            f"{CONSULTANT_PARTIAL_REVIEW_MARKER} 1 of 4 verification tool calls "
+            "failed (spot_check_metric_mcp_fmp). Claims depending on the failed "
+            "verification remain unverified.]\n\n" + self.VERDICT_BLOCK
+        )
+
+        assert summary["consultant_review_status"] == "LIMITED"
+
+    def test_partial_review_remains_usable_and_successful(self):
+        from src.agents.consultant_nodes import CONSULTANT_PARTIAL_REVIEW_MARKER
+
+        summary = self._summary(
+            f"{CONSULTANT_PARTIAL_REVIEW_MARKER} 1 of 4 calls failed]\n\n"
+            + self.VERDICT_BLOCK
+        )
+
+        # Anything stronger would resurrect the 3393.T regression, where one tool
+        # failure discarded the entire +2.0 confirmed-risk counterweight.
+        assert summary["consultant_successful"] is True
+
+    def test_full_review_still_reports_completed(self):
+        summary = self._summary(self.VERDICT_BLOCK)
+
+        assert summary["consultant_review_status"] == "COMPLETED"
+
+    def test_failed_review_still_reports_failed(self):
+        summary = self._summary("", ok=False)
+
+        assert summary["consultant_review_status"] == "FAILED"
+
+    def test_marker_in_a_failed_review_does_not_upgrade_it(self):
+        from src.agents.consultant_nodes import CONSULTANT_PARTIAL_REVIEW_MARKER
+
+        # ERROR is strictly worse than LIMITED; the chain must order them so a
+        # partial marker on a broken artifact cannot mask the breakage.
+        summary = self._summary(f"{CONSULTANT_PARTIAL_REVIEW_MARKER} 1 of 4]", ok=False)
+
+        assert summary["consultant_review_status"] == "FAILED"
+
+    def test_absent_content_is_safe(self):
+        from src.persistence import build_run_summary
+
+        result = {
+            "artifact_statuses": {
+                "consultant_review": {"complete": True, "ok": True, "content": None}
+            },
+            "messages": [],
+        }
+
+        summary = build_run_summary(result, quick_mode=False, article_requested=False)
+
+        assert summary["consultant_review_status"] != "LIMITED"
+
+    def test_marker_constant_is_what_the_node_actually_writes(self):
+        # Guards the writer/reader pair: if the node's f-string drifts, the status
+        # silently stops firing and nothing else would catch it.
+        import inspect
+
+        from src.agents import consultant_nodes
+
+        source = inspect.getsource(consultant_nodes)
+        assert "CONSULTANT_PARTIAL_REVIEW_MARKER} " in source
