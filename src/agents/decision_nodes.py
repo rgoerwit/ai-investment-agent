@@ -57,6 +57,7 @@ from src.runtime_diagnostics import (
 from . import message_utils, support
 from . import runtime as agent_runtime
 from .evidence_constraints import downstream_evidence_constraints
+from .fundamentals_reconciler import stamp_trade_block_price_currency
 from .governance_prompt import governance_block, governance_card
 from .output_limits import cap_state_value
 from .output_validation import (
@@ -641,6 +642,13 @@ RESEARCH MANAGER PLAN:
                 model_name=support.get_model_name(llm),
             )
             content_str = message_utils.extract_string_content(response.content)
+            # ENTRY/STOP/TARGET_* inherit the DATA_BLOCK's denomination. Stamp it
+            # from there rather than trusting the Trader's copy: a transcription
+            # error would otherwise become the unit of record for every level
+            # the reconciler later compares against a live price.
+            content_str = stamp_trade_block_price_currency(
+                content_str, fundamentals_report
+            )
             if re.search(r"(?im)^\s*ACTION:\s*DO_NOT_INITIATE\b", content_str):
                 content_str = re.sub(
                     r"(?im)^\s*STOP:\s*[^\n]*$",

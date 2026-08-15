@@ -12,7 +12,11 @@ from typing import TYPE_CHECKING, Literal
 import structlog
 
 from src.exchange_metadata import IBKR_TO_YFINANCE
-from src.fx_normalization import get_fx_rate_cache, get_fx_rate_fallback
+from src.fx_normalization import (
+    get_fx_rate_cache,
+    get_fx_rate_fallback,
+    normalize_minor_unit_currency,
+)
 from src.ibkr.models import ActionBasis, AnalysisRecord, NormalizedPosition
 from src.ibkr.portfolio_defaults import (
     DEFAULT_DRIFT_PCT,
@@ -332,16 +336,66 @@ def check_staleness(
     return False, ""
 
 
+def _to_major_units(price: float | None, currency: str | None) -> float | None:
+    """Scale a price to its major currency unit using its own code.
+
+    The code decides the scale, so a value already in major units scales by 1.0
+    and a second conversion is a no-op rather than a 100x error. This is what
+    replaces venue-conditional arithmetic (``if suffix == ".L": price *= 100``),
+    which was right only when the fetcher happened to decline a conversion.
+    """
+    if price is None:
+        return None
+    _, scale = normalize_minor_unit_currency(currency)
+    return price * scale
+
+
+def _comparable_prices(
+    analysis: AnalysisRecord,
+    current_price_local: float,
+    position_currency: str | None,
+) -> tuple[float | None, float]:
+    """Return (analysis_scale_factor, position price) in a common denomination.
+
+    Both sides are pulled to major units, but **only when the two codes name the
+    same economy**. Converting one side of a mismatched pair (a GBX position
+    against a JPY-labelled analysis) manufactures a 100x ratio out of data that
+    was merely unrelated, so an economy disagreement returns the prices
+    untouched and leaves the existing suspicious-ratio guard to catch it.
+    Unknown currency on either side is likewise left alone — that is the legacy
+    shape, and guessing at it is what this change exists to stop.
+    """
+    if not analysis.currency or not position_currency:
+        return None, current_price_local
+    analysis_major, analysis_scale = normalize_minor_unit_currency(analysis.currency)
+    position_major, _ = normalize_minor_unit_currency(position_currency)
+    if (analysis_major or "").upper() != (position_major or "").upper():
+        return None, current_price_local
+    return (
+        analysis_scale,
+        _to_major_units(current_price_local, position_currency) or current_price_local,
+    )
+
+
 def check_review_level_breach(
     analysis: AnalysisRecord,
     current_price_local: float,
+    position_currency: str | None = None,
 ) -> bool:
     """Check whether price crossed the legacy downside review level.
 
     This is a refresh/urgency signal only. It never grants sell authority.
     ``stop_price`` remains the persisted field name for old TRADE_BLOCK data.
+
+    ``position_currency`` lets the comparison convert by currency code instead
+    of assuming both sides share a denomination. Omitted => legacy behaviour.
     """
+    analysis_scale, current_price_local = _comparable_prices(
+        analysis, current_price_local, position_currency
+    )
     stop = analysis.stop_price
+    if stop is not None and analysis_scale is not None:
+        stop = stop * analysis_scale
     if stop and current_price_local > 0:
         ratio = stop / current_price_local
         if ratio > 50 or ratio < 0.02:
@@ -368,9 +422,20 @@ check_stop_breach = check_review_level_breach
 def check_base_case_reference_reached(
     analysis: AnalysisRecord,
     current_price_local: float,
+    position_currency: str | None = None,
 ) -> bool:
-    """Check whether price reached the legacy base-case valuation reference."""
+    """Check whether price reached the legacy base-case valuation reference.
+
+    ``position_currency`` lets the comparison convert by currency code. Without
+    it, a GBp-denominated position price compared against a GBP reference reads
+    as an ~85x overshoot — the GAMA.L false "reference reached" review.
+    """
+    analysis_scale, current_price_local = _comparable_prices(
+        analysis, current_price_local, position_currency
+    )
     target = analysis.target_1_price
+    if target is not None and analysis_scale is not None:
+        target = target * analysis_scale
     if target and current_price_local > 0:
         return current_price_local >= target
     return False

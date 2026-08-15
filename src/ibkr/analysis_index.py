@@ -22,7 +22,7 @@ import structlog
 from src.currency_resolver import resolve_local_trading_currency
 from src.data_block_utils import extract_kill_criteria
 from src.error_safety import summarize_exception
-from src.fx_normalization import get_fx_rate_fallback
+from src.fx_normalization import canonical_currency_code, get_fx_rate_fallback
 from src.ibkr.models import AnalysisRecord, PortfolioEvidence, TradeBlockData
 from src.ibkr.order_builder import parse_trade_block
 from src.ibkr.reconciliation_rules import _exchange_from_ticker, _normalize_verdict
@@ -620,7 +620,10 @@ def _repair_legacy_snapshot_currency(
     snapshot: dict[str, Any], *, ticker: str, file_name: str
 ) -> dict[str, Any]:
     """Repair legacy snapshots that were incorrectly persisted as USD."""
-    actual_currency = (snapshot.get("currency") or "USD").upper()
+    # canonical_currency_code, not .upper(): a stored "GBp" must survive load.
+    # Plain upper() here relabelled pence as pounds a third time, after the
+    # resolver and its callers had already been fixed.
+    actual_currency = canonical_currency_code(snapshot.get("currency")) or "USD"
     fx_rate_to_usd = snapshot.get("fx_rate_to_usd")
     currency_source = snapshot.get("currency_source")
     currency_repaired = False

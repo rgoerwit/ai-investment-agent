@@ -38,7 +38,24 @@ if [[ -n "$TICKER_FILE" ]]; then
         echo "Ticker file not found: $TICKER_FILE" >&2
         exit 1
     fi
-    mapfile -t TICKERS < <(grep -v '^[[:space:]]*#' "$TICKER_FILE" | grep -v '^[[:space:]]*$')
+    # Read with a while-loop, not `mapfile`: this script's shebang is
+    # /bin/bash, which on macOS is bash 3.2 where mapfile does not exist. Under
+    # `set -e` that aborted the whole run the moment a ticker file was passed,
+    # so the documented option had never actually worked here.
+    # Trim surrounding whitespace in the pipeline: a stray trailing space would
+    # otherwise reach --ticker verbatim and fail the analysis.
+    TICKERS=()
+    while IFS= read -r ticker_line; do
+        [[ -n "$ticker_line" ]] && TICKERS+=("$ticker_line")
+    done < <(
+        grep -v '^[[:space:]]*#' "$TICKER_FILE" |
+            sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' |
+            grep -v '^$'
+    )
+    if [[ ${#TICKERS[@]} -eq 0 ]]; then
+        echo "No tickers found in $TICKER_FILE (all lines blank or commented)" >&2
+        exit 1
+    fi
 else
     TICKERS=("${DEFAULT_TICKERS[@]}")
 fi

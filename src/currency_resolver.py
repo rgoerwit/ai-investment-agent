@@ -5,6 +5,10 @@ from datetime import date
 from typing import Literal
 
 from src.exchange_metadata import SUFFIX_TO_CURRENCY_CODE, US_IBKR_EXCHANGES
+from src.fx_normalization import (
+    canonical_currency_code,
+    normalize_minor_unit_currency,
+)
 from src.ticker_policy import get_ticker_suffix
 
 ResolutionSource = Literal[
@@ -52,20 +56,36 @@ def resolve_local_trading_currency(
 
     suffix = get_ticker_suffix(ticker)
 
-    # Provider currency normalization
-    normalized_provider_currency = (
-        provider_currency.upper() if provider_currency else None
-    )
+    # Canonicalize case WITHOUT collapsing minor-unit denominations: a plain
+    # .upper() turns "GBp" into "GBP", destroying a 100x distinction.
+    normalized_provider_currency = canonical_currency_code(provider_currency)
 
     if suffix:
         # 1. SUFFIXED TICKER
         canonical_currency = SUFFIX_TO_CURRENCY_CODE.get(suffix)
         if canonical_currency:
-            conflict = None
+            # The suffix and the provider answer different questions. The suffix
+            # is authoritative for the *economy* (a .L listing trades in
+            # sterling); the provider is authoritative for the *denomination*
+            # (pounds or pence), which the suffix map cannot express. When the
+            # provider's code normalizes to the suffix's currency they agree —
+            # the provider is simply more specific, and overriding it is what
+            # made pence indistinguishable from pounds downstream.
+            provider_major, _ = normalize_minor_unit_currency(
+                normalized_provider_currency
+            )
             if (
                 normalized_provider_currency
+                and provider_major == canonical_currency
                 and normalized_provider_currency != canonical_currency
             ):
+                return CurrencyResolution(
+                    code=normalized_provider_currency,
+                    source="provider_currency",
+                    confidence="high",
+                )
+            conflict = None
+            if normalized_provider_currency and provider_major != canonical_currency:
                 conflict = (
                     f"Canonical suffix {suffix} implies {canonical_currency}, "
                     f"but provider reported {normalized_provider_currency}"

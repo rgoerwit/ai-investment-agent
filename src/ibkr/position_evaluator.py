@@ -279,7 +279,7 @@ def evaluate_positions(
         # fundamental evidence — confirmed thesis failure, mandatory flags,
         # tender mechanics — never a price level alone. The breach is threaded
         # into the verdict flow below instead of short-circuiting it.
-        stop_breached = check_review_level_breach(analysis, current_price)
+        stop_breached = check_review_level_breach(analysis, current_price, pos.currency)
 
         # Identity is verified only when the analysis was found under the
         # position's own exchange-resolved yfinance key. Base-symbol borrows
@@ -486,7 +486,9 @@ def evaluate_positions(
             structural_macro_events=structural_macro_events,
         )
 
-        target_hit = check_base_case_reference_reached(analysis, current_price)
+        target_hit = check_base_case_reference_reached(
+            analysis, current_price, pos.currency
+        )
         # A capital-allocation review can be useful when a winner reaches its
         # valuation reference or posts a large gain. Upward price drift should
         # not suppress that review, but it never grants sale authority.

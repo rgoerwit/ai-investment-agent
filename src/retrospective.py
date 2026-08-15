@@ -282,6 +282,23 @@ def _extract_trade_block_fields(trader_plan: str) -> dict[str, Any]:
     }
 
 
+def _provider_quote_currency(result: dict) -> str | None:
+    """The currency code the fetcher stamped on the merged quote, if present.
+
+    This is the *decided* denomination, not a guess: ``_normalize_quote_unit_mismatch``
+    sets it to the major code when it could corroborate a minor-unit conversion
+    and leaves the provider's minor code (``GBp``) when it could not. Returns
+    ``None`` for artifacts without a structured-ingress payload, so callers fall
+    back to suffix resolution unchanged.
+    """
+    ingress = (result.get("structured_inputs") or {}).get("raw_financial_metrics")
+    payload = ingress.get("payload") if isinstance(ingress, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    currency = payload.get("currency")
+    return currency if isinstance(currency, str) and currency.strip() else None
+
+
 def extract_snapshot(
     result: dict,
     ticker: str,
@@ -330,7 +347,16 @@ def extract_snapshot(
 
     suffix = get_ticker_suffix(ticker)
 
-    resolution = resolve_local_trading_currency(ticker=ticker)
+    # The fetcher owns the denomination decision: it converts a minor-unit quote
+    # (GBp -> GBP) only when marketCap/PE corroborate, and stamps the resulting
+    # code on the payload either way. Passing it through is what lets a pence
+    # price stay labelled pence instead of being relabelled pounds by the
+    # suffix map — the GAMA.L false-review bug. Absent payload => suffix only,
+    # exactly as before.
+    resolution = resolve_local_trading_currency(
+        ticker=ticker,
+        provider_currency=_provider_quote_currency(result),
+    )
     currency_source: str
     if resolution.code:
         currency = resolution.code

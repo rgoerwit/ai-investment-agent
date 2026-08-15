@@ -283,23 +283,13 @@ def normalize_positions(
                 reason=normalized_values.valuation_issue,
             )
 
-        # IBKR reports LSE (.L) prices in GBP; yfinance and saved downside/base-case
-        # reference prices use GBX (pence). Multiply by 100 so review-level,
-        # valuation-reference, drift, and P&L comparisons use consistent GBX units.
-        # NOTE: market_value_usd is computed from IBKR's GBP mktValue (before ×100)
-        # using the GBP FX rate, so it is correct — do NOT re-apply FX on GBX prices.
-        if ticker_obj.suffix == ".L" and currency.upper() == "GBP":
-            current_price_local *= 100
-            avg_cost_local *= 100  # GBP → GBX, consistent with analysis/yfinance prices
-            currency = "GBX"  # Reflect actual denomination of *_local fields
-            if position_fx_rate is not None:
-                position_fx_rate *= 0.01
-            # Re-build Ticker so its currency field is "GBX" (used in suffix fallback)
-            ticker_obj = Ticker(
-                symbol=ticker_obj.symbol,
-                exchange=ticker_obj.exchange,
-                currency="GBX",
-            )
+        # No venue-conditional rescaling here. IBKR's own currency code is kept
+        # as-is, and any comparison against an analysis price converts BOTH
+        # sides by their currency codes (see reconciliation_rules._comparable_prices).
+        # The previous ".L + GBP -> x100" rule assumed the analysis always held
+        # pence; it is right only when the fetcher declined a minor-unit
+        # conversion and wrong when it succeeded, and it could not tell which
+        # had happened — the GAMA.L false valuation-reference review.
 
         position = NormalizedPosition(
             conid=p.conid or 0,

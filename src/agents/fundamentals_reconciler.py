@@ -8,11 +8,13 @@ from typing import Any
 from src.data_block_utils import (
     extract_block_number_from_text,
     extract_block_text_value,
+    extract_last_data_block,
     has_block_field_value,
     has_non_na_block_field_value,
     replace_or_append_block_line,
 )
 from src.earnings_baseline import requires_eps_growth_withholding
+from src.fx_normalization import canonical_currency_code
 from src.sector_normalization import normalize_sector_label
 from src.thesis_constants import (
     FINANCIALS_HEALTH_REMOVED_POINTS,
@@ -231,6 +233,79 @@ def _reconcile_when_present(
     ):
         return replace_or_append_block_line(body, key, formatter(value)), True
     return body, False
+
+
+PRICE_CURRENCY_FIELD = "PRICE_CURRENCY"
+
+# A currency code is letters only. Anything else — prose, a symbol, a markdown
+# fragment, or a regex replacement template like "\\g<0>" — is not a code, and
+# validating here makes the stamps injection-proof by construction rather than
+# by escaping at each call site.
+_CURRENCY_CODE_RE = re.compile(r"^[A-Za-z]{2,5}$")
+
+
+def _valid_currency_code(value: str | None) -> str | None:
+    """Return a plausible currency code, or None when the value is not one."""
+    if not value:
+        return None
+    candidate = value.strip()
+    if not _CURRENCY_CODE_RE.match(candidate):
+        return None
+    return canonical_currency_code(candidate)
+
+
+def stamp_price_currency(block_body: str, payload: dict[str, Any]) -> str:
+    """Stamp the authoritative quote currency over whatever the model wrote.
+
+    The denomination is *known*, not judged: the fetcher decides it (converting
+    a minor-unit quote only when marketCap/PE corroborate) and records the
+    resulting code on the merged payload. A model-authored value must never
+    become the unit of record — it satisfies the contract while silently
+    replacing evidence with transcription, the failure the guidance-contract
+    incident already taught. So this overwrites rather than backfills.
+
+    Case is preserved deliberately: ``GBp`` (pence) and ``GBP`` (pounds) differ
+    only in case and by a factor of 100. A payload value that is not a currency
+    code at all (or absent) yields ``N/A`` so an unknown unit is explicit rather
+    than inherited from the model's guess.
+    """
+    currency = payload.get("currency")
+    code = _valid_currency_code(currency if isinstance(currency, str) else None)
+    return replace_or_append_block_line(block_body, PRICE_CURRENCY_FIELD, code or "N/A")
+
+
+_TRADE_BLOCK_PRICE_CURRENCY_RE = re.compile(
+    r"(?im)^[ \t]*\**[ \t]*PRICE_CURRENCY[ \t]*:[ \t]*[^\n]*$"
+)
+_TRADE_BLOCK_ANCHOR_RE = re.compile(r"(?im)^[ \t]*TARGET_2:[ \t]*[^\n]*$")
+
+
+def stamp_trade_block_price_currency(content: str, fundamentals_report: str) -> str:
+    """Copy the DATA_BLOCK denomination onto the TRADE_BLOCK levels.
+
+    ENTRY/STOP/TARGET_* are derived from the DATA_BLOCK price, so they are
+    denominated in whatever it is. The prompt asks the Trader to copy the code
+    across, but a transcription must never *be* the unit of record — the same
+    reason ``stamp_price_currency`` overwrites rather than backfills. Absent a
+    DATA_BLOCK value the content is returned untouched: an unknown denomination
+    is better left unstated than asserted from the model's copy.
+    """
+    block = extract_last_data_block(fundamentals_report, include_markers=False)
+    if not block:
+        return content
+    code = _valid_currency_code(extract_block_text_value(block, PRICE_CURRENCY_FIELD))
+    if not code:
+        return content
+    line = f"PRICE_CURRENCY: {code}"
+    if _TRADE_BLOCK_PRICE_CURRENCY_RE.search(content):
+        # A lambda, not a replacement string: "\\g<0>" in a value would
+        # otherwise be interpreted as a template. Replace EVERY occurrence —
+        # a surviving duplicate is a contradiction a later parser may prefer.
+        return _TRADE_BLOCK_PRICE_CURRENCY_RE.sub(lambda _m: line, content)
+    anchor = _TRADE_BLOCK_ANCHOR_RE.search(content)
+    if not anchor:
+        return content
+    return f"{content[: anchor.end()]}\n{line}{content[anchor.end() :]}"
 
 
 def reconcile_high_risk_fields(

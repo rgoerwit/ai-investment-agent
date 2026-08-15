@@ -343,9 +343,16 @@ class TestNormalizePositions:
         assert position.market_value_usd == 0.0
         assert "market value" in (position.valuation_issue or "")
 
-    def test_lse_price_converted_gbp_to_gbx(self):
-        """IBKR reports .L prices in GBP; normalize_positions multiplies by 100 → GBX
-        and updates currency field to 'GBX' to reflect the actual denomination."""
+    def test_lse_price_keeps_ibkr_denomination(self):
+        """IBKR quotes .L in GBP and normalize_positions leaves it there.
+
+        The previous ".L + GBP -> x100" rule assumed the *analysis* side always
+        held pence. That is true only when the fetcher declined a minor-unit
+        conversion; when it succeeded (GAMA.L: 975.5 GBp -> 9.755 GBP) the rule
+        produced an ~85x mismatch and a false valuation-reference review.
+        Denomination is now reconciled at comparison time by currency code —
+        see reconciliation_rules._comparable_prices.
+        """
         raw = [
             {
                 "conid": 101,
@@ -354,19 +361,16 @@ class TestNormalizePositions:
                 "position": 200,
                 "mktValue": 1788.0,
                 "currency": "GBP",
-                "mktPrice": 8.94,  # IBKR: £8.94 GBP
+                "mktPrice": 8.94,  # IBKR: GBP 8.94
             }
         ]
         positions = normalize_positions(raw)
         assert positions[0].yf_ticker == "GAMA.L"
-        # current_price_local must be 894.0 GBX so stop comparisons work correctly
-        assert positions[0].current_price_local == pytest.approx(894.0)
-        # currency field updated to reflect actual denomination of *_local fields
-        assert positions[0].currency == "GBX"
+        assert positions[0].current_price_local == pytest.approx(8.94)
+        assert positions[0].currency == "GBP"
 
-    def test_lse_currency_defaults_to_gbx(self):
-        """When IBKR omits currency for a .L ticker, it defaults to 'GBP' initially,
-        but normalize_positions converts prices to GBX (pence) and updates currency to 'GBX'."""
+    def test_lse_currency_defaults_to_ibkr_code(self):
+        """An omitted IBKR currency still resolves to the venue's major code."""
         raw = [
             {
                 "conid": 102,
@@ -380,14 +384,16 @@ class TestNormalizePositions:
         ]
         positions = normalize_positions(raw)
         assert positions[0].yf_ticker == "KLR.L"
-        # After GBP→GBX conversion, currency field reflects actual denomination
-        assert positions[0].currency == "GBX"
-        # Price must be in pence (×100) to match analysis/yfinance convention
-        assert positions[0].current_price_local == pytest.approx(2202.0)
+        assert positions[0].currency == "GBP"
+        assert positions[0].current_price_local == pytest.approx(22.02)
 
-    def test_lse_currency_field_is_gbx_after_normalisation(self):
-        """NormalizedPosition.currency must be 'GBX' (not 'GBP') for .L stocks so that
-        any code calling _resolve_fx(analysis) or displaying the price symbol gets GBX."""
+    def test_lse_fx_rate_matches_its_currency_code(self):
+        """The FX rate must correspond to the code on the same record.
+
+        This is the invariant the old rule broke: it rewrote the price to pence
+        and scaled the rate to match, so price and rate were consistent but the
+        code no longer described what the analysis side held.
+        """
         raw = [
             {
                 "conid": 103,
@@ -399,18 +405,11 @@ class TestNormalizePositions:
                 "mktPrice": 8.94,
             }
         ]
-        positions = normalize_positions(raw)
-        p = positions[0]
-        # Currency must reflect the unit of current_price_local (GBX = pence)
-        assert p.currency == "GBX", (
-            "currency should be GBX after GBP→GBX conversion so downstream "
-            "FX lookups use the correct pence rate (0.0127) not the pound rate (1.27)"
-        )
-        assert p.current_price_local == pytest.approx(894.0)
-        assert p.fx_rate_to_usd == pytest.approx(0.0127)
-        assert p.market_value_basis == "LOCAL_CONVERTED"
-        # market_value_usd computed from GBP mktValue before ×100 — must NOT be affected
-        assert p.market_value_usd == pytest.approx(894.0 * 1.27, rel=0.05)
+        p = normalize_positions(raw)[0]
+        assert p.currency == "GBP"
+        assert p.current_price_local == pytest.approx(8.94)
+        # Pounds rate, not the pence rate the x100 rule used to force.
+        assert p.fx_rate_to_usd == pytest.approx(1.27)
 
     def test_position_conid_primary_exchange_overrides_stale_raw_twse(self):
         """Held Taiwan conid beats stale raw TWSE metadata after TPEx migration."""

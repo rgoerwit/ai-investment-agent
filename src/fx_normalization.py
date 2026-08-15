@@ -155,6 +155,30 @@ FALLBACK_RATES_TO_USD = {
 }
 
 
+def canonical_currency_code(currency: str | None) -> str | None:
+    """Upper-case a currency code WITHOUT collapsing minor-unit denominations.
+
+    ``"GBp".upper()`` is ``"GBP"`` — a different currency scaled 100x. A plain
+    ``.upper()`` at a resolution boundary is therefore how a pence quote
+    silently becomes a pounds quote (the GAMA.L false-review bug, Aug 2026).
+    Registered minor-unit aliases keep their canonical spelling; everything else
+    is upper-cased as before, so ``"usd"`` still normalizes to ``"USD"``.
+
+    Matching is deliberately **case-sensitive**: ``"GBp"`` and ``"GBP"`` differ
+    only in case, so a case-insensitive lookup would map pounds onto pence. An
+    exact alias hit is preserved; anything else upper-cases, which still lands
+    ``"gbx"`` on the ``"GBX"`` alias and leaves ``"gbp"`` as ordinary pounds.
+    """
+    if not currency:
+        return None
+    stripped = currency.strip()
+    if not stripped:
+        return None
+    if stripped in MINOR_UNIT_CURRENCY_ALIASES:
+        return stripped
+    return stripped.upper()
+
+
 def normalize_minor_unit_currency(currency: str | None) -> tuple[str | None, float]:
     """Return major-unit currency code and scale factor for minor-unit aliases."""
     if not currency:
