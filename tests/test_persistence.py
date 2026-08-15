@@ -706,3 +706,78 @@ class TestConsultantPartialVerificationStatus:
 
         source = inspect.getsource(consultant_nodes)
         assert "CONSULTANT_PARTIAL_REVIEW_MARKER} " in source
+
+
+class TestRecordedModelProvenance:
+    """The artifact must name the models that actually answered.
+
+    Under the multi-provider schema nobody sets QUICK_MODEL/DEEP_MODEL, so they
+    sit at code defaults. Reading them recorded a model the run never invoked:
+    25 of 25 post-migration artifacts had a `quick_model` absent from their own
+    `token_usage.by_model`.
+    """
+
+    @staticmethod
+    def _new_schema_settings():
+        from src.config import Settings
+
+        # _env_file=None: Settings() otherwise inherits the operator's .env.
+        return Settings(
+            _env_file=None,
+            LLM_BASE_PROVIDER="google",
+            GOOGLE_LLM_FAST_MODEL="gemini-3.1-flash-lite",
+            GOOGLE_LLM_REASONING_MODEL="gemini-3.7-flash",
+            GOOGLE_LLM_CRITICAL_MODEL="gemini-3.1-pro-preview",
+        )
+
+    def test_run_summary_records_bound_models_not_legacy_defaults(self):
+        from src import persistence
+        from src.persistence import build_run_summary
+
+        settings = self._new_schema_settings()
+        with patch.object(persistence, "config", settings):
+            summary = build_run_summary({}, quick_mode=False, article_requested=False)
+
+        assert summary["quick_model"] == "gemini-3.1-flash-lite"
+        assert summary["deep_model"] == "gemini-3.7-flash"
+        assert summary["decision_model"] == "gemini-3.1-pro-preview"
+        # The legacy default that used to be reported here.
+        assert summary["quick_model"] != "gemini-3-flash-preview"
+
+    def test_retired_llm_provider_is_not_stamped_under_the_new_schema(self):
+        """LLM_PROVIDER defaults to "google" even in an all-xAI run.
+
+        `_collect_used_providers` was already fixed to skip it; this sibling
+        fallback in the saved metadata was missed.
+        """
+        from src import persistence
+        from src.persistence import build_run_summary
+
+        settings = self._new_schema_settings()
+        with patch.object(persistence, "config", settings):
+            summary = build_run_summary({}, quick_mode=False, article_requested=False)
+
+        # No artifact carries a provider stamp in this bare result, so nothing
+        # is known — and in particular the retired key's "google" default must
+        # not be asserted as fact. (`llm_provider` reports "multi-provider" for
+        # any count != 1, which is a pre-existing quirk of the empty case and
+        # not this fallback.)
+        assert summary["llm_providers_used"] == []
+        assert summary["llm_provider"] != settings.llm_provider
+
+    def test_saved_metadata_does_not_fall_back_to_the_retired_key(self, tmp_path):
+        """The save path had its own copy of the fallback, and it was missed."""
+        from src import persistence
+
+        settings = self._new_schema_settings()
+        with patch.object(persistence, "config", settings):
+            path = persistence.save_results_to_file(
+                {"run_summary": {}}, "TEST.T", results_dir=tmp_path
+            )
+        metadata = json.loads(path.read_text())["metadata"]
+
+        assert metadata["llm_provider"] != settings.llm_provider
+        assert metadata["llm_providers_used"] == []
+        assert metadata["quick_model"] == "gemini-3.1-flash-lite"
+        assert metadata["deep_model"] == "gemini-3.7-flash"
+        assert metadata["decision_model"] == "gemini-3.1-pro-preview"

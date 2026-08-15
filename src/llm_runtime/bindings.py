@@ -583,6 +583,86 @@ def resolve_binding_plan(settings: Any) -> BindingPlan:
     )
 
 
+@dataclass(frozen=True)
+class ActiveModels:
+    """The models a run actually used, plus the tier its decision seat ran at.
+
+    Two different jobs, deliberately separated:
+
+    * The **names** are provenance. They belong in the persisted artifact so runs
+      can be compared diachronically — "did the verdict change because the model
+      changed?" is only answerable if the artifact records which model answered.
+    * ``decision_intent`` is the **weighting** key. It is the binding layer's own
+      closed enum, so downstream judgments never key on a vendor string and never
+      go stale when a model generation ships.
+    """
+
+    fast: str
+    reasoning: str
+    decision: str
+    decision_intent: str
+
+
+def active_models(settings: Any, *, quick_mode: bool = False) -> ActiveModels:
+    """Resolve what actually ran, for both schemas.
+
+    Under the legacy schema ``QUICK_MODEL``/``DEEP_MODEL`` are authoritative and
+    are returned unchanged. Under the multi-provider schema they are almost
+    always untouched defaults naming models the run never invoked, so the seat
+    bindings are the only truthful source. ``main.py``'s Langfuse banner has done
+    exactly this since the migration; this is that logic, shared.
+    """
+    from src.runtime_config import get_runtime_config
+
+    runtime = get_runtime_config(settings)
+    plan = resolve_binding_plan(settings)
+    if plan.schema != "new":
+        return ActiveModels(
+            fast=runtime.quick_think_llm,
+            reasoning=runtime.deep_think_llm,
+            decision=runtime.deep_think_llm,
+            decision_intent=ModelIntent.REASONING.value,
+        )
+    bindings = plan.quick_bindings if quick_mode else plan.bindings
+    decision = bindings[SeatId.PORTFOLIO_MANAGER]
+    return ActiveModels(
+        fast=bindings[SeatId.MARKET].model,
+        reasoning=bindings[SeatId.RESEARCH_MANAGER].model,
+        decision=decision.model,
+        decision_intent=decision.intent.value,
+    )
+
+
+def active_models_or_legacy(
+    settings: Any, *, quick_mode: bool = False, logger: Any = None
+) -> ActiveModels:
+    """``active_models`` that degrades instead of raising.
+
+    Provenance is metadata: a run must never be lost because the models it used
+    could not be named. Persistence paths use this; callers that want the error
+    (startup, the trace banner) use ``active_models`` directly.
+    """
+    from src.runtime_config import get_runtime_config
+
+    try:
+        return active_models(settings, quick_mode=quick_mode)
+    except Exception as exc:  # noqa: BLE001 - metadata must not break the save
+        if logger is not None:
+            from src.error_safety import summarize_exception
+
+            logger.warning(
+                "active_model_resolution_failed",
+                **summarize_exception(exc, operation="resolving active models"),
+            )
+        runtime = get_runtime_config(settings)
+        return ActiveModels(
+            fast=str(runtime.quick_think_llm),
+            reasoning=str(runtime.deep_think_llm),
+            decision=str(runtime.deep_think_llm),
+            decision_intent="",
+        )
+
+
 def _validate_independence(
     bindings: dict[SeatId, ResolvedBinding],
     statuses: dict[SeatId, SeatStatus],

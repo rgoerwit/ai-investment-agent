@@ -115,14 +115,23 @@ FALLBACK_BENCHMARK = "^GSPC"
 EXCHANGE_CURRENCY: dict[str, str] = dict(SUFFIX_TO_CURRENCY_CODE)
 FALLBACK_CURRENCY = "USD"
 
-MODEL_QUALITY: dict[str, float] = {
-    "gemini-3-pro-preview": 1.0,
-    "gemini-3-pro": 1.0,
-    "gemini-2.5-pro": 0.9,
-    "gemini-2.5-flash": 0.7,
-    "gemini-2.0-flash": 0.6,
+# Analysis capability, keyed on the binding layer's own intent enum rather than
+# on a vendor model string. The predecessor (MODEL_QUALITY) was a model-name
+# table whose newest entry was `gemini-3-pro-preview`: it matched 0 of 4,704
+# stored snapshots, pinning this factor at 0.5 for every lesson ever generated
+# and pushing most of them under the 0.4 retrieval cutoff in
+# get_relevant_lessons(). An intent is a closed enum owned by the seat registry,
+# so a new model generation needs no edit here — the failure mode that produced
+# the bug is structurally gone.
+INTENT_QUALITY: dict[str, float] = {
+    "critical": 1.0,
+    "reasoning": 1.0,
+    "fast": 0.7,
 }
-DEFAULT_MODEL_QUALITY = 0.5
+# Snapshots written before `decision_intent` existed carry only a model name.
+# Neutral rather than penalised: the old 0.5 was never a judgment about those
+# runs, just an unmatched lookup.
+UNKNOWN_INTENT_QUALITY = 1.0
 
 # Temporal confidence decay curve
 TEMPORAL_WEIGHTS: list[tuple[int, float]] = [
@@ -298,6 +307,10 @@ def extract_snapshot(
         extract_pm_block,
         extract_verdict_from_text,
     )
+    from src.llm_runtime.bindings import active_models_or_legacy
+
+    # Provenance must never cost us a snapshot; degrade to the legacy fields.
+    active = active_models_or_legacy(config, quick_mode=is_quick_mode, logger=logger)
 
     # PM_BLOCK extraction (reuse existing extractor)
     pm_output = result.get("final_trade_decision", "") or ""
@@ -416,8 +429,13 @@ def extract_snapshot(
         # Metadata (from existing save_data structure)
         "ticker": ticker,
         "analysis_date": datetime.now().strftime("%Y-%m-%d"),
-        "deep_model": get_runtime_config(config).deep_think_llm,
-        "quick_model": get_runtime_config(config).quick_think_llm,
+        # Model names are provenance — they make runs comparable over time
+        # ("did the verdict move because the model moved?"). The confidence
+        # weighting deliberately does NOT key on them; see compute_confidence.
+        "deep_model": active.reasoning,
+        "quick_model": active.fast,
+        "decision_model": active.decision,
+        "decision_intent": active.decision_intent,
         "is_quick_mode": is_quick_mode,
         # `is_strict_mode` records whether `--strict` was active during
         # analysis. Strict gates auto-reject some valid candidates (REIT/ETF,
@@ -850,9 +868,10 @@ def compute_confidence(comparison: dict[str, Any]) -> float:
             temporal = weight
             break
 
-    # Model quality component
-    deep_model = comparison.get("deep_model", "")
-    model_q = MODEL_QUALITY.get(deep_model, DEFAULT_MODEL_QUALITY)
+    # Analysis-capability component, from the decision seat's intent tier.
+    model_q = INTENT_QUALITY.get(
+        str(comparison.get("decision_intent") or ""), UNKNOWN_INTENT_QUALITY
+    )
 
     # Analysis mode: prefer explicit flag (modern snapshots); fall back to
     # model-name heuristic for snapshots predating is_quick_mode field.

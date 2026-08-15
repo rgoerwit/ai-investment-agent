@@ -231,7 +231,7 @@ def build_run_summary(
     """Build a compact summary for saved artifacts and end-of-run logs."""
     from langchain_core.messages import ToolMessage
 
-    from src.llm_runtime.bindings import resolve_binding_plan
+    from src.llm_runtime.bindings import active_models_or_legacy, resolve_binding_plan
     from src.service_tiers import flex_degradation_snapshot
     from src.token_tracker import get_tracker
 
@@ -297,7 +297,6 @@ def build_run_summary(
     auditor_finished = bool(auditor_status.get("complete"))
     apac_finished = bool(apac_status.get("complete"))
     providers_used = _collect_used_providers()
-    runtime_config = get_runtime_config(config)
 
     # "Successful" must mean the auditor completed a verified audit, not merely that it
     # emitted well-formed prose. Caveated statuses are no data (INSUFFICIENT_DATA/
@@ -367,10 +366,15 @@ def build_run_summary(
         else "COMPLETED"
     )
 
+    # The models that actually answered, not the legacy defaults (see
+    # ActiveModels). Same values the artifact metadata records.
+    active = active_models_or_legacy(config, quick_mode=quick_mode)
+
     summary = {
         "quick_mode": quick_mode,
-        "quick_model": runtime_config.quick_think_llm,
-        "deep_model": runtime_config.deep_think_llm,
+        "quick_model": active.fast,
+        "deep_model": active.reasoning,
+        "decision_model": active.decision,
         "provider_preflight": provider_preflight or {},
         "llm_bindings": binding_telemetry,
         # Why a run was slow and expensive. `token_usage.by_tier` already shows
@@ -554,7 +558,10 @@ def save_results_to_file(
     gate; PFIC/VIE stay risk-penalty warnings in every mode).
     """
     from src.error_safety import summarize_exception
-    from src.llm_runtime.bindings import resolve_binding_plan
+    from src.llm_runtime.bindings import (
+        active_models_or_legacy,
+        resolve_binding_plan,
+    )
     from src.memory import get_ticker_memory_stats
     from src.prompts import get_all_prompts
 
@@ -608,6 +615,16 @@ def save_results_to_file(
     tracker = get_tracker()
     token_stats = tracker.get_total_stats()
 
+    # Provenance must name the models that actually answered. The legacy
+    # QUICK_MODEL/DEEP_MODEL fields are untouched defaults under the
+    # multi-provider schema, so reading them recorded a model the run never
+    # invoked. Fail soft: a metadata field must never cost us the analysis.
+    binding_plan = resolve_binding_plan(config)
+    active = active_models_or_legacy(config, quick_mode=quick_mode, logger=logger_obj)
+    legacy_provider = (
+        "" if binding_plan.schema == "new" else str(config.llm_provider or "").strip()
+    )
+
     save_data = {
         "metadata": {
             "ticker": ticker,
@@ -618,23 +635,29 @@ def save_results_to_file(
             "timestamp": timestamp,
             "analysis_date": datetime.now().isoformat(),
             "environment": config.environment,
-            "quick_model": runtime_config.quick_think_llm,
-            "deep_model": runtime_config.deep_think_llm,
+            "quick_model": active.fast,
+            "deep_model": active.reasoning,
+            "decision_model": active.decision,
             "memory_enabled": runtime_config.enable_memory,
             "online_tools_enabled": config.online_tools,
+            # LLM_PROVIDER is retired and metadata-only: under the multi-provider
+            # schema it defaults to "google" even in an all-xAI run, so falling
+            # back to it would assert a vendor that served nothing. The per-artifact
+            # provider stamps collected into run_summary are the real evidence;
+            # absent those, say nothing rather than something false.
             "llm_provider": (
                 (result.get("run_summary", {}) or {}).get("llm_provider")
-                or config.llm_provider
+                or legacy_provider
             ),
             "llm_providers_used": (
                 (result.get("run_summary", {}) or {}).get("llm_providers_used")
-                or [config.llm_provider]
+                or ([legacy_provider] if legacy_provider else [])
             ),
         },
         "token_usage": token_stats,
         "llm_bindings": (
             (result.get("run_summary", {}) or {}).get("llm_bindings")
-            or resolve_binding_plan(config).telemetry(config)
+            or binding_plan.telemetry(config)
         ),
         "macro_context": _normalize_macro_context_metadata(
             result,
