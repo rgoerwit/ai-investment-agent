@@ -13,7 +13,8 @@ from src.data_block_utils import (
     has_non_na_block_field_value,
     replace_or_append_block_line,
 )
-from src.earnings_baseline import requires_eps_growth_withholding
+from src.earnings_baseline import eps_growth_award_disposition
+from src.evidence_disposition import AwardDisposition, rubric_award_token
 from src.fx_normalization import canonical_currency_code
 from src.sector_normalization import normalize_sector_label
 from src.thesis_constants import (
@@ -773,21 +774,51 @@ def parse_score_breakdown(text: str, kind: str = "HEALTH") -> dict[str, str] | N
     return awards or None
 
 
+def withhold_criterion_award(
+    awards: dict[str, str], key: str, disposition: AwardDisposition
+) -> bool:
+    """Record a withheld rubric criterion in this repo's own N/A-vs-0 vocabulary.
+
+    ``"0"`` keeps the criterion in the rubric denominator; ``"N/A"`` removes it.
+    That single token decides whether missing evidence reads as a *failure*,
+    which is why the choice lives in one helper rather than at each call site:
+    ``NEVER_REMOVED_CRITERIA`` in this module already states that data gaps must
+    use ``N/A``, and ``score_lineage`` already leaves an unresolved dependency at
+    ``N/A``. This is where that rule is applied instead of restated.
+
+    Returns whether the award actually changed, so callers can skip the
+    (expensive, lossy) block rewrite when it did not.
+    """
+    token = rubric_award_token(disposition)
+    if awards.get(key) == token:
+        return False
+    awards[key] = token
+    return True
+
+
 def withhold_eps_growth_for_unusable_baseline(body: str) -> tuple[str, bool]:
-    """Remove sustained EPS-growth credit when the earnings baseline is unsafe."""
+    """Remove sustained EPS-growth credit when the earnings baseline is unsafe.
+
+    A *diagnosed* distortion refutes the criterion (``0``); an unclassifiable
+    baseline or unresolved guidance bridge merely fails to establish it
+    (``N/A``). Collapsing those two is what made an unmeasurable ex-US small cap
+    score identically to one with proven earnings distortion.
+    """
     baseline = extract_block_text_value(body, "EARNINGS_BASELINE_STATUS").upper()
     bridge_status = extract_block_text_value(body, "GUIDANCE_BRIDGE_STATUS").upper()
-    if not requires_eps_growth_withholding(baseline, bridge_status):
+    disposition = eps_growth_award_disposition(
+        baseline_status=baseline, bridge_status=bridge_status
+    )
+    if disposition is AwardDisposition.KEEP:
         return body, False
 
     breakdown_text = extract_block_text_value(body, "GROWTH_SCORE_BREAKDOWN")
     awards = parse_score_breakdown(breakdown_text, "GROWTH")
     if awards is None or set(awards) != set(GROWTH_SCORE_CRITERIA):
         return body, False
-    if awards.get("EPS_GROWTH") == "0":
+    if not withhold_criterion_award(awards, "EPS_GROWTH", disposition):
         return body, False
 
-    awards["EPS_GROWTH"] = "0"
     numeric = {
         key: float(token)
         for key, token in awards.items()
@@ -810,10 +841,22 @@ def withhold_eps_growth_for_unusable_baseline(body: str) -> tuple[str, bool]:
         "ADJUSTED_GROWTH_SCORE",
         f"{earned / available * 100.0:.1f}% (based on {available:g} available points)",
     )
+    # Say which of the two happened. "not durable" asserts a finding; on the
+    # UNRESOLVED path there is no finding, and the PM must be able to tell an
+    # unmeasured criterion from a failed one.
+    if disposition is AwardDisposition.REFUTED:
+        adjustment = (
+            "WITHHELD — trailing earnings baseline is not durable and no "
+            "code-reconciled normalized growth rate is available"
+        )
+    else:
+        adjustment = (
+            "NOT_ESTABLISHED — earnings baseline could not be classified, so "
+            "sustained EPS growth is unproven rather than disproven; criterion "
+            "scored N/A (removed from the rubric denominator, not failed)"
+        )
     updated = replace_or_append_block_line(
-        updated,
-        "EPS_GROWTH_BASELINE_ADJUSTMENT",
-        "WITHHELD — trailing earnings baseline is not durable and no code-reconciled normalized growth rate is available",
+        updated, "EPS_GROWTH_BASELINE_ADJUSTMENT", adjustment
     )
     return updated, True
 

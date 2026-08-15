@@ -60,8 +60,22 @@ else
     TICKERS=("${DEFAULT_TICKERS[@]}")
 fi
 
+# Mode. Full is the default because most of the retained history was run that
+# way, so a full re-run is the like-for-like comparison. `QUICK_MODE=1` runs the
+# same ticker set through the screener tier instead -- the point of that pass is
+# to check that quick degrades *gracefully* (fewer/shallower artifacts, verdicts
+# qualified as screening candidates) rather than failing closed. The mode is
+# stamped into the output directory name so the two passes never collide.
+QUICK_MODE="${QUICK_MODE:-0}"
+MODE_ARGS=()
+MODE_LABEL="full"
+if [[ "$QUICK_MODE" != "0" ]]; then
+    MODE_ARGS=(--quick)
+    MODE_LABEL="quick"
+fi
+
 RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
-OUT_DIR="scratch/eval_rerun_${RUN_STAMP}"
+OUT_DIR="scratch/eval_rerun_${MODE_LABEL}_${RUN_STAMP}"
 IMAGE_DIR="${OUT_DIR}/images"
 LOG_FILE="${OUT_DIR}/run.log"
 SUMMARY_FILE="${OUT_DIR}/SUMMARY.md"
@@ -90,13 +104,14 @@ fi
 {
     echo "# Longitudinal re-evaluation run"
     echo "Started: $(date)"
+    echo "Mode: ${MODE_LABEL}"
     echo "Tickers: ${TICKERS[*]}"
     echo ""
     echo "| Ticker | Status | Report |"
     echo "|---|---|---|"
 } > "$SUMMARY_FILE"
 
-echo "=== Longitudinal re-evaluation: ${#TICKERS[@]} tickers ===" | tee -a "$LOG_FILE"
+echo "=== Longitudinal re-evaluation (${MODE_LABEL}): ${#TICKERS[@]} tickers ===" | tee -a "$LOG_FILE"
 echo "Output dir: $OUT_DIR" | tee -a "$LOG_FILE"
 
 n=0
@@ -111,6 +126,7 @@ for ticker in "${TICKERS[@]}"; do
 
     if "${PYTHON_CMD[@]}" -m src.main --ticker "$ticker" \
             --imagedir "$IMAGE_DIR" --output "$REPORT_PATH" \
+            "${MODE_ARGS[@]+"${MODE_ARGS[@]}"}" \
             --quiet --brief >> "$LOG_FILE" 2>&1; then
         if VALIDITY_RESULT="$("${PYTHON_CMD[@]}" scripts/scan_batch_health.py \
                 --modified-since "$ANALYSIS_STARTED_AT" \

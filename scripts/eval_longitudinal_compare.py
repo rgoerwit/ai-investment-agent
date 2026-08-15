@@ -95,6 +95,7 @@ class RunRow:
     ticker: str
     timestamp: str
     path: str
+    is_quick: bool | None = None
     verdict: str | None = None
     health_adj: float | None = None
     growth_adj: float | None = None
@@ -211,10 +212,23 @@ def extract_row(path: Path) -> RunRow:
     if not isinstance(required_failures, list):
         required_failures = [str(required_failures)]
 
+    # Mode belongs in the timeline: a quick run is a *screener*, so shallower
+    # artifacts and a qualified verdict are the designed behavior, not a
+    # regression. Without the column a quick row read as a code-quality drop.
+    # prediction_snapshot first (the field scan_batch_health keys on), then
+    # run_summary — measured over 400 artifacts, snapshot is present in 100% of
+    # the cases run_summary is, plus 12 where run_summary is not, and neither
+    # source is ever the only one missing. None = mode not recorded.
+    raw_quick = pred_snapshot.get("is_quick_mode")
+    if raw_quick is None:
+        raw_quick = run_summary.get("quick_mode")
+    is_quick = bool(raw_quick) if raw_quick is not None else None
+
     return RunRow(
         ticker=d.get("metadata", {}).get("ticker") or path.stem.split("_")[0],
         timestamp=ts,
         path=str(path),
+        is_quick=is_quick,
         verdict=verdict,
         health_adj=_pick("health_adj", health_m, float),
         growth_adj=_pick("growth_adj", growth_m, float),
@@ -280,9 +294,9 @@ def render_timeline_markdown(ticker: str, rows: list[RunRow]) -> str:
 
     lines = [f"### {ticker}", ""]
     lines.append(
-        "| Timestamp | Artifact | Outcome | Verdict | Health | Growth | Risk | Data quality | Contract | Consultant | Auditor | Flags |"
+        "| Timestamp | Mode | Artifact | Outcome | Verdict | Health | Growth | Risk | Data quality | Contract | Consultant | Auditor | Flags |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 
     # None until the first retained row is emitted: that row is a *baseline*,
     # not a change. Seeding with an empty set marked every one of its flags
@@ -330,8 +344,10 @@ def render_timeline_markdown(ticker: str, rows: list[RunRow]) -> str:
             quality_parts.append(f"conflicts {r.source_conflict_count}")
         quality_disp = "; ".join(quality_parts) or "—"
 
+        mode_disp = "—" if r.is_quick is None else ("quick" if r.is_quick else "full")
+
         lines.append(
-            f"| {date_disp} | {artifact_disp} | {outcome} | {fmt(r.verdict)} | "
+            f"| {date_disp} | {mode_disp} | {artifact_disp} | {outcome} | {fmt(r.verdict)} | "
             f"{fmt(r.health_adj, '%')} | {fmt(r.growth_adj, '%')} | "
             f"{fmt(r.risk_total)} | {quality_disp} | {fmt(r.contract_status)} | "
             f"{fmt(r.consultant_verdict)} | {fmt(r.auditor_status)} | {flags_disp} |"
@@ -456,11 +472,45 @@ def scan_run_log(log_path: Path) -> str:
     return "\n".join(out)
 
 
+_RUN_LOG_TICKER_RE = re.compile(r"^--- \[\d+/\d+\] (\S+) ")
+_RUN_LOG_MODE_RE = re.compile(r"^=== Longitudinal re-evaluation \(([a-z]+)\)")
+
+
+def tickers_from_run_log(text: str) -> tuple[list[str], str | None]:
+    """Return the scope a run log declares about itself: ticker order and mode.
+
+    ``eval_rerun_longitudinal.sh`` writes one ``--- [n/N] TICKER ---`` line per
+    ticker and one banner naming the mode. Reading them is what keeps this
+    report from describing a *different* basket than the one that was run --
+    the whole point of passing ``--run-log``. Before this, ``--tickers``
+    defaulted to a hardcoded list, so a run-log-only invocation silently
+    rendered timelines for six unrelated equities.
+
+    Order is preserved rather than sorted: it is the order the operator watched
+    scroll past, so it is the order they will look for.
+    """
+    seen: dict[str, None] = {}
+    mode: str | None = None
+    for line in text.splitlines():
+        ticker_match = _RUN_LOG_TICKER_RE.match(line)
+        if ticker_match is not None:
+            seen.setdefault(ticker_match.group(1), None)
+            continue
+        if mode is None:
+            mode_match = _RUN_LOG_MODE_RE.match(line)
+            if mode_match is not None:
+                mode = mode_match.group(1)
+    return list(seen), mode
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--tickers", nargs="+", default=DEFAULT_TICKERS)
+    # Default is None, not DEFAULT_TICKERS, so `main` can tell "the operator
+    # asked for these" from "nobody said" -- the run log is better information
+    # than the hardcoded fallback, but it must never outrank an explicit flag.
+    parser.add_argument("--tickers", nargs="+", default=None)
     parser.add_argument("--results-dir", default=None)
     parser.add_argument(
         "--archive-dir", default=os.path.expanduser("~/Developer/results_archive")
@@ -486,14 +536,52 @@ def main(argv: list[str] | None = None) -> int:
     results_dir = args.results_dir or _default_results_dir()
     archive_dir = args.archive_dir if os.path.isdir(args.archive_dir) else None
 
-    sections = [f"# Longitudinal comparison — {datetime.now():%Y-%m-%d %H:%M}", ""]
+    run_log_sections: list[str] = []
+    derived_tickers: list[str] = []
+    run_log_mode: str | None = None
+    scope_source = "`--tickers`"
 
     if args.run_log:
         matches = glob.glob(args.run_log)
         for m in sorted(matches) or [args.run_log]:
             p = Path(m)
-            if p.is_file():
-                sections.append(scan_run_log(p))
+            if not p.is_file():
+                continue
+            run_log_sections.append(scan_run_log(p))
+            try:
+                found, mode = tickers_from_run_log(p.read_text(errors="replace"))
+            except OSError:
+                continue  # a diagnostic must never fail the report it heads
+            for ticker in found:
+                if ticker not in derived_tickers:
+                    derived_tickers.append(ticker)
+            run_log_mode = run_log_mode or mode
+            if found:
+                scope_source = f"`{p}`"
+
+    # CLI > run log > DEFAULT_TICKERS, matching this repo's canonical override
+    # precedence. `--tickers X --run-log Y` still scopes the timelines to X.
+    tickers = args.tickers
+    if tickers is not None:
+        scope_source = "`--tickers`"  # an explicit flag owns the scope it set
+    elif derived_tickers:
+        tickers = derived_tickers
+    else:
+        tickers = list(DEFAULT_TICKERS)
+        scope_source = "`DEFAULT_TICKERS` (no scope given)"
+
+    scope = f"**Scope:** {len(tickers)} ticker(s) from {scope_source}"
+    if run_log_mode:
+        scope += f" · mode `{run_log_mode}`"
+    scope += f" · window {args.lookback_weeks:g}–{args.max_lookback_weeks:g} weeks"
+
+    sections = [
+        f"# Longitudinal comparison — {datetime.now():%Y-%m-%d %H:%M}",
+        "",
+        scope,
+        "",
+        *run_log_sections,
+    ]
 
     sections.append("## Per-ticker timelines")
     sections.append("")
@@ -503,7 +591,7 @@ def main(argv: list[str] | None = None) -> int:
         "review could inspect; partial or insufficient-data reviews are explicitly limited."
     )
     sections.append("")
-    for t in args.tickers:
+    for t in tickers:
         rows = discover_rows(
             t,
             results_dir,

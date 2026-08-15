@@ -202,6 +202,13 @@ def _build_legal_fallback_report(
     sector: str,
     reason: str,
 ) -> str:
+    # Null statuses are correct here and must stay null: every caller wraps this
+    # in failure_artifact(ok=False), and detect_legal_flags keys on that to emit
+    # LEGAL_COUNSEL_UNAVAILABLE (blocks_buy=True, zero risk penalty) rather than
+    # reading the stub as substantive findings. Filling in UNCERTAIN tokens here
+    # would manufacture PFIC/CMIC *findings* out of a provider outage -- and
+    # UNCERTAIN is not even a member of VIE_STRUCTURE_TOKENS. The hazard is
+    # already resolved closed one layer up; see src/evidence_disposition.py.
     return json.dumps(
         {
             "pfic_status": None,
