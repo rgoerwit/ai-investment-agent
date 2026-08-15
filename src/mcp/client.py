@@ -7,12 +7,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
+import structlog
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, ListToolsResult
 
-from src.mcp.auth import MCPResolvedServer, resolve_auth
+from src.mcp.auth import MCPCredentialMissing, MCPResolvedServer, resolve_auth
 from src.mcp.budget import BudgetTracker
 from src.mcp.catalog import ToolCatalog, ToolDescriptor
 from src.mcp.config import MCPServerSpec
@@ -24,6 +25,8 @@ from src.mcp.errors import (
 from src.mcp.normalize import normalize_result
 from src.tooling.inspection_service import INSPECTION_SERVICE
 from src.tooling.inspector import InspectionDecision, InspectionEnvelope, SourceKind
+
+logger = structlog.get_logger(__name__)
 
 _DEFAULT_AUTH_COOLDOWN_SECONDS = 300
 _DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 30
@@ -37,8 +40,22 @@ class MCPRuntime:
     def __init__(self, servers: list[MCPServerSpec], budget_db_path: str) -> None:
         self._specs = {spec.id: spec for spec in servers}
         self._resolved: dict[str, MCPResolvedServer] = {}
+        self._unavailable: dict[str, str] = {}
         for spec in servers:
-            resolved = resolve_auth(spec)
+            # A missing credential disables that one server; every other server
+            # still comes up. Anything else is a malformed registry and should
+            # surface loudly.
+            try:
+                resolved = resolve_auth(spec)
+            except MCPCredentialMissing as exc:
+                self._unavailable[spec.id] = exc.env_var
+                logger.info(
+                    "mcp_server_unavailable",
+                    server_id=spec.id,
+                    reason="credential_not_set",
+                    env_var=exc.env_var,
+                )
+                continue
             if resolved is not None:
                 self._resolved[spec.id] = resolved
 
@@ -50,6 +67,16 @@ class MCPRuntime:
     @property
     def specs(self) -> dict[str, MCPServerSpec]:
         return dict(self._specs)
+
+    @property
+    def usable_server_ids(self) -> frozenset[str]:
+        """Enabled servers whose credentials actually resolved."""
+        return frozenset(self._resolved)
+
+    @property
+    def unavailable_servers(self) -> dict[str, str]:
+        """Server id -> the env var whose absence disabled it."""
+        return dict(self._unavailable)
 
     @property
     def budget(self) -> BudgetTracker:
@@ -128,6 +155,12 @@ class MCPRuntime:
         """
         spec = self._specs.get(server_id)
         if spec is None or not spec.enabled:
+            return False
+        # Enabled is not the same as usable. A server whose credential is absent
+        # resolves to nothing, and offering its tools anyway would trade a clean
+        # "not available" for a mid-review CONFIG failure that counts against
+        # the Consultant's partial-tool-failure ratio.
+        if server_id not in self._resolved:
             return False
         if not spec.supports_scope(scope):
             return False

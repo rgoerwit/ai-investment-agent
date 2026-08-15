@@ -378,9 +378,14 @@ def build_runtime_services_from_config(
             )
             hooks.append(MCPBudgetHook(mcp_runtime))
             if logger is not None:
+                # Report what is *usable*, not what is merely enabled: a server
+                # whose credential is absent is skipped and offers no tools, and
+                # a run with zero usable servers is a supported degenerate state
+                # rather than a failure.
                 logger.info(
                     "mcp_runtime_initialized",
-                    server_count=len([s for s in servers if s.enabled]),
+                    usable_servers=sorted(mcp_runtime.usable_server_ids),
+                    unavailable_servers=sorted(mcp_runtime.unavailable_servers),
                 )
         except Exception as exc:
             if logger is not None:

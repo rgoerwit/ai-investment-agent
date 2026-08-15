@@ -259,8 +259,26 @@ def _reset_flex_health_for_tests() -> None:
         _flex_health.clear()
 
 
+def resolve_google_service_tier(cfg: Any = None) -> str:
+    """The effective Google tier, from whichever key the active schema uses.
+
+    ``GOOGLE_SERVICE_TIER`` is the multi-provider key; ``GEMINI_SERVICE_TIER``
+    is its legacy predecessor. They must never be read at different call sites:
+    seat construction read the first while this module read the second, so an
+    operator who set only ``GOOGLE_SERVICE_TIER=flex`` sent flex requests while
+    the runtime believed flex was inactive — the timeout floors and the
+    degradation cache silently never engaged. That is the same divergence
+    ``RuntimeConfig.from_config`` already resolves for RPM, and it is resolved
+    the same way here: one function, consulted by every reader.
+    """
+    settings = _cfg(cfg)
+    if getattr(settings, "llm_base_provider", None) is not None:
+        return getattr(settings, "google_service_tier", "standard")
+    return getattr(settings, "gemini_service_tier", "standard")
+
+
 def gemini_flex_active(cfg: Any = None) -> bool:
-    return getattr(_cfg(cfg), "gemini_service_tier", "standard") == "flex"
+    return resolve_google_service_tier(cfg) == "flex"
 
 
 def openai_flex_active(cfg: Any = None) -> bool:

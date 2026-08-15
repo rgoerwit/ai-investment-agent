@@ -15,6 +15,25 @@ class MCPResolvedServer:
     cwd: str | None = None
 
 
+class MCPCredentialMissing(ValueError):
+    """A server is configured correctly but its credential is not present.
+
+    Subclasses ``ValueError`` so the narrower type is purely additive: callers
+    that catch ``ValueError`` keep working, while the one that must distinguish
+    "no key" from "bad registry" can catch this.
+
+    Distinct from a malformed registry: the operator simply does not have (or
+    has retired) this vendor's key. One vendor's absent credential must not
+    take down the whole MCP plane, so callers treat this as "this server is
+    unavailable" and keep the others.
+    """
+
+    def __init__(self, server_id: str, env_var: str) -> None:
+        self.server_id = server_id
+        self.env_var = env_var
+        super().__init__(f"{env_var} not set for MCP server {server_id}")
+
+
 def resolve_auth(spec: MCPServerSpec) -> MCPResolvedServer | None:
     if not spec.enabled:
         return None
@@ -38,9 +57,10 @@ def resolve_auth(spec: MCPServerSpec) -> MCPResolvedServer | None:
             )
         key = get_env_value(auth_env_name)
         if not key:
-            raise ValueError(
-                f"Required env var {auth_env_name!r} not set for MCP server {spec.id}"
-            )
+            # Not a configuration error — an absent credential. Raising a
+            # generic ValueError here used to abort construction of the entire
+            # MCPRuntime, so one retired key disabled every server.
+            raise MCPCredentialMissing(spec.id, auth_env_name)
         if spec.transport == "stdio":
             stdio_env[auth_env_name] = key
 

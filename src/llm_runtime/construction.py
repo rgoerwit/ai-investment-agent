@@ -18,6 +18,7 @@ from src.llm_runtime.seats import (
     ReasoningAdjustment,
     SeatId,
 )
+from src.service_tiers import resolve_google_service_tier
 
 
 @dataclass(frozen=True)
@@ -307,7 +308,10 @@ def build_model_for_seat(
         service_tier = "standard"
     elif service_tier is None:
         if binding.provider == "google":
-            service_tier = settings.google_service_tier
+            # Via the shared resolver, never the raw field: the runtime's flex
+            # gate (timeout floors, degradation cache) reads the same helper, so
+            # what we request and what we allow for cannot drift apart.
+            service_tier = resolve_google_service_tier(settings)
         elif binding.provider == "openai":
             service_tier = settings.openai_service_tier
     for callback in callback_list:

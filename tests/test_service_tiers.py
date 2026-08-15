@@ -1,6 +1,7 @@
 """Unit tests for src/service_tiers.py — flex-tier gating, timeout floors,
 and the dynamic (error-driven) flex-capability cache."""
 
+import pathlib
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,7 @@ from src.service_tiers import (
     normalize_model_name,
     openai_flex_active,
     provider_flex_active,
+    resolve_google_service_tier,
 )
 
 
@@ -372,3 +374,74 @@ class TestFlexHealthDowngrade:
 
         # 80 failures against a threshold of 50, all inside the window.
         assert flex_degraded("google", now=self.T0 + 200, cfg=cfg) is True
+
+
+class TestGoogleServiceTierResolution:
+    """One resolver, so what we request and what we allow for cannot diverge.
+
+    ``GOOGLE_SERVICE_TIER`` (multi-provider) and ``GEMINI_SERVICE_TIER``
+    (legacy) name the same concept. Seat construction read the first while this
+    module read the second, so an operator who set only ``GOOGLE_SERVICE_TIER``
+    sent flex requests that the runtime did not treat as flex: the timeout
+    floors never applied and the degradation cache never engaged. Same class of
+    split that ``RuntimeConfig.from_config`` already resolves for RPM.
+    """
+
+    @staticmethod
+    def _schema_cfg(*, google="standard", gemini="standard", base_provider=None):
+        return SimpleNamespace(
+            google_service_tier=google,
+            gemini_service_tier=gemini,
+            llm_base_provider=base_provider,
+            openai_service_tier="auto",
+            flex_llm_timeout_seconds=900,
+            quick_llm_call_hard_timeout_seconds=60,
+        )
+
+    def test_new_schema_reads_the_provider_scoped_key(self):
+        cfg = self._schema_cfg(google="flex", gemini="standard", base_provider="google")
+        assert resolve_google_service_tier(cfg) == "flex"
+        assert gemini_flex_active(cfg)
+        assert provider_flex_active("google", cfg)
+
+    def test_legacy_schema_reads_the_legacy_key(self):
+        cfg = self._schema_cfg(google="standard", gemini="flex", base_provider=None)
+        assert resolve_google_service_tier(cfg) == "flex"
+        assert gemini_flex_active(cfg)
+
+    def test_new_schema_ignores_a_stale_legacy_key(self):
+        """A leftover GEMINI_SERVICE_TIER must not re-enable flex."""
+        cfg = self._schema_cfg(google="standard", gemini="flex", base_provider="google")
+        assert resolve_google_service_tier(cfg) == "standard"
+        assert not gemini_flex_active(cfg)
+
+    def test_legacy_schema_ignores_the_provider_scoped_key(self):
+        cfg = self._schema_cfg(google="flex", gemini="standard", base_provider=None)
+        assert resolve_google_service_tier(cfg) == "standard"
+        assert not gemini_flex_active(cfg)
+
+    def test_missing_fields_default_to_standard(self):
+        assert resolve_google_service_tier(SimpleNamespace()) == "standard"
+
+    def test_seat_construction_does_not_read_the_raw_field(self):
+        """Construction must go through the resolver, not the Settings field.
+
+        A direct ``settings.google_service_tier`` read there is exactly how the
+        two sites drifted apart; a source scan is the only thing that catches
+        it reappearing, since both spellings behave identically in the common
+        case where the keys agree.
+        """
+        source = (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "src"
+            / "llm_runtime"
+            / "construction.py"
+        ).read_text()
+        assert "resolve_google_service_tier(" in source
+        assert "google_service_tier" not in source.replace(
+            "resolve_google_service_tier", ""
+        ), (
+            "construction.py reads the raw google_service_tier field; route it "
+            "through resolve_google_service_tier so the runtime flex gate and "
+            "the outgoing request agree."
+        )
