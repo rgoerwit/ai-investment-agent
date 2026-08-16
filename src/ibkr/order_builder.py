@@ -33,7 +33,12 @@ PARSEABLE_TRADE_ACTIONS = CURRENT_TRADE_ACTIONS | LEGACY_TRADE_ACTIONS
 _FIELD_PATTERNS = {
     "action": re.compile(r"ACTION:\s*(.+?)(?:\n|$)", re.IGNORECASE),
     "size": re.compile(r"SIZE:\s*([\d.]+)\s*%", re.IGNORECASE),
-    "conviction": re.compile(r"CONVICTION:\s*(\w+)", re.IGNORECASE),
+    # `[\w/]+` rather than `\w+` so the null token is seen whole: on "CONVICTION: N/A"
+    # a bare `\w+` captures "N", which is truthy and reaches the operator report as
+    # "BUY (N)" and the concentration escape hatch as a non-HIGH conviction. That is 514
+    # of 1,120 persisted trader plans. The slash also keeps "Low/Medium" intact; a
+    # trailing qualifier ("High (Rejection)") still stops at the space, as before.
+    "conviction": re.compile(r"CONVICTION:\s*([\w/]+)", re.IGNORECASE),
     "entry": re.compile(r"ENTRY:\s*(.+?)(?:\n|$)", re.IGNORECASE),
     "stop": re.compile(r"STOP:\s*(.+?)(?:\n|$)", re.IGNORECASE),
     "target_1": re.compile(r"TARGET_1:\s*(.+?)(?:\n|$)", re.IGNORECASE),
@@ -110,10 +115,16 @@ def parse_trade_block(text: str) -> TradeBlockData | None:
         except ValueError:
             pass
 
+    # An explicit "N/A" is an absent conviction, not a value -- same convention
+    # `parse_price` already applies to the price fields.
+    conviction = fields.get("conviction", "").strip()
+    if conviction.upper() in {"N/A", "NA", "NONE", "-"}:
+        conviction = ""
+
     return TradeBlockData(
         action=action_base,
         size_pct=size_pct,
-        conviction=fields.get("conviction", ""),
+        conviction=conviction,
         entry_price=parse_price(fields.get("entry")),
         stop_price=parse_price(fields.get("stop")),
         target_1_price=parse_price(fields.get("target_1")),

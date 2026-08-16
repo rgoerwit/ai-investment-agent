@@ -170,7 +170,10 @@ def create_chart_generator_node(
             from src.charts.extractors.data_block import (
                 extract_chart_data_from_data_block,
             )
-            from src.charts.extractors.pm_block import extract_pm_block
+            from src.charts.extractors.pm_block import (
+                extract_pm_block,
+                extract_verdict_from_text,
+            )
 
             ticker = state.get("company_of_interest", "UNKNOWN")
             trade_date = datetime.now().strftime("%Y-%m-%d")
@@ -188,7 +191,11 @@ def create_chart_generator_node(
             # Determine verdict (PM_BLOCK preferred, fallback to text parsing)
             verdict = pm_block.verdict
             if not verdict:
-                verdict = _extract_verdict_fallback(pm_output)
+                # Shared with the PM_BLOCK path so both return the same canonical
+                # vocabulary. The former local copy accepted only "DO NOT INITIATE"
+                # (missing the underscore spelling) and returned a RAW token, so a
+                # legacy "REJECT" reached the charts uncanonicalized.
+                verdict = extract_verdict_from_text(pm_output)
 
             logger.info(
                 "chart_generator_processing",
@@ -275,22 +282,6 @@ def _normalize_string(content: Any) -> str:
                 unique_items.append(item_str)
         return "\n\n".join(unique_items)
     return str(content)
-
-
-def _extract_verdict_fallback(pm_output: str) -> str | None:
-    """Fallback verdict extraction when PM_BLOCK is missing."""
-    if not pm_output:
-        return None
-
-    patterns = [
-        r"PORTFOLIO MANAGER VERDICT:\s*(BUY|HOLD|DO NOT INITIATE|SELL)",
-        r"\*\*Action\*\*:\s*(BUY|HOLD|DO NOT INITIATE|SELL)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, pm_output, re.IGNORECASE)
-        if match:
-            return match.group(1).upper().replace(" ", "_")
-    return None
 
 
 def _generate_football_field(
@@ -442,8 +433,6 @@ def _generate_radar_chart(
     chart_config: Any,
 ) -> Path | None:
     """Generate radar chart with PM-adjusted scores when available."""
-    import re
-
     from src.charts.base import RadarChartData
     from src.charts.generators.radar_chart import generate_radar_chart
 

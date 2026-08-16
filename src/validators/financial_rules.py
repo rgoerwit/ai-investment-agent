@@ -12,6 +12,7 @@ import structlog
 from src.data_block_utils import extract_data_block_field
 from src.earnings_baseline import is_material_baseline_distortion
 from src.guidance_vocabulary import all_transient_tax_terms
+from src.text_patterns import SENTENCE_SPLIT_RE
 from src.thesis_constants import (
     PE_MAX,
     PE_VS_SECTOR_RICH,
@@ -110,7 +111,7 @@ _NON_ASSERTIVE_EVENT_CONTEXT_RE = re.compile(
 def _asserted_transient_strength_labels(report: str) -> list[str]:
     """Return event labels only where prose asserts, rather than queries, an event."""
     labels: list[str] = []
-    segments = re.split(r"(?<=[.!?])\s+|\n+", report)
+    segments = SENTENCE_SPLIT_RE.split(report)
     for segment in segments:
         if not segment.strip() or _NON_ASSERTIVE_EVENT_CONTEXT_RE.search(segment):
             continue

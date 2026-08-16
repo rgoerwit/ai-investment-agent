@@ -10,39 +10,54 @@ from unittest.mock import patch
 
 import pytest
 
-from src.retrospective import (
-    _extract_trade_block_fields,
-    _extract_trade_block_price,
-    extract_snapshot,
-)
+from src.ibkr.order_builder import parse_price, parse_trade_block
+from src.retrospective import _extract_trade_block_fields, extract_snapshot
 
 
 class TestExtractTradeBlockPrice:
-    """Test price extraction from individual TRADE_BLOCK fields."""
+    """Price extraction from individual TRADE_BLOCK fields.
+
+    ``retrospective._extract_trade_block_price`` was a second copy of
+    ``order_builder.parse_price`` and has been retired; these assertions are
+    unchanged and now exercise the canonical parser directly. The retrospective
+    path reaches it through ``parse_trade_block``.
+    """
 
     def test_entry_price(self):
-        text = "ENTRY: 2,145 (Scaled Limit)\nSTOP: 1,930"
-        assert _extract_trade_block_price(text, "ENTRY") == 2145.0
+        assert parse_price("2,145 (Scaled Limit)") == 2145.0
 
     def test_stop_price_with_pct(self):
-        text = "STOP: 1,930 (-10.0%)\nTARGET_1: 2,575"
-        assert _extract_trade_block_price(text, "STOP") == 1930.0
+        assert parse_price("1,930 (-10.0%)") == 1930.0
 
     def test_target_price(self):
-        text = "TARGET_1: 2,575 (+20.0%)\nTARGET_2: 3,000"
-        assert _extract_trade_block_price(text, "TARGET_1") == 2575.0
+        assert parse_price("2,575 (+20.0%)") == 2575.0
 
     def test_decimal_price(self):
-        text = "ENTRY: 436.00 (Limit)"
-        assert _extract_trade_block_price(text, "ENTRY") == 436.0
+        assert parse_price("436.00 (Limit)") == 436.0
 
     def test_na_price(self):
-        text = "ENTRY: N/A (Liquidity Fail)"
-        assert _extract_trade_block_price(text, "ENTRY") is None
+        assert parse_price("N/A (Liquidity Fail)") is None
 
     def test_missing_field(self):
-        text = "SIZE: 5.0%"
-        assert _extract_trade_block_price(text, "ENTRY") is None
+        """An absent field yields no price rather than a stray match."""
+        block = parse_trade_block("TRADE_BLOCK:\nACTION: BUY\nSIZE: 5.0%\n")
+        assert block is not None
+        assert block.entry_price is None
+
+    def test_prose_entry_above_the_block_does_not_shadow_the_real_one(self):
+        """Why the shared parser is used: it is scoped to the block.
+
+        The retired copy searched the whole document and took the first ``ENTRY:``
+        it found, so a non-numeric mention in the narrative above the block
+        shadowed the real entry price (3 of 1,120 persisted trader plans).
+        """
+        text = (
+            "Execution approach: ENTRY: staged, do not chase.\n\n"
+            "TRADE_BLOCK:\nACTION: BUY\nSIZE: 3.0%\nENTRY: 98.60 (Limit)\n"
+        )
+        block = parse_trade_block(text)
+        assert block is not None
+        assert block.entry_price == 98.60
 
 
 class TestExtractTradeBlockFields:

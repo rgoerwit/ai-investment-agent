@@ -12,6 +12,12 @@ import structlog
 from langchain_core.messages import BaseMessage
 
 from src.data_block_utils import replace_or_append_block_line
+from src.text_patterns import (
+    EXCHANGE_QUALIFIED_TICKER_RE,
+    RESULT_ENVELOPE_BODY_RE,
+    RESULT_ENVELOPE_RE,
+    URL_RE,
+)
 
 from .message_utils import (
     ToolEvidenceRecord,
@@ -77,7 +83,7 @@ _FACILITY_STATUS_TERMS = {
     "AT_CAPACITY": ("at capacity", "full capacity"),
     "NONE": ("no expansion", "no buildout", "no facility expansion"),
 }
-_PREFLIGHT_RESULT_RE = re.compile(r"(?is)<result\b[^>]*>(.*?)</result>")
+_PREFLIGHT_RESULT_RE = RESULT_ENVELOPE_BODY_RE
 LATEST_RESULTS_SOURCE_FIELDS = (
     "LATEST_RESULTS_PERIOD",
     "LATEST_RESULTS_PERIOD_END",
@@ -100,7 +106,7 @@ _LATEST_RESULTS_NUMERIC_FIELDS = (
     "LATEST_RESULTS_PRIOR_EARNINGS",
 )
 _NUMBER_TOKEN_RE = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?(?![\w.])")
-_URL_RE = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
+_URL_RE = URL_RE
 
 
 def _field(report: str, label: str) -> str:
@@ -118,7 +124,7 @@ def _split_search_result_records(
     split_records: list[ToolEvidenceRecord] = []
     for record in records:
         tool_name, content, urls = record
-        blocks = re.findall(r"(?is)<result\b[^>]*>.*?</result>", content)
+        blocks = RESULT_ENVELOPE_RE.findall(content)
         if not blocks:
             split_records.append(record)
             continue
@@ -634,7 +640,7 @@ def _normalize_ownership(
     related = _field(report, "Related Listed Tickers")
     if verified and related.upper() not in _UNKNOWN:
         supported_text = "\n".join(content for _name, content, _urls in supporting)
-        tickers = re.findall(r"\b[A-Z0-9]{1,8}(?:[.-][A-Z0-9]{1,6})\b", related)
+        tickers = EXCHANGE_QUALIFIED_TICKER_RE.findall(related)
         if not tickers or any(
             ticker_value.upper() not in supported_text.upper()
             for ticker_value in tickers

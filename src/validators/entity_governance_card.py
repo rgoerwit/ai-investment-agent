@@ -26,6 +26,8 @@ from typing import Any, Literal, cast
 
 import structlog
 
+from src.text_patterns import EXCHANGE_QUALIFIED_TICKER_RE
+
 logger = structlog.get_logger(__name__)
 
 
@@ -239,7 +241,7 @@ def _parse_related_listed(value: str | None) -> list[dict[str, Any]]:
         parts = [p.strip() for p in chunk.split(":") if p.strip()]
         if not parts:
             continue
-        ticker_match = _TICKER_RE.search(parts[0])
+        ticker_match = EXCHANGE_QUALIFIED_TICKER_RE.search(parts[0])
         if not ticker_match:
             continue
         edge: dict[str, Any] = {"ticker": ticker_match.group(0).upper()}
@@ -282,7 +284,6 @@ _FLA_EVIDENCE_STATUS_RE = re.compile(
 )
 _FLA_SOURCE_URL_RE = re.compile(r"Ownership Source URL:\s*(.+?)(?:\n|$)", re.IGNORECASE)
 _FLA_AS_OF_RE = re.compile(r"Ownership As Of:\s*(.+?)(?:\n|$)", re.IGNORECASE)
-_TICKER_RE = re.compile(r"\b[A-Z0-9]{1,8}(?:[.-][A-Z0-9]{1,6})\b", re.IGNORECASE)
 
 
 def _coerce_entity_role(value: str) -> EntityRole | None:

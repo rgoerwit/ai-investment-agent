@@ -28,7 +28,11 @@ from src.data_block_utils import (
     unfenced_label,
 )
 from src.error_safety import summarize_exception
-from src.pm_decision_parser import canonicalize_pm_verdict
+from src.pm_decision_parser import (
+    PM_VERDICT_ALTERNATION,
+    PM_VERDICT_HEADER_RE,
+    canonicalize_pm_verdict,
+)
 from src.reporting.state_access import get_effective_red_flags
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import (
@@ -726,7 +730,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
         # 1. PM_BLOCK VERDICT (machine-readable, highest priority)
         # Must be at line start to avoid matching within "PORTFOLIO MANAGER VERDICT"
         pm_block_match = re.search(
-            r"(?:^|\n)\s*VERDICT\s*:\s*(BUY|SELL|HOLD|DO_NOT_INITIATE|DO\s+NOT\s+INITIATE|REJECT)\b",
+            rf"(?:^|\n)\s*VERDICT\s*:\s*{PM_VERDICT_ALTERNATION}\b",
             final_decision_upper,
         )
         if pm_block_match:
@@ -736,11 +740,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
 
         # 2. PORTFOLIO MANAGER VERDICT prose (captures multi-word verdicts)
         # Matches: #### PORTFOLIO MANAGER VERDICT: DO NOT INITIATE
-        verdict_match = re.search(
-            r"PORTFOLIO\s+MANAGER\s+VERDICT\s*:\s*\*?\*?"
-            r"(BUY|SELL|HOLD|DO\s+NOT\s+INITIATE|REJECT)\b",
-            final_decision_upper,
-        )
+        verdict_match = PM_VERDICT_HEADER_RE.search(final_decision_upper)
         if verdict_match:
             verdict = canonicalize_pm_verdict(verdict_match.group(1))
             if verdict != "UNPARSEABLE":
@@ -752,11 +752,7 @@ NOTE: If price is above fair value midpoint but verdict is BUY, you MUST explain
     def _extract_prose_decision(self, final_decision: str) -> str | None:
         """Extract only the narrative PM verdict, ignoring PM_BLOCK fields."""
         final_decision_upper = self._normalize_string(final_decision).upper()
-        verdict_match = re.search(
-            r"PORTFOLIO\s+MANAGER\s+VERDICT\s*:\s*\*?\*?"
-            r"(BUY|SELL|HOLD|DO\s+NOT\s+INITIATE|REJECT)\b",
-            final_decision_upper,
-        )
+        verdict_match = PM_VERDICT_HEADER_RE.search(final_decision_upper)
         if not verdict_match:
             return None
         verdict = canonicalize_pm_verdict(verdict_match.group(1))

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
+from src.ibkr.portfolio_health import CORRELATED_EVENT_EVIDENCE_PATTERN
 from src.ibkr.portfolio_report import PortfolioReportContext
 from src.ibkr.portfolio_report_formatting import ReportBuffer
 
@@ -107,11 +108,11 @@ def _append_macro_banner(
     active = next((flag for flag in flags if "ACTIVE_MACRO_EVENT" in flag), None)
     width = 52
     if correlated:
-        match = re.search(
-            r"(\d+) positions.*?of (\d{4}-\d{2}-\d{2}) \((\d+)%", correlated
-        )
+        # Shared with the emitter so the banner cannot drift from the flag; see
+        # portfolio_health.CORRELATED_EVENT_EVIDENCE_PATTERN for the three phrasings.
+        match = re.search(CORRELATED_EVENT_EVIDENCE_PATTERN, correlated)
         count, event_date, percent = (
-            (match.group(1), match.group(2), f"{match.group(3)}%")
+            (match.group("count"), match.group("date"), f"{match.group('pct')}%")
             if match
             else ("?", "?", "?%")
         )

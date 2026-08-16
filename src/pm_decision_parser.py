@@ -31,10 +31,33 @@ PMVerdict = Literal[
 ]
 
 __all__ = [
+    "PM_VERDICT_ALTERNATION",
+    "PM_VERDICT_HEADER_RE",
     "PMVerdict",
     "canonicalize_pm_verdict",
     "parse_final_decision_scores",
 ]
+
+# Canonical verdict alternation for the *narrative* surfaces, where a closed token set is
+# wanted (charts, memo, report banner) rather than the permissive free-token scan
+# `parse_final_decision_scores` uses below.
+#
+# `DO[ _]NOT[ _]INITIATE` accepts BOTH spellings because both occur: across 1,493
+# persisted decisions the header reads "DO NOT INITIATE" 1,002 times, "DO_NOT_INITIATE"
+# 20 times, and "DO NOT_INITIATE" twice. Four separate consumers had hardcoded the
+# space-only spelling and silently returned no match on the other. Legacy REJECT is kept
+# for archived artifacts, mirroring `canonicalize_pm_verdict` and
+# `order_builder.LEGACY_TRADE_ACTIONS`.
+#
+# Always pass the captured token through `canonicalize_pm_verdict`, which folds
+# separators and collapses runs -- that is what resolves the mixed "DO NOT_INITIATE".
+PM_VERDICT_ALTERNATION = r"(BUY|SELL|HOLD|DO[ _]NOT[ _]INITIATE|REJECT)"
+
+# The "PORTFOLIO MANAGER VERDICT:" narrative header, optionally bolded.
+PM_VERDICT_HEADER_RE = re.compile(
+    rf"PORTFOLIO\s+MANAGER\s+VERDICT\s*:\s*\*{{0,2}}\s*{PM_VERDICT_ALTERNATION}\b",
+    re.IGNORECASE,
+)
 
 
 def canonicalize_pm_verdict(raw: str | None) -> PMVerdict:

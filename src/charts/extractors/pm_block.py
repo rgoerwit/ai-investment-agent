@@ -12,7 +12,11 @@ from dataclasses import dataclass
 import structlog
 
 from src.data_block_utils import extract_last_fenced_block
-from src.pm_decision_parser import canonicalize_pm_verdict
+from src.pm_decision_parser import (
+    PM_VERDICT_ALTERNATION,
+    PM_VERDICT_HEADER_RE,
+    canonicalize_pm_verdict,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -165,6 +169,10 @@ def extract_pm_block(pm_output: str) -> PMBlockData:
 
     result = PMBlockData(
         verdict=verdict,
+        # Integer-only, unlike pm_decision_parser's `([0-9.]+)` for the same two
+        # fields. Verified inert: 0 of 1,493 persisted decisions write a decimal
+        # HEALTH_ADJ/GROWTH_ADJ. If the PM prompt ever starts emitting one, widen
+        # BOTH readers together.
         health_adj=_extract_int(r"HEALTH_ADJ:\s*(\d+)", pm_block),
         growth_adj=_extract_int(r"GROWTH_ADJ:\s*(\d+)", pm_block),
         # Signed: capital-efficiency and moat bonuses can drive the tally below
@@ -212,11 +220,14 @@ def extract_verdict_from_text(pm_output: str) -> str | None:
     if not pm_output:
         return None
 
-    # Look for explicit verdict header
+    # Look for explicit verdict header. The alternation is shared with the other
+    # narrative-surface readers (report_generator, reporting/memo) via
+    # pm_decision_parser so a spelling accepted by one is accepted by all -- the
+    # underscore form "DO_NOT_INITIATE" was previously missed here.
     verdict_patterns = [
-        r"PORTFOLIO MANAGER VERDICT:\s*(BUY|HOLD|DO NOT INITIATE|SELL)",
-        r"\*\*Action\*\*:\s*(BUY|HOLD|DO NOT INITIATE|SELL)",
-        r"Action:\s*(BUY|HOLD|DO NOT INITIATE|SELL)",
+        PM_VERDICT_HEADER_RE.pattern,
+        rf"\*\*Action\*\*:\s*{PM_VERDICT_ALTERNATION}",
+        rf"Action:\s*{PM_VERDICT_ALTERNATION}",
     ]
 
     for pattern in verdict_patterns:

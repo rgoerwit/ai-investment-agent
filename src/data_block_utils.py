@@ -65,6 +65,13 @@ _GLUED_FENCED_MARKER_RE = re.compile(
 )
 
 _NULL_TOKENS = frozenset({"N/A", "NA", "NONE", "-", ""})
+# Deliberately strict: anchored at line start, no leading-whitespace, bullet, or
+# `**emphasis**` tolerance. Do NOT loosen it speculatively -- measured over 1,194
+# persisted fundamentals reports, zero DATA_BLOCK field lines are indented, bulleted,
+# or emphasized, so tolerance would buy nothing and would let a field mentioned in
+# surrounding prose shadow the real one. Looser dialects exist on purpose elsewhere:
+# validators/supplemental_extractors uses `^[\\s*-]*FIELD\\*{0,2}:` for prose-embedded
+# tokens, and charts/extractors/data_block strips markdown around the VALUE.
 _FIELD_VALUE_PATTERN = r"(?m)^{field_name}:\s*(.+?)\s*$"
 _NUMBER_TOKEN_PATTERN = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
 

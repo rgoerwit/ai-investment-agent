@@ -941,7 +941,10 @@ def _store_macro_event_if_detected(
     event is returned even when ChromaDB storage is unavailable or fails, so the
     caller's alert banner reflects the current detection regardless of Chroma.
     """
-    from src.ibkr.portfolio_health import is_macro_event_evidence
+    from src.ibkr.portfolio_health import (
+        CORRELATED_EVENT_EVIDENCE_PATTERN,
+        is_macro_event_evidence,
+    )
     from src.memory import MacroEvent, create_macro_events_store
 
     correlated_flag = next(
@@ -950,21 +953,18 @@ def _store_macro_event_if_detected(
     if not correlated_flag:
         return None
 
-    # Tolerant of the three trigger phrasings: "within Nd of DATE" (window)
-    # and "as of DATE" (cumulative / drawdown_breadth).
-    m = _re.search(
-        r"CORRELATED_SELL_EVENT:\s*(\d+) positions"
-        r".*?(?:within (\d+)d of|as of) (\d{4}-\d{2}-\d{2})"
-        r".*?\((\d+\.?\d*)%",
-        correlated_flag,
-    )
+    # Shared with the emitter so this reader cannot drift from the flag; the pattern
+    # tolerates all three trigger phrasings ("within Nd of DATE" for window, "as of DATE"
+    # for cumulative / drawdown_breadth). See
+    # portfolio_health.CORRELATED_EVENT_EVIDENCE_PATTERN.
+    m = _re.search(CORRELATED_EVENT_EVIDENCE_PATTERN, correlated_flag)
     if not m:
         logger.warning("macro_event_flag_parse_failed", flag=correlated_flag)
         return None
 
-    peak_count = int(m.group(1))
-    event_date = m.group(3)
-    correlation_pct = float(m.group(4)) / 100.0
+    peak_count = int(m.group("count"))
+    event_date = m.group("date")
+    correlation_pct = float(m.group("pct")) / 100.0
     severity = "HIGH" if correlation_pct >= 0.40 else "MEDIUM"
 
     total_held = sum(

@@ -24,6 +24,7 @@ from src.earnings_baseline import (
     canonical_guidance_enum,
 )
 from src.llm_usage import extract_token_usage_breakdown
+from src.text_patterns import URL_RE
 
 logger = structlog.get_logger(__name__)
 
@@ -77,7 +78,7 @@ def _has_valid_latest_results_block(content: str) -> bool:
         and period_end
         and re.fullmatch(r"\d{4}-\d{2}-\d{2}", period_end)
         and source_url
-        and re.fullmatch(r"https?://\S+", source_url, re.IGNORECASE)
+        and URL_RE.fullmatch(source_url)
     ):
         return False
     return True
@@ -135,7 +136,7 @@ def _has_valid_management_guidance_block(content: str) -> bool:
         if not (
             source_date
             and source_url
-            and re.fullmatch(r"https?://\S+", source_url, re.IGNORECASE)
+            and URL_RE.fullmatch(source_url)
             and direction
             and bridge_status in GUIDANCE_BRIDGE_STATUSES
         ):
@@ -219,7 +220,7 @@ def _promoted_management_guidance_issue(content: str) -> str | None:
     direction = canonical_enum(
         extract_block_field(content, "DATA_BLOCK", "OPERATING_VS_NET_DIRECTION")
     )
-    if not source_url or not re.fullmatch(r"https?://\S+", source_url, re.IGNORECASE):
+    if not source_url or not URL_RE.fullmatch(source_url):
         return (
             f"GUIDANCE_SOURCE_URL={source_url or '<missing>'}; expected an HTTP(S) URL"
         )

@@ -20,6 +20,28 @@ logger = structlog.get_logger(__name__)
 # ongoing-awareness banner and forced re-analysis.
 _DEFAULT_MACRO_OVERRIDE_MAX_AGE_DAYS = 21
 
+# Canonical matcher for the CORRELATED_SELL_EVENT flag this module emits (see the
+# per-trigger `evidence` strings in compute_portfolio_health). It lives beside the
+# emitter so the shape and its readers move together.
+#
+# THREE trigger phrasings must all parse:
+#   window           -> "N positions changed verdict within 14d of DATE (P% of held positions)"
+#   cumulative       -> "N positions changed verdict across the held book as of DATE (P% ...)"
+#   drawdown_breadth -> "N positions currently trading >=10% below entry as of DATE (P% ...)"
+#
+# `window` is therefore None for two of the three -- those phrasings carry no window, and
+# a reader that requires one silently drops the flag. That is exactly what happened: the
+# dashboard hardcoded the `window` phrasing and rendered an empty macro alert on the other
+# two triggers. Consumers: web/ibkr_dashboard/macro_alerts.py,
+# scripts/portfolio_manager.py, ibkr/portfolio_report_status.py.
+#
+# The percentage is emitted with `:.0%`, so it is always integral.
+CORRELATED_EVENT_EVIDENCE_PATTERN = (
+    r"(?P<count>\d+) positions"
+    r".*?(?:within (?P<window>\d+)d of|as of) (?P<date>\d{4}-\d{2}-\d{2})"
+    r".*?\((?P<pct>\d+)% of held positions\)"
+)
+
 
 def _entry_and_current(item) -> tuple[float | None, float | None]:
     """Return (analysis entry, current position price), both LOCAL currency."""

@@ -28,6 +28,7 @@ from src.earnings_baseline import (
     guidance_contract_value_is_uninterpretable,
 )
 from src.guidance_vocabulary import guidance_locale_policy
+from src.text_patterns import RESULT_ENVELOPE_BODY_RE, URL_RE
 
 from .evidence_preflight import (
     run_preflight_calls,
@@ -115,9 +116,7 @@ _NUMBER_TOKEN_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 def _matching_source_evidence(evidence: str, source_url: str) -> str:
     if not source_url:
         return ""
-    blocks: list[str] = re.findall(
-        r"(?is)<result\b[^>]*>(.*?)</result>", evidence or ""
-    )
+    blocks: list[str] = re.findall(RESULT_ENVELOPE_BODY_RE.pattern, evidence or "")
     for block in blocks:
         if source_url in block:
             return block
@@ -400,7 +399,7 @@ async def _preload_management_guidance_evidence(
         url.rstrip(".,;:!?)]}")
         for url in dict.fromkeys(
             re.findall(
-                r"https?://[^\s<>\"]+",
+                URL_RE.pattern,
                 rendered_outcomes,
             )
         )
@@ -472,9 +471,7 @@ async def _preload_management_guidance_evidence(
         ),
         "",
     )
-    guidance_candidate_urls = list(
-        dict.fromkeys(re.findall(r"https?://[^\s<]+", bridge_payload))
-    )[:3]
+    guidance_candidate_urls = list(dict.fromkeys(URL_RE.findall(bridge_payload)))[:3]
     if enable_extraction and guidance_candidate_urls:
         extraction_outcomes, extraction_durations = await run_preflight_calls(
             [
@@ -692,7 +689,7 @@ def normalize_management_guidance_output(
         has_sourced_driver = (
             material_driver == "YES"
             and driver_type not in {"", "NONE", "UNKNOWN"}
-            and bool(re.fullmatch(r"https?://\S+", source_url, re.IGNORECASE))
+            and bool(URL_RE.fullmatch(source_url))
         )
         bridge_status = "RECONCILED" if has_sourced_driver else "UNRESOLVED"
         if not has_sourced_driver:

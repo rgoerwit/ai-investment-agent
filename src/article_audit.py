@@ -12,6 +12,7 @@ from src.data_block_utils import (
     extract_block_field_from_text_raw,
     extract_last_data_block,
 )
+from src.text_patterns import SENTENCE_SPLIT_RE
 
 logger = structlog.get_logger(__name__)
 
@@ -259,7 +260,7 @@ def audit_article_claim_support(
     if not article or not snapshot or snapshot.get("contract_status") != "VALID":
         return []
     claims = snapshot.get("claims", {})
-    sentences = re.split(r"(?<=[.!?])\s+|\n+", article)
+    sentences = SENTENCE_SPLIT_RE.split(article)
     errors: list[dict[str, str]] = []
     seen: set[str] = set()
     for claim in claims.values():
@@ -359,7 +360,7 @@ def audit_article_claim_usage(
                 continue
             usage.setdefault(str(claim.get("field") or ""), []).append(excerpt)
 
-    sentences = re.split(r"(?<=[.!?])\s+|\n+", body)
+    sentences = SENTENCE_SPLIT_RE.split(body)
     for claim in claims.values():
         if not isinstance(claim, dict):
             continue

@@ -7,8 +7,6 @@ ownership explicit without forcing broad signature churn through the codebase.
 
 from __future__ import annotations
 
-import ipaddress
-import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -20,6 +18,7 @@ from langchain_core.rate_limiters import BaseRateLimiter
 
 from src.error_safety import redact_sensitive_text
 from src.llm_runtime.rate_limits import create_process_rate_limiter
+from src.text_patterns import is_safe_public_host
 from src.tooling.inspection_service import INSPECTION_SERVICE, InspectionService
 from src.tooling.inspector import ContentInspector
 from src.tooling.runtime import TOOL_SERVICE, ToolExecutionService, ToolHook
@@ -84,17 +83,7 @@ class IssuerAuthorityRegistry:
         host = parsed.hostname.rstrip(".").lower()
         if host.startswith("www."):
             host = host[4:]
-        if (
-            "." not in host
-            or len(host) > 253
-            or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", host)
-        ):
-            return False
-        try:
-            ipaddress.ip_address(host)
-        except ValueError:
-            pass
-        else:
+        if not is_safe_public_host(host):
             return False
         self._provenance_by_host.setdefault(host, provenance)
         return True

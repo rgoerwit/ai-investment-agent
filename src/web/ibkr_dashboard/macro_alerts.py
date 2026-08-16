@@ -4,13 +4,14 @@ import re
 import threading
 from typing import Any
 
+from src.ibkr.portfolio_health import CORRELATED_EVENT_EVIDENCE_PATTERN
 from src.memory import create_macro_events_store
 
-_CORRELATED_EVENT_RE = re.compile(
-    r"(?P<count>\d+) positions changed verdict within (?P<window>\d+)d of "
-    r"(?P<date>\d{4}-\d{2}-\d{2}) \((?P<pct>\d+)% of held positions\)",
-    re.IGNORECASE,
-)
+# Compiled from the emitter's own pattern so this reader cannot drift from the flag it
+# parses. It previously hardcoded the "within Nd of DATE" phrasing and so matched only
+# the `window` trigger -- `cumulative` and `drawdown_breadth` both say "as of DATE" and
+# rendered an alert with no count, date, or percentage.
+_CORRELATED_EVENT_RE = re.compile(CORRELATED_EVENT_EVIDENCE_PATTERN, re.IGNORECASE)
 
 
 class MacroAlertService:
@@ -30,11 +31,14 @@ class MacroAlertService:
             return None
 
         match = _CORRELATED_EVENT_RE.search(correlated_flag)
+        # `window` is absent by design on the cumulative / drawdown_breadth phrasings --
+        # those carry no lookback window -- so it stays None even on a successful match.
+        window = match.group("window") if match else None
         payload: dict[str, Any] = {
             "detected": True,
             "flag": correlated_flag,
             "peak_count": int(match.group("count")) if match else None,
-            "window_days": int(match.group("window")) if match else None,
+            "window_days": int(window) if window else None,
             "event_date": match.group("date") if match else None,
             "correlation_pct": int(match.group("pct")) if match else None,
             "event_type": None,
