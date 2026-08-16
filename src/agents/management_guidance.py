@@ -38,6 +38,28 @@ logger = structlog.get_logger(__name__)
 
 GUIDANCE_PREFLIGHT_MAX_CHARS = 36_000
 
+# Evidence statuses that positively say the *search* fell short, as opposed to
+# the search running cleanly and finding that the company publishes no guidance.
+#
+# That difference decides whether NOT_DISCLOSED_AFTER_TARGETED_SEARCH survives.
+# It is the token for "this issuer does not guide" -- the normal case for ex-US
+# small caps -- and it deliberately does not raise
+# MANAGEMENT_GUIDANCE_EVIDENCE_GAP, which carries blocks_buy=True. The previous
+# rule demoted it unless some status equalled COVERAGE_COMPLETE_NO_MATCH, a
+# value no producer emits (0 of ~4,700 persisted artifacts), so the token was
+# unreachable and every ordinary absence was rewritten into a pipeline failure
+# that blocked the BUY. Aug 2026 measured 60% FOUND / 39% UNRESOLVED / 0%
+# NOT_DISCLOSED with the gap flag firing on 38.5% of runs against a 1.2% July
+# baseline.
+#
+# NO_RESULTS is deliberately NOT here: a targeted guidance search returning
+# nothing is the expected outcome for an issuer that does not guide, and reading
+# it as failure is the defect itself. Members are EvidenceStatus values from
+# src/tooling/evidence_recorder.py -- keep them in sync with that Literal.
+INCOMPLETE_SEARCH_EVIDENCE_STATUSES = frozenset(
+    {"UNAVAILABLE", "AUTH_ERROR", "INSUFFICIENT"}
+)
+
 GUIDANCE_PROMOTION_FIELDS: dict[str, str] = {
     "COVERAGE_STATUS": "GUIDANCE_COVERAGE_STATUS",
     "SOURCE_TYPE": "GUIDANCE_SOURCE_TYPE",
@@ -593,9 +615,8 @@ def normalize_management_guidance_output(
             "CODE_OWNED_PREFLIGHT",
         )
 
-    if (
-        coverage_status == "NOT_DISCLOSED_AFTER_TARGETED_SEARCH"
-        and "COVERAGE_COMPLETE_NO_MATCH" not in evidence_statuses.values()
+    if coverage_status == "NOT_DISCLOSED_AFTER_TARGETED_SEARCH" and (
+        INCOMPLETE_SEARCH_EVIDENCE_STATUSES & set(evidence_statuses.values())
     ):
         coverage_status = "UNRESOLVED_AFTER_TARGETED_SEARCH"
         block_body = replace_or_append_block_line(

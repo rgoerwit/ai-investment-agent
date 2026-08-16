@@ -25,6 +25,7 @@ from src.agents.fundamentals_reconciler import (
     withhold_eps_growth_for_unusable_baseline,
 )
 from src.earnings_baseline import (
+    _GUIDANCE_NULL_TO_UNKNOWN_FIELDS,
     DISTORTED_EARNINGS_BASELINE_STATUSES,
     EARNINGS_BASELINE_STATUSES,
     GUIDANCE_BRIDGE_STATUSES,
@@ -299,6 +300,219 @@ class TestGuidanceEnumsAreNotInterchangeable:
                         f"{name}.{field} offers {sorted(offered - set(allowed))} "
                         f"which code does not accept (enum: {sorted(allowed)})"
                     )
+
+
+class TestNullEquivalentsAgreeAcrossPromptAndCode:
+    """The five guidance-contract fields use *three* different null tokens.
+
+    ``GUIDANCE_COVERAGE_STATUS`` and ``GUIDANCE_BRIDGE_STATUS`` say
+    ``NOT_APPLICABLE``; ``MATERIAL_NONOPERATING_DRIVER`` and
+    ``EARNINGS_BASELINE_STATUS`` say ``UNKNOWN``; ``NORMALIZED_EARNINGS_AVAILABLE``
+    accepts both ``UNKNOWN`` and ``N/A``. That is defensible -- "not applicable
+    to this issuer" and "I could not determine" are genuinely different claims,
+    and the disposition work turns on exactly that difference -- but it means a
+    prompt and its parser can silently disagree about how to spell *absent*,
+    and an off-enum null is not a loud failure: it is uninterpretable, gets
+    replaced by the conservative backfill, and quietly withholds credit.
+
+    So both directions are pinned here, not just prompt ⊆ code.
+    """
+
+    NULLISH = frozenset({"UNKNOWN", "N/A", "NOT_APPLICABLE", "NONE", "NA"})
+
+    @staticmethod
+    def _prompt_offers(field: str) -> set[str]:
+        offered: set[str] = set()
+        for path in (REPO_ROOT / "prompts").glob("*.json"):
+            text = path.read_text(encoding="utf-8")
+            for match in re.finditer(
+                rf"{re.escape(field)}\s*:\s*\[([A-Z_/| ]+)\]", text
+            ):
+                raw = match.group(1).replace("N/A", "\x00")
+                offered |= {
+                    tok.strip().replace("\x00", "N/A")
+                    for tok in re.split(r"[/|]", raw)
+                    if tok.strip()
+                }
+        return offered
+
+    def test_every_null_a_prompt_offers_is_accepted_by_code(self):
+        for field, allowed in REQUIRED_GUIDANCE_CONTRACT_ENUMS.items():
+            stray = (self._prompt_offers(field) & self.NULLISH) - set(allowed)
+            assert not stray, (
+                f"{field}: prompts offer null token(s) {sorted(stray)} that the "
+                f"parser rejects; a model obeying the prompt would be "
+                f"uninterpretable (enum: {sorted(allowed)})"
+            )
+
+    def test_every_null_code_accepts_is_offered_by_the_prompt_that_owns_it(self):
+        """The reverse direction, which prompt⊆code cannot catch.
+
+        A model cannot emit a token it was never shown. If code accepts
+        ``NOT_APPLICABLE`` but the prompt never mentions it, that branch is
+        reachable only by luck. Derived fields are exempt: nothing asks a model
+        for them, by design.
+        """
+        for field, allowed in REQUIRED_GUIDANCE_CONTRACT_ENUMS.items():
+            offered = self._prompt_offers(field)
+            if not offered:
+                continue  # derived field (e.g. GUIDANCE_BRIDGE_STATUS)
+            missing = (self.NULLISH & set(allowed)) - offered
+            assert not missing, (
+                f"{field}: code accepts null token(s) {sorted(missing)} that no "
+                "prompt offers, so a model can never legitimately produce them"
+            )
+
+    def test_folding_targets_exactly_the_fields_that_need_it(self):
+        """``N/A``→``UNKNOWN`` folds iff the enum has UNKNOWN but not N/A.
+
+        This is the invariant that keeps the three-null-token design coherent:
+        fold where the spelling is illegal and a synonym exists, leave it alone
+        where ``N/A`` is itself legal, and never fold a field whose null is
+        ``NOT_APPLICABLE`` -- there, folding would convert "I could not tell"
+        into the affirmative claim "guidance does not apply to this issuer",
+        which suppresses MANAGEMENT_GUIDANCE_EVIDENCE_GAP rather than raising it.
+        """
+        for field, allowed in REQUIRED_GUIDANCE_CONTRACT_ENUMS.items():
+            should_fold = "UNKNOWN" in allowed and "N/A" not in allowed
+            does_fold = field in _GUIDANCE_NULL_TO_UNKNOWN_FIELDS
+            assert does_fold == should_fold, (
+                f"{field}: folds={does_fold} but enum implies {should_fold} "
+                f"(UNKNOWN={'UNKNOWN' in allowed}, N/A={'N/A' in allowed})"
+            )
+
+    def test_each_field_accepts_at_least_one_null_spelling(self):
+        """Every contract field must have a way to say "absent".
+
+        Without one, a model with nothing to report has no legal token and its
+        answer is uninterpretable by construction.
+        """
+        for field, allowed in REQUIRED_GUIDANCE_CONTRACT_ENUMS.items():
+            assert self.NULLISH & set(allowed), (
+                f"{field} has no null-equivalent token; a model with nothing to "
+                f"report cannot answer legally (enum: {sorted(allowed)})"
+            )
+
+
+class TestEveryContractTokenHasAProducer:
+    """A token nothing can emit is a distinction the system does not really make.
+
+    Third instance of this class: ``CMIC_LISTED`` was a dead flag string so a
+    real NS-CMIC hit never kept the Consultant active; ``other_legal_risks`` was
+    an advertised prompt key no parser read, silently discarding every
+    sanctions-adjacent finding; and ``COVERAGE_COMPLETE_NO_MATCH`` gated whether
+    ``NOT_DISCLOSED_AFTER_TARGETED_SEARCH`` survived while being emitted by
+    nothing (0 of ~4,700 artifacts), so an ordinary "this issuer does not guide"
+    became a pipeline failure that blocked the BUY on 38.5% of August runs.
+
+    Each was invisible because *nothing fails when a branch is never taken*.
+
+    Reachability differs by producer, which a naive "is it assigned in src/"
+    scan gets wrong -- ``DURABLE`` and ``TEMPORARILY_BOOSTED`` are never
+    assigned by code either, and correctly so: the model authors them and code
+    only validates. So a token is reachable if code assigns it **or** a prompt
+    advertises it.
+    """
+
+    # Tokens knowingly kept without a producer. Reserved is fine; silent is not.
+    RESERVED_UNOBSERVED = {
+        "COVERAGE_COMPLETE_NO_MATCH": (
+            "Declared in evidence_recorder.EvidenceStatus and passed through "
+            "verbatim if a tool ever returns it; no tool does today. Retired as "
+            "a *gate* in Aug 2026 (it made NOT_DISCLOSED unreachable) but left "
+            "in the Literal so a future tool can adopt it without a schema "
+            "change. It must never again gate a decision while unemitted."
+        ),
+    }
+
+    def _contract_tokens(self) -> set[str]:
+        from src.earnings_baseline import REQUIRED_GUIDANCE_CONTRACT_ENUMS
+
+        tokens = {t for s in REQUIRED_GUIDANCE_CONTRACT_ENUMS.values() for t in s}
+        # Evidence statuses gate the guidance contract, so they belong here too.
+        tokens |= {
+            "EVIDENCE_FOUND",
+            "RESULTS_FOUND",
+            "COVERAGE_COMPLETE_NO_MATCH",
+            "NO_RESULTS",
+            "UNAVAILABLE",
+            "AUTH_ERROR",
+            "INSUFFICIENT",
+        }
+        # Universal null/boolean tokens carry no contract meaning on their own.
+        return tokens - {"N/A", "UNKNOWN", "YES", "NO"}
+
+    def _assigned_in_src(self) -> set[str]:
+        found: set[str] = set()
+
+        def note(node: ast.AST) -> None:
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                found.add(node.value)
+            elif isinstance(node, ast.IfExp):
+                note(node.body)
+                note(node.orelse)
+
+        for path in (REPO_ROOT / "src").rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign | ast.AnnAssign):
+                    if (value := getattr(node, "value", None)) is not None:
+                        note(value)
+                elif isinstance(node, ast.Return) and node.value is not None:
+                    note(node.value)
+                elif isinstance(node, ast.Dict):
+                    for v in node.values:
+                        note(v)
+        return found
+
+    def _advertised_in_prompts(self) -> set[str]:
+        blob = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in (REPO_ROOT / "prompts").glob("*.json")
+        )
+        return {t for t in self._contract_tokens() if t in blob}
+
+    def test_every_contract_token_is_code_assigned_or_prompt_advertised(self):
+        producible = self._assigned_in_src() | self._advertised_in_prompts()
+        dead = sorted(t for t in self._contract_tokens() if t not in producible)
+        unexplained = [t for t in dead if t not in self.RESERVED_UNOBSERVED]
+        assert not unexplained, (
+            "these contract tokens can never be produced -- no code assigns them "
+            "and no prompt offers them, so any branch keyed on them is dead: "
+            f"{unexplained}. Give each a producer or an explicit "
+            "RESERVED_UNOBSERVED entry saying why it is kept."
+        )
+
+    def test_reserved_entries_stay_justified_and_minimal(self):
+        """A reserved token must still be a real member, with a stated reason."""
+        tokens = self._contract_tokens()
+        for token, reason in self.RESERVED_UNOBSERVED.items():
+            assert token in tokens, (
+                f"{token} is reserved but no longer a contract token"
+            )
+            assert len(reason) > 40, f"{token} needs a real reason, not a placeholder"
+
+    def test_the_retired_gate_no_longer_decides_guidance_coverage(self):
+        """Regression: the specific dead-token gate this class was written for.
+
+        Scans the AST, not the file text. A comment explaining *why* the token
+        was retired necessarily names it, and a substring scan cannot tell prose
+        from code -- the same false positive the minor-unit currency guard hit
+        on its own docstring.
+        """
+        path = REPO_ROOT / "src" / "agents" / "management_guidance.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        live = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and node.value == "COVERAGE_COMPLETE_NO_MATCH"
+        ]
+        assert not live, (
+            "management_guidance must not gate NOT_DISCLOSED on a token no "
+            "producer emits; use INCOMPLETE_SEARCH_EVIDENCE_STATUSES instead "
+            f"(live references at lines {live})"
+        )
 
     def test_malformed_breakdown_returns_the_body_unchanged(self):
         body = "EARNINGS_BASELINE_STATUS: UNKNOWN\nGROWTH_SCORE_BREAKDOWN: ROE=1.5"
