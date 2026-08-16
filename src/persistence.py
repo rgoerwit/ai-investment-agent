@@ -829,6 +829,21 @@ def save_results_to_file(
             has_macro_token_row=has_macro_token_row,
         )
 
+    # Provenance: what the code, prompts, bindings and thresholds were. Wrapped
+    # separately from the snapshot so a fingerprint failure cannot cost the run
+    # its snapshot, and vice versa.
+    run_fingerprint: dict[str, Any] = {}
+    try:
+        from src.run_fingerprint import compute_run_fingerprint
+
+        run_fingerprint = compute_run_fingerprint(prompts_used, config).to_dict()
+        save_data["run_fingerprint"] = run_fingerprint
+    except Exception as exc:
+        logger_obj.warning(
+            "run_fingerprint_failed",
+            **summarize_exception(exc, operation="run fingerprint"),
+        )
+
     try:
         from src.retrospective import extract_snapshot
 
@@ -839,6 +854,10 @@ def save_results_to_file(
                 quick_mode,
                 trace_id=trace_id,
                 is_strict_mode=strict_mode,
+                # Same id the run_summary carries, so a snapshot and its run are
+                # joinable and two same-day analyses stay distinguishable.
+                analysis_id=run_id,
+                run_fingerprint=run_fingerprint or None,
             )
         )
     except Exception as exc:
@@ -1027,6 +1046,11 @@ async def _maybe_save_rejection_record(
                 is_quick_mode=args.quick,
                 trace_id=trace_id,
                 is_strict_mode=getattr(args, "strict", False),
+                # This path mints no run id of its own; the trace id is the only
+                # shared handle back to the analysis. Absent tracing it stays
+                # None, which is honest — the rejection record's own dedup keys
+                # on (ticker, analysis_date, lesson_type), not on this field.
+                analysis_id=trace_id,
             )
         )
         verdict = (snapshot or {}).get("verdict", "")

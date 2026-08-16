@@ -17,7 +17,7 @@ from .capture_contract import NodeCaptureSpec, get_node_capture_spec
 from .capture_validation import validate_capture_bundle
 from .execution_profile import summarize_agent_llm_profile
 from .git_meta import get_git_metadata
-from .prompt_digest import prompt_digest
+from .prompt_digest import agent_prompt_payload, stable_digest
 from .prompt_provenance import compute_prompt_set_digest
 from .serialization import normalize_for_json
 
@@ -492,18 +492,11 @@ class BaselineCaptureManager:
                 "prompt_key": prompt_key,
                 "missing": True,
             }
-        payload = {
-            "agent_key": prompt.agent_key,
-            "agent_name": prompt.agent_name,
-            "version": prompt.version,
-            "system_message": prompt.system_message,
-            "category": prompt.category,
-            "requires_tools": prompt.requires_tools,
-        }
+        payload = agent_prompt_payload(prompt)
         return {
             "prompt_key": prompt_key,
             **payload,
-            "digest": prompt_digest(payload),
+            "digest": stable_digest(payload),
         }
 
     def _optional_artifact_fields(self) -> frozenset[str]:

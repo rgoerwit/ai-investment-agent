@@ -710,13 +710,21 @@ class TestLessonDeduplication:
         mock_memory = MagicMock()
         mock_memory.available = True
         mock_memory.situation_collection = MagicMock()
-        # Simulate existing lesson found
+        # Simulate an existing *outcome* lesson. Metadata is required: a
+        # `prior_rejection` record at the same key must NOT block the write.
+        comparison = _make_snapshot()
         mock_memory.situation_collection.get.return_value = {
             "ids": ["existing_lesson_1"],
             "documents": ["Some old lesson"],
+            "metadatas": [
+                {
+                    "ticker": comparison["ticker"],
+                    "analysis_date": comparison["analysis_date"],
+                    "lesson_type": "missed_risk",
+                }
+            ],
         }
 
-        comparison = _make_snapshot()
         stored = await store_lesson(
             "Test lesson", "missed_risk", "CYCLICAL_PEAK", comparison, 0.9, mock_memory
         )
@@ -1255,12 +1263,25 @@ class TestLessonAlreadyProcessed:
     """Test _lesson_already_processed() ChromaDB metadata query."""
 
     def test_returns_true_when_lesson_exists(self):
-        """Returns True when ChromaDB has a matching (ticker, date) entry."""
+        """Returns True when ChromaDB has a matching *outcome* lesson.
+
+        The stub must return metadata now: the predicate distinguishes an outcome
+        lesson from a ``prior_rejection`` screening record, which shares the
+        ticker and analysis date and used to suppress the outcome lesson
+        entirely. See ``test_retrospective_identity.py`` for that regression.
+        """
         mock_memory = MagicMock()
         mock_memory.available = True
         mock_memory.situation_collection.get.return_value = {
             "ids": ["lesson_1"],
             "documents": ["Some lesson"],
+            "metadatas": [
+                {
+                    "ticker": "2767.T",
+                    "analysis_date": "2025-08-01",
+                    "lesson_type": "missed_risk",
+                }
+            ],
         }
 
         assert _lesson_already_processed(mock_memory, "2767.T", "2025-08-01") is True
@@ -1352,10 +1373,19 @@ class TestEarlyDedupInRetrospective:
 
         mock_memory = MagicMock()
         mock_memory.available = True
-        # Simulate lesson already exists for this snapshot
+        # Simulate an existing *outcome* lesson for this snapshot. Metadata is
+        # required: the predicate now ignores `prior_rejection` records, which
+        # share the ticker and date but say nothing about the outcome.
         mock_memory.situation_collection.get.return_value = {
             "ids": ["existing_1"],
             "documents": ["Existing lesson"],
+            "metadatas": [
+                {
+                    "ticker": "2767.T",
+                    "analysis_date": snapshot["analysis_date"],
+                    "lesson_type": "missed_risk",
+                }
+            ],
         }
 
         with (

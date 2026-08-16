@@ -690,6 +690,10 @@ class TestTracingMetadataFlow:
                 "present": False,
             },
             "regime_raw": "",
+            # Summarizer-prompt fingerprint, carried so the retrospective can
+            # tell a changed macro classifier from a changed world. None here
+            # because the stubbed MacroContextResult sets no fingerprint.
+            "fingerprint": None,
         }
         mock_logger.info.assert_any_call(
             "macro_context_prefetch_complete",

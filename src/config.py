@@ -345,6 +345,18 @@ class Settings(BaseSettings):
         validation_alias="RESULTS_DIR",
         description="Directory for analysis result files",
     )
+    retrospective_archive_dirs: str = Field(
+        default="",
+        validation_alias="RETROSPECTIVE_ARCHIVE_DIRS",
+        description=(
+            "Additional directories of archived *_analysis.json artifacts the "
+            "retrospective also scans, separated by the OS path separator "
+            "(':' on macOS/Linux). Local retention moves artifacts out of "
+            "RESULTS_DIR at ~120 days, which is inside the 90-270 day band the "
+            "retrospective weights highest, so without this the best evidence "
+            "is unreachable. Read-only; analyses are never written here."
+        ),
+    )
     data_cache_dir: Path = Field(
         default=Path("./data_cache"),
         validation_alias="DATA_CACHE_DIR",

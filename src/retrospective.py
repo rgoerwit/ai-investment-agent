@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +31,7 @@ from src.config import config
 from src.data_block_utils import (
     extract_data_block_field,
     extract_data_block_number,
+    extract_kill_criteria,
 )
 from src.error_safety import summarize_exception
 from src.exchange_metadata import SUFFIX_TO_CURRENCY_CODE
@@ -134,6 +135,11 @@ INTENT_QUALITY: dict[str, float] = {
 # runs, just an unmatched lookup.
 UNKNOWN_INTENT_QUALITY = 1.0
 
+# Applied to both rejection records and outcome lessons. Kept as one constant so
+# the two paths cannot drift: they had, silently — `save_rejection_record`
+# discounted strict runs and `compute_confidence` did not.
+STRICT_MODE_CONFIDENCE_FACTOR = 0.7
+
 # Temporal confidence decay curve
 TEMPORAL_WEIGHTS: list[tuple[int, float]] = [
     (30, 0.3),  # 0-30 days: too early
@@ -180,6 +186,130 @@ LESSON_TYPES = {
     "prior_rejection",
 }
 
+# `prior_rejection` is a *screening artifact* written by save_rejection_record at
+# analysis time — not an outcome. `_lesson_already_processed` used to treat any
+# record for a (ticker, analysis_date) as proof the snapshot had been evaluated,
+# so a rejection record permanently suppressed the outcome lesson for that
+# analysis. Measured on the corpus: 1,698 of 1,790 tickers carried a surviving
+# rejection record on a date >= 30 days old, i.e. a genuinely evaluable snapshot
+# that could never produce a lesson. Dedup must consider outcome lessons only.
+OUTCOME_LESSON_TYPES = LESSON_TYPES - {"prior_rejection"}
+
+# A snapshot that did not trip a threshold at 40 days may trip it at 200, so a
+# below-threshold evaluation is provisional rather than final. Re-price once the
+# holding period has moved materially.
+RETROSPECTIVE_REEVALUATION_INTERVAL_DAYS = 30
+
+# Hard ceiling on yfinance round-trips per run. Without it, every non-triggering
+# snapshot is re-fetched on every run forever: 7,690 snapshots are >= 30 days old
+# across the live and archived corpora, each costing a stock fetch plus a
+# benchmark fetch, sequentially, at a 15 s timeout apiece.
+RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN = 400
+
+# Centre of the 1.0-weight TEMPORAL_WEIGHTS band (91-270 days). Budgeted
+# evaluation spends its allowance on the highest-confidence window first.
+_EVALUATION_BAND_CENTRE_DAYS = 180
+
+# Where the evaluation memo lives. Deliberately a file rather than a ChromaDB
+# record: a non-triggering evaluation written to Chroma would be embedded and
+# returned by get_relevant_lessons(), polluting retrieval with non-lessons.
+DEFAULT_EVALUATION_MEMO_PATH = Path("runtime/retrospective_evaluations.json")
+
+# Memo outcome tokens.
+MEMO_OUTCOME_TRIGGERED = "TRIGGERED"
+MEMO_OUTCOME_BELOW_THRESHOLD = "BELOW_THRESHOLD"
+MEMO_OUTCOME_NO_DATA = "NO_DATA"
+# A snapshot that triggered but was capped by MAX_LESSONS_PER_TICKER. Recorded so
+# it is not re-priced every run — it was withheld by policy, not lost to failure.
+MEMO_OUTCOME_CAPPED = "CAPPED"
+
+# Rides a triggered comparison from phase 2 to phase 3 so the memo can be written
+# only once the lesson is durably stored. Stripped before the comparison is
+# rendered or persisted.
+MEMO_IDENTITY_KEY = "_memo_identity"
+
+# How much larger one leg must be than the other to be called the driver. A
+# module constant beside THRESHOLDS, tunable once a real corpus exists.
+ATTRIBUTION_DOMINANCE_RATIO = 1.5
+
+DRIVER_MARKET = "MARKET"
+DRIVER_RESIDUAL = "RESIDUAL"
+DRIVER_MIXED = "MIXED"
+DRIVER_UNKNOWN = "UNKNOWN"
+
+# Marker on a comparison that could not be assessed. It rides the comparison dict
+# rather than a new return type so that `compare_to_reality` keeps its
+# `dict | None` contract; the orchestrator branches on it before anything can
+# mistake it for a triggered outcome.
+UNASSESSED_REASON_KEY = "_unassessed_reason"
+UNASSESSED_BENCHMARK = "UNASSESSED_BENCHMARK"
+
+# ── What a lesson may claim ───────────────────────────────────────────────────
+#
+# Residual dominance does NOT establish that the analysis was wrong. A residual
+# can be an earnings surprise, a fraud disclosure, a takeover rumour, sector
+# rotation, a data error, or a genuinely mistaken thesis — and price alone cannot
+# tell them apart. Stamping such a lesson "general" is the overfitting failure
+# this system is most exposed to, given that it learns from a handful of outcomes.
+SCOPE_CONTEXTUAL = "CONTEXTUAL"  # market- or regime-dominated
+SCOPE_UNRESOLVED = "UNRESOLVED"  # stock-specific, but the cause is unknown
+SCOPE_VALIDATED = "VALIDATED"  # cause established by company evidence
+LESSON_SCOPES = {SCOPE_CONTEXTUAL, SCOPE_UNRESOLVED, SCOPE_VALIDATED}
+
+# VALIDATED is reserved, not dead-by-accident. Only an evidence-backed company
+# post-mortem (fetch filings/news published after the decision and test the kill
+# criteria against them) may set it, and no such producer exists yet. Recorded
+# here in the `RESERVED_UNOBSERVED` idiom so the next reader knows it is
+# deliberate — this repository has been bitten three times by a token that
+# silently gated a decision while nothing emitted it (`CMIC_LISTED`,
+# `other_legal_risks`, `COVERAGE_COMPLETE_NO_MATCH`). **No gate may key on
+# VALIDATED while it is unemitted.**
+RESERVED_UNOBSERVED_SCOPES = {SCOPE_VALIDATED}
+
+# The retrospective holds price and macro data only. It has no post-decision
+# company evidence, so it can never establish whether a pre-registered
+# thesis-break trigger fired. This is the *only* value it may write.
+THESIS_NOT_EVALUATED = "NOT_EVALUATED"
+
+# A cached macro brief older than this is not "now". The cache refreshes only
+# when some analysis happens to run in that region, so staleness is routine.
+# 14 days mirrors the reconciler's existing analysis-age default.
+REGIME_STALENESS_MAX_DAYS = 14
+
+# Regime fields that bear on a decision. Deliberately not the full enum set:
+# `equity_transmission` and `dip_posture` are downstream *descriptions* of the
+# same shift, so including them would report the same change several times.
+REGIME_COMPARED_FIELDS = ("risk_appetite", "shock_type")
+
+# A LOW-confidence classification is the model saying it could not tell. Comparing
+# two such labels produces noise, not a delta.
+REGIME_UNUSABLE_CONFIDENCE = "LOW"
+
+# Vector candidates fetched before ranking. The old value of 5, against a top-3
+# cut, left the boost/floor machinery almost nothing to rank — it was a fetch
+# limit wearing a ranking's clothes.
+LESSON_QUERY_CANDIDATES = 20
+
+# UNRESOLVED lessons are STORED but never injected into a live analysis.
+#
+# An earlier revision injected them with this marker appended, on the reasoning
+# that this repo labels unknowns rather than deleting them. Measured against a
+# real batch, that reasoning does not survive: **32 of 47 stored lessons (68%)
+# were UNRESOLVED**. The stored text is an LLM-authored *imperative* ("avoid
+# early margin-recovery stories"), and a caveat rendered beside it does not
+# neutralize the instruction — while the underlying move may have been an
+# earnings surprise, a takeover rumour, sector rotation or a data error. On a
+# corpus this small that is precisely the backtest-overfitting failure (Bailey
+# et al.): unexplained returns becoming authoritative rules.
+#
+# The precedent this repo actually sets is narrower than "label everything":
+# `*_SCORE_UNRELIABLE` makes a gate *indeterminate* — it withholds authority. So
+# does this. The records accumulate for review and become injectable the moment
+# an evidence-backed post-mortem can promote them to VALIDATED.
+UNRESOLVED_LESSON_MARKER = (
+    "cause unresolved: stock-specific move, no post-decision company evidence"
+)
+
 LESSONS_COLLECTION_NAME = "lessons_learned"
 _LESSONS_MEMORY_INSTANCE: Any | None = None
 
@@ -187,13 +317,22 @@ _LESSONS_MEMORY_INSTANCE: Any | None = None
 # ══════════════════════════════════════════════════════════════════════════════
 # Component 1: Prediction Snapshot Extraction
 # ══════════════════════════════════════════════════════════════════════════════
+def _bear_text(result: Mapping[str, Any]) -> str:
+    """Resolve the bear researcher's output from the debate state.
+
+    Single source for the two consumers below — the prose excerpt and the
+    pre-committed kill criteria — so they cannot end up reading different rounds
+    of the same debate.
+    """
+    debate = result.get("investment_debate_state", {})
+    if not isinstance(debate, Mapping):
+        return ""
+    return str(debate.get("bear_history") or debate.get("bear_round1") or "")
+
+
 def _extract_bear_risks(result: dict) -> str:
     """Extract first ~500 chars of bear thesis key risks from debate history."""
-    debate = result.get("investment_debate_state", {})
-    bear_history = debate.get("bear_history", "") or ""
-    if not bear_history:
-        # Try round-specific fields
-        bear_history = debate.get("bear_round1", "") or ""
+    bear_history = _bear_text(result)
 
     if not bear_history:
         return ""
@@ -301,6 +440,8 @@ def extract_snapshot(
     *,
     trace_id: str | None = None,
     is_strict_mode: bool = False,
+    analysis_id: str | None = None,
+    run_fingerprint: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Extract a compact prediction snapshot from an analysis result.
@@ -442,6 +583,12 @@ def extract_snapshot(
         **trade_block_fields,
         # Bear thesis excerpt
         "bear_risks_excerpt": _extract_bear_risks(result),
+        # The pipeline's only *falsifiable, pre-registered* statement of what
+        # would break the thesis — the decision-journal remedy for judging a
+        # past call. Recorded so a future evidence-backed post-mortem can test
+        # it; the price-only retrospective may not adjudicate it (see
+        # THESIS_NOT_EVALUATED).
+        "kill_criteria": extract_kill_criteria(_bear_text(result)),
         # Exchange/currency/benchmark
         "exchange": suffix.lstrip(".") if suffix else "US",
         "currency": currency,
@@ -450,6 +597,17 @@ def extract_snapshot(
         # Metadata (from existing save_data structure)
         "ticker": ticker,
         "analysis_date": datetime.now().strftime("%Y-%m-%d"),
+        # Per-run identity. `analysis_date` alone collapses two analyses of one
+        # ticker on one day into a single record — and that pair is exactly the
+        # model/prompt-change comparison the retrospective exists to support.
+        # None on paths that mint no run id; snapshot_identity() then falls back
+        # to the (already unique) source filename.
+        "analysis_id": analysis_id,
+        # What the machine was: code commit, effective prompts, seat bindings,
+        # thesis thresholds. Lives *in the snapshot* because compare_to_reality
+        # loads only the snapshot — a sibling key in save_data would be invisible
+        # to the consumer that needs it.
+        "run_fingerprint": run_fingerprint,
         # Model names are provenance — they make runs comparable over time
         # ("did the verdict move because the model moved?"). The confidence
         # weighting deliberately does NOT key on them; see compute_confidence.
@@ -470,6 +628,12 @@ def extract_snapshot(
         "regime_confidence": macro_regime.get("confidence")
         if regime_at_decision
         else None,
+        # Macro provenance for the T0-vs-T1 comparison. Without the region a
+        # later run cannot find the right cache file, and without the summarizer
+        # fingerprint a changed macro *prompt* would read as a changed *world*.
+        "macro_region": result.get("macro_context_region"),
+        "macro_fingerprint": result.get("macro_context_fingerprint"),
+        "macro_generated_at": result.get("macro_context_generated_at"),
     }
 
     logger.info(
@@ -505,10 +669,470 @@ def _should_emit_snapshot_progress(processed_files: int, total_files: int) -> bo
     return processed_files == total_files or processed_files % step == 0
 
 
+@dataclass(frozen=True, slots=True)
+class ReturnAttribution:
+    """Two internally-exact views of a realized move; never a three-way split.
+
+    **Local relative (additive).** ``market_return_pct + residual_return_pct ==
+    price_return_pct`` by construction, since ``excess = price - benchmark``.
+    This is the view the trigger thresholds already act on, and the *only* one in
+    which "which leg dominates" is a meaningful question.
+
+    **USD investor (multiplicative).** ``(1 + usd) = (1 + local) x (1 + fx)`` —
+    the idiom ``fx_return_split`` already documents in
+    ``ibkr/portfolio_presentation.py``. FX is reported here but never competes
+    for ``dominant_driver``: it is a *conversion* effect and explains none of the
+    local excess return. An earlier design treated market/FX/residual as three
+    additive legs, which double-counts.
+
+    ``residual_return_pct`` is deliberately **not** named alpha. With no sector
+    benchmark it is "what the country index does not explain", which still
+    contains sector-wide rotation; calling it alpha would licence exactly the
+    overclaim this decomposition exists to prevent.
+    """
+
+    market_return_pct: float | None
+    residual_return_pct: float | None
+    fx_return_pct: float | None
+    usd_investor_return_pct: float | None
+    dominant_driver: str
+    benchmark_available: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "market_return_pct": self.market_return_pct,
+            "residual_return_pct": self.residual_return_pct,
+            "fx_return_pct": self.fx_return_pct,
+            "usd_investor_return_pct": self.usd_investor_return_pct,
+            "dominant_driver": self.dominant_driver,
+            "benchmark_available": self.benchmark_available,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CachedRegimeDelta:
+    """Whether the macro regime moved between a decision and now.
+
+    Named for what it actually is. A macro brief is an advisory LLM
+    classification, and the on-disk cache refreshes only when some analysis
+    happens to run in that region — so "now" may be days old. This is a *cached*
+    comparison, not a measurement of the world.
+
+    ``shifted`` is tri-state and ``None`` is load-bearing: this repository has
+    been bitten before by an unknown masquerading as a negative (the
+    ``is_quick_mode`` tri-state in ``ibkr/reconciliation_rules``). Unknown carries
+    no authority — it neither scopes a lesson nor clears one.
+    """
+
+    shifted: bool | None
+    shift_reason: str
+    regime_now: dict[str, str] | None = None
+    staleness_days: int | None = None
+    t1_generated_at: str | None = None
+    t1_fingerprint: str | None = None
+    region: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "shifted": self.shifted,
+            "shift_reason": self.shift_reason,
+            "regime_now": self.regime_now,
+            "staleness_days": self.staleness_days,
+            "t1_generated_at": self.t1_generated_at,
+            "t1_fingerprint": self.t1_fingerprint,
+            "region": self.region,
+        }
+
+
+def _unknown_regime_delta(reason: str, **fields: Any) -> CachedRegimeDelta:
+    return CachedRegimeDelta(shifted=None, shift_reason=reason, **fields)
+
+
+def _regime_confidence_usable(confidence: Any) -> bool:
+    value = str(confidence or "").strip().upper()
+    return bool(value) and value != REGIME_UNUSABLE_CONFIDENCE
+
+
+def resolve_cached_regime_delta(
+    snapshot: Mapping[str, Any],
+    cache_dir: Path | None = None,
+) -> CachedRegimeDelta:
+    """Compare the decision-time regime (T0) with the cached current one (T1).
+
+    Reads the *existing* on-disk macro cache: zero LLM cost, zero new network
+    calls, and the cache is keyed by region so two tickers in one region share a
+    T1 — which is correct, and cheaper than resolving per ticker.
+
+    Fails to ``None`` (unknown) rather than ``False`` on every degraded path:
+    missing cache, stale cache, corrupt JSON, absent T0, low confidence on either
+    side, or a macro-prompt fingerprint mismatch. The last is the subtle one — if
+    the summarizer prompt changed between the two briefs, a differing label says
+    the classifier moved, not the world.
+    """
+    regime_at_decision = snapshot.get("regime_at_decision")
+    if not isinstance(regime_at_decision, Mapping) or not regime_at_decision:
+        return _unknown_regime_delta("no regime recorded at decision time")
+
+    # Prefer the region the decision actually used. Re-deriving it from the
+    # ticker would follow a *later* mapping change and read a different region's
+    # brief than the one that informed the analysis.
+    region = str(snapshot.get("macro_region") or "").strip()
+    ticker = str(snapshot.get("ticker") or "")
+    if not region:
+        if not ticker:
+            return _unknown_regime_delta("no ticker or recorded macro region")
+        try:
+            from src.macro_regions import infer_macro_region
+
+            region = infer_macro_region(ticker)
+        except Exception:
+            return _unknown_regime_delta("macro region could not be inferred")
+
+    if cache_dir is None:
+        try:
+            from src.macro_context import get_macro_context_cache_dir
+
+            cache_dir = get_macro_context_cache_dir()
+        except Exception:
+            return _unknown_regime_delta("macro cache directory unavailable")
+
+    cache_path = Path(cache_dir) / f"{region}.json"
+    try:
+        with open(cache_path) as handle:
+            cached = json.load(handle)
+    except FileNotFoundError:
+        return _unknown_regime_delta(
+            f"no cached macro brief for {region}", region=region
+        )
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return _unknown_regime_delta(
+            f"cached macro brief for {region} is unreadable", region=region
+        )
+    if not isinstance(cached, dict):
+        return _unknown_regime_delta(
+            f"cached macro brief for {region} is malformed", region=region
+        )
+
+    t1_fingerprint = cached.get("fingerprint")
+    t1_generated_at = cached.get("generated_at")
+    staleness_days = _cache_staleness_days(cached)
+    common: dict[str, Any] = {
+        "region": region,
+        "staleness_days": staleness_days,
+        "t1_generated_at": t1_generated_at,
+        "t1_fingerprint": t1_fingerprint,
+    }
+
+    if staleness_days is None:
+        return _unknown_regime_delta("cached macro brief has no usable date", **common)
+    if staleness_days > REGIME_STALENESS_MAX_DAYS:
+        return _unknown_regime_delta(
+            f"cached macro brief is {staleness_days}d old "
+            f"(> {REGIME_STALENESS_MAX_DAYS}d); not 'now'",
+            **common,
+        )
+
+    # Fail closed on comparability. An absent fingerprint on either side means we
+    # cannot tell whether the summarizer prompt moved, and a classifier change is
+    # indistinguishable from a world change without it — which is the specific
+    # error this guard exists to prevent. An earlier revision compared anyway
+    # when either side was missing, to keep the legacy corpus usable; that
+    # optimizes coverage over correctness, and "unknown" is the honest answer for
+    # a snapshot written before the provenance existed.
+    t0_fingerprint = snapshot.get("macro_fingerprint")
+    if not t0_fingerprint:
+        return _unknown_regime_delta(
+            "no macro summarizer fingerprint recorded at decision time", **common
+        )
+    if not t1_fingerprint:
+        return _unknown_regime_delta(
+            "cached macro brief carries no summarizer fingerprint", **common
+        )
+    if t0_fingerprint != t1_fingerprint:
+        # The classifier changed, so a differing label is not evidence about the
+        # world. Deliberately not treated as a shift.
+        return _unknown_regime_delta(
+            "macro summarizer prompt changed between the two briefs", **common
+        )
+
+    try:
+        from src.macro_regime import parse_macro_regime
+
+        regime_now = parse_macro_regime(str(cached.get("report") or ""))
+    except Exception:
+        return _unknown_regime_delta("cached macro brief could not be parsed", **common)
+
+    if not regime_now.present:
+        return _unknown_regime_delta(
+            "cached macro brief carries no regime block", **common
+        )
+
+    now_dict = regime_now.to_dict()
+    common["regime_now"] = {k: str(v) for k, v in now_dict.items()}
+
+    if not _regime_confidence_usable(
+        snapshot.get("regime_confidence") or regime_at_decision.get("confidence")
+    ):
+        return _unknown_regime_delta("decision-time regime confidence is LOW", **common)
+    if not _regime_confidence_usable(regime_now.confidence):
+        return _unknown_regime_delta("current regime confidence is LOW", **common)
+
+    changes = []
+    for field_name in REGIME_COMPARED_FIELDS:
+        before = str(regime_at_decision.get(field_name) or "").upper()
+        after = str(now_dict.get(field_name) or "").upper()
+        if not before or not after:
+            return _unknown_regime_delta(
+                f"{field_name} missing on one side of the comparison", **common
+            )
+        if before != after:
+            label = field_name.replace("_", " ")
+            changes.append(f"{label}: {before} -> {after}")
+
+    if not changes:
+        return CachedRegimeDelta(
+            shifted=False, shift_reason="no change in risk appetite or shock", **common
+        )
+    return CachedRegimeDelta(shifted=True, shift_reason="; ".join(changes), **common)
+
+
+def _cache_staleness_days(cached: Mapping[str, Any]) -> int | None:
+    """Age of the cached brief in days, preferring its trade date."""
+    raw_date = cached.get("trade_date")
+    if raw_date:
+        try:
+            parsed = datetime.strptime(str(raw_date), "%Y-%m-%d")
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            return max((datetime.now() - parsed).days, 0)
+
+    generated_at = cached.get("generated_at")
+    if generated_at:
+        try:
+            parsed_dt = datetime.fromisoformat(str(generated_at))
+        except ValueError:
+            return None
+        if parsed_dt.tzinfo is not None:
+            parsed_dt = parsed_dt.replace(tzinfo=None)
+        return max((datetime.now() - parsed_dt).days, 0)
+    return None
+
+
+def lesson_scope_for(dominant_driver: str) -> str:
+    """How far a lesson drawn from this outcome may generalize.
+
+    Only ``RESIDUAL`` yields ``UNRESOLVED``, and note what that word concedes:
+    the move was stock-specific, and we do not know why. It is emphatically not
+    ``VALIDATED`` — establishing *why* needs company evidence published after the
+    decision, which the price-only retrospective does not have.
+
+    ``UNRESOLVED`` lessons are still injected, but labelled at the point of use
+    and confidence-discounted. Suppressing them outright was considered and
+    rejected: with no producer for ``VALIDATED`` that would permanently delete the
+    most valuable class of outcome. This repository's idiom is to *label* an
+    unknown rather than delete it — ``*_SCORE_UNRELIABLE`` makes a gate
+    indeterminate rather than removing the stock, and a partial consultant review
+    ships as ``LIMITED`` rather than being discarded.
+    """
+    return SCOPE_UNRESOLVED if dominant_driver == DRIVER_RESIDUAL else SCOPE_CONTEXTUAL
+
+
+def _dominant_local_driver(market_pct: float, residual_pct: float) -> str:
+    """Which of the two *local* legs explains the move, if either."""
+    market_magnitude = abs(market_pct)
+    residual_magnitude = abs(residual_pct)
+    if market_magnitude > residual_magnitude * ATTRIBUTION_DOMINANCE_RATIO:
+        return DRIVER_MARKET
+    if residual_magnitude > market_magnitude * ATTRIBUTION_DOMINANCE_RATIO:
+        return DRIVER_RESIDUAL
+    return DRIVER_MIXED
+
+
+def attribute_return(
+    *,
+    price_return_pct: float,
+    benchmark_return_pct: float | None,
+    fx_delta_pct: float | None,
+) -> ReturnAttribution:
+    """Deterministic split. The lesson LLM is told the answer; it never infers it.
+
+    ``benchmark_return_pct is None`` means the index could not be fetched — which
+    is emphatically not the same as an index that did not move. Reporting it as
+    ``0.0`` (the pre-existing behaviour) makes ``excess`` equal the raw stock
+    return, so a stock down 35% in a market down 30% reads as a company-specific
+    collapse. That is the overclaim this whole decomposition exists to prevent, so
+    the market leg stays ``None`` and the driver is ``UNKNOWN``.
+    """
+    fx_pct = None if fx_delta_pct is None else float(fx_delta_pct)
+    usd_investor_pct: float | None = None
+    if fx_pct is not None:
+        # Multiplicative, not additive: a 10% local gain in a currency that fell
+        # 10% is not a flat USD outcome.
+        usd_investor_pct = (
+            (1.0 + price_return_pct / 100.0) * (1.0 + fx_pct / 100.0) - 1.0
+        ) * 100.0
+
+    if benchmark_return_pct is None:
+        return ReturnAttribution(
+            market_return_pct=None,
+            residual_return_pct=None,
+            fx_return_pct=fx_pct,
+            usd_investor_return_pct=usd_investor_pct,
+            dominant_driver=DRIVER_UNKNOWN,
+            benchmark_available=False,
+        )
+
+    market_pct = float(benchmark_return_pct)
+    residual_pct = price_return_pct - market_pct
+    return ReturnAttribution(
+        market_return_pct=round(market_pct, 2),
+        residual_return_pct=round(residual_pct, 2),
+        fx_return_pct=fx_pct,
+        usd_investor_return_pct=(
+            None if usd_investor_pct is None else round(usd_investor_pct, 2)
+        ),
+        dominant_driver=_dominant_local_driver(market_pct, residual_pct),
+        benchmark_available=True,
+    )
+
+
+def snapshot_identity(snapshot: Mapping[str, Any]) -> str:
+    """Return a stable per-*run* identity for a prediction snapshot.
+
+    Two analyses of one ticker on one day are two analyses, not one — that pair is
+    precisely the model/prompt-change comparison this system exists to support, so
+    identity may not collapse to ``(ticker, analysis_date)``.
+
+    Modern snapshots carry ``analysis_id`` (the run id minted in
+    ``persistence.save_results_to_file``, which is the Langfuse trace id when
+    tracing is on). Legacy snapshots fall back to the source filename, which is
+    ``TICKER_YYYYMMDD_HHMMSS_analysis.json`` and therefore already unique per run.
+    The final fallback is the old composite key, used only when a snapshot reaches
+    us with no source attached at all.
+    """
+    analysis_id = snapshot.get("analysis_id")
+    if analysis_id:
+        return str(analysis_id)
+    source_file = snapshot.get("_source_file")
+    if source_file:
+        return str(source_file).removesuffix(".json").removesuffix("_analysis")
+    return f"{snapshot.get('ticker')}|{snapshot.get('analysis_date')}"
+
+
+def _snapshot_days_elapsed(snapshot: Mapping[str, Any]) -> int | None:
+    """Days between the snapshot's analysis date and now; None if unparseable."""
+    raw = snapshot.get("analysis_date")
+    if not raw:
+        return None
+    try:
+        analysis_date = datetime.strptime(str(raw), "%Y-%m-%d")
+    except ValueError:
+        return None
+    return (datetime.now() - analysis_date).days
+
+
+class EvaluationMemo:
+    """Records which snapshots have already been priced, and at what age.
+
+    The retrospective's only dedup used to be "does a lesson exist for this
+    snapshot", which says nothing about the far more common case: a snapshot that
+    *was* evaluated and simply did not clear its trigger threshold. Those left no
+    trace, so each one paid a fresh pair of yfinance round-trips on every
+    subsequent run, forever.
+
+    Fail-open by construction: a missing, unreadable or corrupt memo means
+    "evaluate everything" (the pre-existing behaviour), never "evaluate nothing".
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = Path(path) if path is not None else DEFAULT_EVALUATION_MEMO_PATH
+        self._entries: dict[str, dict[str, Any]] = self._load()
+        self._dirty = False
+
+    def _load(self) -> dict[str, dict[str, Any]]:
+        try:
+            with open(self.path) as handle:
+                loaded = json.load(handle)
+        except FileNotFoundError:
+            return {}
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+            logger.warning(
+                "retrospective_memo_unreadable",
+                path=str(self.path),
+                reason=type(exc).__name__,
+                msg="Evaluating every snapshot this run; memo will be rewritten",
+            )
+            return {}
+        if not isinstance(loaded, dict):
+            logger.warning(
+                "retrospective_memo_malformed",
+                path=str(self.path),
+                reason=f"expected an object, found {type(loaded).__name__}",
+            )
+            return {}
+        return {key: value for key, value in loaded.items() if isinstance(value, dict)}
+
+    def should_evaluate(self, identity: str, days_elapsed: int | None) -> bool:
+        """True when this snapshot has not been priced recently enough."""
+        seen = self._entries.get(identity)
+        if seen is None:
+            return True
+        # A benchmark that could not be fetched is a transient outage, not a
+        # verdict on the snapshot — retry on the next run rather than in 30 days.
+        if seen.get("outcome") == MEMO_OUTCOME_NO_DATA:
+            return True
+        if days_elapsed is None:
+            return True
+        try:
+            evaluated_at = int(seen.get("evaluated_at_days", 0))
+        except (TypeError, ValueError):
+            return True
+        return days_elapsed - evaluated_at >= RETROSPECTIVE_REEVALUATION_INTERVAL_DAYS
+
+    def record(
+        self,
+        identity: str,
+        *,
+        ticker: str,
+        analysis_date: str,
+        days_elapsed: int | None,
+        outcome: str,
+    ) -> None:
+        """Note that this snapshot was priced. Held in memory until ``flush()``."""
+        self._entries[identity] = {
+            "ticker": ticker,
+            "analysis_date": analysis_date,
+            "evaluated_at_days": int(days_elapsed or 0),
+            "outcome": outcome,
+            "evaluated_on": datetime.now().strftime("%Y-%m-%d"),
+        }
+        self._dirty = True
+
+    def flush(self) -> None:
+        """Persist the memo. Never raises — a lost memo costs time, not results."""
+        if not self._dirty:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
+            with open(tmp_path, "w") as handle:
+                json.dump(self._entries, handle, indent=2, sort_keys=True)
+            tmp_path.replace(self.path)
+            self._dirty = False
+        except Exception as exc:
+            logger.warning(
+                "retrospective_memo_write_failed",
+                path=str(self.path),
+                **summarize_exception(exc, operation="retrospective memo write"),
+            )
+
+
 def load_past_snapshots(
     ticker: str | None,
     results_dir: Path,
     *,
+    archive_dirs: Sequence[Path] = (),
     progress: Callable[[SnapshotLoadProgress], None] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """
@@ -518,6 +1142,12 @@ def load_past_snapshots(
         ticker: If provided, only load snapshots for this ticker.
                 If None, load all tickers found.
         results_dir: Directory containing analysis JSON files.
+        archive_dirs: Read-only directories of archived artifacts, scanned after
+            ``results_dir``. Local retention moves artifacts out at ~120 days,
+            inside the 90-270 day band ``TEMPORAL_WEIGHTS`` scores highest, so
+            without these the best evidence is unreachable. A directory that does
+            not exist is skipped rather than raising, mirroring
+            ``scripts/eval_longitudinal_compare.py --archive-dir``.
 
     Returns:
         Dict mapping ticker -> list of snapshots (sorted by date descending)
@@ -526,7 +1156,10 @@ def load_past_snapshots(
 
     if not results_dir.exists():
         logger.warning("results_dir_not_found", path=str(results_dir))
-        return snapshots
+        # An archive may still be readable, so this is no longer fatal — but with
+        # nothing configured it degrades to exactly the old behaviour.
+        if not archive_dirs:
+            return snapshots
 
     # Build pattern based on ticker filter
     if ticker:
@@ -538,19 +1171,36 @@ def load_past_snapshots(
         pattern = "*_analysis.json"
         pattern2 = None
 
-    files = sorted(results_dir.glob(pattern), reverse=True)
-    if pattern2:
-        files.extend(sorted(results_dir.glob(pattern2), reverse=True))
-    # Deduplicate
-    seen = set()
-    unique_files = []
-    for f in files:
-        if f.name not in seen:
-            seen.add(f.name)
-            unique_files.append(f)
-    files = unique_files
+    # Live results first: the ordering *is* the precedence rule, since the first
+    # artifact seen for a given identity wins.
+    search_dirs = [results_dir]
+    for archive_dir in archive_dirs:
+        archive_path = Path(archive_dir)
+        if archive_path in search_dirs:
+            continue
+        if not archive_path.is_dir():
+            logger.debug("archive_dir_skipped", path=str(archive_path))
+            continue
+        search_dirs.append(archive_path)
+
+    files: list[Path] = []
+    seen: set[str] = set()
+    for search_dir in search_dirs:
+        if not search_dir.exists():
+            continue
+        found = sorted(search_dir.glob(pattern), reverse=True)
+        if pattern2:
+            found.extend(sorted(search_dir.glob(pattern2), reverse=True))
+        for candidate in found:
+            # Deduplicate by filename: the same artifact copied into an archive
+            # keeps its name, and the live tree is scanned first.
+            if candidate.name in seen:
+                continue
+            seen.add(candidate.name)
+            files.append(candidate)
 
     total_files = len(files)
+    seen_identities: set[str] = set()
     if progress is not None:
         progress(
             SnapshotLoadProgress(
@@ -602,8 +1252,23 @@ def load_past_snapshots(
             snap_ticker = snapshot.get("ticker", "UNKNOWN")
             if snap_ticker not in snapshots:
                 snapshots[snap_ticker] = []
-            # Attach source file for deduplication
+            # Attach source file before deriving identity — it is the legacy
+            # fallback for snapshots written before analysis_id existed.
             snapshot["_source_file"] = filepath.name
+            identity = snapshot_identity(snapshot)
+            if identity in seen_identities:
+                # Same run re-saved under a different filename (a live artifact
+                # and its archived copy). Two *distinct* same-day runs carry
+                # different identities and both survive — that pair is the whole
+                # point of tracking identity rather than date.
+                logger.debug(
+                    "duplicate_snapshot_identity_skipped",
+                    file=filepath.name,
+                    identity=identity,
+                )
+                emit_progress()
+                continue
+            seen_identities.add(identity)
             snapshots[snap_ticker].append(snapshot)
             emit_progress()
 
@@ -647,6 +1312,13 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     Returns:
         Comparison dict if threshold exceeded, None otherwise.
         Also returns None if data fetch fails or elapsed days < 30.
+
+        A third case: when the benchmark could not be fetched, the outcome is
+        *unassessable* rather than below threshold. The returned dict carries
+        ``UNASSESSED_REASON_KEY`` and must never reach lesson generation — the
+        stock's own return alone cannot distinguish a company collapse from a
+        market-wide one, and scoring it as if the index were flat is precisely
+        how a market crash becomes a lesson about a company.
     """
     import asyncio
 
@@ -674,7 +1346,9 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         logger.debug("invalid_date", date=analysis_date_str)
         return None
 
-    days_elapsed = (datetime.now() - analysis_date).days
+    # Shared with the orchestrator, which needs the age before deciding whether
+    # this snapshot is worth a fetch at all.
+    days_elapsed = _snapshot_days_elapsed(snapshot) or 0
     if days_elapsed < MINIMUM_DAYS_ELAPSED:
         logger.debug(
             "too_recent", ticker=ticker, days=days_elapsed, min=MINIMUM_DAYS_ELAPSED
@@ -783,12 +1457,18 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
 
     bench_start = data.get("bench_start")
     bench_end = data.get("bench_end")
-    benchmark_return_pct = 0.0
+    measured_benchmark_return_pct: float | None = None
     if bench_start and bench_end and bench_start > 0:
-        benchmark_return_pct = (
+        measured_benchmark_return_pct = (
             (bench_end - bench_start) / bench_start
         ) * 100.0  # % unitless
 
+    # `benchmark_return_pct` stays 0.0 in the persisted dict for display
+    # compatibility with existing consumers. No *decision* reads it: the
+    # attribution below carries the truth, and an unavailable benchmark now
+    # short-circuits the whole comparison rather than being scored as a flat
+    # market.
+    benchmark_return_pct = measured_benchmark_return_pct or 0.0
     excess_return_pct = price_return_pct - benchmark_return_pct
 
     # FX delta
@@ -804,6 +1484,32 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
                 fx_delta_pct = ((current_fx - snapshot_fx) / snapshot_fx) * 100.0
         except Exception:
             pass  # FX delta is informational, not critical
+
+    attribution = attribute_return(
+        price_return_pct=price_return_pct,
+        benchmark_return_pct=measured_benchmark_return_pct,
+        fx_delta_pct=fx_delta_pct,
+    )
+
+    if not attribution.benchmark_available:
+        # Unassessable, not below threshold. Without the index there is no way to
+        # tell a company-specific collapse from a market-wide one, and the
+        # thresholds below would be applied to the raw stock return as though the
+        # market had been flat.
+        logger.info(
+            "retrospective_benchmark_unavailable",
+            ticker=ticker,
+            benchmark=snapshot.get("benchmark_index"),
+            price_return=f"{price_return_pct:.1f}%",
+            msg="Outcome unassessable; no lesson will be generated",
+        )
+        return {
+            **snapshot,
+            UNASSESSED_REASON_KEY: UNASSESSED_BENCHMARK,
+            "price_return_pct": round(price_return_pct, 2),
+            "days_elapsed": days_elapsed,
+            "attribution": attribution.to_dict(),
+        }
 
     # Check thresholds
     thresholds = THRESHOLDS.get(verdict, THRESHOLDS.get("HOLD", {}))
@@ -850,6 +1556,22 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         "benchmark_used": data.get(
             "benchmark_fallback", snapshot.get("benchmark_index")
         ),
+        "attribution": attribution.to_dict(),
+        "lesson_scope": lesson_scope_for(attribution.dominant_driver),
+        # Never anything else from this code path — see THESIS_NOT_EVALUATED.
+        "thesis_validation_status": THESIS_NOT_EVALUATED,
+        # Read-only, from the existing on-disk macro cache: no LLM call, no fetch.
+        "cached_regime_delta": resolve_cached_regime_delta(snapshot).to_dict(),
+        # Provenance, not causation: CHANGED says the two runs are not directly
+        # comparable. It never asserts the tooling change caused the outcome.
+        #
+        # Per-axis, not the strict scalar. During a retrospective no analysis
+        # prompts are in use, so `_comparison_context` is structurally always
+        # UNKNOWN and storing it would waste the field — while the run *can*
+        # know that the code, models or thresholds moved.
+        "comparison_context": _render_comparison_context(
+            {"run_fingerprint": snapshot.get("run_fingerprint")}
+        ),
     }
 
     logger.info(
@@ -857,6 +1579,7 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         ticker=ticker,
         verdict=verdict,
         excess_return=f"{excess_return_pct:.1f}%",
+        dominant_driver=attribution.dominant_driver,
         days=days_elapsed,
     )
 
@@ -903,6 +1626,14 @@ def compute_confidence(comparison: dict[str, Any]) -> float:
         deep = comparison.get("deep_model", "")
         mode = 0.7 if quick_model == deep else 1.0
 
+    # Strict gates auto-reject some valid candidates (REIT/ETF, earnings quality)
+    # at the screening layer, so a strict-mode verdict is partly an artifact of
+    # the gates rather than a pure quality signal. `save_rejection_record` has
+    # discounted rejection records by 0.7 for this reason since it was written;
+    # outcome lessons were simply never given the same term.
+    if comparison.get("is_strict_mode"):
+        mode *= STRICT_MODE_CONFIDENCE_FACTOR
+
     # Signal strength component (bigger deltas = clearer lessons)
     excess = abs(comparison.get("excess_return_pct", 0.0))
     signal = min(excess / 30.0, 1.0)
@@ -941,14 +1672,162 @@ def _prediction_is_directionally_correct(comparison: dict[str, Any]) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _comparison_context(snapshot: Mapping[str, Any]) -> str:
+    """Was the machine the same when this decision was made as it is now?
+
+    Deliberately strict: an unresolvable axis on either side yields ``UNKNOWN``,
+    because the unknown axis could be the one that moved. During a retrospective
+    no analysis prompts are in use, so this is usually ``UNKNOWN`` — which is the
+    honest scalar. ``_render_comparison_context`` gives the model the per-axis
+    detail that strictness necessarily hides.
+    """
+    try:
+        from src.run_fingerprint import (
+            CONTEXT_UNKNOWN,
+            RunFingerprint,
+            compute_run_fingerprint,
+        )
+
+        recorded = RunFingerprint.from_dict(snapshot.get("run_fingerprint"))
+        if recorded is None:
+            return CONTEXT_UNKNOWN
+        return compute_run_fingerprint().compare(recorded)
+    except Exception:
+        return "UNKNOWN"
+
+
+def _render_comparison_context(comparison: Mapping[str, Any]) -> str:
+    """Per-axis tooling comparison: code, prompts, bindings, thresholds.
+
+    A single ``UNKNOWN`` token would tell the model nothing, and a run *can*
+    know that (say) the code and the model bindings moved even while the prompt
+    set is unresolvable. Each axis is reported on its own evidence.
+    """
+    try:
+        from src.run_fingerprint import (
+            CONTEXT_CHANGED,
+            CONTEXT_SAME,
+            CONTEXT_UNKNOWN,
+            RunFingerprint,
+            compute_run_fingerprint,
+        )
+
+        recorded = RunFingerprint.from_dict(comparison.get("run_fingerprint"))
+        if recorded is None:
+            return "UNKNOWN (this analysis predates tooling provenance)"
+        current = compute_run_fingerprint()
+        if recorded.code_dirty or current.code_dirty:
+            return "UNKNOWN (uncommitted changes on one side)"
+
+        now, then = current.to_dict(), recorded.to_dict()
+        labels = {
+            "code_commit": "code",
+            "prompt_set_digest": "prompts",
+            "binding_digest": "models",
+            "thesis_digest": "thresholds",
+        }
+        parts = []
+        for axis, label in labels.items():
+            if now[axis] is None or then[axis] is None:
+                verdict = CONTEXT_UNKNOWN
+            elif now[axis] == then[axis]:
+                verdict = CONTEXT_SAME
+            else:
+                verdict = CONTEXT_CHANGED
+            parts.append(f"{label} {verdict}")
+        return " | ".join(parts)
+    except Exception:
+        return "UNKNOWN"
+
+
+def _pct(value: Any) -> str:
+    """Render a percentage, or say plainly that it is unknown."""
+    if value is None:
+        return "unknown"
+    try:
+        return f"{float(value):+.1f}%"
+    except (TypeError, ValueError):
+        return "unknown"
+
+
+def _render_attribution(comparison: Mapping[str, Any]) -> str:
+    """Both views, with the additive one labelled as such.
+
+    A legacy comparison carrying no attribution renders honestly rather than
+    printing `None` — the model would read that as a value.
+    """
+    attribution = comparison.get("attribution")
+    if not isinstance(attribution, Mapping):
+        return "unavailable for this analysis"
+
+    benchmark = comparison.get("benchmark_used") or "benchmark"
+    lines = [
+        f"Local relative — Market ({benchmark}): "
+        f"{_pct(attribution.get('market_return_pct'))} | Residual: "
+        f"{_pct(attribution.get('residual_return_pct'))}",
+        "  (these two sum to the stock's local return; the residual is what the",
+        "   country index does not explain and still contains sector-wide",
+        "   rotation — it is not stock-specific alpha)",
+        f"USD investor — local {_pct(comparison.get('price_return_pct'))}"
+        f" x FX {_pct(attribution.get('fx_return_pct'))}"
+        f" = {_pct(attribution.get('usd_investor_return_pct'))}",
+        f"Dominant driver: {attribution.get('dominant_driver') or DRIVER_UNKNOWN}"
+        f"   Lesson scope: {comparison.get('lesson_scope') or SCOPE_CONTEXTUAL}",
+    ]
+    return "\n".join(lines)
+
+
+def _render_regime(regime: Any) -> str:
+    if not isinstance(regime, Mapping) or not regime:
+        return "not recorded"
+    parts = [
+        str(regime.get("risk_appetite") or "UNKNOWN"),
+        str(regime.get("shock_type") or "UNKNOWN"),
+        str(regime.get("shock_phase") or "UNKNOWN"),
+    ]
+    return " / ".join(parts)
+
+
+def _render_regime_now(delta: Any) -> str:
+    """The T1 line, including *why* it is unknown when it is.
+
+    A bare "unknown" invites the model to guess; naming the cause (stale cache,
+    changed macro prompt) tells it the comparison genuinely cannot be made.
+    """
+    if not isinstance(delta, Mapping):
+        return "not resolved [shifted: unknown]"
+    shifted = delta.get("shifted")
+    label = {True: "yes", False: "no", None: "unknown"}.get(shifted, "unknown")
+    regime_now = delta.get("regime_now")
+    rendered = _render_regime(regime_now) if regime_now else "not available"
+    reason = str(delta.get("shift_reason") or "").strip()
+    suffix = f" — {reason}" if reason else ""
+    return f"{rendered} [shifted: {label}]{suffix}"
+
+
+def _render_kill_criteria(criteria: Any) -> str:
+    if not isinstance(criteria, list) or not criteria:
+        return "none recorded"
+    return "\n".join(
+        f"{index}. {str(item).strip()}"
+        for index, item in enumerate(criteria[:3], start=1)
+        if str(item).strip()
+    )
+
+
 async def generate_lesson(
     comparison: dict[str, Any],
 ) -> tuple[str, str, str] | None:
     """
     Generate a generalizable lesson from a significant prediction delta.
 
-    One Gemini Flash call with a compact prompt (~300 input tokens).
+    One Gemini Flash call with a compact prompt (~400 input tokens).
     Returns (lesson_text, lesson_type, failure_mode) or None on failure.
+
+    The deterministic layer owns the attribution and hands the model the answer;
+    the model's job narrows to writing prose about what is left unexplained. The
+    prompt used to withhold the regime it was asked to reason about, which is how
+    a benchmark crash became a lesson to relax valuation discipline.
     """
     prompt = f"""Given this past equity analysis and its actual outcome, generate ONE generalizable lesson.
 
@@ -961,14 +1840,28 @@ Key bear risks: {comparison.get("bear_risks_excerpt", "N/A")[:300]}
 
 OUTCOME ({comparison.get("days_elapsed", 0)} days later):
 Price: {comparison.get("start_price", "N/A")} → {comparison.get("end_price", "N/A")} ({comparison.get("price_return_pct", 0):+.1f}%)
-Benchmark ({comparison.get("benchmark_used", "N/A")}): {comparison.get("benchmark_return_pct", 0):+.1f}%
-Excess return: {comparison.get("excess_return_pct", 0):+.1f}%
-FX ({comparison.get("currency", "USD")}/USD): {comparison.get("fx_delta_pct", 0):+.1f}%
+
+RETURN ATTRIBUTION (computed, not inferred — do not re-derive):
+{_render_attribution(comparison)}
+
+REGIME AT DECISION (T0): {_render_regime(comparison.get("regime_at_decision"))} (confidence {comparison.get("regime_confidence") or "unknown"})
+CACHED REGIME NOW (T1):  {_render_regime_now(comparison.get("cached_regime_delta"))}
+TOOLING BETWEEN RUNS: {_render_comparison_context(comparison)}
+
+PRE-COMMITTED THESIS-BREAK TRIGGERS (from the bear case):
+{_render_kill_criteria(comparison.get("kill_criteria"))}
+You have price and macro data only — NO post-decision company evidence. Do NOT
+state whether these fired. Status is {THESIS_NOT_EVALUATED}.
 
 Rules:
 - Lesson must be GENERAL (applicable to similar stocks), not specific to this ticker
 - One sentence, max 40 words
-- Focus on what the analysis missed or over/under-weighted
+- If the dominant driver is not RESIDUAL, or it is UNKNOWN, or the regime shifted
+  between T0 and T1, write about REGIME CONDITIONING — how this setup behaves
+  under this regime — NOT about the company's fundamentals or valuation
+  discipline. A market-wide move is not evidence the screen was wrong.
+- If the lesson scope is {SCOPE_UNRESOLVED}, the residual is unexplained, not
+  diagnosed. Write what should be CHECKED next time, not what was wrong.
 
 LESSON: [your lesson]
 TYPE: missed_risk | false_positive | missed_opportunity | correct_call
@@ -1151,7 +2044,11 @@ async def save_rejection_record(
                 )
                 return False
 
-            # Delete existing record(s) before inserting fresher data
+            # Delete existing *prior_rejection* record(s) before inserting fresher
+            # data. This intentionally compacts that one ticker's screening state;
+            # it must never be generalized into cleanup of outcome lessons or the
+            # durable lessons_learned corpus. Historical outcome records are
+            # forward-only evidence and must remain intact.
             try:
                 lessons_memory.situation_collection.delete(ids=existing_ids)
                 logger.debug(
@@ -1200,7 +2097,7 @@ async def save_rejection_record(
     # weight by 0.7 for strict rejections.
     confidence_weight = 0.3 if is_quick_mode else 0.5
     if is_strict_mode:
-        confidence_weight *= 0.7
+        confidence_weight *= STRICT_MODE_CONFIDENCE_FACTOR
     deep_model = (
         snapshot.get("deep_model")
         or get_runtime_config(config).deep_think_llm
@@ -1278,28 +2175,26 @@ async def store_lesson(
 
     ticker = comparison.get("ticker", "UNKNOWN")
     analysis_date = comparison.get("analysis_date", "")
+    analysis_id = comparison.get("analysis_id")
 
-    # Deduplication: check if lesson already exists for this ticker + date
-    try:
-        existing = lessons_memory.situation_collection.get(
-            where={
-                "$and": [
-                    {"ticker": {"$eq": ticker}},
-                    {"analysis_date": {"$eq": analysis_date}},
-                ]
-            }
+    # Deduplication shares one predicate with the orchestrator's early skip.
+    # These were two independent copies of the same (ticker, analysis_date)
+    # query, so a prior_rejection record blocked the write here even once the
+    # orchestrator let the snapshot through — fixing only one site would have
+    # changed nothing observable.
+    if _lesson_already_processed(
+        lessons_memory,
+        ticker,
+        analysis_date,
+        str(analysis_id) if analysis_id else None,
+    ):
+        logger.info(
+            "lesson_already_exists",
+            ticker=ticker,
+            date=analysis_date,
+            analysis_id=analysis_id,
         )
-        if existing and existing.get("ids") and len(existing["ids"]) > 0:
-            logger.info(
-                "lesson_already_exists",
-                ticker=ticker,
-                date=analysis_date,
-                count=len(existing["ids"]),
-            )
-            return False
-    except Exception as e:
-        logger.debug("dedup_check_failed", error=str(e))
-        # Continue with storage — better to have a duplicate than lose a lesson
+        return False
 
     metadata = {
         "ticker": ticker,
@@ -1316,6 +2211,9 @@ async def store_lesson(
         "failure_mode": failure_mode,
         "analysis_model": comparison.get("deep_model", "unknown") or "unknown",
         "analysis_date": analysis_date,
+        # Per-run identity, so dedup can tell two same-day analyses apart.
+        # Empty string rather than None: ChromaDB metadata rejects null values.
+        "analysis_id": str(analysis_id) if analysis_id else "",
         "retrospective_date": datetime.now().strftime("%Y-%m-%d"),
         "confidence_weight": float(confidence),
         "timestamp": datetime.now().isoformat(),
@@ -1328,9 +2226,44 @@ async def store_lesson(
                 "regime_shock_type": regime.get("shock_type", ""),
                 "regime_shock_phase": regime.get("shock_phase", ""),
                 "regime_dip_posture": regime.get("dip_posture", ""),
+                "regime_equity_transmission": regime.get("equity_transmission", ""),
                 "regime_confidence": comparison.get("regime_confidence", "") or "",
             }
         )
+
+    # Everything a reader needs to reproduce `confidence_weight` and to decide
+    # whether this lesson applies to the situation in front of them. All flat
+    # scalars: ChromaDB metadata takes no nested values and no nulls.
+    attribution = comparison.get("attribution")
+    attribution = attribution if isinstance(attribution, dict) else {}
+    delta = comparison.get("cached_regime_delta")
+    delta = delta if isinstance(delta, dict) else {}
+    shifted = delta.get("shifted")
+    metadata.update(
+        {
+            "lesson_scope": str(comparison.get("lesson_scope") or SCOPE_CONTEXTUAL),
+            "dominant_driver": str(
+                attribution.get("dominant_driver") or DRIVER_UNKNOWN
+            ),
+            "market_return_pct": float(attribution.get("market_return_pct") or 0.0),
+            "residual_return_pct": float(attribution.get("residual_return_pct") or 0.0),
+            "benchmark_available": bool(attribution.get("benchmark_available", False)),
+            # Tri-state flattened to a token, not a bool: `False` would claim the
+            # regime demonstrably held still, which an unresolved delta does not.
+            "regime_shifted": (
+                "YES" if shifted is True else "NO" if shifted is False else "UNKNOWN"
+            ),
+            "comparison_context": str(
+                comparison.get("comparison_context") or "UNKNOWN"
+            ),
+            "decision_intent": str(comparison.get("decision_intent") or ""),
+            "is_quick_mode": bool(comparison.get("is_quick_mode", False)),
+            "is_strict_mode": bool(comparison.get("is_strict_mode", False)),
+            "thesis_validation_status": str(
+                comparison.get("thesis_validation_status") or THESIS_NOT_EVALUATED
+            ),
+        }
+    )
 
     stored = await lessons_memory.add_situations([lesson], [metadata])
     if stored:
@@ -1356,14 +2289,72 @@ async def store_lesson(
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _regime_matches(
+    current_regime: Mapping[str, Any] | None, meta: Mapping[str, Any]
+) -> bool:
+    """Does a regime-conditional lesson apply to the regime in front of us?
+
+    Matches on risk appetite **or** shock type — either alone is enough for the
+    lesson to be about a recognizably similar world.
+
+    Returns ``False`` when the current regime is unknown. That is deliberate: a
+    lesson stamped CONTEXTUAL asserts something about a *particular* regime, and
+    with no regime to compare against there is no basis to apply it. Treating
+    unknown as a match would make the scope stamp decorative.
+    """
+    if not isinstance(current_regime, Mapping) or not current_regime:
+        return False
+    for field_name in REGIME_COMPARED_FIELDS:
+        current = str(current_regime.get(field_name) or "").strip().upper()
+        stored = str(meta.get(f"regime_{field_name}") or "").strip().upper()
+        if current and stored and current == stored:
+            return True
+    return False
+
+
+def _same_ticker_rejections(lessons_memory: Any, ticker: str) -> list[dict[str, Any]]:
+    """Fetch this ticker's prior screening record by metadata, not similarity.
+
+    "Have I screened this ticker out before?" is an exact-match fact. Leaving it
+    to embedding similarity means the single most decision-relevant record in the
+    store competes for a slot on semantic distance and can simply lose.
+    """
+    if not ticker:
+        return []
+    try:
+        found = lessons_memory.situation_collection.get(
+            where={
+                "$and": [
+                    {"ticker": {"$eq": ticker}},
+                    {"lesson_type": {"$eq": "prior_rejection"}},
+                ]
+            }
+        )
+    except Exception:
+        return []
+    if not found:
+        return []
+    documents = found.get("documents") or []
+    metadatas = found.get("metadatas") or []
+    return [
+        {"document": document, "metadata": dict(metadata), "distance": 0.0}
+        for document, metadata in zip(documents, metadatas, strict=False)
+        if isinstance(metadata, Mapping)
+    ]
+
+
 async def get_relevant_lessons(
     lessons_memory: Any,
     sector: str,
     ticker: str,
-    n_results: int = 5,
+    n_results: int = LESSON_QUERY_CANDIDATES,
 ) -> list[dict[str, Any]]:
     """
     Query lessons_learned collection for relevant past lessons.
+
+    Two candidate sources, merged: an exact metadata fetch of this ticker's prior
+    screening record, then a vector query. The former is deterministic by design —
+    see :func:`_same_ticker_rejections`.
 
     Args:
         lessons_memory: FinancialSituationMemory for lessons_learned collection
@@ -1387,11 +2378,23 @@ async def get_relevant_lessons(
         return []
 
     try:
-        query = f"Investment lessons for {sector} sector stocks"
+        # The ticker was accepted by this function and never used. Including it
+        # matters: the store is cross-sector, and a sector-only query cannot
+        # distinguish a lesson about this listing from one about its neighbours.
+        query = f"Investment lessons for {ticker} and similar {sector} sector stocks"
         results = await lessons_memory.query_similar_situations(
             query_text=query,
             n_results=n_results,
         )
+        results = list(results or [])
+
+        # Merge the deterministic fetch ahead of the vector candidates, skipping
+        # any it already returned.
+        exact = _same_ticker_rejections(lessons_memory, ticker)
+        if exact:
+            seen_documents = {r.get("document") for r in results}
+            prepend = [r for r in exact if r["document"] not in seen_documents]
+            results = prepend + results
         _record_capture_memory_event(
             {
                 "event": "lessons_query",
@@ -1500,9 +2503,28 @@ async def format_lessons_for_injection(
     current_currency = EXCHANGE_CURRENCY.get(suffix, FALLBACK_CURRENCY)
 
     scored_lessons = []
+    skipped_off_regime = 0
+    skipped_unresolved = 0
     for r in results:
         meta = r.get("metadata", {})
         base_confidence = meta.get("confidence_weight", 0.5)
+
+        # An UNRESOLVED lesson has no established cause. It is retained in the
+        # store for review and for later promotion, but never handed to a live
+        # analysis as guidance — see UNRESOLVED_LESSON_MARKER.
+        if meta.get("lesson_scope") == SCOPE_UNRESOLVED:
+            skipped_unresolved += 1
+            continue
+
+        # A CONTEXTUAL lesson was learned under a particular regime and says
+        # nothing about a different one. Skipped before scoring, so it cannot be
+        # promoted by a geographic boost into a world it does not describe.
+        # Legacy records carry no scope and are unaffected.
+        if meta.get("lesson_scope") == SCOPE_CONTEXTUAL and not _regime_matches(
+            current_regime, meta
+        ):
+            skipped_off_regime += 1
+            continue
 
         # Boost priority: same-ticker rejection record > geographic proximity
         boost = 0.0
@@ -1546,11 +2568,13 @@ async def format_lessons_for_injection(
                 "exchange": meta.get("exchange", "??"),
                 "confidence": round(effective_score, 2),
                 "lesson_type": meta.get("lesson_type"),
+                "lesson_scope": meta.get("lesson_scope"),
                 "ticker": meta.get("ticker"),
             }
         )
 
-    # Sort by effective score descending, take top 3
+    # Sort by effective score descending, take top 3. UNRESOLVED records never
+    # reach this point, so no scope tiebreak is needed.
     scored_lessons.sort(key=lambda x: x["confidence"], reverse=True)
     top_lessons = scored_lessons[:3]
 
@@ -1562,6 +2586,8 @@ async def format_lessons_for_injection(
         candidates=len(results) if results else 0,
         passed_filter=len(scored_lessons),
         filtered_out=filtered_count,
+        skipped_off_regime=skipped_off_regime,
+        skipped_unresolved=skipped_unresolved,
         top_n=len(top_lessons),
     )
 
@@ -1627,9 +2653,23 @@ async def format_lessons_for_injection(
 
 
 def _lesson_already_processed(
-    lessons_memory: Any, ticker: str, analysis_date: str
+    lessons_memory: Any,
+    ticker: str,
+    analysis_date: str,
+    analysis_id: str | None = None,
 ) -> bool:
-    """Check if a lesson already exists for this (ticker, analysis_date).
+    """Check whether an *outcome* lesson already exists for this snapshot.
+
+    Two corrections over the original, both load-bearing:
+
+    1. The query is scoped to ``OUTCOME_LESSON_TYPES``. A ``prior_rejection``
+       screening record shares the ticker and analysis date with the analysis it
+       describes, so counting it here suppressed the outcome lesson entirely.
+    2. Matching prefers ``analysis_id`` so two same-day runs stay distinct, and
+       falls back to ``analysis_date`` for records stored before that field
+       existed. The comparison is done in Python rather than in the ``where``
+       clause because the two cases need different keys, and the candidate set is
+       tiny by construction (``MAX_LESSONS_PER_TICKER`` caps it per ticker).
 
     Uses ChromaDB metadata query — no embedding needed. ~50ms.
     """
@@ -1640,13 +2680,28 @@ def _lesson_already_processed(
             where={
                 "$and": [
                     {"ticker": {"$eq": ticker}},
-                    {"analysis_date": {"$eq": analysis_date}},
+                    {"lesson_type": {"$in": sorted(OUTCOME_LESSON_TYPES)}},
                 ]
             }
         )
-        return bool(existing and existing.get("ids"))
     except Exception:
         return False
+
+    if not existing:
+        return False
+    for meta in existing.get("metadatas") or []:
+        if not isinstance(meta, Mapping):
+            continue
+        stored_id = meta.get("analysis_id")
+        if stored_id and analysis_id:
+            if str(stored_id) == str(analysis_id):
+                return True
+            continue
+        # Legacy record (no analysis_id), or a snapshot that carries none:
+        # the date is the only identity available on one side or the other.
+        if analysis_date and meta.get("analysis_date") == analysis_date:
+            return True
+    return False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1654,24 +2709,220 @@ def _lesson_already_processed(
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+@dataclass(slots=True)
+class _RunCounters:
+    """Mutable accumulator for one retrospective run.
+
+    Every scanned snapshot lands in exactly one of the disposition buckets, which
+    is what makes the totals auditable rather than merely suggestive. Frozen into
+    a :class:`RetrospectiveRunSummary` once the run finishes.
+    """
+
+    scanned: int = 0
+    skipped_existing_lesson: int = 0
+    skipped_memo: int = 0
+    skipped_too_recent: int = 0
+    deferred_over_budget: int = 0
+    evaluated: int = 0
+    unassessed_benchmark: int = 0
+    triggered: int = 0
+    generated: int = 0
+    stored: int = 0
+    failed: int = 0
+
+    def freeze(self, *, dry_run: bool) -> RetrospectiveRunSummary:
+        return RetrospectiveRunSummary(
+            scanned=self.scanned,
+            skipped_existing_lesson=self.skipped_existing_lesson,
+            skipped_memo=self.skipped_memo,
+            skipped_too_recent=self.skipped_too_recent,
+            deferred_over_budget=self.deferred_over_budget,
+            evaluated=self.evaluated,
+            unassessed_benchmark=self.unassessed_benchmark,
+            triggered=self.triggered,
+            generated=self.generated,
+            stored=self.stored,
+            failed=self.failed,
+            dry_run=dry_run,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RetrospectiveRunSummary:
+    """What one retrospective run actually did.
+
+    The orchestrator previously reported a start line and a stored count, which
+    cannot answer the only operational question that matters before widening its
+    inputs: how many network round-trips will this cost, and where did the rest of
+    the corpus go? Every scanned snapshot lands in exactly one disposition bucket
+    (see :attr:`reconciles`), so the totals are auditable rather than indicative.
+    """
+
+    scanned: int = 0
+    skipped_existing_lesson: int = 0
+    skipped_memo: int = 0
+    skipped_too_recent: int = 0
+    deferred_over_budget: int = 0
+    evaluated: int = 0
+    unassessed_benchmark: int = 0
+    triggered: int = 0
+    generated: int = 0
+    stored: int = 0
+    failed: int = 0
+    # A dry run reports what *would* be evaluated, so a reader must be able to
+    # tell the projection from the record of work performed.
+    dry_run: bool = False
+
+    @property
+    def reconciles(self) -> bool:
+        """Every scanned snapshot must be accounted for exactly once."""
+        return self.scanned == (
+            self.skipped_existing_lesson
+            + self.skipped_memo
+            + self.skipped_too_recent
+            + self.deferred_over_budget
+            + self.evaluated
+        )
+
+    def to_dict(self) -> dict[str, int | bool]:
+        return {
+            "scanned": self.scanned,
+            "skipped_existing_lesson": self.skipped_existing_lesson,
+            "skipped_memo": self.skipped_memo,
+            "skipped_too_recent": self.skipped_too_recent,
+            "deferred_over_budget": self.deferred_over_budget,
+            "evaluated": self.evaluated,
+            "unassessed_benchmark": self.unassessed_benchmark,
+            "triggered": self.triggered,
+            "generated": self.generated,
+            "stored": self.stored,
+            "failed": self.failed,
+            "dry_run": self.dry_run,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _EvaluationCandidate:
+    """A snapshot that survived dedup and is eligible to be priced."""
+
+    ticker: str
+    identity: str
+    days_elapsed: int
+    snapshot: dict[str, Any]
+
+    @property
+    def analysis_date(self) -> str:
+        return str(self.snapshot.get("analysis_date") or "")
+
+    @property
+    def band_distance(self) -> int:
+        """Distance from the centre of the 1.0-weight confidence band."""
+        return abs(self.days_elapsed - _EVALUATION_BAND_CENTRE_DAYS)
+
+
+def _select_within_budget(
+    candidates: list[_EvaluationCandidate], budget: int
+) -> tuple[list[_EvaluationCandidate], list[_EvaluationCandidate]]:
+    """Split candidates into (selected, deferred), deterministically.
+
+    Ordering is by proximity to the highest-confidence temporal band, then by
+    ticker/date/identity so that two runs over an unchanged corpus select exactly
+    the same set — a budget that reshuffles would starve the same snapshots
+    forever while re-pricing others.
+    """
+    ordered = sorted(
+        candidates,
+        key=lambda c: (c.band_distance, c.ticker, c.analysis_date, c.identity),
+    )
+    if budget is None or budget <= 0:
+        return ordered, []
+    return ordered[:budget], ordered[budget:]
+
+
+def _memoize_stored(
+    memo: EvaluationMemo,
+    pending: Mapping[str, _EvaluationCandidate],
+    comparison: Mapping[str, Any],
+    *,
+    outcome: str = MEMO_OUTCOME_TRIGGERED,
+) -> None:
+    """Record a triggered snapshot only once its lesson is durably stored.
+
+    "Processed" must mean the work finished. Recording at pricing time meant a
+    timed-out lesson call, a refused content inspection or a failed Chroma write
+    cost the snapshot its lesson for the whole re-evaluation interval, with a
+    manual memo deletion as the only recovery.
+    """
+    identity = comparison.get(MEMO_IDENTITY_KEY)
+    candidate = pending.get(str(identity)) if identity else None
+    if candidate is None:
+        return
+    memo.record(
+        candidate.identity,
+        ticker=candidate.ticker,
+        analysis_date=candidate.analysis_date,
+        days_elapsed=candidate.days_elapsed,
+        outcome=outcome,
+    )
+
+
 async def run_retrospective(
     ticker: str | None,
     results_dir: Path,
     lessons_memory: Any = None,
     progress: Callable[[SnapshotLoadProgress], None] | None = None,
+    *,
+    archive_dirs: Sequence[Path] = (),
+    memo: EvaluationMemo | None = None,
+    memo_path: Path | None = None,
+    max_evaluations: int = RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN,
+    dry_run: bool = False,
+    on_summary: Callable[[RetrospectiveRunSummary], None] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Orchestrate retrospective: load snapshots → compare → generate → store.
+
+    Evaluation runs in phases so that the expensive middle one can be bounded:
+    build the candidate set (cheap, local), select within budget
+    (deterministic), then price and generate. The alternative — pricing inline
+    per ticker — cannot express a run-wide ceiling.
 
     Args:
         ticker: If provided, process only this ticker. If None, all tickers.
         results_dir: Directory containing analysis JSONs.
         lessons_memory: FinancialSituationMemory for lessons_learned.
                        If None, creates one.
+        archive_dirs: Read-only archived-results directories, scanned after
+            ``results_dir`` (see :func:`load_past_snapshots`).
+        memo: Evaluation memo; constructed from ``memo_path`` when omitted.
+        max_evaluations: Ceiling on snapshots priced this run.
+        dry_run: Report what *would* be evaluated without pricing anything —
+            no market fetch, no LLM call, no memo write, no lesson stored.
+        on_summary: Receives the run summary. The lesson list stays the return
+            value so existing callers are unaffected.
 
     Returns:
         List of generated lesson dicts (for display/logging)
     """
+
+    def _emit(counters: _RunCounters) -> None:
+        """Every exit path reports, including the ones that do no work."""
+        summary = counters.freeze(dry_run=dry_run)
+        if not summary.reconciles:
+            # A disposition bucket was missed. Loud rather than silent: the
+            # totals are the only evidence that the budget and memo are sane.
+            logger.warning(
+                "retrospective_summary_does_not_reconcile", **summary.to_dict()
+            )
+        if on_summary is not None:
+            try:
+                on_summary(summary)
+            except Exception as exc:
+                logger.debug(
+                    "retrospective_summary_callback_failed",
+                    **summarize_exception(exc, operation="retrospective summary"),
+                )
+
     # Create lessons memory if not provided
     if lessons_memory is None:
         try:
@@ -1684,14 +2935,18 @@ async def run_retrospective(
                 exc_info=True,
                 **summarize_exception(e, operation="lessons_memory_init"),
             )
+            _emit(_RunCounters())
             return []
 
     # Load snapshots
-    all_snapshots = load_past_snapshots(ticker, results_dir, progress=progress)
+    all_snapshots = load_past_snapshots(
+        ticker, results_dir, archive_dirs=archive_dirs, progress=progress
+    )
 
     if not all_snapshots:
         msg = f"for {ticker}" if ticker else "in results directory"
         logger.info("retrospective_no_snapshots", ticker=ticker or "all", detail=msg)
+        _emit(_RunCounters())
         return []
 
     total_snapshots = sum(len(s) for s in all_snapshots.values())
@@ -1702,46 +2957,150 @@ async def run_retrospective(
         filter_ticker=ticker or "all",
     )
 
-    generated_lessons = []
+    if memo is None:
+        memo = EvaluationMemo(memo_path)
+    counters = _RunCounters()
 
+    # ── Phase 1: candidate selection (no network, no LLM) ────────────────────
+    candidates: list[_EvaluationCandidate] = []
     for snap_ticker, snapshots in all_snapshots.items():
-        logger.info(
-            "retrospective_processing_ticker",
-            ticker=snap_ticker,
-            snapshot_count=len(snapshots),
-        )
-        ticker_lessons = 0
-        # Sort by significance (we'll evaluate all, but cap stored lessons)
-        comparisons = []
-
         for snapshot in snapshots:
-            # Early dedup: skip snapshots that already have a lesson in ChromaDB
-            # This avoids the expensive yfinance call for already-processed data
-            snap_ticker = snapshot.get("ticker", "")
-            snap_date = snapshot.get("analysis_date", "")
-            if _lesson_already_processed(lessons_memory, snap_ticker, snap_date):
+            counters.scanned += 1
+            snap_ticker_value = str(snapshot.get("ticker") or snap_ticker)
+            snap_date = str(snapshot.get("analysis_date") or "")
+            identity = snapshot_identity(snapshot)
+
+            if _lesson_already_processed(
+                lessons_memory, snap_ticker_value, snap_date, identity
+            ):
+                counters.skipped_existing_lesson += 1
                 logger.debug(
                     "snapshot_already_processed",
-                    ticker=snap_ticker,
+                    ticker=snap_ticker_value,
                     date=snap_date,
+                    identity=identity,
                 )
                 continue
 
-            comparison = await compare_to_reality(snapshot)
-            if comparison:
-                comparison["_confidence"] = compute_confidence(comparison)
-                comparisons.append(comparison)
+            days_elapsed = _snapshot_days_elapsed(snapshot)
+            if days_elapsed is None or days_elapsed < MINIMUM_DAYS_ELAPSED:
+                # Cannot clear the trigger yet; spending budget here would starve
+                # snapshots that can.
+                counters.skipped_too_recent += 1
+                continue
 
+            if not memo.should_evaluate(identity, days_elapsed):
+                counters.skipped_memo += 1
+                continue
+
+            candidates.append(
+                _EvaluationCandidate(
+                    ticker=snap_ticker_value,
+                    identity=identity,
+                    days_elapsed=days_elapsed,
+                    snapshot=snapshot,
+                )
+            )
+
+    selected, deferred = _select_within_budget(candidates, max_evaluations)
+    counters.deferred_over_budget = len(deferred)
+    if deferred:
+        logger.info(
+            "retrospective_budget_reached",
+            budget=max_evaluations,
+            deferred=len(deferred),
+            msg="Remaining snapshots will be evaluated on a later run",
+        )
+
+    if dry_run:
+        # `evaluated` reports the *projected* cost — the whole point of the mode
+        # is to answer "how many round-trips would this run buy?" before paying
+        # for them. The dry_run flag on the summary keeps that legible.
+        counters.evaluated = len(selected)
+        logger.info(
+            "retrospective_dry_run_complete",
+            **counters.freeze(dry_run=True).to_dict(),
+        )
+        _emit(counters)
+        return []
+
+    # ── Phase 2: price the selected snapshots ────────────────────────────────
+    comparisons_by_ticker: dict[str, list[dict[str, Any]]] = {}
+    for candidate in selected:
+        counters.evaluated += 1
+        try:
+            comparison = await compare_to_reality(candidate.snapshot)
+        except Exception as exc:
+            counters.failed += 1
+            logger.warning(
+                "retrospective_comparison_failed",
+                ticker=candidate.ticker,
+                identity=candidate.identity,
+                **summarize_exception(exc, operation="retrospective comparison"),
+            )
+            continue
+
+        # Checked first, and deliberately: an unassessed outcome is a truthy dict,
+        # so any branch that tests `if comparison` would otherwise generate a
+        # lesson from a return whose market component is unknown.
+        if comparison and comparison.get(UNASSESSED_REASON_KEY):
+            counters.unassessed_benchmark += 1
+            # NO_DATA re-evaluates on the next run rather than in 30 days — a
+            # failed index fetch is a transient outage, not a verdict.
+            outcome = MEMO_OUTCOME_NO_DATA
+        elif comparison:
+            counters.triggered += 1
+            comparison["_confidence"] = compute_confidence(comparison)
+            # Carry the identity so phase 3 can memoize this snapshot only once
+            # its lesson is durably stored. Recording TRIGGERED here would mean a
+            # timed-out LLM call or a refused Chroma write silently costs the
+            # snapshot its lesson for the whole re-evaluation interval.
+            comparison[MEMO_IDENTITY_KEY] = candidate.identity
+            comparisons_by_ticker.setdefault(candidate.ticker, []).append(comparison)
+            outcome = None
+        else:
+            outcome = MEMO_OUTCOME_BELOW_THRESHOLD
+
+        if outcome is not None:
+            memo.record(
+                candidate.identity,
+                ticker=candidate.ticker,
+                analysis_date=candidate.analysis_date,
+                days_elapsed=candidate.days_elapsed,
+                outcome=outcome,
+            )
+
+    # Flushed before generation so a run interrupted during phase 3 keeps the
+    # pricing it already paid for; triggered snapshots are added below.
+    memo.flush()
+    pending_memo = {c.identity: c for c in selected}
+
+    # ── Phase 3: generate and store, capped per ticker ───────────────────────
+    generated_lessons = []
+    for snap_ticker, comparisons in comparisons_by_ticker.items():
+        logger.info(
+            "retrospective_processing_ticker",
+            ticker=snap_ticker,
+            snapshot_count=len(comparisons),
+        )
+        ticker_lessons = 0
         # Sort by significance (largest excess return first)
         comparisons.sort(key=lambda c: abs(c.get("excess_return_pct", 0)), reverse=True)
 
-        for comparison in comparisons:
+        for index, comparison in enumerate(comparisons):
             if ticker_lessons >= MAX_LESSONS_PER_TICKER:
                 logger.info(
                     "max_lessons_reached",
                     ticker=snap_ticker,
                     max=MAX_LESSONS_PER_TICKER,
+                    withheld=len(comparisons) - index,
                 )
+                # Withheld by policy, not lost to failure — memoize so the run
+                # does not re-price them every time only to cap them again.
+                for capped in comparisons[index:]:
+                    _memoize_stored(
+                        memo, pending_memo, capped, outcome=MEMO_OUTCOME_CAPPED
+                    )
                 break
 
             confidence = comparison["_confidence"]
@@ -1770,9 +3129,12 @@ async def run_retrospective(
                 "stored": stored,
             }
             generated_lessons.append(lesson_record)
+            counters.generated += 1
 
             if stored:
                 ticker_lessons += 1
+                counters.stored += 1
+                _memoize_stored(memo, pending_memo, comparison)
 
             trace_id = comparison.get("trace_id")
             if trace_id:
@@ -1796,13 +3158,17 @@ async def run_retrospective(
                     metadata={"ticker": snap_ticker},
                 )
 
-    stored_count = sum(1 for lesson in generated_lessons if lesson.get("stored"))
+    # Second flush: triggered snapshots are memoized only after their lesson is
+    # durably stored, so this is what makes a *successful* generation stick.
+    memo.flush()
+
     logger.info(
         "retrospective_complete",
         lessons_generated=len(generated_lessons),
-        lessons_stored=stored_count,
         tickers_evaluated=len(all_snapshots),
+        **counters.freeze(dry_run=False).to_dict(),
     )
+    _emit(counters)
     return generated_lessons
 
 

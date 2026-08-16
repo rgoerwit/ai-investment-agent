@@ -749,6 +749,12 @@ class FinancialSituationMemory:
         """
         Remove memories older than specified days.
 
+        WARNING: with ``ticker=None`` this walks every collection in the configured
+        persistent Chroma directory, including durable ``lessons_learned`` history.
+        It is an explicit operator-cleanup API, never a normal runtime or test
+        reset mechanism. Tests must point ``CHROMA_PERSIST_DIR`` at a temporary
+        directory before calling it.
+
         UPDATED: Now supports ticker-scoped cleanup.
 
         Args:
@@ -1060,6 +1066,11 @@ def get_ticker_memory_stats(ticker: str) -> dict[str, dict[str, Any]]:
 def cleanup_all_memories(days: int = 0, ticker: str | None = None) -> dict[str, int]:
     """
     Clean up memories from collections.
+
+    WARNING: ``days=0, ticker=None`` deletes every collection in the configured
+    persistent Chroma directory, including ``lessons_learned``. Keep this for an
+    explicit, validated operator cleanup only; production calls must be
+    ticker-scoped, and tests must use the isolated test Chroma directory.
 
     UPDATED: Now supports ticker-scoped cleanup.
 

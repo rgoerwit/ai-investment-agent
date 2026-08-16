@@ -241,6 +241,17 @@ Examples:
     )
 
     parser.add_argument(
+        "--retrospective-dry-run",
+        action="store_true",
+        help=(
+            "With --retrospective-only, report how many snapshots would be "
+            "scanned, skipped and priced without fetching market data, calling "
+            "an LLM, or writing anything. Use this to size a run before paying "
+            "for it."
+        ),
+    )
+
+    parser.add_argument(
         "--capture-baseline",
         action="store_true",
         help=(

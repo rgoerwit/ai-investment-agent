@@ -432,6 +432,9 @@ async def _prefetch_macro_context(
             "prompt_used": macro_context.prompt_used,
             "regime_block_dict": regime.to_dict(),
             "regime_raw": regime.raw_block,
+            # Provenance for the retrospective's T0-vs-T1 regime comparison: a
+            # changed summarizer prompt must not read as a changed world.
+            "fingerprint": getattr(macro_context, "fingerprint", None),
         }
         logger.info(
             "macro_context_prefetch_complete",
@@ -673,6 +676,7 @@ async def run_analysis(
             macro_context_prompt_used = macro_context["prompt_used"]
             macro_regime_block = macro_context.get("regime_block_dict") or {}
             macro_regime_raw = macro_context.get("regime_raw", "")
+            macro_context_fingerprint = macro_context.get("fingerprint")
 
             session_id = _resolve_langfuse_session_id(
                 session_id or f"{ticker}-{real_date}-{uuid.uuid4().hex[:8]}"
@@ -863,6 +867,7 @@ async def run_analysis(
                 result["macro_context_llm_invoked"] = macro_context_llm_invoked
                 result["macro_regime_block"] = macro_regime_block
                 result["macro_regime_raw"] = macro_regime_raw
+                result["macro_context_fingerprint"] = macro_context_fingerprint
                 result["macro_context_injected_into_news"] = bool(
                     result.get("macro_context_injected_into_news", False)
                 )
@@ -1007,6 +1012,7 @@ async def _run_retrospective_only(args: argparse.Namespace) -> int:
     try:
         from src.observability import flush_traces, get_observability_runtime
         from src.retrospective import SnapshotLoadProgress, run_retrospective
+        from src.retrospective_sources import resolve_retrospective_sources
 
         def report(update: SnapshotLoadProgress) -> None:
             if update.phase == "discovered":
@@ -1033,11 +1039,20 @@ async def _run_retrospective_only(args: argparse.Namespace) -> int:
                     flush=True,
                 )
 
-        results_dir = Path(config.results_dir)
-        if not args.quiet and not args.brief:
+        results_dir, *archive_dirs = resolve_retrospective_sources(config)
+        dry_run = bool(getattr(args, "retrospective_dry_run", False))
+        verbose_console = not args.quiet and not args.brief
+        if verbose_console:
             console.print(
-                "[cyan]Running retrospective evaluation on all past analyses...[/cyan]"
+                "[cyan]Running retrospective evaluation on all past analyses"
+                f"{' (dry run — nothing will be fetched or written)' if dry_run else ''}"
+                "...[/cyan]"
             )
+
+        summaries: list[Any] = []
+
+        def capture_summary(summary: Any) -> None:
+            summaries.append(summary)
 
         runtime = get_observability_runtime(config)
         trace_context = runtime.start_retrospective_trace(
@@ -1058,11 +1073,36 @@ async def _run_retrospective_only(args: argparse.Namespace) -> int:
             lessons = await run_retrospective(
                 ticker=None,
                 results_dir=results_dir,
+                archive_dirs=archive_dirs,
                 progress=report if not (args.quiet or args.brief) else None,
+                dry_run=dry_run,
+                on_summary=capture_summary,
             )
         finally:
             trace_context.close()
             flush_traces()
+
+        # The disposition breakdown is the operator's only view of where the
+        # corpus went — print it in every verbosity, since a run that skipped
+        # everything looks identical to one that found nothing.
+        if summaries:
+            summary = summaries[-1]
+            headline = (
+                f"scanned {summary.scanned} | "
+                f"priced {summary.evaluated} | "
+                f"already-lessoned {summary.skipped_existing_lesson} | "
+                f"memoized {summary.skipped_memo} | "
+                f"too-recent {summary.skipped_too_recent} | "
+                f"deferred {summary.deferred_over_budget}"
+            )
+            if verbose_console:
+                label = "Retrospective dry run" if dry_run else "Retrospective"
+                console.print(f"[cyan]{label}:[/cyan] {headline}")
+            else:
+                print(f"# Retrospective\n\n{headline}")
+
+        if dry_run:
+            return 0
 
         if lessons:
             if not args.quiet and not args.brief:
@@ -1112,6 +1152,7 @@ async def _maybe_run_ticker_retrospective(args: argparse.Namespace) -> None:
     try:
         from src.observability import flush_traces, get_observability_runtime
         from src.retrospective import SnapshotLoadProgress, run_retrospective
+        from src.retrospective_sources import resolve_retrospective_sources
 
         def report(update: SnapshotLoadProgress) -> None:
             if update.phase != "parsing" or args.quiet or args.brief:
@@ -1123,7 +1164,7 @@ async def _maybe_run_ticker_retrospective(args: argparse.Namespace) -> None:
                 flush=True,
             )
 
-        results_dir = Path(config.results_dir)
+        results_dir, *archive_dirs = resolve_retrospective_sources(config)
         runtime = get_observability_runtime(config)
         trace_context = runtime.start_retrospective_trace(
             ticker=args.ticker,
@@ -1143,6 +1184,7 @@ async def _maybe_run_ticker_retrospective(args: argparse.Namespace) -> None:
             lessons = await run_retrospective(
                 ticker=args.ticker,
                 results_dir=results_dir,
+                archive_dirs=archive_dirs,
                 progress=report,
             )
         finally:

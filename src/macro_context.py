@@ -57,6 +57,11 @@ class MacroContextResult:
     llm_invoked: bool = False
     prompt_used: dict[str, Any] | None = None
     regime: MacroRegime = field(default_factory=MacroRegime)
+    # Fingerprint of the summarizer prompt that produced this brief. The
+    # retrospective compares a decision-time regime against a later cached one;
+    # without this, a changed macro *prompt* is indistinguishable from a changed
+    # *world*.
+    fingerprint: str | None = None
 
 
 def _cache_path(region: str) -> Path:
@@ -76,6 +81,8 @@ def _prompt_metadata() -> dict[str, Any] | None:
     prompt = get_prompt("macro_context_analyst")
     if not prompt:
         return None
+    from src.eval.prompt_digest import agent_prompt_digest
+
     return {
         "agent_name": prompt.agent_name,
         "version": prompt.version,
@@ -83,6 +90,10 @@ def _prompt_metadata() -> dict[str, Any] | None:
         "requires_tools": prompt.requires_tools,
         "source": prompt.source,
         "execution_path": "pre_graph",
+        # Content digest of the prompt as resolved (Langfuse override included).
+        # `compute_prompt_set_digest` keys on this; without it the macro seat is
+        # recorded in `prompts_used` but silently absent from the run fingerprint.
+        "digest": agent_prompt_digest(prompt),
     }
 
 
@@ -347,6 +358,7 @@ async def get_macro_context(
             status="cached",
             generated_at=cached.get("generated_at"),
             regime=parse_macro_regime(report),
+            fingerprint=fingerprint,
         )
 
     try:
@@ -422,6 +434,7 @@ async def get_macro_context(
             llm_invoked=llm_invoked,
             prompt_used=prompt_used,
             regime=parse_macro_regime(report),
+            fingerprint=fingerprint,
         )
     except Exception as exc:
         logger.warning(

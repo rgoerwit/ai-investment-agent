@@ -1050,10 +1050,19 @@ def create_analyst_node(
         )
 
         try:
+            from src.eval.prompt_digest import agent_prompt_digest
+
             prompts_used = state.get("prompts_used", {})
             prompts_used[output_field] = {
                 "agent_name": agent_prompt.agent_name,
                 "version": agent_prompt.version,
+                # Content digest of the prompt as actually resolved this run.
+                # `compute_prompt_set_digest` reads this key; without it the run
+                # fingerprint hashed an empty payload — a constant for every run,
+                # which is worse than no fingerprint. It also captures a PROMPT_*
+                # env or Langfuse override, which a digest of the on-disk file
+                # cannot see, and an edit made without a version bump.
+                "digest": agent_prompt_digest(agent_prompt),
             }
 
             from src.llm_runtime.messages import prepare_messages_for_model

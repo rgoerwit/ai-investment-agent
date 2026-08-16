@@ -60,14 +60,41 @@ def _reset_flex_health():
 _REAL_GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 
 
+@pytest.fixture(scope="session")
+def test_chroma_persist_dir(tmp_path_factory) -> Path:
+    """Allocate the only ChromaDB directory a pytest session may use.
+
+    Kept as a named fixture so ``test_chroma_isolation.py`` can assert that the
+    live config points to this exact temporary path, rather than merely to a path
+    that is not the repository default. The latter would still permit an
+    operator-supplied external Chroma directory to be destroyed.
+    """
+    return tmp_path_factory.mktemp("chroma_db_test")
+
+
 @pytest.fixture(scope="session", autouse=True)
-def setup_test_env():
+def setup_test_env(test_chroma_persist_dir: Path):
     """
     Set up test environment variables.
     This fixture runs for the entire session and applies default MOCK values.
     Individual tests that need real keys (integration tests) must override this.
     """
+    # The test session must never touch the operator's persistent ChromaDB.
+    #
+    # This is not hygiene, it is data loss: `cleanup_all_memories(days=0)` with no
+    # ticker skips its prefix filter and calls `delete_collection` on *every*
+    # collection it finds, and `tests/memory/test_contamination_vectors.py` calls
+    # it exactly that way (twice) to get a "clean slate". Pointed at the default
+    # `./chroma_db`, a single `pytest tests/memory/` destroyed the entire
+    # `lessons_learned` corpus along with `macro_events` and every legacy
+    # collection — which is why the lessons store kept reappearing empty and
+    # same-day, and why a stray `test_memory__emb_*` collection was found living
+    # in the real database.
+    #
+    # Redirecting the whole session is the boundary fix: it protects against any
+    # future test that constructs a real memory, not just the two known callers.
     test_env = {
+        "CHROMA_PERSIST_DIR": str(test_chroma_persist_dir),
         "ENVIRONMENT": "test",
         "LOG_LEVEL": "ERROR",
         "ENABLE_MEMORY": "false",
