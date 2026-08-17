@@ -1117,7 +1117,7 @@ class TestConstants:
     """Validate constant definitions."""
 
     def test_failure_modes_complete(self):
-        assert len(FAILURE_MODES) == 12
+        assert len(FAILURE_MODES) == 13
         assert "CYCLICAL_PEAK" in FAILURE_MODES
         assert "FX_DRIVEN" in FAILURE_MODES
         assert "VALUATION_TRAP" in FAILURE_MODES
@@ -1218,7 +1218,10 @@ class TestGenerateLesson:
         assert result is not None
         _, lesson_type, failure_mode = result
         assert lesson_type == "missed_risk"  # default
-        assert failure_mode == "OPERATIONAL_MISS"  # default
+        # An unparseable response resolves to the one value that claims nothing.
+        # It used to default to OPERATIONAL_MISS, asserting an operational cause
+        # on the strength of a formatting failure.
+        assert failure_mode == "UNRESOLVED_PRICE_ONLY"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

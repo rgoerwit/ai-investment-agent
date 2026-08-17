@@ -19,12 +19,15 @@ from __future__ import annotations
 import pytest
 
 from src.retrospective import (
+    BEAR_EXCERPT_PROMPT_CHARS,
     DRIVER_MARKET,
     DRIVER_RESIDUAL,
+    FAILURE_MODES,
     SCOPE_CONTEXTUAL,
     SCOPE_UNRESOLVED,
     STRICT_MODE_CONFIDENCE_FACTOR,
     THESIS_NOT_EVALUATED,
+    UNRESOLVED_PRICE_ONLY,
     compute_confidence,
     generate_lesson,
     store_lesson,
@@ -372,7 +375,9 @@ class TestTheParseContractIsUnchanged:
         )
         _text, lesson_type, failure_mode = await generate_lesson(_comparison())
         assert lesson_type == "missed_risk"
-        assert failure_mode == "OPERATIONAL_MISS"
+        # Out-of-vocabulary now resolves to the value that claims nothing.
+        # OPERATIONAL_MISS asserted an operational cause from a parse failure.
+        assert failure_mode == UNRESOLVED_PRICE_ONLY
 
 
 class TestThePromptForbidsTheConstructionsTheModelActuallyUsed:
@@ -395,7 +400,10 @@ class TestThePromptForbidsTheConstructionsTheModelActuallyUsed:
     async def test_inventing_a_mechanism_is_forbidden(self, monkeypatch):
         prompt = await _prompt_for(_comparison(), monkeypatch)
         assert "failure mechanism that appears nowhere above" in prompt
-        assert "recorded bear risks" in prompt
+        # Wording deliberately generalized: the rule used to enumerate "recorded
+        # bear risks, thesis-break triggers, or the regime", two of which are
+        # empty on essentially every legacy snapshot.
+        assert "follows from something actually shown to you" in prompt
 
     @pytest.mark.asyncio
     async def test_demoting_the_screen_by_contrast_is_forbidden(self, monkeypatch):
@@ -462,3 +470,125 @@ class TestTheScopeStampGatesTheAntiDiagnosisRule:
         prompt = await _prompt_for(comparison, monkeypatch)
         assert f"Lesson scope: {SCOPE_UNRESOLVED}" in prompt
         assert f"Lesson scope: {SCOPE_CONTEXTUAL}" not in prompt
+
+
+class TestTheGroundingRuleIsSatisfiable:
+    """An unsatisfiable instruction is ignored, not obeyed.
+
+    Measured on the 2026-08-17 probe: 5 of the 7 lessons whose named mechanism
+    could be checked cited something present in NO input. The cause was not model
+    misbehaviour — the rule pointed at three grounding sources, and across all
+    7,952 snapshots the thesis-break triggers are absent in 100% (the field
+    postdates every legacy snapshot), the regime in 84%, and the bear excerpt was
+    clipped to 300 chars while 55% are longer. Told to ground its answer and
+    handed almost nothing, the model invents.
+
+    Two repairs: show it the material that already exists on disk, and give it a
+    legal way to decline.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_full_stored_bear_excerpt_reaches_the_prompt(self, monkeypatch):
+        excerpt = "".join(f"risk{i} " for i in range(80))[:500]
+        prompt = await _prompt_for(_comparison(bear_risks_excerpt=excerpt), monkeypatch)
+        assert excerpt[:BEAR_EXCERPT_PROMPT_CHARS] in prompt
+        assert len(excerpt) > 300, "fixture must exceed the old clip or this is vacuous"
+
+    def test_the_prompt_budget_matches_what_the_snapshot_stores(self):
+        """A clip below the stored length withholds evidence the rule demands.
+
+        `_extract_bear_risks` keeps ~500 chars; showing the model fewer means the
+        anti-invention rule binds while the material to satisfy it sits unused.
+        """
+        assert BEAR_EXCERPT_PROMPT_CHARS >= 500
+
+    @pytest.mark.asyncio
+    async def test_declining_to_name_a_mechanism_is_offered_as_valid(self, monkeypatch):
+        prompt = await _prompt_for(_comparison(), monkeypatch)
+        assert "then SAY SO" in prompt
+        assert "complete and correct lesson" in prompt
+
+    @pytest.mark.asyncio
+    async def test_the_rule_no_longer_cites_a_universally_absent_source(
+        self, monkeypatch
+    ):
+        """It may describe triggers as *possibly* absent; it may not require them.
+
+        The earlier wording said a check must follow from "the recorded bear
+        risks, the thesis-break triggers, or the regime" — naming as a permitted
+        source a field that is empty in every snapshot on disk.
+        """
+        prompt = await _prompt_for(_comparison(), monkeypatch)
+        assert "follows from something actually shown to you" in prompt
+        assert (
+            "You may only\n  name a check that follows from the recorded" not in prompt
+        )
+
+
+class TestDecliningIsReachableInTheResponseFormat:
+    """An escape hatch the output format cannot express is not an escape hatch.
+
+    The prose rule said "if nothing supports a specific check, say so" while
+    every one of the twelve FAILURE_MODE values named a mechanism — so a model
+    that declined in the LESSON line still had to assert a cause one field down,
+    and that field renders in the header beside the prose. The rule was
+    unsatisfiable one field over from where it was written.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_prompt_offers_the_token_in_the_enum(self, monkeypatch):
+        prompt = await _prompt_for(_comparison(), monkeypatch)
+        assert f"FAILURE_MODE: {UNRESOLVED_PRICE_ONLY} |" in prompt
+
+    @pytest.mark.asyncio
+    async def test_the_prompt_ties_declining_to_the_token(self, monkeypatch):
+        """Offering the value is not enough; the model must be told when to use it."""
+        prompt = await _prompt_for(_comparison(), monkeypatch)
+        assert f"FAILURE_MODE must be {UNRESOLVED_PRICE_ONLY}" in prompt
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("emitted", [UNRESOLVED_PRICE_ONLY, "GOVERNANCE_BLEED"])
+    async def test_the_parser_preserves_what_the_model_emitted(
+        self, monkeypatch, emitted
+    ):
+        """Both rows are needed, and the second is why.
+
+        Asserting only that a declining response yields the declining token
+        proves nothing: that token is *also* the out-of-vocabulary default, so
+        the assertion holds even if it were deleted from FAILURE_MODES. Pairing
+        it with a causal mode shows the parser is preserving what was emitted
+        rather than collapsing everything to the default.
+        """
+        llm = FakeLessonLLM(
+            reply=(
+                "LESSON: The inputs identify no mechanism; record what evidence "
+                "would settle it.\n"
+                "TYPE: missed_risk\n"
+                f"FAILURE_MODE: {emitted}"
+            )
+        )
+        monkeypatch.setattr(
+            "src.llm_runtime.construction.build_required_model_for_seat",
+            lambda *_a, **_k: llm,
+        )
+        result = await generate_lesson(_comparison())
+        assert result is not None
+        assert result[2] == emitted
+
+    @pytest.mark.asyncio
+    async def test_an_unparseable_mode_no_longer_invents_a_cause(self, monkeypatch):
+        llm = FakeLessonLLM(
+            reply="LESSON: Something.\nTYPE: missed_risk\nFAILURE_MODE: NONSENSE"
+        )
+        monkeypatch.setattr(
+            "src.llm_runtime.construction.build_required_model_for_seat",
+            lambda *_a, **_k: llm,
+        )
+        result = await generate_lesson(_comparison())
+        assert result is not None
+        assert result[2] == UNRESOLVED_PRICE_ONLY
+
+    def test_it_is_the_only_member_that_names_no_mechanism(self):
+        assert UNRESOLVED_PRICE_ONLY in FAILURE_MODES
+        others = FAILURE_MODES - {UNRESOLVED_PRICE_ONLY}
+        assert len(others) == 12, "the causal vocabulary must be unchanged"

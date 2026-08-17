@@ -164,6 +164,16 @@ THRESHOLDS: dict[str, dict[str, float]] = {
 MINIMUM_DAYS_ELAPSED = 30
 MAX_LESSONS_PER_TICKER = 3
 
+# The only failure mode that asserts nothing, and the reason it exists: every
+# other value names a mechanism, so a model told "say so when no mechanism is
+# supported" still had to pick a causal category from the response format. The
+# escape hatch was unsatisfiable one field over from where it was written.
+#
+# It is also the right default for an unparseable response. Inferring
+# OPERATIONAL_MISS from a parse miss manufactures a finding out of a formatting
+# failure — the same category error, arrived at by accident.
+UNRESOLVED_PRICE_ONLY = "UNRESOLVED_PRICE_ONLY"
+
 FAILURE_MODES = {
     "CYCLICAL_PEAK",
     "FX_DRIVEN",
@@ -177,6 +187,7 @@ FAILURE_MODES = {
     "GEOPOLITICAL",
     "LIQUIDITY_CRISIS",
     "DEAD_MONEY",
+    UNRESOLVED_PRICE_ONLY,
 }
 
 LESSON_TYPES = {
@@ -259,6 +270,14 @@ DRIVER_UNKNOWN = "UNKNOWN"
 # fixed for the market leg; the FX sibling was missed. Measured 2026-08-17: 6 of
 # 7,952 snapshots are non-USD with no recorded rate, 987 are USD, and the
 # live-fetch failure path is unbounded during a sweep.
+# How much of the recorded bear case the lesson prompt gets. `_extract_bear_risks`
+# already stores ~500 chars, and the prompt was clipping to 300 — so 55% of
+# snapshots (measured over 7,952) had grounding material that existed on disk and
+# was never shown to the model. Since the anti-invention rule tells it to name
+# only checks that follow from its inputs, withholding inputs it already has is
+# the worst of both: the rule binds and the material to satisfy it is missing.
+BEAR_EXCERPT_PROMPT_CHARS = 500
+
 FX_OBSERVED = "FX_OBSERVED"
 FX_NOT_APPLICABLE = "FX_NOT_APPLICABLE"  # USD-denominated: there is no FX leg
 FX_UNAVAILABLE = "FX_UNAVAILABLE"  # could not be determined; NOT a flat rate
@@ -1993,10 +2012,17 @@ def _observation_lines(lesson: Mapping[str, Any]) -> list[str]:
     # per-record field or a condition reading one would encode a constant as data.
     # Make this conditional at the same time a validation producer lands — the
     # SCOPE_VALIDATED / RESERVED_UNOBSERVED_SCOPES machinery is where that arrives.
-    lines.append(
-        f"topic {lesson.get('failure_mode') or 'UNKNOWN'} is an unvalidated "
-        f"price-only classification, not an established cause"
-    )
+    mode = lesson.get("failure_mode") or "UNKNOWN"
+    if mode == UNRESOLVED_PRICE_ONLY:
+        # The model declined to name a mechanism. Repeating "unvalidated
+        # price-only classification" after a topic that already says so reads as
+        # a double negative rather than a caveat.
+        lines.append("the inputs identified no mechanism for this outcome")
+    else:
+        lines.append(
+            f"topic {mode} is an unvalidated price-only classification, "
+            f"not an established cause"
+        )
 
     flags = str(lesson.get("red_flags_at_decision") or "").strip()
     if flags:
@@ -2075,7 +2101,7 @@ Ticker: {comparison.get("ticker")} | Sector: {comparison.get("sector", "Unknown"
 Verdict: {comparison.get("verdict")} (Position: {comparison.get("position_size", "N/A")}%) | Zone: {comparison.get("zone", "N/A")}
 Health: {comparison.get("health_adj", "N/A")} | Growth: {comparison.get("growth_adj", "N/A")} | P/E: {comparison.get("pe_ratio", "N/A")} | PEG: {comparison.get("peg_ratio", "N/A")}
 Valuation references: Fair entry {comparison.get("entry_price") or "N/A"} | Base {comparison.get("target_1_price") or "N/A"} | Stretch {comparison.get("target_2_price") or "N/A"} | Downside review {comparison.get("stop_price") or "N/A"} | Horizon: {comparison.get("investment_horizon") or "N/A"}
-Key bear risks: {comparison.get("bear_risks_excerpt", "N/A")[:300]}
+Key bear risks: {comparison.get("bear_risks_excerpt", "N/A")[:BEAR_EXCERPT_PROMPT_CHARS]}
 Flags recorded at decision (noted, NOT tested against the outcome):
 {_render_recorded_flags(comparison.get("red_flags_at_decision"))}
 
@@ -2103,10 +2129,18 @@ Rules:
   discipline. A market-wide move is not evidence the screen was wrong.
 - If the lesson scope is {SCOPE_UNRESOLVED}, the residual is unexplained, not
   diagnosed. Write what should be CHECKED next time, not what was wrong.
-- Do NOT introduce a failure mechanism that appears nowhere above. You may only
-  name a check that follows from the recorded bear risks, the thesis-break
-  triggers, or the regime. Inventing a plausible cause ("verify cash flow
-  reconciliations") reads as a diagnosis you have no evidence for.
+- Do NOT introduce a failure mechanism that appears nowhere above. You may name
+  a check only if it follows from something actually shown to you. Inventing a
+  plausible cause ("verify cash flow reconciliations", "check for supply chain
+  pressure") reads as a diagnosis you have no evidence for.
+- If nothing above supports a specific check — a thin or missing bear excerpt, no
+  thesis-break triggers recorded, an unknown regime — then SAY SO. Naming what
+  could not be determined, and what evidence would settle it next time, is a
+  complete and correct lesson. It is always better than a plausible invention,
+  and "the inputs identify no mechanism" is the honest answer far more often than
+  it looks. When you do this, FAILURE_MODE must be {UNRESOLVED_PRICE_ONLY} —
+  every other value names a mechanism, so picking one would re-assert in that
+  field exactly the cause you just declined to claim.
 - Do NOT demote the screen by contrast. No "rather than", "instead of" or "not
   merely" clause that subordinates fundamental valuation, growth, or the screen
   itself to regime or momentum. Write what to ADD, never what to trust less. An
@@ -2121,7 +2155,7 @@ Rules:
 
 LESSON: [your lesson]
 TYPE: missed_risk | false_positive | missed_opportunity | correct_call
-FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | REGULATORY_SHIFT | MACRO_REGIME | DISRUPTION | VALUATION_TRAP | ACCOUNTING_FRAUD | GEOPOLITICAL | LIQUIDITY_CRISIS | DEAD_MONEY"""
+FAILURE_MODE: {UNRESOLVED_PRICE_ONLY} | CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | REGULATORY_SHIFT | MACRO_REGIME | DISRUPTION | VALUATION_TRAP | ACCOUNTING_FRAUD | GEOPOLITICAL | LIQUIDITY_CRISIS | DEAD_MONEY"""
 
     # Bound before the try so the failure path below can report the seat's real
     # vendor. Construction itself can fail (a missing credential), and "unknown"
@@ -2184,15 +2218,18 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
         lesson_type = (
             type_match.group(1).strip().lower() if type_match else "missed_risk"
         )
+        # An absent or out-of-vocabulary FAILURE_MODE resolves to the one value
+        # that claims nothing. It used to resolve to OPERATIONAL_MISS, which
+        # asserts an operational cause on the strength of a formatting failure.
         failure_mode = (
-            mode_match.group(1).strip().upper() if mode_match else "OPERATIONAL_MISS"
+            mode_match.group(1).strip().upper() if mode_match else UNRESOLVED_PRICE_ONLY
         )
 
         # Validate against known enums
         if lesson_type not in LESSON_TYPES:
             lesson_type = "missed_risk"
         if failure_mode not in FAILURE_MODES:
-            failure_mode = "OPERATIONAL_MISS"
+            failure_mode = UNRESOLVED_PRICE_ONLY
 
         logger.info(
             "lesson_generated",
