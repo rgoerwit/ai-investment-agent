@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.retrospective import format_lessons_for_injection, save_rejection_record
+from src.retrospective import (
+    LESSON_ELIGIBILITY_INJECTABLE,
+    format_lessons_for_injection,
+    save_rejection_record,
+)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Fixtures
@@ -337,6 +341,11 @@ class TestSameTickerBoost:
                 "exchange": exchange,
                 "currency": currency,
                 "confidence_weight": confidence,
+                # These tests are about *ranking*, so the outcome lesson has to
+                # clear the eligibility gate first — otherwise they would pass
+                # for the wrong reason once it is withheld. Quarantine behaviour
+                # is covered in tests/advanced/test_retrospective_retrieval.py.
+                "lesson_eligibility": LESSON_ELIGIBILITY_INJECTABLE,
             },
             "distance": 0.4,
         }

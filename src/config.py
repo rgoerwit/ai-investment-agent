@@ -357,6 +357,17 @@ class Settings(BaseSettings):
             "is unreachable. Read-only; analyses are never written here."
         ),
     )
+    retrospective_max_evaluations_per_run: int = Field(
+        default=400,
+        gt=0,
+        validation_alias="RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN",
+        description=(
+            "Ceiling on snapshots priced in one retrospective run. Each costs a "
+            "stock fetch plus a benchmark fetch, so without a ceiling every "
+            "non-triggering snapshot is re-fetched on every run. Lower it to "
+            "probe a policy change on a small batch before committing to a sweep."
+        ),
+    )
     data_cache_dir: Path = Field(
         default=Path("./data_cache"),
         validation_alias="DATA_CACHE_DIR",

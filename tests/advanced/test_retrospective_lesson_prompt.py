@@ -373,3 +373,92 @@ class TestTheParseContractIsUnchanged:
         _text, lesson_type, failure_mode = await generate_lesson(_comparison())
         assert lesson_type == "missed_risk"
         assert failure_mode == "OPERATIONAL_MISS"
+
+
+class TestThePromptForbidsTheConstructionsTheModelActuallyUsed:
+    """Two rules aimed at observed evasions, not at the abstract principle.
+
+    Measured 2026-08-16 across 67 stored lessons, both patterns recurring:
+
+    * a cause invented from price alone — "prioritize vetting data quality
+      discrepancies, specifically cash flow reconciliations" (7047.T), where no
+      input mentions cash flow at all;
+    * the regime-conditioning rule satisfied in the clause the model wrote first,
+      then undone by a trailing contrast — "…rather than assuming fundamental
+      undervaluation alone is a sufficient margin of safety" (7638.T).
+
+    The second is why restating the principle would not have helped: the model
+    obeyed the rule as written and smuggled the prohibited half back afterwards.
+    """
+
+    @pytest.mark.asyncio
+    async def test_inventing_a_mechanism_is_forbidden(self, monkeypatch):
+        prompt = await _prompt_for(_comparison(), monkeypatch)
+        assert "failure mechanism that appears nowhere above" in prompt
+        assert "recorded bear risks" in prompt
+
+    @pytest.mark.asyncio
+    async def test_demoting_the_screen_by_contrast_is_forbidden(self, monkeypatch):
+        prompt = await _prompt_for(_comparison(), monkeypatch)
+        assert "rather than" in prompt and "instead of" in prompt
+        assert "Write what to ADD, never what to trust less." in prompt
+
+    @pytest.mark.asyncio
+    async def test_type_is_scoped_to_the_price_outcome(self, monkeypatch):
+        prompt = await _prompt_for(_comparison(), monkeypatch)
+        assert "TYPE labels the prediction against the price only" in prompt
+        assert THESIS_NOT_EVALUATED in prompt
+
+    @pytest.mark.asyncio
+    async def test_the_output_template_stays_clean(self, monkeypatch):
+        """Explanatory prose belongs in the rules, never in the format block.
+
+        The model copies the template, so a clarification written into the
+        `TYPE:` line would be echoed into the parsed value.
+        """
+        prompt = await _prompt_for(_comparison(), monkeypatch)
+        assert (
+            "TYPE: missed_risk | false_positive | missed_opportunity | correct_call"
+            in prompt
+        )
+
+
+class TestTheScopeStampGatesTheAntiDiagnosisRule:
+    """The mapping fix and the prompt fix are one change, observed here.
+
+    `_render_attribution` prints the scope into the prompt, and the "unexplained,
+    not diagnosed" rule keys on it — so while MIXED resolved to CONTEXTUAL, that
+    rule was never in force for the 67 records that most needed it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_mixed_outcome_now_renders_as_unresolved(self, monkeypatch):
+        comparison = _comparison(
+            attribution={
+                "market_return_pct": 21.0,
+                "residual_return_pct": -18.0,
+                "fx_return_pct": 0.0,
+                "usd_investor_return_pct": 0.0,
+                "dominant_driver": "MIXED",
+                "benchmark_available": True,
+            },
+            lesson_scope=SCOPE_UNRESOLVED,
+        )
+        prompt = await _prompt_for(comparison, monkeypatch)
+        assert f"Lesson scope: {SCOPE_UNRESOLVED}" in prompt
+        assert "the residual is unexplained, not" in prompt
+
+    @pytest.mark.asyncio
+    async def test_a_comparison_with_no_scope_renders_the_humbler_one(
+        self, monkeypatch
+    ):
+        """Fail closed: an absent scope reaches the prompt as UNRESOLVED.
+
+        The old `or SCOPE_CONTEXTUAL` default asserted the opposite in the very
+        place the anti-diagnosis rule is read.
+        """
+        comparison = _comparison()
+        comparison.pop("lesson_scope")
+        prompt = await _prompt_for(comparison, monkeypatch)
+        assert f"Lesson scope: {SCOPE_UNRESOLVED}" in prompt
+        assert f"Lesson scope: {SCOPE_CONTEXTUAL}" not in prompt

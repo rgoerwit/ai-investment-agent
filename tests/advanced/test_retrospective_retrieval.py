@@ -24,6 +24,8 @@ from __future__ import annotations
 import pytest
 
 from src.retrospective import (
+    LESSON_ELIGIBILITY_INJECTABLE,
+    LESSON_ELIGIBILITY_REVIEW_ONLY,
     LESSON_QUERY_CANDIDATES,
     SCOPE_CONTEXTUAL,
     SCOPE_UNRESOLVED,
@@ -62,8 +64,24 @@ def _lesson(**meta) -> dict:
         "lesson_type": "missed_risk",
         "failure_mode": "MACRO_REGIME",
         "confidence_weight": 0.8,
+        # Written under the eligibility policy. Tests exercising the *regime*
+        # gate need a record that already cleared the eligibility gate, or they
+        # would pass for the wrong reason.
+        "lesson_eligibility": LESSON_ELIGIBILITY_INJECTABLE,
     }
     base.update(meta)
+    return base
+
+
+def _pre_policy_lesson(**meta) -> dict:
+    """A record shaped like the 162 stored on 2026-08-16, before eligibility existed.
+
+    Deliberately built by *removing* the key rather than by listing fields: the
+    thing under test is what happens when the marker is absent, and a
+    hand-written dict would drift from `_lesson` as the schema grows.
+    """
+    base = _lesson(**meta)
+    base.pop("lesson_eligibility", None)
     return base
 
 
@@ -389,3 +407,180 @@ class TestNoDoubleCountedScoringTerms:
             "identical stored weights must rank identically; a retrieval-time "
             "quick-mode penalty would double-count save_rejection_record's"
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Eligibility: injectability is a positive property of the record
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestOutcomeLessonsMustClaimEligibility:
+    """The store cannot vouch for records written before the policy existed.
+
+    Measured 2026-08-16: 67 records were stamped CONTEXTUAL while carrying no
+    regime metadata at all, so `_regime_matches` could never fire for them. They
+    were inert *by accident* — an emergent consequence of four separate
+    conditions rather than a stated property. A positive marker makes it
+    auditable by reading the record, and quarantines the pre-policy corpus with
+    no deletion or rewrite.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_pre_policy_record_is_withheld(self):
+        memory = _QueryableMemory()
+        memory.seed(
+            "Rate shocks compress multiples first.",
+            **_pre_policy_lesson(
+                lesson_scope=SCOPE_CONTEXTUAL, regime_risk_appetite="RISK_OFF"
+            ),
+        )
+        text = await format_lessons_for_injection(
+            memory, "7203.T", "Industrials", current_regime=RISK_OFF_NOW
+        )
+        assert text == "", (
+            "a record with no eligibility marker must be withheld even when its "
+            "regime matches — absence of the marker is not permission"
+        )
+
+    @pytest.mark.asyncio
+    async def test_review_only_is_withheld_even_under_a_matching_regime(self):
+        memory = _QueryableMemory()
+        memory.seed(
+            "Defensive names outperform, so relax valuation discipline.",
+            **_lesson(
+                lesson_scope=SCOPE_CONTEXTUAL,
+                regime_risk_appetite="RISK_OFF",
+                lesson_eligibility=LESSON_ELIGIBILITY_REVIEW_ONLY,
+            ),
+        )
+        text = await format_lessons_for_injection(
+            memory, "7203.T", "Industrials", current_regime=RISK_OFF_NOW
+        )
+        assert "relax valuation discipline" not in text
+
+    @pytest.mark.asyncio
+    async def test_an_injectable_record_still_needs_a_matching_regime(self):
+        """Eligibility replaces nothing; the regime check remains in force."""
+        memory = _QueryableMemory()
+        memory.seed(
+            "Rate shocks compress multiples first.",
+            **_lesson(
+                lesson_scope=SCOPE_CONTEXTUAL,
+                regime_risk_appetite="RISK_OFF",
+                lesson_eligibility=LESSON_ELIGIBILITY_INJECTABLE,
+            ),
+        )
+        assert "Rate shocks" in await format_lessons_for_injection(
+            memory, "7203.T", "Industrials", current_regime=RISK_OFF_NOW
+        )
+        assert "Rate shocks" not in await format_lessons_for_injection(
+            memory, "7203.T", "Industrials", current_regime=RISK_ON_NOW
+        )
+
+    @pytest.mark.asyncio
+    async def test_prior_rejection_records_are_unaffected(self):
+        """A screening record is a fact about this ticker, not a generalization.
+
+        It carries no eligibility marker and must keep reaching the analysis —
+        gating it would be the costliest possible false positive, since "have I
+        screened this ticker out before?" is the case the retrieval path exists
+        to answer.
+        """
+        memory = _QueryableMemory()
+        memory.seed(
+            "7203.T was screened out on valuation in March.",
+            **_pre_policy_lesson(ticker="7203.T", lesson_type="prior_rejection"),
+        )
+        text = await format_lessons_for_injection(
+            memory, "7203.T", "Industrials", current_regime=RISK_ON_NOW
+        )
+        assert "screened out on valuation" in text
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# A retrieved lesson carries the measurement it came from
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestTheObservationIsRenderedBesideThePose:
+    """Prose alone is a bare imperative.
+
+    `benchmark_used` was stored and carried into the retrieval object but never
+    printed — so the reader could not see the horizon, what the excess was struck
+    against, or whether FX was determined at all. A 40-day 12% wobble against an
+    unnamed index read exactly like a 250-day collapse against the country index.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_measurement_is_printed(self):
+        memory = _QueryableMemory()
+        memory.seed(
+            "Rate shocks compress multiples first.",
+            **_lesson(
+                lesson_scope=SCOPE_CONTEXTUAL,
+                regime_risk_appetite="RISK_OFF",
+                benchmark_used="^N225",
+                days_elapsed=184,
+                actual_return_pct=-22.0,
+                benchmark_return_pct=-8.0,
+                excess_return_pct=-14.0,
+                fx_observation="FX_OBSERVED",
+            ),
+        )
+        text = await format_lessons_for_injection(
+            memory, "7203.T", "Industrials", current_regime=RISK_OFF_NOW
+        )
+        assert "observed over 184d vs ^N225" in text
+        assert "-22.0%" in text and "-8.0%" in text and "-14.0%" in text
+        assert "FX_OBSERVED" in text
+
+    @pytest.mark.asyncio
+    async def test_recorded_hazards_are_labelled_as_non_causal(self):
+        memory = _QueryableMemory()
+        memory.seed(
+            "Check the ownership chain before trusting a low multiple.",
+            **_lesson(
+                lesson_scope=SCOPE_CONTEXTUAL,
+                regime_risk_appetite="RISK_OFF",
+                red_flags_at_decision="CMIC_FLAGGED,PFIC_UNCERTAIN",
+            ),
+        )
+        text = await format_lessons_for_injection(
+            memory, "7203.T", "Industrials", current_regime=RISK_OFF_NOW
+        )
+        assert "CMIC_FLAGGED,PFIC_UNCERTAIN" in text
+        assert "not evidence they occurred or caused this outcome" in text
+
+    @pytest.mark.asyncio
+    async def test_a_legacy_record_renders_no_measurement_rather_than_zeroes(self):
+        """Absent fields must not become a row of zeroes, which would be a claim."""
+        memory = _QueryableMemory()
+        memory.seed(
+            "An older lesson.",
+            **_lesson(lesson_scope=SCOPE_CONTEXTUAL, regime_risk_appetite="RISK_OFF"),
+        )
+        text = await format_lessons_for_injection(
+            memory, "7203.T", "Industrials", current_regime=RISK_OFF_NOW
+        )
+        assert "An older lesson." in text
+        assert "observed over" not in text
+        assert "0.0%" not in text
+
+    @pytest.mark.asyncio
+    async def test_a_prior_rejection_carries_no_measurement(self):
+        """It is a screening fact, not an outcome measured against an index."""
+        memory = _QueryableMemory()
+        memory.seed(
+            "7203.T was screened out on valuation in March.",
+            **_pre_policy_lesson(
+                ticker="7203.T",
+                lesson_type="prior_rejection",
+                days_elapsed=184,
+                excess_return_pct=-14.0,
+            ),
+        )
+        text = await format_lessons_for_injection(
+            memory, "7203.T", "Industrials", current_regime=RISK_ON_NOW
+        )
+        assert "screened out on valuation" in text
+        assert "observed over" not in text

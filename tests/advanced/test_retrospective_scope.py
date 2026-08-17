@@ -29,6 +29,9 @@ from src.retrospective import (
     DRIVER_MIXED,
     DRIVER_RESIDUAL,
     DRIVER_UNKNOWN,
+    LESSON_ELIGIBILITIES,
+    LESSON_ELIGIBILITY_INJECTABLE,
+    LESSON_ELIGIBILITY_REVIEW_ONLY,
     LESSON_SCOPES,
     RESERVED_UNOBSERVED_SCOPES,
     SCOPE_CONTEXTUAL,
@@ -36,6 +39,7 @@ from src.retrospective import (
     SCOPE_VALIDATED,
     THESIS_NOT_EVALUATED,
     extract_snapshot,
+    lesson_eligibility,
     lesson_scope_for,
 )
 
@@ -181,14 +185,26 @@ class TestLessonScope:
     @pytest.mark.parametrize(
         ("driver", "expected"),
         [
-            (DRIVER_RESIDUAL, SCOPE_UNRESOLVED),
             (DRIVER_MARKET, SCOPE_CONTEXTUAL),
-            (DRIVER_MIXED, SCOPE_CONTEXTUAL),
-            (DRIVER_UNKNOWN, SCOPE_CONTEXTUAL),
+            (DRIVER_RESIDUAL, SCOPE_UNRESOLVED),
+            (DRIVER_MIXED, SCOPE_UNRESOLVED),
+            (DRIVER_UNKNOWN, SCOPE_UNRESOLVED),
         ],
     )
     def test_scope_follows_the_driver(self, driver, expected):
         assert lesson_scope_for(driver) == expected
+
+    def test_an_unattributed_move_is_not_a_regime_observation(self):
+        """MIXED means neither leg dominated, i.e. we could not attribute it.
+
+        Reading that as "market-dominated" did more than mislabel a record: the
+        scope is printed into the lesson prompt, and the prompt's "unexplained,
+        not diagnosed" rule keys on it, so every MIXED outcome was generated with
+        that rule switched off. Measured 2026-08-16: 95 RESIDUAL, 67 MIXED, zero
+        MARKET — and all 67 CONTEXTUAL lessons asserted a cause never established.
+        """
+        assert lesson_scope_for(DRIVER_MIXED) == SCOPE_UNRESOLVED
+        assert lesson_scope_for(DRIVER_MIXED) != SCOPE_CONTEXTUAL
 
     def test_a_stock_specific_move_is_unresolved_not_validated(self):
         """The concession that matters: we know it was idiosyncratic, not why."""
@@ -200,7 +216,8 @@ class TestLessonScope:
             assert lesson_scope_for(driver) != SCOPE_VALIDATED
 
     def test_an_unrecognized_driver_degrades_to_the_humbler_scope(self):
-        assert lesson_scope_for("SOMETHING_NEW") == SCOPE_CONTEXTUAL
+        """A driver added later must not inherit authority by falling through."""
+        assert lesson_scope_for("SOMETHING_NEW") == SCOPE_UNRESOLVED
 
 
 class TestValidatedIsReservedNotDead:
@@ -236,3 +253,144 @@ class TestValidatedIsReservedNotDead:
             "SCOPE_VALIDATED is compared against at "
             f"{offenders}, but nothing emits it — that is a dead gate"
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Eligibility
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _comparison(driver, regime, shifted, shift_reason=""):
+    return {
+        "attribution": {"dominant_driver": driver},
+        "regime_at_decision": regime,
+        "cached_regime_delta": {"shifted": shifted, "shift_reason": shift_reason},
+    }
+
+
+_STABLE_REGIME = {"risk_appetite": "RISK_ON", "shock_type": "NONE"}
+
+
+class TestLessonEligibility:
+    """Scope says how far an outcome generalizes; eligibility says whether the
+    record carries the evidence needed to apply it. Both are required, and the
+    second is why 67 records could be stamped CONTEXTUAL and still be inert.
+    """
+
+    def test_a_market_move_in_a_stable_recorded_regime_is_injectable(self):
+        eligibility, _ = lesson_eligibility(
+            _comparison(DRIVER_MARKET, _STABLE_REGIME, False)
+        )
+        assert eligibility == LESSON_ELIGIBILITY_INJECTABLE
+
+    @pytest.mark.parametrize(
+        "driver", [DRIVER_MIXED, DRIVER_RESIDUAL, DRIVER_UNKNOWN, "SOMETHING_NEW"]
+    )
+    def test_an_unattributed_move_is_review_only(self, driver):
+        eligibility, reason = lesson_eligibility(
+            _comparison(driver, _STABLE_REGIME, False)
+        )
+        assert eligibility == LESSON_ELIGIBILITY_REVIEW_ONLY
+        assert driver in reason
+
+    def test_a_market_move_with_no_recorded_regime_is_review_only(self):
+        """The exact shape of all 67 records stored on 2026-08-16.
+
+        A scope-only fix misses this: the record would still say CONTEXTUAL while
+        `_regime_matches` could never fire for it, because the fields it compares
+        are blank. Injectability has to be checked against the metadata that
+        retrieval actually reads.
+        """
+        eligibility, reason = lesson_eligibility(
+            _comparison(DRIVER_MARKET, {"risk_appetite": "", "shock_type": ""}, False)
+        )
+        assert eligibility == LESSON_ELIGIBILITY_REVIEW_ONLY
+        assert "regime" in reason
+
+    def test_a_missing_regime_key_is_treated_as_absent_not_as_an_error(self):
+        eligibility, _ = lesson_eligibility(
+            {"attribution": {"dominant_driver": DRIVER_MARKET}}
+        )
+        assert eligibility == LESSON_ELIGIBILITY_REVIEW_ONLY
+
+    def test_a_shifted_regime_is_review_only(self):
+        eligibility, reason = lesson_eligibility(
+            _comparison(
+                DRIVER_MARKET,
+                _STABLE_REGIME,
+                True,
+                "risk appetite: RISK_ON -> RISK_OFF",
+            )
+        )
+        assert eligibility == LESSON_ELIGIBILITY_REVIEW_ONLY
+        assert "RISK_OFF" in reason
+
+    def test_an_unknown_shift_is_withheld_not_permitted(self):
+        """`shifted` is False only when both regimes were usable, comparable and
+        equal; every degraded path returns None. "We could not establish that the
+        regime held still" is not a basis for authorizing guidance about it.
+        """
+        eligibility, _ = lesson_eligibility(
+            _comparison(DRIVER_MARKET, _STABLE_REGIME, None, "cache is 40d old")
+        )
+        assert eligibility == LESSON_ELIGIBILITY_REVIEW_ONLY
+
+    def test_the_two_withholding_reasons_are_distinguishable(self):
+        """REVIEW_ONLY is ambiguous on its face, so the reason is persisted.
+
+        "the driver was MIXED" is a finding about the snapshot; "the macro cache
+        was stale" is a finding about the run that evaluated it. An auditor
+        reading the store must be able to tell them apart.
+        """
+        _, about_snapshot = lesson_eligibility(
+            _comparison(DRIVER_MIXED, _STABLE_REGIME, False)
+        )
+        _, about_run = lesson_eligibility(
+            _comparison(DRIVER_MARKET, _STABLE_REGIME, None, "cache is 40d old")
+        )
+        assert about_snapshot != about_run
+        assert "40d old" in about_run
+
+    def test_every_result_is_a_declared_token(self):
+        for driver in (DRIVER_MARKET, DRIVER_MIXED, DRIVER_RESIDUAL, DRIVER_UNKNOWN):
+            for shifted in (True, False, None):
+                eligibility, reason = lesson_eligibility(
+                    _comparison(driver, _STABLE_REGIME, shifted)
+                )
+                assert eligibility in LESSON_ELIGIBILITIES
+                assert reason, "a withheld or granted record must say why"
+
+    def test_a_malformed_comparison_does_not_raise(self):
+        for bad in ({}, {"attribution": "nonsense"}, {"cached_regime_delta": 5}):
+            eligibility, _ = lesson_eligibility(bad)
+            assert eligibility == LESSON_ELIGIBILITY_REVIEW_ONLY
+
+
+class TestAnActiveDealIsNotAMarketOutcome:
+    """A live tender prices the stock against deal terms, not against its market.
+
+    The benchmark decomposition still computes and means nothing, so a MARKET
+    label there is an artefact of deal mechanics. `m_and_a_status` was already
+    carried in the snapshot for the IBKR reconciler; eligibility now reads it.
+    """
+
+    def test_an_active_tender_is_review_only(self):
+        comparison = _comparison(DRIVER_MARKET, _STABLE_REGIME, False)
+        comparison["m_and_a_status"] = "ACTIVE_TENDER"
+        eligibility, reason = lesson_eligibility(comparison)
+        assert eligibility == LESSON_ELIGIBILITY_REVIEW_ONLY
+        assert "tender" in reason
+
+    def test_a_rumour_does_not_disqualify(self):
+        """A rumour does not pin the price, so attribution still means something."""
+        comparison = _comparison(DRIVER_MARKET, _STABLE_REGIME, False)
+        comparison["m_and_a_status"] = "RUMORED"
+        eligibility, _ = lesson_eligibility(comparison)
+        assert eligibility == LESSON_ELIGIBILITY_INJECTABLE
+
+    @pytest.mark.parametrize("value", ["NONE", "", None])
+    def test_no_deal_is_not_disqualifying(self, value):
+        comparison = _comparison(DRIVER_MARKET, _STABLE_REGIME, False)
+        comparison["m_and_a_status"] = value
+        eligibility, _ = lesson_eligibility(comparison)
+        assert eligibility == LESSON_ELIGIBILITY_INJECTABLE

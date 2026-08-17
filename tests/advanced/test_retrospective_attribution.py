@@ -31,12 +31,22 @@ from src.retrospective import (
     DRIVER_MIXED,
     DRIVER_RESIDUAL,
     DRIVER_UNKNOWN,
+    FX_NOT_APPLICABLE,
+    FX_OBSERVATIONS,
+    FX_OBSERVED,
+    FX_UNAVAILABLE,
     UNASSESSED_BENCHMARK,
     UNASSESSED_REASON_KEY,
+    _render_attribution,
     attribute_return,
+    compare_to_reality,
     run_retrospective,
 )
-from tests.advanced.retrospective_fakes import FakeLessonsMemory, make_snapshot
+from tests.advanced.retrospective_fakes import (
+    FakeLessonsMemory,
+    FakeYFinance,
+    make_snapshot,
+)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Accounting identities
@@ -395,3 +405,140 @@ class TestAttributionReachesTheComparison:
         assert attribution["benchmark_available"] is True
         assert attribution["dominant_driver"] == DRIVER_RESIDUAL
         assert attribution["market_return_pct"] == pytest.approx(1.0, abs=0.01)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FX is tri-state: unavailable is not flat
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFxObservationIsTriState:
+    """`fx_delta_pct` was initialized to 0.0 and left there on three paths.
+
+    No recorded decision-time rate, a failed live fetch, and a USD-denominated
+    security all produced `+0.0%` — so "we could not tell" was reported to the
+    lesson model as "the currency did not move". Only the third is a real zero.
+
+    This is the same defect the comment above `benchmark_return_pct` describes as
+    already fixed for the market leg; the FX sibling was missed. Measured
+    2026-08-17: 6 of 7,952 snapshots are non-USD with no recorded rate, 987 are
+    USD, and the live-fetch failure path is unbounded during a sweep.
+    """
+
+    def test_the_three_states_are_distinct_tokens(self):
+        assert len({FX_OBSERVED, FX_NOT_APPLICABLE, FX_UNAVAILABLE}) == 3
+        assert FX_OBSERVATIONS == {FX_OBSERVED, FX_NOT_APPLICABLE, FX_UNAVAILABLE}
+
+    def test_a_missing_fx_leg_is_not_attributed_as_flat(self):
+        """`attribute_return` must carry None through, not coerce it to zero."""
+        attribution = attribute_return(
+            price_return_pct=-30.0, benchmark_return_pct=-10.0, fx_delta_pct=None
+        )
+        assert attribution.fx_return_pct is None
+        assert attribution.usd_investor_return_pct is None
+
+    def test_an_observed_fx_leg_still_composes_multiplicatively(self):
+        attribution = attribute_return(
+            price_return_pct=10.0, benchmark_return_pct=4.0, fx_delta_pct=-5.0
+        )
+        assert attribution.fx_return_pct == pytest.approx(-5.0)
+        # (1+usd) = (1+local) x (1+fx)
+        assert attribution.usd_investor_return_pct == pytest.approx(
+            ((1.10 * 0.95) - 1) * 100, abs=0.01
+        )
+
+    def test_an_undetermined_leg_renders_as_unknown_not_as_zero(self):
+        """The prompt is the consumer that matters; "+0.0%" would be a claim."""
+        rendered = _render_attribution(
+            {
+                "price_return_pct": -30.0,
+                "attribution": attribute_return(
+                    price_return_pct=-30.0,
+                    benchmark_return_pct=-10.0,
+                    fx_delta_pct=None,
+                ).to_dict(),
+                "fx_observation": FX_UNAVAILABLE,
+            }
+        )
+        assert "unknown" in rendered
+        assert FX_UNAVAILABLE in rendered, "the prompt must say why it is unknown"
+        assert "FX +0.0%" not in rendered
+
+
+class TestCompareToRealityReportsFxHonestly:
+    """The integration the isolated tests above do NOT cover.
+
+    Reverting the initializer to `0.0` left every test in this file green, which
+    is the trap: `attribute_return` and `_render_attribution` were exercised
+    directly while the site that *decides* the value was not. These drive
+    `compare_to_reality` itself.
+    """
+
+    async def _compare(self, monkeypatch, *, currency, fx_rate, fx_result):
+        fake_yf = FakeYFinance(
+            prices={"7203.T": (1000.0, 700.0), "^N225": (30000.0, 27000.0)}
+        )
+        monkeypatch.setattr("src.retrospective.yf", fake_yf, raising=False)
+
+        async def _fx(*_a, **_k):
+            if isinstance(fx_result, Exception):
+                raise fx_result
+            return fx_result
+
+        monkeypatch.setattr("src.fx_normalization.get_fx_rate_yfinance", _fx)
+        snapshot = make_snapshot(age_days=184)
+        snapshot.update(
+            {
+                "ticker": "7203.T",
+                "currency": currency,
+                "fx_rate_to_usd": fx_rate,
+                "benchmark_index": "^N225",
+                "verdict": "BUY",
+            }
+        )
+        return await compare_to_reality(snapshot)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_fx_fetch_is_unavailable_not_flat(self, monkeypatch):
+        comparison = await self._compare(
+            monkeypatch,
+            currency="JPY",
+            fx_rate=0.0067,
+            fx_result=RuntimeError("yfinance down"),
+        )
+        assert comparison is not None
+        assert comparison["fx_observation"] == FX_UNAVAILABLE
+        assert comparison["attribution"]["fx_return_pct"] is None, (
+            "an FX outage must not be attributed as a flat currency"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_missing_decision_time_rate_is_unavailable(self, monkeypatch):
+        comparison = await self._compare(
+            monkeypatch, currency="JPY", fx_rate=None, fx_result=0.0070
+        )
+        assert comparison is not None
+        assert comparison["fx_observation"] == FX_UNAVAILABLE
+        assert comparison["attribution"]["fx_return_pct"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_usd_security_is_not_applicable_and_genuinely_zero(
+        self, monkeypatch
+    ):
+        comparison = await self._compare(
+            monkeypatch, currency="USD", fx_rate=1.0, fx_result=1.0
+        )
+        assert comparison is not None
+        assert comparison["fx_observation"] == FX_NOT_APPLICABLE
+        assert comparison["attribution"]["fx_return_pct"] == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_a_successful_fetch_is_observed(self, monkeypatch):
+        comparison = await self._compare(
+            monkeypatch, currency="JPY", fx_rate=0.0067, fx_result=0.0060
+        )
+        assert comparison is not None
+        assert comparison["fx_observation"] == FX_OBSERVED
+        assert comparison["attribution"]["fx_return_pct"] == pytest.approx(
+            -10.45, abs=0.1
+        )

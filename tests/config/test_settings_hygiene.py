@@ -20,12 +20,14 @@ the existing coverage:
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from src.config import Settings
 from src.ibkr_config import IbkrSettings
@@ -129,6 +131,12 @@ _SETTINGS_ENV_CASES = [
         "gemini-3.5-flash",
     ),
     ("apex_thinking_level", "APEX_THINKING_LEVEL", "medium", "medium"),
+    (
+        "retrospective_max_evaluations_per_run",
+        "RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN",
+        "20",
+        20,
+    ),
 ]
 
 
@@ -488,3 +496,94 @@ def test_main_analyzer_cli_flag_overrides_config():
     )
     assert overridden.quick_think_llm == "zzz-quick"
     assert overridden.deep_think_llm == "zzz-deep"
+
+
+class TestRetrospectiveEvaluationBudget:
+    """A probe batch must not require a source edit.
+
+    The ceiling was a module constant, so judging a policy change on a small
+    batch meant editing `retrospective.py` — which is exactly the moment you
+    least want an uncommitted diff in the file under test.
+    """
+
+    def test_the_shipped_default_is_unchanged(self):
+        """Read the field default, never `Settings()`.
+
+        Instantiating loads the operator's `.env`, so an operator who has set a
+        documented override would fail this on a correct configuration.
+        """
+        field = Settings.model_fields["retrospective_max_evaluations_per_run"]
+        assert field.default == 400
+
+    @pytest.mark.parametrize("bad", ["0", "-1"])
+    def test_a_non_positive_budget_is_rejected(self, monkeypatch, bad):
+        """A ceiling of zero silently evaluates nothing, which reads as success."""
+        monkeypatch.setenv("RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN", bad)
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_the_orchestrator_resolves_it_at_call_time(self, monkeypatch):
+        """`None` means "ask config", so the value cannot be bound at import.
+
+        A signature default would freeze whatever config held when the module was
+        first imported — invisible, and wrong for exactly the operator who sets
+        the variable to run a probe.
+        """
+        import inspect
+
+        from src.retrospective import run_retrospective
+
+        parameter = inspect.signature(run_retrospective).parameters["max_evaluations"]
+        assert parameter.default is None
+
+    @pytest.mark.asyncio
+    async def test_the_configured_value_actually_bounds_selection(
+        self, monkeypatch, tmp_path
+    ):
+        """The signature default proves nothing on its own.
+
+        `None` could reach the budget as `None`, or be resolved from a stale
+        import-time copy, and the signature test would still pass. This drives
+        the real orchestrator against real snapshot files and asserts the
+        configured ceiling reached `_select_within_budget`.
+        """
+        import src.retrospective as retro
+
+        for index in range(5):
+            (tmp_path / f"T{index}.T_20260101_00000{index}_analysis.json").write_text(
+                json.dumps(
+                    {
+                        "prediction_snapshot": {
+                            "ticker": f"T{index}.T",
+                            "analysis_date": "2026-01-01",
+                            "verdict": "HOLD",
+                            "current_price": 100.0,
+                            "currency": "JPY",
+                            "benchmark_index": "^N225",
+                        }
+                    }
+                )
+            )
+
+        monkeypatch.setattr(retro.config, "retrospective_max_evaluations_per_run", 2)
+        budgets: list[int] = []
+        real_select = retro._select_within_budget
+        monkeypatch.setattr(
+            retro,
+            "_select_within_budget",
+            lambda candidates, budget: (
+                budgets.append(budget) or real_select(candidates, budget)
+            ),
+        )
+
+        await retro.run_retrospective(
+            None,
+            tmp_path,
+            lessons_memory=SimpleNamespace(available=False),
+            memo_path=tmp_path / "memo.json",
+            dry_run=True,
+        )
+        assert budgets == [2], (
+            "run_retrospective(max_evaluations=None) must resolve the ceiling "
+            f"from config at call time; got {budgets}"
+        )

@@ -229,6 +229,17 @@ MEMO_OUTCOME_CAPPED = "CAPPED"
 # rendered or persisted.
 MEMO_IDENTITY_KEY = "_memo_identity"
 
+# The canonical per-run identity of the snapshot a comparison came from, carried
+# so that both dedup sites and the stored record agree on one value.
+#
+# Deliberately NOT `analysis_id`: persistence.py mints that as the run id (the
+# Langfuse trace id when tracing is on), while `snapshot_identity()` falls back to
+# the source filename for snapshots written before that field existed. Writing a
+# surrogate into a field with an established meaning would give it two writers and
+# two semantics. Nothing outside this module reads the stored `analysis_id`
+# today — inert, which is not a reason to introduce the conflation.
+SNAPSHOT_IDENTITY_KEY = "snapshot_identity"
+
 # How much larger one leg must be than the other to be called the driver. A
 # module constant beside THRESHOLDS, tunable once a real corpus exists.
 ATTRIBUTION_DOMINANCE_RATIO = 1.5
@@ -237,6 +248,21 @@ DRIVER_MARKET = "MARKET"
 DRIVER_RESIDUAL = "RESIDUAL"
 DRIVER_MIXED = "MIXED"
 DRIVER_UNKNOWN = "UNKNOWN"
+
+# Was FX measured, inapplicable, or simply not determinable?
+#
+# `fx_delta_pct` was initialized to 0.0 and left there on three distinct paths —
+# no recorded decision-time rate, a failed live fetch (`except: pass`), and a
+# USD-denominated security — so "we could not tell" was reported to the lesson
+# model as "the currency did not move". Only the third is a real zero. This is
+# the same defect the comment above `benchmark_return_pct` describes as already
+# fixed for the market leg; the FX sibling was missed. Measured 2026-08-17: 6 of
+# 7,952 snapshots are non-USD with no recorded rate, 987 are USD, and the
+# live-fetch failure path is unbounded during a sweep.
+FX_OBSERVED = "FX_OBSERVED"
+FX_NOT_APPLICABLE = "FX_NOT_APPLICABLE"  # USD-denominated: there is no FX leg
+FX_UNAVAILABLE = "FX_UNAVAILABLE"  # could not be determined; NOT a flat rate
+FX_OBSERVATIONS = {FX_OBSERVED, FX_NOT_APPLICABLE, FX_UNAVAILABLE}
 
 # Marker on a comparison that could not be assessed. It rides the comparison dict
 # rather than a new return type so that `compare_to_reality` keeps its
@@ -266,6 +292,21 @@ LESSON_SCOPES = {SCOPE_CONTEXTUAL, SCOPE_UNRESOLVED, SCOPE_VALIDATED}
 # `other_legal_risks`, `COVERAGE_COMPLETE_NO_MATCH`). **No gate may key on
 # VALIDATED while it is unemitted.**
 RESERVED_UNOBSERVED_SCOPES = {SCOPE_VALIDATED}
+
+# ── Whether a lesson may be handed to a live analysis ─────────────────────────
+#
+# Separate from scope, and the separation is the point. Scope answers "how far
+# does this outcome generalize"; eligibility additionally asks whether the record
+# carries the evidence needed to *apply* it. Measured 2026-08-16: 67 records were
+# stamped CONTEXTUAL while carrying no regime metadata at all, so `_regime_matches`
+# could never fire for them — injectable by label, inert in fact. Leaving that
+# implicit meant the store could not be audited by reading it.
+#
+# A positive marker, never a negative one: a record written before this policy
+# existed cannot vouch for itself, so absence withholds authority.
+LESSON_ELIGIBILITY_INJECTABLE = "INJECTABLE"
+LESSON_ELIGIBILITY_REVIEW_ONLY = "REVIEW_ONLY"
+LESSON_ELIGIBILITIES = {LESSON_ELIGIBILITY_INJECTABLE, LESSON_ELIGIBILITY_REVIEW_ONLY}
 
 # The retrospective holds price and macro data only. It has no post-decision
 # company evidence, so it can never establish whether a pre-registered
@@ -590,6 +631,22 @@ def extract_snapshot(
         # it; the price-only retrospective may not adjudicate it (see
         # THESIS_NOT_EVALUATED).
         "kill_criteria": extract_kill_criteria(_bear_text(result)),
+        # Hazards the analysis actually recorded, as bare type tokens.
+        #
+        # Noted, never scored: the retrospective has price and macro data only and
+        # cannot test whether a flag came true. But the lesson prompt forbids
+        # naming a mechanism absent from its inputs, and without this the *only*
+        # hazards in scope were the bear case's — so a run flagged CMIC, PFIC or
+        # VIE at decision time could not be referred to at all, while an invented
+        # "governance bleed" read as equally grounded. Regulatory and currency
+        # exposure are exactly the classes a benchmark cannot net out.
+        "red_flags_at_decision": sorted(
+            {
+                str(flag.get("type"))
+                for flag in (result.get("red_flags") or [])
+                if isinstance(flag, Mapping) and flag.get("type")
+            }
+        ),
         # Exchange/currency/benchmark
         "exchange": suffix.lstrip(".") if suffix else "US",
         "currency": currency,
@@ -923,20 +980,93 @@ def _cache_staleness_days(cached: Mapping[str, Any]) -> int | None:
 def lesson_scope_for(dominant_driver: str) -> str:
     """How far a lesson drawn from this outcome may generalize.
 
-    Only ``RESIDUAL`` yields ``UNRESOLVED``, and note what that word concedes:
-    the move was stock-specific, and we do not know why. It is emphatically not
-    ``VALIDATED`` — establishing *why* needs company evidence published after the
-    decision, which the price-only retrospective does not have.
+    Only a MARKET-dominated move earns ``CONTEXTUAL``. ``MIXED`` means neither
+    leg dominates by ``ATTRIBUTION_DOMINANCE_RATIO`` — the move could not be
+    attributed — and an unattributed move is not a regime observation. An
+    unrecognized driver falls here too: authority defaults to withheld.
 
-    ``UNRESOLVED`` lessons are still injected, but labelled at the point of use
-    and confidence-discounted. Suppressing them outright was considered and
-    rejected: with no producer for ``VALIDATED`` that would permanently delete the
-    most valuable class of outcome. This repository's idiom is to *label* an
-    unknown rather than delete it — ``*_SCORE_UNRELIABLE`` makes a gate
-    indeterminate rather than removing the stock, and a partial consultant review
-    ships as ``LIMITED`` rather than being discarded.
+    The earlier ``else CONTEXTUAL`` did more damage than a mislabelled record.
+    ``_render_attribution`` prints the scope into the lesson prompt, and the
+    prompt's "if the scope is UNRESOLVED, the residual is unexplained, not
+    diagnosed" rule keys on it — so every MIXED outcome was generated with that
+    rule switched off. Measured 2026-08-16: 95 RESIDUAL, 67 MIXED, **zero
+    MARKET**, and all 67 CONTEXTUAL lessons asserted a cause that was never
+    established ("verify cash flow reconciliations" from a price move alone).
+
+    ``UNRESOLVED`` concedes that the move was stock-specific and the cause
+    unknown. It is emphatically not ``VALIDATED`` — establishing *why* needs
+    company evidence published after the decision, which a price-only
+    retrospective does not have. UNRESOLVED lessons are stored for review and
+    never injected; see the eligibility gate in ``get_relevant_lessons``.
     """
-    return SCOPE_UNRESOLVED if dominant_driver == DRIVER_RESIDUAL else SCOPE_CONTEXTUAL
+    return SCOPE_CONTEXTUAL if dominant_driver == DRIVER_MARKET else SCOPE_UNRESOLVED
+
+
+def lesson_eligibility(comparison: Mapping[str, Any]) -> tuple[str, str]:
+    """May this lesson be handed to a live analysis? Returns ``(eligibility, reason)``.
+
+    Separate from ``lesson_scope_for`` because attribution alone is not enough. A
+    CONTEXTUAL lesson is retrieved only when its stored regime matches the present
+    one, so a record with no recorded regime is unreachable no matter what its
+    text says. That gap is what let 67 records look injectable while being inert.
+
+    The reason is returned and persisted because ``REVIEW_ONLY`` is otherwise
+    ambiguous on its face: "the driver was MIXED" is a finding about the snapshot,
+    while "the macro cache was stale when this ran" is a finding about the run.
+    Only one of them says anything about the lesson.
+    """
+    # Checked first, and deliberately so: a live deal prices the stock against its
+    # terms, not against its market. The benchmark decomposition still computes
+    # and means nothing, so whichever leg "dominates" is an artefact of deal
+    # mechanics — reporting `driver MIXED` here would name a symptom and hide the
+    # cause. `m_and_a_status` is already carried in the snapshot for the IBKR
+    # reconciler; RUMORED is not disqualifying, since a rumour does not pin price.
+    if str(comparison.get("m_and_a_status") or "").strip().upper() == "ACTIVE_TENDER":
+        return (
+            LESSON_ELIGIBILITY_REVIEW_ONLY,
+            "an active tender priced the stock against deal terms, not the market",
+        )
+
+    attribution = comparison.get("attribution")
+    attribution = attribution if isinstance(attribution, Mapping) else {}
+    driver = str(attribution.get("dominant_driver") or DRIVER_UNKNOWN)
+    if driver != DRIVER_MARKET:
+        return (
+            LESSON_ELIGIBILITY_REVIEW_ONLY,
+            f"driver {driver}: the move was not attributed to the market",
+        )
+
+    regime = comparison.get("regime_at_decision")
+    regime = regime if isinstance(regime, Mapping) else {}
+    # Exactly the fields `_regime_matches` compares. Without one of them the
+    # CONTEXTUAL stamp is decorative: retrieval can never match it.
+    if not any(
+        str(regime.get(field) or "").strip() for field in REGIME_COMPARED_FIELDS
+    ):
+        return (
+            LESSON_ELIGIBILITY_REVIEW_ONLY,
+            "no decision-time regime recorded, so no regime can ever match it",
+        )
+
+    delta = comparison.get("cached_regime_delta")
+    delta = delta if isinstance(delta, Mapping) else {}
+    shifted = delta.get("shifted")
+    if shifted is not False:
+        # UNKNOWN is withheld, not permitted. `shifted` is False only when both
+        # regimes were usable, comparable and equal; every degraded path returns
+        # None. "We could not establish that the regime held still" is not a
+        # basis for authorizing guidance about that regime.
+        detail = str(delta.get("shift_reason") or "").strip()
+        state = "the regime shifted" if shifted is True else "regime shift unknown"
+        return (
+            LESSON_ELIGIBILITY_REVIEW_ONLY,
+            f"{state}{f': {detail}' if detail else ''}",
+        )
+
+    return (
+        LESSON_ELIGIBILITY_INJECTABLE,
+        "market-dominated outcome in a stable regime",
+    )
 
 
 def _dominant_local_driver(market_pct: float, residual_pct: float) -> str:
@@ -1472,19 +1602,28 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     benchmark_return_pct = measured_benchmark_return_pct or 0.0
     excess_return_pct = price_return_pct - benchmark_return_pct
 
-    # FX delta
-    fx_delta_pct = 0.0
-    snapshot_fx = snapshot.get("fx_rate_to_usd")
+    # FX delta, tri-state. `None` means "not determined" and must never be
+    # rendered or attributed as a flat rate — see the FX_* tokens.
+    fx_delta_pct: float | None = None
     currency = snapshot.get("currency", FALLBACK_CURRENCY)
-    if snapshot_fx and currency != "USD":
-        try:
-            from src.fx_normalization import get_fx_rate_yfinance
+    snapshot_fx = snapshot.get("fx_rate_to_usd")
+    if currency == "USD":
+        # A real zero: a USD-denominated security has no FX leg at all.
+        fx_delta_pct, fx_observation = 0.0, FX_NOT_APPLICABLE
+    else:
+        fx_observation = FX_UNAVAILABLE
+        if snapshot_fx and snapshot_fx > 0:
+            try:
+                from src.fx_normalization import get_fx_rate_yfinance
 
-            current_fx = await get_fx_rate_yfinance(currency, "USD")
-            if current_fx and snapshot_fx > 0:
-                fx_delta_pct = ((current_fx - snapshot_fx) / snapshot_fx) * 100.0
-        except Exception:
-            pass  # FX delta is informational, not critical
+                current_fx = await get_fx_rate_yfinance(currency, "USD")
+                if current_fx:
+                    fx_delta_pct = ((current_fx - snapshot_fx) / snapshot_fx) * 100.0
+                    fx_observation = FX_OBSERVED
+            except Exception:
+                # Still informational, still not critical — but an outage is not
+                # an observation of stability.
+                pass
 
     attribution = attribute_return(
         price_return_pct=price_return_pct,
@@ -1550,7 +1689,11 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         "price_return_pct": round(price_return_pct, 2),
         "benchmark_return_pct": round(benchmark_return_pct, 2),
         "excess_return_pct": round(excess_return_pct, 2),
-        "fx_delta_pct": round(fx_delta_pct, 2),
+        # Legacy key, kept float for display compatibility exactly as
+        # `benchmark_return_pct` is: 0.0 when undetermined, with the adjacent
+        # token carrying the truth. No decision reads the number.
+        "fx_delta_pct": round(fx_delta_pct, 2) if fx_delta_pct is not None else 0.0,
+        "fx_observation": fx_observation,
         "days_elapsed": days_elapsed,
         "start_price": round(start_price, 4),
         "end_price": round(end_price, 4),
@@ -1771,9 +1914,13 @@ def _render_attribution(comparison: Mapping[str, Any]) -> str:
         "   rotation — it is not stock-specific alpha)",
         f"USD investor — local {_pct(comparison.get('price_return_pct'))}"
         f" x FX {_pct(attribution.get('fx_return_pct'))}"
-        f" = {_pct(attribution.get('usd_investor_return_pct'))}",
+        f" = {_pct(attribution.get('usd_investor_return_pct'))}"
+        f"   [{comparison.get('fx_observation') or FX_UNAVAILABLE}]",
+        # A comparison carrying no scope has not been attributed. Defaulting to
+        # CONTEXTUAL asserted the opposite *into the prompt*, which is where the
+        # anti-diagnosis rule is read.
         f"Dominant driver: {attribution.get('dominant_driver') or DRIVER_UNKNOWN}"
-        f"   Lesson scope: {comparison.get('lesson_scope') or SCOPE_CONTEXTUAL}",
+        f"   Lesson scope: {comparison.get('lesson_scope') or SCOPE_UNRESOLVED}",
     ]
     return "\n".join(lines)
 
@@ -1804,6 +1951,97 @@ def _render_regime_now(delta: Any) -> str:
     reason = str(delta.get("shift_reason") or "").strip()
     suffix = f" — {reason}" if reason else ""
     return f"{rendered} [shifted: {label}]{suffix}"
+
+
+def _observation_lines(lesson: Mapping[str, Any]) -> list[str]:
+    """The measurement a lesson was drawn from, rendered beside its prose.
+
+    Without this the injected text is a bare imperative: the reader cannot see
+    the horizon, what the excess was struck against, or whether FX was even
+    determined — so a 40-day 12% wobble against an unnamed index reads exactly
+    like a 250-day collapse against the country benchmark.
+
+    Emitted only for outcome lessons, and only from fields the record actually
+    carries. A `prior_rejection` is a screening fact with no such measurement,
+    and legacy records predate these keys; both correctly render nothing rather
+    than a row of zeroes, which would be a claim.
+    """
+    if lesson.get("lesson_type") == "prior_rejection":
+        return []
+
+    lines: list[str] = []
+    horizon = lesson.get("days_elapsed")
+    excess = lesson.get("excess_return_pct")
+    if horizon and excess is not None:
+        against = lesson.get("benchmark_used") or "benchmark not recorded"
+        lines.append(
+            f"observed over {int(horizon)}d vs {against}: "
+            f"stock {_pct(lesson.get('actual_return_pct'))}, "
+            f"index {_pct(lesson.get('benchmark_return_pct'))}, "
+            f"excess {_pct(excess)} [FX {lesson.get('fx_observation') or 'unknown'}]"
+        )
+
+    # `FAILURE_MODE` is an LLM pick from a *causal* vocabulary (GOVERNANCE_BLEED,
+    # REGULATORY_SHIFT, ACCOUNTING_FRAUD…) made from price and macro data alone,
+    # and it renders in the header beside the prose where it reads as an
+    # established finding. Feeding the model decision-time flag tokens sharpened
+    # that risk: it can now see `REGULATORY_*` in the inputs and pick the matching
+    # category. So the header is labelled.
+    #
+    # Unconditional, and that is the honest shape: `thesis_validation_status` is
+    # permanently NOT_EVALUATED because no producer of VALIDATED exists, so a
+    # per-record field or a condition reading one would encode a constant as data.
+    # Make this conditional at the same time a validation producer lands — the
+    # SCOPE_VALIDATED / RESERVED_UNOBSERVED_SCOPES machinery is where that arrives.
+    lines.append(
+        f"topic {lesson.get('failure_mode') or 'UNKNOWN'} is an unvalidated "
+        f"price-only classification, not an established cause"
+    )
+
+    flags = str(lesson.get("red_flags_at_decision") or "").strip()
+    if flags:
+        lines.append(
+            f"hazards recorded at that decision (not evidence they occurred or "
+            f"caused this outcome): {flags}"
+        )
+
+    # Historical context only: never an eligibility gate and never a scoring term.
+    # A rumoured deal or an unresolved currency changes how a benchmark-relative
+    # number should be read, and neither is recoverable from the prose.
+    context = [
+        f"region {lesson['macro_region']}" if lesson.get("macro_region") else "",
+        f"currency source {lesson['currency_source']}"
+        if lesson.get("currency_source")
+        else "",
+        f"special situation {lesson['m_and_a_status']}"
+        if str(lesson.get("m_and_a_status") or "").upper() not in ("", "NONE")
+        else "",
+    ]
+    context = [part for part in context if part]
+    if context:
+        lines.append("decision context: " + " | ".join(context))
+    return lines
+
+
+def _render_recorded_flags(flags: Any) -> str:
+    """Hazards the analysis recorded, as bare tokens.
+
+    Deliberately unranked and uninterpreted. Their job is to bound what the model
+    may reach for: the prompt forbids naming a mechanism absent from the inputs,
+    and regulatory or currency exposure recorded at decision time is exactly the
+    class a country benchmark cannot net out of a residual. Whether any of them
+    came true is unknowable here, which the surrounding line states.
+
+    Legacy snapshots predate the field and say so rather than rendering nothing —
+    an empty line reads to a model as "no flags", which is a different claim.
+    """
+    if flags is None:
+        return "  not recorded (snapshot predates this field)"
+    if not isinstance(flags, list) or not flags:
+        return "  none recorded"
+    return "\n".join(
+        f"  - {str(flag).strip()}" for flag in flags[:12] if str(flag).strip()
+    )
 
 
 def _render_kill_criteria(criteria: Any) -> str:
@@ -1838,6 +2076,8 @@ Verdict: {comparison.get("verdict")} (Position: {comparison.get("position_size",
 Health: {comparison.get("health_adj", "N/A")} | Growth: {comparison.get("growth_adj", "N/A")} | P/E: {comparison.get("pe_ratio", "N/A")} | PEG: {comparison.get("peg_ratio", "N/A")}
 Valuation references: Fair entry {comparison.get("entry_price") or "N/A"} | Base {comparison.get("target_1_price") or "N/A"} | Stretch {comparison.get("target_2_price") or "N/A"} | Downside review {comparison.get("stop_price") or "N/A"} | Horizon: {comparison.get("investment_horizon") or "N/A"}
 Key bear risks: {comparison.get("bear_risks_excerpt", "N/A")[:300]}
+Flags recorded at decision (noted, NOT tested against the outcome):
+{_render_recorded_flags(comparison.get("red_flags_at_decision"))}
 
 OUTCOME ({comparison.get("days_elapsed", 0)} days later):
 Price: {comparison.get("start_price", "N/A")} → {comparison.get("end_price", "N/A")} ({comparison.get("price_return_pct", 0):+.1f}%)
@@ -1863,6 +2103,21 @@ Rules:
   discipline. A market-wide move is not evidence the screen was wrong.
 - If the lesson scope is {SCOPE_UNRESOLVED}, the residual is unexplained, not
   diagnosed. Write what should be CHECKED next time, not what was wrong.
+- Do NOT introduce a failure mechanism that appears nowhere above. You may only
+  name a check that follows from the recorded bear risks, the thesis-break
+  triggers, or the regime. Inventing a plausible cause ("verify cash flow
+  reconciliations") reads as a diagnosis you have no evidence for.
+- Do NOT demote the screen by contrast. No "rather than", "instead of" or "not
+  merely" clause that subordinates fundamental valuation, growth, or the screen
+  itself to regime or momentum. Write what to ADD, never what to trust less. An
+  unattributed move is not evidence the screen was wrong.
+- TYPE labels the prediction against the price only. It is not a verdict on the
+  thesis, whose status is {THESIS_NOT_EVALUATED} and stays there.
+- A flag recorded at the decision may NOMINATE a check. It may not establish
+  FAILURE_MODE as fact: picking REGULATORY_SHIFT because a REGULATORY_ flag was
+  recorded, or GOVERNANCE_BLEED because a governance flag was, asserts a cause
+  from a price move plus a pre-existing label. FAILURE_MODE is a topic for
+  filing, not a finding.
 
 LESSON: [your lesson]
 TYPE: missed_risk | false_positive | missed_opportunity | correct_call
@@ -2190,25 +2445,32 @@ async def store_lesson(
     ticker = comparison.get("ticker", "UNKNOWN")
     analysis_date = comparison.get("analysis_date", "")
     analysis_id = comparison.get("analysis_id")
+    # The canonical per-run identity, carried from the candidate. Falls back to a
+    # real analysis_id for comparisons built outside the orchestrator.
+    snapshot_id = comparison.get(SNAPSHOT_IDENTITY_KEY) or analysis_id
 
-    # Deduplication shares one predicate with the orchestrator's early skip.
-    # These were two independent copies of the same (ticker, analysis_date)
-    # query, so a prior_rejection record blocked the write here even once the
-    # orchestrator let the snapshot through — fixing only one site would have
-    # changed nothing observable.
+    # Deduplication shares one predicate with the orchestrator's early skip, and
+    # now shares its *key* too. These were two independent copies of the same
+    # (ticker, analysis_date) query, so a prior_rejection record blocked the write
+    # here even once the orchestrator let the snapshot through — and once that was
+    # fixed the two still disagreed, because only one of them had an identity.
     if _lesson_already_processed(
         lessons_memory,
         ticker,
         analysis_date,
-        str(analysis_id) if analysis_id else None,
+        str(snapshot_id) if snapshot_id else None,
     ):
         logger.info(
             "lesson_already_exists",
             ticker=ticker,
             date=analysis_date,
-            analysis_id=analysis_id,
+            snapshot_id=snapshot_id,
         )
         return False
+
+    # Decided once, here, from the comparison itself — never passed in by a
+    # caller who could disagree with what is about to be written.
+    eligibility, eligibility_reason = lesson_eligibility(comparison)
 
     metadata = {
         "ticker": ticker,
@@ -2219,15 +2481,43 @@ async def store_lesson(
         "actual_return_pct": float(comparison.get("price_return_pct", 0.0)),
         "benchmark_return_pct": float(comparison.get("benchmark_return_pct", 0.0)),
         "excess_return_pct": float(comparison.get("excess_return_pct", 0.0)),
-        "fx_delta_pct": float(comparison.get("fx_delta_pct", 0.0)),
+        "fx_delta_pct": float(comparison.get("fx_delta_pct") or 0.0),
+        # Disambiguates the line above: a 0.0 delta means "no FX leg" only when
+        # this reads FX_NOT_APPLICABLE, and means nothing at all when it reads
+        # FX_UNAVAILABLE.
+        "fx_observation": str(comparison.get("fx_observation") or FX_UNAVAILABLE),
         "days_elapsed": int(comparison.get("days_elapsed", 0)),
         "lesson_type": lesson_type,
         "failure_mode": failure_mode,
+        # What the excess return was measured against. The prompt has always
+        # named it; the stored record did not, so a reader could not tell whether
+        # a lesson was struck against ^N225, ^KS11 or nothing in particular —
+        # and "residual" means nothing without its benchmark.
+        "benchmark_used": str(comparison.get("benchmark_used") or ""),
+        # Context a benchmark cannot net out. All flat scalars — ChromaDB
+        # metadata takes no lists — so the flag tokens are joined, and only
+        # tokens: the `detail`/`rationale` prose is deliberately not carried,
+        # since a hazard is a recorded fact while its explanation is not one.
+        "red_flags_at_decision": ",".join(
+            str(flag)
+            for flag in (comparison.get("red_flags_at_decision") or [])
+            if str(flag).strip()
+        ),
+        "macro_region": str(comparison.get("macro_region") or ""),
+        "m_and_a_status": str(comparison.get("m_and_a_status") or ""),
+        # How the currency was determined. `unresolved` / `fallback_bare_ticker`
+        # mean the benchmark and FX legs rest on a guess about the listing, which
+        # a later reader cannot recover from the currency code alone.
+        "currency_source": str(comparison.get("currency_source") or ""),
         "analysis_model": comparison.get("deep_model", "unknown") or "unknown",
         "analysis_date": analysis_date,
         # Per-run identity, so dedup can tell two same-day analyses apart.
         # Empty string rather than None: ChromaDB metadata rejects null values.
+        # `analysis_id` keeps its established meaning (the run/trace id minted in
+        # persistence.save_results_to_file) and is empty when the snapshot had
+        # none; SNAPSHOT_IDENTITY_KEY carries the surrogate for legacy snapshots.
         "analysis_id": str(analysis_id) if analysis_id else "",
+        SNAPSHOT_IDENTITY_KEY: str(snapshot_id) if snapshot_id else "",
         "retrospective_date": datetime.now().strftime("%Y-%m-%d"),
         "confidence_weight": float(confidence),
         "timestamp": datetime.now().isoformat(),
@@ -2255,7 +2545,11 @@ async def store_lesson(
     shifted = delta.get("shifted")
     metadata.update(
         {
-            "lesson_scope": str(comparison.get("lesson_scope") or SCOPE_CONTEXTUAL),
+            # Same fail-closed default as the prompt renderer: an absent scope is
+            # an unattributed outcome, not a regime observation.
+            "lesson_scope": str(comparison.get("lesson_scope") or SCOPE_UNRESOLVED),
+            "lesson_eligibility": eligibility,
+            "lesson_eligibility_reason": eligibility_reason,
             "dominant_driver": str(
                 attribution.get("dominant_driver") or DRIVER_UNKNOWN
             ),
@@ -2519,13 +2813,26 @@ async def format_lessons_for_injection(
     scored_lessons = []
     skipped_off_regime = 0
     skipped_unresolved = 0
+    skipped_ineligible = 0
     for r in results:
         meta = r.get("metadata", {})
         base_confidence = meta.get("confidence_weight", 0.5)
 
+        # Outcome lessons must claim eligibility positively. A record written
+        # before this policy existed carries no marker and is withheld rather
+        # than assumed safe: the store cannot vouch for itself. This is what
+        # quarantines the pre-policy corpus without deleting or rewriting it.
+        if meta.get("lesson_type") in OUTCOME_LESSON_TYPES and (
+            meta.get("lesson_eligibility") != LESSON_ELIGIBILITY_INJECTABLE
+        ):
+            skipped_ineligible += 1
+            continue
+
         # An UNRESOLVED lesson has no established cause. It is retained in the
         # store for review and for later promotion, but never handed to a live
-        # analysis as guidance — see UNRESOLVED_LESSON_MARKER.
+        # analysis as guidance — see UNRESOLVED_LESSON_MARKER. Redundant for
+        # records written under the eligibility policy above, and retained as
+        # defense in depth for anything that reaches here without a lesson_type.
         if meta.get("lesson_scope") == SCOPE_UNRESOLVED:
             skipped_unresolved += 1
             continue
@@ -2584,6 +2891,16 @@ async def format_lessons_for_injection(
                 "lesson_type": meta.get("lesson_type"),
                 "lesson_scope": meta.get("lesson_scope"),
                 "ticker": meta.get("ticker"),
+                "benchmark_used": meta.get("benchmark_used", ""),
+                "days_elapsed": meta.get("days_elapsed"),
+                "actual_return_pct": meta.get("actual_return_pct"),
+                "benchmark_return_pct": meta.get("benchmark_return_pct"),
+                "excess_return_pct": meta.get("excess_return_pct"),
+                "fx_observation": meta.get("fx_observation", ""),
+                "red_flags_at_decision": meta.get("red_flags_at_decision", ""),
+                "macro_region": meta.get("macro_region", ""),
+                "m_and_a_status": meta.get("m_and_a_status", ""),
+                "currency_source": meta.get("currency_source", ""),
             }
         )
 
@@ -2602,6 +2919,7 @@ async def format_lessons_for_injection(
         filtered_out=filtered_count,
         skipped_off_regime=skipped_off_regime,
         skipped_unresolved=skipped_unresolved,
+        skipped_ineligible=skipped_ineligible,
         top_n=len(top_lessons),
     )
 
@@ -2632,6 +2950,8 @@ async def format_lessons_for_injection(
             f"({lesson['failure_mode']} | {lesson['sector']}/{lesson['exchange']} "
             f"| conf: {lesson['confidence']})"
         )
+        for detail in _observation_lines(lesson):
+            lines.append(f"    {detail}")
 
     formatted = "\n".join(lines)
 
@@ -2670,20 +2990,29 @@ def _lesson_already_processed(
     lessons_memory: Any,
     ticker: str,
     analysis_date: str,
-    analysis_id: str | None = None,
+    snapshot_id: str | None = None,
 ) -> bool:
     """Check whether an *outcome* lesson already exists for this snapshot.
 
-    Two corrections over the original, both load-bearing:
+    Three corrections over the original, all load-bearing:
 
     1. The query is scoped to ``OUTCOME_LESSON_TYPES``. A ``prior_rejection``
        screening record shares the ticker and analysis date with the analysis it
        describes, so counting it here suppressed the outcome lesson entirely.
-    2. Matching prefers ``analysis_id`` so two same-day runs stay distinct, and
-       falls back to ``analysis_date`` for records stored before that field
-       existed. The comparison is done in Python rather than in the ``where``
-       clause because the two cases need different keys, and the candidate set is
-       tiny by construction (``MAX_LESSONS_PER_TICKER`` caps it per ticker).
+    2. Matching prefers the canonical per-run identity so two same-day runs stay
+       distinct, and falls back to ``analysis_date`` for records stored before
+       that field existed. The comparison is done in Python rather than in the
+       ``where`` clause because the cases need different keys, and the candidate
+       set is tiny by construction (``MAX_LESSONS_PER_TICKER`` caps it per ticker).
+    3. Both call sites pass the *same* value. They did not: the orchestrator
+       passed the candidate's ``snapshot_identity`` while ``store_lesson`` passed
+       ``comparison["analysis_id"]``, which nothing set — so the pre-check
+       compared identities and the write fell through to the date. Four lessons
+       per run were generated and then rejected, indefinitely, because a snapshot
+       is memoized only once its lesson is durably stored.
+
+    Stored records carry the identity under ``snapshot_identity``; ``analysis_id``
+    is read as a fallback so records written before that key existed still dedup.
 
     Uses ChromaDB metadata query — no embedding needed. ~50ms.
     """
@@ -2706,9 +3035,9 @@ def _lesson_already_processed(
     for meta in existing.get("metadatas") or []:
         if not isinstance(meta, Mapping):
             continue
-        stored_id = meta.get("analysis_id")
-        if stored_id and analysis_id:
-            if str(stored_id) == str(analysis_id):
+        stored_id = meta.get(SNAPSHOT_IDENTITY_KEY) or meta.get("analysis_id")
+        if stored_id and snapshot_id:
+            if str(stored_id) == str(snapshot_id):
                 return True
             continue
         # Legacy record (no analysis_id), or a snapshot that carries none:
@@ -2889,7 +3218,7 @@ async def run_retrospective(
     archive_dirs: Sequence[Path] = (),
     memo: EvaluationMemo | None = None,
     memo_path: Path | None = None,
-    max_evaluations: int = RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN,
+    max_evaluations: int | None = None,
     dry_run: bool = False,
     on_summary: Callable[[RetrospectiveRunSummary], None] | None = None,
 ) -> list[dict[str, Any]]:
@@ -2909,7 +3238,11 @@ async def run_retrospective(
         archive_dirs: Read-only archived-results directories, scanned after
             ``results_dir`` (see :func:`load_past_snapshots`).
         memo: Evaluation memo; constructed from ``memo_path`` when omitted.
-        max_evaluations: Ceiling on snapshots priced this run.
+        max_evaluations: Ceiling on snapshots priced this run. ``None`` reads
+            ``RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN`` from config, so an operator
+            can probe a policy change on a small batch without a source edit.
+            Resolved at call time rather than as a signature default, which would
+            bind the value once at import.
         dry_run: Report what *would* be evaluated without pricing anything —
             no market fetch, no LLM call, no memo write, no lesson stored.
         on_summary: Receives the run summary. The lesson list stays the return
@@ -2936,6 +3269,15 @@ async def run_retrospective(
                     "retrospective_summary_callback_failed",
                     **summarize_exception(exc, operation="retrospective summary"),
                 )
+
+    if max_evaluations is None:
+        max_evaluations = int(
+            getattr(
+                config,
+                "retrospective_max_evaluations_per_run",
+                RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN,
+            )
+        )
 
     # Create lessons memory if not provided
     if lessons_memory is None:
@@ -3070,6 +3412,9 @@ async def run_retrospective(
             # timed-out LLM call or a refused Chroma write silently costs the
             # snapshot its lesson for the whole re-evaluation interval.
             comparison[MEMO_IDENTITY_KEY] = candidate.identity
+            # The same value the pre-check above used, so the write-time dedup
+            # cannot reach a different conclusion from the early skip.
+            comparison[SNAPSHOT_IDENTITY_KEY] = candidate.identity
             comparisons_by_ticker.setdefault(candidate.ticker, []).append(comparison)
             outcome = None
         else:

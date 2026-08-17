@@ -32,6 +32,7 @@ from src.retrospective import (
     MEMO_OUTCOME_TRIGGERED,
     OUTCOME_LESSON_TYPES,
     RETROSPECTIVE_REEVALUATION_INTERVAL_DAYS,
+    SNAPSHOT_IDENTITY_KEY,
     EvaluationMemo,
     _lesson_already_processed,
     _select_within_budget,
@@ -606,3 +607,131 @@ class TestOrchestration:
 
         assert len(calls) == 2
         assert lessons == []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# One identity, both sites
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBothSitesKeyOnTheSameIdentity:
+    """The two dedup sites shared a predicate but not a key.
+
+    The orchestrator passed the candidate's `snapshot_identity` — truthy even for
+    legacy snapshots, since it falls back to the source filename — while
+    `store_lesson` read `comparison["analysis_id"]`, which nothing set. So the
+    pre-check compared identities and the write fell through to the date.
+
+    Observed 2026-08-16: four lessons (7047.T, 9534.T, 6099.T, 9960.T, all dated
+    2026-02-14) were generated and then rejected at the write. Because a snapshot
+    is memoized only once its lesson is durably stored, that repeats on *every*
+    subsequent run — a permanent per-run tax, not a one-off.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_write_side_reads_the_carried_identity(self):
+        memory = FakeLessonsMemory()
+        memory.seed(
+            ticker="7047.T",
+            analysis_date="2026-02-14",
+            snapshot_identity="7047.T_20260214_055659",
+            lesson_type="missed_risk",
+        )
+        stored = await store_lesson(
+            "lesson",
+            "missed_risk",
+            "OPERATIONAL_MISS",
+            {
+                "ticker": "7047.T",
+                "analysis_date": "2026-02-14",
+                SNAPSHOT_IDENTITY_KEY: "7047.T_20260214_055659",
+            },
+            0.8,
+            memory,
+        )
+        assert stored is False, "the same snapshot must not be stored twice"
+
+    @pytest.mark.asyncio
+    async def test_a_different_run_of_the_same_day_still_stores(self):
+        """`snapshot_identity`'s docstring: two same-day analyses are two analyses.
+
+        That pair is the model/prompt-change comparison the system exists to
+        support, so the write-side date fallback must not collapse it.
+        """
+        memory = FakeLessonsMemory()
+        memory.seed(
+            ticker="7047.T",
+            analysis_date="2026-02-14",
+            snapshot_identity="7047.T_20260214_055659",
+            lesson_type="missed_risk",
+        )
+        stored = await store_lesson(
+            "lesson",
+            "missed_risk",
+            "OPERATIONAL_MISS",
+            {
+                "ticker": "7047.T",
+                "analysis_date": "2026-02-14",
+                SNAPSHOT_IDENTITY_KEY: "7047.T_20260214_213000",
+            },
+            0.8,
+            memory,
+        )
+        assert stored is True
+
+    @pytest.mark.asyncio
+    async def test_the_identity_is_persisted_under_its_own_key(self):
+        memory = FakeLessonsMemory()
+        await store_lesson(
+            "lesson",
+            "missed_risk",
+            "OPERATIONAL_MISS",
+            {
+                "ticker": "7047.T",
+                "analysis_date": "2026-02-14",
+                SNAPSHOT_IDENTITY_KEY: "7047.T_20260214_055659",
+            },
+            0.8,
+            memory,
+        )
+        assert memory.metadatas()[0]["snapshot_identity"] == "7047.T_20260214_055659"
+
+    @pytest.mark.asyncio
+    async def test_a_real_trace_id_is_not_overwritten_by_the_surrogate(self):
+        """`analysis_id` keeps its established meaning.
+
+        persistence.py mints it as the run id (the Langfuse trace id when tracing
+        is on). A filename-derived surrogate written into it would give one field
+        two writers and two semantics — inert today, since nothing outside the
+        retrospective reads it, which is not a reason to introduce it.
+        """
+        memory = FakeLessonsMemory()
+        await store_lesson(
+            "lesson",
+            "missed_risk",
+            "OPERATIONAL_MISS",
+            {
+                "ticker": "7047.T",
+                "analysis_date": "2026-02-14",
+                "analysis_id": "langfuse-trace-abc",
+                SNAPSHOT_IDENTITY_KEY: "7047.T_20260214_055659",
+            },
+            0.8,
+            memory,
+        )
+        meta = memory.metadatas()[0]
+        assert meta["analysis_id"] == "langfuse-trace-abc"
+        assert meta["snapshot_identity"] == "7047.T_20260214_055659"
+
+    def test_a_pre_policy_record_still_dedups_by_date(self):
+        """The existing 162 carry neither key and must not start duplicating."""
+        memory = FakeLessonsMemory()
+        memory.seed(
+            ticker="7047.T", analysis_date="2026-02-14", lesson_type="missed_risk"
+        )
+        assert (
+            _lesson_already_processed(
+                memory, "7047.T", "2026-02-14", "7047.T_20260214_055659"
+            )
+            is True
+        )
