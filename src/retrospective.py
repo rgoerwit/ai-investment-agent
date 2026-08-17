@@ -37,7 +37,8 @@ from src.error_safety import summarize_exception
 from src.exchange_metadata import SUFFIX_TO_CURRENCY_CODE
 from src.ibkr.order_builder import parse_trade_block
 from src.runtime_config import get_runtime_config
-from src.runtime_diagnostics import classify_failure
+from src.runtime_diagnostics import classify_failure, get_runtime_provider
+from src.runtime_diagnostics.failure_classification import ProviderName, get_model_name
 from src.runtime_services import get_current_inspection_service
 from src.ticker_policy import get_ticker_suffix
 from src.tooling.inspector import InspectionEnvelope, SourceKind
@@ -1867,6 +1868,11 @@ LESSON: [your lesson]
 TYPE: missed_risk | false_positive | missed_opportunity | correct_call
 FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | REGULATORY_SHIFT | MACRO_REGIME | DISRUPTION | VALUATION_TRAP | ACCOUNTING_FRAUD | GEOPOLITICAL | LIQUIDITY_CRISIS | DEAD_MONEY"""
 
+    # Bound before the try so the failure path below can report the seat's real
+    # vendor. Construction itself can fail (a missing credential), and "unknown"
+    # is the honest answer there rather than a guess.
+    lesson_provider: ProviderName = "unknown"
+    lesson_model: str | None = None
     try:
         from src.llm_runtime.construction import build_required_model_for_seat
         from src.llm_runtime.seats import SeatId
@@ -1884,10 +1890,15 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
         from src.config import config as settings_config
         from src.service_tiers import floor_llm_hard_timeout
 
-        # Lesson LLM is the quick Gemini model; floor for GEMINI_SERVICE_TIER=flex.
+        # The flex floor is provider-scoped, so it must follow the seat's actual
+        # binding rather than assume Google: SeatId.RETROSPECTIVE is bindable,
+        # and hardcoding a vendor here gave a non-Google operational plane the
+        # wrong ceiling (and a misleading provider in every diagnostic below).
+        lesson_provider = get_runtime_provider(llm)
+        lesson_model = get_model_name(llm)
         hard_timeout = floor_llm_hard_timeout(
             float(get_runtime_config(settings_config).llm_call_hard_timeout_seconds),
-            provider="google",
+            provider=lesson_provider,
             label="retrospective_lesson_timeout",
         )
         if invoke_config:
@@ -1940,8 +1951,11 @@ FAILURE_MODE: CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_BLEED | OPERATIONAL_MISS | 
     except Exception as e:
         details = classify_failure(
             e,
-            provider="google",
-            model_name=getattr(config, "quick_think_llm", None),
+            provider=lesson_provider,
+            # The seat's resolved model, not the legacy settings field:
+            # provider and model must describe the same binding or the
+            # telemetry is internally inconsistent.
+            model_name=lesson_model,
             class_name="RetrospectiveLessonLLM",
         )
         logger.error(

@@ -22,7 +22,12 @@ import structlog
 from src.currency_resolver import resolve_local_trading_currency
 from src.data_block_utils import extract_kill_criteria
 from src.error_safety import summarize_exception
-from src.fx_normalization import canonical_currency_code, get_fx_rate_fallback
+from src.fx_normalization import (
+    PriceLevelCoherence,
+    assess_price_level_coherence,
+    canonical_currency_code,
+    get_fx_rate_fallback,
+)
 from src.ibkr.models import AnalysisRecord, PortfolioEvidence, TradeBlockData
 from src.ibkr.order_builder import parse_trade_block
 from src.ibkr.reconciliation_rules import _exchange_from_ticker, _normalize_verdict
@@ -51,8 +56,30 @@ logger = structlog.get_logger(__name__)
 #     present (prose re-derivation is now the legacy fallback only), plus
 #     flag_source provenance — cached v8 records hold prose-re-derived tuples
 #     computed with the wrong sector and without the value-trap report.
-_ANALYSIS_INDEX_VERSION = 9
+# v10: price levels are refused when they do not share a scale with the record's
+#     own current_price (GAMA.L: 9.76 GBP price, 900/750/1150 pence levels, all
+#     labelled GBP) — cached v9 records still hold the mis-scaled values, which
+#     rendered as a fabricated "price drift 98.9% down [SELL]".
+_ANALYSIS_INDEX_VERSION = 10
 _DATA_VACUUM_COVERAGE_THRESHOLD_PCT = 40.0
+
+# The TradeBlockData price fields, cleared alongside the canonical ones when a
+# record's levels are refused. `risk_reward` is deliberately excluded: it is a
+# free-text field, not a price, and is production-dead (no callers).
+_TRADE_BLOCK_PRICE_FIELDS = (
+    "entry_price",
+    "stop_price",
+    "target_1_price",
+    "target_2_price",
+)
+
+# Total over the enum, so a new coherence state must declare its record-level
+# meaning rather than inherit one.
+_COHERENCE_TO_TRISTATE: dict[PriceLevelCoherence, bool | None] = {
+    PriceLevelCoherence.COHERENT: True,
+    PriceLevelCoherence.INCOHERENT: False,
+    PriceLevelCoherence.UNASSESSED: None,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -575,6 +602,41 @@ def _build_analysis_record_from_data(
         source_file=filepath.name,
     )
 
+    current_price = snapshot.get("current_price")
+    levels = {
+        "entry_price": snapshot.get("entry_price") or trade_block.entry_price,
+        "stop_price": snapshot.get("stop_price") or trade_block.stop_price,
+        "target_1_price": snapshot.get("target_1_price") or trade_block.target_1_price,
+        "target_2_price": snapshot.get("target_2_price") or trade_block.target_2_price,
+    }
+    # A level that does not share the price's scale cannot be interpreted — the
+    # TRADE_BLOCK carries no denomination of its own — so it is refused here, at
+    # the one boundary that admits these values. Every consumer (staleness drift,
+    # drawdown breadth, dip scoring, review/target breach) already guards on
+    # None, so refusing once protects all of them without touching any of them.
+    coherence = assess_price_level_coherence(current_price, levels.values())
+    if coherence.is_incoherent:
+        logger.warning(
+            "analysis_price_levels_incoherent",
+            ticker=ticker,
+            source_file=filepath.name,
+            currency=currency,
+            current_price=current_price,
+            worst_ratio=coherence.worst_ratio,
+            reason=coherence.reason,
+            discarded={name: value for name, value in levels.items() if value},
+        )
+        levels = dict.fromkeys(levels)
+        # The nested TRADE_BLOCK is the SAME rejected data, and clearing only
+        # the canonical fields leaves a shadow copy that consumers can still
+        # read — the dashboard serializes `analysis.trade_block.*` verbatim, so
+        # the real GAMA.L record kept showing the operator 900/750/1150 while
+        # the record itself said the levels were unusable. One rejection, one
+        # record: a refusal that leaves a second store is not a refusal.
+        trade_block = trade_block.model_copy(
+            update=dict.fromkeys(_TRADE_BLOCK_PRICE_FIELDS)
+        )
+
     return AnalysisRecord(
         ticker=ticker,
         analysis_date=snapshot.get("analysis_date", "")
@@ -585,17 +647,20 @@ def _build_analysis_record_from_data(
         growth_adj=snapshot.get("growth_adj"),
         zone=snapshot.get("zone") or "",
         position_size=snapshot.get("position_size"),
-        current_price=snapshot.get("current_price"),
+        current_price=current_price,
         currency=currency,
         currency_source=currency_source,
         fx_rate_to_usd=fx_rate_to_usd,
         currency_repaired=currency_repaired,
         currency_repair_reason=currency_repair_reason,
         trade_block=trade_block,
-        entry_price=snapshot.get("entry_price") or trade_block.entry_price,
-        stop_price=snapshot.get("stop_price") or trade_block.stop_price,
-        target_1_price=snapshot.get("target_1_price") or trade_block.target_1_price,
-        target_2_price=snapshot.get("target_2_price") or trade_block.target_2_price,
+        **levels,
+        # Preserve the enum's three states rather than flattening to a bool:
+        # UNASSESSED (no reference price) is not a clean bill of health.
+        price_levels_coherent=_COHERENCE_TO_TRISTATE[coherence.status],
+        price_levels_incoherent_reason=(
+            coherence.reason if coherence.is_incoherent else None
+        ),
         conviction=snapshot.get("conviction") or trade_block.conviction,
         sector=normalize_sector_label(snapshot.get("sector")),
         exchange=snapshot.get("exchange") or _exchange_from_ticker(ticker),

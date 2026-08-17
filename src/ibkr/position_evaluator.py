@@ -484,6 +484,7 @@ def evaluate_positions(
             max_age_days,
             drift_threshold_pct,
             structural_macro_events=structural_macro_events,
+            position_currency=pos.currency,
         )
 
         target_hit = check_base_case_reference_reached(
@@ -498,6 +499,7 @@ def evaluate_positions(
             max_age_days,
             float("inf"),
             structural_macro_events=structural_macro_events,
+            position_currency=pos.currency,
         )
         profit_take = (
             classify_profit_take(

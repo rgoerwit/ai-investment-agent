@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import structlog
 
+from src.fx_normalization import comparable_prices
 from src.ibkr.models import AnalysisRecord, NormalizedPosition, PortfolioSummary
 from src.ibkr.portfolio_defaults import (
     DEFAULT_EXCHANGE_LIMIT_PCT,
@@ -44,16 +45,27 @@ CORRELATED_EVENT_EVIDENCE_PATTERN = (
 
 
 def _entry_and_current(item) -> tuple[float | None, float | None]:
-    """Return (analysis entry, current position price), both LOCAL currency."""
+    """Return (analysis entry, current position price) in a common denomination.
+
+    Returns ``(None, None)`` when the two sides are not comparable — a different
+    economy, or an unlabelled currency on either side. Both callers treat that as
+    "no signal", which is correct: an incomparable pair is not evidence a
+    position is down, and reading it as such produced the GAMA.L/MEGP.L
+    fabricated ~99% drawdowns.
+    """
     analysis = getattr(item, "analysis", None)
     pos = getattr(item, "ibkr_position", None)
     if analysis is None or pos is None:
         return None, None
-    entry = analysis.entry_price or analysis.current_price
-    current = pos.current_price_local
-    if not entry or not current or entry <= 0 or current <= 0:
+    pair = comparable_prices(
+        analysis.entry_price or analysis.current_price,
+        getattr(analysis, "currency", None),
+        pos.current_price_local,
+        getattr(pos, "currency", None),
+    )
+    if pair is None:
         return None, None
-    return entry, current
+    return pair.left, pair.right
 
 
 def _below_entry(item) -> bool:
@@ -362,17 +374,15 @@ def compute_portfolio_health(
         if not correlated_event and total_held > 0:
             # Drawdown breadth: refresh-schedule-independent price evidence —
             # how much of the held book trades well below its analysis entry
-            # right now. Uses the same entry/current fields as the staleness
-            # drift check (both LOCAL currency, GBX-normalized upstream).
+            # right now. Shares `_entry_and_current` with the staleness drift
+            # check rather than re-deriving the pair: this loop used to inline
+            # its own comparison and carried a stale comment claiming prices were
+            # "GBX-normalized upstream", describing a x100 that the Aug 2026
+            # denomination work deleted.
             drawdown_count = 0
             for item in reconciliation_items:
-                pos = item.ibkr_position
-                analysis = item.analysis
-                if pos is None or analysis is None:
-                    continue
-                entry = analysis.entry_price or analysis.current_price
-                current = pos.current_price_local
-                if not entry or not current or entry <= 0:
+                entry, current = _entry_and_current(item)
+                if entry is None or current is None:
                     continue
                 if (entry - current) / entry * 100 >= drawdown_pct:
                     drawdown_count += 1

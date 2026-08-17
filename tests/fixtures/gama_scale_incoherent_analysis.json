@@ -1,0 +1,23 @@
+{
+  "_fixture_note": "Distilled from the real results/GAMA.L_20260815_100957_analysis.json. The DATA_BLOCK price is 9.76 GBP (correct); the TRADE_BLOCK levels are pence, and every value is labelled GBP. Committed so the shadow-copy regression runs in a clean checkout — results/ is gitignored, so a skipif on the real artifact silently disables the test in CI.",
+  "prediction_snapshot": {
+    "ticker": "GAMA.L",
+    "analysis_date": "2026-08-15",
+    "verdict": "HOLD",
+    "current_price": 9.76,
+    "currency": "GBP",
+    "health_adj": 75.0,
+    "growth_adj": 58.0,
+    "zone": "MODERATE",
+    "entry_price": null,
+    "stop_price": null,
+    "target_1_price": null,
+    "target_2_price": null,
+    "is_quick_mode": false
+  },
+  "investment_analysis": {
+    "trader_plan": "Position sizing and reference levels.\n\n```\nTRADE_BLOCK:\nACTION: HOLD\nSIZE: 0.0%\nCONVICTION: Medium\nENTRY: 900.00\nSTOP: 750.00\nTARGET_1: 1150.00\nTARGET_2: 1400.00\nPRICE_CURRENCY: GBP\nHORIZON: 18-24 months\nSPECIAL: Non-initiation recommended; monitor for improved FCF conversion.\n```\n"
+  },
+  "reports": {},
+  "source_artifacts": {}
+}

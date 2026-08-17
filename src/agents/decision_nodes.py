@@ -647,7 +647,9 @@ RESEARCH MANAGER PLAN:
             # error would otherwise become the unit of record for every level
             # the reconciler later compares against a live price.
             content_str = stamp_trade_block_price_currency(
-                content_str, fundamentals_report
+                content_str,
+                fundamentals_report,
+                ticker=state.get("company_of_interest", "UNKNOWN"),
             )
             if re.search(r"(?im)^\s*ACTION:\s*DO_NOT_INITIATE\b", content_str):
                 content_str = re.sub(

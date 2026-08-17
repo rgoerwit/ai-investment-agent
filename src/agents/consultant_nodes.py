@@ -54,6 +54,11 @@ logger = structlog.get_logger(__name__)
 # sibling; kept as module constants because that is the seam tests patch.
 CONSULTANT_CALL_TIMEOUT_SECONDS = settings_config.consultant_call_timeout_seconds
 CONSULTANT_TOTAL_TIMEOUT_SECONDS = settings_config.consultant_total_timeout_seconds
+# Headroom between the cooperative deadline (checked before each tool fan-out)
+# and the hard node bound below it. Wide enough that the graceful path — which
+# still produces a usable partial review — wins on any ordinary overshoot, and
+# narrow enough that a wedged batch cannot outlive the seat by much.
+CONSULTANT_HARD_TIMEOUT_GRACE_SECONDS = 30.0
 # A completed review with a minority of failed verification calls is degraded,
 # not worthless: above this failed/executed ratio the review is excluded from
 # PM inputs (previous all-or-nothing behavior); at or below it the review
@@ -322,7 +327,21 @@ def create_consultant_node(
     tools_by_name = {tool.name: tool for tool in active_tools} if active_tools else {}
     llm_with_tools = llm.bind_tools(active_tools) if active_tools else None
 
-    async def consultant_node(
+    def _consultant_total_budget() -> float:
+        """The node's wall-clock budget, shared by the deadline and the wrapper.
+
+        One definition so the cooperative deadline and the hard bound below it
+        cannot disagree about how long this seat is allowed to run.
+        """
+        return floor_llm_total_timeout(
+            settings_config.consultant_quick_total_timeout_seconds
+            if quick_mode
+            else CONSULTANT_TOTAL_TIMEOUT_SECONDS,
+            provider=support.infer_provider_name(llm_with_tools or llm),
+            label="consultant_total_timeout",
+        )
+
+    async def _consultant_workflow(
         state: AgentState, config: RunnableConfig
     ) -> dict[str, str]:
         from src.prompts import get_prompt
@@ -466,13 +485,7 @@ Provide your independent consultant review."""
         try:
             messages = [HumanMessage(content=prompt)]
             active_llm = llm_with_tools or llm
-            total_timeout = floor_llm_total_timeout(
-                settings_config.consultant_quick_total_timeout_seconds
-                if quick_mode
-                else CONSULTANT_TOTAL_TIMEOUT_SECONDS,
-                provider=support.infer_provider_name(active_llm),
-                label="consultant_total_timeout",
-            )
+            total_timeout = _consultant_total_budget()
             consultant_deadline = time.monotonic() + total_timeout
 
             async def _invoke_loop_llm(runnable, loop_messages: list) -> object:
@@ -689,6 +702,51 @@ Provide your independent consultant review."""
                 result["consultant_quick_profile"] = (
                     locals().get("consultant_profile") or "quick_standard"
                 )
+            return result
+
+    async def consultant_node(
+        state: AgentState, config: RunnableConfig
+    ) -> dict[str, str]:
+        """Hard-bound wrapper — an optional seat must never cost the ticker.
+
+        The deadline inside the workflow bounds a *turn*: it is checked once
+        before the tool fan-out, so a batch that starts just under it can run a
+        full per-tool timeout past it, and the metrics preload, re-planning
+        rounds, forced synthesis and the truncated-response re-ask all sit
+        outside any single check. Wrapping the whole workflow is hermetic by
+        construction — every path inside shares this one ceiling. This is the
+        shape the Auditor already uses, and it is deliberately not the narrower
+        "wrap the gather" fix: that repeats a mistake this repo already made
+        once, where a node-scoped checkpoint bounded nothing that followed it.
+
+        ``run_with_hard_timeout`` **orphans** the in-flight work, so a partially
+        folded tool batch cannot be recovered here — the honest contract on
+        expiry is the same degraded optional artifact the workflow already emits
+        for any other failure, with the PM continuing without a cross-check.
+        The grace below exists so the cooperative deadline gets first refusal
+        and the graceful path stays the normal one.
+        """
+        ticker = state.get("company_of_interest", "UNKNOWN")
+        budget = _consultant_total_budget() + CONSULTANT_HARD_TIMEOUT_GRACE_SECONDS
+        try:
+            return await run_with_hard_timeout(
+                _consultant_workflow(state, config),
+                timeout=budget,
+                label=f"consultant_total:{ticker}",
+            )
+        except TimeoutError:
+            logger.warning(
+                "consultant_total_budget_exhausted",
+                ticker=ticker,
+                budget_seconds=budget,
+                quick_mode=quick_mode,
+            )
+            result = failure_artifact(
+                "consultant_review",
+                "Consultant node exceeded its total wall-clock budget",
+                provider=support.infer_provider_name(llm),
+            )
+            result["sender"] = "consultant"
             return result
 
     return consultant_node

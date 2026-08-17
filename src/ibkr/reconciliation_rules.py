@@ -13,6 +13,7 @@ import structlog
 
 from src.exchange_metadata import IBKR_TO_YFINANCE
 from src.fx_normalization import (
+    comparable_prices,
     get_fx_rate_cache,
     get_fx_rate_fallback,
     normalize_minor_unit_currency,
@@ -297,8 +298,15 @@ def check_staleness(
     max_age_days: int = DEFAULT_MAX_AGE_DAYS,
     drift_threshold_pct: float = DEFAULT_DRIFT_PCT,
     structural_macro_events: list | None = None,
+    position_currency: str | None = None,
 ) -> tuple[bool, str]:
-    """Check if an analysis is stale and should be reviewed."""
+    """Check if an analysis is stale and should be reviewed.
+
+    ``position_currency`` lets the drift comparison convert by currency code
+    instead of assuming both sides share a denomination. Omitted => legacy
+    behaviour, which is safe because the analysis index already refuses levels
+    that contradict their own price scale.
+    """
     reasons = []
 
     if analysis.age_days > max_age_days:
@@ -307,10 +315,25 @@ def check_staleness(
 
     entry_price = analysis.entry_price or analysis.current_price
     if entry_price and current_price_local and entry_price > 0:
-        drift_pct = abs((current_price_local - entry_price) / entry_price) * 100
-        if drift_pct > drift_threshold_pct:
-            direction = "up" if current_price_local > entry_price else "down"
-            reasons.append(f"price drift {drift_pct:.1f}% {direction}")
+        # A drift percentage is only meaningful between same-denomination
+        # prices: a GBp position against a GBP analysis reads as a ~99% fall on
+        # a stock that has not moved (the GAMA.L/MEGP.L report lines). When the
+        # two are not comparable the drift signal is skipped — NOT the whole
+        # check, which still has age and macro-event reasons to report.
+        pair = (
+            comparable_prices(
+                entry_price, analysis.currency, current_price_local, position_currency
+            )
+            if position_currency
+            else None
+        )
+        if pair is not None:
+            entry_price, current_price_local = pair.left, pair.right
+        if pair is not None or not position_currency:
+            drift_pct = abs((current_price_local - entry_price) / entry_price) * 100
+            if drift_pct > drift_threshold_pct:
+                direction = "up" if current_price_local > entry_price else "down"
+                reasons.append(f"price drift {drift_pct:.1f}% {direction}")
 
     if structural_macro_events and analysis.analysis_date:
         for event in structural_macro_events:
@@ -365,16 +388,17 @@ def _comparable_prices(
     Unknown currency on either side is likewise left alone — that is the legacy
     shape, and guessing at it is what this change exists to stop.
     """
-    if not analysis.currency or not position_currency:
-        return None, current_price_local
-    analysis_major, analysis_scale = normalize_minor_unit_currency(analysis.currency)
-    position_major, _ = normalize_minor_unit_currency(position_currency)
-    if (analysis_major or "").upper() != (position_major or "").upper():
-        return None, current_price_local
-    return (
-        analysis_scale,
-        _to_major_units(current_price_local, position_currency) or current_price_local,
+    # Delegates to the shared contract so this rule, the staleness drift check,
+    # dip scoring and portfolio health cannot drift apart on what "comparable"
+    # means. A reference price of 1.0 stands in for the left side because this
+    # caller wants the *scale*, not a converted left value — it has several
+    # levels to convert and does that itself.
+    pair = comparable_prices(
+        1.0, analysis.currency, current_price_local, position_currency
     )
+    if pair is None:
+        return None, current_price_local
+    return pair.left_scale, pair.right
 
 
 def check_review_level_breach(

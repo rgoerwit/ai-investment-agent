@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable
 from typing import Any
+
+import structlog
 
 from src.data_block_utils import (
     extract_block_number_from_text,
@@ -15,7 +18,11 @@ from src.data_block_utils import (
 )
 from src.earnings_baseline import eps_growth_award_disposition
 from src.evidence_disposition import AwardDisposition, rubric_award_token
-from src.fx_normalization import canonical_currency_code
+from src.fx_normalization import (
+    assess_price_level_coherence,
+    canonical_currency_code,
+    is_near_minor_unit_ratio,
+)
 from src.sector_normalization import normalize_sector_label
 from src.thesis_constants import (
     FINANCIALS_HEALTH_REMOVED_POINTS,
@@ -31,6 +38,8 @@ from src.validators.pfic_constants import (
     PFIC_ASSET_PROXIMITY_THRESHOLD,
     PFIC_ASSET_TEST_THRESHOLD,
 )
+
+logger = structlog.get_logger(__name__)
 
 HORIZON_FIELD_RAW_KEYS = (
     ("REVENUE_GROWTH_FY", "revenueGrowth"),
@@ -272,7 +281,76 @@ def stamp_price_currency(block_body: str, payload: dict[str, Any]) -> str:
     """
     currency = payload.get("currency")
     code = _valid_currency_code(currency if isinstance(currency, str) else None)
+    _log_price_divergence_from_payload(block_body, payload, code)
     return replace_or_append_block_line(block_body, PRICE_CURRENCY_FIELD, code or "N/A")
+
+
+# How far the model's transcribed CURRENT_PRICE may drift from the payload's
+# own quote before it is worth recording. Generous: quotes move between fetch
+# and write, and this is a measurement, not a gate.
+_PRICE_DIVERGENCE_TOLERANCE = 0.05
+
+
+def _usable_price(value: Any) -> bool:
+    """Whether a value is a finite, positive price.
+
+    `inf` is the trap: it passes every naive guard (`not inf` is False,
+    `inf > 0` is True), makes `reported / inf` exactly 0.0, and then blows up
+    the reciprocal in the minor-unit hint — turning an observation-only check
+    into a hard failure of the fundamentals artifact on malformed provider data.
+    """
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return False
+    return math.isfinite(value) and value > 0
+
+
+def _log_price_divergence_from_payload(
+    block_body: str, payload: dict[str, Any], code: str | None
+) -> None:
+    """Record when the block's CURRENT_PRICE disagrees with the payload's.
+
+    Observation only — deliberately NOT a correction. Making ``CURRENT_PRICE`` a
+    stamped projection of the payload (as ``PRICE_CURRENCY`` already is) is the
+    fuller fix, but it would not have caught the GAMA.L defect, whose DATA_BLOCK
+    price was already right; the corruption was in the TRADE_BLOCK levels. It
+    also costs frozen fixtures and touches a ``pm_claim_audit`` hard field. So
+    this measures whether the whole-record mislabelling that transform would
+    guard against actually occurs, and the transform stays deferred until the
+    evidence says otherwise. Grep ``data_block_price_diverges_from_payload``
+    across a batch to decide.
+    """
+    reported = extract_block_number_from_text(block_body, "CURRENT_PRICE")
+    if not _usable_price(reported):
+        return
+    # First *finite positive* quote wins. `a or b` alone would accept an inf
+    # currentPrice and never consult regularMarketPrice, and an observation-only
+    # check must not be the thing that decides which quote is usable.
+    quoted = next(
+        (
+            value
+            for value in (
+                payload.get("currentPrice"),
+                payload.get("regularMarketPrice"),
+            )
+            if _usable_price(value)
+        ),
+        None,
+    )
+    if quoted is None:
+        return
+    assert reported is not None  # narrowed by _usable_price
+    ratio = reported / quoted
+    if abs(ratio - 1.0) <= _PRICE_DIVERGENCE_TOLERANCE:
+        return
+    logger.warning(
+        "data_block_price_diverges_from_payload",
+        currency=code,
+        reported_price=reported,
+        payload_price=quoted,
+        ratio=round(ratio, 4),
+        near_minor_unit=is_near_minor_unit_ratio(ratio)
+        or is_near_minor_unit_ratio(1 / ratio),
+    )
 
 
 _TRADE_BLOCK_PRICE_CURRENCY_RE = re.compile(
@@ -280,16 +358,30 @@ _TRADE_BLOCK_PRICE_CURRENCY_RE = re.compile(
 )
 _TRADE_BLOCK_ANCHOR_RE = re.compile(r"(?im)^[ \t]*TARGET_2:[ \t]*[^\n]*$")
 
+# The derived levels the Trader emits, all denominated like the DATA_BLOCK price.
+TRADE_BLOCK_LEVEL_FIELDS = ("ENTRY", "STOP", "TARGET_1", "TARGET_2")
 
-def stamp_trade_block_price_currency(content: str, fundamentals_report: str) -> str:
+
+def stamp_trade_block_price_currency(
+    content: str, fundamentals_report: str, ticker: str = "UNKNOWN"
+) -> str:
     """Copy the DATA_BLOCK denomination onto the TRADE_BLOCK levels.
 
-    ENTRY/STOP/TARGET_* are derived from the DATA_BLOCK price, so they are
-    denominated in whatever it is. The prompt asks the Trader to copy the code
-    across, but a transcription must never *be* the unit of record — the same
-    reason ``stamp_price_currency`` overwrites rather than backfills. Absent a
-    DATA_BLOCK value the content is returned untouched: an unknown denomination
+    ENTRY/STOP/TARGET_* are *supposed* to be derived from the DATA_BLOCK price,
+    so they are denominated in whatever it is. The prompt asks the Trader to copy
+    the code across, but a transcription must never *be* the unit of record — the
+    same reason ``stamp_price_currency`` overwrites rather than backfills. Absent
+    a DATA_BLOCK value the content is returned untouched: an unknown denomination
     is better left unstated than asserted from the model's copy.
+
+    That derivation is verified, not assumed. GAMA.L (2026-08-15) carried
+    ``CURRENT_PRICE: 9.76`` with ``ENTRY 900 / STOP 750 / TARGET_1 1150`` — pence
+    levels against a pounds price — and stamping ``GBP`` over them made the
+    artifact look internally consistent while being wrong by 100x, which
+    downstream rendered as a fabricated "price drift 98.9% down". When the levels
+    do not share the price's scale the denomination is unknowable from here (the
+    TRADE_BLOCK carries no independent unit), so this stamps ``N/A`` rather than
+    asserting something false.
     """
     block = extract_last_data_block(fundamentals_report, include_markers=False)
     if not block:
@@ -297,6 +389,25 @@ def stamp_trade_block_price_currency(content: str, fundamentals_report: str) -> 
     code = _valid_currency_code(extract_block_text_value(block, PRICE_CURRENCY_FIELD))
     if not code:
         return content
+
+    verdict = assess_price_level_coherence(
+        extract_block_number_from_text(block, "CURRENT_PRICE"),
+        (
+            extract_block_number_from_text(content, field)
+            for field in TRADE_BLOCK_LEVEL_FIELDS
+        ),
+    )
+    if verdict.is_incoherent:
+        logger.warning(
+            "trade_block_price_scale_incoherent",
+            ticker=ticker,
+            data_block_currency=code,
+            reference_price=extract_block_number_from_text(block, "CURRENT_PRICE"),
+            worst_ratio=verdict.worst_ratio,
+            reason=verdict.reason,
+        )
+        code = "N/A"
+
     line = f"PRICE_CURRENCY: {code}"
     if _TRADE_BLOCK_PRICE_CURRENCY_RE.search(content):
         # A lambda, not a replacement string: "\\g<0>" in a value would
