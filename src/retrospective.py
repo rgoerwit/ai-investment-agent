@@ -391,24 +391,193 @@ def _bear_text(result: Mapping[str, Any]) -> str:
     return str(debate.get("bear_history") or debate.get("bear_round1") or "")
 
 
-def _extract_bear_risks(result: dict) -> str:
-    """Extract first ~500 chars of bear thesis key risks from debate history."""
-    bear_history = _bear_text(result)
+BEAR_EVIDENCE_MAX_CHARS = 500
 
-    if not bear_history:
+# Every section heading `prompts/bear_researcher.json` mandates. Used both to
+# *find* a section and to bound the previous one — a body ends at the next
+# heading, never at a blank line.
+#
+# Completeness is the contract, not convenience: a heading missing from this
+# tuple does not merely go unfound, it stops terminating the section above it, so
+# a BEAR CASE SUMMARY silently swallows the counterargument that follows. The
+# first cut omitted COUNTER TO BULL ARGUMENTS, CONVICTION and RECOMMENDATION and
+# did exactly that. `test_every_matched_heading_is_declared_by_the_bear_prompt`
+# and its converse keep this tuple and the prompt in step.
+_BEAR_SECTION_HEADINGS = (
+    "KEY RISKS",
+    "BEAR CASE SUMMARY",
+    "COUNTER TO BULL ARGUMENTS",
+    "FAILURE MODE SCORING",
+    "FAILURE MODE",
+    "KILL CRITERIA",
+    "DOWNSIDE PROBABILITY",
+    "PRE-MORTEM",
+    "RECOMMENDATION",
+    "CONVICTION",
+)
+
+# Which section actually answers "what did the bear think could go wrong".
+# KEY RISKS first (1,247 occurrences) because it is the enumerated form; the
+# summary is prose and second-best. FAILURE MODE SCORING is a table and KILL
+# CRITERIA is extracted separately into `kill_criteria`, so neither is a source
+# here — but both still terminate a preceding body.
+_BEAR_PREFERRED_SECTIONS = ("KEY RISKS", "BEAR CASE SUMMARY")
+
+# A heading line, tolerating markdown emphasis, a trailing colon, and the
+# "Bear Analyst (Round 1): " speaker prefix the debate transcript adds.
+_BEAR_HEADING_RE = re.compile(
+    r"^\s*(?:bear analyst[^:]*:\s*)?[*_#\s]*"
+    r"(" + "|".join(re.escape(h) for h in _BEAR_SECTION_HEADINGS) + r")"
+    # Emphasis and the colon appear in either order in real output —
+    # `SUMMARY**:` (1,596) and `SUMMARY:**` (142) are both live spellings, so the
+    # tail is a character class rather than a fixed sequence. Letters are
+    # excluded, so `KEY RISKS: Debt is high` is a body line, not a heading.
+    r"[*_\s:]*$",
+    re.IGNORECASE,
+)
+
+
+def _bear_heading_of(line: str) -> str | None:
+    """The canonical section name if this line is *only* a heading, else None."""
+    match = _BEAR_HEADING_RE.match(line)
+    return match.group(1).upper() if match else None
+
+
+def is_usable_bear_evidence(text: str | None) -> bool:
+    """False when the value is empty or is nothing but a section heading.
+
+    The stored excerpt was produced by a regex whose lazy quantifier stopped at
+    the first blank line, so a heading followed by a blank line yielded the
+    heading alone — `'BEAR CASE SUMMARY**:'` — on **2,449 of 7,952 snapshots
+    (31%)**. That string is non-empty, so every downstream consumer read it as
+    evidence and the lesson model was asked to ground a mechanism in a bare
+    label.
+
+    This is sentinel recognition, not a length threshold: a genuinely terse
+    excerpt ("Debt.") is usable, and a 20-character heading is not. Same shape as
+    `guidance_contract_value_is_uninterpretable` — a value that is present,
+    uninterpretable, and must be read as absent.
+    """
+    # JSON can hold anything, so a corrupt artifact may carry a number or a list
+    # here. `(text or "").strip()` raised AttributeError on all of them, which
+    # would have cost the snapshot — or the run — over a field that is merely
+    # malformed. A non-string is not bear evidence; it is not an error either.
+    if not isinstance(text, str):
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return any(
+        _bear_heading_of(line) is None for line in stripped.splitlines() if line.strip()
+    )
+
+
+def extract_bear_evidence(bear_history: str | None) -> str:
+    """The bear's stated risks, as text, or "" when the transcript has none.
+
+    Section-aware rather than another permissive regex. A body runs from its
+    heading to the *next heading*; blank lines are internal to a section, and
+    treating one as a terminator is precisely the defect this replaces.
+    """
+    history = (bear_history or "").strip()
+    if not history:
         return ""
 
-    # Try to find a KEY RISKS or FAILURE MODE section
-    for pattern in [
-        r"(?:KEY RISKS|FAILURE MODE|KILL CRITERIA|BEAR CASE).*?(?=\n\n|\Z)",
-        r"(?:risk|bear|downside).*",
-    ]:
-        match = re.search(pattern, bear_history, re.IGNORECASE | re.DOTALL)
-        if match:
-            return match.group(0)[:500]
+    lines = history.splitlines()
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in lines:
+        heading = _bear_heading_of(line)
+        if heading is not None:
+            current = heading
+            sections.setdefault(current, [])
+            continue
+        if current is not None:
+            sections[current].append(line)
 
-    # Fallback: first 500 chars of bear history
-    return bear_history[:500]
+    for name in _BEAR_PREFERRED_SECTIONS:
+        body = "\n".join(sections.get(name, [])).strip()
+        if body:
+            return body[:BEAR_EVIDENCE_MAX_CHARS]
+
+    # No recognized section carried a body. Fall back to the transcript itself
+    # with heading-only lines dropped, so the result can never *be* a heading.
+    remainder = "\n".join(
+        line for line in lines if line.strip() and _bear_heading_of(line) is None
+    ).strip()
+    return remainder[:BEAR_EVIDENCE_MAX_CHARS]
+
+
+# Where the full bear transcript lives in a saved artifact. The snapshot's
+# excerpt is a cache of it, and the cache has been wrong 31% of the time.
+_ARTIFACT_BEAR_HISTORY_PATH = (
+    "investment_analysis",
+    "investment_debate",
+    "bear_history",
+)
+
+BEAR_EVIDENCE_FROM_SNAPSHOT = "snapshot"
+BEAR_EVIDENCE_RECONSTRUCTED = "artifact_reconstructed"
+BEAR_EVIDENCE_MISSING = "missing"
+
+
+def _artifact_bear_history(artifact: Mapping[str, Any]) -> str:
+    cursor: Any = artifact
+    for key in _ARTIFACT_BEAR_HISTORY_PATH:
+        if not isinstance(cursor, Mapping):
+            return ""
+        cursor = cursor.get(key)
+    return cursor if isinstance(cursor, str) else ""
+
+
+def _resolve_bear_evidence(
+    snapshot: dict[str, Any], artifact: Mapping[str, Any]
+) -> str:
+    """Resolve the bear evidence from the artifact, preferring the cached excerpt.
+
+    The architectural point of this function: **evidence for a decision is
+    resolved at read time, with provenance; a write-time extract is a cache, not
+    the source of truth.** The old excerpt was a lossy 500-char projection of a
+    ~4,500-char field that is still sitting in the same JSON, and when the
+    projection failed it produced a *non-empty* string — so no consumer could
+    tell a truncation from a value. Three rounds of prompt rules, a decline
+    token and a grounding gate were all compensating for that.
+
+    Costs nothing: `json.load` has already parsed the whole artifact, so this
+    reads one more key from a dict already in memory. Mutates only the in-memory
+    snapshot — the file on disk is never rewritten.
+
+    Measured 2026-08-17 over 7,952 snapshots: 4,753 already usable, **2,449
+    repaired here**, 750 genuinely unrecoverable. Point-in-time — the corpus
+    grows, so `scripts/retrospective_evidence_audit.py` is the live number.
+    """
+    stored = snapshot.get("bear_risks_excerpt")
+    if is_usable_bear_evidence(stored):
+        snapshot["bear_evidence_provenance"] = BEAR_EVIDENCE_FROM_SNAPSHOT
+        return str(stored)
+
+    recovered = extract_bear_evidence(_artifact_bear_history(artifact))
+    if is_usable_bear_evidence(recovered):
+        snapshot["bear_risks_excerpt"] = recovered
+        snapshot["bear_evidence_provenance"] = BEAR_EVIDENCE_RECONSTRUCTED
+        return recovered
+
+    # Neither source carries evidence. Blank the heading-only value rather than
+    # leave it: `has_grounding_context` would otherwise read a bare label as
+    # grounding, which is the defect being repaired.
+    snapshot["bear_risks_excerpt"] = ""
+    snapshot["bear_evidence_provenance"] = BEAR_EVIDENCE_MISSING
+    return ""
+
+
+def _extract_bear_risks(result: dict) -> str:
+    """Bear evidence for the snapshot, written at analysis time.
+
+    A cache of `extract_bear_evidence`, not a second implementation: the same
+    function resolves it again at read time, so a future extraction defect is
+    recoverable rather than frozen into the corpus.
+    """
+    return extract_bear_evidence(_bear_text(result))
 
 
 def _extract_data_block_field(fundamentals_report: str, field_name: str) -> str | None:
@@ -1017,8 +1186,13 @@ def has_grounding_context(snapshot: Mapping[str, Any]) -> bool:
     would put an arbitrary threshold on the only path that can produce a real
     lesson.
     """
-    bear = str(snapshot.get("bear_risks_excerpt") or "").strip()
-    if bear:
+    # `is_usable_bear_evidence`, not truthiness. The loader already blanks a
+    # heading-only excerpt, so this is defense in depth — but a caller that
+    # builds a snapshot without going through `load_past_snapshots` would
+    # otherwise reintroduce the exact defect: a bare label read as evidence.
+    # The predicate that decides whether a model may be asked to ground a
+    # mechanism must not depend on an upstream caller having sanitized its input.
+    if is_usable_bear_evidence(snapshot.get("bear_risks_excerpt")):
         return True
     if snapshot.get("red_flags_at_decision") or snapshot.get("kill_criteria"):
         return True
@@ -1453,6 +1627,7 @@ def load_past_snapshots(
                 emit_progress()
                 continue
             seen_identities.add(identity)
+            _resolve_bear_evidence(snapshot, data)
             snapshots[snap_ticker].append(snapshot)
             emit_progress()
 
