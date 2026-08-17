@@ -996,6 +996,40 @@ def _cache_staleness_days(cached: Mapping[str, Any]) -> int | None:
     return None
 
 
+def has_grounding_context(snapshot: Mapping[str, Any]) -> bool:
+    """Is there anything here a lesson could be grounded in?
+
+    The prompt forbids naming a mechanism absent from its inputs and offers
+    ``UNRESOLVED_PRICE_ONLY`` for when nothing supports one. Measured on the
+    2026-08-17 probe, that mostly works — invention fell from 5-of-7 to 1-of-6 —
+    but the one remaining invention was a snapshot with a **zero-character** bear
+    excerpt, no flags, no triggers and no regime. Handed literally nothing and
+    still required to produce a lesson, the model reached for "thin-liquidity
+    environment".
+
+    An instruction is the wrong tool for that. Where there is no context, the
+    only honest lesson is "record more context", and 737 of 7,952 snapshots
+    (9.3%) would each produce one — a corpus of duplicate process notes at one
+    LLM call apiece. So the deterministic layer declines instead of asking.
+
+    Any one source suffices; this is a floor, not a quality bar. A thin excerpt
+    still lets the model ground *something*, and judging sufficiency by length
+    would put an arbitrary threshold on the only path that can produce a real
+    lesson.
+    """
+    bear = str(snapshot.get("bear_risks_excerpt") or "").strip()
+    if bear:
+        return True
+    if snapshot.get("red_flags_at_decision") or snapshot.get("kill_criteria"):
+        return True
+    regime = snapshot.get("regime_at_decision")
+    if isinstance(regime, Mapping) and any(
+        str(regime.get(field) or "").strip() for field in REGIME_COMPARED_FIELDS
+    ):
+        return True
+    return False
+
+
 def lesson_scope_for(dominant_driver: str) -> str:
     """How far a lesson drawn from this outcome may generalize.
 
@@ -3102,6 +3136,7 @@ class _RunCounters:
     skipped_existing_lesson: int = 0
     skipped_memo: int = 0
     skipped_too_recent: int = 0
+    skipped_no_grounding: int = 0
     deferred_over_budget: int = 0
     evaluated: int = 0
     unassessed_benchmark: int = 0
@@ -3116,6 +3151,7 @@ class _RunCounters:
             skipped_existing_lesson=self.skipped_existing_lesson,
             skipped_memo=self.skipped_memo,
             skipped_too_recent=self.skipped_too_recent,
+            skipped_no_grounding=self.skipped_no_grounding,
             deferred_over_budget=self.deferred_over_budget,
             evaluated=self.evaluated,
             unassessed_benchmark=self.unassessed_benchmark,
@@ -3142,6 +3178,7 @@ class RetrospectiveRunSummary:
     skipped_existing_lesson: int = 0
     skipped_memo: int = 0
     skipped_too_recent: int = 0
+    skipped_no_grounding: int = 0
     deferred_over_budget: int = 0
     evaluated: int = 0
     unassessed_benchmark: int = 0
@@ -3160,6 +3197,7 @@ class RetrospectiveRunSummary:
             self.skipped_existing_lesson
             + self.skipped_memo
             + self.skipped_too_recent
+            + self.skipped_no_grounding
             + self.deferred_over_budget
             + self.evaluated
         )
@@ -3170,6 +3208,7 @@ class RetrospectiveRunSummary:
             "skipped_existing_lesson": self.skipped_existing_lesson,
             "skipped_memo": self.skipped_memo,
             "skipped_too_recent": self.skipped_too_recent,
+            "skipped_no_grounding": self.skipped_no_grounding,
             "deferred_over_budget": self.deferred_over_budget,
             "evaluated": self.evaluated,
             "unassessed_benchmark": self.unassessed_benchmark,
@@ -3384,6 +3423,27 @@ async def run_retrospective(
 
             if not memo.should_evaluate(identity, days_elapsed):
                 counters.skipped_memo += 1
+                continue
+
+            # Declined before pricing, not after generating. A snapshot with no
+            # bear text, no flags, no triggers and no regime cannot ground a
+            # lesson however the prompt is worded, so the two yfinance round
+            # trips buy nothing either.
+            #
+            # Deliberately NOT memoized. The check is free — a few lookups inside
+            # a loop already parsing the file — so a memo entry would save nothing
+            # while costing two things: the count would migrate into `skipped_memo`
+            # on the next run and stop telling the operator how much of the corpus
+            # is ungrounded, and widening this predicate later would leave the
+            # previously-skipped snapshots permanently dead. Memo entries record
+            # *work performed*; declining to work is not work.
+            if not has_grounding_context(snapshot):
+                counters.skipped_no_grounding += 1
+                logger.debug(
+                    "snapshot_has_no_grounding_context",
+                    ticker=snap_ticker_value,
+                    date=snap_date,
+                )
                 continue
 
             candidates.append(

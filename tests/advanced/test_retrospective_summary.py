@@ -12,12 +12,17 @@ the orchestrator itself logs a warning when it fails.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.retrospective import RetrospectiveRunSummary, run_retrospective
+from src.retrospective import (
+    RetrospectiveRunSummary,
+    has_grounding_context,
+    run_retrospective,
+)
 from tests.advanced.retrospective_fakes import FakeLessonsMemory, make_snapshot
 
 
@@ -54,6 +59,7 @@ class TestSummaryShape:
             "skipped_existing_lesson",
             "skipped_memo",
             "skipped_too_recent",
+            "skipped_no_grounding",
             "deferred_over_budget",
             "evaluated",
             "unassessed_benchmark",
@@ -555,3 +561,165 @@ class TestDryRun:
             )
 
         mock_compare.assert_awaited_once()
+
+
+class TestUngroundedSnapshotsAreDeclinedNotAsked:
+    """Where there is no context, an instruction is the wrong tool.
+
+    The prompt forbids naming a mechanism absent from its inputs and offers
+    UNRESOLVED_PRICE_ONLY when nothing supports one. Measured on the 2026-08-17
+    probe that mostly worked — invention fell 5-of-7 to 1-of-6 — but the one
+    remaining invention had a **zero-character** bear excerpt, no flags, no
+    triggers and no regime. Handed nothing and still required to produce a
+    lesson, the model reached for "thin-liquidity environment".
+
+    737 of 7,952 snapshots (9.3%) are in that state. Each would cost one LLM call
+    to produce the same "record more context" note.
+    """
+
+    def test_the_predicate_accepts_any_single_source(self):
+        for key, value in (
+            ("bear_risks_excerpt", "Cyclical exposure."),
+            ("red_flags_at_decision", ["CMIC_FLAGGED"]),
+            ("kill_criteria", ["Margin below 8%"]),
+            ("regime_at_decision", {"risk_appetite": "RISK_OFF"}),
+        ):
+            assert has_grounding_context({key: value}), key
+
+    def test_it_is_a_floor_not_a_quality_bar(self):
+        """A thin excerpt still lets the model ground something.
+
+        Judging sufficiency by length would put an arbitrary threshold on the
+        only path that can produce a real lesson.
+        """
+        assert has_grounding_context({"bear_risks_excerpt": "Debt."})
+
+    @pytest.mark.parametrize(
+        "snapshot",
+        [
+            {},
+            {"bear_risks_excerpt": "   "},
+            {
+                "bear_risks_excerpt": "",
+                "kill_criteria": [],
+                "red_flags_at_decision": [],
+            },
+            {"regime_at_decision": {"risk_appetite": "", "shock_type": ""}},
+            {"regime_at_decision": "corrupted"},
+        ],
+    )
+    def test_nothing_is_nothing(self, snapshot):
+        assert not has_grounding_context(snapshot)
+
+    @pytest.mark.asyncio
+    async def test_no_llm_call_and_no_chroma_write(self, tmp_path, monkeypatch):
+        """The assertion that matters: the model is never asked."""
+        snapshot = make_snapshot(age_days=200)
+        for key in ("bear_risks_excerpt", "kill_criteria", "red_flags_at_decision"):
+            snapshot.pop(key, None)
+        snapshot["regime_at_decision"] = None
+        path = tmp_path / "NOCTX.T_20260101_000000_analysis.json"
+        path.write_text(json.dumps({"prediction_snapshot": snapshot}))
+
+        called: list[str] = []
+        monkeypatch.setattr(
+            "src.retrospective.generate_lesson",
+            lambda *a, **k: called.append("llm") or None,
+        )
+        memory = FakeLessonsMemory()
+        summaries: list = []
+        await run_retrospective(
+            None,
+            tmp_path,
+            lessons_memory=memory,
+            memo_path=tmp_path / "memo.json",
+            on_summary=summaries.append,
+        )
+        assert called == [], "an ungrounded snapshot must never reach the model"
+        assert memory.add_calls == 0, "and must never become a stored lesson"
+        assert summaries[-1].skipped_no_grounding == 1
+        assert summaries[-1].reconciles, "the new bucket must be in the identity"
+
+    @pytest.mark.asyncio
+    async def test_the_decline_repeats_and_is_never_memoized(
+        self, tmp_path, monkeypatch
+    ):
+        """Declining to work is not work, so it earns no memo entry.
+
+        A memo entry would save nothing — the check runs before pricing and costs
+        a few lookups — while costing two things: on the next run the count would
+        migrate into `skipped_memo` and stop telling the operator how much of the
+        corpus is ungrounded, and widening the predicate later would leave these
+        snapshots permanently dead. Both need a *second* run to observe.
+        """
+        snapshot = make_snapshot(age_days=200)
+        for key in ("bear_risks_excerpt", "kill_criteria", "red_flags_at_decision"):
+            snapshot.pop(key, None)
+        snapshot["regime_at_decision"] = None
+        (tmp_path / "NOCTX.T_20260101_000000_analysis.json").write_text(
+            json.dumps({"prediction_snapshot": snapshot})
+        )
+        memo_path = tmp_path / "memo.json"
+
+        async def _run():
+            seen: list = []
+            await run_retrospective(
+                None,
+                tmp_path,
+                lessons_memory=FakeLessonsMemory(),
+                memo_path=memo_path,
+                on_summary=seen.append,
+            )
+            return seen[-1]
+
+        first = await _run()
+        assert first.skipped_no_grounding == 1
+
+        second = await _run()
+        assert second.skipped_no_grounding == 1, (
+            "the count must stay visible rather than migrating into skipped_memo"
+        )
+        assert second.skipped_memo == 0
+        assert second.reconciles
+        if memo_path.exists():
+            recorded = json.loads(memo_path.read_text())
+            assert recorded == {}, (
+                "an ungrounded snapshot must leave no memo entry; one would make "
+                "a later widening of has_grounding_context unable to reach it"
+            )
+
+
+class TestADryRunPersistsNothing:
+    """The mode's whole contract, and it currently holds by accident of ordering.
+
+    Both `memo.flush()` calls happen to sit after the dry-run early return, so a
+    write recorded during candidate building never reaches disk. Nothing enforces
+    that: moving or adding a flush would silently make dry runs persistent, and
+    the failure would be invisible until an operator's memo grew during a run
+    that promised to write nothing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_memo_file_is_written(self, tmp_path):
+        for index, ground in enumerate((True, False)):
+            snapshot = make_snapshot(age_days=200)
+            if not ground:
+                for key in ("bear_risks_excerpt", "kill_criteria"):
+                    snapshot.pop(key, None)
+                snapshot["regime_at_decision"] = None
+            (tmp_path / f"T{index}.T_2026010{index}_000000_analysis.json").write_text(
+                json.dumps({"prediction_snapshot": snapshot})
+            )
+        memo_path = tmp_path / "memo.json"
+        seen: list = []
+        await run_retrospective(
+            None,
+            tmp_path,
+            lessons_memory=FakeLessonsMemory(),
+            memo_path=memo_path,
+            dry_run=True,
+            on_summary=seen.append,
+        )
+        assert not memo_path.exists(), "a dry run must not persist a memo"
+        assert seen[-1].dry_run is True
+        assert seen[-1].reconciles

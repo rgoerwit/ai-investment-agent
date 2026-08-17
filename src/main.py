@@ -1093,6 +1093,7 @@ async def _run_retrospective_only(args: argparse.Namespace) -> int:
                 f"already-lessoned {summary.skipped_existing_lesson} | "
                 f"memoized {summary.skipped_memo} | "
                 f"too-recent {summary.skipped_too_recent} | "
+                f"no-context {summary.skipped_no_grounding} | "
                 f"deferred {summary.deferred_over_budget}"
             )
             if verbose_console:
