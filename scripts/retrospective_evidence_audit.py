@@ -151,6 +151,7 @@ def _dispositions(dirs: tuple[Path, ...], ticker: str | None) -> int:
     is worth paying for, and a conditional number presented as a fact is how that
     question gets answered wrongly.
     """
+    from src.config import config
     from src.lesson_disposition import (
         DRIVER_MARKET,
         DRIVER_MIXED,
@@ -160,6 +161,7 @@ def _dispositions(dirs: tuple[Path, ...], ticker: str | None) -> int:
     )
     from src.retrospective import (
         MINIMUM_DAYS_ELAPSED,
+        RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN,
         evidence_capabilities,
         resolve_cached_regime_delta,
     )
@@ -253,6 +255,17 @@ def _dispositions(dirs: tuple[Path, ...], ticker: str | None) -> int:
 
     total = sum(exact.values()) + evaluable
     assert total == sum(exact.values()) + evaluable, "the report must reconcile"
+    configured_budget = int(
+        getattr(
+            config,
+            "retrospective_max_evaluations_per_run",
+            RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN,
+        )
+    )
+    # Match `_select_within_budget`: zero and negative values mean no cap.
+    per_run_price_ceiling = (
+        min(evaluable, configured_budget) if configured_budget > 0 else evaluable
+    )
     _print_scope(report, total)
 
     print("EXACT — decided without pricing:")
@@ -311,8 +324,9 @@ def _dispositions(dirs: tuple[Path, ...], ticker: str | None) -> int:
     # statistical claim that reads as computed. It also changes no decision: the
     # injectable ceiling already answers whether a sweep is worth paying for.
     print(
-        f"\nA legacy sweep would price up to {evaluable:,} snapshots — fewer after\n"
-        f"dedup, the memo and the per-run budget — and could produce at most\n"
+        f"\nA legacy sweep has {evaluable:,} snapshots eligible for pricing before\n"
+        f"dedup and memo checks. This configuration can price at most\n"
+        f"{per_run_price_ceiling:,} in one run, and could produce at most\n"
         f"{ceiling:,} injectable records. How many of the rest would trigger, and so\n"
         f"become review-only records, cannot be known without pricing them."
     )

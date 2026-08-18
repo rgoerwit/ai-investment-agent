@@ -76,6 +76,27 @@ class TestTheReportDistinguishesItsStages:
         assert "among comparisons that TRIGGER" not in out
         assert "not of triggered comparisons" in out
 
+    def test_per_run_price_ceiling_uses_the_runtime_budget(self, tmp_path, capsys):
+        """Corpus eligibility must not be reported as one run's price volume."""
+        from src.retrospective import RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN
+
+        for index in range(RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN + 1):
+            _artifact(
+                tmp_path,
+                f"T{index}.T_20260101_000000_analysis.json",
+                ticker=f"T{index}.T",
+            )
+
+        audit._dispositions((tmp_path,), None)
+        out = capsys.readouterr().out
+        assert (
+            f"{RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN + 1:,} snapshots eligible" in out
+        )
+        assert (
+            f"price at most\n{RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN:,} in one run"
+            in out
+        )
+
 
 class TestTheDenominatorIsAuditable:
     def test_scope_and_counts_are_printed(self, tmp_path, capsys):
