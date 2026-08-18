@@ -112,13 +112,91 @@ def _rows(
     return rows, report
 
 
+def _parity(dirs: tuple[Path, ...], ticker: str | None) -> int:
+    """Replay the pre-consolidation eligibility over the operator's real corpus.
+
+    The committed unit test covers synthetic shapes, because CI has neither
+    `results/` nor the archive. This covers the artifacts that actually exist —
+    the combination the test cannot see. Read-only; no pricing, no writes.
+    """
+    from src.retrospective import (
+        LESSON_ELIGIBILITY_INJECTABLE,
+        LESSON_ELIGIBILITY_REVIEW_ONLY,
+        REGIME_COMPARED_FIELDS,
+        lesson_eligibility,
+    )
+
+    def previously(comparison: dict[str, Any]) -> str:
+        if str(comparison.get("m_and_a_status") or "").strip().upper() == (
+            "ACTIVE_TENDER"
+        ):
+            return LESSON_ELIGIBILITY_REVIEW_ONLY
+        attribution = comparison.get("attribution") or {}
+        if str(attribution.get("dominant_driver") or "UNKNOWN") != "MARKET":
+            return LESSON_ELIGIBILITY_REVIEW_ONLY
+        regime = comparison.get("regime_at_decision")
+        regime = regime if isinstance(regime, dict) else {}
+        if not any(
+            str(regime.get(field) or "").strip() for field in REGIME_COMPARED_FIELDS
+        ):
+            return LESSON_ELIGIBILITY_REVIEW_ONLY
+        delta = comparison.get("cached_regime_delta") or {}
+        if delta.get("shifted") is not False:
+            return LESSON_ELIGIBILITY_REVIEW_ONLY
+        return LESSON_ELIGIBILITY_INJECTABLE
+
+    agree = 0
+    disagreements: list[str] = []
+    rows, _ = _rows(dirs, ticker)
+    for directory in dirs:
+        if not directory.exists():
+            continue
+        for path in sorted(directory.glob("*_analysis.json")):
+            if ticker and not path.name.startswith(f"{ticker}_"):
+                continue
+            try:
+                artifact = json.loads(path.read_text())
+            except Exception:
+                continue
+            snapshot = artifact.get("prediction_snapshot")
+            if not snapshot:
+                continue
+            _resolve_bear_evidence(snapshot, artifact)
+            for driver in ("MARKET", "RESIDUAL", "MIXED", "UNKNOWN"):
+                for shifted in (True, False, None):
+                    comparison = dict(snapshot)
+                    comparison["attribution"] = {"dominant_driver": driver}
+                    comparison["cached_regime_delta"] = {"shifted": shifted}
+                    if lesson_eligibility(comparison)[0] == previously(comparison):
+                        agree += 1
+                    else:
+                        disagreements.append(f"{path.name} {driver} shifted={shifted}")
+    total = agree + len(disagreements)
+    print(f"snapshots: {len(rows)}   combinations replayed: {total:,}")
+    print(f"   agree {agree:,}   DISAGREE {len(disagreements):,}")
+    for line in disagreements[:20]:
+        print(f"      {line}")
+    return 1 if disagreements else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ticker", help="restrict to one ticker")
     parser.add_argument(
         "--sample", type=int, default=0, help="print N reconstructed examples"
     )
+    parser.add_argument(
+        "--parity",
+        action="store_true",
+        help=(
+            "replay the pre-consolidation eligibility logic over every snapshot "
+            "x attribution x regime state and report disagreements"
+        ),
+    )
     args = parser.parse_args()
+
+    if args.parity:
+        return _parity(resolve_retrospective_sources(config), args.ticker)
 
     rows, report = _rows(resolve_retrospective_sources(config), args.ticker)
     if not rows:

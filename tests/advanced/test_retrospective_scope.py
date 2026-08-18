@@ -260,12 +260,23 @@ class TestValidatedIsReservedNotDead:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def _comparison(driver, regime, shifted, shift_reason=""):
-    return {
+def _comparison(driver, regime, shifted, shift_reason="", *, hypothesis=True):
+    """A priced outcome.
+
+    ``hypothesis`` controls whether a decision-time *company* claim is on record.
+    It defaults to True because that is the ordinary case, and because the
+    distinction is load-bearing: a context-only snapshot cannot license a review
+    of a company risk it never recorded. The original fixture had no bear
+    evidence at all, so every case it built was context-only without saying so.
+    """
+    comparison = {
         "attribution": {"dominant_driver": driver},
         "regime_at_decision": regime,
         "cached_regime_delta": {"shifted": shifted, "shift_reason": shift_reason},
     }
+    if hypothesis:
+        comparison["bear_risks_excerpt"] = "1. Cyclical exposure at a peak."
+    return comparison
 
 
 _STABLE_REGIME = {"risk_appetite": "RISK_ON", "shock_type": "NONE"}

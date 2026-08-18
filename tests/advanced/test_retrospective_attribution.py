@@ -44,8 +44,8 @@ from src.retrospective import (
 )
 from tests.advanced.retrospective_fakes import (
     FakeLessonsMemory,
-    FakeYFinance,
     make_snapshot,
+    yfinance_ticker_stub,
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -311,7 +311,11 @@ class TestUnassessableOutcomesNeverBecomeLessons:
                 memo_path=tmp_path / "m.json",
             )
 
-        mock_lesson.assert_awaited_once()
+        # Reversed deliberately. This asserted that a usable benchmark *did*
+        # reach the lesson LLM, which was the contract until the record became a
+        # deterministic rendering. The outcome it exercises is real and still
+        # produces a record — it just is not generated.
+        mock_lesson.assert_not_awaited()
         assert len(lessons) == 1
 
     @pytest.mark.asyncio
@@ -384,7 +388,7 @@ class TestAttributionReachesTheComparison:
         }
         captured: list[dict] = []
 
-        async def _capture(comparison):
+        def _capture(comparison, verdict):
             captured.append(comparison)
             return ("a lesson", "missed_risk", "OPERATIONAL_MISS")
 
@@ -395,7 +399,7 @@ class TestAttributionReachesTheComparison:
                 "Ticker",
                 _yf_stub(stock=(100.0, 65.0), benchmark=(100.0, 101.0)),
             ),
-            patch("src.retrospective.generate_lesson", side_effect=_capture),
+            patch("src.retrospective.build_lesson_record", side_effect=_capture),
         ):
             await run_retrospective(
                 "2767.T", Path("/fake"), memory, memo_path=tmp_path / "m.json"
@@ -475,10 +479,18 @@ class TestCompareToRealityReportsFxHonestly:
     """
 
     async def _compare(self, monkeypatch, *, currency, fx_rate, fx_result):
-        fake_yf = FakeYFinance(
-            prices={"7203.T": (1000.0, 700.0), "^N225": (30000.0, 27000.0)}
+        # `compare_to_reality` does `import yfinance as yf` *inside* the fetch
+        # function, so `src.retrospective.yf` is not a seam. Patching it — with
+        # `raising=False` silencing the one signal that would have said so — left
+        # these four tests reaching the live network, passing on real 7203.T data
+        # and failing anywhere offline.
+        import yfinance
+
+        monkeypatch.setattr(
+            yfinance,
+            "Ticker",
+            yfinance_ticker_stub(stock=(1000.0, 700.0), benchmark=(30000.0, 27000.0)),
         )
-        monkeypatch.setattr("src.retrospective.yf", fake_yf, raising=False)
 
         async def _fx(*_a, **_k):
             if isinstance(fx_result, Exception):

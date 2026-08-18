@@ -64,6 +64,7 @@ class TestSummaryShape:
             "evaluated",
             "unassessed_benchmark",
             "triggered",
+            "withheld_no_record",
             "generated",
             "stored",
             "failed",

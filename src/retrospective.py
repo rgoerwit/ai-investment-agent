@@ -36,6 +36,23 @@ from src.data_block_utils import (
 from src.error_safety import summarize_exception
 from src.exchange_metadata import SUFFIX_TO_CURRENCY_CODE
 from src.ibkr.order_builder import parse_trade_block
+from src.lesson_disposition import (
+    ATTRIBUTION_DOMINANCE_RATIO,
+    DRIVER_MARKET,
+    DRIVER_MIXED,
+    DRIVER_RESIDUAL,
+    DRIVER_UNKNOWN,
+    HYPOTHESIS_TOPIC_BEAR_CASE,
+    HYPOTHESIS_TOPIC_KILL_CRITERIA,
+    HYPOTHESIS_TOPIC_NONE,
+    HYPOTHESIS_TOPIC_RED_FLAGS,
+    DispositionVerdict,
+    EvidenceCapability,
+    LessonDisposition,
+    OutcomeFacts,
+    derive_disposition,
+    render_record,
+)
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import classify_failure, get_runtime_provider
 from src.runtime_diagnostics.failure_classification import ProviderName, get_model_name
@@ -234,6 +251,15 @@ MEMO_OUTCOME_NO_DATA = "NO_DATA"
 # A snapshot that triggered but was capped by MAX_LESSONS_PER_TICKER. Recorded so
 # it is not re-priced every run — it was withheld by policy, not lost to failure.
 MEMO_OUTCOME_CAPPED = "CAPPED"
+# Priced, and the disposition produces no record — an unattributed outcome with
+# no company hypothesis. Memoized because the work *was* done: re-pricing it in
+# 30 days would buy the same nothing, and a durable "cause unresolved" document
+# would be the noise this disposition exists to avoid.
+MEMO_OUTCOME_WITHHELD = "WITHHELD_NO_RECORD"
+
+# Rides a comparison into `store_lesson` so the persisted metadata records the
+# disposition that produced it rather than re-deriving it there.
+DISPOSITION_VERDICT_KEY = "_disposition_verdict"
 
 # Rides a triggered comparison from phase 2 to phase 3 so the memo can be written
 # only once the lesson is durably stored. Stripped before the comparison is
@@ -251,14 +277,10 @@ MEMO_IDENTITY_KEY = "_memo_identity"
 # today — inert, which is not a reason to introduce the conflation.
 SNAPSHOT_IDENTITY_KEY = "snapshot_identity"
 
-# How much larger one leg must be than the other to be called the driver. A
-# module constant beside THRESHOLDS, tunable once a real corpus exists.
-ATTRIBUTION_DOMINANCE_RATIO = 1.5
-
-DRIVER_MARKET = "MARKET"
-DRIVER_RESIDUAL = "RESIDUAL"
-DRIVER_MIXED = "MIXED"
-DRIVER_UNKNOWN = "UNKNOWN"
+# ATTRIBUTION_DOMINANCE_RATIO and the DRIVER_* tokens are imported at the top of
+# this module from `src/lesson_disposition.py`, which owns the decision policy
+# and imports nothing from here. The import binds them as module attributes, so
+# every existing `from src.retrospective import DRIVER_MARKET` still resolves.
 
 # Was FX measured, inapplicable, or simply not determinable?
 #
@@ -1186,22 +1208,45 @@ def has_grounding_context(snapshot: Mapping[str, Any]) -> bool:
     would put an arbitrary threshold on the only path that can produce a real
     lesson.
     """
+    return bool(evidence_capabilities(snapshot))
+
+
+def evidence_capabilities(
+    snapshot: Mapping[str, Any],
+) -> frozenset[EvidenceCapability]:
+    """Stage 1: what the decision-time record can license. Snapshot only.
+
+    Deliberately separate from `derive_disposition`, which needs the *measured
+    outcome* — attribution, regime comparison, deal status. This stage runs in
+    the candidate loop before any price fetch, so it cannot depend on facts that
+    do not exist yet. Collapsing the two into one function is impossible for
+    that reason, not merely inelegant.
+
+    Returning a set rather than a single value is the point: a snapshot can hold
+    both a company hypothesis and a macro regime, and they license different
+    things. The old single boolean answered "is there anything?", which let a
+    regime-only record authorize company-mechanism prose.
+    """
+    capabilities: set[EvidenceCapability] = set()
+
     # `is_usable_bear_evidence`, not truthiness. The loader already blanks a
     # heading-only excerpt, so this is defense in depth — but a caller that
     # builds a snapshot without going through `load_past_snapshots` would
     # otherwise reintroduce the exact defect: a bare label read as evidence.
-    # The predicate that decides whether a model may be asked to ground a
-    # mechanism must not depend on an upstream caller having sanitized its input.
-    if is_usable_bear_evidence(snapshot.get("bear_risks_excerpt")):
-        return True
-    if snapshot.get("red_flags_at_decision") or snapshot.get("kill_criteria"):
-        return True
+    if (
+        is_usable_bear_evidence(snapshot.get("bear_risks_excerpt"))
+        or snapshot.get("red_flags_at_decision")
+        or snapshot.get("kill_criteria")
+    ):
+        capabilities.add(EvidenceCapability.HYPOTHESIS)
+
     regime = snapshot.get("regime_at_decision")
     if isinstance(regime, Mapping) and any(
         str(regime.get(field) or "").strip() for field in REGIME_COMPARED_FIELDS
     ):
-        return True
-    return False
+        capabilities.add(EvidenceCapability.CONTEXT)
+
+    return frozenset(capabilities)
 
 
 def lesson_scope_for(dominant_driver: str) -> str:
@@ -1229,71 +1274,42 @@ def lesson_scope_for(dominant_driver: str) -> str:
     return SCOPE_CONTEXTUAL if dominant_driver == DRIVER_MARKET else SCOPE_UNRESOLVED
 
 
-def lesson_eligibility(comparison: Mapping[str, Any]) -> tuple[str, str]:
-    """May this lesson be handed to a live analysis? Returns ``(eligibility, reason)``.
+def disposition_for(comparison: Mapping[str, Any]) -> DispositionVerdict:
+    """Stage 2: what this priced outcome may produce. The single authority.
 
-    Separate from ``lesson_scope_for`` because attribution alone is not enough. A
-    CONTEXTUAL lesson is retrieved only when its stored regime matches the present
-    one, so a record with no recorded regime is unreachable no matter what its
-    text says. That gap is what let 67 records look injectable while being inert.
-
-    The reason is returned and persisted because ``REVIEW_ONLY`` is otherwise
-    ambiguous on its face: "the driver was MIXED" is a finding about the snapshot,
-    while "the macro cache was stale when this ran" is a finding about the run.
-    Only one of them says anything about the lesson.
+    A thin adapter — it reads the measured facts off the comparison and hands
+    primitives to `derive_disposition`, which holds the policy and can be
+    matrix-tested without a snapshot fixture. Every consumer that used to make
+    part of this decision for itself now routes through here.
     """
-    # Checked first, and deliberately so: a live deal prices the stock against its
-    # terms, not against its market. The benchmark decomposition still computes
-    # and means nothing, so whichever leg "dominates" is an artefact of deal
-    # mechanics — reporting `driver MIXED` here would name a symptom and hide the
-    # cause. `m_and_a_status` is already carried in the snapshot for the IBKR
-    # reconciler; RUMORED is not disqualifying, since a rumour does not pin price.
-    if str(comparison.get("m_and_a_status") or "").strip().upper() == "ACTIVE_TENDER":
-        return (
-            LESSON_ELIGIBILITY_REVIEW_ONLY,
-            "an active tender priced the stock against deal terms, not the market",
-        )
-
     attribution = comparison.get("attribution")
     attribution = attribution if isinstance(attribution, Mapping) else {}
-    driver = str(attribution.get("dominant_driver") or DRIVER_UNKNOWN)
-    if driver != DRIVER_MARKET:
-        return (
-            LESSON_ELIGIBILITY_REVIEW_ONLY,
-            f"driver {driver}: the move was not attributed to the market",
-        )
-
-    regime = comparison.get("regime_at_decision")
-    regime = regime if isinstance(regime, Mapping) else {}
-    # Exactly the fields `_regime_matches` compares. Without one of them the
-    # CONTEXTUAL stamp is decorative: retrieval can never match it.
-    if not any(
-        str(regime.get(field) or "").strip() for field in REGIME_COMPARED_FIELDS
-    ):
-        return (
-            LESSON_ELIGIBILITY_REVIEW_ONLY,
-            "no decision-time regime recorded, so no regime can ever match it",
-        )
-
     delta = comparison.get("cached_regime_delta")
     delta = delta if isinstance(delta, Mapping) else {}
     shifted = delta.get("shifted")
-    if shifted is not False:
-        # UNKNOWN is withheld, not permitted. `shifted` is False only when both
-        # regimes were usable, comparable and equal; every degraded path returns
-        # None. "We could not establish that the regime held still" is not a
-        # basis for authorizing guidance about that regime.
-        detail = str(delta.get("shift_reason") or "").strip()
-        state = "the regime shifted" if shifted is True else "regime shift unknown"
-        return (
-            LESSON_ELIGIBILITY_REVIEW_ONLY,
-            f"{state}{f': {detail}' if detail else ''}",
-        )
-
-    return (
-        LESSON_ELIGIBILITY_INJECTABLE,
-        "market-dominated outcome in a stable regime",
+    verdict = derive_disposition(
+        evidence_capabilities(comparison),
+        dominant_driver=str(attribution.get("dominant_driver") or DRIVER_UNKNOWN),
+        # Tri-state preserved: only a real `False` means the regime was compared
+        # and held. A non-bool from a corrupt payload is not a comparison.
+        regime_shifted=shifted if isinstance(shifted, bool) else None,
+        m_and_a_status=comparison.get("m_and_a_status"),
+        regime_shift_reason=str(delta.get("shift_reason") or ""),
     )
+    return verdict
+
+
+def lesson_eligibility(comparison: Mapping[str, Any]) -> tuple[str, str]:
+    """May this lesson be handed to a live analysis? ``(eligibility, reason)``.
+
+    Retained as the storage-facing spelling of one bit of `disposition_for`.
+    Injectability is a property of the disposition, so the two cannot disagree —
+    which is the whole reason this no longer re-derives anything.
+    """
+    verdict = disposition_for(comparison)
+    if verdict.is_injectable:
+        return (LESSON_ELIGIBILITY_INJECTABLE, verdict.reason)
+    return (LESSON_ELIGIBILITY_REVIEW_ONLY, verdict.reason)
 
 
 def _dominant_local_driver(market_pct: float, residual_pct: float) -> str:
@@ -2024,7 +2040,95 @@ def compute_confidence(comparison: dict[str, Any]) -> float:
     return float(final)
 
 
-def _prediction_is_directionally_correct(comparison: dict[str, Any]) -> bool:
+def _hypothesis_for_review(comparison: Mapping[str, Any]) -> tuple[str, str]:
+    """The recorded hypothesis and where it came from — quoted, never summarized.
+
+    Priority follows specificity: a pre-registered thesis-break trigger is the
+    sharpest decision-time claim, then the enumerated bear risks, then the flag
+    tokens. Whichever is used, the text is reproduced verbatim; the retrospective
+    has no basis to paraphrase a claim it cannot test.
+    """
+    triggers = comparison.get("kill_criteria")
+    if isinstance(triggers, list) and any(str(item).strip() for item in triggers):
+        joined = "; ".join(str(item).strip() for item in triggers if str(item).strip())
+        return joined[:BEAR_EVIDENCE_MAX_CHARS], HYPOTHESIS_TOPIC_KILL_CRITERIA
+
+    bear = comparison.get("bear_risks_excerpt")
+    if is_usable_bear_evidence(bear):
+        return str(bear).strip()[:BEAR_EVIDENCE_MAX_CHARS], HYPOTHESIS_TOPIC_BEAR_CASE
+
+    flags = comparison.get("red_flags_at_decision")
+    if isinstance(flags, list) and flags:
+        return ", ".join(str(flag) for flag in flags), HYPOTHESIS_TOPIC_RED_FLAGS
+
+    return "", HYPOTHESIS_TOPIC_NONE
+
+
+def _outcome_facts(comparison: Mapping[str, Any]) -> OutcomeFacts:
+    attribution = comparison.get("attribution")
+    attribution = attribution if isinstance(attribution, Mapping) else {}
+    regime = comparison.get("regime_at_decision")
+    regime = regime if isinstance(regime, Mapping) else {}
+    label = " / ".join(
+        str(regime.get(field)).strip()
+        for field in REGIME_COMPARED_FIELDS
+        if str(regime.get(field) or "").strip()
+    )
+    return OutcomeFacts(
+        ticker=str(comparison.get("ticker") or "UNKNOWN"),
+        days_elapsed=int(comparison.get("days_elapsed") or 0),
+        price_return_pct=float(comparison.get("price_return_pct") or 0.0),
+        benchmark_return_pct=float(comparison.get("benchmark_return_pct") or 0.0),
+        excess_return_pct=float(comparison.get("excess_return_pct") or 0.0),
+        benchmark_used=str(comparison.get("benchmark_used") or "an unnamed benchmark"),
+        market_return_pct=attribution.get("market_return_pct"),
+        residual_return_pct=attribution.get("residual_return_pct"),
+        regime_label=label,
+    )
+
+
+def _deterministic_lesson_type(comparison: Mapping[str, Any]) -> str:
+    """Prediction against price — a fact, and derivable without a model.
+
+    It was already the only defensible reading of this field; asking an LLM for
+    it added nothing but the chance of a different answer.
+    """
+    if _prediction_is_directionally_correct(comparison):
+        return "correct_call"
+    verdict = str(comparison.get("verdict") or "").upper()
+    excess = float(comparison.get("excess_return_pct") or 0.0)
+    if verdict in {"DO_NOT_INITIATE", "SELL"}:
+        return "missed_opportunity"
+    if verdict == "HOLD" and excess > 0:
+        return "missed_opportunity"
+    return "false_positive" if verdict == "BUY" else "missed_risk"
+
+
+def build_lesson_record(
+    comparison: Mapping[str, Any], verdict: DispositionVerdict
+) -> tuple[str, str, str] | None:
+    """Render the record for a priced outcome, or None when none is produced.
+
+    The deterministic replacement for `generate_lesson`. Returns the same
+    ``(text, lesson_type, failure_mode)`` shape so storage is unchanged.
+
+    ``failure_mode`` is always ``UNRESOLVED_PRICE_ONLY`` because no deterministic
+    path establishes a cause — which is the honest value, and the reason the
+    causal vocabulary is no longer requested from anyone.
+    """
+    if not verdict.disposition.produces_record:
+        return None
+    hypothesis, topic = _hypothesis_for_review(comparison)
+    text = render_record(
+        verdict,
+        _outcome_facts(comparison),
+        hypothesis=hypothesis,
+        hypothesis_topic=topic,
+    )
+    return text, _deterministic_lesson_type(comparison), UNRESOLVED_PRICE_ONLY
+
+
+def _prediction_is_directionally_correct(comparison: Mapping[str, Any]) -> bool:
     """Return a simple correctness judgment for deferred retrospective scoring."""
     verdict = (comparison.get("verdict") or "").upper()
     excess_return_pct = float(comparison.get("excess_return_pct") or 0.0)
@@ -2294,6 +2398,19 @@ async def generate_lesson(
 ) -> tuple[str, str, str] | None:
     """
     Generate a generalizable lesson from a significant prediction delta.
+
+    **RESERVED — no production caller. Not part of the ordinary retrospective.**
+
+    Ordinary outcomes are rendered deterministically by `build_lesson_record`;
+    this free-form path is what produced FX exposure for a bear case that never
+    mentions currency. It is retained only as the starting point for a future
+    *evidence-backed* post-mortem — one that fetches post-decision filings and
+    news, and so has something to synthesize — which is the only context in which
+    a generator earns its place here. `SCOPE_VALIDATED` is the disposition that
+    would consume it, and it has no producer either.
+
+    Do not wire this into the ordinary path. `TestTheGeneratorHasNoProductionCaller`
+    fails if anything does.
 
     One Gemini Flash call with a compact prompt (~400 input tokens).
     Returns (lesson_text, lesson_type, failure_mode) or None on failure.
@@ -2659,6 +2776,38 @@ async def save_rejection_record(
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _disposition_metadata(comparison: Mapping[str, Any]) -> dict[str, str]:
+    """Persist which disposition produced this record, and why.
+
+    Flat scalars — ChromaDB metadata takes no nested values. `hypothesis_topic`
+    names the *source* of the recorded claim (bear case / flags / triggers),
+    never an interpretation: asking for a topic is how a causal vocabulary
+    re-enters after being removed from the failure-mode field.
+    """
+    verdict = comparison.get(DISPOSITION_VERDICT_KEY)
+    if not isinstance(verdict, DispositionVerdict):
+        return {}
+    # Only where the hypothesis was actually rendered. A contextual observation
+    # deliberately does not use one, so stamping its source there would suggest
+    # the record drew on evidence it never consulted.
+    topic = (
+        _hypothesis_for_review(comparison)[1]
+        if verdict.disposition is LessonDisposition.REVIEW_HYPOTHESIS
+        else HYPOTHESIS_TOPIC_NONE
+    )
+    return {
+        "lesson_disposition": verdict.disposition.value,
+        "disposition_reason_code": verdict.reason_code,
+        "evidence_capabilities": ",".join(
+            sorted(c.value for c in evidence_capabilities(comparison))
+        ),
+        "hypothesis_topic": topic,
+        "bear_evidence_provenance": str(
+            comparison.get("bear_evidence_provenance") or ""
+        ),
+    }
+
+
 async def store_lesson(
     lesson: str,
     lesson_type: str,
@@ -2755,6 +2904,10 @@ async def store_lesson(
         # mean the benchmark and FX legs rest on a guess about the listing, which
         # a later reader cannot recover from the currency code alone.
         "currency_source": str(comparison.get("currency_source") or ""),
+        # Forward-only. Legacy records carry none of these and are not rewritten:
+        # they were produced under a different policy and relabelling them would
+        # assert a classification nobody made.
+        **_disposition_metadata(comparison),
         "analysis_model": comparison.get("deep_model", "unknown") or "unknown",
         "analysis_date": analysis_date,
         # Per-run identity, so dedup can tell two same-day analyses apart.
@@ -3316,6 +3469,7 @@ class _RunCounters:
     evaluated: int = 0
     unassessed_benchmark: int = 0
     triggered: int = 0
+    withheld_no_record: int = 0
     generated: int = 0
     stored: int = 0
     failed: int = 0
@@ -3331,6 +3485,7 @@ class _RunCounters:
             evaluated=self.evaluated,
             unassessed_benchmark=self.unassessed_benchmark,
             triggered=self.triggered,
+            withheld_no_record=self.withheld_no_record,
             generated=self.generated,
             stored=self.stored,
             failed=self.failed,
@@ -3358,6 +3513,7 @@ class RetrospectiveRunSummary:
     evaluated: int = 0
     unassessed_benchmark: int = 0
     triggered: int = 0
+    withheld_no_record: int = 0
     generated: int = 0
     stored: int = 0
     failed: int = 0
@@ -3388,6 +3544,7 @@ class RetrospectiveRunSummary:
             "evaluated": self.evaluated,
             "unassessed_benchmark": self.unassessed_benchmark,
             "triggered": self.triggered,
+            "withheld_no_record": self.withheld_no_record,
             "generated": self.generated,
             "stored": self.stored,
             "failed": self.failed,
@@ -3735,7 +3892,28 @@ async def run_retrospective(
                 break
 
             confidence = comparison["_confidence"]
-            result = await generate_lesson(comparison)
+
+            # Deterministic rendering, not generation. An unattributed outcome
+            # has no lesson to write: asking a model "what should be checked
+            # next time" is a request for content the evidence cannot support,
+            # and it produced FX exposure for a bear case that never mentions
+            # currency (2PP.DE) and momentum screens for one about analyst
+            # coverage (3008.TW). The templates have no slot for either.
+            verdict = disposition_for(comparison)
+            if not verdict.disposition.produces_record:
+                counters.withheld_no_record += 1
+                logger.debug(
+                    "retrospective_record_withheld",
+                    ticker=snap_ticker,
+                    disposition=verdict.disposition.value,
+                    reason_code=verdict.reason_code,
+                )
+                _memoize_stored(
+                    memo, pending_memo, comparison, outcome=MEMO_OUTCOME_WITHHELD
+                )
+                continue
+
+            result = build_lesson_record(comparison, verdict)
             if not result:
                 continue
 
@@ -3745,7 +3923,7 @@ async def run_retrospective(
                 lesson_text,
                 lesson_type,
                 failure_mode,
-                comparison,
+                {**comparison, DISPOSITION_VERDICT_KEY: verdict},
                 confidence,
                 lessons_memory,
             )

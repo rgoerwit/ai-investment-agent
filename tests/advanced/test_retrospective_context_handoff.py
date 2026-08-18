@@ -36,8 +36,8 @@ from src.retrospective import (
 )
 from tests.advanced.retrospective_fakes import (
     FakeLessonsMemory,
-    FakeYFinance,
     make_snapshot,
+    yfinance_ticker_stub,
 )
 from tests.advanced.test_retrospective_retrieval import _QueryableMemory
 
@@ -104,12 +104,16 @@ class TestFlagsSurviveEveryStage:
         )
 
         # --- stage 2: compare ------------------------------------------------
+        # `import yfinance as yf` is inside the fetch function, so
+        # `src.retrospective.yf` is not a seam: patching it does nothing and this
+        # test was reaching the live network, passing only because 7203.T is a
+        # real ticker with real data.
+        import yfinance
+
         monkeypatch.setattr(
-            "src.retrospective.yf",
-            FakeYFinance(
-                prices={"7203.T": (1000.0, 500.0), "^N225": (30000.0, 29000.0)}
-            ),
-            raising=False,
+            yfinance,
+            "Ticker",
+            yfinance_ticker_stub(stock=(1000.0, 500.0), benchmark=(30000.0, 29000.0)),
         )
         comparison = await compare_to_reality(snapshot)
         assert comparison is not None, "fixture must trigger or this asserts nothing"

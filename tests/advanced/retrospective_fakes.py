@@ -165,6 +165,11 @@ class FakeLessonsMemory:
     def metadatas(self) -> list[dict[str, Any]]:
         return [dict(r["metadata"]) for r in self.situation_collection.records]
 
+    def documents(self) -> list[str]:
+        """The stored text. Needed once records became deterministic renderings:
+        the text itself is now an assertable contract, not model output."""
+        return [str(r["document"]) for r in self.situation_collection.records]
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # yfinance
@@ -326,3 +331,31 @@ def write_analysis_artifact(
     with open(path, "w") as handle:
         json.dump({"prediction_snapshot": payload}, handle)
     return path
+
+
+def yfinance_ticker_stub(*, stock=(100.0, 65.0), benchmark=(100.0, 70.0)):
+    """A `yfinance.Ticker` replacement for `patch.object(yfinance, "Ticker", ...)`.
+
+    The seam matters: `src/retrospective.py` does `import yfinance as yf` *inside*
+    the fetch function, so `monkeypatch.setattr("src.retrospective.yf", ...)`
+    patches an attribute nothing reads. A test doing that reaches the live
+    network and passes or fails on real market data — which two tests written on
+    2026-08-17 did, undetected, because their tickers exist.
+    """
+    import pandas as pd
+
+    class _Ticker:
+        def __init__(self, symbol: str) -> None:
+            self.symbol = symbol
+
+        def history(self, **_: object):
+            series = benchmark if self.symbol.startswith("^") else stock
+            if series is None:
+                return pd.DataFrame({"Close": []})
+            return pd.DataFrame({"Close": list(series)})
+
+        @property
+        def info(self) -> dict:
+            return {}
+
+    return _Ticker
