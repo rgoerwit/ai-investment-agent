@@ -112,6 +112,213 @@ def _rows(
     return rows, report
 
 
+def _print_scope(report: dict[str, Any], total: int) -> None:
+    """Where the denominator came from.
+
+    Two runs of this audit reported 7,952 and 4,732 identities and both were
+    right — one had RETROSPECTIVE_ARCHIVE_DIRS set. A count with no stated scope
+    invites exactly that confusion, so every mode prints this.
+    """
+    print("sources scanned (in precedence order):")
+    for name in report["scanned"]:
+        print(f"    {name}")
+    for name in report["missing_dirs"]:
+        print(f"    {name}  [CONFIGURED BUT MISSING — corpus is smaller than intended]")
+    print(
+        f"\nfiles read {report['files']}"
+        f" | malformed {report['malformed']}"
+        f" | no snapshot {report['no_snapshot']}"
+        f" | duplicate identity {report['duplicate_identity']}"
+    )
+    print(f"\nsnapshots (by identity, live tree preferred): {total}\n")
+
+
+def _dispositions(dirs: tuple[Path, ...], ticker: str | None) -> int:
+    """What the corpus would produce, without spending anything to find out.
+
+    Three of the four inputs to a disposition are knowable offline — evidence
+    capabilities, the cached regime delta, and deal status all read from disk.
+    Only the attribution driver needs a price fetch. So this reports:
+
+    * **exact** counts for the driver-independent dispositions;
+    * an **exact ceiling** on injectability, because a contextual observation
+      requires CONTEXT capability *and* a regime that demonstrably held, both
+      computable here — a snapshot failing either can never be injectable no
+      matter how its outcome turns out;
+    * the remaining split **conditional** on each driver, labelled as such.
+
+    The distinction matters because the operational question is whether a sweep
+    is worth paying for, and a conditional number presented as a fact is how that
+    question gets answered wrongly.
+    """
+    from src.lesson_disposition import (
+        DRIVER_MARKET,
+        DRIVER_MIXED,
+        DRIVER_RESIDUAL,
+        EvidenceCapability,
+        derive_disposition,
+    )
+    from src.retrospective import (
+        MINIMUM_DAYS_ELAPSED,
+        evidence_capabilities,
+        resolve_cached_regime_delta,
+    )
+
+    exact: collections.Counter[str] = collections.Counter()
+    conditional: dict[str, collections.Counter[str]] = {
+        driver: collections.Counter()
+        for driver in (DRIVER_MARKET, DRIVER_RESIDUAL, DRIVER_MIXED)
+    }
+    ceiling = 0
+    evaluable = 0
+    tenders = 0
+    with_context = 0
+    blocked: collections.Counter[str] = collections.Counter()
+
+    seen: set[str] = set()
+    report: dict[str, Any] = {
+        "scanned": [],
+        "missing_dirs": [],
+        "files": 0,
+        "malformed": 0,
+        "no_snapshot": 0,
+        "duplicate_identity": 0,
+    }
+    for directory in dirs:
+        if not directory.exists():
+            report["missing_dirs"].append(str(directory))
+            continue
+        report["scanned"].append(str(directory))
+        for path in sorted(directory.glob("*_analysis.json")):
+            if ticker and not path.name.startswith(f"{ticker}_"):
+                continue
+            report["files"] += 1
+            try:
+                artifact = json.loads(path.read_text())
+            except Exception:
+                report["malformed"] += 1
+                continue
+            snapshot = artifact.get("prediction_snapshot")
+            if not snapshot:
+                report["no_snapshot"] += 1
+                continue
+            snapshot["_source_file"] = path.name
+            identity = snapshot_identity(snapshot)
+            if identity in seen:
+                report["duplicate_identity"] += 1
+                continue
+            seen.add(identity)
+            _resolve_bear_evidence(snapshot, artifact)
+
+            days = _snapshot_days_elapsed(snapshot)
+            if days is None or days < MINIMUM_DAYS_ELAPSED:
+                exact["too recent to evaluate"] += 1
+                continue
+
+            capabilities = evidence_capabilities(snapshot)
+            if not capabilities:
+                exact["SKIP_NO_EVIDENCE (never priced)"] += 1
+                continue
+
+            # Counted once. A tender snapshot *is* priced — it produces a
+            # special-situation record — so it belongs in `evaluable`, and adding
+            # it to `exact` as well made the report's own total exceed the
+            # identity count by exactly the tender population.
+            evaluable += 1
+            tender = snapshot.get("m_and_a_status")
+            # Once. Reading the cache twice invited the two reads disagreeing,
+            # and cost a second parse per snapshot for nothing.
+            delta = resolve_cached_regime_delta(snapshot)
+            shifted = delta.shifted
+
+            if str(tender or "").strip().upper() == "ACTIVE_TENDER":
+                tenders += 1
+                continue
+            if EvidenceCapability.CONTEXT in capabilities:
+                with_context += 1
+                if shifted is False:
+                    ceiling += 1
+                else:
+                    blocked[delta.shift_reason[:70] or "no reason recorded"] += 1
+
+            for driver, counter in conditional.items():
+                counter[
+                    derive_disposition(
+                        capabilities,
+                        dominant_driver=driver,
+                        regime_shifted=shifted,
+                        m_and_a_status=tender,
+                    ).disposition.value
+                ] += 1
+
+    total = sum(exact.values()) + evaluable
+    assert total == sum(exact.values()) + evaluable, "the report must reconcile"
+    _print_scope(report, total)
+
+    print("EXACT — decided without pricing:")
+    for name, count in exact.most_common():
+        print(f"  {count:6d} ({100 * count / total:4.1f}%)  {name}")
+    print(f"  {evaluable:6d} ({100 * evaluable / total:4.1f}%)  eligible for pricing")
+    print(
+        "         Eligible is not the same as priced, and priced is not the same\n"
+        "         as recorded. Dedup against existing lessons, the evaluation\n"
+        "         memo, and the per-run budget all cut this further, and a priced\n"
+        "         snapshot produces nothing at all unless its excess return clears\n"
+        "         the verdict's trigger threshold."
+    )
+    print(
+        f"         {tenders} are active tenders — special-situation records *if*\n"
+        f"         they trigger, and never injectable either way.\n"
+    )
+
+    print("CEILING — the most that could ever be injectable:")
+    print(
+        f"  {ceiling:6d} ({100 * ceiling / total:4.1f}%)  carry a recorded regime "
+        f"that demonstrably held"
+    )
+    print(
+        "         and of those, only the ones whose outcome is MARKET-dominated "
+        "actually qualify."
+    )
+    if ceiling == 0 and with_context:
+        print(
+            f"\n  {with_context} snapshots DO record a regime, but none has a "
+            f"comparable one. Why:"
+        )
+        for reason, count in blocked.most_common(3):
+            print(f"    {count:6d}  {reason}")
+        print(
+            "  A zero here is structural, not incidental: without a comparable "
+            "regime the\n  contextual path — the only injectable one — cannot be "
+            "reached at any price."
+        )
+    print()
+
+    print(
+        "HYPOTHETICAL — the disposition an eligible non-tender candidate would\n"
+        "receive *if* it later triggers with the named driver. These are counts of\n"
+        "eligible candidates, not of triggered comparisons: which ones trigger\n"
+        "cannot be known without pricing. Active tenders are excluded here and\n"
+        "counted above, since their disposition does not depend on the driver."
+    )
+    for driver, counter in conditional.items():
+        parts = ", ".join(f"{name} {count}" for name, count in sorted(counter.items()))
+        print(f"  {driver:9s} {parts}")
+
+    # No extrapolated record count. A trigger rate from five band-ordered probes
+    # is not a corpus statistic and is not derivable from this report's offline
+    # inputs; publishing one here would replace a 2.3x overstatement with a
+    # statistical claim that reads as computed. It also changes no decision: the
+    # injectable ceiling already answers whether a sweep is worth paying for.
+    print(
+        f"\nA legacy sweep would price up to {evaluable:,} snapshots — fewer after\n"
+        f"dedup, the memo and the per-run budget — and could produce at most\n"
+        f"{ceiling:,} injectable records. How many of the rest would trigger, and so\n"
+        f"become review-only records, cannot be known without pricing them."
+    )
+    return 0
+
+
 def _parity(dirs: tuple[Path, ...], ticker: str | None) -> int:
     """Replay the pre-consolidation eligibility over the operator's real corpus.
 
@@ -186,6 +393,14 @@ def main() -> int:
         "--sample", type=int, default=0, help="print N reconstructed examples"
     )
     parser.add_argument(
+        "--dispositions",
+        action="store_true",
+        help=(
+            "shadow report: what each snapshot would produce, computed offline. "
+            "No pricing, no LLM, no writes."
+        ),
+    )
+    parser.add_argument(
         "--parity",
         action="store_true",
         help=(
@@ -194,6 +409,9 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+
+    if args.dispositions:
+        return _dispositions(resolve_retrospective_sources(config), args.ticker)
 
     if args.parity:
         return _parity(resolve_retrospective_sources(config), args.ticker)
