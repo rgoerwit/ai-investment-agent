@@ -9,7 +9,12 @@ from typing import Any
 import structlog
 
 from src.data_block_utils import extract_last_data_block
-from src.validators.metric_extractor import parse_ratio_or_percent
+from src.validators.metric_extractor import (
+    read_block_enum,
+    read_block_float,
+    read_block_leading_float,
+    read_block_ratio,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -216,6 +221,15 @@ _CONSULTANT_GROWTH_QUALITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
+# Sibling of `financial_rules._TRANSIENT_STRENGTH_PATTERNS` (exposed as
+# `contains_transient_strength_marker`) -- they share the "legal settlement|settlement
+# gain" line verbatim and overlap on the others. Deliberately NOT merged: that set
+# classifies whether the *issuer's* reported strength is non-recurring and is much wider
+# (CJK subsidy terms, tax credits, regime benefits); this one only scans *consultant
+# prose* for a mention, and its final entry names "restructuring charge" -- a cost --
+# where the sibling names "one-time gain". Widening this scan to the full vocabulary
+# would change what the consultant flags with no evidence that it should.
+# If you edit one list, read the other and decide explicitly.
 _CONSULTANT_TRANSIENT_STRENGTH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"\b(?:one-time|non-recurring|nonoperating|non-operating)\b", re.IGNORECASE
@@ -555,15 +569,11 @@ def extract_capital_efficiency_signals(fundamentals_report: str) -> dict[str, An
     if not data_block:
         return {}
 
-    roic_quality_match = re.search(
-        r"ROIC_QUALITY:\s*(STRONG|ADEQUATE|WEAK|DESTRUCTIVE|N/A)",
-        data_block,
-        re.IGNORECASE,
+    roic_quality = read_block_enum(
+        data_block, "ROIC_QUALITY", ("STRONG", "ADEQUATE", "WEAK", "DESTRUCTIVE")
     )
-    if roic_quality_match:
-        value = roic_quality_match.group(1).upper()
-        if value != "N/A":
-            signals["roic_quality"] = value
+    if roic_quality:
+        signals["roic_quality"] = roic_quality
 
     leverage_quality_match = re.search(
         r"LEVERAGE_QUALITY:\s*(GENUINE|CONSERVATIVE|SUSPECT|ENGINEERED|VALUE_DESTRUCTION|N/A)",
@@ -600,46 +610,31 @@ def extract_capital_efficiency_signals(fundamentals_report: str) -> dict[str, An
         ("NET_CASH_TO_MARKET_CAP", "net_cash_to_market_cap"),
         ("CASH_TO_ASSETS", "cash_to_assets"),
     ):
-        match = re.search(rf"{field}:\s*([^\n]+)", data_block, re.IGNORECASE)
-        if match:
-            value = parse_ratio_or_percent(match.group(1))
-            if value is not None:
-                signals[key] = value
+        value = read_block_ratio(data_block, field)
+        if value is not None:
+            signals[key] = value
 
-    capex_to_da_match = re.search(r"CAPEX_TO_DA:\s*([^\n]+)", data_block, re.IGNORECASE)
-    if capex_to_da_match:
-        raw_value = capex_to_da_match.group(1).strip()
-        if raw_value.upper() != "N/A":
-            try:
-                signals["capex_to_da"] = float(raw_value)
-            except ValueError:
-                pass
+    capex_to_da = read_block_float(data_block, "CAPEX_TO_DA")
+    if capex_to_da is not None:
+        signals["capex_to_da"] = capex_to_da
 
-    capex_status_match = re.search(
-        r"CAPEX_TO_DA_STATUS:\s*(UNDERINVESTING|MAINTENANCE|GROWTH_INVESTING|N/A)",
+    capex_status = read_block_enum(
         data_block,
-        re.IGNORECASE,
+        "CAPEX_TO_DA_STATUS",
+        ("UNDERINVESTING", "MAINTENANCE", "GROWTH_INVESTING"),
     )
-    if capex_status_match:
-        value = capex_status_match.group(1).upper()
-        if value != "N/A":
-            signals["capex_to_da_status"] = value
+    if capex_status:
+        signals["capex_to_da_status"] = capex_status
 
-    backlog_coverage_match = re.search(
-        r"REVENUE_BACKLOG_COVERAGE:\s*([0-9]+(?:\.\d+)?)", data_block, re.IGNORECASE
-    )
-    if backlog_coverage_match:
-        signals["revenue_backlog_coverage"] = float(backlog_coverage_match.group(1))
+    backlog_coverage = read_block_leading_float(data_block, "REVENUE_BACKLOG_COVERAGE")
+    if backlog_coverage is not None:
+        signals["revenue_backlog_coverage"] = backlog_coverage
 
-    capital_plan_match = re.search(
-        r"CAPITAL_PLAN_STATUS:\s*(EXPLICIT|NONE|UNKNOWN|N/A)",
-        data_block,
-        re.IGNORECASE,
+    capital_plan = read_block_enum(
+        data_block, "CAPITAL_PLAN_STATUS", ("EXPLICIT", "NONE", "UNKNOWN")
     )
-    if capital_plan_match:
-        value = capital_plan_match.group(1).upper()
-        if value != "N/A":
-            signals["capital_plan_status"] = value
+    if capital_plan:
+        signals["capital_plan_status"] = capital_plan
 
     cash_persistence_match = re.search(
         r"CASH_EXCESS_PERSISTENCE:\s*"

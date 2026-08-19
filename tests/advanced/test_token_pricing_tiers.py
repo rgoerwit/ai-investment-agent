@@ -356,9 +356,10 @@ class TestCachedTokenExtraction:
 
 
 class TestUnknownModelWarning:
-    def test_unknown_model_uses_default_and_warns_once(self, caplog):
+    def test_unknown_model_is_unpriced_and_warns_once(self, caplog):
         _warned_unknown_pricing_models.discard("totally-new-model")
         assert _lookup_model_pricing("totally-new-model") is DEFAULT_PRICING_PER_1M
+        assert DEFAULT_PRICING_PER_1M == {"prompt": 0.0, "completion": 0.0}
         assert "totally-new-model" in _warned_unknown_pricing_models
         # Second lookup does not duplicate the warning entry
         _lookup_model_pricing("totally-new-model")

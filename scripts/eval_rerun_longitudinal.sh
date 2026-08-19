@@ -38,13 +38,44 @@ if [[ -n "$TICKER_FILE" ]]; then
         echo "Ticker file not found: $TICKER_FILE" >&2
         exit 1
     fi
-    mapfile -t TICKERS < <(grep -v '^[[:space:]]*#' "$TICKER_FILE" | grep -v '^[[:space:]]*$')
+    # Read with a while-loop, not `mapfile`: this script's shebang is
+    # /bin/bash, which on macOS is bash 3.2 where mapfile does not exist. Under
+    # `set -e` that aborted the whole run the moment a ticker file was passed,
+    # so the documented option had never actually worked here.
+    # Trim surrounding whitespace in the pipeline: a stray trailing space would
+    # otherwise reach --ticker verbatim and fail the analysis.
+    TICKERS=()
+    while IFS= read -r ticker_line; do
+        [[ -n "$ticker_line" ]] && TICKERS+=("$ticker_line")
+    done < <(
+        grep -v '^[[:space:]]*#' "$TICKER_FILE" |
+            sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' |
+            grep -v '^$'
+    )
+    if [[ ${#TICKERS[@]} -eq 0 ]]; then
+        echo "No tickers found in $TICKER_FILE (all lines blank or commented)" >&2
+        exit 1
+    fi
 else
     TICKERS=("${DEFAULT_TICKERS[@]}")
 fi
 
+# Mode. Full is the default because most of the retained history was run that
+# way, so a full re-run is the like-for-like comparison. `QUICK_MODE=1` runs the
+# same ticker set through the screener tier instead -- the point of that pass is
+# to check that quick degrades *gracefully* (fewer/shallower artifacts, verdicts
+# qualified as screening candidates) rather than failing closed. The mode is
+# stamped into the output directory name so the two passes never collide.
+QUICK_MODE="${QUICK_MODE:-0}"
+MODE_ARGS=()
+MODE_LABEL="full"
+if [[ "$QUICK_MODE" != "0" ]]; then
+    MODE_ARGS=(--quick)
+    MODE_LABEL="quick"
+fi
+
 RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
-OUT_DIR="scratch/eval_rerun_${RUN_STAMP}"
+OUT_DIR="scratch/eval_rerun_${MODE_LABEL}_${RUN_STAMP}"
 IMAGE_DIR="${OUT_DIR}/images"
 LOG_FILE="${OUT_DIR}/run.log"
 SUMMARY_FILE="${OUT_DIR}/SUMMARY.md"
@@ -73,13 +104,14 @@ fi
 {
     echo "# Longitudinal re-evaluation run"
     echo "Started: $(date)"
+    echo "Mode: ${MODE_LABEL}"
     echo "Tickers: ${TICKERS[*]}"
     echo ""
     echo "| Ticker | Status | Report |"
     echo "|---|---|---|"
 } > "$SUMMARY_FILE"
 
-echo "=== Longitudinal re-evaluation: ${#TICKERS[@]} tickers ===" | tee -a "$LOG_FILE"
+echo "=== Longitudinal re-evaluation (${MODE_LABEL}): ${#TICKERS[@]} tickers ===" | tee -a "$LOG_FILE"
 echo "Output dir: $OUT_DIR" | tee -a "$LOG_FILE"
 
 n=0
@@ -94,13 +126,26 @@ for ticker in "${TICKERS[@]}"; do
 
     if "${PYTHON_CMD[@]}" -m src.main --ticker "$ticker" \
             --imagedir "$IMAGE_DIR" --output "$REPORT_PATH" \
+            "${MODE_ARGS[@]+"${MODE_ARGS[@]}"}" \
             --quiet --brief >> "$LOG_FILE" 2>&1; then
         if VALIDITY_RESULT="$("${PYTHON_CMD[@]}" scripts/scan_batch_health.py \
                 --modified-since "$ANALYSIS_STARTED_AT" \
                 --require-publishable-ticker "$ticker" 2>> "$LOG_FILE")"; then
-            echo "OK: $ticker" | tee -a "$LOG_FILE"
+            # A publishable run can still be degraded (a failed optional
+            # cross-check seat). scan_batch_health reports that in `detail`;
+            # surfacing it here is what keeps a silent provider outage from
+            # reading as a clean batch. Status stays OK -- this is not a failure.
+            DEGRADED="$(printf '%s' "$VALIDITY_RESULT" | "${PYTHON_CMD[@]}" -c \
+                'import json,sys; print(json.load(sys.stdin).get("detail","") or "")' \
+                2>/dev/null || true)"
+            if [[ -n "$DEGRADED" ]]; then
+                echo "OK (degraded): $ticker — $DEGRADED" | tee -a "$LOG_FILE"
+                echo "| $ticker | OK (degraded) | [$ticker.md](./${ticker}.md); $DEGRADED |" >> "$SUMMARY_FILE"
+            else
+                echo "OK: $ticker" | tee -a "$LOG_FILE"
+                echo "| $ticker | OK | [$ticker.md](./${ticker}.md) |" >> "$SUMMARY_FILE"
+            fi
             echo "$VALIDITY_RESULT" >> "$LOG_FILE"
-            echo "| $ticker | OK | [$ticker.md](./${ticker}.md) |" >> "$SUMMARY_FILE"
         else
             echo "INCOMPLETE: $ticker (diagnostic output retained)" | tee -a "$LOG_FILE"
             echo "$VALIDITY_RESULT" >> "$LOG_FILE"

@@ -13,9 +13,17 @@ Run with: pytest tests/test_legal_counsel.py -v
 """
 
 import json
+import re
 
+from src.agents.consultant_nodes import _build_legal_fallback_report
+from src.eval.prompt_contracts import prompt_text
 from src.runtime_diagnostics import ArtifactStatus
 from src.validators.red_flag_detector import RedFlagDetector
+from src.validators.supplemental_extractors import (
+    CMIC_STATUS_TOKENS,
+    PFIC_STATUS_TOKENS,
+    VIE_STRUCTURE_TOKENS,
+)
 
 
 class TestLegalRiskExtraction:
@@ -918,3 +926,74 @@ class TestLegalJsonFallbackVisibility:
             event == "legal_report_json_parse_failed_using_regex_fallback"
             for event, _ in recorder.events
         )
+
+
+class TestLegalStatusEnumsAreNotInterchangeable:
+    """Edge case: three sibling status fields, three *different* vocabularies.
+
+    ``pfic_status``, ``vie_structure`` and ``cmic_status`` sit adjacent in the
+    same JSON payload and read like one enum, but they are three. ``UNCERTAIN``
+    is legal for PFIC and CMIC and illegal for VIE; ``CLEAN`` belongs to PFIC
+    and ``CLEAR`` to CMIC -- near-homographs with different owners. A patch that
+    filled all three with ``UNCERTAIN`` was written and caught during review in
+    Aug 2026, so this is a demonstrated confusion, not a hypothetical one.
+
+    These assert the *shape* of the vocabularies rather than any single token,
+    so they keep holding as tokens are added.
+    """
+
+    def test_each_field_owns_a_distinct_vocabulary(self):
+        assert PFIC_STATUS_TOKENS != VIE_STRUCTURE_TOKENS
+        assert CMIC_STATUS_TOKENS != VIE_STRUCTURE_TOKENS
+        assert PFIC_STATUS_TOKENS != CMIC_STATUS_TOKENS
+
+    def test_na_is_the_only_token_all_three_share(self):
+        """If a second token ever became universal, a swap would stop being visible."""
+        shared = (
+            set(PFIC_STATUS_TOKENS)
+            & set(VIE_STRUCTURE_TOKENS)
+            & set(CMIC_STATUS_TOKENS)
+        )
+        assert shared == {"N/A"}
+
+    def test_uncertain_is_not_a_vie_token(self):
+        """The exact mis-fill that was caught: VIE is YES/NO/N/A, with no hedge."""
+        assert "UNCERTAIN" in PFIC_STATUS_TOKENS
+        assert "UNCERTAIN" in CMIC_STATUS_TOKENS
+        assert "UNCERTAIN" not in VIE_STRUCTURE_TOKENS
+
+    def test_clean_and_clear_are_not_the_same_token(self):
+        """Near-homographs: PFIC says CLEAN, CMIC says CLEAR. Neither accepts the other."""
+        assert "CLEAN" in PFIC_STATUS_TOKENS and "CLEAN" not in CMIC_STATUS_TOKENS
+        assert "CLEAR" in CMIC_STATUS_TOKENS and "CLEAR" not in PFIC_STATUS_TOKENS
+
+    def test_legal_counsel_prompt_offers_exactly_the_code_vocabulary(self):
+        """Prompt/parser drift here is silent: an off-enum token extracts as absent."""
+        text = prompt_text("legal_counsel")
+        for field, allowed in (
+            ("pfic_status", PFIC_STATUS_TOKENS),
+            ("vie_structure", VIE_STRUCTURE_TOKENS),
+            ("cmic_status", CMIC_STATUS_TOKENS),
+        ):
+            match = re.search(rf'"{field}"\s*:\s*"([^"]+)"', text)
+            assert match, f"{field} not advertised in the legal_counsel prompt"
+            offered = {t.strip() for t in match.group(1).split("|")}
+            assert offered == set(allowed), (
+                f"{field}: prompt offers {sorted(offered)}, code accepts {sorted(allowed)}"
+            )
+
+    def test_unavailable_fallback_leaves_every_status_null(self):
+        """A provider outage must not mint findings in any of the three fields.
+
+        detect_legal_flags keys on artifact_status.ok, so the stub's job is to
+        stay silent; filling these in would both manufacture findings and, for
+        VIE, write an off-enum token.
+        """
+        payload = json.loads(
+            _build_legal_fallback_report(
+                ticker="TEST.T", country="Japan", sector="Industrials", reason="timeout"
+            )
+        )
+        assert payload["pfic_status"] is None
+        assert payload["vie_structure"] is None
+        assert payload["cmic_status"] is None

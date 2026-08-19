@@ -8,6 +8,7 @@ of existing system behavior when consultant is enabled/disabled.
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from langchain_core.messages import ToolMessage
 from langgraph.types import RunnableConfig
 
 from src.agents import create_consultant_node, create_portfolio_manager_node
@@ -650,8 +651,15 @@ class TestConsultantNodeExecution:
         assert result["consultant_review"] == ""
 
     @pytest.mark.asyncio
-    async def test_consultant_suppresses_repeated_fmp_alt_calls_after_failure(self):
-        """Managed FMP alt-source unavailability should not poison consultant validity."""
+    async def test_managed_fmp_unavailability_does_not_poison_validity(self):
+        """Managed FMP alt-source unavailability should not poison consultant validity.
+
+        The turn runs concurrently, so a second ``spot_check_metric_alt`` in the
+        *same* batch is issued rather than pre-skipped — every task reads the
+        pre-turn cooldown state. What must hold regardless is that a managed
+        provider outage is not counted as a verification failure; the cross-turn
+        skip is covered by the sibling test below.
+        """
         mock_tool_bound_llm = Mock()
         mock_llm = Mock()
         mock_llm.bind_tools.return_value = mock_tool_bound_llm
@@ -697,12 +705,14 @@ class TestConsultantNodeExecution:
         mock_filings_tool.name = "get_official_filings"
         mock_filings_tool.ainvoke = AsyncMock()
 
+        fmp_auth_error = '{"error":"FMP alt-source unavailable","provider":"fmp","failure_kind":"auth_error","retryable":false}'
         exec_mock = AsyncMock(
             side_effect=[
-                ToolResult(
-                    value='{"error":"FMP alt-source unavailable","provider":"fmp","failure_kind":"auth_error","retryable":false}'
-                ),
+                ToolResult(value=fmp_auth_error),
                 ToolResult(value="official-filings-result"),
+                # A live FMP outage answers the same way for every call in the
+                # batch; both are classified as managed unavailability.
+                ToolResult(value=fmp_auth_error),
             ]
         )
 
@@ -743,19 +753,134 @@ class TestConsultantNodeExecution:
 
                     result = await consultant_node(state, config)
 
-        assert exec_mock.await_count == 2
+        # All three calls in the batch are issued concurrently.
+        assert exec_mock.await_count == 3
         final_messages = mock_invoke.last_messages
         assert final_messages is not None
-        skipped_tool_messages = [
+        # Every requested call still gets its ToolMessage, in request order.
+        assert [
+            getattr(message, "tool_call_id", "")
+            for message in final_messages
+            if isinstance(message, ToolMessage)
+        ] == ["alt_1", "filings_1", "alt_2"]
+        assert result["consultant_review"] == "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
+        # The load-bearing invariant: a managed provider outage is not a
+        # verification failure, so it cannot push the review past the partial
+        # ratio and out of the PM's inputs.
+        assert result["consultant_tool_failures"] == 0
+        assert result["artifact_statuses"]["consultant_review"]["ok"] is True
+
+    @pytest.mark.asyncio
+    async def test_fmp_cooldown_persists_across_turns(self):
+        """An FMP failure in turn 1 pre-skips spot_check_metric_alt in turn 2.
+
+        This is the half of the cooldown that concurrency preserves, and the
+        half that matters: an auth failure is sticky, so re-issuing the call in
+        a later round would spend budget on a known-dead provider.
+        """
+        mock_llm = Mock()
+        mock_llm.bind_tools.return_value = Mock()
+
+        def _turn(alt_id: str, filings_id: str) -> Mock:
+            response = Mock()
+            response.content = ""
+            response.tool_calls = [
+                {
+                    "name": "spot_check_metric_alt",
+                    "args": {"ticker": "0005.HK", "metric": "operatingCashflow"},
+                    "id": alt_id,
+                },
+                {
+                    "name": "get_official_filings",
+                    "args": {"ticker": "0005.HK"},
+                    "id": filings_id,
+                },
+            ]
+            return response
+
+        final_response = Mock()
+        final_response.content = "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
+        final_response.tool_calls = []
+        turns = [_turn("alt_1", "filings_1"), _turn("alt_2", "filings_2")]
+
+        async def mock_invoke(*args, **kwargs):
+            if mock_invoke.calls < len(turns):
+                response = turns[mock_invoke.calls]
+                mock_invoke.calls += 1
+                return response
+            mock_invoke.last_messages = args[1]
+            return final_response
+
+        mock_invoke.calls = 0
+        mock_invoke.last_messages = None
+
+        mock_alt_tool = Mock()
+        mock_alt_tool.name = "spot_check_metric_alt"
+        mock_alt_tool.ainvoke = AsyncMock()
+        mock_filings_tool = Mock()
+        mock_filings_tool.name = "get_official_filings"
+        mock_filings_tool.ainvoke = AsyncMock()
+
+        exec_mock = AsyncMock(
+            side_effect=[
+                ToolResult(
+                    value='{"error":"FMP alt-source unavailable","provider":"fmp","failure_kind":"auth_error","retryable":false}'
+                ),
+                ToolResult(value="official-filings-result"),
+                # Turn 2: only the filings call reaches the tool service — the
+                # alt call is answered from the cooldown without executing.
+                ToolResult(value="official-filings-result-2"),
+            ]
+        )
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling", new=mock_invoke
+        ):
+            with patch("src.prompts.get_prompt") as mock_get_prompt:
+                tool_service = Mock()
+                tool_service.execute = exec_mock
+                with patch(
+                    "src.agents.consultant_nodes.get_current_tool_service",
+                    return_value=tool_service,
+                ):
+                    mock_prompt = Mock()
+                    mock_prompt.system_message = "You are a consultant."
+                    mock_prompt.agent_name = "External Consultant"
+                    mock_get_prompt.return_value = mock_prompt
+
+                    consultant_node = create_consultant_node(
+                        mock_llm,
+                        "consultant",
+                        tools=[mock_alt_tool, mock_filings_tool],
+                    )
+                    state = {
+                        "company_of_interest": "0005.HK",
+                        "company_name": "HSBC Holdings",
+                        "market_report": "Report",
+                        "sentiment_report": "Report",
+                        "news_report": "Report",
+                        "fundamentals_report": "Report",
+                        "investment_debate_state": {"history": "Debate"},
+                        "investment_plan": "Plan",
+                    }
+                    result = await consultant_node(
+                        state,
+                        RunnableConfig(
+                            configurable={"context": Mock(trade_date="2025-12-13")}
+                        ),
+                    )
+
+        # 2 executions in turn 1 + 1 in turn 2: the second alt call never ran.
+        assert exec_mock.await_count == 3
+        final_messages = mock_invoke.last_messages
+        assert final_messages is not None
+        skipped = [
             message.content
             for message in final_messages
             if getattr(message, "tool_call_id", "") == "alt_2"
         ]
-        assert skipped_tool_messages
-        assert '"skipped": true' in skipped_tool_messages[0].lower()
-        assert result["consultant_review"] == "CONSULTANT REVIEW: CONDITIONAL APPROVAL"
+        assert skipped and '"skipped": true' in skipped[0].lower()
         assert result["consultant_tool_failures"] == 0
-        assert result["artifact_statuses"]["consultant_review"]["ok"] is True
 
     @pytest.mark.asyncio
     async def test_consultant_finalizes_after_fully_suppressed_iteration(self):
@@ -1589,6 +1714,8 @@ class TestConsultantQuickMode:
             callbacks=None,
             quick_mode=True,
             max_completion_tokens=2048,
+            model=None,
+            settings=mock_config,
         )
 
     def test_get_consultant_llm_does_not_reuse_wrong_mode_instance(self):

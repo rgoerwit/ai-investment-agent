@@ -39,7 +39,8 @@ All monetary fields follow a strict naming convention to prevent
 cross-currency arithmetic bugs:
 
   _local  suffix → value is in the stock's TRADING currency
-                   (JPY for 7203.T, HKD for 0005.HK, GBX for .L, etc.)
+                   (JPY for 7203.T, HKD for 0005.HK, and whatever code the
+                   broker reports for .L — see the denomination note below)
   _usd    suffix → value has been converted to USD (using fx_rate_to_usd)
   (no suffix)    → either a ratio / percentage, or clearly context-only
 
@@ -53,15 +54,26 @@ missing, `src.ibkr.reconciliation_rules._resolve_fx()` applies a hardcoded
 fallback from `src.fx_normalization.FALLBACK_RATES_TO_USD`, logging a warning.
 If neither source provides a trustworthy non-USD rate, order sizing fails closed.
 
-## GBX (British pence) note
+## Minor-unit denominations (GBp / GBX) note
 ----------------------------------------------------------------------
-IBKR reports London Stock Exchange prices in GBP (pounds).  The
-portfolio reader (`src/ibkr/portfolio.py`) multiplies them by 100 so
-that `current_price_local` and `avg_cost_local` on NormalizedPosition
-are in GBX (pence), matching the prices yfinance and the Trader agent
-emit.  After the conversion `NormalizedPosition.currency` is set to
-"GBX", not "GBP".  `market_value_usd` is computed from IBKR's
-GBP-denominated `mktValue` (before the ×100) so it is correct.
+CORRECTED Aug 2026.  This section previously said the portfolio reader
+multiplies London prices by 100 and sets `currency` to "GBX" rather than
+"GBP".  That ×100 was **deleted**: it was a guess standing in for a
+currency code that upstream layers had already computed and discarded.
+
+The rule now is: **never discard the currency code you were given, never
+convert speculatively, and let the code decide the scale at the one point
+a common basis is needed.**  `GBp` is not a unit *of* `GBP`; it is its own
+currency code, and `fx_normalization` treats it as first class
+(`get_fx_rate_fallback("GBp")` returns 1/100th of the `GBP` rate).
+
+So `NormalizedPosition.currency` carries whatever the broker reported —
+for GAMA.L today that is "GBP" with `current_price_local` of 9.7587
+(pounds), not 975.87 (pence).  Comparisons convert by code via
+`comparable_prices`, and only when the two codes name the same economy.
+
+Do NOT reintroduce a venue-keyed ×100 anywhere; `tests/financial/
+test_minor_unit_denomination.py` AST-scans for exactly that.
 ----------------------------------------------------------------------
 """
 
@@ -80,11 +92,13 @@ class NormalizedPosition(BaseModel):
 
     Denomination contract
     ─────────────────────
-    • avg_cost_local     – average cost in LOCAL currency (GBX for .L stocks)
+    • avg_cost_local     – average cost in LOCAL currency, as the broker reports it
     • current_price_local – latest price in LOCAL currency
     • market_value_usd   – position value in USD (converted via IBKR/fallback FX)
     • unrealized_pnl_usd – running P&L in USD
-    • currency           – ISO code for the LOCAL currency ("GBX" not "GBP" for .L)
+    • currency           – ISO code for the LOCAL currency, preserved verbatim
+                           from the broker (minor-unit codes like "GBp"/"GBX"
+                           are distinct currencies, never case-folded to "GBP")
 
     The value-basis fields record whether the broker supplied a value in USD
     or whether normalization converted it from local currency. Invalid or
@@ -252,11 +266,31 @@ class AnalysisRecord(BaseModel):
     currency_repaired: bool = False
     currency_repair_reason: str | None = None
     trade_block: TradeBlockData = Field(default_factory=TradeBlockData)
-    # Snapshot fields (may be missing in older analyses)
+    # Snapshot fields (may be missing in older analyses).
+    #
+    # These are nulled at load when they do not share a scale with
+    # `current_price` — see `price_levels_coherent` below. Every consumer already
+    # guards on None, so refusing them here is what keeps a mis-scaled level out
+    # of drift, drawdown, dip and breach arithmetic.
     entry_price: float | None = None  # LOCAL currency
     stop_price: float | None = None  # LOCAL currency
     target_1_price: float | None = None  # LOCAL currency
     target_2_price: float | None = None  # LOCAL currency
+    # Tri-state, and the third state is load-bearing:
+    #   True  — assessed against this record's own price, and consistent
+    #   False — contradicted its price scale and was discarded (GAMA.L: a
+    #           9.76 GBP price against 900/750/1150 pence levels, all "GBP")
+    #   None  — NOT ASSESSABLE (no usable reference price, or no levels)
+    # None must never collapse into True. "I could not check" is not "I checked
+    # and it was fine" — the same distinction `is_quick_mode` carries, and the
+    # one `assess_price_level_coherence` returns as UNASSESSED.
+    # Defaults to None, not True: a record built directly (tests, legacy
+    # deserialization, any path that does not run the loader's check) has NOT
+    # been assessed, and claiming True there is the same manufactured-clean-
+    # result error the tri-state exists to prevent. The loader always sets this
+    # explicitly, so nothing that actually checks is affected.
+    price_levels_coherent: bool | None = None
+    price_levels_incoherent_reason: str | None = None
     conviction: str = ""
     sector: str = ""  # GICS sector (e.g. "Industrials"), if available in snapshot
     exchange: str = ""  # Exchange suffix (e.g. "HK", "T"), inferred from ticker

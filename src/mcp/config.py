@@ -119,7 +119,10 @@ def load_registry(path: Path, *, required: bool = False) -> list[MCPServerSpec]:
     if required and not result:
         raise ValueError(f"MCP registry is empty: {path}")
 
-    if required and not any(server.enabled for server in result):
-        raise ValueError(f"MCP registry contains no enabled servers: {path}")
-
+    # A registry whose servers are all disabled is a legitimate state, not an
+    # error: MCP_ENABLED=true with nothing currently wired up simply exposes no
+    # MCP tools. Rejecting it meant the only way to retire the last server was
+    # to also remember to flip MCP_ENABLED, and getting that wrong produced a
+    # warning every run. A missing or empty *file* is still an error, because
+    # that means MCP_SERVERS_PATH points somewhere wrong.
     return result

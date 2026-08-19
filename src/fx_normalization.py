@@ -11,8 +11,11 @@ UPDATED: Dec 2025 - Aligned with modern yfinance patterns
 """
 
 import asyncio
+import math
 import time
 from collections.abc import Iterable
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 import structlog
@@ -155,6 +158,30 @@ FALLBACK_RATES_TO_USD = {
 }
 
 
+def canonical_currency_code(currency: str | None) -> str | None:
+    """Upper-case a currency code WITHOUT collapsing minor-unit denominations.
+
+    ``"GBp".upper()`` is ``"GBP"`` — a different currency scaled 100x. A plain
+    ``.upper()`` at a resolution boundary is therefore how a pence quote
+    silently becomes a pounds quote (the GAMA.L false-review bug, Aug 2026).
+    Registered minor-unit aliases keep their canonical spelling; everything else
+    is upper-cased as before, so ``"usd"`` still normalizes to ``"USD"``.
+
+    Matching is deliberately **case-sensitive**: ``"GBp"`` and ``"GBP"`` differ
+    only in case, so a case-insensitive lookup would map pounds onto pence. An
+    exact alias hit is preserved; anything else upper-cases, which still lands
+    ``"gbx"`` on the ``"GBX"`` alias and leaves ``"gbp"`` as ordinary pounds.
+    """
+    if not currency:
+        return None
+    stripped = currency.strip()
+    if not stripped:
+        return None
+    if stripped in MINOR_UNIT_CURRENCY_ALIASES:
+        return stripped
+    return stripped.upper()
+
+
 def normalize_minor_unit_currency(currency: str | None) -> tuple[str | None, float]:
     """Return major-unit currency code and scale factor for minor-unit aliases."""
     if not currency:
@@ -178,6 +205,167 @@ def normalize_minor_unit_amount(
 def is_near_minor_unit_ratio(ratio: float, tolerance: float = 0.10) -> bool:
     """Return True when a ratio is close to a 100x minor-unit mismatch."""
     return (100 * (1 - tolerance)) < ratio < (100 * (1 + tolerance))
+
+
+@dataclass(frozen=True, slots=True)
+class ComparablePrices:
+    """Two prices pulled to a common major-unit denomination.
+
+    ``left_scale`` is exposed so a caller holding *several* values on the left
+    side (an analysis carries entry, stop and two targets) can convert the rest
+    without re-deriving the factor.
+    """
+
+    left: float
+    right: float
+    left_scale: float
+    right_scale: float
+
+
+def comparable_prices(
+    left: float | None,
+    left_currency: str | None,
+    right: float | None,
+    right_currency: str | None,
+) -> ComparablePrices | None:
+    """Return both prices in major units, or ``None`` when not comparable.
+
+    Fails closed on three counts, each learned the hard way:
+
+    * **Unknown currency on either side.** Guessing a denomination is what the
+      GBp work exists to stop; an unlabelled price is left alone.
+    * **Different economies.** Converting one side of a mismatched pair (a GBX
+      position against a JPY-labelled analysis) manufactures a 100x ratio out of
+      data that was merely unrelated.
+    * **Non-positive prices**, which carry no scale information.
+
+    Note what this deliberately does *not* catch: two values that agree on a
+    currency code while disagreeing on scale, which is the GAMA.L defect. That
+    is a different question, answered by :func:`assess_price_level_coherence`.
+    Code agreement is necessary and not sufficient, so the two checks are
+    complementary and neither subsumes the other.
+    """
+    # isfinite first: NaN fails every comparison, so `not nan` and `nan <= 0`
+    # are both False and a NaN price would sail through both guards below and
+    # poison every downstream ratio silently.
+    if left is None or right is None:
+        return None
+    if not math.isfinite(left) or not math.isfinite(right):
+        return None
+    if left <= 0 or right <= 0:
+        return None
+    if not left_currency or not right_currency:
+        return None
+    left_major, left_scale = normalize_minor_unit_currency(left_currency)
+    right_major, right_scale = normalize_minor_unit_currency(right_currency)
+    if (left_major or "").upper() != (right_major or "").upper():
+        return None
+    return ComparablePrices(
+        left=left * left_scale,
+        right=right * right_scale,
+        left_scale=left_scale,
+        right_scale=right_scale,
+    )
+
+
+class PriceLevelCoherence(StrEnum):
+    """Whether derived price levels share a scale with their reference price."""
+
+    COHERENT = "COHERENT"
+    INCOHERENT = "INCOHERENT"
+    # No usable reference price. Deliberately NOT folded into COHERENT: an
+    # unknown must not be read as a clean bill of health (the `is_quick_mode`
+    # tri-state lesson). Callers leave the levels alone on this status.
+    UNASSESSED = "UNASSESSED"
+
+
+@dataclass(frozen=True, slots=True)
+class CoherenceVerdict:
+    """Result of :func:`assess_price_level_coherence`."""
+
+    status: PriceLevelCoherence
+    worst_ratio: float | None = None
+    reason: str = ""
+
+    @property
+    def is_incoherent(self) -> bool:
+        return self.status is PriceLevelCoherence.INCOHERENT
+
+
+# A derived level and the price it was derived from must share a scale. In
+# practice they differ by a currency's minor-unit factor: GAMA.L carried
+# CURRENT_PRICE 9.76 (GBP) with ENTRY 900 / STOP 750 (pence) in one artifact,
+# every value labelled GBP. Currency-code agreement cannot catch that — the
+# disagreement is a *scale* inside one code.
+#
+# The band is deliberately wide. A legitimate stretch target sits far inside
+# 20x, while every minor-unit mismatch is >=100x, so the gap between them is
+# large enough that this can only fire on genuine incoherence.
+PRICE_LEVEL_BAND = (0.05, 20.0)
+
+
+def assess_price_level_coherence(
+    reference_price: float | None,
+    levels: Iterable[float | None],
+) -> CoherenceVerdict:
+    """Judge whether ``levels`` are denominated like ``reference_price``.
+
+    Pure and side-effect free so the producer (the TRADE_BLOCK stamper) and the
+    reader (the analysis index) share one definition rather than two copies that
+    can drift apart.
+
+    A level outside the band cannot be *interpreted* — the TRADE_BLOCK carries no
+    denomination independent of the DATA_BLOCK, so there is no evidence for which
+    side is wrong. It can only be refused. Recovery by rescaling is deliberately
+    not offered: these values gate portfolio actions, and inferring authority
+    from missing evidence is the failure mode ``evidence_disposition`` exists to
+    prevent.
+    """
+    # A non-finite reference resolves UNASSESSED, not INCOHERENT: we could not
+    # check, which is different from having checked and found a contradiction.
+    # (NaN would otherwise produce NaN ratios, fail the band test, and report a
+    # confident-looking "incoherent" verdict about nothing.)
+    if (
+        reference_price is None
+        or not math.isfinite(reference_price)
+        or reference_price <= 0
+    ):
+        return CoherenceVerdict(
+            PriceLevelCoherence.UNASSESSED, reason="no usable reference price"
+        )
+    ratios = [
+        level / reference_price
+        for level in levels
+        if level and math.isfinite(level) and level > 0
+    ]
+    if not ratios:
+        return CoherenceVerdict(
+            PriceLevelCoherence.UNASSESSED, reason="no usable price levels"
+        )
+    low, high = PRICE_LEVEL_BAND
+    worst = max(ratios, key=lambda ratio: abs(_log_distance(ratio)))
+    if low <= worst <= high:
+        return CoherenceVerdict(PriceLevelCoherence.COHERENT, worst_ratio=worst)
+    # Test every ratio, not just the worst: a GAMA.L-shaped block spans 77x-118x,
+    # so the telltale ~100x sits on a different level than the extreme one.
+    hint = (
+        " (~100x — looks like a minor-unit/major-unit mismatch)"
+        if any(
+            is_near_minor_unit_ratio(ratio) or is_near_minor_unit_ratio(1 / ratio)
+            for ratio in ratios
+        )
+        else ""
+    )
+    return CoherenceVerdict(
+        PriceLevelCoherence.INCOHERENT,
+        worst_ratio=worst,
+        reason=(f"level/price ratio {worst:.4g} outside {low:g}-{high:g}x band{hint}"),
+    )
+
+
+def _log_distance(ratio: float) -> float:
+    """Distance from parity on a log scale, so 100x and 0.01x rank equally."""
+    return math.log(ratio) if ratio > 0 else 0.0
 
 
 def get_fx_rate_fallback(from_currency: str, to_currency: str = "USD") -> float | None:

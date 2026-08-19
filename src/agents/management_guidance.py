@@ -28,6 +28,7 @@ from src.earnings_baseline import (
     guidance_contract_value_is_uninterpretable,
 )
 from src.guidance_vocabulary import guidance_locale_policy
+from src.text_patterns import RESULT_ENVELOPE_BODY_RE, URL_RE
 
 from .evidence_preflight import (
     run_preflight_calls,
@@ -37,6 +38,28 @@ from .evidence_preflight import (
 logger = structlog.get_logger(__name__)
 
 GUIDANCE_PREFLIGHT_MAX_CHARS = 36_000
+
+# Evidence statuses that positively say the *search* fell short, as opposed to
+# the search running cleanly and finding that the company publishes no guidance.
+#
+# That difference decides whether NOT_DISCLOSED_AFTER_TARGETED_SEARCH survives.
+# It is the token for "this issuer does not guide" -- the normal case for ex-US
+# small caps -- and it deliberately does not raise
+# MANAGEMENT_GUIDANCE_EVIDENCE_GAP, which carries blocks_buy=True. The previous
+# rule demoted it unless some status equalled COVERAGE_COMPLETE_NO_MATCH, a
+# value no producer emits (0 of ~4,700 persisted artifacts), so the token was
+# unreachable and every ordinary absence was rewritten into a pipeline failure
+# that blocked the BUY. Aug 2026 measured 60% FOUND / 39% UNRESOLVED / 0%
+# NOT_DISCLOSED with the gap flag firing on 38.5% of runs against a 1.2% July
+# baseline.
+#
+# NO_RESULTS is deliberately NOT here: a targeted guidance search returning
+# nothing is the expected outcome for an issuer that does not guide, and reading
+# it as failure is the defect itself. Members are EvidenceStatus values from
+# src/tooling/evidence_recorder.py -- keep them in sync with that Literal.
+INCOMPLETE_SEARCH_EVIDENCE_STATUSES = frozenset(
+    {"UNAVAILABLE", "AUTH_ERROR", "INSUFFICIENT"}
+)
 
 GUIDANCE_PROMOTION_FIELDS: dict[str, str] = {
     "COVERAGE_STATUS": "GUIDANCE_COVERAGE_STATUS",
@@ -93,9 +116,7 @@ _NUMBER_TOKEN_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 def _matching_source_evidence(evidence: str, source_url: str) -> str:
     if not source_url:
         return ""
-    blocks: list[str] = re.findall(
-        r"(?is)<result\b[^>]*>(.*?)</result>", evidence or ""
-    )
+    blocks: list[str] = re.findall(RESULT_ENVELOPE_BODY_RE.pattern, evidence or "")
     for block in blocks:
         if source_url in block:
             return block
@@ -378,7 +399,7 @@ async def _preload_management_guidance_evidence(
         url.rstrip(".,;:!?)]}")
         for url in dict.fromkeys(
             re.findall(
-                r"https?://[^\s<>\"]+",
+                URL_RE.pattern,
                 rendered_outcomes,
             )
         )
@@ -450,9 +471,7 @@ async def _preload_management_guidance_evidence(
         ),
         "",
     )
-    guidance_candidate_urls = list(
-        dict.fromkeys(re.findall(r"https?://[^\s<]+", bridge_payload))
-    )[:3]
+    guidance_candidate_urls = list(dict.fromkeys(URL_RE.findall(bridge_payload)))[:3]
     if enable_extraction and guidance_candidate_urls:
         extraction_outcomes, extraction_durations = await run_preflight_calls(
             [
@@ -593,9 +612,8 @@ def normalize_management_guidance_output(
             "CODE_OWNED_PREFLIGHT",
         )
 
-    if (
-        coverage_status == "NOT_DISCLOSED_AFTER_TARGETED_SEARCH"
-        and "COVERAGE_COMPLETE_NO_MATCH" not in evidence_statuses.values()
+    if coverage_status == "NOT_DISCLOSED_AFTER_TARGETED_SEARCH" and (
+        INCOMPLETE_SEARCH_EVIDENCE_STATUSES & set(evidence_statuses.values())
     ):
         coverage_status = "UNRESOLVED_AFTER_TARGETED_SEARCH"
         block_body = replace_or_append_block_line(
@@ -671,7 +689,7 @@ def normalize_management_guidance_output(
         has_sourced_driver = (
             material_driver == "YES"
             and driver_type not in {"", "NONE", "UNKNOWN"}
-            and bool(re.fullmatch(r"https?://\S+", source_url, re.IGNORECASE))
+            and bool(URL_RE.fullmatch(source_url))
         )
         bridge_status = "RECONCILED" if has_sourced_driver else "UNRESOLVED"
         if not has_sourced_driver:

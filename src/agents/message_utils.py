@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -14,6 +13,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
+from src.text_patterns import URL_RE
 from src.tooling.evidence_recorder import (
     EvidenceAuthority,
     EvidenceRecord,
@@ -45,7 +45,7 @@ class ToolEvidenceRecord:
         return (self.tool_name, self.content, self.urls)[index]
 
 
-_URL_RE = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
+_URL_RE = URL_RE
 
 
 def make_tool_evidence_record(

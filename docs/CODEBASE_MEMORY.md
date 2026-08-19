@@ -403,6 +403,20 @@ Provenance typing (Stage 6, July 2026): the gate-critical snapshot / decision-tr
 Recent completed control-plane/security work:
 
 - runtime-scoped service container via `RuntimeServices`
+- provider-neutral LLM control plane via `src/llm_runtime/`: canonical seats,
+  immutable per-run binding plans, reviewed model identity/capabilities,
+  separate provider/group application qualification, native/compatible adapters,
+  provider-neutral retry/reasoning policies, conservative provider-specific rate
+  ceilings (including direct-construction fallbacks), and secret-free persisted
+  binding telemetry; seat execution policy also owns sampling, client bounds,
+  reasoning/output semantics, and quick-mode availability, with normalized
+  legacy/provider parity contracts guarding the reachable fleet
+- vendor-adversarial grouping: Bull and Bear remain in `base`; Consultant,
+  Forensic Auditor, and Editor form `review`; APAC is independently bound through
+  `regional_review`; base and review selectors can reverse without graph changes
+- provider-selectable embeddings with fingerprinted provider/model/dimension/schema
+  collection names; model switches preserve legacy Chroma collections rather than
+  deleting them
 - memory-write inspection
 - financial-API text-field inspection
 - artifact bounding via `cap_state_value()`

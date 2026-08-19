@@ -15,21 +15,35 @@ class RuntimeConfig:
     enable_memory: bool
     langfuse_enabled: bool
     api_retry_attempts: int
-    gemini_rpm_limit: int
+    google_rpm_limit: int
     llm_call_hard_timeout_seconds: float
     quick_mode_active: bool
     images_dir: Path
     quiet_mode: bool
+    # Run-scoped `--quick-model` / `--deep-model`, applied to the BASE group's
+    # `fast` and `reasoning` intents under the multi-provider schema. Kept
+    # separate from `quick_think_llm`/`deep_think_llm` (which always carry a
+    # value) because the binding resolver must distinguish "the operator asked
+    # for this on the command line" from "this is the configured default" — a
+    # snapshot value would otherwise shadow the provider-scoped model keys on
+    # every run.
+    base_fast_model_override: str | None = None
+    base_reasoning_model_override: str | None = None
 
     @classmethod
     def from_config(cls, base_config: Any) -> RuntimeConfig:
+        google_rpm_limit = (
+            base_config.google_rpm_limit
+            if getattr(base_config, "llm_base_provider", None) is not None
+            else base_config.gemini_rpm_limit
+        )
         return cls(
             quick_think_llm=base_config.quick_think_llm,
             deep_think_llm=base_config.deep_think_llm,
             enable_memory=base_config.enable_memory,
             langfuse_enabled=base_config.langfuse_enabled,
             api_retry_attempts=base_config.api_retry_attempts,
-            gemini_rpm_limit=base_config.gemini_rpm_limit,
+            google_rpm_limit=google_rpm_limit,
             llm_call_hard_timeout_seconds=base_config.llm_call_hard_timeout_seconds,
             quick_mode_active=getattr(base_config, "quick_mode_active", False),
             images_dir=Path(base_config.images_dir),
@@ -52,16 +66,26 @@ def build_runtime_config(args: Any, base_config: Any) -> RuntimeConfig:
         runtime_config = runtime_config.with_overrides(
             quick_mode_active=True,
             api_retry_attempts=min(runtime_config.api_retry_attempts, 2),
-            gemini_rpm_limit=min(runtime_config.gemini_rpm_limit, 360),
+            google_rpm_limit=min(runtime_config.google_rpm_limit, 360),
             llm_call_hard_timeout_seconds=min(
                 runtime_config.llm_call_hard_timeout_seconds,
                 120.0,
             ),
         )
+    # Each flag drives both schemas: the legacy factories read
+    # ``quick_think_llm``/``deep_think_llm``, while the provider-scoped resolver
+    # reads the ``*_override`` fields so it can tell a CLI request apart from a
+    # configured default.
     if getattr(args, "quick_model", None):
-        runtime_config = runtime_config.with_overrides(quick_think_llm=args.quick_model)
+        runtime_config = runtime_config.with_overrides(
+            quick_think_llm=args.quick_model,
+            base_fast_model_override=args.quick_model,
+        )
     if getattr(args, "deep_model", None):
-        runtime_config = runtime_config.with_overrides(deep_think_llm=args.deep_model)
+        runtime_config = runtime_config.with_overrides(
+            deep_think_llm=args.deep_model,
+            base_reasoning_model_override=args.deep_model,
+        )
     if getattr(args, "no_memory", False):
         runtime_config = runtime_config.with_overrides(enable_memory=False)
     if getattr(args, "quiet", False) or getattr(args, "brief", False):
@@ -79,15 +103,21 @@ def quick_runtime_clamp_changes(
     if not getattr(args, "quick", False):
         return {}
     changes: dict[str, dict[str, Any]] = {}
-    for field in (
-        "api_retry_attempts",
-        "gemini_rpm_limit",
-        "llm_call_hard_timeout_seconds",
-    ):
+    for field in ("api_retry_attempts", "llm_call_hard_timeout_seconds"):
         before = getattr(base_config, field)
         after = getattr(runtime_config, field)
         if after < before:
             changes[field] = {"from": before, "to": after}
+    configured_google_rpm = (
+        base_config.google_rpm_limit
+        if getattr(base_config, "llm_base_provider", None) is not None
+        else base_config.gemini_rpm_limit
+    )
+    if runtime_config.google_rpm_limit < configured_google_rpm:
+        changes["google_rpm_limit"] = {
+            "from": configured_google_rpm,
+            "to": runtime_config.google_rpm_limit,
+        }
     return changes
 
 

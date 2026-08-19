@@ -9,12 +9,20 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
+from src.text_patterns import RESULT_ENVELOPE_RE, URL_RE
 from src.tooling.runtime import ToolInvocation, ToolResult
 
 _MAX_CONTENT_CHARS = 20_000
 _MAX_RECORDS = 200
 _MAX_TOTAL_CONTENT_CHARS = 250_000
-_URL_RE = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
+_URL_RE = URL_RE
+# Six variants of this line grammar exist (here, agents/forensic_repair,
+# agents/capital_structure, agents/management_guidance, agents/consultant_nodes,
+# graph/routing) differing on leading-whitespace tolerance and the `:`/`=` separator.
+# Measured inert -- across 2,191 reports containing "STATUS:" the tolerant and strict
+# spellings disagree once each way -- so they are left separate rather than merged into
+# a reader none of the six quite wants. Byte-identical twin: agents/forensic_repair.
+# Widen one and you probably want to widen that twin too.
 _STATUS_RE = re.compile(r"(?im)^\s*STATUS:\s*([A-Z_]+)\s*$")
 _REASON_RE = re.compile(r"(?im)^\s*REASON:\s*([A-Z0-9_]+)\s*$")
 _ERROR_ENVELOPE_RE = re.compile(
@@ -244,12 +252,12 @@ def classify_evidence_value(
     # Error semantics override that optimistic wrapper.
     error_blocks = [
         block
-        for block in re.findall(r"(?is)<result\b[^>]*>.*?</result>", content)
+        for block in RESULT_ENVELOPE_RE.findall(content)
         if _ERROR_ENVELOPE_RE.search(block)
     ]
     valid_blocks = [
         block
-        for block in re.findall(r"(?is)<result\b[^>]*>.*?</result>", content)
+        for block in RESULT_ENVELOPE_RE.findall(content)
         if not _ERROR_ENVELOPE_RE.search(block)
         and ("<url>" in block.casefold() or "<content>" in block.casefold())
     ]

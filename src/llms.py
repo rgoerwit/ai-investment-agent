@@ -37,15 +37,23 @@ from src.runtime_config import get_runtime_config
 from src.runtime_services import get_current_provider_runtime
 from src.service_tiers import (
     flex_attempt_client_timeout,
+    flex_degraded,
     gemini_flex_active,
     is_flex_unsupported,
     is_flex_unsupported_error,
     mark_flex_unsupported,
     normalize_model_name,
+    note_flex_fallback,
     openai_flex_active,
 )
 
 logger = structlog.get_logger(__name__)
+
+
+def _settings_or_default(settings: Any | None) -> Any:
+    return config if settings is None else settings
+
+
 _logged_model_init_configs: set[tuple[str, str, int, int, str | None]] = set()
 
 
@@ -330,18 +338,11 @@ def is_gemini_v3_or_greater(model_name: str) -> bool:
 
 
 def _create_rate_limiter_from_rpm(rpm: int) -> InMemoryRateLimiter:
-    """
-    Create a rate limiter from RPM (requests per minute) setting.
-    """
-    safety_factor = 0.8
-    rps = (rpm / 60.0) * safety_factor
-    max_bucket = max(5, int(rpm * 0.1))
-    logger.info(
-        "rate_limiter_configured", rpm=rpm, rps=round(rps, 2), max_bucket=max_bucket
-    )
-    return InMemoryRateLimiter(
-        requests_per_second=rps, check_every_n_seconds=0.1, max_bucket_size=max_bucket
-    )
+    """Compatibility wrapper around the provider-neutral limiter factory."""
+
+    from src.llm_runtime.rate_limits import create_process_rate_limiter
+
+    return create_process_rate_limiter(rpm)
 
 
 def create_process_rate_limiter(rpm: int | None = None) -> InMemoryRateLimiter:
@@ -394,7 +395,9 @@ class _LazyRateLimiterProxy(BaseRateLimiter):
             and provider_runtime.rate_limiter is not None
             and provider_runtime.rate_limiter is not self
         ):
-            return provider_runtime.rate_limiter
+            runtime_limiter = provider_runtime.limiter_for("google")
+            if runtime_limiter is not None:
+                return runtime_limiter
         if self._instance is None:
             self._instance = self._factory()
         return self._instance
@@ -433,8 +436,18 @@ _openai_rate_limiter_initialized: bool = False
 _warned_openai_unthrottled: set[str] = set()
 
 
-def _get_openai_rate_limiter() -> InMemoryRateLimiter | None:
+def _get_openai_rate_limiter(*, settings: Any | None = None) -> BaseRateLimiter | None:
     """Return the shared OpenAI rate limiter, initializing it on first call."""
+    settings = _settings_or_default(settings)
+    if settings is not config:
+        from src.llm_runtime.identities import sanitize_endpoint_host
+        from src.llm_runtime.rate_limits import limiter_for_binding
+
+        return limiter_for_binding(
+            settings,
+            "openai",
+            sanitize_endpoint_host(settings.get_openai_api_base()),
+        )
     global _openai_rate_limiter, _openai_rate_limiter_initialized
     if not _openai_rate_limiter_initialized:
         _openai_rate_limiter_initialized = True
@@ -442,6 +455,14 @@ def _get_openai_rate_limiter() -> InMemoryRateLimiter | None:
         if rpm is not None:
             _openai_rate_limiter = _create_rate_limiter_from_rpm(rpm)
     return _openai_rate_limiter
+
+
+def _get_openai_rate_limiter_for_settings(
+    settings: Any,
+) -> BaseRateLimiter | None:
+    if settings is config:
+        return _get_openai_rate_limiter()
+    return _get_openai_rate_limiter(settings=settings)
 
 
 def _warn_openai_unthrottled_once(llm_kind: str) -> None:
@@ -503,17 +524,19 @@ def _resolve_generation_budget(
     intent_tokens: int,
     reserve_class: Literal["default", "deep"],
     reserve_enabled: bool,
+    settings: Any | None = None,
 ) -> GenerationBudget:
+    settings = _settings_or_default(settings)
     return get_generation_budget(
         intent_tokens=intent_tokens,
         reserve_class=reserve_class,
         reserve_enabled=reserve_enabled,
         default_reserve_tokens=_coerce_int_setting(
-            getattr(config, "llm_default_reasoning_reserve_tokens", None),
+            getattr(settings, "llm_default_reasoning_reserve_tokens", None),
             2048,
         ),
         deep_reserve_tokens=_coerce_int_setting(
-            getattr(config, "llm_deep_reasoning_reserve_tokens", None),
+            getattr(settings, "llm_deep_reasoning_reserve_tokens", None),
             8192,
         ),
     )
@@ -681,16 +704,25 @@ class _TieredChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
         if (
             self.service_tier is not None
             and "service_tier" not in kwargs
-            and not is_flex_unsupported(self.model)
+            and not self._flex_ineligible()
         ):
             kwargs["service_tier"] = self.service_tier
         return super()._prepare_request(*args, **kwargs)
+
+    def _flex_ineligible(self) -> bool:
+        """Whether this call must not request flex — capability or health.
+
+        Capability is permanent and model-scoped; health is a cool-off and
+        provider-scoped (models share a vendor's queue). One predicate so the
+        request builder and the tier resolver cannot disagree.
+        """
+        return is_flex_unsupported(self.model) or flex_degraded("google")
 
     def _effective_tier(self, kwargs: dict[str, Any]) -> str | None:
         requested_tier = kwargs.get("service_tier")
         if isinstance(requested_tier, str):
             return requested_tier
-        if self.service_tier == "flex" and is_flex_unsupported(self.model):
+        if self.service_tier == "flex" and self._flex_ineligible():
             return None
         return self.service_tier
 
@@ -711,16 +743,19 @@ class _TieredChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
                 model=self.model,
                 **summarize_exception(exc, operation="gemini_flex_capacity"),
             )
+            note_flex_fallback("google", reason="capacity", model=self.model)
             return "standard"
         if self.flex_fallback_to_standard and _is_flex_latency_timeout(exc):
-            # Queued-too-long: the flex attempt exceeded its (short, quick-mode)
-            # SDK client timeout. Re-issue at standard rather than re-queue at
-            # flex. Not cached — the queue is transient.
+            # Queued-too-long: the flex attempt exceeded its SDK client timeout.
+            # Re-issue at standard rather than re-queue at flex, and record it —
+            # past the threshold the provider stops being asked for the cool-off,
+            # so one run cannot pay this wait once per call.
             logger.warning(
                 "flex_fallback_to_standard",
                 model=self.model,
                 **summarize_exception(exc, operation="gemini_flex_latency"),
             )
+            note_flex_fallback("google", reason="latency", model=self.model)
             return "standard"
         return None
 
@@ -781,21 +816,30 @@ def _get_flex_fallback_chat_openai_cls() -> type[BaseChatModel]:
     class _FlexFallbackChatOpenAI(ChatOpenAI):
         flex_fallback_to_standard: bool = True
 
+        def _flex_ineligible(self) -> bool:
+            """Whether this call must not request flex — capability or health.
+
+            Mirror of the Gemini transport's predicate: capability is permanent
+            and model-scoped, health is a cool-off and provider-scoped.
+            """
+            return is_flex_unsupported(self.model_name) or flex_degraded("openai")
+
         def _effective_tier(self, kwargs: dict[str, Any]) -> str | None:
             requested_tier = kwargs.get("service_tier")
             if isinstance(requested_tier, str):
                 return requested_tier
-            if self.service_tier == "flex" and is_flex_unsupported(self.model_name):
+            if self.service_tier == "flex" and self._flex_ineligible():
                 return "auto"
             return self.service_tier
 
         def _payload_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
-            # A model learned to be flex-incapable must not send "flex" from
-            # the constructor field; invoke kwargs override _default_params.
+            # A model learned to be flex-incapable — or a provider learned to be
+            # congested — must not send "flex" from the constructor field; invoke
+            # kwargs override _default_params.
             if (
                 self.service_tier == "flex"
                 and "service_tier" not in kwargs
-                and is_flex_unsupported(self.model_name)
+                and self._flex_ineligible()
             ):
                 return {**kwargs, "service_tier": "auto"}
             return kwargs
@@ -815,15 +859,18 @@ def _get_flex_fallback_chat_openai_cls() -> type[BaseChatModel]:
                     model=self.model_name,
                     **summarize_exception(exc, operation="openai_flex_capacity"),
                 )
+                note_flex_fallback("openai", reason="capacity", model=self.model_name)
                 return "auto"
             if self.flex_fallback_to_standard and _is_flex_latency_timeout(exc):
                 # Queued-too-long: re-issue at standard (auto) rather than
-                # re-queue at flex. Not cached — the queue is transient.
+                # re-queue at flex, and record it — past the threshold the
+                # provider stops being asked for the cool-off.
                 logger.warning(
                     "flex_fallback_to_standard",
                     model=self.model_name,
                     **summarize_exception(exc, operation="openai_flex_latency"),
                 )
+                note_flex_fallback("openai", reason="latency", model=self.model_name)
                 return "auto"
             return None
 
@@ -855,7 +902,13 @@ def _get_flex_fallback_chat_openai_cls() -> type[BaseChatModel]:
     return _FlexFallbackChatOpenAI
 
 
-def _apply_openai_service_tier(kwargs: dict[str, Any], *, label: str) -> None:
+def _apply_openai_service_tier(
+    kwargs: dict[str, Any],
+    *,
+    label: str,
+    service_tier: str | None = None,
+    settings: Any | None = None,
+) -> None:
     """Mutate ChatOpenAI constructor kwargs for OPENAI_SERVICE_TIER=flex.
 
     Sets the tier, enables fallback per config, and floors the client
@@ -863,33 +916,73 @@ def _apply_openai_service_tier(kwargs: dict[str, Any], *, label: str) -> None:
     standard/auto tier is configured, or when this process has already
     learned the model rejects flex. Not applied to the APAC specialist,
     whose OpenAI-compatible backend is a different vendor.
+
+    **Also a no-op for any other OpenAI-*compatible* base** (``OPENAI_API_BASE``
+    pointing somewhere other than ``api.openai.com``). A service tier is an
+    OpenAI pricing/queueing product; a compatible vendor does not sell one, and
+    sending it either 400s or is silently swallowed. Before Aug 2026 this
+    function also owned the client-timeout floor, which made
+    ``OPENAI_SERVICE_TIER=flex`` the *only* way to give a compatible vendor more
+    than the OpenAI-shaped default — an operator had to set a pricing flag to
+    buy a timeout. That timeout is now
+    ``OPENAI_COMPATIBLE_CLIENT_TIMEOUT_SECONDS``, applied by
+    ``_apply_openai_api_base``, and the two concerns are independent.
     """
-    if not openai_flex_active():
+    settings = _settings_or_default(settings)
+    if _openai_compatible_host(settings=settings) is not None:
+        return
+    if service_tier is None:
+        flex_active = openai_flex_active(settings)
+    else:
+        flex_active = service_tier == "flex"
+    if not flex_active:
         return
     if is_flex_unsupported(str(kwargs.get("model", ""))):
         return
     kwargs["service_tier"] = "flex"
-    kwargs["flex_fallback_to_standard"] = config.flex_fallback_to_standard
+    kwargs["flex_fallback_to_standard"] = settings.flex_fallback_to_standard
     kwargs["timeout"] = int(
         flex_attempt_client_timeout(
             float(kwargs.get("timeout", 120)),
             provider="openai",
+            cfg=settings,
             label=label,
         )
     )
 
 
-def _apply_openai_api_base(kwargs: dict[str, Any]) -> None:
+def _openai_compatible_host(*, settings: Any | None = None) -> str | None:
+    """Return the host when ``OPENAI_API_BASE`` names a non-OpenAI vendor.
+
+    ``None`` means "the default OpenAI endpoint", so every OpenAI-only behavior
+    (service tiers, the Responses API) stays byte-identical.
+    """
+    settings = _settings_or_default(settings)
+    base_url = settings.get_openai_api_base()
+    if not isinstance(base_url, str) or not base_url:
+        return None
+    host = urlsplit(base_url).hostname
+    if not host or host == "api.openai.com":
+        return None
+    return host
+
+
+def _apply_openai_api_base(
+    kwargs: dict[str, Any], *, settings: Any | None = None
+) -> None:
     """Route OpenAI-plane calls to a custom base URL when configured.
 
     Single chokepoint for the consultant, auditor, editor, and writer-fallback
     seats (all of which construct via ``_construct_chat_openai``). A custom base
     is treated as an OpenAI-*compatible* — not OpenAI — endpoint: it speaks the
     Chat Completions API, so the OpenAI-only Responses API fields are dropped
-    (mirrors the APAC/DeepSeek path). No-op when unset, so the default OpenAI
-    path is byte-identical.
+    (mirrors the APAC/DeepSeek path), and it takes its own client timeout from
+    ``OPENAI_COMPATIBLE_CLIENT_TIMEOUT_SECONDS`` rather than the OpenAI-shaped
+    per-seat default. No-op when unset, so the default OpenAI path is
+    byte-identical.
     """
-    base_url = config.get_openai_api_base()
+    settings = _settings_or_default(settings)
+    base_url = settings.get_openai_api_base()
     # Act only on a real, non-empty URL string. The accessor returns
     # ``str | None`` in production, so this guard is a no-op there — but it also
     # keeps the default OpenAI path byte-identical when ``config`` is a bare
@@ -898,25 +991,28 @@ def _apply_openai_api_base(kwargs: dict[str, Any]) -> None:
     if not isinstance(base_url, str) or not base_url:
         return
     kwargs["base_url"] = base_url
-    kwargs.pop("use_responses_api", None)
-    kwargs.pop("output_version", None)
+    if urlsplit(base_url).hostname != "api.openai.com":
+        kwargs.pop("use_responses_api", None)
+        kwargs.pop("output_version", None)
+        kwargs["timeout"] = int(settings.openai_compatible_client_timeout_seconds)
 
 
-def _openai_base_url_override() -> str | None:
+def _openai_base_url_override(*, settings: Any | None = None) -> str | None:
     """Return the configured OpenAI-compatible base URL, or None when unset."""
-    base_url = config.get_openai_api_base()
+    settings = _settings_or_default(settings)
+    base_url = settings.get_openai_api_base()
     if not isinstance(base_url, str) or not base_url:
         return None
     return base_url
 
 
-def _openai_endpoint_host() -> str | None:
+def _openai_endpoint_host(*, settings: Any | None = None) -> str | None:
     """Log-safe host of the configured base URL — never the full URL.
 
     Mirrors ``runtime_diagnostics.get_endpoint_host``: a base URL may carry a
     path, a query string, or embedded credentials, none of which may be logged.
     """
-    base_url = _openai_base_url_override()
+    base_url = _openai_base_url_override(settings=settings)
     if base_url is None:
         return None
     try:
@@ -965,9 +1061,14 @@ def _apply_openai_reasoning_effort(
 
 
 def _apply_openai_generation_budget(
-    kwargs: dict[str, Any], *, model_name: str, effort: str | None
+    kwargs: dict[str, Any],
+    *,
+    model_name: str,
+    effort: str | None,
+    settings: Any | None = None,
 ) -> GenerationBudget:
     """Convert an intent budget into an API cap with a reasoning reserve."""
+    settings = _settings_or_default(settings)
     budget = _resolve_generation_budget(
         intent_tokens=kwargs["max_completion_tokens"],
         reserve_class=_reserve_class_for_effort(effort),
@@ -976,19 +1077,31 @@ def _apply_openai_generation_budget(
             model_name=model_name,
             reasoning_effort=effort,
         ),
+        settings=settings,
     )
     kwargs["max_completion_tokens"] = budget.api_cap_tokens
     return budget
 
 
-def _construct_chat_openai(kwargs: dict[str, Any]) -> BaseChatModel:
+def _construct_chat_openai(
+    kwargs: dict[str, Any], *, settings: Any | None = None
+) -> BaseChatModel:
     """Build ChatOpenAI, using the flex-fallback subclass when tiered."""
-    _apply_openai_api_base(kwargs)
+    settings = _settings_or_default(settings)
+    _apply_openai_api_base(kwargs, settings=settings)
     if kwargs.get("service_tier") == "flex":
         return _get_flex_fallback_chat_openai_cls()(**kwargs)
     from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(**kwargs)
+
+
+def _construct_chat_openai_for_settings(
+    kwargs: dict[str, Any], settings: Any
+) -> BaseChatModel:
+    if settings is config:
+        return _construct_chat_openai(kwargs)
+    return _construct_chat_openai(kwargs, settings=settings)
 
 
 class _LazyLLMProxy:
@@ -1031,7 +1144,7 @@ def get_all_llm_instances() -> dict:
 
 
 def _resolve_gemini_service_tier(
-    model_name: str, service_tier: str | None
+    model_name: str, service_tier: str | None, *, settings: Any | None = None
 ) -> str | None:
     """Resolve the effective Gemini tier for a new model instance.
 
@@ -1042,10 +1155,11 @@ def _resolve_gemini_service_tier(
     explicit ``"standard"`` pins the instance to the standard tier (e.g. the
     LLM-judge content inspector, an inline security path that must not queue).
     """
+    settings = _settings_or_default(settings)
     if service_tier is not None:
         return service_tier if service_tier == "flex" else None
     if (
-        gemini_flex_active()
+        gemini_flex_active(settings)
         and normalize_model_name(model_name).startswith("gemini-")
         and not is_flex_unsupported(model_name)
     ):
@@ -1064,6 +1178,8 @@ def create_gemini_model(
     max_output_tokens: int | None = None,
     reserve_class: Literal["default", "deep"] = "default",
     service_tier: str | None = None,
+    api_key: str | None = None,
+    settings: Any | None = None,
 ) -> BaseChatModel:
     """
     Generic factory for Gemini models.
@@ -1080,19 +1196,23 @@ def create_gemini_model(
     .env loading for our config, but third-party libs like LangChain still
     expect explicit api_key or os.environ values).
     """
+    settings = _settings_or_default(settings)
     global _llm_instance_counter
 
-    resolved_tier = _resolve_gemini_service_tier(model_name, service_tier)
+    resolved_tier = _resolve_gemini_service_tier(
+        model_name, service_tier, settings=settings
+    )
     if resolved_tier == "flex":
         timeout = int(
             flex_attempt_client_timeout(
                 float(timeout),
                 provider="google",
+                cfg=settings,
                 label=f"gemini_sdk_timeout:{model_name}",
             )
         )
 
-    intent_tokens = max_output_tokens or config.llm_base_output_tokens
+    intent_tokens = max_output_tokens or settings.llm_base_output_tokens
     thinking_budget = None
     if thinking_level and _is_gemini_v2_5(model_name):
         thinking_budget = _THINKING_BUDGETS.get(thinking_level, 4096)
@@ -1106,6 +1226,7 @@ def create_gemini_model(
             thinking_level=thinking_level,
             thinking_budget=thinking_budget,
         ),
+        settings=settings,
     )
 
     kwargs: dict[str, Any] = {
@@ -1119,7 +1240,7 @@ def create_gemini_model(
         "convert_system_message_to_human": False,
         "max_output_tokens": budget.api_cap_tokens,
         "callbacks": callbacks or [],
-        "api_key": config.get_google_api_key(),  # Explicit API key from config
+        "api_key": api_key if api_key is not None else settings.get_google_api_key(),
     }
 
     if thinking_level and _is_gemini_v3_or_greater(model_name):
@@ -1138,7 +1259,7 @@ def create_gemini_model(
 
     if resolved_tier is not None:
         kwargs["service_tier"] = resolved_tier
-        kwargs["flex_fallback_to_standard"] = config.flex_fallback_to_standard
+        kwargs["flex_fallback_to_standard"] = settings.flex_fallback_to_standard
 
     llm = _TieredChatGoogleGenerativeAI(**kwargs)
     _stamp_budget_metadata(
@@ -1166,6 +1287,8 @@ def create_quick_thinking_llm(
     max_output_tokens: int | None = None,
     service_tier: str | None = None,
     thinking_level_bump: bool = False,
+    api_key: str | None = None,
+    settings: Any | None = None,
 ) -> BaseChatModel:
     """
     Create a quick thinking LLM.
@@ -1181,12 +1304,13 @@ def create_quick_thinking_llm(
     Trap Detector distinguishing "announced" from "executed" corporate
     actions). No-op on models that do not support ``thinking_level``.
     """
-    runtime_config = get_runtime_config(config)
+    settings = _settings_or_default(settings)
+    runtime_config = get_runtime_config(settings)
     model_name = model or runtime_config.quick_think_llm
     final_timeout = (
         timeout
         if timeout is not None
-        else min(config.api_timeout, config.quick_llm_api_timeout_seconds)
+        else min(settings.api_timeout, settings.quick_llm_api_timeout_seconds)
     )
     final_retries = (
         max_retries if max_retries is not None else runtime_config.api_retry_attempts
@@ -1214,6 +1338,8 @@ def create_quick_thinking_llm(
         max_output_tokens=max_output_tokens,
         reserve_class="default",
         service_tier=service_tier,
+        api_key=api_key,
+        settings=settings,
     )
 
 
@@ -1224,14 +1350,17 @@ def create_deep_thinking_llm(
     max_retries: int | None = None,
     callbacks: list[BaseCallbackHandler] | None = None,
     max_output_tokens: int | None = None,
+    api_key: str | None = None,
+    settings: Any | None = None,
 ) -> BaseChatModel:
     """
     Create a deep thinking LLM.
     If the DEEP_MODEL is Gemini 3+ or Gemini 2.5, this will set high reasoning.
     """
-    runtime_config = get_runtime_config(config)
+    settings = _settings_or_default(settings)
+    runtime_config = get_runtime_config(settings)
     model_name = model or runtime_config.deep_think_llm
-    final_timeout = timeout if timeout is not None else config.api_timeout
+    final_timeout = timeout if timeout is not None else settings.api_timeout
     final_retries = (
         max_retries if max_retries is not None else runtime_config.api_retry_attempts
     )
@@ -1252,6 +1381,8 @@ def create_deep_thinking_llm(
         thinking_level=thinking_level,
         max_output_tokens=max_output_tokens,
         reserve_class="deep",
+        api_key=api_key,
+        settings=settings,
     )
 
 
@@ -1264,6 +1395,7 @@ def create_apex_llm(
     quick_mode: bool,
     callbacks: list[BaseCallbackHandler] | None = None,
     max_output_tokens: int | None = None,
+    settings: Any | None = None,
 ) -> BaseChatModel:
     """
     Create the LLM for a gate-critical (APEX) seat.
@@ -1279,33 +1411,41 @@ def create_apex_llm(
     the plain quick floor — quick mode stays cheap and the degradation is an
     accepted trade-off.
     """
+    explicit_settings = settings is not None
+    settings = _settings_or_default(settings)
     if seat not in APEX_SEATS:
         raise ValueError(f"unknown apex seat: {seat!r} (expected one of {APEX_SEATS})")
 
-    if not config.apex_model:
+    if not settings.apex_model:
+        delegated_kwargs: dict[str, Any] = {
+            "callbacks": callbacks,
+            "max_output_tokens": max_output_tokens,
+        }
+        if explicit_settings:
+            delegated_kwargs["settings"] = settings
         if seat == "portfolio_manager" and not quick_mode:
-            return create_deep_thinking_llm(
-                callbacks=callbacks, max_output_tokens=max_output_tokens
-            )
-        return create_quick_thinking_llm(
-            callbacks=callbacks, max_output_tokens=max_output_tokens
-        )
+            return create_deep_thinking_llm(**delegated_kwargs)
+        return create_quick_thinking_llm(**delegated_kwargs)
 
-    model_name = config.apex_model
+    model_name = settings.apex_model
     if quick_mode:
-        if not config.apex_quick_model:
-            return create_quick_thinking_llm(
-                callbacks=callbacks, max_output_tokens=max_output_tokens
-            )
-        model_name = config.apex_quick_model
+        if not settings.apex_quick_model:
+            delegated_kwargs = {
+                "callbacks": callbacks,
+                "max_output_tokens": max_output_tokens,
+            }
+            if explicit_settings:
+                delegated_kwargs["settings"] = settings
+            return create_quick_thinking_llm(**delegated_kwargs)
+        model_name = settings.apex_quick_model
 
-    thinking_level: str | None = config.apex_thinking_level
+    thinking_level: str | None = settings.apex_thinking_level
     if not (_is_gemini_v3_or_greater(model_name) or _is_gemini_v2_5(model_name)):
         logger.warning("apex_model_no_thinking_support", seat=seat, model=model_name)
         thinking_level = None
 
-    runtime_config = get_runtime_config(config)
-    final_timeout = config.api_timeout
+    runtime_config = get_runtime_config(settings)
+    final_timeout = settings.api_timeout
     final_retries = runtime_config.api_retry_attempts
     _log_model_init_once(
         f"apex:{seat}", model_name, final_timeout, final_retries, thinking_level
@@ -1325,12 +1465,18 @@ def create_apex_llm(
         # any fallback. Full mode keeps config-driven flex (the flex floors +
         # the _is_flex_latency_timeout fallback give it room to recover).
         service_tier="standard" if quick_mode else None,
+        api_key=settings.get_google_api_key(),
+        settings=settings,
     )
 
 
 def create_writer_fallback_llm(
     temperature: float = 0.1,
     callbacks: list[BaseCallbackHandler] | None = None,
+    model: str | None = None,
+    service_tier: str | None = None,
+    api_key: str | None = None,
+    settings: Any | None = None,
 ) -> BaseChatModel:
     """
     Create the Gemini fallback used when the Claude article writer is
@@ -1347,20 +1493,24 @@ def create_writer_fallback_llm(
     ``max_tokens``); the budget machinery adds only the small "default" reserve
     on top, so the 16384 visible tokens can never be cannibalized by reasoning.
     """
-    runtime_config = get_runtime_config(config)
-    model_name = runtime_config.deep_think_llm
+    settings = _settings_or_default(settings)
+    runtime_config = get_runtime_config(settings)
+    model_name = model or runtime_config.deep_think_llm
     thinking_level: Literal["low"] | None = None
     if _is_gemini_v3_or_greater(model_name) or _is_gemini_v2_5(model_name):
         thinking_level = "low"
     return create_gemini_model(
         model_name,
         temperature,
-        config.api_timeout,
+        settings.api_timeout,
         runtime_config.api_retry_attempts,
         callbacks=callbacks,
         thinking_level=thinking_level,
         max_output_tokens=16384,
         reserve_class="default",
+        service_tier=service_tier,
+        api_key=api_key,
+        settings=settings,
     )
 
 
@@ -1378,22 +1528,26 @@ class WriterTier:
     build: Callable[[], BaseChatModel]
 
 
-def _writer_openai_tier_available() -> bool:
+def _writer_openai_tier_available(*, settings: Any | None = None) -> bool:
     """OpenAI usable for the writer fallback tier: lib + key + ENABLE_CONSULTANT.
 
     ``enable_consultant`` is the de-facto OpenAI master switch (consultant,
     auditor, and editor all gate on it) — the writer tier honors it too, so a
     deployment that disabled every other OpenAI agent never gets a GPT writer.
     """
+    settings = _settings_or_default(settings)
     return (
         _langchain_openai_available()
-        and config.enable_consultant
-        and bool(config.get_openai_api_key())
+        and settings.enable_consultant
+        and bool(settings.get_openai_api_key())
     )
 
 
 def create_writer_openai_fallback_llm(
     callbacks: list[BaseCallbackHandler] | None = None,
+    *,
+    model: str | None = None,
+    settings: Any | None = None,
 ) -> BaseChatModel | None:
     """EDITOR_MODEL (OpenAI) as the preferred article-writer fallback.
 
@@ -1403,25 +1557,29 @@ def create_writer_openai_fallback_llm(
     reasoning depth). Returns None when the tier is unavailable (missing
     lib/key or ``ENABLE_CONSULTANT=false``).
     """
-    if not _writer_openai_tier_available():
+    settings = _settings_or_default(settings)
+    if not _writer_openai_tier_available(settings=settings):
         return None
 
-    model_name = config.editor_model or config.consultant_model or "gpt-4o"
+    model_name = model or settings.editor_model or settings.consultant_model or "gpt-4o"
     logger.info("writer_fallback_tier_init", tier="editor_model", model=model_name)
     return _build_openai_chat(
         model_name,
-        api_key=config.get_openai_api_key(),
+        api_key=settings.get_openai_api_key(),
         callbacks=callbacks,
         max_completion_tokens=16384,
         service_tier_label="openai_sdk_timeout:writer_fallback",
         unthrottled_kind="writer_fallback",
         effort_preference=_EFFORT_PREFERENCE_PROSE,
+        settings=settings,
     )
 
 
 def writer_fallback_chain(
     callbacks: list[BaseCallbackHandler] | None = None,
     temperature: float = 0.7,
+    *,
+    settings: Any | None = None,
 ) -> list[WriterTier]:
     """Ordered, key/switch-aware fallback tiers for the article writer.
 
@@ -1432,20 +1590,27 @@ def writer_fallback_chain(
     it defaults to the writer's 0.7 prose setting.
     """
 
+    settings = _settings_or_default(settings)
+
     def _build_openai_tier() -> BaseChatModel:
-        llm = create_writer_openai_fallback_llm(callbacks=callbacks)
+        llm = create_writer_openai_fallback_llm(
+            callbacks=callbacks,
+            settings=settings,
+        )
         if llm is None:  # availability changed between chain build and attempt
             raise RuntimeError("OpenAI writer fallback tier unavailable")
         return llm
 
     tiers: list[WriterTier] = []
-    if _writer_openai_tier_available():
+    if _writer_openai_tier_available(settings=settings):
         tiers.append(WriterTier("editor_model", _build_openai_tier))
     tiers.append(
         WriterTier(
             "gemini_last_resort",
             lambda: create_writer_fallback_llm(
-                temperature=temperature, callbacks=callbacks
+                temperature=temperature,
+                callbacks=callbacks,
+                settings=settings,
             ),
         )
     )
@@ -1467,6 +1632,7 @@ def create_consultant_llm(
     quick_mode: bool = False,
     callbacks: list[BaseCallbackHandler] | None = None,
     max_completion_tokens: int | None = None,
+    settings: Any | None = None,
 ) -> BaseChatModel:
     """
     Create an OpenAI consultant LLM for cross-validation.
@@ -1500,6 +1666,7 @@ def create_consultant_llm(
         >>> result = consultant_llm.invoke("Review this analysis...")
         >>> quick_llm = create_consultant_llm(quick_mode=True)
     """
+    settings = _settings_or_default(settings)
     if not _langchain_openai_available():
         raise ImportError(
             "langchain-openai package not found. Install with: "
@@ -1507,13 +1674,13 @@ def create_consultant_llm(
         )
 
     # Check if consultant is enabled (via config, not os.environ)
-    if not config.enable_consultant:
+    if not settings.enable_consultant:
         raise ValueError(
             "Consultant LLM is disabled. Set ENABLE_CONSULTANT=true to enable."
         )
 
     # Get OpenAI API key via config (SecretStr protected)
-    api_key = config.get_openai_api_key()
+    api_key = settings.get_openai_api_key()
     if not api_key:
         raise ValueError(
             "OPENAI_API_KEY not found in environment. "
@@ -1525,9 +1692,9 @@ def create_consultant_llm(
     if model:
         model_name = model
     elif quick_mode:
-        model_name = config.consultant_quick_model or config.consultant_model
+        model_name = settings.consultant_quick_model or settings.consultant_model
     else:
-        model_name = config.consultant_model
+        model_name = settings.consultant_model
 
     logger.info(
         "consultant_llm_init", model=model_name, timeout=timeout, retries=max_retries
@@ -1551,8 +1718,12 @@ def create_consultant_llm(
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
-    _apply_openai_service_tier(kwargs, label="openai_sdk_timeout:consultant")
-    _rl = _get_openai_rate_limiter()
+    _apply_openai_service_tier(
+        kwargs,
+        label="openai_sdk_timeout:consultant",
+        settings=settings,
+    )
+    _rl = _get_openai_rate_limiter_for_settings(settings)
     if _rl is not None:
         kwargs["rate_limiter"] = _rl
     else:
@@ -1564,10 +1735,13 @@ def create_consultant_llm(
         preference=_effort_preference_for_mode(quick_mode),
     )
     budget = _apply_openai_generation_budget(
-        kwargs, model_name=model_name, effort=reasoning_effort
+        kwargs,
+        model_name=model_name,
+        effort=reasoning_effort,
+        settings=settings,
     )
 
-    llm = _construct_chat_openai(kwargs)
+    llm = _construct_chat_openai_for_settings(kwargs, settings)
     _stamp_budget_metadata(
         llm,
         callbacks=kwargs["callbacks"],
@@ -1584,6 +1758,7 @@ def create_auditor_llm(
     max_completion_tokens: int | None = None,
     quick_mode: bool = False,
     model_name_override: str | None = None,
+    settings: Any | None = None,
 ) -> BaseChatModel | None:
     """
     Create Auditor LLM with fallback logic.
@@ -1600,15 +1775,16 @@ def create_auditor_llm(
     normal mode uses ``medium``.  This includes GPT-5.6 Sol/Terra/Luna, which
     do not support the legacy ``minimal`` setting.
     """
+    settings = _settings_or_default(settings)
     if not _langchain_openai_available():
         logger.warning("langchain_openai_missing")
         return None
 
-    if not config.enable_consultant:
+    if not settings.enable_consultant:
         return None
 
     # Get OpenAI API key via config
-    api_key = config.get_openai_api_key()
+    api_key = settings.get_openai_api_key()
     if not api_key:
         logger.warning("auditor_no_api_key")
         return None
@@ -1616,10 +1792,10 @@ def create_auditor_llm(
     # Determine model: quick override -> specific -> consultant -> default
     if model_name_override:
         model_name = model_name_override
-    elif quick_mode and config.auditor_quick_model:
-        model_name = config.auditor_quick_model
+    elif quick_mode and settings.auditor_quick_model:
+        model_name = settings.auditor_quick_model
     else:
-        model_name = config.auditor_model or config.consultant_model or "gpt-4o"
+        model_name = settings.auditor_model or settings.consultant_model or "gpt-4o"
 
     logger.info("auditor_llm_init", model=model_name, quick_mode=quick_mode)
 
@@ -1643,8 +1819,12 @@ def create_auditor_llm(
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
-    _apply_openai_service_tier(kwargs, label="openai_sdk_timeout:auditor")
-    _rl = _get_openai_rate_limiter()
+    _apply_openai_service_tier(
+        kwargs,
+        label="openai_sdk_timeout:auditor",
+        settings=settings,
+    )
+    _rl = _get_openai_rate_limiter_for_settings(settings)
     if _rl is not None:
         kwargs["rate_limiter"] = _rl
     else:
@@ -1656,10 +1836,13 @@ def create_auditor_llm(
         preference=_effort_preference_for_mode(quick_mode),
     )
     budget = _apply_openai_generation_budget(
-        kwargs, model_name=model_name, effort=reasoning_effort
+        kwargs,
+        model_name=model_name,
+        effort=reasoning_effort,
+        settings=settings,
     )
 
-    llm = _construct_chat_openai(kwargs)
+    llm = _construct_chat_openai_for_settings(kwargs, settings)
     _stamp_budget_metadata(
         llm,
         callbacks=kwargs["callbacks"],
@@ -1676,14 +1859,16 @@ def create_apac_specialist_llm(
     max_completion_tokens: int | None = None,
     quick_mode: bool = False,
     thinking_enabled: bool = True,
+    settings: Any | None = None,
 ) -> BaseChatModel | None:
     """Create the optional APAC Regional Specialist LLM."""
+    settings = _settings_or_default(settings)
     if quick_mode:
         return None
-    if not config.enable_apac_specialist:
+    if not settings.enable_apac_specialist:
         return None
 
-    api_key = config.get_apac_specialist_api_key()
+    api_key = settings.get_apac_specialist_api_key()
     if not api_key:
         logger.warning("apac_specialist_no_api_key")
         return None
@@ -1699,16 +1884,16 @@ def create_apac_specialist_llm(
         )
         return None
 
-    model_name = config.apac_specialist_model
+    model_name = settings.apac_specialist_model
     logger.info(
         "apac_specialist_llm_init",
         model=model_name,
-        base_url=config.apac_specialist_base_url,
+        base_url=settings.apac_specialist_base_url,
     )
 
     kwargs: dict[str, Any] = {
         "model": model_name,
-        "base_url": config.apac_specialist_base_url,
+        "base_url": settings.apac_specialist_base_url,
         "api_key": api_key,
         "timeout": 240,
         "max_retries": 1 if thinking_enabled else 0,
@@ -1735,6 +1920,7 @@ def create_apac_specialist_llm(
         intent_tokens=kwargs["max_completion_tokens"],
         reserve_class="deep",
         reserve_enabled=True,
+        settings=settings,
     )
     kwargs["max_completion_tokens"] = budget.api_cap_tokens
 
@@ -1759,6 +1945,10 @@ def create_writer_llm(
     timeout: int | None = None,
     max_retries: int = 3,
     callbacks: list[BaseCallbackHandler] | None = None,
+    model: str | None = None,
+    allow_fallback: bool = True,
+    api_key_override: str | None = None,
+    settings: Any | None = None,
 ) -> BaseChatModel:
     """
     Create the LLM for article writing.
@@ -1777,25 +1967,39 @@ def create_writer_llm(
     Returns:
         ChatAnthropic or ChatGoogleGenerativeAI instance
     """
-    api_key = config.get_claude_api_key()
+    settings = _settings_or_default(settings)
+    api_key = (
+        api_key_override
+        if api_key_override is not None
+        else settings.get_claude_api_key()
+    )
+
+    if not api_key and allow_fallback:
+        logger.warning("writer_no_claude_key")
+        return writer_fallback_chain(
+            callbacks=callbacks,
+            temperature=temperature,
+            settings=settings,
+        )[0].build()
 
     if not api_key:
-        logger.warning("writer_no_claude_key")
-        return writer_fallback_chain(callbacks=callbacks, temperature=temperature)[
-            0
-        ].build()
+        raise ValueError("Anthropic writer binding requires CLAUDE_KEY")
 
     # --- Claude path ---
     try:
         from langchain_anthropic import ChatAnthropic
     except ImportError:
+        if not allow_fallback:
+            raise
         logger.warning("langchain_anthropic_missing")
-        return writer_fallback_chain(callbacks=callbacks, temperature=temperature)[
-            0
-        ].build()
+        return writer_fallback_chain(
+            callbacks=callbacks,
+            temperature=temperature,
+            settings=settings,
+        )[0].build()
 
-    model_name = config.writer_model
-    final_timeout = float(timeout if timeout is not None else config.api_timeout)
+    model_name = model or settings.writer_model
+    final_timeout = float(timeout if timeout is not None else settings.api_timeout)
 
     # Build kwargs — base configuration
     kwargs: dict = {
@@ -1852,8 +2056,10 @@ def _build_openai_chat(
     callbacks: list[BaseCallbackHandler] | None,
     max_completion_tokens: int,
     service_tier_label: str,
+    service_tier: str | None = None,
     unthrottled_kind: str,
     effort_preference: tuple[str, ...],
+    settings: Any | None = None,
 ) -> BaseChatModel:
     """Shared ChatOpenAI construction for the editor and writer-fallback tiers.
 
@@ -1863,6 +2069,7 @@ def _build_openai_chat(
     against whatever the configured model family actually documents, so these
     seats behave correctly on an OpenAI-compatible endpoint too.
     """
+    settings = _settings_or_default(settings)
     kwargs: dict[str, Any] = {
         "model": model_name,
         "timeout": 120,
@@ -1874,8 +2081,13 @@ def _build_openai_chat(
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
-    _apply_openai_service_tier(kwargs, label=service_tier_label)
-    _rl = _get_openai_rate_limiter()
+    _apply_openai_service_tier(
+        kwargs,
+        label=service_tier_label,
+        service_tier=service_tier,
+        settings=settings,
+    )
+    _rl = _get_openai_rate_limiter_for_settings(settings)
     if _rl is not None:
         kwargs["rate_limiter"] = _rl
     else:
@@ -1884,10 +2096,13 @@ def _build_openai_chat(
         kwargs, model_name=model_name, preference=effort_preference
     )
     budget = _apply_openai_generation_budget(
-        kwargs, model_name=model_name, effort=reasoning_effort
+        kwargs,
+        model_name=model_name,
+        effort=reasoning_effort,
+        settings=settings,
     )
 
-    llm = _construct_chat_openai(kwargs)
+    llm = _construct_chat_openai_for_settings(kwargs, settings)
     _stamp_budget_metadata(
         llm,
         callbacks=kwargs["callbacks"],
@@ -1900,6 +2115,9 @@ def _build_openai_chat(
 
 def create_editor_llm(
     callbacks: list[BaseCallbackHandler] | None = None,
+    *,
+    model: str | None = None,
+    settings: Any | None = None,
 ) -> BaseChatModel | None:
     """
     Create Editor-in-Chief LLM for article revision and fact-checking.
@@ -1914,21 +2132,22 @@ def create_editor_llm(
     Returns:
         ChatOpenAI instance or None if editor unavailable
     """
+    settings = _settings_or_default(settings)
     if not _langchain_openai_available():
         logger.warning("langchain_openai_missing")
         return None
 
-    if not config.enable_consultant:
+    if not settings.enable_consultant:
         logger.info("editor_disabled")
         return None
 
-    api_key = config.get_openai_api_key()
+    api_key = settings.get_openai_api_key()
     if not api_key:
         logger.warning("editor_no_api_key")
         return None
 
     # Fallback chain: EDITOR_MODEL -> CONSULTANT_MODEL -> gpt-4o
-    model_name = config.editor_model or config.consultant_model or "gpt-4o"
+    model_name = model or settings.editor_model or settings.consultant_model or "gpt-4o"
 
     logger.info("editor_llm_init", model=model_name)
 
@@ -1940,6 +2159,7 @@ def create_editor_llm(
         service_tier_label="openai_sdk_timeout:editor",
         unthrottled_kind="editor",
         effort_preference=_EFFORT_PREFERENCE_FULL,
+        settings=settings,
     )
 
 
@@ -1953,6 +2173,8 @@ def get_consultant_llm(
     callbacks: list[BaseCallbackHandler] | None = None,
     quick_mode: bool = False,
     max_completion_tokens: int | None = None,
+    model: str | None = None,
+    settings: Any | None = None,
 ) -> BaseChatModel | None:
     """
     Get a consultant LLM instance for the current run.
@@ -1968,13 +2190,14 @@ def get_consultant_llm(
         ChatOpenAI instance or None if consultant disabled/unavailable
 
     """
+    settings = _settings_or_default(settings)
     # Check if consultant is enabled (via config, not os.environ)
-    if not config.enable_consultant:
+    if not settings.enable_consultant:
         logger.info("consultant_disabled")
         return None
 
     # Check if API key exists (via config with SecretStr protection)
-    if not config.get_openai_api_key():
+    if not settings.get_openai_api_key():
         logger.warning("consultant_no_api_key")
         return None
 
@@ -1983,14 +2206,16 @@ def get_consultant_llm(
             callbacks=callbacks,
             quick_mode=quick_mode,
             max_completion_tokens=max_completion_tokens,
+            model=model,
+            settings=settings,
         )
     except Exception as e:
         logger.error(
             "consultant_llm_init_failed",
             model=(
-                config.consultant_quick_model or config.consultant_model
+                settings.consultant_quick_model or settings.consultant_model
                 if quick_mode
-                else config.consultant_model
+                else settings.consultant_model
             ),
             quick_mode=quick_mode,
             exc_info=True,

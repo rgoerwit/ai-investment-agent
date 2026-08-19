@@ -26,7 +26,7 @@ import src.cli as cli
 import src.output as output
 import src.persistence as persistence
 from src.async_utils import run_with_hard_timeout
-from src.config import config, validate_environment_variables
+from src.config import Settings, config, validate_environment_variables
 from src.error_safety import format_error_message, summarize_exception
 from src.eval import (
     CURRENT_CAPTURE_SCHEMA_VERSION,
@@ -197,16 +197,39 @@ def _resolve_langfuse_session_id(default_session_id: str) -> str:
 
 
 def _build_analysis_trace_tags(quick_mode: bool) -> list[str]:
-    """Return stable tags for an analysis trace."""
+    """Return stable tags for an analysis trace.
+
+    Seat availability comes from the binding plan, not from ``ENABLE_CONSULTANT``
+    /``AUDITOR_MODEL``: those are retired under the multi-provider schema, so a
+    migrated ``.env`` (where both are commented out) would tag every run
+    ``consultant:on auditor:off`` regardless of what actually ran.
+    """
     runtime_config = get_runtime_config(config)
+    consultant_on = config.enable_consultant
+    auditor_on = bool(config.auditor_model)
+    quick_model = runtime_config.quick_think_llm
+    deep_model = runtime_config.deep_think_llm
+    if isinstance(config, Settings):
+        from src.llm_runtime.bindings import resolve_binding_plan
+        from src.llm_runtime.seats import SeatId
+
+        plan = resolve_binding_plan(config)
+        if plan.schema == "new":
+            consultant_on = plan.status_for(
+                SeatId.CONSULTANT, quick_mode=quick_mode
+            ).enabled
+            auditor_on = plan.status_for(SeatId.AUDITOR, quick_mode=quick_mode).enabled
+            bindings = plan.quick_bindings if quick_mode else plan.bindings
+            quick_model = bindings[SeatId.MARKET].model
+            deep_model = bindings[SeatId.RESEARCH_MANAGER].model
     return [
         "analysis",
         "quick" if quick_mode else "full",
-        f"quick-model:{runtime_config.quick_think_llm}",
-        f"deep-model:{runtime_config.deep_think_llm}",
+        f"quick-model:{quick_model}",
+        f"deep-model:{deep_model}",
         f"memory:{'on' if runtime_config.enable_memory else 'off'}",
-        f"consultant:{'on' if config.enable_consultant else 'off'}",
-        f"auditor:{'on' if bool(config.auditor_model) else 'off'}",
+        f"consultant:{'on' if consultant_on else 'off'}",
+        f"auditor:{'on' if auditor_on else 'off'}",
     ]
 
 
@@ -409,6 +432,9 @@ async def _prefetch_macro_context(
             "prompt_used": macro_context.prompt_used,
             "regime_block_dict": regime.to_dict(),
             "regime_raw": regime.raw_block,
+            # Provenance for the retrospective's T0-vs-T1 regime comparison: a
+            # changed summarizer prompt must not read as a changed world.
+            "fingerprint": getattr(macro_context, "fingerprint", None),
         }
         logger.info(
             "macro_context_prefetch_complete",
@@ -650,6 +676,7 @@ async def run_analysis(
             macro_context_prompt_used = macro_context["prompt_used"]
             macro_regime_block = macro_context.get("regime_block_dict") or {}
             macro_regime_raw = macro_context.get("regime_raw", "")
+            macro_context_fingerprint = macro_context.get("fingerprint")
 
             session_id = _resolve_langfuse_session_id(
                 session_id or f"{ticker}-{real_date}-{uuid.uuid4().hex[:8]}"
@@ -840,6 +867,7 @@ async def run_analysis(
                 result["macro_context_llm_invoked"] = macro_context_llm_invoked
                 result["macro_regime_block"] = macro_regime_block
                 result["macro_regime_raw"] = macro_regime_raw
+                result["macro_context_fingerprint"] = macro_context_fingerprint
                 result["macro_context_injected_into_news"] = bool(
                     result.get("macro_context_injected_into_news", False)
                 )
@@ -945,13 +973,14 @@ def _setup_runtime(
 
     # Content inspection is configured independently of logging verbosity.
     try:
-        from src.llms import create_process_rate_limiter
+        from src.llm_runtime.rate_limits import create_process_rate_limiter
         from src.runtime_services import build_provider_runtime
 
         provider_runtime = build_provider_runtime(
+            settings=config,
             rate_limiter=create_process_rate_limiter(
-                rpm=runtime_config.gemini_rpm_limit
-            )
+                rpm=runtime_config.google_rpm_limit
+            ),
         )
         runtime_services = build_runtime_services_from_config(
             enable_tool_audit=enable_tool_audit,
@@ -983,6 +1012,7 @@ async def _run_retrospective_only(args: argparse.Namespace) -> int:
     try:
         from src.observability import flush_traces, get_observability_runtime
         from src.retrospective import SnapshotLoadProgress, run_retrospective
+        from src.retrospective_sources import resolve_retrospective_sources
 
         def report(update: SnapshotLoadProgress) -> None:
             if update.phase == "discovered":
@@ -1009,11 +1039,20 @@ async def _run_retrospective_only(args: argparse.Namespace) -> int:
                     flush=True,
                 )
 
-        results_dir = Path(config.results_dir)
-        if not args.quiet and not args.brief:
+        results_dir, *archive_dirs = resolve_retrospective_sources(config)
+        dry_run = bool(getattr(args, "retrospective_dry_run", False))
+        verbose_console = not args.quiet and not args.brief
+        if verbose_console:
             console.print(
-                "[cyan]Running retrospective evaluation on all past analyses...[/cyan]"
+                "[cyan]Running retrospective evaluation on all past analyses"
+                f"{' (dry run — nothing will be fetched or written)' if dry_run else ''}"
+                "...[/cyan]"
             )
+
+        summaries: list[Any] = []
+
+        def capture_summary(summary: Any) -> None:
+            summaries.append(summary)
 
         runtime = get_observability_runtime(config)
         trace_context = runtime.start_retrospective_trace(
@@ -1034,11 +1073,37 @@ async def _run_retrospective_only(args: argparse.Namespace) -> int:
             lessons = await run_retrospective(
                 ticker=None,
                 results_dir=results_dir,
+                archive_dirs=archive_dirs,
                 progress=report if not (args.quiet or args.brief) else None,
+                dry_run=dry_run,
+                on_summary=capture_summary,
             )
         finally:
             trace_context.close()
             flush_traces()
+
+        # The disposition breakdown is the operator's only view of where the
+        # corpus went — print it in every verbosity, since a run that skipped
+        # everything looks identical to one that found nothing.
+        if summaries:
+            summary = summaries[-1]
+            headline = (
+                f"scanned {summary.scanned} | "
+                f"priced {summary.evaluated} | "
+                f"already-lessoned {summary.skipped_existing_lesson} | "
+                f"memoized {summary.skipped_memo} | "
+                f"too-recent {summary.skipped_too_recent} | "
+                f"no-context {summary.skipped_no_grounding} | "
+                f"deferred {summary.deferred_over_budget}"
+            )
+            if verbose_console:
+                label = "Retrospective dry run" if dry_run else "Retrospective"
+                console.print(f"[cyan]{label}:[/cyan] {headline}")
+            else:
+                print(f"# Retrospective\n\n{headline}")
+
+        if dry_run:
+            return 0
 
         if lessons:
             if not args.quiet and not args.brief:
@@ -1088,6 +1153,7 @@ async def _maybe_run_ticker_retrospective(args: argparse.Namespace) -> None:
     try:
         from src.observability import flush_traces, get_observability_runtime
         from src.retrospective import SnapshotLoadProgress, run_retrospective
+        from src.retrospective_sources import resolve_retrospective_sources
 
         def report(update: SnapshotLoadProgress) -> None:
             if update.phase != "parsing" or args.quiet or args.brief:
@@ -1099,7 +1165,7 @@ async def _maybe_run_ticker_retrospective(args: argparse.Namespace) -> None:
                 flush=True,
             )
 
-        results_dir = Path(config.results_dir)
+        results_dir, *archive_dirs = resolve_retrospective_sources(config)
         runtime = get_observability_runtime(config)
         trace_context = runtime.start_retrospective_trace(
             ticker=args.ticker,
@@ -1119,6 +1185,7 @@ async def _maybe_run_ticker_retrospective(args: argparse.Namespace) -> None:
             lessons = await run_retrospective(
                 ticker=args.ticker,
                 results_dir=results_dir,
+                archive_dirs=archive_dirs,
                 progress=report,
             )
         finally:
@@ -1248,6 +1315,51 @@ def _print_capture_preflight_messages(
             console.print(f"[yellow]{message}[/yellow]")
 
 
+def _print_degradation_notice(
+    result: dict[str, Any],
+    *,
+    quiet: bool,
+    brief: bool,
+) -> None:
+    """Report optional-seat degradation on the console.
+
+    An optional artifact failing is publishable by design, which for one day also
+    made it invisible: bound to an unfunded provider, three full-mode tickers ran
+    with no cross-check at all and reported success (2026-08-14). The analytical
+    consequence points the wrong way -- several risk flags are produced by those
+    very agents, so losing them lowers the risk tally and the stock reads *safer*.
+
+    ``--quiet``/``--brief`` reduce this to one plain line but never suppress it:
+    verbosity is about noise, not about hiding a run that produced no cross-check.
+    Reads only already-persisted fields and never raises -- a diagnostic must not
+    be able to break an otherwise successful run.
+    """
+
+    run_summary = result.get("run_summary")
+    failures = (run_summary or {}).get("optional_failures") or []
+    if not isinstance(failures, list) or not failures:
+        return
+    statuses = result.get("artifact_statuses")
+    statuses = statuses if isinstance(statuses, dict) else {}
+    parts: list[str] = []
+    for name in sorted(str(field) for field in failures):
+        status = statuses.get(name)
+        kind = (status or {}).get("error_kind") if isinstance(status, dict) else None
+        parts.append(f"{name} ({kind or 'unknown'})")
+    detail = ", ".join(parts)
+    if quiet or brief:
+        print(f"DEGRADED: {detail}")
+        return
+    console.print(
+        f"[bold yellow]⚠ Degraded run[/bold yellow] — optional cross-checks "
+        f"unavailable: {detail}"
+    )
+    console.print(
+        "[yellow]  The analysis is publishable but less corroborated; "
+        "risk flags from these agents are absent.[/yellow]"
+    )
+
+
 def _print_capture_result(
     args: argparse.Namespace,
     baseline_capture: BaselineCaptureManager | None,
@@ -1367,8 +1479,18 @@ def _warn_quick_timeout_config_drift(args: argparse.Namespace) -> None:
         drift["LLM_CALL_HARD_TIMEOUT_SECONDS"] = config.llm_call_hard_timeout_seconds
     if config.api_retry_attempts > 2:
         drift["API_RETRY_ATTEMPTS"] = config.api_retry_attempts
-    if config.gemini_rpm_limit > 360:
-        drift["GEMINI_RPM_LIMIT"] = config.gemini_rpm_limit
+    configured_google_rpm = (
+        config.google_rpm_limit
+        if config.llm_base_provider is not None
+        else config.gemini_rpm_limit
+    )
+    if configured_google_rpm > 360:
+        key = (
+            "GOOGLE_RPM_LIMIT"
+            if config.llm_base_provider is not None
+            else "GEMINI_RPM_LIMIT"
+        )
+        drift[key] = configured_google_rpm
 
     if not drift:
         return
@@ -1382,7 +1504,7 @@ def _warn_quick_timeout_config_drift(args: argparse.Namespace) -> None:
             "QUICK_LLM_API_TIMEOUT_SECONDS": 120,
             "LLM_CALL_HARD_TIMEOUT_SECONDS": 120,
             "API_RETRY_ATTEMPTS": 2,
-            "GEMINI_RPM_LIMIT": "15-360",
+            "GOOGLE_RPM_LIMIT": "15-360",
         },
     )
 
@@ -1578,6 +1700,9 @@ async def run_with_args(
                     return 1
 
                 _attach_run_summary(result, args, provider_preflight)
+                _print_degradation_notice(
+                    result, quiet=bool(args.quiet), brief=bool(args.brief)
+                )
                 _score_analysis_trace(result, trace_context)
                 capture_path = _finalize_baseline_capture(baseline_capture, result)
                 _print_capture_result(args, baseline_capture, capture_path)

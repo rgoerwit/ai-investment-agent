@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Literal
 
 import structlog
-from pydantic import Field, SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Note: Pydantic Settings handles .env loading natively via env_file in SettingsConfigDict.
@@ -283,10 +283,26 @@ def validate_environment_variables() -> None:
     # Use the config singleton to check API keys (loaded via Pydantic Settings)
     # This avoids dependency on load_dotenv() polluting os.environ
     required_checks = [
-        ("GOOGLE_API_KEY", config.get_google_api_key),
         ("FINNHUB_API_KEY", config.get_finnhub_api_key),
         ("TAVILY_API_KEY", config.get_tavily_api_key),
     ]
+    if isinstance(config, Settings):
+        from src.llm_runtime.bindings import resolve_binding_plan
+
+        binding_plan = resolve_binding_plan(config)
+        if binding_plan.schema == "legacy":
+            logger.warning(
+                "Legacy LLM configuration is active; generate a multi-provider "
+                "candidate with scripts/llm_env_migrate.py. Mixed schemas are rejected."
+            )
+        if binding_plan.schema == "legacy" or any(
+            binding.identity.vendor_id == "google"
+            for binding in binding_plan.reachable_bindings()
+        ):
+            required_checks.insert(0, ("GOOGLE_API_KEY", config.get_google_api_key))
+    else:
+        # Compatibility for tests/integrations supplying the old config protocol.
+        required_checks.insert(0, ("GOOGLE_API_KEY", config.get_google_api_key))
 
     # Check for EODHD key (Optional but recommended)
     if not config.get_eodhd_api_key():
@@ -329,6 +345,29 @@ class Settings(BaseSettings):
         validation_alias="RESULTS_DIR",
         description="Directory for analysis result files",
     )
+    retrospective_archive_dirs: str = Field(
+        default="",
+        validation_alias="RETROSPECTIVE_ARCHIVE_DIRS",
+        description=(
+            "Additional directories of archived *_analysis.json artifacts the "
+            "retrospective also scans, separated by the OS path separator "
+            "(':' on macOS/Linux). Local retention moves artifacts out of "
+            "RESULTS_DIR at ~120 days, which is inside the 90-270 day band the "
+            "retrospective weights highest, so without this the best evidence "
+            "is unreachable. Read-only; analyses are never written here."
+        ),
+    )
+    retrospective_max_evaluations_per_run: int = Field(
+        default=400,
+        gt=0,
+        validation_alias="RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN",
+        description=(
+            "Ceiling on snapshots priced in one retrospective run. Each costs a "
+            "stock fetch plus a benchmark fetch, so without a ceiling every "
+            "non-triggering snapshot is re-fetched on every run. Lower it to "
+            "probe a policy change on a small batch before committing to a sweep."
+        ),
+    )
     data_cache_dir: Path = Field(
         default=Path("./data_cache"),
         validation_alias="DATA_CACHE_DIR",
@@ -338,6 +377,18 @@ class Settings(BaseSettings):
         default="./chroma_db",
         validation_alias="CHROMA_PERSIST_DIR",
         description="Directory for ChromaDB vector storage",
+    )
+    embedding_provider: Literal["google", "openai"] = Field(
+        default="google", validation_alias="EMBEDDING_PROVIDER"
+    )
+    embedding_model: str = Field(
+        default="gemini-embedding-001", validation_alias="EMBEDDING_MODEL"
+    )
+    embedding_dimension: int = Field(
+        default=768, ge=1, validation_alias="EMBEDDING_DIMENSION"
+    )
+    embedding_schema_version: int = Field(
+        default=1, ge=1, validation_alias="EMBEDDING_SCHEMA_VERSION"
     )
     images_dir: Path = Field(
         default=Path("images"),
@@ -361,6 +412,144 @@ class Settings(BaseSettings):
         default="gemini-3-flash-preview",
         validation_alias="QUICK_MODEL",
         description="Model for quick thinking/data gathering agents",
+    )
+    # New multi-provider schema. ``None`` provider selectors preserve the legacy
+    # configuration path during the compatibility window. Supplying any selector
+    # opts into the new schema; the binding resolver rejects mixed old/new keys.
+    llm_base_provider: str | None = Field(
+        default=None, validation_alias="LLM_BASE_PROVIDER"
+    )
+    llm_review_provider: str | None = Field(
+        default=None, validation_alias="LLM_REVIEW_PROVIDER"
+    )
+    llm_regional_provider: str | None = Field(
+        default=None, validation_alias="LLM_REGIONAL_PROVIDER"
+    )
+    llm_writer_provider: str | None = Field(
+        default=None, validation_alias="LLM_WRITER_PROVIDER"
+    )
+    llm_operational_provider: str | None = Field(
+        default=None, validation_alias="LLM_OPERATIONAL_PROVIDER"
+    )
+    llm_judge_provider: str | None = Field(
+        default=None, validation_alias="LLM_JUDGE_PROVIDER"
+    )
+    llm_seat_model_overrides: dict[str, str] = Field(
+        default_factory=dict, validation_alias="LLM_SEAT_MODEL_OVERRIDES"
+    )
+    llm_seat_quick_model_overrides: dict[str, str] = Field(
+        default_factory=dict, validation_alias="LLM_SEAT_QUICK_MODEL_OVERRIDES"
+    )
+    llm_seat_reasoning_overrides: dict[str, str] = Field(
+        default_factory=dict, validation_alias="LLM_SEAT_REASONING_OVERRIDES"
+    )
+    llm_seat_quick_reasoning_overrides: dict[str, str] = Field(
+        default_factory=dict,
+        validation_alias="LLM_SEAT_QUICK_REASONING_OVERRIDES",
+    )
+    google_llm_fast_model: str = Field(
+        default="gemini-3-flash-preview", validation_alias="GOOGLE_LLM_FAST_MODEL"
+    )
+    google_llm_reasoning_model: str = Field(
+        default="gemini-3.1-pro-preview",
+        validation_alias="GOOGLE_LLM_REASONING_MODEL",
+    )
+    google_llm_critical_model: str = Field(
+        default="gemini-3.1-pro-preview",
+        validation_alias="GOOGLE_LLM_CRITICAL_MODEL",
+    )
+    openai_llm_fast_model: str = Field(
+        default="gpt-5.4-mini", validation_alias="OPENAI_LLM_FAST_MODEL"
+    )
+    openai_llm_reasoning_model: str = Field(
+        default="gpt-5.4", validation_alias="OPENAI_LLM_REASONING_MODEL"
+    )
+    openai_llm_critical_model: str = Field(
+        default="gpt-5.4", validation_alias="OPENAI_LLM_CRITICAL_MODEL"
+    )
+    openai_llm_escalation_model: str = Field(
+        default="gpt-5.6-sol", validation_alias="OPENAI_LLM_ESCALATION_MODEL"
+    )
+    moonshot_llm_fast_model: str = Field(
+        default="kimi-k3", validation_alias="MOONSHOT_LLM_FAST_MODEL"
+    )
+    moonshot_llm_reasoning_model: str = Field(
+        default="kimi-k3", validation_alias="MOONSHOT_LLM_REASONING_MODEL"
+    )
+    moonshot_llm_critical_model: str = Field(
+        default="kimi-k3", validation_alias="MOONSHOT_LLM_CRITICAL_MODEL"
+    )
+    moonshot_llm_escalation_model: str = Field(
+        default="kimi-k3", validation_alias="MOONSHOT_LLM_ESCALATION_MODEL"
+    )
+    moonshot_api_key: SecretStr = Field(
+        default=SecretStr(""), validation_alias="MOONSHOT_API_KEY"
+    )
+    moonshot_api_base: str = Field(
+        default="https://api.moonshot.ai/v1", validation_alias="MOONSHOT_API_BASE"
+    )
+    # xAI exposes no separate escalation model field on purpose: `bindings.py`
+    # maps ModelIntent.ESCALATION to the "critical" suffix for every non-OpenAI
+    # provider, so an XAI_LLM_ESCALATION_MODEL would never be read.
+    xai_llm_fast_model: str = Field(
+        default="grok-4.6", validation_alias="XAI_LLM_FAST_MODEL"
+    )
+    xai_llm_reasoning_model: str = Field(
+        default="grok-4.6", validation_alias="XAI_LLM_REASONING_MODEL"
+    )
+    xai_llm_critical_model: str = Field(
+        default="grok-4.6", validation_alias="XAI_LLM_CRITICAL_MODEL"
+    )
+    xai_api_key: SecretStr = Field(
+        default=SecretStr(""), validation_alias="XAI_API_KEY"
+    )
+    xai_api_base: str = Field(
+        default="https://api.x.ai/v1", validation_alias="XAI_API_BASE"
+    )
+    anthropic_llm_prose_model: str = Field(
+        default="claude-opus-4-6", validation_alias="ANTHROPIC_LLM_PROSE_MODEL"
+    )
+    deepseek_llm_reasoning_model: str = Field(
+        default="deepseek-v4-pro", validation_alias="DEEPSEEK_LLM_REASONING_MODEL"
+    )
+    deepseek_api_key: SecretStr = Field(
+        default=SecretStr(""), validation_alias="DEEPSEEK_API_KEY"
+    )
+    deepseek_api_base: str = Field(
+        default="https://api.deepseek.com", validation_alias="DEEPSEEK_API_BASE"
+    )
+    zai_llm_reasoning_model: str = Field(
+        default="glm-5.2", validation_alias="ZAI_LLM_REASONING_MODEL"
+    )
+    zai_api_key: SecretStr = Field(
+        default=SecretStr(""), validation_alias="ZAI_API_KEY"
+    )
+    zai_api_base: str = Field(
+        default="https://api.z.ai/api/paas/v4/", validation_alias="ZAI_API_BASE"
+    )
+    llm_consultant_mode: Literal["required", "auto", "off"] = Field(
+        default="auto", validation_alias="LLM_CONSULTANT_MODE"
+    )
+    llm_auditor_mode: Literal["required", "auto", "off"] = Field(
+        default="auto", validation_alias="LLM_AUDITOR_MODE"
+    )
+    llm_editor_mode: Literal["required", "auto", "off"] = Field(
+        default="auto", validation_alias="LLM_EDITOR_MODE"
+    )
+    llm_apac_mode: Literal["required", "auto", "off"] = Field(
+        default="off", validation_alias="LLM_APAC_MODE"
+    )
+    llm_require_review_independence: bool = Field(
+        default=True, validation_alias="LLM_REQUIRE_REVIEW_INDEPENDENCE"
+    )
+    llm_review_independence_waiver_reason: str = Field(
+        default="", validation_alias="LLM_REVIEW_INDEPENDENCE_WAIVER_REASON"
+    )
+    llm_require_regional_independence: bool = Field(
+        default=True, validation_alias="LLM_REQUIRE_REGIONAL_INDEPENDENCE"
+    )
+    llm_regional_independence_waiver_reason: str = Field(
+        default="", validation_alias="LLM_REGIONAL_INDEPENDENCE_WAIVER_REASON"
     )
     # APEX tier: one pin for the two gate-critical seats — Senior Fundamentals
     # (rubric arithmetic feeding the hard <50% health/growth gates) and the
@@ -472,6 +661,45 @@ class Settings(BaseSettings):
         validation_alias="CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS",
         description="Total wall-clock Consultant budget in --quick mode",
     )
+    # Full-mode siblings of the quick budget above. Measured 2026-08-14: the
+    # slowest single Consultant call was 87s (grok-4.6) and 77s (kimi-k3)
+    # against a 90s per-call cap, and 3 calls at ~85s already exceed a 240s
+    # total before any tool time. Both are ceilings, not waits — unused
+    # headroom costs nothing, while a cap crossed mid-loop discards the review.
+    consultant_call_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0.0,
+        validation_alias="CONSULTANT_CALL_TIMEOUT_SECONDS",
+        description="Wall-clock cap for a single Consultant LLM call in full mode",
+    )
+    consultant_total_timeout_seconds: float = Field(
+        default=300.0,
+        gt=0.0,
+        validation_alias="CONSULTANT_TOTAL_TIMEOUT_SECONDS",
+        description="Total wall-clock Consultant budget in full mode",
+    )
+    # Loop shape. The Consultant prompt mandates plan-then-batch, so the whole
+    # verification set lands in one round: 2 rounds leaves a follow-up plus
+    # synthesis (3 LLM calls), where the old 4-per-turn x 3-iteration shape was
+    # sized for a sequential prober and cost 4. The executed-tool ceiling is
+    # unchanged at 12.
+    consultant_max_tool_iterations: int = Field(
+        default=2,
+        ge=1,
+        le=4,
+        validation_alias="CONSULTANT_MAX_TOOL_ITERATIONS",
+        description="Consultant tool rounds in full mode (quick mode is always 1)",
+    )
+    consultant_max_tool_calls_per_turn: int = Field(
+        default=6,
+        ge=1,
+        validation_alias="CONSULTANT_MAX_TOOL_CALLS_PER_TURN",
+        description=(
+            "Fan-out bound for one Consultant turn. Unlike the Auditor, the "
+            "Consultant has no per-tool budget, so this cap is its only guard "
+            "against a runaway plan — raise it, do not remove it."
+        ),
+    )
     consultant_quick_max_completion_tokens: int = Field(
         default=4096,
         ge=1024,
@@ -560,7 +788,7 @@ class Settings(BaseSettings):
     # --- Writer Configuration (Anthropic/Claude) ---
     claude_api_key: SecretStr | None = Field(
         default=None,
-        validation_alias="CLAUDE_KEY",
+        validation_alias=AliasChoices("ANTHROPIC_API_KEY", "CLAUDE_KEY"),
         description="Anthropic API key for article writer (optional, falls back to Gemini)",
     )
     writer_model: str = Field(
@@ -650,6 +878,11 @@ class Settings(BaseSettings):
         validation_alias="GEMINI_SERVICE_TIER",
         description="Gemini inference tier: standard, or flex (50% cost, higher latency)",
     )
+    google_service_tier: Literal["standard", "flex"] = Field(
+        default="standard",
+        validation_alias="GOOGLE_SERVICE_TIER",
+        description="Google inference tier for the new multi-provider schema",
+    )
     openai_service_tier: Literal["auto", "flex"] = Field(
         default="auto",
         validation_alias="OPENAI_SERVICE_TIER",
@@ -672,6 +905,43 @@ class Settings(BaseSettings):
             "calls; floors SDK timeouts and hard-timeout caps when flex is active"
         ),
     )
+    # A degraded flex pool costs time AND money: each queued call burns up to
+    # flex_llm_timeout_seconds before falling back, and the fallback is billed at
+    # the standard rate. Without a memory the run re-learns that per call (8002.T,
+    # 2026-08-14: 134 min, four fallbacks, $0.90 vs a $0.48-0.66 norm). These
+    # bound how often a run is willing to re-discover it.
+    flex_degrade_enabled: bool = Field(
+        default=True,
+        validation_alias="FLEX_DEGRADE_ENABLED",
+        description=(
+            "Stop requesting the flex tier from a provider whose pool has "
+            "repeatedly failed to serve, until the cool-off expires"
+        ),
+    )
+    flex_degrade_threshold: int = Field(
+        default=2,
+        ge=1,
+        validation_alias="FLEX_DEGRADE_THRESHOLD",
+        description=(
+            "Flex fallbacks (latency or capacity) within the window before a "
+            "provider is downgraded; 1 while on post-cool-off probation"
+        ),
+    )
+    flex_degrade_window_seconds: float = Field(
+        default=900.0,
+        gt=0,
+        validation_alias="FLEX_DEGRADE_WINDOW_SECONDS",
+        description=(
+            "Sliding-window length (s) for counting flex fallbacks; matches the "
+            "flex floor, so the threshold means 'twice in one attempt's waiting'"
+        ),
+    )
+    flex_degrade_cool_off_seconds: float = Field(
+        default=1800.0,
+        gt=0,
+        validation_alias="FLEX_DEGRADE_COOL_OFF_SECONDS",
+        description=("How long (s) to use the standard tier before probing flex again"),
+    )
 
     # --- Logging ---
     log_level: str = Field(
@@ -687,6 +957,20 @@ class Settings(BaseSettings):
         ge=1,
         validation_alias="API_TIMEOUT",
         description="API request timeout in seconds",
+    )
+    # An OpenAI-compatible vendor (Moonshot/Kimi, and anything else reachable via
+    # OPENAI_API_BASE) has its own latency profile and no service tiers. This is
+    # the one knob for how long its client may wait — do NOT reach for
+    # OPENAI_SERVICE_TIER=flex to stretch it, which is a pricing/queueing product
+    # the vendor does not sell and which is now ignored for a non-OpenAI base.
+    openai_compatible_client_timeout_seconds: int = Field(
+        default=300,
+        ge=1,
+        validation_alias="OPENAI_COMPATIBLE_CLIENT_TIMEOUT_SECONDS",
+        description=(
+            "SDK client timeout for OpenAI-compatible (non-api.openai.com) "
+            "endpoints on the review plane"
+        ),
     )
     # Quick-mode screening should not inherit a 5-minute SDK socket/read
     # timeout. The outer runtime helper still enforces the hard wall-clock cap;
@@ -760,7 +1044,7 @@ class Settings(BaseSettings):
     # baseline capture was rejected. Kept distinct from the APEX knob so tuning
     # one cannot silently starve the other.
     # Scope note: in practice this governs the **Auditor**. The Consultant passes
-    # its own `overall_timeout_seconds` = min(CONSULTANT_CALL_TIMEOUT_SECONDS=90,
+    # its own `overall_timeout_seconds` = min(CONSULTANT_CALL_TIMEOUT_SECONDS,
     # remaining-of-CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS), which overrides this
     # cap — so raising this alone does not lengthen a Consultant call. Tune the
     # consultant via those two knobs instead.
@@ -897,13 +1181,49 @@ class Settings(BaseSettings):
         validation_alias="GEMINI_RPM_LIMIT",
         description="Gemini API rate limit (requests per minute)",
     )
-    # OpenAI RPM limit for consultant/auditor/editor LLMs. None (default) means
-    # no rate limiter is attached — set OPENAI_RPM_LIMIT in .env to enable.
+    # Conservative application-side ceilings. Provider accounts may permit more;
+    # operators can raise these explicitly after checking their actual quota.
     openai_rpm_limit: int | None = Field(
-        default=None,
+        default=120,
         ge=1,
         validation_alias="OPENAI_RPM_LIMIT",
-        description="OpenAI API rate limit (requests per minute); unset = no throttle",
+        description="OpenAI application rate limit (requests per minute)",
+    )
+    google_rpm_limit: int = Field(
+        default=15,
+        ge=1,
+        validation_alias="GOOGLE_RPM_LIMIT",
+        description="Google API rate limit for the new multi-provider schema",
+    )
+    anthropic_rpm_limit: int | None = Field(
+        default=60,
+        ge=1,
+        validation_alias="ANTHROPIC_RPM_LIMIT",
+        description="Anthropic application rate limit (requests per minute)",
+    )
+    deepseek_rpm_limit: int | None = Field(
+        default=30,
+        ge=1,
+        validation_alias="DEEPSEEK_RPM_LIMIT",
+        description="DeepSeek application rate limit (requests per minute)",
+    )
+    zai_rpm_limit: int | None = Field(
+        default=30,
+        ge=1,
+        validation_alias="ZAI_RPM_LIMIT",
+        description="Z.AI application rate limit (requests per minute)",
+    )
+    moonshot_rpm_limit: int | None = Field(
+        default=60,
+        ge=1,
+        validation_alias="MOONSHOT_RPM_LIMIT",
+        description="Moonshot application rate limit (requests per minute)",
+    )
+    xai_rpm_limit: int | None = Field(
+        default=60,
+        ge=1,
+        validation_alias="XAI_RPM_LIMIT",
+        description="xAI application rate limit (requests per minute)",
     )
 
     # --- Token Management ---
@@ -1139,9 +1459,10 @@ class Settings(BaseSettings):
         default="",
         validation_alias="OPENAI_API_BASE",
         description=(
-            "Custom OpenAI-compatible base URL (optional; e.g. Kimi/Moonshot). "
-            "Empty uses the default OpenAI endpoint. A custom base uses the Chat "
-            "Completions API rather than the OpenAI-only Responses API."
+            "Optional OpenAI API base override. Provider-scoped configuration "
+            "accepts only reviewed OpenAI-owned endpoints and preserves Responses "
+            "API behavior. Legacy configuration may use a compatible endpoint "
+            "and falls back to Chat Completions."
         ),
     )
     langsmith_api_key: SecretStr = Field(

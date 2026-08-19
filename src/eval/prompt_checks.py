@@ -597,9 +597,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--judge-model",
         default=None,
         help=(
-            "Optional model override for the Stage 3 semantic judge. "
-            f"Defaults to QUICK_MODEL (currently: {config.quick_think_llm}). "
-            "Use an OpenAI model name explicitly if you want the consultant-backed judge path."
+            "Optional model override for the Stage 3 semantic judge. Defaults to "
+            "the semantic_eval_judge seat, which binds to LLM_JUDGE_PROVIDER under "
+            "the multi-provider schema and to QUICK_MODEL "
+            f"(currently: {config.quick_think_llm}) under the legacy schema. Pin the "
+            "judge for both arms of an A/B so it cannot move with the arm under test."
         ),
     )
     parser.add_argument(

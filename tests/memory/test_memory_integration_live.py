@@ -16,6 +16,11 @@ except ImportError:
 
 pytestmark = pytest.mark.integration
 
+# These tests use real embeddings but must still use the temporary Chroma
+# directory installed by tests/conftest.py. ``clear_old_memories(..., ticker=None)``
+# would otherwise prune the operator's historical lessons collection. Do not run
+# this module through a harness that bypasses the repository pytest fixtures.
+
 
 def is_rate_limit_error(exc: BaseException) -> bool:
     """Check if exception is a rate limit error worth retrying."""

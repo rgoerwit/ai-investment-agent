@@ -1766,3 +1766,219 @@ class TestConsultantPartialRecovery:
     async def test_clean_first_response_needs_no_resynthesis(self):
         result = await self._run([self._clean(self.HEADERS + "complete")])
         assert result.partial_reason is None
+
+
+class TestConcurrentToolExecution:
+    """A Consultant turn is one planned batch, so it runs concurrently.
+
+    The loop used to await each tool call in sequence while the prompt (as of
+    v8.12) mandates plan-then-batch and the Auditor loop already gathered. On
+    2026-08-14 a batch-planning vendor requested 6-7 calls against a cap of 4,
+    re-planned, and twice hit ``consultant_deadline_mid_loop``. Widening the cap
+    without concurrency would have made each turn longer, not shorter.
+    """
+
+    @staticmethod
+    def _policy(*, per_turn=6, iterations=1, budget=60.0):
+        from src.agents.consultant_tool_loop import ConsultantToolLoopPolicy
+
+        return ConsultantToolLoopPolicy(
+            max_tool_iterations=iterations,
+            max_tool_calls_per_turn=per_turn,
+            deadline=time.monotonic() + budget,
+            total_timeout=budget,
+        )
+
+    @staticmethod
+    def _tool_service(runner):
+        from src.tooling.runtime import ToolResult
+
+        class _Service:
+            async def execute(self, invocation, runner=None):
+                return ToolResult(value=await runner(invocation.args))
+
+        del runner
+        return lambda: _Service()
+
+    @staticmethod
+    def _turn(names):
+        return SimpleNamespace(
+            content="",
+            tool_calls=[
+                {"name": name, "args": {"metric": name}, "id": f"call_{index}"}
+                for index, name in enumerate(names)
+            ],
+            response_metadata={"finish_reason": "tool_calls"},
+        )
+
+    @staticmethod
+    def _final(text="FINAL CONSULTANT VERDICT: CONDITIONAL APPROVAL"):
+        return SimpleNamespace(
+            content=text, tool_calls=[], response_metadata={"finish_reason": "stop"}
+        )
+
+    async def _run(self, *, tool_calls, tools_by_name, policy=None):
+        from src.agents.consultant_tool_loop import run_bounded_consultant_loop
+
+        responses = [self._turn(tool_calls), self._final()]
+
+        async def fake_invoke(_llm, _messages):
+            return responses.pop(0) if responses else self._final()
+
+        return await run_bounded_consultant_loop(
+            active_llm="active",
+            fallback_llm="fallback",
+            messages=[],
+            tools_by_name=tools_by_name,
+            policy=policy or self._policy(),
+            invoke_with_deadline=fake_invoke,
+            tool_service_getter=self._tool_service(None),
+            agent_name="External Consultant",
+            agent_key="consultant",
+            ticker="7740.T",
+        )
+
+    @staticmethod
+    def _sleeping_tool(delay, value="ok"):
+        async def _ainvoke(_args):
+            await asyncio.sleep(delay)
+            return value
+
+        return SimpleNamespace(ainvoke=_ainvoke)
+
+    @pytest.mark.asyncio
+    async def test_turn_costs_its_slowest_call_not_their_sum(self):
+        """Six 50ms calls must finish in ~50ms, not ~300ms."""
+        names = [f"tool_{index}" for index in range(6)]
+        tools = {name: self._sleeping_tool(0.05) for name in names}
+
+        started = time.monotonic()
+        result = await self._run(tool_calls=names, tools_by_name=tools)
+        elapsed = time.monotonic() - started
+
+        assert result.tool_call_count == 6
+        # Sequential would be >= 0.30s; allow generous headroom for CI jitter.
+        assert elapsed < 0.20, f"turn took {elapsed:.3f}s — calls did not overlap"
+
+    @pytest.mark.asyncio
+    async def test_failed_tool_order_follows_the_request_not_completion(self):
+        """gather preserves argument order, so the ledger must too."""
+
+        def _failing(delay):
+            async def _ainvoke(_args):
+                await asyncio.sleep(delay)
+                raise RuntimeError("boom")
+
+            return SimpleNamespace(ainvoke=_ainvoke)
+
+        # Deliberately inverted: the first-requested tool finishes last.
+        tools = {"slow": _failing(0.06), "fast": _failing(0.01)}
+        result = await self._run(tool_calls=["slow", "fast"], tools_by_name=tools)
+
+        assert result.failed_tools == ("slow", "fast")
+        assert result.tool_failure_count == 2
+
+    @pytest.mark.asyncio
+    async def test_one_failing_task_does_not_disturb_its_siblings(self):
+        tools = {
+            "good_1": self._sleeping_tool(0.01, "value-1"),
+            "bad": SimpleNamespace(ainvoke=Mock(side_effect=RuntimeError("boom"))),
+            "good_2": self._sleeping_tool(0.01, "value-2"),
+        }
+        result = await self._run(
+            tool_calls=["good_1", "bad", "good_2"], tools_by_name=tools
+        )
+
+        assert result.tool_call_count == 3
+        assert result.tool_failure_count == 1
+        assert result.failed_tools == ("bad",)
+        assert result.had_tool_errors is True
+
+    @pytest.mark.asyncio
+    async def test_expired_deadline_raises_before_any_task_starts(self):
+        executed = []
+
+        def _tracking_tool(name):
+            async def _ainvoke(_args):
+                executed.append(name)
+                return "ok"
+
+            return SimpleNamespace(ainvoke=_ainvoke)
+
+        tools = {name: _tracking_tool(name) for name in ("a", "b")}
+        with pytest.raises(TimeoutError, match="total wall-clock timeout"):
+            await self._run(
+                tool_calls=["a", "b"],
+                tools_by_name=tools,
+                policy=self._policy(budget=-1.0),
+            )
+        assert executed == [], "tools ran despite an exhausted budget"
+
+    @pytest.mark.asyncio
+    async def test_surplus_calls_beyond_the_cap_are_still_skipped(self):
+        """The cap was raised, not removed — it is the only fan-out guard."""
+        names = [f"tool_{index}" for index in range(8)]
+        tools = {name: self._sleeping_tool(0.0) for name in names}
+        result = await self._run(
+            tool_calls=names, tools_by_name=tools, policy=self._policy(per_turn=6)
+        )
+        assert result.tool_call_count == 6
+
+
+class TestConsultantLoopBudgetResolution:
+    """The loop budget is config-sourced, mirroring AuditorBudgetPolicy."""
+
+    def test_full_mode_resolves_the_configured_shape(self):
+        from src.agents.consultant_tool_loop import ConsultantToolLoopPolicy
+
+        policy = ConsultantToolLoopPolicy.from_settings(
+            quick_mode=False, deadline=1.0, total_timeout=2.0
+        )
+        assert policy.max_tool_iterations == 2
+        assert policy.max_tool_calls_per_turn == 6
+        assert (policy.deadline, policy.total_timeout) == (1.0, 2.0)
+
+    def test_quick_mode_pins_one_round_but_keeps_the_fan_out(self):
+        from src.agents.consultant_tool_loop import ConsultantToolLoopPolicy
+
+        policy = ConsultantToolLoopPolicy.from_settings(
+            quick_mode=True, deadline=0.0, total_timeout=0.0
+        )
+        assert policy.max_tool_iterations == 1
+        assert policy.max_tool_calls_per_turn == 6
+
+    def test_settings_override_reaches_the_policy(self):
+        from src.agents.consultant_tool_loop import ConsultantToolLoopPolicy
+        from src.config import Settings
+
+        overridden = Settings(
+            CONSULTANT_MAX_TOOL_ITERATIONS=3,
+            CONSULTANT_MAX_TOOL_CALLS_PER_TURN=2,
+        )
+        policy = ConsultantToolLoopPolicy.from_settings(
+            quick_mode=False, deadline=0.0, total_timeout=0.0, settings=overridden
+        )
+        assert (policy.max_tool_iterations, policy.max_tool_calls_per_turn) == (3, 2)
+
+    def test_zero_iterations_is_rejected_rather_than_disabling_the_loop(self):
+        import pydantic
+
+        from src.config import Settings
+
+        with pytest.raises(pydantic.ValidationError):
+            Settings(CONSULTANT_MAX_TOOL_ITERATIONS=0)
+
+    def test_shipped_deadlines_clear_the_slowest_measured_call(self):
+        """grok-4.6 peaked at 87s per call; kimi-k3 at 77s (2026-08-14).
+
+        Read defaults off the model rather than an instance: instantiating
+        Settings loads the operator's .env, so a documented override would fail
+        this on a correct configuration.
+        """
+        from src.config import Settings
+
+        fields = Settings.model_fields
+        per_call = fields["consultant_call_timeout_seconds"].default
+        total = fields["consultant_total_timeout_seconds"].default
+        assert per_call >= 120.0
+        assert total >= 3 * 87.0, "total cannot fit three slowest-case calls"

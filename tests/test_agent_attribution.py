@@ -7,9 +7,8 @@ token-usage row from the token tracker. Three invariants matter:
 1. Every row in `_ARTIFACT_AGENT_MAP` appears in saved JSON.
 2. Token-usage join: agent_attribution[...]["token_usage"] matches the
    corresponding token_usage.agents[...] row (or aggregates multiple rows).
-3. Map drift: every `tracked_callbacks(...)` display name in
-   `src/graph/components.py` either appears in the map or in a small allowlist.
-   The AST scan guards against silent renames.
+3. Map drift: every graph seat's registry-owned callback name, plus every
+   explicit `tracked_callbacks(...)` name, appears in the map or allowlist.
 """
 
 from __future__ import annotations
@@ -335,7 +334,9 @@ def test_agent_attribution_aggregates_multi_agent_token_rows(tmp_path: Path) -> 
 
 
 def _extract_tracked_callbacks_names() -> set[str]:
-    """AST scan: collect every string literal passed to tracked_callbacks(...)."""
+    """Collect registry-driven graph seats and explicit callback literals."""
+    from src.llm_runtime.seats import SEATS, SeatId
+
     source = Path("src/graph/components.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     names: set[str] = set()
@@ -349,13 +350,34 @@ def _extract_tracked_callbacks_names() -> set[str]:
             and isinstance(node.args[0].value, str)
         ):
             names.add(node.args[0].value)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "seat_model"
+            and node.args
+            and isinstance(node.args[0], ast.Attribute)
+            and isinstance(node.args[0].value, ast.Name)
+            and node.args[0].value.id == "SeatId"
+        ):
+            tracked = next(
+                (
+                    keyword.value.value
+                    for keyword in node.keywords
+                    if keyword.arg == "tracked"
+                    and isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, bool)
+                ),
+                True,
+            )
+            if not tracked:
+                continue
+            seat_id = SeatId[node.args[0].attr]
+            names.add(SEATS[seat_id].callback_name)
     return names
 
 
 def test_agent_attribution_map_matches_live_token_callbacks() -> None:
-    """Drift guard: every name in _ARTIFACT_AGENT_MAP must exist as a
-    tracked_callbacks(...) literal, and every literal must be either in the
-    map or the unmapped allowlist."""
+    """Every graph callback name must be mapped or explicitly exempted."""
     live_names = _extract_tracked_callbacks_names()
     assert live_names, "AST scan found no tracked_callbacks() call sites"
 

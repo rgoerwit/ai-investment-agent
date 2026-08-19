@@ -154,12 +154,13 @@ class LLMJudgeInspector:
     def _get_llm(self) -> Any:
         """Lazily create the LLM instance."""
         if self._llm is None:
-            from src.llms import create_quick_thinking_llm
+            from src.llm_runtime.construction import build_required_model_for_seat
+            from src.llm_runtime.seats import SeatId
 
-            self._llm = create_quick_thinking_llm(
-                temperature=0.0,
-                model=self._model_name,
-                max_output_tokens=256,
+            self._llm = build_required_model_for_seat(
+                SeatId.CONTENT_INSPECTOR,
+                model_override=self._model_name,
+                output_tokens=256,
                 callbacks=self._merge_judge_callbacks(),
                 # Inline security path: must not queue on the flex tier
                 # (GEMINI_SERVICE_TIER=flex would add minutes per inspected

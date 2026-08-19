@@ -57,6 +57,11 @@ class MacroContextResult:
     llm_invoked: bool = False
     prompt_used: dict[str, Any] | None = None
     regime: MacroRegime = field(default_factory=MacroRegime)
+    # Fingerprint of the summarizer prompt that produced this brief. The
+    # retrospective compares a decision-time regime against a later cached one;
+    # without this, a changed macro *prompt* is indistinguishable from a changed
+    # *world*.
+    fingerprint: str | None = None
 
 
 def _cache_path(region: str) -> Path:
@@ -76,6 +81,8 @@ def _prompt_metadata() -> dict[str, Any] | None:
     prompt = get_prompt("macro_context_analyst")
     if not prompt:
         return None
+    from src.eval.prompt_digest import agent_prompt_digest
+
     return {
         "agent_name": prompt.agent_name,
         "version": prompt.version,
@@ -83,6 +90,10 @@ def _prompt_metadata() -> dict[str, Any] | None:
         "requires_tools": prompt.requires_tools,
         "source": prompt.source,
         "execution_path": "pre_graph",
+        # Content digest of the prompt as resolved (Langfuse override included).
+        # `compute_prompt_set_digest` keys on this; without it the macro seat is
+        # recorded in `prompts_used` but silently absent from the run fingerprint.
+        "digest": agent_prompt_digest(prompt),
     }
 
 
@@ -253,7 +264,8 @@ async def _summarize(
 
     from src.agents.message_utils import extract_string_content
     from src.agents.runtime import invoke_with_rate_limit_handling
-    from src.llms import create_quick_thinking_llm
+    from src.llm_runtime.construction import build_required_model_for_seat
+    from src.llm_runtime.seats import SeatId
     from src.prompts import get_prompt
 
     prompt = get_prompt("macro_context_analyst")
@@ -261,9 +273,9 @@ async def _summarize(
         logger.warning("macro_context_prompt_missing")
         return "", False, None
 
-    llm = create_quick_thinking_llm(
-        temperature=0.1,
-        max_output_tokens=900,
+    llm = build_required_model_for_seat(
+        SeatId.MACRO_CONTEXT,
+        output_tokens=900,
         callbacks=_merge_macro_callbacks(callbacks),
     )
     response = await invoke_with_rate_limit_handling(
@@ -346,6 +358,7 @@ async def get_macro_context(
             status="cached",
             generated_at=cached.get("generated_at"),
             regime=parse_macro_regime(report),
+            fingerprint=fingerprint,
         )
 
     try:
@@ -421,6 +434,7 @@ async def get_macro_context(
             llm_invoked=llm_invoked,
             prompt_used=prompt_used,
             regime=parse_macro_regime(report),
+            fingerprint=fingerprint,
         )
     except Exception as exc:
         logger.warning(

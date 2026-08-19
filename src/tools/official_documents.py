@@ -27,6 +27,7 @@ from src.runtime_services import (
     get_current_inspection_service,
     get_current_issuer_hosts,
 )
+from src.text_patterns import is_safe_public_host
 from src.tooling.inspector import InspectionEnvelope, SourceKind
 
 logger = structlog.get_logger(__name__)
@@ -145,18 +146,7 @@ def _configured_host_suffixes(value: str) -> tuple[str, ...]:
         host = raw.strip().rstrip(".").lower()
         if not host:
             continue
-        if (
-            "." not in host
-            or len(host) > 253
-            or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", host)
-        ):
-            logger.warning("auditor_document_host_ignored", host=host)
-            continue
-        try:
-            ipaddress.ip_address(host)
-        except ValueError:
-            pass
-        else:
+        if not is_safe_public_host(host):
             logger.warning("auditor_document_host_ignored", host=host)
             continue
         hosts.append(host)

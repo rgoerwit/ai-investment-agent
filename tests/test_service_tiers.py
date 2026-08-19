@@ -1,6 +1,7 @@
 """Unit tests for src/service_tiers.py — flex-tier gating, timeout floors,
 and the dynamic (error-driven) flex-capability cache."""
 
+import pathlib
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,7 @@ from src.service_tiers import (
     normalize_model_name,
     openai_flex_active,
     provider_flex_active,
+    resolve_google_service_tier,
 )
 
 
@@ -215,4 +217,231 @@ class TestFlexAttemptClientTimeout:
         assert 0.0 < FLEX_QUICK_ATTEMPT_FRACTION <= 0.45, (
             "FLEX_QUICK_ATTEMPT_FRACTION must leave >=10% margin after two "
             "attempts (flex + standard re-issue) under the outer hard cap."
+        )
+
+
+class TestFlexHealthDowngrade:
+    """Provider-scoped flex-health cache — the memory the capability cache lacks.
+
+    Measured on 8002.T (2026-08-14): a 134-minute run, ~121 of them waiting on
+    four queued flex calls that each burned the 900 s flex floor before falling
+    back. Nothing remembered the first timeout, so the run re-learned the same
+    outage four times, and the fallbacks billed at the standard rate -- $0.90
+    against a $0.48-0.66 norm.
+
+    All timing is injected via ``now`` so nothing sleeps.
+    """
+
+    T0 = 1000.0
+
+    @staticmethod
+    def _cfg(**over):
+        from src.config import Settings
+
+        base = {
+            "flex_degrade_enabled": True,
+            "flex_degrade_threshold": 2,
+            "flex_degrade_window_seconds": 900.0,
+            "flex_degrade_cool_off_seconds": 1800.0,
+        }
+        base.update(over)
+        return Settings(_env_file=None, **base)
+
+    def _fail(self, provider, *, at, cfg, reason="latency"):
+        from src.service_tiers import note_flex_fallback
+
+        note_flex_fallback(provider, reason=reason, now=at, cfg=cfg)
+
+    def test_threshold_failures_degrade_the_provider(self):
+        from src.service_tiers import flex_degraded
+
+        cfg = self._cfg()
+        self._fail("google", at=self.T0, cfg=cfg)
+        assert flex_degraded("google", now=self.T0 + 1, cfg=cfg) is False
+        self._fail("google", at=self.T0 + 60, cfg=cfg)
+        assert flex_degraded("google", now=self.T0 + 61, cfg=cfg) is True
+
+    def test_capacity_and_latency_both_count(self):
+        """Both mean 'the flex pool did not serve this call'."""
+        from src.service_tiers import flex_degraded
+
+        cfg = self._cfg()
+        self._fail("google", at=self.T0, cfg=cfg, reason="capacity")
+        self._fail("google", at=self.T0 + 5, cfg=cfg, reason="latency")
+        assert flex_degraded("google", now=self.T0 + 6, cfg=cfg) is True
+
+    def test_failures_older_than_the_window_age_out(self):
+        from src.service_tiers import flex_degraded
+
+        cfg = self._cfg()
+        self._fail("google", at=self.T0, cfg=cfg)
+        # Second failure lands after the window has slid past the first.
+        self._fail("google", at=self.T0 + 1000, cfg=cfg)
+        assert flex_degraded("google", now=self.T0 + 1001, cfg=cfg) is False
+
+    def test_providers_are_independent(self):
+        """Google congestion must not downgrade the OpenAI review plane."""
+        from src.service_tiers import flex_degraded
+
+        cfg = self._cfg()
+        self._fail("google", at=self.T0, cfg=cfg)
+        self._fail("google", at=self.T0 + 1, cfg=cfg)
+        assert flex_degraded("google", now=self.T0 + 2, cfg=cfg) is True
+        assert flex_degraded("openai", now=self.T0 + 2, cfg=cfg) is False
+
+    def test_cool_off_expiry_restores_eligibility(self):
+        from src.service_tiers import flex_degraded
+
+        cfg = self._cfg()
+        self._fail("google", at=self.T0, cfg=cfg)
+        self._fail("google", at=self.T0 + 1, cfg=cfg)
+        assert flex_degraded("google", now=self.T0 + 1799, cfg=cfg) is True
+        assert flex_degraded("google", now=self.T0 + 1802, cfg=cfg) is False
+
+    def test_single_failure_on_probation_re_degrades(self):
+        """Without this, a sustained outage re-pays threshold x 900 s per cycle."""
+        from src.service_tiers import flex_degraded
+
+        cfg = self._cfg()
+        self._fail("google", at=self.T0, cfg=cfg)
+        self._fail("google", at=self.T0 + 1, cfg=cfg)
+        assert (
+            flex_degraded("google", now=self.T0 + 2000, cfg=cfg) is False
+        )  # probation
+        self._fail("google", at=self.T0 + 2001, cfg=cfg)
+        assert flex_degraded("google", now=self.T0 + 2002, cfg=cfg) is True
+
+    def test_failures_during_degradation_do_not_extend_it(self):
+        """An in-flight call that already requested flex must not re-arm the clock."""
+        from src.service_tiers import flex_degraded
+
+        cfg = self._cfg()
+        self._fail("google", at=self.T0, cfg=cfg)
+        self._fail("google", at=self.T0 + 1, cfg=cfg)
+        self._fail("google", at=self.T0 + 900, cfg=cfg)
+        assert flex_degraded("google", now=self.T0 + 1802, cfg=cfg) is False
+
+    @pytest.mark.parametrize("provider", [None, "", "   "])
+    def test_unknown_provider_is_inert(self, provider):
+        from src.service_tiers import flex_degraded
+
+        cfg = self._cfg()
+        self._fail(provider, at=self.T0, cfg=cfg)
+        self._fail(provider, at=self.T0 + 1, cfg=cfg)
+        assert flex_degraded(provider, now=self.T0 + 2, cfg=cfg) is False
+
+    def test_disabled_switch_makes_it_a_no_op(self):
+        from src.service_tiers import flex_degraded
+
+        cfg = self._cfg(flex_degrade_enabled=False)
+        self._fail("google", at=self.T0, cfg=cfg)
+        self._fail("google", at=self.T0 + 1, cfg=cfg)
+        assert flex_degraded("google", now=self.T0 + 2, cfg=cfg) is False
+
+    def test_snapshot_is_secret_free_and_serializable(self):
+        """It rides into a persisted artifact, so it must survive json.dumps."""
+        import json
+
+        from src.service_tiers import flex_degradation_snapshot
+
+        cfg = self._cfg()
+        assert flex_degradation_snapshot(now=self.T0) == {}
+        self._fail("google", at=self.T0, cfg=cfg)
+        self._fail("google", at=self.T0 + 1, cfg=cfg)
+        snap = flex_degradation_snapshot(now=self.T0 + 2)
+        assert snap["google"]["episodes"] == 1
+        assert snap["google"]["degraded"] is True
+        json.dumps(snap)
+
+    def test_concurrent_failures_stay_consistent(self):
+        import threading
+
+        from src.service_tiers import flex_degraded
+
+        cfg = self._cfg(flex_degrade_threshold=50)
+        barrier = threading.Barrier(8)
+
+        def worker(index: int) -> None:
+            barrier.wait()
+            for step in range(10):
+                self._fail("google", at=self.T0 + index * 10 + step, cfg=cfg)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        # 80 failures against a threshold of 50, all inside the window.
+        assert flex_degraded("google", now=self.T0 + 200, cfg=cfg) is True
+
+
+class TestGoogleServiceTierResolution:
+    """One resolver, so what we request and what we allow for cannot diverge.
+
+    ``GOOGLE_SERVICE_TIER`` (multi-provider) and ``GEMINI_SERVICE_TIER``
+    (legacy) name the same concept. Seat construction read the first while this
+    module read the second, so an operator who set only ``GOOGLE_SERVICE_TIER``
+    sent flex requests that the runtime did not treat as flex: the timeout
+    floors never applied and the degradation cache never engaged. Same class of
+    split that ``RuntimeConfig.from_config`` already resolves for RPM.
+    """
+
+    @staticmethod
+    def _schema_cfg(*, google="standard", gemini="standard", base_provider=None):
+        return SimpleNamespace(
+            google_service_tier=google,
+            gemini_service_tier=gemini,
+            llm_base_provider=base_provider,
+            openai_service_tier="auto",
+            flex_llm_timeout_seconds=900,
+            quick_llm_call_hard_timeout_seconds=60,
+        )
+
+    def test_new_schema_reads_the_provider_scoped_key(self):
+        cfg = self._schema_cfg(google="flex", gemini="standard", base_provider="google")
+        assert resolve_google_service_tier(cfg) == "flex"
+        assert gemini_flex_active(cfg)
+        assert provider_flex_active("google", cfg)
+
+    def test_legacy_schema_reads_the_legacy_key(self):
+        cfg = self._schema_cfg(google="standard", gemini="flex", base_provider=None)
+        assert resolve_google_service_tier(cfg) == "flex"
+        assert gemini_flex_active(cfg)
+
+    def test_new_schema_ignores_a_stale_legacy_key(self):
+        """A leftover GEMINI_SERVICE_TIER must not re-enable flex."""
+        cfg = self._schema_cfg(google="standard", gemini="flex", base_provider="google")
+        assert resolve_google_service_tier(cfg) == "standard"
+        assert not gemini_flex_active(cfg)
+
+    def test_legacy_schema_ignores_the_provider_scoped_key(self):
+        cfg = self._schema_cfg(google="flex", gemini="standard", base_provider=None)
+        assert resolve_google_service_tier(cfg) == "standard"
+        assert not gemini_flex_active(cfg)
+
+    def test_missing_fields_default_to_standard(self):
+        assert resolve_google_service_tier(SimpleNamespace()) == "standard"
+
+    def test_seat_construction_does_not_read_the_raw_field(self):
+        """Construction must go through the resolver, not the Settings field.
+
+        A direct ``settings.google_service_tier`` read there is exactly how the
+        two sites drifted apart; a source scan is the only thing that catches
+        it reappearing, since both spellings behave identically in the common
+        case where the keys agree.
+        """
+        source = (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "src"
+            / "llm_runtime"
+            / "construction.py"
+        ).read_text()
+        assert "resolve_google_service_tier(" in source
+        assert "google_service_tier" not in source.replace(
+            "resolve_google_service_tier", ""
+        ), (
+            "construction.py reads the raw google_service_tier field; route it "
+            "through resolve_google_service_tier so the runtime flex gate and "
+            "the outgoing request agree."
         )

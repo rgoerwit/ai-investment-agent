@@ -39,6 +39,7 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -165,6 +166,11 @@ def detect_anomalies(record: Record, prior: str | None) -> list[str]:
 
     if rs.get("consultant_verdict") in _CONSULTANT_BAD_VERDICTS:
         anomalies.append(f"consultant {rs.get('consultant_verdict')}")
+    elif rs.get("consultant_review_status") == "LIMITED":
+        # Ran and is usable, but some verification tool calls failed -- a permanent
+        # property of this artifact, not a transient the run recovered from, so it
+        # belongs in the operator-facing label rather than only the log.
+        anomalies.append("consultant LIMITED (partial verification)")
 
     optional = rs.get("optional_failures") or []
     if isinstance(optional, list) and optional:
@@ -175,6 +181,32 @@ def detect_anomalies(record: Record, prior: str | None) -> list[str]:
         anomalies.append(f"verdict flip: {prior} → {record.verdict}")
 
     return anomalies
+
+
+# Anomalies that mean an artifact is absent or unusable, as opposed to ones that
+# merely record that something went wrong and was recovered from. Only these earn
+# the operator-facing "degraded" label.
+#
+# ``llm_failures=N`` is deliberately excluded: it counts *attempts*, not outcomes.
+# 1088.HK (2026-08-14) retried one Google call successfully, lost nothing, and was
+# still labelled degraded -- which is how a signal built to replace silence becomes
+# noise instead. Transient-but-recovered belongs in the run log, where the run-log
+# scan groups it by ``failure_kind``.
+_DEGRADATION_PREFIXES: tuple[str, ...] = ("optional failures:", "consultant ")
+
+
+def degradation_anomalies(
+    anomalies: Iterable[str],
+    *,
+    exclude: Collection[str] = (),
+) -> list[str]:
+    """Return the anomalies that mean output is missing, preserving order."""
+
+    return [
+        anomaly
+        for anomaly in anomalies
+        if anomaly not in exclude and anomaly.startswith(_DEGRADATION_PREFIXES)
+    ]
 
 
 @dataclass
@@ -234,7 +266,18 @@ def check_fresh_ticker_output(
             path=record.path,
             detail="; ".join(validity_failures),
         )
-    return FreshOutputCheck("PUBLISHABLE", path=record.path)
+    # A publishable run can still be degraded -- an optional cross-check seat that
+    # failed leaves required artifacts intact. ``detect_anomalies`` already found
+    # those; returning them in ``detail`` is what lets the batch print
+    # "OK (degraded)" instead of a bare "OK". Status and exit code stay
+    # PUBLISHABLE/0 on purpose: the publication contract is correct, only its
+    # reporting was silent, and a degraded-but-publishable run must not start
+    # failing batches.
+    return FreshOutputCheck(
+        "PUBLISHABLE",
+        path=record.path,
+        detail="; ".join(degradation_anomalies(anomalies, exclude=validity_failures)),
+    )
 
 
 def scan(

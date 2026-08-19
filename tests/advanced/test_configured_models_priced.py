@@ -9,11 +9,17 @@ This guard derives the model-name fields by **introspecting** ``Settings`` (any
 field ending ``_model`` or ``_llm``), so a newly-added model setting is covered
 automatically — there is no list to forget to update.
 
-Limit (deliberate): this catches drift in the **code defaults**. The operator's
-``.env`` override (e.g. ``APAC_SPECIALIST_MODEL=kimi-k3``) is not a code default,
-so it is NOT caught here — that path is covered at runtime by the
-``unpriced_models`` field surfaced in the persisted artifact (A3). The two are
-complementary.
+Coverage, precisely: ``Settings()`` below resolves through the normal precedence
+chain, so it reads the operator's ``.env`` when one is present. This guard therefore
+catches **code-default drift always, and operator-``.env`` drift whenever a ``.env``
+exists** — i.e. locally but not in CI, which has no ``.env``. It earned that second
+half on 2026-08-14 by catching ``GOOGLE_LLM_REASONING_MODEL=gemini-3.7-flash``, a
+value present only in an operator ``.env``.
+
+Do not read the CI half as the whole contract (an earlier version of this docstring
+did, and said ``.env`` drift was "NOT caught here"). The runtime ``unpriced_models``
+field in the persisted artifact (A3) remains the guard that holds in CI and in
+production, where no test runs at all. The two are complementary.
 """
 
 from src.config import Settings

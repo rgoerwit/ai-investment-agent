@@ -120,10 +120,15 @@ def create_apac_specialist_node(llm, *, fallback_llm=None) -> Callable:
                 provider="unknown",
             )
 
+        from src.eval.prompt_digest import agent_prompt_digest
+
         prompts_used = dict(state.get("prompts_used", {}) or {})
         prompts_used[APAC_REPORT_FIELD] = {
             "agent_name": agent_prompt.agent_name,
             "version": agent_prompt.version,
+            # See analyst_nodes: the digest is what makes the run fingerprint
+            # respond to a prompt actually changing.
+            "digest": agent_prompt_digest(agent_prompt),
         }
 
         payload = build_apac_specialist_payload(state)

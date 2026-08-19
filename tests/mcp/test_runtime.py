@@ -8,7 +8,7 @@ from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
 from src.mcp.catalog import ToolDescriptor
 from src.mcp.client import MCPRuntime
-from src.mcp.config import MCPServerSpec
+from src.mcp.config import MCPAuthSpec, MCPServerSpec
 from src.mcp.errors import MCPCallError, MCPErrorCategory
 from src.tooling.inspector import InspectionDecision
 
@@ -295,3 +295,84 @@ async def test_open_session_streamable_http_uses_http_client_for_headers(
     assert captured["passed_http_client"] is captured["http_client"]
     assert captured["url"] == "https://example.test/mcp"
     assert captured["initialized"] is True
+
+
+class TestPartialServerAvailability:
+    """One vendor's absent credential must not disable the MCP plane.
+
+    Before this, ``resolve_auth`` raised a bare ValueError on a missing key,
+    ``MCPRuntime.__init__`` let it escape, and ``build_runtime_services_from_config``
+    caught it and set ``mcp_runtime = None`` — so commenting out FMP_API_KEY
+    turned off every MCP server, present and future.
+    """
+
+    @staticmethod
+    def _spec(server_id: str, env_var: str, *, enabled: bool = True) -> MCPServerSpec:
+        return MCPServerSpec(
+            id=server_id,
+            description=server_id,
+            transport="streamable_http",
+            base_url="https://example.test/mcp",
+            auth=MCPAuthSpec(type="query_api_key", param="apikey", env_var=env_var),
+            enabled=enabled,
+            scopes=["consultant"],
+            tool_allowlist=["quote"],
+        )
+
+    def test_one_missing_key_leaves_the_other_server_usable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        monkeypatch.delenv("FMP_API_KEY", raising=False)
+        monkeypatch.setenv("OTHER_API_KEY", "present")
+        runtime = MCPRuntime(
+            servers=[
+                self._spec("fmp_remote", "FMP_API_KEY"),
+                self._spec("other_remote", "OTHER_API_KEY"),
+            ],
+            budget_db_path=str(tmp_path / "usage.db"),
+        )
+
+        assert runtime.usable_server_ids == frozenset({"other_remote"})
+        assert runtime.unavailable_servers == {"fmp_remote": "FMP_API_KEY"}
+        assert runtime.is_tool_available("other_remote", "quote", scope="consultant")
+
+    def test_an_unusable_server_exposes_no_tools(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        """Enabled != usable.
+
+        Exposure must track resolution, otherwise the tool is offered and then
+        fails mid-review with a CONFIG error that counts against the
+        Consultant's partial-tool-failure ratio.
+        """
+        monkeypatch.delenv("FMP_API_KEY", raising=False)
+        runtime = MCPRuntime(
+            servers=[self._spec("fmp_remote", "FMP_API_KEY")],
+            budget_db_path=str(tmp_path / "usage.db"),
+        )
+
+        assert runtime.specs["fmp_remote"].enabled is True
+        assert not runtime.is_tool_available("fmp_remote", "quote", scope="consultant")
+
+    def test_zero_usable_servers_is_a_supported_degenerate_state(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        """MCP on with nothing wired up must construct cleanly, not raise."""
+        monkeypatch.delenv("FMP_API_KEY", raising=False)
+        runtime = MCPRuntime(
+            servers=[self._spec("fmp_remote", "FMP_API_KEY")],
+            budget_db_path=str(tmp_path / "usage.db"),
+        )
+        assert runtime.usable_server_ids == frozenset()
+
+    def test_a_disabled_server_is_not_reported_as_missing_a_credential(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        """Deliberately off is not the same as broken."""
+        monkeypatch.delenv("FMP_API_KEY", raising=False)
+        runtime = MCPRuntime(
+            servers=[self._spec("fmp_remote", "FMP_API_KEY", enabled=False)],
+            budget_db_path=str(tmp_path / "usage.db"),
+        )
+        assert runtime.unavailable_servers == {}
+        assert runtime.usable_server_ids == frozenset()

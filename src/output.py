@@ -187,14 +187,19 @@ def _cost_suffix() -> str:
 
 def get_welcome_banner(ticker: str, quick_mode: bool) -> str:
     """Generate welcome banner string with configuration."""
+    from src.llm_runtime.bindings import active_models
+
     runtime_config = get_runtime_config(config)
+    # Name the models that will actually answer, not the legacy defaults.
+    active = active_models(config, quick_mode=quick_mode)
     banner = []
     banner.append("# Multi-Agent Investment Analysis System")
     banner.append("")
     banner.append(f"**Ticker:** {ticker.upper()}  ")
     banner.append(f"**Analysis Mode:** {'Quick' if quick_mode else 'Deep'}  ")
-    banner.append(f"**Quick Model:** {runtime_config.quick_think_llm}  ")
-    banner.append(f"**Deep Model:** {runtime_config.deep_think_llm}  ")
+    banner.append(f"**Quick Model:** {active.fast}  ")
+    banner.append(f"**Deep Model:** {active.reasoning}  ")
+    banner.append(f"**Decision Model:** {active.decision}  ")
     banner.append(
         f"**Memory System:** {'Enabled' if runtime_config.enable_memory else 'Disabled'}  "
     )

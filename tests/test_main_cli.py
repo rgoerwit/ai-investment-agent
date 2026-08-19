@@ -690,6 +690,10 @@ class TestTracingMetadataFlow:
                 "present": False,
             },
             "regime_raw": "",
+            # Summarizer-prompt fingerprint, carried so the retrospective can
+            # tell a changed macro classifier from a changed world. None here
+            # because the stubbed MacroContextResult sets no fingerprint.
+            "fingerprint": None,
         }
         mock_logger.info.assert_any_call(
             "macro_context_prefetch_complete",
@@ -2713,3 +2717,94 @@ class TestRichApiSurface:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestDegradationNotice:
+    """An optional cross-check seat failing is publishable by design, which on
+    2026-08-14 also made it invisible: three full-mode tickers ran against an
+    unfunded provider with no cross-check at all and reported success. Losing
+    those agents *lowers* the risk tally, so a degraded run reads as a cleaner
+    stock unless something says otherwise."""
+
+    @staticmethod
+    def _degraded_result():
+        return {
+            "run_summary": {
+                "optional_failures": ["auditor_report", "consultant_review"]
+            },
+            "artifact_statuses": {
+                "auditor_report": {"ok": False, "error_kind": "auth_error"},
+                "consultant_review": {"ok": False, "error_kind": "auth_error"},
+            },
+        }
+
+    def test_names_each_failed_artifact_and_its_error_kind(self, capsys):
+        from src.main import _print_degradation_notice
+
+        _print_degradation_notice(self._degraded_result(), quiet=True, brief=False)
+
+        out = capsys.readouterr().out
+        assert "auditor_report (auth_error)" in out
+        assert "consultant_review (auth_error)" in out
+
+    @pytest.mark.parametrize(
+        ("quiet", "brief"), [(True, False), (False, True), (True, True)]
+    )
+    def test_quiet_and_brief_do_not_suppress_it(self, capsys, quiet, brief):
+        # The invariant that makes this worth having: verbosity is about noise,
+        # not about hiding a run that produced no cross-check.
+        from src.main import _print_degradation_notice
+
+        _print_degradation_notice(self._degraded_result(), quiet=quiet, brief=brief)
+
+        assert "DEGRADED" in capsys.readouterr().out
+
+    def test_verbose_mode_explains_the_consequence(self, capsys):
+        from src.main import _print_degradation_notice
+
+        _print_degradation_notice(self._degraded_result(), quiet=False, brief=False)
+
+        out = capsys.readouterr().out
+        assert "Degraded run" in out
+        assert "risk flags" in out
+
+    def test_clean_run_prints_nothing(self, capsys):
+        from src.main import _print_degradation_notice
+
+        _print_degradation_notice(
+            {"run_summary": {"optional_failures": []}}, quiet=False, brief=False
+        )
+
+        assert capsys.readouterr().out == ""
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            {},
+            {"run_summary": None},
+            {"run_summary": {}},
+            {"run_summary": {"optional_failures": None}},
+        ],
+    )
+    def test_absent_run_summary_is_silent_not_fatal(self, capsys, result):
+        from src.main import _print_degradation_notice
+
+        _print_degradation_notice(result, quiet=True, brief=False)
+
+        assert capsys.readouterr().out == ""
+
+    @pytest.mark.parametrize("statuses", ["garbage", None, {"consultant_review": None}])
+    def test_malformed_statuses_degrade_to_unknown(self, capsys, statuses):
+        # A diagnostic must never be able to break an otherwise successful run.
+        from src.main import _print_degradation_notice
+
+        _print_degradation_notice(
+            {
+                "run_summary": {"optional_failures": ["consultant_review"]},
+                "artifact_statuses": statuses,
+            },
+            quiet=True,
+            brief=False,
+        )
+
+        assert "consultant_review (unknown)" in capsys.readouterr().out

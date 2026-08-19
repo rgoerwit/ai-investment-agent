@@ -272,16 +272,15 @@ class TestGraphWiring:
         assert calls and calls[0][0] == "senior_fundamentals"
 
     def test_build_routes_both_apex_seats_through_factory(self):
-        """The assembly source must route Senior AND PM through the apex
-        factory, and must not rebuild the PM via the plain tier factories."""
+        """Assembly routes both gate-critical seats through the seat factory."""
         import inspect
 
         import src.graph.components as components_mod
 
         source = inspect.getsource(components_mod)
-        assert 'senior_fund_llm = create_apex_llm(\n        "senior_fundamentals"' in (
-            source
-        )
-        assert 'pm_llm = create_apex_llm(\n        "portfolio_manager"' in source
+        assert "senior_fund_llm = seat_model(SeatId.SENIOR_FUNDAMENTALS)" in source
+        assert "pm_llm = seat_model(SeatId.PORTFOLIO_MANAGER)" in source
+        assert "legacy_builder=_build_legacy_seat_model" in source
+        assert "LegacyGraphFactories(" in source
         assert "pm_llm = create_deep_thinking_llm(" not in source
         assert "pm_llm = create_quick_thinking_llm(" not in source

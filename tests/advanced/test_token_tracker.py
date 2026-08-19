@@ -76,7 +76,7 @@ class TestTokenUsage:
         assert abs(usage.estimated_cost_usd - expected_cost) < 0.001
 
     def test_cost_calculation_flash_exp(self):
-        """Test cost calculation for experimental Flash models (paid tier when billing enabled)."""
+        """Retired models remain visibly unpriced instead of using a guess."""
         usage = TokenUsage(
             timestamp="2025-12-05T12:00:00",
             agent_name="analyst",
@@ -86,9 +86,7 @@ class TestTokenUsage:
             total_tokens=3_000_000,
         )
 
-        # Paid tier pricing: (2 * $0.30) + (1 * $2.50) = $0.60 + $2.50 = $3.10
-        expected_cost = 0.60 + 2.50
-        assert abs(usage.estimated_cost_usd - expected_cost) < 0.001
+        assert usage.estimated_cost_usd == 0.0
 
     def test_cost_calculation_flash_lite(self):
         """Test cost calculation for Gemini 2.5 Flash-Lite (cheaper alternative)."""
@@ -106,7 +104,7 @@ class TestTokenUsage:
         assert abs(usage.estimated_cost_usd - expected_cost) < 0.001
 
     def test_cost_calculation_unknown_model(self):
-        """Test cost calculation for unknown model (defaults to Flash pricing)."""
+        """Unknown model cost is not fabricated from another model family."""
         usage = TokenUsage(
             timestamp="2025-12-05T12:00:00",
             agent_name="test_agent",
@@ -116,9 +114,7 @@ class TestTokenUsage:
             total_tokens=2_000_000,
         )
 
-        # Should default to Flash pricing: $0.30 + $2.50 = $2.80
-        expected_cost = 0.30 + 2.50
-        assert abs(usage.estimated_cost_usd - expected_cost) < 0.001
+        assert usage.estimated_cost_usd == 0.0
 
     def test_cost_calculation_zero_tokens(self):
         """Test cost calculation when no tokens are used."""

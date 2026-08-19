@@ -144,6 +144,8 @@ clean: ## Clean up generated files
 	@echo "$(GREEN)Cleanup complete!$(NC)"
 
 clean-all: clean ## Clean everything including venv and ChromaDB
+	# DESTRUCTIVE: removes the local persistent ChromaDB, including lessons_learned.
+	# Do not use this target when historical lessons must be retained.
 	@echo "$(BLUE)Cleaning everything...$(NC)"
 	rm -rf .venv
 	rm -rf chroma_db

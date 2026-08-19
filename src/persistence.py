@@ -29,12 +29,13 @@ _SOURCE_ARTIFACT_MAX_CHARS = 50_000
 
 
 # Maps each saved-JSON artifact field to its originating graph agent and the
-# TokenTrackingCallback display name(s) used in src/graph/components.py.
+# TokenTrackingCallback display name(s) owned by the seat registry and used in
+# src/graph/components.py.
 # A single artifact can have multiple contributing token-agents (e.g.,
 # investment_plan is synthesized from research_manager but pulls work done by
 # bull/bear researchers; risk_debate_state aggregates three risk analysts).
-# The Stage 1 AST drift test (tests/test_agent_attribution.py) verifies
-# every name listed here appears at a tracked_callbacks(...) call site.
+# The drift test in tests/test_agent_attribution.py verifies every name here is
+# reachable from a graph seat or an explicit callback call site.
 _ARTIFACT_AGENT_MAP: list[tuple[str, str, tuple[str, ...]]] = [
     ("market_report", "market_analyst", ("Market Analyst",)),
     ("sentiment_report", "sentiment_analyst", ("Sentiment Analyst",)),
@@ -230,6 +231,8 @@ def build_run_summary(
     """Build a compact summary for saved artifacts and end-of-run logs."""
     from langchain_core.messages import ToolMessage
 
+    from src.llm_runtime.bindings import active_models_or_legacy, resolve_binding_plan
+    from src.service_tiers import flex_degradation_snapshot
     from src.token_tracker import get_tracker
 
     def _tool_message_failed(content: object) -> bool:
@@ -256,9 +259,14 @@ def build_run_summary(
 
     def _collect_used_providers() -> list[str]:
         providers: set[str] = set()
-        configured = str(config.llm_provider or "").strip()
-        if configured:
-            providers.add(configured)
+        # LLM_PROVIDER is a retired, metadata-only key. Seeding from it under the
+        # multi-provider schema asserts a vendor that may not have served a single
+        # call (it defaults to "google" even in an all-OpenAI configuration); the
+        # per-artifact provider stamps below are the real evidence.
+        if binding_telemetry.get("schema") != "new":
+            configured = str(config.llm_provider or "").strip()
+            if configured:
+                providers.add(configured)
         artifact_statuses = result.get("artifact_statuses", {}) or {}
         for status in artifact_statuses.values():
             provider = str((status or {}).get("provider") or "").strip()
@@ -273,6 +281,7 @@ def build_run_summary(
     )
 
     tracker_stats = get_tracker().get_total_stats()
+    binding_telemetry = resolve_binding_plan(config).telemetry(config)
     messages = result.get("messages", []) or []
     tool_messages = [msg for msg in messages if isinstance(msg, ToolMessage)]
     tool_failures = manual_tool_failures + sum(
@@ -288,7 +297,6 @@ def build_run_summary(
     auditor_finished = bool(auditor_status.get("complete"))
     apac_finished = bool(apac_status.get("complete"))
     providers_used = _collect_used_providers()
-    runtime_config = get_runtime_config(config)
 
     # "Successful" must mean the auditor completed a verified audit, not merely that it
     # emitted well-formed prose. Caveated statuses are no data (INSUFFICIENT_DATA/
@@ -318,6 +326,21 @@ def build_run_summary(
     # content — the same parser the PM uses to raise CONSULTANT_* flags — so the
     # memo/source-confidence renderers can branch on a single ready value.
     consultant_verdict = _derive_consultant_verdict(consultant_status)
+    # A review whose verification tool calls partly failed is usable but not whole,
+    # and it reported as COMPLETED to every operator-facing surface (7740.T,
+    # 2026-08-14: 1 of 4 calls failed, PM was told via the in-text tag, the human
+    # was not). Reuse the auditor's existing LIMITED vocabulary rather than minting
+    # a parallel token -- both mean "ran, usable, less than full verification".
+    # Read from the machine-written marker, never recomputed, so the status cannot
+    # disagree with the review the PM actually received.
+    # Local import: this module keeps the heavy agent/LLM stack off the CLI's
+    # import path, the same reason `parse_consultant_conditions` and
+    # `parse_auditor_status` are imported inside their call sites.
+    from src.agents.consultant_nodes import CONSULTANT_PARTIAL_REVIEW_MARKER
+
+    consultant_partial = CONSULTANT_PARTIAL_REVIEW_MARKER in (
+        consultant_status.get("content") or ""
+    )
     consultant_review_status = (
         "NOT_RUN"
         if consultant_verdict == "NOT_RUN"
@@ -327,6 +350,8 @@ def build_run_summary(
         if consultant_verdict == "ERROR"
         else "UNPARSED"
         if consultant_verdict == "UNPARSED"
+        else "LIMITED"
+        if consultant_partial
         else "COMPLETED"
     )
     auditor_review_status = (
@@ -341,11 +366,22 @@ def build_run_summary(
         else "COMPLETED"
     )
 
+    # The models that actually answered, not the legacy defaults (see
+    # ActiveModels). Same values the artifact metadata records.
+    active = active_models_or_legacy(config, quick_mode=quick_mode)
+
     summary = {
         "quick_mode": quick_mode,
-        "quick_model": runtime_config.quick_think_llm,
-        "deep_model": runtime_config.deep_think_llm,
+        "quick_model": active.fast,
+        "deep_model": active.reasoning,
+        "decision_model": active.decision,
         "provider_preflight": provider_preflight or {},
+        "llm_bindings": binding_telemetry,
+        # Why a run was slow and expensive. `token_usage.by_tier` already shows
+        # that calls fell back to the standard tier; this names the cause, so a
+        # 2-hour artifact explains itself without anyone reading the logs.
+        # Empty mapping on a healthy run — an absent key would be ambiguous.
+        "service_tier_downgrades": flex_degradation_snapshot(),
         "pre_screening_result": result.get("pre_screening_result", ""),
         # `count` tallies debate *turns* (one Bull + one Bear per round → even), so
         # actual rounds = count // 2 (quick=1, full=2). `debate_turns` keeps the raw value.
@@ -522,6 +558,10 @@ def save_results_to_file(
     gate; PFIC/VIE stay risk-penalty warnings in every mode).
     """
     from src.error_safety import summarize_exception
+    from src.llm_runtime.bindings import (
+        active_models_or_legacy,
+        resolve_binding_plan,
+    )
     from src.memory import get_ticker_memory_stats
     from src.prompts import get_all_prompts
 
@@ -575,6 +615,16 @@ def save_results_to_file(
     tracker = get_tracker()
     token_stats = tracker.get_total_stats()
 
+    # Provenance must name the models that actually answered. The legacy
+    # QUICK_MODEL/DEEP_MODEL fields are untouched defaults under the
+    # multi-provider schema, so reading them recorded a model the run never
+    # invoked. Fail soft: a metadata field must never cost us the analysis.
+    binding_plan = resolve_binding_plan(config)
+    active = active_models_or_legacy(config, quick_mode=quick_mode, logger=logger_obj)
+    legacy_provider = (
+        "" if binding_plan.schema == "new" else str(config.llm_provider or "").strip()
+    )
+
     save_data = {
         "metadata": {
             "ticker": ticker,
@@ -585,20 +635,30 @@ def save_results_to_file(
             "timestamp": timestamp,
             "analysis_date": datetime.now().isoformat(),
             "environment": config.environment,
-            "quick_model": runtime_config.quick_think_llm,
-            "deep_model": runtime_config.deep_think_llm,
+            "quick_model": active.fast,
+            "deep_model": active.reasoning,
+            "decision_model": active.decision,
             "memory_enabled": runtime_config.enable_memory,
             "online_tools_enabled": config.online_tools,
+            # LLM_PROVIDER is retired and metadata-only: under the multi-provider
+            # schema it defaults to "google" even in an all-xAI run, so falling
+            # back to it would assert a vendor that served nothing. The per-artifact
+            # provider stamps collected into run_summary are the real evidence;
+            # absent those, say nothing rather than something false.
             "llm_provider": (
                 (result.get("run_summary", {}) or {}).get("llm_provider")
-                or config.llm_provider
+                or legacy_provider
             ),
             "llm_providers_used": (
                 (result.get("run_summary", {}) or {}).get("llm_providers_used")
-                or [config.llm_provider]
+                or ([legacy_provider] if legacy_provider else [])
             ),
         },
         "token_usage": token_stats,
+        "llm_bindings": (
+            (result.get("run_summary", {}) or {}).get("llm_bindings")
+            or binding_plan.telemetry(config)
+        ),
         "macro_context": _normalize_macro_context_metadata(
             result,
             cache_dir=results_dir / ".macro_context_cache",
@@ -769,6 +829,21 @@ def save_results_to_file(
             has_macro_token_row=has_macro_token_row,
         )
 
+    # Provenance: what the code, prompts, bindings and thresholds were. Wrapped
+    # separately from the snapshot so a fingerprint failure cannot cost the run
+    # its snapshot, and vice versa.
+    run_fingerprint: dict[str, Any] = {}
+    try:
+        from src.run_fingerprint import compute_run_fingerprint
+
+        run_fingerprint = compute_run_fingerprint(prompts_used, config).to_dict()
+        save_data["run_fingerprint"] = run_fingerprint
+    except Exception as exc:
+        logger_obj.warning(
+            "run_fingerprint_failed",
+            **summarize_exception(exc, operation="run fingerprint"),
+        )
+
     try:
         from src.retrospective import extract_snapshot
 
@@ -779,6 +854,10 @@ def save_results_to_file(
                 quick_mode,
                 trace_id=trace_id,
                 is_strict_mode=strict_mode,
+                # Same id the run_summary carries, so a snapshot and its run are
+                # joinable and two same-day analyses stay distinguishable.
+                analysis_id=run_id,
+                run_fingerprint=run_fingerprint or None,
             )
         )
     except Exception as exc:
@@ -967,6 +1046,11 @@ async def _maybe_save_rejection_record(
                 is_quick_mode=args.quick,
                 trace_id=trace_id,
                 is_strict_mode=getattr(args, "strict", False),
+                # This path mints no run id of its own; the trace id is the only
+                # shared handle back to the analysis. Absent tracing it stays
+                # None, which is honest — the rejection record's own dedup keys
+                # on (ticker, analysis_date, lesson_type), not on this field.
+                analysis_id=trace_id,
             )
         )
         verdict = (snapshot or {}).get("verdict", "")

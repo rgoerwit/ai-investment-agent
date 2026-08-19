@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from src.fx_normalization import comparable_prices
 from src.ibkr.concentration import (
     canonical_exchange_bucket,
     canonical_sector_bucket,
@@ -62,22 +63,26 @@ class DipWatchCandidate:
 
 
 def dip_pct(item: ReconciliationItem) -> float:
-    """Return percent pullback from analysis entry to current position price."""
+    """Return percent pullback from analysis entry to current position price.
+
+    Returns ``0.0`` (no dip) when the two prices are not comparable — a
+    different economy, or an unlabelled currency on either side. A dip is a
+    reason to *buy more*, so an incomparable pair must never read as one: the
+    GAMA.L artifact would otherwise have scored a ~99% pullback.
+    """
     analysis = item.analysis
     position = item.ibkr_position
-    if (
-        analysis is None
-        or position is None
-        or analysis.entry_price is None
-        or analysis.entry_price <= 0
-        or position.current_price_local <= 0
-    ):
+    if analysis is None or position is None:
         return 0.0
-    return (
-        (analysis.entry_price - position.current_price_local)
-        / analysis.entry_price
-        * 100
+    pair = comparable_prices(
+        analysis.entry_price,
+        getattr(analysis, "currency", None),
+        position.current_price_local,
+        getattr(position, "currency", None),
     )
+    if pair is None:
+        return 0.0
+    return (pair.left - pair.right) / pair.left * 100
 
 
 def dip_watch_source(item: ReconciliationItem) -> DipWatchSource | None:
@@ -150,12 +155,26 @@ def compute_dip_score(
     # to the stop price — stop-anchored math has no place in a long-term
     # dip-buying score (legacy stop fields remain readable but inert here).
     # Same 8-point cap keeps the ★★★/★★ thresholds calibrated.
+    #
+    # Converts by currency code like `dip_pct` above: a valid GBP analysis
+    # paired with a GBp broker quote would otherwise compute a ~100x upside,
+    # award the full 8-point bonus, and push the name over the ★★★ /
+    # concentration thresholds on arithmetic alone. `dip_pct` was fixed first
+    # and this arithmetic was missed — the same comparison, three lines down.
     upside_bonus = 0.0
-    if analysis.target_1_price and position:
-        current = position.current_price_local
-        if current > 0:
-            upside = (analysis.target_1_price - current) / current
-            upside_bonus = min(max(upside, 0.0) * 20.0, 8.0)
+    upside_pair = (
+        comparable_prices(
+            analysis.target_1_price,
+            getattr(analysis, "currency", None),
+            position.current_price_local,
+            getattr(position, "currency", None),
+        )
+        if position
+        else None
+    )
+    if upside_pair is not None:
+        upside = (upside_pair.left - upside_pair.right) / upside_pair.right
+        upside_bonus = min(max(upside, 0.0) * 20.0, 8.0)
 
     return base + price_bonus + upside_bonus
 
@@ -426,11 +445,21 @@ def build_dip_watch_candidates(
             continue
         current_price = position.current_price_local
         score = score_dip_watch_item(item)
-        upside_pct: float | None = None
-        if analysis.target_1_price and current_price > 0:
-            upside_pct = round(
-                (analysis.target_1_price - current_price) / current_price * 100, 1
-            )
+        # Displayed to the operator, so it must obey the same currency contract
+        # as the score it sits beside — an unconverted pair renders a ~10,000%
+        # upside. None means "not comparable", which the renderer already
+        # handles as absent.
+        upside_pair = comparable_prices(
+            analysis.target_1_price,
+            getattr(analysis, "currency", None),
+            current_price,
+            getattr(position, "currency", None),
+        )
+        upside_pct: float | None = (
+            round((upside_pair.left - upside_pair.right) / upside_pair.right * 100, 1)
+            if upside_pair is not None
+            else None
+        )
         rows.append(
             DipWatchCandidate(
                 ticker_yf=item.ticker.yf,

@@ -54,6 +54,44 @@ def test_validate_cli_args_rejects_quick_with_chart_flags(capsys):
     assert "--transparent has no effect with --quick" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("flag", ["quick_model", "deep_model"])
+def test_model_flags_are_accepted_under_both_binding_schemas(flag):
+    """Neither schema rejects the flags; the resolver decides what they mean."""
+    from src.cli import _validate_cli_args
+
+    values = {
+        "quick": False,
+        "transparent": False,
+        "svg": False,
+        "quick_model": None,
+        "deep_model": None,
+    }
+    values[flag] = "gemini-3.6-flash"
+
+    for provider in ("google", None):
+        _validate_cli_args(
+            Namespace(**values), settings=Namespace(llm_base_provider=provider)
+        )
+
+
+def test_model_flag_help_names_the_intent_each_one_drives():
+    """The mapping is non-obvious, so it has to be in --help, not just docs."""
+    from src.cli import build_arg_parser
+
+    actions = {
+        action.dest: action.help
+        for action in build_arg_parser()._actions
+        if action.dest in {"quick_model", "deep_model"}
+    }
+
+    assert "fast" in actions["quick_model"]
+    assert "reasoning" in actions["deep_model"]
+    # The APEX carve-out is the surprising part: --deep-model does NOT move the
+    # two gate-critical seats, because they are 'critical', not 'reasoning'.
+    assert "critical" in actions["deep_model"]
+    assert "LLM_SEAT_MODEL_OVERRIDES" in actions["deep_model"]
+
+
 def test_explicit_article_path_is_cwd_relative_even_with_output():
     from src.cli import resolve_article_path
 

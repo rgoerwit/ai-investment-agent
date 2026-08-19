@@ -28,6 +28,8 @@ def _inject_forensic_verdict_if_missing(content: str) -> str:
     if _FORENSIC_LABEL not in content:
         return content
 
+    # Byte-identical to tooling/evidence_recorder._STATUS_RE; see the note there for
+    # the other four spellings of this line grammar and why they stay separate.
     status_match = re.search(r"(?im)^\s*STATUS:\s*([A-Z_]+)\s*$", content)
     if not status_match:
         return content

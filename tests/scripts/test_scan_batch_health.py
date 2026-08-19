@@ -25,6 +25,7 @@ def _write(results_dir: Path, ticker: str, date: str, time: str, **kw) -> Path:
         "publishable": kw.get("publishable", True),
         "llm_failures": kw.get("llm_failures", 0),
         "consultant_verdict": kw.get("consultant_verdict", "CONDITIONAL"),
+        "consultant_review_status": kw.get("consultant_review_status", "COMPLETED"),
         "optional_failures": kw.get("optional_failures", []),
         "required_failures": kw.get("required_failures", []),
     }
@@ -114,6 +115,80 @@ class TestDetectAnomalies:
     def test_no_flip_when_prior_matches(self):
         rec = self._rec(verdict="HOLD")
         assert sbh.detect_anomalies(rec, prior="HOLD") == []
+
+
+class TestDegradationAnomalies:
+    """Pure filter separating 'output is missing' from 'something recovered'."""
+
+    def test_absent_output_kinds_are_kept(self):
+        anomalies = [
+            "optional failures: consultant_review",
+            "consultant ERROR",
+            "consultant LIMITED (partial verification)",
+        ]
+        assert sbh.degradation_anomalies(anomalies) == anomalies
+
+    def test_transient_kinds_are_dropped(self):
+        assert sbh.degradation_anomalies(["llm_failures=4"]) == []
+
+    def test_order_is_preserved(self):
+        anomalies = ["consultant ERROR", "optional failures: auditor_report"]
+        assert sbh.degradation_anomalies(anomalies) == anomalies
+
+    def test_exclude_removes_already_reported_validity_failures(self):
+        anomalies = ["consultant ERROR", "optional failures: x"]
+        assert sbh.degradation_anomalies(anomalies, exclude={"consultant ERROR"}) == [
+            "optional failures: x"
+        ]
+
+    def test_empty_and_unknown_inputs_are_safe(self):
+        assert sbh.degradation_anomalies([]) == []
+        assert sbh.degradation_anomalies(["verdict flip: BUY → HOLD"]) == []
+        # An anomaly kind added later is excluded until it opts in, which fails
+        # quiet rather than mislabelling a clean batch.
+        assert sbh.degradation_anomalies(["some_future_anomaly=1"]) == []
+
+    def test_accepts_any_iterable(self):
+        assert sbh.degradation_anomalies(iter(["consultant ERROR"])) == [
+            "consultant ERROR"
+        ]
+
+
+class TestPartialConsultantAnomaly:
+    def _rec(self, **rs) -> sbh.Record:
+        return sbh.Record(
+            ticker="7740.T",
+            date="20260814",
+            time="191258",
+            path=Path("x"),
+            verdict="DO NOT INITIATE",
+            is_quick=False,
+            run_summary={"publishable": True, **rs},
+            validity={},
+        )
+
+    def test_limited_status_is_flagged(self):
+        anomalies = sbh.detect_anomalies(
+            self._rec(consultant_review_status="LIMITED"), None
+        )
+        assert any("LIMITED" in a for a in anomalies)
+
+    def test_completed_status_is_not_flagged(self):
+        assert (
+            sbh.detect_anomalies(self._rec(consultant_review_status="COMPLETED"), None)
+            == []
+        )
+
+    def test_a_broken_verdict_takes_precedence_over_limited(self):
+        # ERROR is strictly worse; reporting both would double-count one artifact.
+        anomalies = sbh.detect_anomalies(
+            self._rec(consultant_verdict="ERROR", consultant_review_status="LIMITED"),
+            None,
+        )
+        assert anomalies == ["consultant ERROR"]
+
+    def test_legacy_artifact_without_the_field_is_not_flagged(self):
+        assert sbh.detect_anomalies(self._rec(), None) == []
 
 
 class TestPriorVerdictSameMode:
@@ -289,6 +364,137 @@ class TestFreshOutputCheck:
 
         assert check.status == "AMBIGUOUS"
         assert check.publishable is False
+
+
+class TestDegradedButPublishable:
+    """A failed optional cross-check seat leaves required artifacts intact, so the
+    run is publishable -- and used to report as an unqualified success. The 2026-08-14
+    xAI outage ran three full-mode tickers with no cross-check at all and printed
+    'OK' each time. ``detect_anomalies`` had already found it; the result was being
+    discarded one line before use."""
+
+    def _degraded(self, results_dir: Path) -> Path:
+        artifact = _write(
+            results_dir,
+            "AGS.BR",
+            "20260814",
+            "174832",
+            publishable=True,
+            llm_failures=2,
+            consultant_verdict="ERROR",
+            optional_failures=["auditor_report", "consultant_review"],
+        )
+        os.utime(artifact, (5000, 5000))
+        return artifact
+
+    def test_optional_failures_are_reported_in_detail(self, tmp_path: Path):
+        artifact = self._degraded(tmp_path)
+
+        check = sbh.check_fresh_ticker_output(tmp_path, "AGS.BR", 3000)
+
+        assert check.status == "PUBLISHABLE"
+        assert check.path == artifact
+        assert "optional failures" in check.detail
+        assert "consultant_review" in check.detail
+        assert "auditor_report" in check.detail
+
+    def test_degradation_does_not_change_status_or_publishability(self, tmp_path: Path):
+        # The publication contract is correct as written -- only its reporting was
+        # silent. A degraded run must not start failing batches.
+        self._degraded(tmp_path)
+
+        check = sbh.check_fresh_ticker_output(tmp_path, "AGS.BR", 3000)
+
+        assert check.status == "PUBLISHABLE"
+        assert check.publishable is True
+
+    def test_recovered_retries_are_not_degraded(self, tmp_path: Path):
+        # 1088.HK, 2026-08-14: one Google call failed, retried, and succeeded. No
+        # artifact was lost, yet the batch row read "OK (degraded)". llm_failures
+        # counts attempts, not outcomes -- a label that fires on routine retries
+        # is noise, which is the failure mode this signal replaced.
+        artifact = _write(
+            tmp_path,
+            "1088.HK",
+            "20260814",
+            "193554",
+            publishable=True,
+            llm_failures=1,
+            optional_failures=[],
+        )
+        os.utime(artifact, (5000, 5000))
+
+        check = sbh.check_fresh_ticker_output(tmp_path, "1088.HK", 3000)
+
+        assert check.status == "PUBLISHABLE"
+        assert check.detail == ""
+
+    def test_a_recovered_retry_alongside_a_real_failure_still_degrades(
+        self, tmp_path: Path
+    ):
+        # The transient must be filtered out without masking the real signal.
+        artifact = _write(
+            tmp_path,
+            "X.T",
+            "20260814",
+            "120000",
+            publishable=True,
+            llm_failures=3,
+            optional_failures=["consultant_review"],
+        )
+        os.utime(artifact, (5000, 5000))
+
+        check = sbh.check_fresh_ticker_output(tmp_path, "X.T", 3000)
+
+        assert "optional failures" in check.detail
+        assert "llm_failures" not in check.detail
+
+    def test_partial_verification_is_degraded(self, tmp_path: Path):
+        # A review that ran but lost some verification tool calls is usable and
+        # permanently incomplete -- unlike a retry, it never recovers.
+        artifact = _write(
+            tmp_path,
+            "7740.T",
+            "20260814",
+            "191258",
+            publishable=True,
+            consultant_review_status="LIMITED",
+        )
+        os.utime(artifact, (5000, 5000))
+
+        check = sbh.check_fresh_ticker_output(tmp_path, "7740.T", 3000)
+
+        assert check.status == "PUBLISHABLE"
+        assert "LIMITED" in check.detail
+
+    def test_clean_run_reports_no_detail(self, tmp_path: Path):
+        # The regression that matters most: if every run carried detail, the batch
+        # would print "(degraded)" for all of them and the signal would be worthless.
+        artifact = _write(tmp_path, "X.T", "20260712", "120000")
+        os.utime(artifact, (5000, 5000))
+
+        check = sbh.check_fresh_ticker_output(tmp_path, "X.T", 3000)
+
+        assert check.status == "PUBLISHABLE"
+        assert check.detail == ""
+
+    def test_incomplete_run_still_reports_only_validity_failures(self, tmp_path: Path):
+        artifact = _write(
+            tmp_path,
+            "1681.HK",
+            "20260712",
+            "120000",
+            publishable=False,
+            required_failures=["fundamentals_report"],
+            optional_failures=["consultant_review"],
+        )
+        os.utime(artifact, (5000, 5000))
+
+        check = sbh.check_fresh_ticker_output(tmp_path, "1681.HK", 3000)
+
+        assert check.status == "INCOMPLETE"
+        assert "not publishable" in check.detail
+        assert "optional failures" not in check.detail
 
 
 class TestMainArgHandling:

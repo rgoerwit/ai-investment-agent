@@ -7,7 +7,9 @@ import pytest
 from src.runtime_services import (
     IssuerAuthorityRegistry,
     ProviderRuntime,
+    ProviderRuntimeKey,
     RuntimeServices,
+    build_provider_runtime,
     get_current_issuer_hosts,
     get_current_runtime_services,
     register_current_issuer_url,
@@ -72,6 +74,58 @@ def test_with_extra_tool_hooks_returns_new_service_without_mutating_original():
 
     assert services.tool_service.hooks == [base_hook]
     assert scoped.tool_service.hooks == [base_hook, extra_hook]
+
+
+def test_provider_runtime_isolates_vendor_and_endpoint_limiters():
+    fallback = SimpleNamespace(name="fallback")
+    google = SimpleNamespace(name="google")
+    moonshot = SimpleNamespace(name="moonshot-cn")
+    runtime = ProviderRuntime(
+        fetcher=SimpleNamespace(),
+        rate_limiter=fallback,
+        rate_limiters={
+            ProviderRuntimeKey("google"): google,
+            ProviderRuntimeKey("moonshot", "api.moonshot.cn"): moonshot,
+        },
+    )
+
+    assert runtime.limiter_for("google") is google
+    assert runtime.limiter_for("moonshot", "api.moonshot.cn") is moonshot
+    assert runtime.limiter_for("moonshot", "api.moonshot.com") is None
+
+
+def test_provider_runtime_builds_only_configured_independent_vendor_buckets(
+    monkeypatch,
+):
+    created = []
+
+    def fake_limiter(rpm=None):
+        limiter = SimpleNamespace(rpm=rpm)
+        created.append(limiter)
+        return limiter
+
+    monkeypatch.setattr(
+        "src.runtime_services.create_process_rate_limiter", fake_limiter
+    )
+    settings = SimpleNamespace(
+        llm_base_provider="google",
+        google_rpm_limit=17,
+        gemini_rpm_limit=15,
+        openai_rpm_limit=101,
+        anthropic_rpm_limit=61,
+        deepseek_rpm_limit=None,
+        zai_rpm_limit=31,
+    )
+    runtime = build_provider_runtime(
+        fetcher=SimpleNamespace(), settings=settings, explicit=True
+    )
+
+    assert runtime.limiter_for("google").rpm == 17
+    assert runtime.limiter_for("openai").rpm == 101
+    assert runtime.limiter_for("anthropic").rpm == 61
+    assert runtime.limiter_for("zai").rpm == 31
+    assert runtime.limiter_for("deepseek") is None
+    assert len({id(limiter) for limiter in created}) == 4
 
 
 def test_issuer_authority_is_validated_and_run_scoped():

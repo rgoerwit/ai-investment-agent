@@ -1,18 +1,28 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable
 from typing import Any
 
+import structlog
+
 from src.data_block_utils import (
     extract_block_number_from_text,
     extract_block_text_value,
+    extract_last_data_block,
     has_block_field_value,
     has_non_na_block_field_value,
     replace_or_append_block_line,
 )
-from src.earnings_baseline import requires_eps_growth_withholding
+from src.earnings_baseline import eps_growth_award_disposition
+from src.evidence_disposition import AwardDisposition, rubric_award_token
+from src.fx_normalization import (
+    assess_price_level_coherence,
+    canonical_currency_code,
+    is_near_minor_unit_ratio,
+)
 from src.sector_normalization import normalize_sector_label
 from src.thesis_constants import (
     FINANCIALS_HEALTH_REMOVED_POINTS,
@@ -28,6 +38,8 @@ from src.validators.pfic_constants import (
     PFIC_ASSET_PROXIMITY_THRESHOLD,
     PFIC_ASSET_TEST_THRESHOLD,
 )
+
+logger = structlog.get_logger(__name__)
 
 HORIZON_FIELD_RAW_KEYS = (
     ("REVENUE_GROWTH_FY", "revenueGrowth"),
@@ -231,6 +243,181 @@ def _reconcile_when_present(
     ):
         return replace_or_append_block_line(body, key, formatter(value)), True
     return body, False
+
+
+PRICE_CURRENCY_FIELD = "PRICE_CURRENCY"
+
+# A currency code is letters only. Anything else — prose, a symbol, a markdown
+# fragment, or a regex replacement template like "\\g<0>" — is not a code, and
+# validating here makes the stamps injection-proof by construction rather than
+# by escaping at each call site.
+_CURRENCY_CODE_RE = re.compile(r"^[A-Za-z]{2,5}$")
+
+
+def _valid_currency_code(value: str | None) -> str | None:
+    """Return a plausible currency code, or None when the value is not one."""
+    if not value:
+        return None
+    candidate = value.strip()
+    if not _CURRENCY_CODE_RE.match(candidate):
+        return None
+    return canonical_currency_code(candidate)
+
+
+def stamp_price_currency(block_body: str, payload: dict[str, Any]) -> str:
+    """Stamp the authoritative quote currency over whatever the model wrote.
+
+    The denomination is *known*, not judged: the fetcher decides it (converting
+    a minor-unit quote only when marketCap/PE corroborate) and records the
+    resulting code on the merged payload. A model-authored value must never
+    become the unit of record — it satisfies the contract while silently
+    replacing evidence with transcription, the failure the guidance-contract
+    incident already taught. So this overwrites rather than backfills.
+
+    Case is preserved deliberately: ``GBp`` (pence) and ``GBP`` (pounds) differ
+    only in case and by a factor of 100. A payload value that is not a currency
+    code at all (or absent) yields ``N/A`` so an unknown unit is explicit rather
+    than inherited from the model's guess.
+    """
+    currency = payload.get("currency")
+    code = _valid_currency_code(currency if isinstance(currency, str) else None)
+    _log_price_divergence_from_payload(block_body, payload, code)
+    return replace_or_append_block_line(block_body, PRICE_CURRENCY_FIELD, code or "N/A")
+
+
+# How far the model's transcribed CURRENT_PRICE may drift from the payload's
+# own quote before it is worth recording. Generous: quotes move between fetch
+# and write, and this is a measurement, not a gate.
+_PRICE_DIVERGENCE_TOLERANCE = 0.05
+
+
+def _usable_price(value: Any) -> bool:
+    """Whether a value is a finite, positive price.
+
+    `inf` is the trap: it passes every naive guard (`not inf` is False,
+    `inf > 0` is True), makes `reported / inf` exactly 0.0, and then blows up
+    the reciprocal in the minor-unit hint — turning an observation-only check
+    into a hard failure of the fundamentals artifact on malformed provider data.
+    """
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return False
+    return math.isfinite(value) and value > 0
+
+
+def _log_price_divergence_from_payload(
+    block_body: str, payload: dict[str, Any], code: str | None
+) -> None:
+    """Record when the block's CURRENT_PRICE disagrees with the payload's.
+
+    Observation only — deliberately NOT a correction. Making ``CURRENT_PRICE`` a
+    stamped projection of the payload (as ``PRICE_CURRENCY`` already is) is the
+    fuller fix, but it would not have caught the GAMA.L defect, whose DATA_BLOCK
+    price was already right; the corruption was in the TRADE_BLOCK levels. It
+    also costs frozen fixtures and touches a ``pm_claim_audit`` hard field. So
+    this measures whether the whole-record mislabelling that transform would
+    guard against actually occurs, and the transform stays deferred until the
+    evidence says otherwise. Grep ``data_block_price_diverges_from_payload``
+    across a batch to decide.
+    """
+    reported = extract_block_number_from_text(block_body, "CURRENT_PRICE")
+    if not _usable_price(reported):
+        return
+    # First *finite positive* quote wins. `a or b` alone would accept an inf
+    # currentPrice and never consult regularMarketPrice, and an observation-only
+    # check must not be the thing that decides which quote is usable.
+    quoted = next(
+        (
+            value
+            for value in (
+                payload.get("currentPrice"),
+                payload.get("regularMarketPrice"),
+            )
+            if _usable_price(value)
+        ),
+        None,
+    )
+    if quoted is None:
+        return
+    assert reported is not None  # narrowed by _usable_price
+    ratio = reported / quoted
+    if abs(ratio - 1.0) <= _PRICE_DIVERGENCE_TOLERANCE:
+        return
+    logger.warning(
+        "data_block_price_diverges_from_payload",
+        currency=code,
+        reported_price=reported,
+        payload_price=quoted,
+        ratio=round(ratio, 4),
+        near_minor_unit=is_near_minor_unit_ratio(ratio)
+        or is_near_minor_unit_ratio(1 / ratio),
+    )
+
+
+_TRADE_BLOCK_PRICE_CURRENCY_RE = re.compile(
+    r"(?im)^[ \t]*\**[ \t]*PRICE_CURRENCY[ \t]*:[ \t]*[^\n]*$"
+)
+_TRADE_BLOCK_ANCHOR_RE = re.compile(r"(?im)^[ \t]*TARGET_2:[ \t]*[^\n]*$")
+
+# The derived levels the Trader emits, all denominated like the DATA_BLOCK price.
+TRADE_BLOCK_LEVEL_FIELDS = ("ENTRY", "STOP", "TARGET_1", "TARGET_2")
+
+
+def stamp_trade_block_price_currency(
+    content: str, fundamentals_report: str, ticker: str = "UNKNOWN"
+) -> str:
+    """Copy the DATA_BLOCK denomination onto the TRADE_BLOCK levels.
+
+    ENTRY/STOP/TARGET_* are *supposed* to be derived from the DATA_BLOCK price,
+    so they are denominated in whatever it is. The prompt asks the Trader to copy
+    the code across, but a transcription must never *be* the unit of record — the
+    same reason ``stamp_price_currency`` overwrites rather than backfills. Absent
+    a DATA_BLOCK value the content is returned untouched: an unknown denomination
+    is better left unstated than asserted from the model's copy.
+
+    That derivation is verified, not assumed. GAMA.L (2026-08-15) carried
+    ``CURRENT_PRICE: 9.76`` with ``ENTRY 900 / STOP 750 / TARGET_1 1150`` — pence
+    levels against a pounds price — and stamping ``GBP`` over them made the
+    artifact look internally consistent while being wrong by 100x, which
+    downstream rendered as a fabricated "price drift 98.9% down". When the levels
+    do not share the price's scale the denomination is unknowable from here (the
+    TRADE_BLOCK carries no independent unit), so this stamps ``N/A`` rather than
+    asserting something false.
+    """
+    block = extract_last_data_block(fundamentals_report, include_markers=False)
+    if not block:
+        return content
+    code = _valid_currency_code(extract_block_text_value(block, PRICE_CURRENCY_FIELD))
+    if not code:
+        return content
+
+    verdict = assess_price_level_coherence(
+        extract_block_number_from_text(block, "CURRENT_PRICE"),
+        (
+            extract_block_number_from_text(content, field)
+            for field in TRADE_BLOCK_LEVEL_FIELDS
+        ),
+    )
+    if verdict.is_incoherent:
+        logger.warning(
+            "trade_block_price_scale_incoherent",
+            ticker=ticker,
+            data_block_currency=code,
+            reference_price=extract_block_number_from_text(block, "CURRENT_PRICE"),
+            worst_ratio=verdict.worst_ratio,
+            reason=verdict.reason,
+        )
+        code = "N/A"
+
+    line = f"PRICE_CURRENCY: {code}"
+    if _TRADE_BLOCK_PRICE_CURRENCY_RE.search(content):
+        # A lambda, not a replacement string: "\\g<0>" in a value would
+        # otherwise be interpreted as a template. Replace EVERY occurrence —
+        # a surviving duplicate is a contradiction a later parser may prefer.
+        return _TRADE_BLOCK_PRICE_CURRENCY_RE.sub(lambda _m: line, content)
+    anchor = _TRADE_BLOCK_ANCHOR_RE.search(content)
+    if not anchor:
+        return content
+    return f"{content[: anchor.end()]}\n{line}{content[anchor.end() :]}"
 
 
 def reconcile_high_risk_fields(
@@ -698,21 +885,51 @@ def parse_score_breakdown(text: str, kind: str = "HEALTH") -> dict[str, str] | N
     return awards or None
 
 
+def withhold_criterion_award(
+    awards: dict[str, str], key: str, disposition: AwardDisposition
+) -> bool:
+    """Record a withheld rubric criterion in this repo's own N/A-vs-0 vocabulary.
+
+    ``"0"`` keeps the criterion in the rubric denominator; ``"N/A"`` removes it.
+    That single token decides whether missing evidence reads as a *failure*,
+    which is why the choice lives in one helper rather than at each call site:
+    ``NEVER_REMOVED_CRITERIA`` in this module already states that data gaps must
+    use ``N/A``, and ``score_lineage`` already leaves an unresolved dependency at
+    ``N/A``. This is where that rule is applied instead of restated.
+
+    Returns whether the award actually changed, so callers can skip the
+    (expensive, lossy) block rewrite when it did not.
+    """
+    token = rubric_award_token(disposition)
+    if awards.get(key) == token:
+        return False
+    awards[key] = token
+    return True
+
+
 def withhold_eps_growth_for_unusable_baseline(body: str) -> tuple[str, bool]:
-    """Remove sustained EPS-growth credit when the earnings baseline is unsafe."""
+    """Remove sustained EPS-growth credit when the earnings baseline is unsafe.
+
+    A *diagnosed* distortion refutes the criterion (``0``); an unclassifiable
+    baseline or unresolved guidance bridge merely fails to establish it
+    (``N/A``). Collapsing those two is what made an unmeasurable ex-US small cap
+    score identically to one with proven earnings distortion.
+    """
     baseline = extract_block_text_value(body, "EARNINGS_BASELINE_STATUS").upper()
     bridge_status = extract_block_text_value(body, "GUIDANCE_BRIDGE_STATUS").upper()
-    if not requires_eps_growth_withholding(baseline, bridge_status):
+    disposition = eps_growth_award_disposition(
+        baseline_status=baseline, bridge_status=bridge_status
+    )
+    if disposition is AwardDisposition.KEEP:
         return body, False
 
     breakdown_text = extract_block_text_value(body, "GROWTH_SCORE_BREAKDOWN")
     awards = parse_score_breakdown(breakdown_text, "GROWTH")
     if awards is None or set(awards) != set(GROWTH_SCORE_CRITERIA):
         return body, False
-    if awards.get("EPS_GROWTH") == "0":
+    if not withhold_criterion_award(awards, "EPS_GROWTH", disposition):
         return body, False
 
-    awards["EPS_GROWTH"] = "0"
     numeric = {
         key: float(token)
         for key, token in awards.items()
@@ -735,10 +952,22 @@ def withhold_eps_growth_for_unusable_baseline(body: str) -> tuple[str, bool]:
         "ADJUSTED_GROWTH_SCORE",
         f"{earned / available * 100.0:.1f}% (based on {available:g} available points)",
     )
+    # Say which of the two happened. "not durable" asserts a finding; on the
+    # UNRESOLVED path there is no finding, and the PM must be able to tell an
+    # unmeasured criterion from a failed one.
+    if disposition is AwardDisposition.REFUTED:
+        adjustment = (
+            "WITHHELD — trailing earnings baseline is not durable and no "
+            "code-reconciled normalized growth rate is available"
+        )
+    else:
+        adjustment = (
+            "NOT_ESTABLISHED — earnings baseline could not be classified, so "
+            "sustained EPS growth is unproven rather than disproven; criterion "
+            "scored N/A (removed from the rubric denominator, not failed)"
+        )
     updated = replace_or_append_block_line(
-        updated,
-        "EPS_GROWTH_BASELINE_ADJUSTMENT",
-        "WITHHELD — trailing earnings baseline is not durable and no code-reconciled normalized growth rate is available",
+        updated, "EPS_GROWTH_BASELINE_ADJUSTMENT", adjustment
     )
     return updated, True
 

@@ -129,6 +129,11 @@ class TestCompanyNameExtraction:
 class TestMemoryIsolation:
     """Test ChromaDB memory isolation between tickers."""
 
+    # These tests deliberately exercise unscoped cleanup for isolation checks.
+    # They are safe only under tests/conftest.py, which redirects
+    # CHROMA_PERSIST_DIR to a temporary directory for the full pytest session.
+    # Do not run this module through a harness that bypasses that fixture.
+
     @pytest.mark.asyncio
     async def test_memory_collections_are_ticker_specific(self):
         """Verify that different tickers get different collection names."""

@@ -16,8 +16,10 @@ from pathlib import Path
 
 import structlog
 
+from src.async_utils import run_with_hard_timeout
 from src.error_safety import summarize_exception
-from src.runtime_config import get_runtime_config
+from src.runtime_diagnostics import get_runtime_provider
+from src.runtime_diagnostics.failure_classification import get_model_name
 
 # Add the repository root to Python path
 repo_root = Path(__file__).parent.parent
@@ -37,6 +39,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("google.ai").setLevel(logging.WARNING)
 logging.getLogger("chromadb").setLevel(logging.ERROR)
+
+# Deliberately brief: this is a liveness probe, not a work call. The
+# HEALTH_CHECK seat pins standard tier so it can never queue behind flex.
+_CONNECTIVITY_TIMEOUT_SECONDS = 15.0
 
 
 def get_package_version(module_name: str, package_name: str | None = None) -> str:
@@ -151,27 +157,43 @@ def check_imports() -> bool:
 
 
 async def check_llm_connectivity() -> bool:
-    """Test basic LLM connectivity with Gemini."""
+    """Probe the health-check seat for basic LLM connectivity.
+
+    Provider-neutral: SeatId.HEALTH_CHECK is bindable, so neither this
+    docstring nor the log below may name a vendor.
+    """
     try:
-        from src.config import config
-        from src.llms import create_gemini_model
+        from src.llm_runtime.construction import build_required_model_for_seat
+        from src.llm_runtime.seats import SeatId
 
-        runtime_config = get_runtime_config(config)
-        logger.info("testing_llm_connectivity", model=runtime_config.quick_think_llm)
-
-        llm = create_gemini_model(
-            runtime_config.quick_think_llm,
-            temperature=0.0,
-            timeout=10,
-            max_retries=1,
+        llm = build_required_model_for_seat(
+            SeatId.HEALTH_CHECK,
             service_tier="standard",
         )
-
-        response = await asyncio.wait_for(
-            llm.ainvoke("Respond with just the word 'OK'."), timeout=15.0
+        logger.info(
+            "testing_llm_connectivity",
+            provider=get_runtime_provider(llm),
+            model=get_model_name(llm),
         )
 
-        # Handle potential dict/list response from Gemini
+        # run_with_hard_timeout, NOT asyncio.wait_for: `wait_for` cancels the
+        # inner task and then *awaits* it, and a provider SDK call parked in a
+        # socket read cannot be cancelled — the health check would hang exactly
+        # when it is most needed. Deadline-only semantics are the repo standard
+        # for any provider call (see the async timeout standard in CLAUDE.md).
+        #
+        # Wrapped directly rather than routed through
+        # invoke_with_rate_limit_handling: the HEALTH_CHECK seat's execution
+        # policy already pins standard tier, one retry and a short client
+        # timeout, and the generic wrapper could floor this deliberately-brief
+        # probe up to a provider's flex ceiling.
+        response = await run_with_hard_timeout(
+            llm.ainvoke("Respond with just the word 'OK'."),
+            timeout=_CONNECTIVITY_TIMEOUT_SECONDS,
+            label="health_check_connectivity",
+        )
+
+        # Handle potential dict/list response shapes across providers
         raw_content = response.content
         if isinstance(raw_content, dict):
             content = str(raw_content.get("text", raw_content))
@@ -217,9 +239,9 @@ async def run_comprehensive_health_check() -> bool:
 
     # Check internal project imports to ensure no lingering OpenAI references break imports
     try:
-        from src.llms import quick_thinking_llm
+        from src.llm_runtime import construction
 
-        logger.info("llms_import_ok")
+        logger.info("llms_import_ok", module=construction.__name__)
     except ImportError as e:
         logger.error(
             "llms_import_failed",

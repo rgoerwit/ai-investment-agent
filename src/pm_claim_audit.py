@@ -44,6 +44,7 @@ from src.data_block_utils import (
 )
 from src.pm_decision_parser import canonicalize_pm_verdict
 from src.provenance_schema import DecisionTrace, Scorecard
+from src.text_patterns import SENTENCE_SPLIT_RE
 
 logger = structlog.get_logger(__name__)
 
@@ -382,7 +383,7 @@ _WEAK_RELIABILITY_VALUES = (
     "UNVERIFIED",
 )
 
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_SENTENCE_SPLIT_RE = SENTENCE_SPLIT_RE
 _NA_VALUES = frozenset({"N/A", "NA", "NONE", "UNKNOWN", ""})
 
 

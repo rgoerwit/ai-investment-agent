@@ -22,7 +22,8 @@ from src.data_block_utils import (
     unfenced_label,
 )
 from src.error_safety import summarize_exception
-from src.llms import quick_thinking_llm
+from src.llm_runtime.construction import build_required_model_for_seat
+from src.llm_runtime.seats import SeatId
 
 logger = structlog.get_logger(__name__)
 
@@ -241,7 +242,7 @@ class SignalProcessor:
 
     def __init__(self, config: Config):
         self.config = config
-        self.llm = quick_thinking_llm
+        self.llm = build_required_model_for_seat(SeatId.SIGNAL_PROCESSOR)
 
     async def process_signal(self, full_signal: str) -> str:
         """

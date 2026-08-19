@@ -8,9 +8,27 @@ from urllib.parse import urlsplit
 
 from src.error_safety import redact_sensitive_text
 
-ProviderName = Literal["google", "openai", "anthropic", "deepseek", "unknown"]
+ProviderName = Literal[
+    "google",
+    "openai",
+    "anthropic",
+    "deepseek",
+    "zai",
+    "moonshot",
+    "xai",
+    "unknown",
+]
 _PROVIDER_NAMES: frozenset[str] = frozenset(
-    {"google", "openai", "anthropic", "deepseek", "unknown"}
+    {
+        "google",
+        "openai",
+        "anthropic",
+        "deepseek",
+        "zai",
+        "moonshot",
+        "xai",
+        "unknown",
+    }
 )
 FailureKind = Literal[
     "dns_resolution",
@@ -221,26 +239,40 @@ def _extract_host(message: str) -> str | None:
 def infer_provider(
     model_name: str | None = None, class_name: str | None = None
 ) -> ProviderName:
-    """Name the *transport family* serving a call — the SDK, not the billing vendor.
+    """Infer provider identity for legacy or externally constructed clients.
 
-    Deliberately not extended with the OpenAI-compatible vendors (Moonshot, Z.AI,
-    …): everything reachable through ``OPENAI_API_BASE`` uses ``ChatOpenAI`` with
-    an OpenAI-shaped model name, and this value keys the circuit breakers and the
-    flex-tier gate, both of which are transport concerns. "Which vendor actually
-    served this?" is answered by ``FailureDetails.endpoint_host``, which needs no
-    vendor table and so covers vendors we have never seen. Billing vendor is a
-    third question, owned by ``token_tracker._provider_for_model``.
+    Registry-built clients use :func:`get_runtime_provider`, whose stamped
+    identity takes precedence over this model/class-name fallback. This keeps an
+    OpenAI-compatible SDK transport from inheriting OpenAI-only runtime policy.
     """
     haystack = " ".join(part for part in (model_name, class_name) if part).lower()
     if "gemini" in haystack or "google" in haystack:
         return "google"
     if "deepseek" in haystack:
         return "deepseek"
+    if "kimi" in haystack or "moonshot" in haystack:
+        return "moonshot"
+    if "glm" in haystack or "zai" in haystack or "z.ai" in haystack:
+        return "zai"
+    if "grok" in haystack or "x.ai" in haystack or "xai" in haystack:
+        return "xai"
     if "gpt" in haystack or "openai" in haystack:
         return "openai"
     if "claude" in haystack or "anthropic" in haystack:
         return "anthropic"
     return "unknown"
+
+
+def get_runtime_provider(runnable: Any) -> ProviderName:
+    """Return the bound provider policy identity, falling back for legacy clients."""
+
+    stamped = getattr(runnable, "_llm_runtime_provider", None)
+    if isinstance(stamped, str) and stamped in _PROVIDER_NAMES:
+        return cast(ProviderName, stamped)
+    return infer_provider(
+        model_name=get_model_name(runnable),
+        class_name=get_class_name(runnable),
+    )
 
 
 def get_base_url(runnable: Any) -> str | None:
@@ -379,11 +411,31 @@ def classify_failure(
     elif "provider_partial_response" in combined:
         kind = "provider_partial_response"
         retryable = True
-    elif statuses & {"500", "502", "503", "504", "520", "521", "522", "523", "524"} or (
-        # "internalservererror" catches the OpenAI SDK class name (raised for
-        # any >=500, including Cloudflare 52x bodies that name no 50x code the
-        # status match would find); 520-524 are Cloudflare origin errors.
-        "internal server error" in combined or "internalservererror" in combined
+    elif (
+        statuses
+        & {"499", "500", "502", "503", "504", "520", "521", "522", "523", "524"}
+        or (
+            # "internalservererror" catches the OpenAI SDK class name (raised for
+            # any >=500, including Cloudflare 52x bodies that name no 50x code the
+            # status match would find); 520-524 are Cloudflare origin errors.
+            "internal server error" in combined or "internalservererror" in combined
+        )
+        # 499/CANCELLED is a 4xx by number but a mid-flight abort in substance —
+        # the upstream dropped the operation, so it is transient and retryable,
+        # exactly like the 52x family folded in above. It landed in
+        # `unknown_provider_error` (non-retryable) until Aug 2026, which cost the
+        # 8002.T Portfolio Manager its only attempt and the whole ticker its
+        # verdict on an otherwise clean run. Our *own* cancellation surfaces as
+        # `TimeoutError` from `run_with_hard_timeout`, not as a 499 response body,
+        # so this cannot mask a self-inflicted timeout.
+        #
+        # The numeric 499 above carries this on its own, via the same introducer
+        # discipline as every other status. A bare "cancelled" substring must NOT
+        # be added: this system's exception text quotes financial prose, where
+        # cancelled orders/contracts/dividends are ordinary vocabulary — the same
+        # trap as "403" inside "executive order 14032". Only the gRPC enum, which
+        # cannot occur in prose, is matched as a token.
+        or "statuscode.cancelled" in combined
     ):
         kind = "server_error"
         retryable = True

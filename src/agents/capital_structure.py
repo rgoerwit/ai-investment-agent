@@ -11,6 +11,7 @@ from typing import Any
 import structlog
 
 from src.data_block_utils import replace_or_append_block_line
+from src.text_patterns import RESULT_ENVELOPE_RE
 
 from .evidence_preflight import (
     PreflightCall,
@@ -20,6 +21,18 @@ from .evidence_preflight import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# Deliberately NOT `text_patterns.URL_RE`, and the difference is the apostrophe.
+#
+# This scans `outcome.render()` output -- Python-rendered tool results, which routinely
+# embed URLs inside single-quoted strings (``{'url': 'https://ir.example.co.jp/a'}``).
+# The canonical URL_RE excludes only ``<>"`` and so captures the closing ``'`` as part of
+# the URL; the candidates here are handed straight to the official-document tool, so a
+# trailing quote is a fetch failure rather than a cosmetic issue.
+#
+# If you widen this, widen it knowing that; regression test:
+# tests/agents/test_capital_structure_urls.py.
+_URL_IN_QUOTED_PAYLOAD_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
 
 CAPITAL_STRUCTURE_PREFLIGHT_MAX_CHARS = 32_000
 MATERIAL_EXPOSURE_TO_DEBT_PCT = 20.0
@@ -259,7 +272,7 @@ async def preload_capital_structure_evidence(
         outcome.render() for outcome in outcomes if "search" in outcome.label
     )
     candidate_urls = list(
-        dict.fromkeys(re.findall(r"https?://[^\s<>'\"]+", search_payload))
+        dict.fromkeys(_URL_IN_QUOTED_PAYLOAD_RE.findall(search_payload))
     )[:2]
     if candidate_urls and document_tool is not None:
         document_calls = [
@@ -376,9 +389,7 @@ def _source_context(evidence: str, source_url: str) -> str:
     """Return the bounded preflight section that actually contains the URL."""
     if not source_url or source_url.upper() in {"N/A", "UNKNOWN"}:
         return ""
-    result_blocks: list[str] = re.findall(
-        r"(?is)<result\b[^>]*>.*?</result>", evidence or ""
-    )
+    result_blocks: list[str] = re.findall(RESULT_ENVELOPE_RE.pattern, evidence or "")
     for block in result_blocks:
         if source_url in block:
             return block

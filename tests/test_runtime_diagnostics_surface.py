@@ -66,6 +66,7 @@ INTENTIONAL_ADDITIONS = frozenset(
         "get_base_url",
         # Log-safe host; get_base_url returns the credential-bearing full URL.
         "get_endpoint_host",
+        "get_runtime_provider",
     }
 )
 

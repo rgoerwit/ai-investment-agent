@@ -249,8 +249,13 @@ class ThesisVisualizer:
             metrics.us_revenue_pass = result in ("PASS", "N/A", "MARGINAL", "")
 
         # TOTAL RISK COUNT: 1.33 or **TOTAL RISK COUNT**: **1.33**
+        # Sign class must stay identical to the three sibling tally parsers:
+        # pm_decision_parser.parse_final_decision_scores, charts/extractors/pm_block
+        # (risk_tally), and scripts/eval_longitudinal_compare. The tally goes negative
+        # -- capital-efficiency and moat bonuses subtract -- on ~4% of decisions, and an
+        # unsigned class drops the match entirely rather than clipping the sign.
         risk_match = re.search(
-            r"\*?\*?TOTAL RISK (?:COUNT|SCORE)?\*?\*?[:\s]*\*?\*?(\d+(?:\.\d+)?)\*?\*?",
+            r"\*?\*?TOTAL RISK (?:COUNT|SCORE)?\*?\*?[:\s]*\*?\*?(-?\d+(?:\.\d+)?)\*?\*?",
             self.text,
             re.IGNORECASE,
         )

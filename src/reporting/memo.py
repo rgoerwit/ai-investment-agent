@@ -34,7 +34,7 @@ from src.charts.extractors.valuation import (
     scenario_valuation_caveat,
 )
 from src.data_block_utils import extract_data_block_field, extract_last_fenced_block
-from src.pm_decision_parser import canonicalize_pm_verdict
+from src.pm_decision_parser import PM_VERDICT_HEADER_RE, canonicalize_pm_verdict
 from src.reporting.source_confidence import (
     SourceRow,
     build_source_confidence_rows,
@@ -52,10 +52,9 @@ logger = structlog.get_logger(__name__)
 
 
 _VERDICT_LINE = re.compile(r"VERDICT:\s*([A-Z_ ]+)")
-_VERDICT_NARRATIVE = re.compile(
-    r"PORTFOLIO MANAGER VERDICT:\s*(BUY|HOLD|DO NOT INITIATE|SELL)",
-    re.IGNORECASE,
-)
+# Shared alternation: this reader previously accepted only "DO NOT INITIATE" and
+# silently returned no match on the underscore spelling the PM also emits.
+_VERDICT_NARRATIVE = PM_VERDICT_HEADER_RE
 _RATIONALE_HEADER = re.compile(
     r"#+\s*DECISION RATIONALE\s*\n+(.+?)(?:\n#+\s|\n---|\Z)",
     re.DOTALL | re.IGNORECASE,

@@ -56,6 +56,74 @@ def parse_ratio_or_percent(raw_value: str) -> float | None:
     return value
 
 
+# --- Shared DATA_BLOCK field readers -------------------------------------------------
+#
+# These exist because `metric_extractor` and `validators/supplemental_extractors` each
+# grew their own copy of the same seven parsers (ROIC_QUALITY, CAPEX_TO_DA,
+# CAPEX_TO_DA_STATUS, CAPITAL_PLAN_STATUS, REVENUE_BACKLOG_COVERAGE,
+# NET_CASH_TO_MARKET_CAP, CASH_TO_ASSETS) -- byte-identical regexes plus byte-identical
+# N/A handling and float coercion, maintained separately. Read a field through one of
+# these rather than re-authoring the pattern; `parse_ratio_or_percent` above is the other
+# shared primitive both modules already use.
+#
+# All three return None for "absent, N/A, or unparseable" so a caller can store
+# conditionally. That is deliberately indistinguishable at this layer: deciding what
+# absence *means* belongs to the consumer (see src/evidence_disposition.py), not here.
+
+
+def read_block_enum(
+    data_block: str, field: str, allowed: tuple[str, ...]
+) -> str | None:
+    """Return an upper-cased enum token from ``FIELD: VALUE``, or None for N/A."""
+    match = re.search(
+        rf"{re.escape(field)}:\s*({'|'.join(allowed)}|N/A)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    value = match.group(1).upper()
+    return None if value == "N/A" else value
+
+
+def read_block_float(data_block: str, field: str) -> float | None:
+    """Return a bare float from ``FIELD: VALUE``, tolerating ~/≈ and N/A."""
+    match = re.search(rf"{re.escape(field)}:\s*([^\n]+)", data_block, re.IGNORECASE)
+    if not match:
+        return None
+    raw_value = match.group(1).strip()
+    if raw_value.upper() == "N/A":
+        return None
+    try:
+        return float(raw_value.lstrip("~≈"))
+    except ValueError:
+        return None
+
+
+def read_block_leading_float(data_block: str, field: str) -> float | None:
+    """Return the leading number of ``FIELD: VALUE``, ignoring a trailing unit.
+
+    Distinct from ``read_block_float`` on purpose. Some fields carry a unit the model
+    writes inline -- ``REVENUE_BACKLOG_COVERAGE: 4.0 yrs`` is the live case, 95 of the
+    901 values on disk -- and coercing the whole line would silently drop every one of
+    them. Fields whose contract is a bare scalar keep the strict reader, so a stray unit
+    there stays visible as a parse failure rather than being half-read.
+    """
+    match = re.search(
+        rf"{re.escape(field)}:\s*(-?\d+(?:\.\d+)?)", data_block, re.IGNORECASE
+    )
+    return float(match.group(1)) if match else None
+
+
+def read_block_ratio(data_block: str, field: str) -> float | None:
+    """Return a ratio from ``FIELD: VALUE``, accepting a decimal or a percentage."""
+    match = re.search(rf"{re.escape(field)}:\s*([^\n]+)", data_block, re.IGNORECASE)
+    return parse_ratio_or_percent(match.group(1)) if match else None
+
+
+# --------------------------------------------------------------------------------------
+
+
 def extract_metrics(
     fundamentals_report: str,
     *,
@@ -202,6 +270,10 @@ def extract_metrics(
         ),
     ):
         match = re.search(
+            # NOTE: field_name is not re.escape()d here while the sibling loop below
+            # (guidance_fields) does escape it. Harmless today -- both iterate over
+            # hardcoded names with no regex metacharacters -- but escape any name you
+            # add, and prefer the read_block_* helpers above for new fields.
             rf"^{field_name}:\s*([^\n]+)",
             data_block,
             re.IGNORECASE | re.MULTILINE,
@@ -226,7 +298,11 @@ def extract_metrics(
     if sector_median_pe_match:
         metrics["sector_median_pe"] = float(sector_median_pe_match.group(1))
 
-    pe_vs_sector_match = re.search(r"PE_VS_SECTOR:\s*(\d+(?:\.\d+)?)", data_block)
+    # Signed: PE_VS_SECTOR goes negative when trailing earnings are negative. An
+    # unsigned class returns None, so the field reads as *absent* rather than negative
+    # and SECTOR_RELATIVE_VALUATION_RICH silently never evaluates it. Same sign
+    # discipline as REVENUE_CAGR_3Y / FCF_CAGR_3Y / ROIC_PERCENT below.
+    pe_vs_sector_match = re.search(r"PE_VS_SECTOR:\s*(-?\d+(?:\.\d+)?)", data_block)
     if pe_vs_sector_match:
         metrics["pe_vs_sector"] = float(pe_vs_sector_match.group(1))
 
@@ -270,19 +346,18 @@ def extract_metrics(
         if value != "N/A":
             metrics["dividend_coverage"] = value
 
-    margin_match = re.search(r"NET_MARGIN:\s*(\d+(?:\.\d+)?)%", data_block)
+    # Signed: a loss-making company reports a negative net margin. Unsigned, the match
+    # fails and downstream reads "no margin data" instead of "margin is negative" --
+    # absent evidence standing in for adverse evidence (see src/evidence_disposition.py).
+    margin_match = re.search(r"NET_MARGIN:\s*(-?\d+(?:\.\d+)?)%", data_block)
     if margin_match:
         metrics["net_margin"] = float(margin_match.group(1))
 
-    roic_quality_match = re.search(
-        r"ROIC_QUALITY:\s*(STRONG|ADEQUATE|WEAK|DESTRUCTIVE|N/A)",
-        data_block,
-        re.IGNORECASE,
+    roic_quality = read_block_enum(
+        data_block, "ROIC_QUALITY", ("STRONG", "ADEQUATE", "WEAK", "DESTRUCTIVE")
     )
-    if roic_quality_match:
-        value = roic_quality_match.group(1).upper()
-        if value != "N/A":
-            metrics["roic_quality"] = value
+    if roic_quality:
+        metrics["roic_quality"] = roic_quality
 
     trend_match = re.search(
         r"PROFITABILITY_TREND:\s*(IMPROVING|STABLE|DECLINING|UNSTABLE|N/A)",
@@ -438,11 +513,9 @@ def extract_metrics(
     if rev_ttm_match:
         metrics["revenue_growth_ttm"] = float(rev_ttm_match.group(1))
 
-    backlog_coverage_match = re.search(
-        r"REVENUE_BACKLOG_COVERAGE:\s*([0-9]+(?:\.\d+)?)", data_block
-    )
-    if backlog_coverage_match:
-        metrics["revenue_backlog_coverage"] = float(backlog_coverage_match.group(1))
+    backlog_coverage = read_block_leading_float(data_block, "REVENUE_BACKLOG_COVERAGE")
+    if backlog_coverage is not None:
+        metrics["revenue_backlog_coverage"] = backlog_coverage
 
     quarter_date_match = re.search(
         r"LATEST_QUARTER_DATE:\s*(\d{4}-\d{2}-\d{2})", data_block
@@ -450,41 +523,18 @@ def extract_metrics(
     if quarter_date_match:
         metrics["latest_quarter_date"] = quarter_date_match.group(1)
 
-    net_cash_to_mc_match = re.search(
-        r"NET_CASH_TO_MARKET_CAP:\s*([^\n]+)", data_block, re.IGNORECASE
+    metrics["net_cash_to_market_cap"] = read_block_ratio(
+        data_block, "NET_CASH_TO_MARKET_CAP"
     )
-    if net_cash_to_mc_match:
-        metrics["net_cash_to_market_cap"] = parse_ratio_or_percent(
-            net_cash_to_mc_match.group(1)
-        )
+    metrics["cash_to_assets"] = read_block_ratio(data_block, "CASH_TO_ASSETS")
 
-    cash_to_assets_match = re.search(
-        r"CASH_TO_ASSETS:\s*([^\n]+)", data_block, re.IGNORECASE
-    )
-    if cash_to_assets_match:
-        metrics["cash_to_assets"] = parse_ratio_or_percent(
-            cash_to_assets_match.group(1)
-        )
+    net_debt_ebitda = read_block_float(data_block, "NET_DEBT_EBITDA")
+    if net_debt_ebitda is not None:
+        metrics["net_debt_ebitda"] = net_debt_ebitda
 
-    net_debt_ebitda_match = re.search(
-        r"NET_DEBT_EBITDA:\s*([^\n]+)", data_block, re.IGNORECASE
-    )
-    if net_debt_ebitda_match:
-        raw_value = net_debt_ebitda_match.group(1).strip()
-        if raw_value.upper() != "N/A":
-            try:
-                metrics["net_debt_ebitda"] = float(raw_value.lstrip("~≈"))
-            except ValueError:
-                pass
-
-    capex_to_da_match = re.search(r"CAPEX_TO_DA:\s*([^\n]+)", data_block, re.IGNORECASE)
-    if capex_to_da_match:
-        raw_value = capex_to_da_match.group(1).strip()
-        if raw_value.upper() != "N/A":
-            try:
-                metrics["capex_to_da"] = float(raw_value)
-            except ValueError:
-                pass
+    capex_to_da = read_block_float(data_block, "CAPEX_TO_DA")
+    if capex_to_da is not None:
+        metrics["capex_to_da"] = capex_to_da
 
     asset_turnover_match = re.search(
         r"ASSET_TURNOVER:\s*([0-9]+(?:\.[0-9]+)?)", data_block

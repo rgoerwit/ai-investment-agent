@@ -142,6 +142,23 @@ temp/
 # Docker
 .dockerignore
 
+# Terraform local state, credentials, variable files, and saved plans.
+# Environment templates remain versioned; real values belong in ignored
+# terraform.tfvars files or CI secret variables.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+*.tfplan
+*.tfplan.*
+**/tfplan.*
+plan.out
+plan.cache
+.terraformrc
+terraform.rc
+credentials.tfrc.json
+
 ## CI/CD
 # .github/workflows/*.yml.bak
 

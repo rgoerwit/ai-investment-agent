@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.mcp.auth import resolve_auth
+from src.mcp.auth import MCPCredentialMissing, resolve_auth
 from src.mcp.config import MCPAuthSpec, MCPServerSpec
 
 
@@ -35,7 +35,14 @@ def test_resolve_auth_uses_query_key(monkeypatch: pytest.MonkeyPatch):
     assert "apikey=secret-token-123" in (resolved.url or "")
 
 
-def test_resolve_auth_requires_env_var(monkeypatch: pytest.MonkeyPatch):
+def test_resolve_auth_reports_a_missing_credential_distinctly(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An absent key is "this server is unavailable", not "the registry is bad".
+
+    The distinction is what lets MCPRuntime skip one vendor and keep the rest;
+    before it, any missing key aborted construction of the whole runtime.
+    """
     monkeypatch.delenv("FMP_API_KEY", raising=False)
     spec = MCPServerSpec(
         id="fmp_remote",
@@ -45,8 +52,24 @@ def test_resolve_auth_requires_env_var(monkeypatch: pytest.MonkeyPatch):
         auth=MCPAuthSpec(type="query_api_key", param="apikey", env_var="FMP_API_KEY"),
     )
 
-    with pytest.raises(ValueError, match="Required env var"):
+    with pytest.raises(MCPCredentialMissing) as excinfo:
         resolve_auth(spec)
+    assert excinfo.value.server_id == "fmp_remote"
+    assert excinfo.value.env_var == "FMP_API_KEY"
+    # Still a ValueError, so existing handlers keep working.
+    assert isinstance(excinfo.value, ValueError)
+
+
+def test_a_malformed_auth_block_is_rejected_and_is_not_a_missing_credential():
+    """An auth block with no env_var is an authoring error, not a missing key.
+
+    It is caught at spec construction rather than in resolve_auth, so it can
+    never be mistaken for the "operator has no key" case and silently disable a
+    server instead of surfacing a broken registry.
+    """
+    with pytest.raises(ValueError, match="must declare env_var") as excinfo:
+        MCPAuthSpec(type="query_api_key", param="apikey", env_var=None)
+    assert not isinstance(excinfo.value, MCPCredentialMissing)
 
 
 def test_resolve_auth_injects_auth_env_into_stdio_process(

@@ -175,3 +175,69 @@ def test_no_fx_fallback_lookup_in_repo_silently_defaults_to_one():
         "Unknown currencies must return None, never silently use USD identity: "
         + ", ".join(offenders)
     )
+
+
+class TestFxResolutionInsideAnEventLoop:
+    """A cold FX cache inside a running loop must degrade, not abort the report.
+
+    `recommendation_service.build_bundle` is driven by `asyncio.run`, and the
+    reconciler reaches `_fx_rate_for_currency` synchronously from inside it.
+    `resolve_rates_sync` is `asyncio.run` and raises there by its own documented
+    contract. The miss is normally impossible because `normalize_positions`
+    batch-warms every held currency first -- but a `--read-only` run has no
+    positions to normalize, so an opportunity in an unseen currency arrives cold.
+    That aborted the entire portfolio report with
+    "asyncio.run() cannot be called from a running event loop".
+    """
+
+    @staticmethod
+    def _cold_cache():
+        from src.fx_normalization import FxRateCache
+
+        return FxRateCache()
+
+    def test_cold_miss_inside_a_loop_falls_back_instead_of_raising(self, monkeypatch):
+        import asyncio
+
+        from src.fx_normalization import set_fx_rate_cache
+        from src.ibkr.reconciliation_rules import _fx_rate_for_currency
+
+        set_fx_rate_cache(self._cold_cache())
+
+        async def _resolve_under_a_running_loop():
+            return _fx_rate_for_currency("JPY")
+
+        rate = asyncio.run(_resolve_under_a_running_loop())
+
+        assert rate is not None
+        assert 0 < rate < 1  # JPY->USD, from the static table
+
+    def test_warm_cache_is_still_served_without_io(self):
+        import asyncio
+
+        from src.fx_normalization import set_fx_rate_cache
+        from src.ibkr.reconciliation_rules import _fx_rate_for_currency
+
+        set_fx_rate_cache(_FakeFxRateCache())
+
+        async def _resolve_under_a_running_loop():
+            return _fx_rate_for_currency("JPY")
+
+        assert asyncio.run(_resolve_under_a_running_loop()) is not None
+
+    def test_outside_a_loop_the_live_first_path_is_unchanged(self, monkeypatch):
+        from src.fx_normalization import set_fx_rate_cache
+        from src.ibkr.reconciliation_rules import _fx_rate_for_currency
+
+        cache = self._cold_cache()
+        calls: list[list[str]] = []
+
+        def _fake_sync(currencies, to_currency="USD"):
+            calls.append(list(currencies))
+            return {"JPY": (0.0065, "test")}
+
+        monkeypatch.setattr(cache, "resolve_rates_sync", _fake_sync)
+        set_fx_rate_cache(cache)
+
+        assert _fx_rate_for_currency("JPY") == 0.0065
+        assert calls == [["JPY"]]

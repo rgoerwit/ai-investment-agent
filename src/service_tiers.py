@@ -21,6 +21,9 @@ subclasses in ``src/llms.py``, not here.
 from __future__ import annotations
 
 import threading
+import time
+from collections import deque
+from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
@@ -42,6 +45,40 @@ _logged_floor_labels: set[str] = set()
 # models start working without a code change.
 _flex_capability_lock = threading.Lock()
 _flex_unsupported_models: set[str] = set()
+
+# Per-process flex *health* cache — the sibling of the capability cache above,
+# and keyed differently on purpose.
+#
+# Capability is a property of a MODEL: flex either exists for it or does not, and
+# the answer never changes, so that cache is model-keyed and permanent.
+# Congestion is a property of a VENDOR'S POOL: models queue together. Measured on
+# 8002.T (2026-08-14), `gemini-3.6-flash` timed out three times and
+# `gemini-3.1-pro-preview` once in a single run, ~121 minutes of waiting, because
+# nothing remembered the first timeout — each flex attempt is bounded by the
+# 900 s flex floor, and the run re-learned the same outage four times. Keying
+# this by model would merely make it re-learn per model.
+#
+# The provider is a plain string; nothing here is specific to Google or OpenAI
+# (today's only tiered vendors). A compatible vendor that gains a tier plugs in
+# unchanged.
+_flex_health_lock = threading.Lock()
+
+
+@dataclass
+class _FlexHealth:
+    """Per-provider flex-pool health. Use only with ``_flex_health_lock`` held."""
+
+    failures: deque[float] = field(default_factory=deque)
+    degraded_until: float = 0.0
+    # Set when a cool-off expires: the provider is eligible again, but a single
+    # further failure re-degrades it. Without this, a sustained outage re-pays
+    # ``threshold x flex floor`` on every cool-off cycle. Mirrors the half-open
+    # probe in ``agents/circuit_breaker.LLMCircuitBreaker``.
+    probation: bool = False
+    episodes: int = 0
+
+
+_flex_health: dict[str, _FlexHealth] = {}
 
 
 def _cfg(cfg: Any = None) -> Any:
@@ -101,13 +138,147 @@ def is_flex_unsupported_error(exc: BaseException) -> bool:
     )
 
 
+def _normalize_provider(provider: str | None) -> str:
+    return (provider or "").strip().lower()
+
+
+def flex_degraded(
+    provider: str | None, *, now: float | None = None, cfg: Any = None
+) -> bool:
+    """Whether this process has learned the provider's flex pool is not serving.
+
+    True only while a cool-off is active. Expiry is evaluated here rather than by
+    a timer: the check happens on every call anyway, so the transition is free and
+    there is no background state to leak.
+    """
+    key = _normalize_provider(provider)
+    if not key or not bool(getattr(_cfg(cfg), "flex_degrade_enabled", True)):
+        return False
+    ts = time.monotonic() if now is None else now
+    with _flex_health_lock:
+        health = _flex_health.get(key)
+        if health is None or not health.degraded_until:
+            return False
+        if ts < health.degraded_until:
+            return True
+        # Cool-off expired: eligible again, but on a hair trigger.
+        health.degraded_until = 0.0
+        health.probation = True
+        health.failures.clear()
+        return False
+
+
+def note_flex_fallback(
+    provider: str | None,
+    *,
+    reason: str,
+    model: str = "",
+    now: float | None = None,
+    cfg: Any = None,
+) -> None:
+    """Record that a flex attempt fell back, and degrade the provider past threshold.
+
+    ``reason`` is the flex-attributable failure class — ``"latency"`` (a queued
+    call that never returned) or ``"capacity"`` (429/503). Both mean "the flex
+    pool did not serve this call", which is the signal. Capability rejections are
+    deliberately excluded: they are already cached permanently by
+    ``mark_flex_unsupported`` and are not congestion.
+    """
+    key = _normalize_provider(provider)
+    settings = _cfg(cfg)
+    if not key or not bool(getattr(settings, "flex_degrade_enabled", True)):
+        return
+    threshold = int(getattr(settings, "flex_degrade_threshold", 2))
+    window = float(getattr(settings, "flex_degrade_window_seconds", 900.0))
+    cool_off = float(getattr(settings, "flex_degrade_cool_off_seconds", 1800.0))
+    ts = time.monotonic() if now is None else now
+
+    with _flex_health_lock:
+        health = _flex_health.setdefault(key, _FlexHealth())
+        if health.degraded_until and ts < health.degraded_until:
+            return  # already degraded; nothing to learn
+        cutoff = ts - window
+        while health.failures and health.failures[0] < cutoff:
+            health.failures.popleft()
+        health.failures.append(ts)
+        # One failure is enough while on probation — the cool-off just expired and
+        # the pool immediately failed again.
+        effective_threshold = 1 if health.probation else threshold
+        if len(health.failures) < effective_threshold:
+            return
+        health.degraded_until = ts + cool_off
+        health.probation = False
+        health.episodes += 1
+        failures = len(health.failures)
+
+    logger.warning(
+        "flex_provider_degraded",
+        provider=key,
+        reason=reason,
+        model=normalize_model_name(model) if model else None,
+        failures_in_window=failures,
+        cool_off_seconds=round(cool_off, 1),
+        note=(
+            "flex fallbacks reached the threshold; requesting the standard tier "
+            "for this provider until the cool-off expires"
+        ),
+    )
+
+
+def flex_degradation_snapshot(*, now: float | None = None) -> dict[str, dict[str, Any]]:
+    """Secret-free, JSON-serializable view of flex health, for run artifacts.
+
+    Reports every provider that degraded at least once this process, so a slow or
+    expensive run explains itself without anyone reading the logs.
+    """
+    ts = time.monotonic() if now is None else now
+    snapshot: dict[str, dict[str, Any]] = {}
+    with _flex_health_lock:
+        for key, health in _flex_health.items():
+            if not health.episodes:
+                continue
+            snapshot[key] = {
+                "episodes": health.episodes,
+                "degraded": bool(health.degraded_until and ts < health.degraded_until),
+                "seconds_remaining": (
+                    round(max(0.0, health.degraded_until - ts), 1)
+                    if health.degraded_until
+                    else 0.0
+                ),
+            }
+    return snapshot
+
+
 def _reset_flex_capability_cache_for_tests() -> None:
     with _flex_capability_lock:
         _flex_unsupported_models.clear()
 
 
+def _reset_flex_health_for_tests() -> None:
+    with _flex_health_lock:
+        _flex_health.clear()
+
+
+def resolve_google_service_tier(cfg: Any = None) -> str:
+    """The effective Google tier, from whichever key the active schema uses.
+
+    ``GOOGLE_SERVICE_TIER`` is the multi-provider key; ``GEMINI_SERVICE_TIER``
+    is its legacy predecessor. They must never be read at different call sites:
+    seat construction read the first while this module read the second, so an
+    operator who set only ``GOOGLE_SERVICE_TIER=flex`` sent flex requests while
+    the runtime believed flex was inactive — the timeout floors and the
+    degradation cache silently never engaged. That is the same divergence
+    ``RuntimeConfig.from_config`` already resolves for RPM, and it is resolved
+    the same way here: one function, consulted by every reader.
+    """
+    settings = _cfg(cfg)
+    if getattr(settings, "llm_base_provider", None) is not None:
+        return getattr(settings, "google_service_tier", "standard")
+    return getattr(settings, "gemini_service_tier", "standard")
+
+
 def gemini_flex_active(cfg: Any = None) -> bool:
-    return getattr(_cfg(cfg), "gemini_service_tier", "standard") == "flex"
+    return resolve_google_service_tier(cfg) == "flex"
 
 
 def openai_flex_active(cfg: Any = None) -> bool:

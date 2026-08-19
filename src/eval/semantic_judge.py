@@ -17,10 +17,35 @@ from src.eval.prompt_checks import (
     PromptCheckScenarioReport,
     PromptCheckSuiteExecution,
 )
-from src.llms import create_consultant_llm, create_quick_thinking_llm
+from src.llm_runtime.construction import build_required_model_for_seat
+from src.llm_runtime.seats import SeatId
 from src.runtime_config import get_runtime_config
 
 JudgeVerdict = Literal["PASS", "SOFT_FAIL", "HARD_FAIL", "SKIPPED"]
+
+
+def create_quick_thinking_llm(*, model=None, max_output_tokens=None):
+    """Compatibility test seam backed by the fixed Semantic Judge seat."""
+
+    return build_required_model_for_seat(
+        SeatId.SEMANTIC_JUDGE,
+        model_override=model,
+        output_tokens=max_output_tokens,
+    )
+
+
+def create_consultant_llm(
+    *, model=None, quick_mode=True, max_completion_tokens=None, **kwargs
+):
+    """Compatibility test seam for an explicitly pinned OpenAI judge."""
+
+    del quick_mode, kwargs
+    return build_required_model_for_seat(
+        SeatId.SEMANTIC_JUDGE,
+        model_override=model,
+        output_tokens=max_completion_tokens,
+    )
+
 
 _RUBRIC_PROMPTS: dict[str, str] = {
     "analysis_report": """Return JSON only.

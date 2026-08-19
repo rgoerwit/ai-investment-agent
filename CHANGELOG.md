@@ -45,6 +45,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   update is intentionally earlier than the normal cooldown because the exposed
   parser path makes the denial-of-service risk material.
 
+## [3.15.0] - 2026-08-18
+
+### Added
+
+- **Provider-neutral LLM seats** — Named application seats now resolve through
+  independently configurable base, review, and regional provider planes, with
+  validated capabilities, explicit independence waivers, migration tooling, and
+  provider-accurate model/tier cost attribution.
+- **Retrospective audit tooling** — A read-only evidence/disposition report and
+  bounded, archive-aware evaluation make prospective learning coverage and any
+  legacy-sweep value observable before prices or lessons are written.
+
+### Changed
+
+- **Evidence-scoped lessons learned** — Retrospectives recover stored bear
+  evidence from source artifacts and render deterministic records from an
+  explicit disposition policy; only verified, market-contextual outcomes can
+  become injectable lessons.
+- **Consultant and evidence workflows** — Consultant tools now use bounded
+  concurrent batches, while evidence disposition, output validation, and shared
+  parser contracts make incomplete evidence explicit rather than inferred.
+
+### Fixed
+
+- **International pricing and portfolio decisions** — Preserve minor-unit
+  denominations (including GBp/GBX), compare prices only when currencies and
+  scales are compatible, and reject incoherent derived price levels.
+- **Runtime resilience and reporting** — Correct flex fallback/cache behavior,
+  provider failure classification, optional MCP credentials, degraded-run
+  status, and the Auditor/IBKR execution paths.
+- **Cross-consumer parser drift** — Centralize repeated report patterns and
+  protect key verdict, metric, risk, macro-alert, and ticker parsers with
+  regression contracts.
+
 ## [3.14.0] - 2026-07-30
 
 ### Added

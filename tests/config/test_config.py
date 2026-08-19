@@ -243,6 +243,34 @@ class TestValidateEnvironmentVariables:
 
             assert "GOOGLE_API_KEY" in str(exc_info.value)
 
+    def test_new_schema_does_not_require_google_when_no_reachable_seat_uses_it(self):
+        """A fully OpenAI chat plane can start without a Google credential."""
+        from src.config import Settings, validate_environment_variables
+
+        settings = Settings(
+            _env_file=None,
+            llm_base_provider="openai",
+            llm_review_provider="openai",
+            llm_regional_provider="deepseek",
+            llm_writer_provider="openai",
+            llm_operational_provider="openai",
+            llm_judge_provider="openai",
+            openai_api_key="o",
+            google_api_key="",
+            finnhub_api_key="f",
+            tavily_api_key="t",
+            llm_require_review_independence=False,
+            llm_review_independence_waiver_reason="single-provider deployment",
+            llm_apac_mode="off",
+            embedding_provider="openai",
+            embedding_model="text-embedding-3-small",
+        )
+        with (
+            patch("src.config.config", settings),
+            patch("src.config.configure_langsmith_tracing"),
+        ):
+            validate_environment_variables()
+
 
 class TestConfigDataclass:
     """Test Config dataclass initialization and defaults."""

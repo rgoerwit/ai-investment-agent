@@ -39,18 +39,62 @@ def _reset_ibkr_session_manager():
     reset_ibkr_session_manager()
 
 
+@pytest.fixture(autouse=True)
+def _reset_flex_health():
+    """Reset the process-wide flex-health cache between tests.
+
+    Same hazard as the IBKR pool: a degradation recorded by one test silently
+    changes the tier another test's model is constructed with, and the failure
+    only appears under full-suite ordering. The sibling capability cache
+    (``_flex_unsupported_models``) has the same shape; tests that touch it reset
+    it explicitly.
+    """
+    from src.service_tiers import _reset_flex_health_for_tests
+
+    _reset_flex_health_for_tests()
+    yield
+    _reset_flex_health_for_tests()
+
+
 # Capture real API key if present (for integration tests)
 _REAL_GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 
 
+@pytest.fixture(scope="session")
+def test_chroma_persist_dir(tmp_path_factory) -> Path:
+    """Allocate the only ChromaDB directory a pytest session may use.
+
+    Kept as a named fixture so ``test_chroma_isolation.py`` can assert that the
+    live config points to this exact temporary path, rather than merely to a path
+    that is not the repository default. The latter would still permit an
+    operator-supplied external Chroma directory to be destroyed.
+    """
+    return tmp_path_factory.mktemp("chroma_db_test")
+
+
 @pytest.fixture(scope="session", autouse=True)
-def setup_test_env():
+def setup_test_env(test_chroma_persist_dir: Path):
     """
     Set up test environment variables.
     This fixture runs for the entire session and applies default MOCK values.
     Individual tests that need real keys (integration tests) must override this.
     """
+    # The test session must never touch the operator's persistent ChromaDB.
+    #
+    # This is not hygiene, it is data loss: `cleanup_all_memories(days=0)` with no
+    # ticker skips its prefix filter and calls `delete_collection` on *every*
+    # collection it finds, and `tests/memory/test_contamination_vectors.py` calls
+    # it exactly that way (twice) to get a "clean slate". Pointed at the default
+    # `./chroma_db`, a single `pytest tests/memory/` destroyed the entire
+    # `lessons_learned` corpus along with `macro_events` and every legacy
+    # collection — which is why the lessons store kept reappearing empty and
+    # same-day, and why a stray `test_memory__emb_*` collection was found living
+    # in the real database.
+    #
+    # Redirecting the whole session is the boundary fix: it protects against any
+    # future test that constructs a real memory, not just the two known callers.
     test_env = {
+        "CHROMA_PERSIST_DIR": str(test_chroma_persist_dir),
         "ENVIRONMENT": "test",
         "LOG_LEVEL": "ERROR",
         "ENABLE_MEMORY": "false",
@@ -69,6 +113,16 @@ def setup_test_env():
         "OPENAI_SERVICE_TIER": "auto",
         "FLEX_FALLBACK_TO_STANDARD": "true",
         "FLEX_LLM_TIMEOUT_SECONDS": "900",
+        # Same rationale, one layer down: an operator .env pointing
+        # OPENAI_API_BASE at a compatible vendor makes every OpenAI-plane seat
+        # take the compatible path — no service tier, no Responses API, and the
+        # OPENAI_COMPATIBLE_CLIENT_TIMEOUT_SECONDS client timeout. Tests for the
+        # compatible path set the base explicitly (tests/test_llms_openai_base.py).
+        "OPENAI_API_BASE": "",
+        # NOTE: the LLM_*_PROVIDER schema selectors are deliberately NOT pinned
+        # here. A process env var beats `_env_file`, which would break the tests
+        # that load a purpose-built new-schema .env fixture. They are pinned on
+        # the config singleton instead — see `_pin_legacy_binding_schema` below.
         # Pin the APEX-tier knobs to unset: an operator .env with APEX_MODEL
         # flips the llms.py construction path for the Senior Fundamentals and
         # PM seats (dedicated deep-tier instance instead of the quick/deep
@@ -141,6 +195,36 @@ def _pin_config_singleton_identity():
     else:
         if src.config.config is not baseline:
             src.config.config = baseline
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _pin_legacy_binding_schema(monkeypatch):
+    """Keep the config singleton on the legacy LLM binding schema.
+
+    Same hazard as the pinned service tiers and APEX models, one layer wider: a
+    single ``LLM_*_PROVIDER`` selector in an operator's ``.env`` switches EVERY
+    seat from the legacy factories to the provider-scoped adapters. Mock-based
+    unit tests that patch a legacy facade (``components.get_consultant_llm``,
+    ``create_apex_llm``, …) then observe no calls at all, and fail only on the
+    machine whose ``.env`` has been migrated.
+
+    Pinned on the singleton rather than via ``os.environ`` on purpose: a process
+    env var outranks ``_env_file``, which would break the tests that load a
+    purpose-built new-schema ``.env`` fixture. Multi-provider behavior is tested
+    with explicit ``Settings(...)`` objects, which this fixture does not touch.
+    """
+    import src.config
+
+    for field in (
+        "llm_base_provider",
+        "llm_review_provider",
+        "llm_regional_provider",
+        "llm_writer_provider",
+        "llm_operational_provider",
+        "llm_judge_provider",
+    ):
+        monkeypatch.setattr(src.config.config, field, None, raising=False)
     yield
 
 

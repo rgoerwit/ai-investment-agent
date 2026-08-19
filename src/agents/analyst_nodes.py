@@ -51,6 +51,7 @@ from .fundamentals_reconciler import (
     extract_raw_metrics_payload,
     reconcile_high_risk_fields,
     reconcile_score_consistency,
+    stamp_price_currency,
     statement_mrq_period_lag_note,
     withhold_eps_growth_for_unusable_baseline,
 )
@@ -433,6 +434,13 @@ def _sanitize_fundamentals_output(
     if has_structured_payload:
         updated_body = reconcile_high_risk_fields(updated_body, payload)
         updated_body = _append_metric_provenance(updated_body, payload)
+        # Payload-gated like every sibling reconciliation. With no structured
+        # payload the denomination is unverifiable, and stamping N/A over the
+        # model's line would destroy a possibly-correct transcription while
+        # adding a line to every thin-data block. Consumers resolve the unit
+        # from the payload-derived snapshot currency, not from this field, so
+        # an unstamped block degrades to today's suffix resolution.
+        updated_body = stamp_price_currency(updated_body, payload)
         mrq_lag_note = statement_mrq_period_lag_note(payload)
         if mrq_lag_note:
             existing_note = extract_block_text_value(
@@ -1042,14 +1050,25 @@ def create_analyst_node(
         )
 
         try:
+            from src.eval.prompt_digest import agent_prompt_digest
+
             prompts_used = state.get("prompts_used", {})
             prompts_used[output_field] = {
                 "agent_name": agent_prompt.agent_name,
                 "version": agent_prompt.version,
+                # Content digest of the prompt as actually resolved this run.
+                # `compute_prompt_set_digest` reads this key; without it the run
+                # fingerprint hashed an empty payload — a constant for every run,
+                # which is worse than no fingerprint. It also captures a PROMPT_*
+                # env or Langfuse override, which a digest of the on-disk file
+                # cannot see, and an edit made without a version bump.
+                "digest": agent_prompt_digest(agent_prompt),
             }
 
-            filtered_messages = message_utils.filter_messages_for_gemini(
-                state.get("messages", []), agent_key=agent_key
+            from src.llm_runtime.messages import prepare_messages_for_model
+
+            filtered_messages = prepare_messages_for_model(
+                llm, state.get("messages", []), agent_key=agent_key
             )
             msg_types = [type(message).__name__ for message in filtered_messages]
             msg_has_tool_calls = [

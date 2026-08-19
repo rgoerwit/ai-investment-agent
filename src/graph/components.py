@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import structlog
+from langchain_core.callbacks import BaseCallbackHandler
 
 from src.agents import (
     create_analyst_node,
@@ -23,6 +25,16 @@ from src.agents import (
 from src.charts.chart_node import create_chart_generator_node
 from src.config import config
 from src.llm_budgets import get_agent_output_budget
+from src.llm_runtime.bindings import BindingPlan, resolve_binding_plan
+from src.llm_runtime.capabilities import Capability
+from src.llm_runtime.construction import (
+    LegacyGraphFactories,
+    LegacySeatRequest,
+    build_legacy_model,
+    build_model_for_seat,
+)
+from src.llm_runtime.factory import SeatModelFactory
+from src.llm_runtime.seats import SEATS, SeatId
 from src.runtime_config import get_runtime_config
 from src.token_tracker import TokenTrackingCallback, get_tracker
 from src.tools.registry import toolkit
@@ -98,10 +110,47 @@ def get_consultant_llm(*args: Any, **kwargs: Any) -> Any:
     return _get_consultant_llm(*args, **kwargs)
 
 
-def is_gemini_v3_or_greater(*args: Any, **kwargs: Any) -> Any:
-    from src.llms import is_gemini_v3_or_greater as _is_gemini_v3_or_greater
+def _build_legacy_seat_model(
+    request: LegacySeatRequest,
+) -> Any:
+    """Inject patchable legacy facades into the canonical dispatcher."""
 
-    return _is_gemini_v3_or_greater(*args, **kwargs)
+    return build_legacy_model(
+        request,
+        graph_factories=LegacyGraphFactories(
+            quick=create_quick_thinking_llm,
+            deep=create_deep_thinking_llm,
+            apex=create_apex_llm,
+            consultant=get_consultant_llm,
+            auditor=create_auditor_llm,
+            apac=create_apac_specialist_llm,
+        ),
+    )
+
+
+def build_seat_model(
+    seat_id: SeatId,
+    *,
+    plan: BindingPlan,
+    model_factory: SeatModelFactory,
+    quick_mode: bool,
+    callbacks: Sequence[BaseCallbackHandler],
+    output_tokens: int | None,
+) -> Any:
+    """Build one fresh model from a canonical seat and resolved binding."""
+
+    return build_model_for_seat(
+        seat_id,
+        plan=plan,
+        factory=model_factory,
+        quick_mode=quick_mode,
+        callbacks=list(callbacks),
+        output_tokens=output_tokens,
+        # The quick-mode APEX standard-tier pin is seat data
+        # (``standard_tier_in_quick_mode``), so every caller inherits it — not
+        # only the graph.
+        legacy_builder=_build_legacy_seat_model,
+    )
 
 
 def _create_legacy_memories() -> tuple[Any, Any, Any, Any, Any]:
@@ -148,6 +197,8 @@ def build_graph_components(
     transparent_charts: bool,
     image_dir: Path | None,
     skip_charts: bool,
+    binding_plan: BindingPlan | None = None,
+    model_factory: SeatModelFactory | None = None,
 ) -> GraphComponents:
     runtime_config = get_runtime_config(config)
     """Build graph memories, LLMs, nodes, and agent-specific tool nodes."""
@@ -219,6 +270,8 @@ def build_graph_components(
 
     tracker = get_tracker()
     base_output_tokens = config.llm_base_output_tokens
+    plan = binding_plan or resolve_binding_plan(config)
+    factory = model_factory or SeatModelFactory()
 
     def output_budget(agent_name: str) -> int:
         return get_agent_output_budget(agent_name, base_output_tokens)
@@ -232,114 +285,74 @@ def build_graph_components(
             )
         ]
 
-    market_llm = create_quick_thinking_llm(
-        callbacks=tracked_callbacks("Market Analyst"),
-        max_output_tokens=output_budget("Market Analyst"),
-    )
-    social_llm = create_quick_thinking_llm(
-        callbacks=tracked_callbacks("Sentiment Analyst"),
-        max_output_tokens=output_budget("Sentiment Analyst"),
-    )
-    news_llm = create_quick_thinking_llm(
-        callbacks=tracked_callbacks("News Analyst"),
-        max_output_tokens=output_budget("News Analyst"),
-    )
-    junior_fund_llm = create_quick_thinking_llm(
-        callbacks=tracked_callbacks("Junior Fundamentals Analyst"),
-        max_output_tokens=output_budget("Junior Fundamentals Analyst"),
-    )
+    def seat_model(seat_id: SeatId, *, tracked: bool = True) -> Any:
+        spec = SEATS[seat_id]
+        budget = output_budget(spec.budget_key) if spec.budget_key else None
+        callbacks = tracked_callbacks(spec.callback_name) if tracked else []
+        return build_seat_model(
+            seat_id,
+            plan=plan,
+            model_factory=factory,
+            quick_mode=quick_mode,
+            callbacks=callbacks,
+            output_tokens=budget,
+        )
+
+    market_llm = seat_model(SeatId.MARKET)
+    social_llm = seat_model(SeatId.SENTIMENT)
+    news_llm = seat_model(SeatId.NEWS)
+    junior_fund_llm = seat_model(SeatId.JUNIOR_FUNDAMENTALS)
     # Senior Fundamentals and the PM are the two gate-critical (APEX) seats:
     # the largest, most rule-dense prompts, whose outputs feed the hard <50%
     # gates and the verdict contract. Both route through create_apex_llm —
     # APEX_MODEL pins them in full mode; in --quick they drop to
     # APEX_QUICK_MODEL (or the plain quick floor) so screening stays cheap.
-    senior_fund_llm = create_apex_llm(
-        "senior_fundamentals",
-        quick_mode=quick_mode,
-        callbacks=tracked_callbacks("Fundamentals Analyst"),
-        max_output_tokens=output_budget("Fundamentals Analyst"),
-    )
-    pm_llm = create_apex_llm(
-        "portfolio_manager",
-        quick_mode=quick_mode,
-        callbacks=tracked_callbacks("Portfolio Manager"),
-        max_output_tokens=output_budget("Portfolio Manager"),
-    )
+    senior_fund_llm = seat_model(SeatId.SENIOR_FUNDAMENTALS)
+    pm_llm = seat_model(SeatId.PORTFOLIO_MANAGER)
 
     retry_llm = None
     allow_retry = False
-    if not quick_mode and is_gemini_v3_or_greater(runtime_config.quick_think_llm):
+    if not quick_mode:
+        retry_binding = plan.bindings[SeatId.ANALYST_RETRY]
+        if plan.schema == "legacy":
+            # The compatibility window promises byte-for-byte legacy behavior:
+            # older Gemini quick floors did not opt into RETRY-HIGH.
+            from src.llms import is_gemini_v3_or_greater
+
+            allow_retry = is_gemini_v3_or_greater(runtime_config.quick_think_llm)
+        else:
+            allow_retry = Capability.TOOL_CALLING in retry_binding.profile.capabilities
         # No bound token-tracking callback: this deep-model instance is shared
         # across every analyst's retry path, so its cost is attributed to the
         # ORIGINATING agent at the retry call site (analyst_nodes) via a per-call
         # callback — not pooled into a synthetic "Retry Agent (Deep)" bucket.
-        retry_llm = create_deep_thinking_llm(callbacks=[])
-        allow_retry = True
-        logger.debug("retry_llm_enabled", ticker=ticker)
+        if allow_retry:
+            retry_llm = seat_model(SeatId.ANALYST_RETRY, tracked=False)
+            logger.debug("retry_llm_enabled", ticker=ticker)
+        else:
+            logger.warning(
+                "retry_llm_disabled_binding_capability",
+                ticker=ticker,
+                provider=retry_binding.provider,
+                model=retry_binding.model,
+                reason="retry binding lacks the reviewed tool-calling policy",
+            )
     elif quick_mode:
         logger.debug("retry_llm_disabled_quick_mode", ticker=ticker)
 
-    if quick_mode:
-        logger.debug("synthesis_llm_mode", quick_mode=quick_mode, thinking_level="low")
-        bull_llm = create_quick_thinking_llm(
-            callbacks=tracked_callbacks("Bull Researcher"),
-            max_output_tokens=output_budget("Bull Researcher"),
-        )
-        bear_llm = create_quick_thinking_llm(
-            callbacks=tracked_callbacks("Bear Researcher"),
-            max_output_tokens=output_budget("Bear Researcher"),
-        )
-        res_mgr_llm = create_quick_thinking_llm(
-            callbacks=tracked_callbacks("Research Manager"),
-            max_output_tokens=output_budget("Research Manager"),
-        )
-        risky_llm = create_quick_thinking_llm(
-            callbacks=tracked_callbacks("Risky Analyst"),
-            max_output_tokens=output_budget("Risky Analyst"),
-        )
-        safe_llm = create_quick_thinking_llm(
-            callbacks=tracked_callbacks("Safe Analyst"),
-            max_output_tokens=output_budget("Safe Analyst"),
-        )
-        neutral_llm = create_quick_thinking_llm(
-            callbacks=tracked_callbacks("Neutral Analyst"),
-            max_output_tokens=output_budget("Neutral Analyst"),
-        )
-    else:
-        logger.debug("synthesis_llm_mode", quick_mode=quick_mode, thinking_level="high")
-        bull_llm = create_deep_thinking_llm(
-            callbacks=tracked_callbacks("Bull Researcher"),
-            max_output_tokens=output_budget("Bull Researcher"),
-        )
-        bear_llm = create_deep_thinking_llm(
-            callbacks=tracked_callbacks("Bear Researcher"),
-            max_output_tokens=output_budget("Bear Researcher"),
-        )
-        res_mgr_llm = create_deep_thinking_llm(
-            callbacks=tracked_callbacks("Research Manager"),
-            max_output_tokens=output_budget("Research Manager"),
-        )
-        risky_llm = create_deep_thinking_llm(
-            callbacks=tracked_callbacks("Risky Analyst"),
-            max_output_tokens=output_budget("Risky Analyst"),
-        )
-        safe_llm = create_deep_thinking_llm(
-            callbacks=tracked_callbacks("Safe Analyst"),
-            max_output_tokens=output_budget("Safe Analyst"),
-        )
-        neutral_llm = create_deep_thinking_llm(
-            callbacks=tracked_callbacks("Neutral Analyst"),
-            max_output_tokens=output_budget("Neutral Analyst"),
-        )
-
-    trader_llm = create_quick_thinking_llm(
-        callbacks=tracked_callbacks("Trader"),
-        max_output_tokens=output_budget("Trader"),
+    logger.debug(
+        "synthesis_llm_mode",
+        quick_mode=quick_mode,
+        reasoning_intent="fast" if quick_mode else "reasoning",
     )
-    valuation_llm = create_quick_thinking_llm(
-        callbacks=tracked_callbacks("Valuation Calculator"),
-        max_output_tokens=output_budget("Valuation Calculator"),
-    )
+    bull_llm = seat_model(SeatId.BULL)
+    bear_llm = seat_model(SeatId.BEAR)
+    res_mgr_llm = seat_model(SeatId.RESEARCH_MANAGER)
+    risky_llm = seat_model(SeatId.RISKY)
+    safe_llm = seat_model(SeatId.SAFE)
+    neutral_llm = seat_model(SeatId.NEUTRAL)
+    trader_llm = seat_model(SeatId.TRADER)
+    valuation_llm = seat_model(SeatId.VALUATION)
 
     consultant_output_budget = output_budget("Consultant")
     if quick_mode:
@@ -347,18 +360,37 @@ def build_graph_components(
             consultant_output_budget,
             int(config.consultant_quick_max_completion_tokens),
         )
-    consultant_llm = get_consultant_llm(
-        callbacks=tracked_callbacks("Consultant"),
-        quick_mode=quick_mode,
-        max_completion_tokens=consultant_output_budget,
+    consultant_requested = (
+        plan.statuses[SeatId.CONSULTANT].enabled
+        if plan.schema == "new"
+        else config.enable_consultant
+    )
+    consultant_llm = (
+        build_seat_model(
+            SeatId.CONSULTANT,
+            plan=plan,
+            model_factory=factory,
+            quick_mode=quick_mode,
+            callbacks=tracked_callbacks("Consultant"),
+            output_tokens=consultant_output_budget,
+        )
+        if consultant_requested
+        else None
     )
 
-    auditor_requested = _is_auditor_enabled()
+    auditor_requested = (
+        plan.statuses[SeatId.AUDITOR].enabled
+        if plan.schema == "new"
+        else _is_auditor_enabled()
+    )
     auditor_llm = (
-        create_auditor_llm(
-            callbacks=tracked_callbacks("Global Forensic Auditor"),
-            max_completion_tokens=output_budget("Global Forensic Auditor"),
+        build_seat_model(
+            SeatId.AUDITOR,
+            plan=plan,
+            model_factory=factory,
             quick_mode=quick_mode,
+            callbacks=tracked_callbacks("Global Forensic Auditor"),
+            output_tokens=output_budget("Global Forensic Auditor"),
         )
         if auditor_requested
         else None
@@ -369,32 +401,53 @@ def build_graph_components(
         )
 
     auditor_escalation_llm = None
-    if (
-        auditor_llm is not None
-        and not quick_mode
-        and config.auditor_escalation_model
-        and config.auditor_escalation_model != config.auditor_model
-    ):
-        auditor_escalation_llm = create_auditor_llm(
+    escalation_differs = (
+        plan.bindings[SeatId.AUDITOR_ESCALATION].model
+        != plan.bindings[SeatId.AUDITOR].model
+        if plan.schema == "new"
+        else bool(
+            config.auditor_escalation_model
+            and config.auditor_escalation_model != config.auditor_model
+        )
+    )
+    if auditor_llm is not None and not quick_mode and escalation_differs:
+        auditor_escalation_llm = build_seat_model(
+            SeatId.AUDITOR_ESCALATION,
+            plan=plan,
+            model_factory=factory,
+            quick_mode=False,
             callbacks=tracked_callbacks("Global Forensic Auditor Escalation"),
-            max_completion_tokens=output_budget("Global Forensic Auditor"),
-            model_name_override=config.auditor_escalation_model,
+            output_tokens=output_budget("Global Forensic Auditor"),
         )
 
     consultant_enabled = consultant_llm is not None
     auditor_enabled = auditor_llm is not None
-    apac_specialist_llm = create_apac_specialist_llm(
-        callbacks=tracked_callbacks("APAC Regional Specialist"),
-        max_completion_tokens=output_budget("APAC Regional Specialist"),
-        quick_mode=quick_mode,
+    apac_requested = (
+        plan.status_for(SeatId.APAC, quick_mode=quick_mode).enabled
+        if plan.schema == "new"
+        else not quick_mode
+    )
+    apac_specialist_llm = (
+        build_seat_model(
+            SeatId.APAC,
+            plan=plan,
+            model_factory=factory,
+            quick_mode=quick_mode,
+            callbacks=tracked_callbacks("APAC Regional Specialist"),
+            output_tokens=output_budget("APAC Regional Specialist"),
+        )
+        if apac_requested
+        else None
     )
     apac_specialist_enabled = apac_specialist_llm is not None
     apac_specialist_fallback_llm = (
-        create_apac_specialist_llm(
-            callbacks=tracked_callbacks("APAC Regional Specialist Direct Retry"),
-            max_completion_tokens=output_budget("APAC Regional Specialist"),
+        build_seat_model(
+            SeatId.APAC_DIRECT_RETRY,
+            plan=plan,
+            model_factory=factory,
             quick_mode=quick_mode,
-            thinking_enabled=False,
+            callbacks=tracked_callbacks("APAC Regional Specialist Direct Retry"),
+            output_tokens=output_budget("APAC Regional Specialist"),
         )
         if apac_specialist_enabled
         else None
@@ -436,10 +489,7 @@ def build_graph_components(
         allow_retry=allow_retry,
     )
 
-    foreign_llm = create_quick_thinking_llm(
-        callbacks=tracked_callbacks("Foreign Language Analyst"),
-        max_output_tokens=output_budget("Foreign Language Analyst"),
-    )
+    foreign_llm = seat_model(SeatId.FOREIGN_LANGUAGE)
     foreign_analyst = create_analyst_node(
         foreign_llm,
         "foreign_language_analyst",
@@ -449,23 +499,10 @@ def build_graph_components(
         allow_retry=allow_retry,
     )
 
-    legal_llm = create_quick_thinking_llm(
-        callbacks=tracked_callbacks("Legal Counsel"),
-        max_output_tokens=output_budget("Legal Counsel"),
-    )
+    legal_llm = seat_model(SeatId.LEGAL_COUNSEL)
     legal_counsel = create_legal_counsel_node(legal_llm, toolkit.get_legal_tools())
 
-    value_trap_llm = create_quick_thinking_llm(
-        callbacks=tracked_callbacks("Value Trap Detector"),
-        max_output_tokens=output_budget("Value Trap Detector"),
-        # Full mode only: the Value Trap Detector interprets native-language
-        # filings and distinguishes announced vs. executed corporate actions —
-        # a synthesis task where a thinking-level notch reduces fabrication.
-        # Quick-mode batch sweeps (four-figure ticker counts) stay unbumped to
-        # keep screening cheap, matching the codebase's quick-mode degradation
-        # convention.
-        thinking_level_bump=not quick_mode,
-    )
+    value_trap_llm = seat_model(SeatId.VALUE_TRAP)
     value_trap_detector = create_analyst_node(
         value_trap_llm,
         "value_trap_detector",

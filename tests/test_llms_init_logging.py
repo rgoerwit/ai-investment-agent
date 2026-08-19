@@ -1,6 +1,24 @@
+from contextlib import ExitStack, contextmanager
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+
+
+@contextmanager
+def _patch_llms_config(mock_cfg):
+    """Substitute *both* config references src/llms.py actually reads.
+
+    ``_settings_or_default`` resolves the module-level ``src.llms.config`` binding,
+    while the rate-limiter and budget helpers go through
+    ``src.llms.config_module.config``. Patching only the latter left every factory
+    reading the real ``.env`` — so these assertions silently depended on the
+    developer's OPENAI_API_KEY being set, and began failing the moment a migrated
+    ``.env`` moved that key to MOONSHOT_API_KEY.
+    """
+    with ExitStack() as stack:
+        stack.enter_context(patch("src.llms.config", mock_cfg))
+        stack.enter_context(patch("src.llms.config_module.config", mock_cfg))
+        yield mock_cfg
 
 
 def test_quick_llm_init_logging_emits_once_per_config():
@@ -120,7 +138,7 @@ class TestOpenAIRateLimiter:
         mock_llm = MagicMock()
         mock_rl = MagicMock()
 
-        with patch("src.llms.config_module.config", self._make_config(rpm=60)):
+        with _patch_llms_config(self._make_config(rpm=60)):
             with patch("src.llms._create_rate_limiter_from_rpm", return_value=mock_rl):
                 with patch(
                     self._CHATOPENAI_TARGET, return_value=mock_llm
@@ -142,7 +160,7 @@ class TestOpenAIRateLimiter:
 
         mock_llm = MagicMock()
 
-        with patch("src.llms.config_module.config", self._make_config(rpm=None)):
+        with _patch_llms_config(self._make_config(rpm=None)):
             with patch(
                 self._CHATOPENAI_TARGET, return_value=mock_llm
             ) as MockChatOpenAI:
@@ -161,7 +179,7 @@ class TestOpenAIRateLimiter:
         """debug log fires exactly once per LLM kind when no limiter is configured."""
         import src.llms as llms_mod
 
-        with patch("src.llms.config_module.config", self._make_config(rpm=None)):
+        with _patch_llms_config(self._make_config(rpm=None)):
             with patch(self._CHATOPENAI_TARGET, return_value=MagicMock()):
                 with patch("src.llms.logger") as mock_logger:
                     factory = getattr(llms_mod, factory_name)
@@ -189,7 +207,7 @@ class TestOpenAIRateLimiter:
                 captured.append(kw["rate_limiter"])
             return MagicMock()
 
-        with patch("src.llms.config_module.config", self._make_config(rpm=60)):
+        with _patch_llms_config(self._make_config(rpm=60)):
             with patch("src.llms._create_rate_limiter_from_rpm", return_value=mock_rl):
                 with patch(self._CHATOPENAI_TARGET, side_effect=capture_rl):
                     llms_mod.create_consultant_llm(model="gpt-4o")

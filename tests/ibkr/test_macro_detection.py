@@ -12,6 +12,7 @@ from scripts.portfolio_manager import (
     _store_macro_event_if_detected,
 )
 from src.ibkr.models import AnalysisRecord, ReconciliationItem, TradeBlockData
+from src.ibkr.portfolio_health import CORRELATED_EVENT_EVIDENCE_PATTERN
 from tests.ibkr.reconciler_cases import _make_analysis, _make_position
 
 
@@ -674,28 +675,57 @@ class TestMacroFlagParsingContract:
         assert f"[{trigger}]" in event_flags[0]
         return event_flags[0]
 
-    # Keep in sync with _store_macro_event_if_detected in scripts/portfolio_manager.py
-    _STORAGE_REGEX = (
-        r"CORRELATED_SELL_EVENT:\s*(\d+) positions"
-        r".*?(?:within (\d+)d of|as of) (\d{4}-\d{2}-\d{2})"
-        r".*?\((\d+\.?\d*)%"
-    )
-
     @pytest.mark.parametrize("trigger", ["window", "cumulative", "drawdown_breadth"])
     def test_every_trigger_flag_matches_storage_regex(self, trigger):
+        """The emitter's own pattern must parse every phrasing the emitter produces.
+
+        Uses ``CORRELATED_EVENT_EVIDENCE_PATTERN`` rather than a local copy. A local
+        copy previously lived here and had already drifted -- it accepted a decimal
+        percentage the emitter never writes (``:.0%``), so it asserted a *weaker*
+        contract than production and would have stayed green through a production
+        regression.
+        """
         import re
 
         flag = self._flag_for_trigger(trigger)
-        m = re.search(self._STORAGE_REGEX, flag)
+        m = re.search(CORRELATED_EVENT_EVIDENCE_PATTERN, flag)
         assert m, f"{trigger} flag not parseable: {flag!r}"
-        count, window, anchor, pct = m.groups()
-        assert int(count) > 0
+        assert int(m.group("count")) > 0
         if trigger == "window":
-            assert int(window) == 14
+            assert int(m.group("window")) == 14
         else:
-            assert window is None  # cumulative/drawdown use "as of DATE"
-        date.fromisoformat(anchor)  # valid ISO date
-        assert 0 < float(pct) <= 100
+            # cumulative / drawdown_breadth say "as of DATE" and carry no window.
+            assert m.group("window") is None
+        date.fromisoformat(m.group("date"))  # valid ISO date
+        assert 0 < int(m.group("pct")) <= 100
+
+    @pytest.mark.parametrize("trigger", ["window", "cumulative", "drawdown_breadth"])
+    def test_every_consumer_reads_a_production_generated_flag(self, trigger):
+        """Cross-consumer contract on real emitter output, not a hand-written string.
+
+        The dashboard hardcoded the ``within Nd of`` phrasing and returned an alert with
+        no count, date, or percentage on the other two triggers -- publishable, silent,
+        and invisible to any single-consumer test.
+        """
+        from src.ibkr.portfolio_report_status import (
+            CORRELATED_EVENT_EVIDENCE_PATTERN as banner_pattern,
+        )
+        from src.web.ibkr_dashboard.macro_alerts import MacroAlertService
+
+        flag = self._flag_for_trigger(trigger)
+
+        payload = MacroAlertService(lambda: None).build_alert([flag])
+        assert payload is not None
+        assert payload["peak_count"] is not None, f"dashboard lost count on {trigger}"
+        assert payload["event_date"] is not None, f"dashboard lost date on {trigger}"
+        assert payload["correlation_pct"] is not None, (
+            f"dashboard lost percentage on {trigger}"
+        )
+        assert (payload["window_days"] == 14) is (trigger == "window")
+
+        # The report banner reads the same constant; assert the identity rather than
+        # re-deriving the value, so a swapped-in local copy there fails here.
+        assert banner_pattern is CORRELATED_EVENT_EVIDENCE_PATTERN
 
     @pytest.mark.parametrize(
         ("trigger", "required", "forbidden"),

@@ -97,11 +97,20 @@ def main() -> int:
         print(f"Judge replay fixture is complete: {len(replay)} entries")
         return 0
 
-    from src.config import get_env_value
+    # The judge inspector is the CONTENT_INSPECTOR seat, so the credential it
+    # needs follows LLM_OPERATIONAL_PROVIDER — not a hardcoded Google key.
+    from src.config import config
+    from src.llm_runtime.bindings import resolve_binding_plan
+    from src.llm_runtime.provider_policy import provider_credential
+    from src.llm_runtime.seats import SeatId
 
-    api_key = get_env_value("GOOGLE_API_KEY")
+    provider = resolve_binding_plan(config).bindings[SeatId.CONTENT_INSPECTOR].provider
+    api_key = provider_credential(config, provider)
     if not api_key or api_key == "test-key":
-        raise SystemExit("--record requires a real GOOGLE_API_KEY")
+        raise SystemExit(
+            f"--record requires a real credential for the inspector's bound "
+            f"provider ({provider})"
+        )
 
     recorded = asyncio.run(_record())
     REPLAY_PATH.write_text(

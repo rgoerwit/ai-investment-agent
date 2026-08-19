@@ -20,7 +20,10 @@ def sample_bundle(tmp_path: Path) -> PortfolioRecommendationBundle:
     review_analysis = make_analysis(ticker="5285.T", verdict="DO_NOT_INITIATE")
     review_analysis.health_adj = 87.0
     review_analysis.growth_adj = 75.0
-    hold_analysis = make_analysis(ticker="MEGP.L", verdict="BUY")
+    # GBX to match the paired position: a dip is only computable between
+    # same-economy prices, and this fixture previously paired a JPY
+    # analysis with a GBX holding.
+    hold_analysis = make_analysis(ticker="MEGP.L", verdict="BUY", currency="GBX")
     hold_analysis.health_adj = 92.0
     hold_analysis.growth_adj = 67.0
     hold_analysis.entry_price = 146.5

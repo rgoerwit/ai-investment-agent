@@ -489,8 +489,7 @@ STATUS: INSUFFICIENT_DATA
         assert "EARNINGS_BASELINE_STATUS: UNKNOWN" in normalized
         assert "GUIDANCE_BRIDGE_STATUS: NOT_APPLICABLE" in normalized
 
-    def test_not_disclosed_requires_complete_source_coverage(self):
-        content = """### --- START MANAGEMENT_GUIDANCE ---
+    _NOT_DISCLOSED_BLOCK = """### --- START MANAGEMENT_GUIDANCE ---
 COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH
 SOURCE_TYPE: N/A
 SOURCE_URL: N/A
@@ -502,6 +501,27 @@ DRIVER_TYPE: UNKNOWN
 EARNINGS_BASELINE_STATUS: UNKNOWN
 ### --- END MANAGEMENT_GUIDANCE ---
 """
+
+    def test_not_disclosed_survives_a_clean_search_that_found_no_guidance(self):
+        """A search that ran and found nothing means the issuer does not guide.
+
+        Replaces ``test_not_disclosed_requires_complete_source_coverage``. That
+        test asserted the demotion to UNRESOLVED, and the requirement it encoded
+        was sound in principle but unsatisfiable in practice: the old rule kept
+        NOT_DISCLOSED only when some evidence status equalled
+        ``COVERAGE_COMPLETE_NO_MATCH``, a value no producer emits (0 of ~4,700
+        persisted artifacts). So every ordinary "this company does not publish
+        guidance" was rewritten into a pipeline failure, which raises
+        MANAGEMENT_GUIDANCE_EVIDENCE_GAP with ``blocks_buy=True``. Measured Aug
+        2026: 0% NOT_DISCLOSED, and the gap flag on 38.5% of runs against a 1.2%
+        July baseline, with a 0/61 BUY rate wherever it fired.
+
+        Note this fixture is the *favourable* reading of its own scenario: the
+        results-package search -- the one that would surface guidance -- returned
+        RESULTS_FOUND, so coverage of the guidance question was complete. Only
+        the earnings-bridge search came back empty, and a missing bridge does not
+        bear on whether guidance was ever disclosed.
+        """
         evidence = """#### results_package
 STATUS: COMPLETED
 EXECUTION_STATUS: SUCCEEDED
@@ -514,12 +534,44 @@ EVIDENCE_STATUS: NO_RESULTS
 
         normalized = _normalize_structured_output(
             "foreign_language_analyst",
-            content,
+            self._NOT_DISCLOSED_BLOCK,
+            "TEST.T",
+            management_guidance_evidence=evidence,
+        )
+
+        assert "COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH" in normalized
+
+    @pytest.mark.parametrize("failure", ["UNAVAILABLE", "AUTH_ERROR", "INSUFFICIENT"])
+    def test_not_disclosed_is_demoted_when_the_search_itself_fell_short(self, failure):
+        """The informative case still works: a broken search is not a finding."""
+        evidence = f"""#### results_package
+STATUS: COMPLETED
+EXECUTION_STATUS: SUCCEEDED
+EVIDENCE_STATUS: {failure}
+#### earnings_bridge
+STATUS: INSUFFICIENT_DATA
+EXECUTION_STATUS: SUCCEEDED
+EVIDENCE_STATUS: NO_RESULTS
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            self._NOT_DISCLOSED_BLOCK,
             "TEST.T",
             management_guidance_evidence=evidence,
         )
 
         assert "COVERAGE_STATUS: UNRESOLVED_AFTER_TARGETED_SEARCH" in normalized
+
+    def test_absent_evidence_statuses_do_not_demote_or_raise(self):
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            self._NOT_DISCLOSED_BLOCK,
+            "TEST.T",
+            management_guidance_evidence="",
+        )
+
+        assert "COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH" in normalized
 
     def test_incomplete_causal_guidance_keeps_bridge_unresolved(self):
         content = """### --- START MANAGEMENT_GUIDANCE ---

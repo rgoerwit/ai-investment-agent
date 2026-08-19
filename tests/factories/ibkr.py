@@ -47,7 +47,16 @@ def make_analysis(
     conviction: str = "Medium",
     size_pct: float = 5.0,
     current_price: float = 2100.0,
+    currency: str = "JPY",
 ) -> AnalysisRecord:
+    """Build an AnalysisRecord for tests.
+
+    ``currency`` must match the paired position's currency wherever a test
+    compares the two. Price comparisons now convert by code and refuse a
+    cross-economy pair, so a JPY analysis against a GBX position yields no
+    signal at all — which is correct, and is what a silently mismatched fixture
+    would otherwise hide.
+    """
     analysis_date = (datetime.now() - timedelta(days=age_days)).strftime("%Y-%m-%d")
     return AnalysisRecord(
         ticker=ticker,
@@ -62,7 +71,7 @@ def make_analysis(
         target_1_price=target_1,
         target_2_price=target_2,
         conviction=conviction,
-        currency="JPY",
+        currency=currency,
         trade_block=TradeBlockData(
             action=verdict,
             size_pct=size_pct,

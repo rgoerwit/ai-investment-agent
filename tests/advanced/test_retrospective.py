@@ -462,20 +462,24 @@ class TestConfidenceWeighting:
         # temporal=0.3, model=1.0, mode=1.0, signal=0.833
         assert conf == pytest.approx(0.3 * 1.0 * 1.0 * (25 / 30), abs=0.01)
 
-    def test_weak_model_quick_mode(self):
-        """Flash model in quick mode (same model for quick and deep)."""
+    def test_fast_seat_in_quick_mode(self):
+        """A fast-tier decision seat run in quick mode: both factors apply."""
         comparison = _make_snapshot(
             days_elapsed=180,
             excess_return_pct=-18.0,
-            deep_model="gemini-2.0-flash",
-            quick_model="gemini-2.0-flash",
+            decision_intent="fast",
+            is_quick_mode=True,
         )
         conf = compute_confidence(comparison)
-        # temporal=1.0, model=0.6, mode=0.7 (quick=deep), signal=0.6
-        assert conf == pytest.approx(1.0 * 0.6 * 0.7 * 0.6, abs=0.01)
+        # temporal=1.0, capability=0.7 (fast), mode=0.7 (quick), signal=0.6
+        assert conf == pytest.approx(1.0 * 0.7 * 0.7 * 0.6, abs=0.01)
 
-    def test_unknown_model(self):
-        """Unknown model defaults to 0.5."""
+    def test_snapshot_without_intent_is_neutral(self):
+        """Legacy snapshots carry a model name and no intent.
+
+        They get no capability penalty: the old 0.5 was an unmatched model-name
+        lookup, never a judgment about the run.
+        """
         comparison = _make_snapshot(
             days_elapsed=180,
             excess_return_pct=-30.0,
@@ -483,8 +487,8 @@ class TestConfidenceWeighting:
             quick_model="other-model",
         )
         conf = compute_confidence(comparison)
-        # temporal=1.0, model=0.5, mode=1.0, signal=1.0
-        assert conf == pytest.approx(0.5, abs=0.01)
+        # temporal=1.0, capability=1.0 (unknown->neutral), mode=1.0, signal=1.0
+        assert conf == pytest.approx(1.0, abs=0.01)
 
     def test_small_signal(self):
         """Small excess return -> proportionally smaller signal component."""
@@ -706,13 +710,21 @@ class TestLessonDeduplication:
         mock_memory = MagicMock()
         mock_memory.available = True
         mock_memory.situation_collection = MagicMock()
-        # Simulate existing lesson found
+        # Simulate an existing *outcome* lesson. Metadata is required: a
+        # `prior_rejection` record at the same key must NOT block the write.
+        comparison = _make_snapshot()
         mock_memory.situation_collection.get.return_value = {
             "ids": ["existing_lesson_1"],
             "documents": ["Some old lesson"],
+            "metadatas": [
+                {
+                    "ticker": comparison["ticker"],
+                    "analysis_date": comparison["analysis_date"],
+                    "lesson_type": "missed_risk",
+                }
+            ],
         }
 
-        comparison = _make_snapshot()
         stored = await store_lesson(
             "Test lesson", "missed_risk", "CYCLICAL_PEAK", comparison, 0.9, mock_memory
         )
@@ -1105,7 +1117,7 @@ class TestConstants:
     """Validate constant definitions."""
 
     def test_failure_modes_complete(self):
-        assert len(FAILURE_MODES) == 12
+        assert len(FAILURE_MODES) == 13
         assert "CYCLICAL_PEAK" in FAILURE_MODES
         assert "FX_DRIVEN" in FAILURE_MODES
         assert "VALUATION_TRAP" in FAILURE_MODES
@@ -1206,7 +1218,10 @@ class TestGenerateLesson:
         assert result is not None
         _, lesson_type, failure_mode = result
         assert lesson_type == "missed_risk"  # default
-        assert failure_mode == "OPERATIONAL_MISS"  # default
+        # An unparseable response resolves to the one value that claims nothing.
+        # It used to default to OPERATIONAL_MISS, asserting an operational cause
+        # on the strength of a formatting failure.
+        assert failure_mode == "UNRESOLVED_PRICE_ONLY"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1251,12 +1266,25 @@ class TestLessonAlreadyProcessed:
     """Test _lesson_already_processed() ChromaDB metadata query."""
 
     def test_returns_true_when_lesson_exists(self):
-        """Returns True when ChromaDB has a matching (ticker, date) entry."""
+        """Returns True when ChromaDB has a matching *outcome* lesson.
+
+        The stub must return metadata now: the predicate distinguishes an outcome
+        lesson from a ``prior_rejection`` screening record, which shares the
+        ticker and analysis date and used to suppress the outcome lesson
+        entirely. See ``test_retrospective_identity.py`` for that regression.
+        """
         mock_memory = MagicMock()
         mock_memory.available = True
         mock_memory.situation_collection.get.return_value = {
             "ids": ["lesson_1"],
             "documents": ["Some lesson"],
+            "metadatas": [
+                {
+                    "ticker": "2767.T",
+                    "analysis_date": "2025-08-01",
+                    "lesson_type": "missed_risk",
+                }
+            ],
         }
 
         assert _lesson_already_processed(mock_memory, "2767.T", "2025-08-01") is True
@@ -1348,10 +1376,19 @@ class TestEarlyDedupInRetrospective:
 
         mock_memory = MagicMock()
         mock_memory.available = True
-        # Simulate lesson already exists for this snapshot
+        # Simulate an existing *outcome* lesson for this snapshot. Metadata is
+        # required: the predicate now ignores `prior_rejection` records, which
+        # share the ticker and date but say nothing about the outcome.
         mock_memory.situation_collection.get.return_value = {
             "ids": ["existing_1"],
             "documents": ["Existing lesson"],
+            "metadatas": [
+                {
+                    "ticker": "2767.T",
+                    "analysis_date": snapshot["analysis_date"],
+                    "lesson_type": "missed_risk",
+                }
+            ],
         }
 
         with (
@@ -1516,3 +1553,103 @@ ANALYST_COVERAGE: 4
         snapshot = extract_snapshot(result, "2767.T")
         # ANALYST_COVERAGE doesn't match ANALYST_COVERAGE_ENGLISH, so should be None
         assert snapshot["analyst_coverage"] is None
+
+
+class TestIntentBasedConfidence:
+    """Lesson confidence must not key on a vendor model string.
+
+    The predecessor MODEL_QUALITY table's newest entry was `gemini-3-pro-preview`.
+    It matched 0 of 4,704 stored snapshots, so `model_q` was pinned at 0.5 for
+    every lesson ever generated — and `get_relevant_lessons` drops anything under
+    0.4, so most of what the system learned was unreachable.
+    """
+
+    # Exactly the retrieval cutoff in get_relevant_lessons().
+    CUTOFF = 0.4
+
+    @staticmethod
+    def _comparison(**overrides):
+        base = {
+            "days_elapsed": 180,
+            "is_quick_mode": False,
+            "excess_return_pct": 30.0,
+        }
+        return {**base, **overrides}
+
+    @pytest.mark.parametrize(
+        ("intent", "expected"),
+        [("critical", 1.0), ("reasoning", 1.0), ("fast", 0.7)],
+    )
+    def test_each_intent_resolves_to_its_weight(self, intent, expected):
+        from src.retrospective import compute_confidence
+
+        # Optimal window + max signal isolates the capability factor.
+        got = compute_confidence(self._comparison(decision_intent=intent))
+        assert got == pytest.approx(expected, abs=0.01)
+
+    @pytest.mark.parametrize(
+        ("label", "overrides"),
+        [
+            ("early signal (30-90d)", {"days_elapsed": 60}),
+            ("quick mode", {"is_quick_mode": True}),
+            ("moderate signal", {"excess_return_pct": 15.0}),
+            ("degrading window", {"days_elapsed": 400}),
+        ],
+    )
+    def test_previously_suppressed_lessons_now_reach_retrieval(self, label, overrides):
+        """Each of these scored 0.25-0.35 under the pinned 0.5 and was dropped."""
+        from src.retrospective import compute_confidence
+
+        got = compute_confidence(
+            self._comparison(decision_intent="critical", **overrides)
+        )
+        assert got >= self.CUTOFF, f"{label} still below the retrieval cutoff"
+
+    def test_legacy_snapshot_without_intent_is_neutral_not_penalised(self):
+        """4,704 stored snapshots carry only a model name.
+
+        They must not keep the 0.5 that was never a judgment about them — it was
+        an unmatched table lookup.
+        """
+        from src.retrospective import compute_confidence
+
+        legacy = self._comparison(deep_model="gemini-3.1-pro-preview")
+        assert compute_confidence(legacy) == pytest.approx(1.0, abs=0.01)
+
+    def test_unrecognized_intent_degrades_to_neutral(self):
+        from src.retrospective import compute_confidence
+
+        assert compute_confidence(
+            self._comparison(decision_intent="not-an-intent")
+        ) == pytest.approx(1.0, abs=0.01)
+
+    def test_quick_mode_on_a_fast_seat_compounds_but_still_qualifies(self):
+        """fast (0.7) and quick mode (0.7) both fire — correctly, and it still passes."""
+        from src.retrospective import compute_confidence
+
+        got = compute_confidence(
+            self._comparison(decision_intent="fast", is_quick_mode=True)
+        )
+        assert got == pytest.approx(0.49, abs=0.01)
+        assert got >= self.CUTOFF
+
+    def test_retrospective_module_names_no_models(self):
+        """The structural guard: a judgment layer must not know model names.
+
+        Mirrors test_consultant_gate.py::TestGateFlagTokensAreLive — the table
+        rotted precisely because nothing failed when it went stale.
+        """
+        import pathlib
+        import re
+
+        source = (
+            pathlib.Path(__file__).resolve().parents[2] / "src" / "retrospective.py"
+        ).read_text()
+        # Comments may cite the retired table's entries as history.
+        code = "\n".join(
+            line for line in source.splitlines() if not line.lstrip().startswith("#")
+        )
+        found = re.findall(
+            r'"(?:gemini|gpt|claude|kimi|grok|glm|deepseek)-[^"]*"', code
+        )
+        assert not found, f"model names leaked back into retrospective.py: {found}"

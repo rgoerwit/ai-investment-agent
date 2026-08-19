@@ -182,6 +182,40 @@ def format_report(runs: list[RunCost], by: str) -> str:
     return "\n".join(out)
 
 
+def _basket_overlap_note(
+    baseline: list[RunCost], candidate: list[RunCost]
+) -> list[str]:
+    """Warn when the two run sets are not measuring the same names.
+
+    Cost per run is only a like-for-like number when both sides analysed the
+    same tickers: a Japanese small cap with sparse filings and a Mexican
+    large cap do not cost the same to analyse, so a diff across disjoint
+    baskets mostly reports basket composition and reads as if it reported a
+    code change. Advisory only -- comparing a full basket against a quick one
+    is a legitimate tier-vs-tier use, so this never changes the exit code.
+    """
+    base_tickers = {r.ticker for r in baseline}
+    cand_tickers = {r.ticker for r in candidate}
+    if not base_tickers or not cand_tickers:
+        return []
+    overlap = base_tickers & cand_tickers
+    if not overlap:
+        return [
+            f"NOTE: baseline and candidate share no tickers "
+            f"({len(base_tickers)} vs {len(cand_tickers)}). Per-run cost reflects "
+            "basket composition as much as any code change -- read the totals as "
+            "tier cost, not as a per-name delta.",
+            "",
+        ]
+    if len(overlap) < min(len(base_tickers), len(cand_tickers)):
+        return [
+            f"NOTE: baskets overlap on {len(overlap)} of "
+            f"{len(base_tickers)}/{len(cand_tickers)} tickers -- partial comparison.",
+            "",
+        ]
+    return []
+
+
 def diff_report(baseline: list[RunCost], candidate: list[RunCost], by: str) -> str:
     """A/B: per-key cost/run delta between two run sets (candidate − baseline)."""
 
@@ -197,6 +231,7 @@ def diff_report(baseline: list[RunCost], candidate: list[RunCost], by: str) -> s
     cand_total, cand = per_run(candidate)
     keys = sorted(set(base) | set(cand))
     out = [
+        *_basket_overlap_note(baseline, candidate),
         f"baseline: {len(baseline)} run(s), mean ${base_total:.4f}/run",
         f"candidate: {len(candidate)} run(s), mean ${cand_total:.4f}/run",
         f"Δ total: ${cand_total - base_total:+.4f}/run "

@@ -66,6 +66,8 @@ def test_get_package_version_returns_unknown_for_missing_package():
 
 @pytest.mark.asyncio
 async def test_llm_connectivity_uses_shared_gemini_factory():
+    from src.config import config
+
     llm = AsyncMock()
     llm.ainvoke.return_value = AIMessage(content="OK")
 
@@ -73,7 +75,10 @@ async def test_llm_connectivity_uses_shared_gemini_factory():
         assert await check_llm_connectivity() is True
 
     assert create.call_args.args[0]
-    assert create.call_args.kwargs == {
+    kwargs = create.call_args.kwargs
+    assert kwargs.pop("settings") is config
+    assert kwargs.pop("api_key") == config.get_google_api_key()
+    assert kwargs == {
         "temperature": 0.0,
         "timeout": 10,
         "max_retries": 1,

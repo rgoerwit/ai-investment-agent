@@ -11,7 +11,6 @@ from typing import Any
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.types import RunnableConfig
-from pydantic import SecretStr
 
 from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
@@ -51,14 +50,26 @@ from .state import AgentState
 
 logger = structlog.get_logger(__name__)
 
-CONSULTANT_CALL_TIMEOUT_SECONDS = 90.0
-CONSULTANT_TOTAL_TIMEOUT_SECONDS = 240.0
+# Seeded from config so the full-mode budgets sit beside their quick-mode
+# sibling; kept as module constants because that is the seam tests patch.
+CONSULTANT_CALL_TIMEOUT_SECONDS = settings_config.consultant_call_timeout_seconds
+CONSULTANT_TOTAL_TIMEOUT_SECONDS = settings_config.consultant_total_timeout_seconds
+# Headroom between the cooperative deadline (checked before each tool fan-out)
+# and the hard node bound below it. Wide enough that the graceful path — which
+# still produces a usable partial review — wins on any ordinary overshoot, and
+# narrow enough that a wedged batch cannot outlive the seat by much.
+CONSULTANT_HARD_TIMEOUT_GRACE_SECONDS = 30.0
 # A completed review with a minority of failed verification calls is degraded,
 # not worthless: above this failed/executed ratio the review is excluded from
 # PM inputs (previous all-or-nothing behavior); at or below it the review
 # reaches the PM tagged PARTIAL. The 3393.T 2026-07-03 run lost the entire
 # +2.0 confirmed-risk counterweight to a single 1-of-4 tool failure.
 CONSULTANT_PARTIAL_TOOL_FAILURE_RATIO = 0.5
+# Machine-written marker opening a partially-verified review. Shared with
+# `persistence.py` so the writer and the reader cannot drift, mirroring
+# `DNI_REVIEW_CANDIDATE_MARKER`: the run summary reports the state that *actually
+# occurred* rather than recomputing a predicate that could disagree with the text.
+CONSULTANT_PARTIAL_REVIEW_MARKER = "[PARTIAL REVIEW:"
 # Cap for the aggregator-metrics snapshot injected into the auditor's first
 # message (the loop's ToolMessage truncation cap is far larger at 63.5k).
 _AUDITOR_SNAPSHOT_MAX_CHARS = 8_000
@@ -196,6 +207,13 @@ def _build_legal_fallback_report(
     sector: str,
     reason: str,
 ) -> str:
+    # Null statuses are correct here and must stay null: every caller wraps this
+    # in failure_artifact(ok=False), and detect_legal_flags keys on that to emit
+    # LEGAL_COUNSEL_UNAVAILABLE (blocks_buy=True, zero risk penalty) rather than
+    # reading the stub as substantive findings. Filling in UNCERTAIN tokens here
+    # would manufacture PFIC/CMIC *findings* out of a provider outage -- and
+    # UNCERTAIN is not even a member of VIE_STRUCTURE_TOKENS. The hazard is
+    # already resolved closed one layer up; see src/evidence_disposition.py.
     return json.dumps(
         {
             "pfic_status": None,
@@ -274,33 +292,12 @@ def _create_openai_responses_fallback_llm(llm):
     if support.infer_provider_name(llm) != "openai":
         raise ValueError("OpenAI Responses fallback requires an OpenAI primary LLM")
 
-    from langchain_openai import ChatOpenAI
+    from src.llm_runtime.factory import SeatModelFactory
 
     model_name = support.get_model_name(llm)
     if not model_name:
         raise ValueError("OpenAI Responses fallback requires a configured model name")
-    raw_api_key = settings_config.get_openai_api_key()
-    api_key = SecretStr(raw_api_key) if raw_api_key else None
-    base_url = settings_config.get_openai_api_base()
-    if isinstance(base_url, str) and base_url:
-        # Custom OpenAI-compatible endpoint (e.g. Kimi): Chat Completions only.
-        return ChatOpenAI(
-            model=model_name,
-            timeout=120,
-            max_retries=3,
-            streaming=False,
-            api_key=api_key,
-            base_url=base_url,
-        )
-    return ChatOpenAI(
-        model=model_name,
-        timeout=120,
-        max_retries=3,
-        streaming=False,
-        api_key=api_key,
-        use_responses_api=True,
-        output_version="responses/v1",
-    )
+    return SeatModelFactory().build_openai_transport_fallback(model_name)
 
 
 def create_consultant_node(
@@ -313,8 +310,13 @@ def create_consultant_node(
     """
     Create external consultant node for cross-validation.
     """
-    max_tool_iterations = 1 if quick_mode else 3
-    max_tool_calls_per_turn = 2 if quick_mode else 4
+    # Deadline/total are per-invocation, so build the shape here and stamp the
+    # runtime budget in at call time (see ConsultantToolLoopPolicy.from_settings).
+    loop_shape = ConsultantToolLoopPolicy.from_settings(
+        quick_mode=quick_mode, deadline=0.0, total_timeout=0.0
+    )
+    max_tool_iterations = loop_shape.max_tool_iterations
+    max_tool_calls_per_turn = loop_shape.max_tool_calls_per_turn
     tools_enabled = bool(tools) and (
         not quick_mode or settings_config.consultant_tools_in_quick
     )
@@ -325,7 +327,21 @@ def create_consultant_node(
     tools_by_name = {tool.name: tool for tool in active_tools} if active_tools else {}
     llm_with_tools = llm.bind_tools(active_tools) if active_tools else None
 
-    async def consultant_node(
+    def _consultant_total_budget() -> float:
+        """The node's wall-clock budget, shared by the deadline and the wrapper.
+
+        One definition so the cooperative deadline and the hard bound below it
+        cannot disagree about how long this seat is allowed to run.
+        """
+        return floor_llm_total_timeout(
+            settings_config.consultant_quick_total_timeout_seconds
+            if quick_mode
+            else CONSULTANT_TOTAL_TIMEOUT_SECONDS,
+            provider=support.infer_provider_name(llm_with_tools or llm),
+            label="consultant_total_timeout",
+        )
+
+    async def _consultant_workflow(
         state: AgentState, config: RunnableConfig
     ) -> dict[str, str]:
         from src.prompts import get_prompt
@@ -469,13 +485,7 @@ Provide your independent consultant review."""
         try:
             messages = [HumanMessage(content=prompt)]
             active_llm = llm_with_tools or llm
-            total_timeout = floor_llm_total_timeout(
-                settings_config.consultant_quick_total_timeout_seconds
-                if quick_mode
-                else CONSULTANT_TOTAL_TIMEOUT_SECONDS,
-                provider=support.infer_provider_name(active_llm),
-                label="consultant_total_timeout",
-            )
+            total_timeout = _consultant_total_budget()
             consultant_deadline = time.monotonic() + total_timeout
 
             async def _invoke_loop_llm(runnable, loop_messages: list) -> object:
@@ -609,7 +619,8 @@ Provide your independent consultant review."""
                         else ""
                     )
                     partial_content = (
-                        f"[PARTIAL REVIEW: {tool_failure_count} of {executed} "
+                        f"{CONSULTANT_PARTIAL_REVIEW_MARKER} {tool_failure_count} "
+                        f"of {executed} "
                         f"verification tool calls failed{failed_tools_note}. "
                         "Claims depending on the failed verification remain "
                         "unverified — weight accordingly.]\n\n" + content_str
@@ -691,6 +702,51 @@ Provide your independent consultant review."""
                 result["consultant_quick_profile"] = (
                     locals().get("consultant_profile") or "quick_standard"
                 )
+            return result
+
+    async def consultant_node(
+        state: AgentState, config: RunnableConfig
+    ) -> dict[str, str]:
+        """Hard-bound wrapper — an optional seat must never cost the ticker.
+
+        The deadline inside the workflow bounds a *turn*: it is checked once
+        before the tool fan-out, so a batch that starts just under it can run a
+        full per-tool timeout past it, and the metrics preload, re-planning
+        rounds, forced synthesis and the truncated-response re-ask all sit
+        outside any single check. Wrapping the whole workflow is hermetic by
+        construction — every path inside shares this one ceiling. This is the
+        shape the Auditor already uses, and it is deliberately not the narrower
+        "wrap the gather" fix: that repeats a mistake this repo already made
+        once, where a node-scoped checkpoint bounded nothing that followed it.
+
+        ``run_with_hard_timeout`` **orphans** the in-flight work, so a partially
+        folded tool batch cannot be recovered here — the honest contract on
+        expiry is the same degraded optional artifact the workflow already emits
+        for any other failure, with the PM continuing without a cross-check.
+        The grace below exists so the cooperative deadline gets first refusal
+        and the graceful path stays the normal one.
+        """
+        ticker = state.get("company_of_interest", "UNKNOWN")
+        budget = _consultant_total_budget() + CONSULTANT_HARD_TIMEOUT_GRACE_SECONDS
+        try:
+            return await run_with_hard_timeout(
+                _consultant_workflow(state, config),
+                timeout=budget,
+                label=f"consultant_total:{ticker}",
+            )
+        except TimeoutError:
+            logger.warning(
+                "consultant_total_budget_exhausted",
+                ticker=ticker,
+                budget_seconds=budget,
+                quick_mode=quick_mode,
+            )
+            result = failure_artifact(
+                "consultant_review",
+                "Consultant node exceeded its total wall-clock budget",
+                provider=support.infer_provider_name(llm),
+            )
+            result["sender"] = "consultant"
             return result
 
     return consultant_node

@@ -24,7 +24,7 @@ from src.runtime_diagnostics import (
     get_base_url,
     get_class_name,
     get_model_name,
-    infer_provider,
+    get_runtime_provider,
 )
 from src.service_tiers import floor_llm_hard_timeout, provider_flex_active
 from src.token_tracker import canonical_display_name
@@ -424,10 +424,7 @@ async def invoke_with_rate_limit_handling(
     quiet_mode = runtime_config.quiet_mode
     resolved_model = model_name or get_model_name(runnable)
     class_name = get_class_name(runnable)
-    resolved_provider = provider or infer_provider(
-        model_name=resolved_model,
-        class_name=class_name,
-    )
+    resolved_provider = provider or get_runtime_provider(runnable)
 
     if not quiet_mode:
         logger.debug(
