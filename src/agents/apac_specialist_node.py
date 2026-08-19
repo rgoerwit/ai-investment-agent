@@ -9,12 +9,15 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import RunnableConfig
 
-from src.error_safety import summarize_exception
+from src.error_safety import summarize_failure_details
 from src.runtime_diagnostics import (
+    classify_failure,
     failure_artifact,
     failure_classification,
+    get_base_url,
     is_provider_content_block,
     success_artifact,
+    unavailable_artifact,
 )
 from src.tooling.text_boundary import format_untrusted_block
 from src.validators.supplemental_extractors import extract_capital_efficiency_signals
@@ -196,16 +199,24 @@ def create_apac_specialist_node(llm, *, fallback_llm=None) -> Callable:
             result["prompts_used"] = prompts_used
             return result
         except Exception as exc:
-            logger.warning(
-                "apac_specialist_failed",
-                ticker=ticker,
-                **summarize_exception(exc, operation="apac_specialist_failed"),
-                exc_info=True,
-            )
-            result = failure_artifact(
-                APAC_REPORT_FIELD,
+            provider = support.infer_provider_name(active_llm)
+            details = classify_failure(
                 exc,
-                provider=support.infer_provider_name(llm),
+                provider=provider,
+                model_name=support.get_model_name(active_llm),
+                class_name=type(active_llm).__name__,
+                base_url=get_base_url(active_llm),
+            )
+            logger.warning(
+                "artifact_unavailable",
+                ticker=ticker,
+                artifact=APAC_REPORT_FIELD,
+                artifact_status="UNAVAILABLE",
+                **summarize_failure_details(details, operation="apac_specialist"),
+            )
+            result = unavailable_artifact(
+                APAC_REPORT_FIELD,
+                details=details,
                 fallback_content=APAC_UNAVAILABLE_SENTINEL,
             )
             result["sender"] = "apac_regional_specialist"

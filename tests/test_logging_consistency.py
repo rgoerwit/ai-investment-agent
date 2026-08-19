@@ -33,8 +33,10 @@ EVENT_NAME_PATTERN = re.compile(r"^[a-z0-9_.]+$")
 PREVIEW_KWARG_PATTERN = re.compile(r"preview|prefix|snippet|excerpt")
 
 
-def _iter_logger_calls(skip: set[str] | None = None):
-    """Yield (relpath, call_node) for every logger.<level>() call in src/."""
+def _iter_logger_calls(
+    skip: set[str] | None = None, *, include_injected_aliases: bool = False
+):
+    """Yield logger-like structured calls from source files."""
     skip = skip or set()
     for py_file in sorted(Path("src").rglob("*.py")):
         rel = str(py_file.as_posix())
@@ -47,9 +49,24 @@ def _iter_logger_calls(skip: set[str] | None = None):
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr in LOG_METHODS
                 and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "logger"
+                and (
+                    node.func.value.id == "logger"
+                    or (include_injected_aliases and node.func.value.id == "logger_obj")
+                )
             ):
                 yield rel, node
+
+
+def _has_operator_traceback(node: ast.Call) -> bool:
+    if node.func.attr == "exception":
+        return True
+    if node.func.attr not in OPERATOR_LEVELS:
+        return False
+    return any(
+        kw.arg == "exc_info"
+        and not (isinstance(kw.value, ast.Constant) and kw.value.value is False)
+        for kw in node.keywords
+    )
 
 
 def test_no_stdlib_logger_in_src():
@@ -101,6 +118,45 @@ def test_no_raw_error_kwarg_at_operator_levels():
         "raw `error=` kwarg at operator-visible level (use "
         f"**summarize_exception(...) or reason=): {violations}"
     )
+
+
+def test_no_tracebacks_at_operator_levels():
+    """Operator logs must stay structured and must not attach raw tracebacks.
+
+    ``logger.exception`` implicitly sets ``exc_info=True``; explicit traceback
+    keywords have the same effect. Both can expose provider payloads, account
+    identifiers, local paths, and long dependency stacks. Static analysis keeps
+    comments/docstrings harmless and reports the exact source line.
+    """
+    violations = [
+        f"{rel}:{node.lineno}"
+        for rel, node in _iter_logger_calls(include_injected_aliases=True)
+        if _has_operator_traceback(node)
+    ]
+    assert not violations, (
+        "raw traceback at operator-visible level; use structured fields from "
+        f"summarize_exception/summarize_failure_details: {violations}"
+    )
+
+
+def test_traceback_guard_detects_real_calls_without_matching_prose():
+    tree = ast.parse(
+        '''
+"""logger.error("quoted", exc_info=True)"""
+logger.warning("bad", exc_info=True)
+logger.error("allowed", exc_info=False)
+logger.debug("debug_trace", exc_info=True)
+logger.exception("implicit")
+'''
+    )
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+
+    assert [_has_operator_traceback(node) for node in calls] == [
+        True,
+        False,
+        False,
+        True,
+    ]
 
 
 def test_preview_kwargs_redacted_at_operator_levels():

@@ -20,11 +20,13 @@ from src.error_safety import summarize_exception
 from src.llm_usage import extract_token_usage_breakdown
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import (
+    RetryDisposition,
     classify_failure,
     get_base_url,
     get_class_name,
     get_model_name,
     get_runtime_provider,
+    retry_disposition,
 )
 from src.service_tiers import floor_llm_hard_timeout, provider_flex_active
 from src.token_tracker import canonical_display_name
@@ -756,12 +758,12 @@ async def invoke_with_rate_limit_handling(
                     retryable=details.retryable,
                 )
 
-            is_rate_limit = details.kind in {"rate_limit", "quota_error"}
-            # ``classify_failure`` owns retryability. Keep only the distinct
-            # rate-limit branch here because it has a different backoff policy.
-            is_transient = details.retryable and not is_rate_limit
+            retry_class = retry_disposition(details)
 
-            if is_rate_limit and attempt < max_attempts - 1:
+            if (
+                retry_class is RetryDisposition.RATE_LIMIT
+                and attempt < max_attempts - 1
+            ):
                 jitter = random.uniform(1, 10)
                 wait_time = (60 * (attempt + 1)) + jitter
                 if deadline is not None:
@@ -804,7 +806,7 @@ async def invoke_with_rate_limit_handling(
 
             transient_max_attempts = max(1, min(max_attempts, max_transient_attempts))
             if (
-                is_transient
+                retry_class is RetryDisposition.TRANSIENT
                 and not flex_latency_timeout_quick
                 and attempt < transient_max_attempts - 1
             ):

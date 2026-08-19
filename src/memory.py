@@ -387,7 +387,6 @@ class FinancialSituationMemory:
                 retryable=details.retryable,
                 error_message=details.message,
                 fallback="direct_embed_query",
-                exc_info=True,
             )
             embedding = await run_with_hard_timeout(
                 self.embeddings.aembed_query(truncated_text),

@@ -61,7 +61,7 @@ def test_consultant_llm_init_failure_logs_stack_trace():
     assert kwargs["error_type"] == "RuntimeError"
     assert kwargs["message_preview"] == "boom"
     assert "error" not in kwargs
-    assert kwargs["exc_info"] is True
+    assert "exc_info" not in kwargs
 
 
 def test_quick_consultant_llm_init_failure_uses_quick_model_in_log():

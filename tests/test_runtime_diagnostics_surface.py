@@ -67,6 +67,12 @@ INTENTIONAL_ADDITIONS = frozenset(
         # Log-safe host; get_base_url returns the credential-bearing full URL.
         "get_endpoint_host",
         "get_runtime_provider",
+        # Aug 2026: canonical retry policy and safe unavailable-artifact
+        # construction shared by graph and optional-agent recovery paths.
+        "RetryDisposition",
+        "retry_disposition",
+        "operator_failure_reason",
+        "unavailable_artifact",
     }
 )
 

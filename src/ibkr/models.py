@@ -168,7 +168,8 @@ class NormalizedPosition(BaseModel):
 #   CONFIRMED_THESIS_FAILURE   – reject verdict confirmed by a prior full-mode
 #                                reject with minimum spacing (the forcing function
 #                                that prevents deadwood accumulating forever)
-#   THESIS_REASSESSMENT        – single unconfirmed reject — review + refresh
+#   THESIS_REASSESSMENT        – unconfirmed hard reject — review + refresh;
+#                                price-only soft rejects remain on cadence
 #   ENTRY_CONSTRAINT           – analyzer would not initiate at this price, but
 #                                fundamentals are intact ("not cheap enough to
 #                                buy" is not evidence to exit)

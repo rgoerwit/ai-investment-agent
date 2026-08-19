@@ -31,20 +31,39 @@
   ANALYSIS FRESHNESS  (what is stale, what is queued, what happens next)
 ══════════════════════════════════════════════════════
 
-  Needs review before action:
-    STOP         no analysis  →  poetry run python -m src.main --ticker STOP.T
+  Urgent analysis refreshes:
+    STOP         no analysis
+             →  poetry run python -m src.main --ticker STOP.T
 
-  Already in refresh queue:
+  Stale sell/trim decisions needing current analysis:
     None
 
-  Due soon:
+  Normal-cycle eligible refreshes:
     None
+
+  Operator decision points — will be re-run on normal cadence:
+    SOFT00       no analysis
+             Verdict: REJECT  (2026-03-05)
+    SOFT01       no analysis
+             Verdict: REJECT  (2026-03-05)
+    SOFT02       no analysis
+             Verdict: REJECT  (2026-03-05)
+    SOFT03       no analysis
+             Verdict: REJECT  (2026-03-05)
+    SOFT04       no analysis
+             Verdict: REJECT  (2026-03-05)
+    SOFT05       no analysis
+             Verdict: REJECT  (2026-03-05)
+    SOFT06       no analysis
+             Verdict: REJECT  (2026-03-05)
+    SOFT07       no analysis
+             Verdict: REJECT  (2026-03-05)
 
   Refresh activity this run:
     Policy: off
     No refresh actions were needed.
 
-  User action: run poetry run python scripts/portfolio_manager.py --recommend --refresh-policy blocking
+  User action: run poetry run python scripts/portfolio_manager.py --recommend --refresh-policy proactive
 
 ══════════════════════════════════════════════════════
   SELL RECOMMENDATIONS  (review sell reason labels before executing)

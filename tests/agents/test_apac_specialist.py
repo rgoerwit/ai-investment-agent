@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from types import ModuleType
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -119,6 +119,40 @@ async def test_apac_llm_failure_degrades_to_failure_artifact(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_apac_account_limit_uses_active_provider_and_safe_metadata(monkeypatch):
+    provider_payload = "team-id SECRET-PROVIDER-PAYLOAD"
+    monkeypatch.setattr(
+        "src.agents.apac_specialist_node.agent_runtime.invoke_with_rate_limit_handling",
+        AsyncMock(
+            side_effect=RuntimeError(
+                "Error code: 403 - Your team "
+                f"{provider_payload} reached its monthly spending limit."
+            )
+        ),
+    )
+    llm = Mock(model_name="grok-4.6")
+    node = create_apac_specialist_node(llm)
+
+    with patch("src.agents.apac_specialist_node.logger") as mock_logger:
+        out = await node({"company_of_interest": "7203.T"}, {"configurable": {}})
+
+    status = out["artifact_statuses"][APAC_REPORT_FIELD]
+    assert out[APAC_REPORT_FIELD] == APAC_UNAVAILABLE_SENTINEL
+    assert status["error_kind"] == "quota_error"
+    assert status["retryable"] is False
+    assert status["provider"] == "xai"
+    assert provider_payload not in repr(out)
+    calls = [
+        call
+        for call in mock_logger.warning.call_args_list
+        if call.args and call.args[0] == "artifact_unavailable"
+    ]
+    assert len(calls) == 1
+    assert calls[0].kwargs["artifact"] == APAC_REPORT_FIELD
+    assert "exc_info" not in calls[0].kwargs
+
+
+@pytest.mark.asyncio
 async def test_glm_1301_retries_once_without_thinking(monkeypatch):
     invoke = AsyncMock(
         side_effect=[
@@ -170,6 +204,31 @@ async def test_second_glm_1301_failure_is_not_retried_again(monkeypatch):
 
     assert invoke.await_count == 2
     assert out[APAC_REPORT_FIELD] == APAC_UNAVAILABLE_SENTINEL
+
+
+@pytest.mark.asyncio
+async def test_apac_fallback_failure_stamps_fallback_provider(monkeypatch):
+    invoke = AsyncMock(
+        side_effect=[
+            RuntimeError("Error code 400: {'code': '1301', 'message': '敏感内容'}"),
+            RuntimeError("Error code: 403 - account used all available credits"),
+        ]
+    )
+    monkeypatch.setattr(
+        "src.agents.apac_specialist_node.agent_runtime.invoke_with_rate_limit_handling",
+        invoke,
+    )
+    primary = Mock(model_name="glm-5.2")
+    fallback = Mock(model_name="grok-4.6")
+    node = create_apac_specialist_node(primary, fallback_llm=fallback)
+
+    out = await node({"company_of_interest": "AGS.SI"}, {"configurable": {}})
+
+    status = out["artifact_statuses"][APAC_REPORT_FIELD]
+    assert invoke.await_count == 2
+    assert status["provider"] == "xai"
+    assert status["error_kind"] == "quota_error"
+    assert status["retryable"] is False
 
 
 @pytest.mark.asyncio

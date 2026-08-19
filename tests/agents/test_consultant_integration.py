@@ -254,10 +254,14 @@ class TestConsultantNodeExecution:
                 result = await consultant_node(state, config)
 
                 assert "consultant_review" in result
-                assert result["consultant_review"] == ""
+                assert result["consultant_review"].startswith(
+                    "CONSULTANT REVIEW: UNAVAILABLE"
+                )
                 status = result["artifact_statuses"]["consultant_review"]
                 assert status["ok"] is False
-                assert status["message"] == "OpenAI API timeout"
+                assert status["message"] == (
+                    "The provider call exceeded its configured time limit."
+                )
 
     @pytest.mark.asyncio
     async def test_consultant_tool_loop_routes_through_tool_service(self):

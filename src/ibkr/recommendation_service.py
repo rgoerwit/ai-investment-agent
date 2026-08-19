@@ -30,6 +30,7 @@ from src.ibkr.refresh_service import (
     RefreshExecutionOptions,
     RefreshPlanOptions,
     RefreshPolicy,
+    refresh_scheduler_state_path,
 )
 from src.ibkr.screening_freshness import (
     ScreeningFreshnessSummary,
@@ -199,6 +200,7 @@ class PortfolioRecommendationService:
                 show_recommendations=request.recommend,
                 read_only=request.read_only,
                 max_age_days=request.max_age_days,
+                scheduler_state_path=refresh_scheduler_state_path(request.results_dir),
             ),
         )
 

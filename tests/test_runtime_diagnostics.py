@@ -9,6 +9,8 @@ from src.runtime_diagnostics import (
     QUICK_REQUIRED_PUBLISHABLE_ARTIFACTS,
     REQUIRED_PUBLISHABLE_ARTIFACTS,
     SYNC_CHECK_FIELDS,
+    FailureDetails,
+    RetryDisposition,
     build_analysis_validity,
     classify_failure,
     failure_artifact,
@@ -16,10 +18,22 @@ from src.runtime_diagnostics import (
     get_optional_publishable_artifacts,
     get_required_publishable_artifacts,
     is_artifact_complete,
+    operator_failure_reason,
+    retry_disposition,
+    unavailable_artifact,
 )
 
 
 class TestRuntimeFailureClassification:
+    def test_required_and_optional_graceful_artifact_roles_are_distinct(self):
+        assert "legal_report" in FUNDAMENTALS_SYNC_FIELDS
+        assert "legal_report" not in OPTIONAL_PUBLISHABLE_ARTIFACTS
+        assert {
+            "auditor_report",
+            "consultant_review",
+            "apac_regional_report",
+        } <= OPTIONAL_PUBLISHABLE_ARTIFACTS
+
     def test_classifies_dns_resolution(self):
         exc = socket.gaierror(8, "nodename nor servname provided, or not known")
 
@@ -77,6 +91,105 @@ class TestRuntimeFailureClassification:
         assert details.kind == "auth_error"
         assert details.provider == "openai"
         assert details.retryable is False
+
+    def test_classifies_exhausted_provider_account_as_non_retryable_quota(self):
+        exc = Exception(
+            "Error code: 403 - Your team has either used all available credits "
+            "or reached its monthly spending limit."
+        )
+
+        details = classify_failure(exc, provider="xai", model_name="grok-4.6")
+
+        assert details.kind == "quota_error"
+        assert details.provider == "xai"
+        assert details.retryable is False
+
+    def test_account_limit_outranks_generic_rate_limit_wording(self):
+        exc = Exception(
+            "HTTP 403: monthly rate limit denied because the credit balance is too low"
+        )
+
+        details = classify_failure(exc, provider="xai", model_name="grok-4.6")
+
+        assert details.kind == "quota_error"
+        assert details.retryable is False
+        assert retry_disposition(details) is RetryDisposition.NONE
+
+    @pytest.mark.parametrize(
+        ("kind", "retryable", "expected"),
+        [
+            ("rate_limit", True, RetryDisposition.RATE_LIMIT),
+            ("quota_error", True, RetryDisposition.RATE_LIMIT),
+            ("quota_error", False, RetryDisposition.NONE),
+            ("timeout", True, RetryDisposition.TRANSIENT),
+            ("server_error", True, RetryDisposition.TRANSIENT),
+            ("connect_error", True, RetryDisposition.TRANSIENT),
+            ("provider_partial_response", True, RetryDisposition.TRANSIENT),
+            ("auth_error", False, RetryDisposition.NONE),
+            ("bad_request", False, RetryDisposition.NONE),
+            ("model_not_found", False, RetryDisposition.NONE),
+            ("provider_safety_block", False, RetryDisposition.NONE),
+            ("application_error", False, RetryDisposition.NONE),
+            ("data_unavailable", False, RetryDisposition.NONE),
+            ("unknown_provider_error", False, RetryDisposition.NONE),
+        ],
+    )
+    def test_retry_disposition_matrix(self, kind, retryable, expected):
+        details = FailureDetails(
+            kind=kind,
+            provider="unknown",
+            host=None,
+            error_type="RuntimeError",
+            root_cause_type="RuntimeError",
+            retryable=retryable,
+            message="safe",
+        )
+
+        assert retry_disposition(details) is expected
+
+    def test_operator_reason_never_reflects_provider_exception_text(self):
+        details = FailureDetails(
+            kind="auth_error",
+            provider="xai",
+            host="api.x.ai",
+            error_type="PermissionDeniedError",
+            root_cause_type="HTTPStatusError",
+            retryable=False,
+            message="team-id SECRET-PROVIDER-PAYLOAD",
+        )
+
+        reason = operator_failure_reason(details)
+
+        assert "SECRET-PROVIDER-PAYLOAD" not in reason
+        assert "team-id" not in reason
+        assert "rejected authentication or access" in reason
+
+    def test_unavailable_artifact_preserves_classification_but_not_raw_message(self):
+        details = FailureDetails(
+            kind="quota_error",
+            provider="xai",
+            host="api.x.ai",
+            error_type="PermissionDeniedError",
+            root_cause_type="HTTPStatusError",
+            retryable=False,
+            message="team-id SECRET-PROVIDER-PAYLOAD",
+        )
+
+        artifact = unavailable_artifact(
+            "auditor_report",
+            details=details,
+            fallback_content="STATUS: UNAVAILABLE",
+        )
+
+        status = artifact["artifact_statuses"]["auditor_report"]
+        assert artifact["auditor_report"] == "STATUS: UNAVAILABLE"
+        assert status["complete"] is True
+        assert status["ok"] is False
+        assert status["error_kind"] == "quota_error"
+        assert status["provider"] == "xai"
+        assert status["retryable"] is False
+        assert "SECRET-PROVIDER-PAYLOAD" not in repr(artifact)
+        assert "team-id" not in repr(artifact)
 
     def test_classifies_server_error(self):
         exc = Exception("503 Internal Server Error")

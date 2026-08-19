@@ -246,7 +246,7 @@ async def test_refresh_runs_and_rereconciles():
     )
 
     bundle = await service.build_bundle(
-        _make_request(recommend=True, refresh_policy="blocking")
+        _make_request(recommend=True, refresh_policy="proactive")
     )
 
     assert refresh_calls == [("7203.T", False, True)]

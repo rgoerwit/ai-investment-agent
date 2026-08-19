@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from src.ibkr.portfolio_health import CORRELATED_EVENT_EVIDENCE_PATTERN
 from src.ibkr.portfolio_report import PortfolioReportContext
-from src.ibkr.portfolio_report_formatting import ReportBuffer
+from src.ibkr.portfolio_report_formatting import (
+    DETAIL_INDENT,
+    DETAIL_WRAP_WIDTH,
+    ReportBuffer,
+    normalize_reason,
+)
+
+if TYPE_CHECKING:
+    from src.ibkr.refresh_service import AnalysisFreshnessRow
 
 
 def _append_account_header(lines: list[str], context: PortfolioReportContext) -> None:
@@ -236,17 +245,44 @@ def _append_analysis_freshness(
         or summary.stale_in_queue
         or summary.due_soon
         or summary.candidate_blocked
+        or summary.operator_review
         or activity.refreshed
         or activity.failed
         or activity.skipped_due_to_policy
         or activity.skipped_due_to_limit
         or activity.skipped_read_only
+        or activity.skipped_due_to_cooldown
     ):
         return
     writer.section(
         "ANALYSIS FRESHNESS", "what is stale, what is queued, what happens next"
     )
-    lines.append("  Needs review before action:")
+
+    def append_refresh_command(row: AnalysisFreshnessRow, details: list[str]) -> None:
+        """Render a refresh reason and its command on aligned detail lines.
+
+        Keeping the command off the summary line matches the report's REVIEW
+        layout and avoids a long ticker/expiry/command compound line.
+        """
+        prefix = f"    {row.display_ticker:<12} "
+        lines.extend(
+            writer.wrap_banner_value(
+                prefix,
+                "  ·  ".join(details),
+                width=DETAIL_WRAP_WIDTH + 14,
+                max_lines=2,
+            )
+        )
+        lines.extend(
+            writer.wrap_banner_value(
+                f"{DETAIL_INDENT}→  ",
+                analysis_command(row.run_ticker),
+                width=DETAIL_WRAP_WIDTH + 14,
+                max_lines=2,
+            )
+        )
+
+    lines.append("  Urgent analysis refreshes:")
     if summary.blocking_now:
         for row in summary.blocking_now:
             details = [row.reason_family]
@@ -254,30 +290,24 @@ def _append_analysis_freshness(
                 details.append(f"{row.age_days}d old")
             if row.expires_date:
                 details.append(f"expires {row.expires_date}")
-            lines.append(
-                f"    {row.display_ticker:<12} {'  ·  '.join(details)}"
-                f"  →  {analysis_command(row.run_ticker)}"
-            )
+            append_refresh_command(row, details)
     else:
         lines.append("    None")
     lines.append("")
 
     if summary.candidate_blocked:
-        lines.append("  Candidates needing full refresh:")
+        lines.append("  Unheld candidates needing full refresh:")
         for row in summary.candidate_blocked:
             details = [row.reason_family]
             if row.age_days is not None:
                 details.append(f"{row.age_days}d old")
-            lines.append(
-                f"    {row.display_ticker:<12} {'  ·  '.join(details)}"
-                f"  →  {analysis_command(row.run_ticker)}"
-            )
+            append_refresh_command(row, details)
         lines.append("")
 
-    lines.append("  Already in refresh queue:")
+    lines.append("  Stale sell/trim decisions needing current analysis:")
     if summary.stale_in_queue:
         for row in summary.stale_in_queue:
-            details = [f"already in {row.action} queue"]
+            details = [f"current {row.action} decision"]
             if row.age_days is not None:
                 details.append(f"{row.age_days}d old")
             lines.append(f"    {row.display_ticker:<12} {'  ·  '.join(details)}")
@@ -285,7 +315,7 @@ def _append_analysis_freshness(
         lines.append("    None")
     lines.append("")
 
-    lines.append("  Due soon:")
+    lines.append("  Normal-cycle eligible refreshes:")
     if summary.due_soon:
         for row in sorted(
             summary.due_soon,
@@ -298,12 +328,32 @@ def _append_analysis_freshness(
                 due_details.append(f"expires {row.expires_date}")
             if row.days_until_due is not None:
                 due_details.append(f"{row.days_until_due}d remaining")
-            lines.append(
-                f"    {row.display_ticker:<12} {'  ·  '.join(due_details)}"
-                f"  →  {analysis_command(row.run_ticker)}"
-            )
+            append_refresh_command(row, due_details)
     else:
         lines.append("    None")
+
+    if summary.operator_review:
+        lines.extend(
+            ("", "  Operator decision points — will be re-run on normal cadence:")
+        )
+        for row in summary.operator_review:
+            reason = normalize_reason(
+                row.reason_text.split("  [MACRO_PRICE:")[0]
+                .split("  [MACRO_STOP:")[0]
+                .split("  [MACRO_WATCH:")[0]
+            )
+            lines.append(
+                f"    {row.display_ticker:<12} {row.action_basis or row.reason_family}"
+            )
+            lines.extend(
+                writer.wrap_banner_value(
+                    DETAIL_INDENT,
+                    reason,
+                    width=DETAIL_WRAP_WIDTH + 14,
+                    max_lines=3,
+                )
+            )
+
     lines.extend(("", "  Refresh activity this run:"))
     lines.append(
         f"    Policy: {activity.policy}"
@@ -326,12 +376,18 @@ def _append_analysis_freshness(
             "    Deferred by refresh limit: will be retried on the next "
             "refresh-enabled run: " + ", ".join(activity.skipped_due_to_limit)
         )
+    if activity.skipped_due_to_cooldown:
+        lines.append(
+            "    Deferred after failed refresh: "
+            + ", ".join(activity.skipped_due_to_cooldown)
+        )
     if not (
         activity.refreshed
         or activity.failed
         or activity.skipped_read_only
         or activity.skipped_due_to_policy
         or activity.skipped_due_to_limit
+        or activity.skipped_due_to_cooldown
     ):
         lines.append("    No refresh actions were needed.")
     lines.extend(("", f"  User action: {user_action}", ""))

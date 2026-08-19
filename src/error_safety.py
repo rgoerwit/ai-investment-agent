@@ -172,8 +172,27 @@ def summarize_exception(
     from src.runtime_diagnostics import classify_failure
 
     details = classify_failure(exc, provider=provider)
+    return summarize_failure_details(
+        details,
+        operation=operation,
+        preview_chars=preview_chars,
+    )
+
+
+def summarize_failure_details(
+    details: Any,
+    *,
+    operation: str,
+    preview_chars: int = _DEFAULT_PREVIEW_CHARS,
+) -> dict[str, Any]:
+    """Render already-classified failure details as safe structured log fields.
+
+    Graceful degradation paths classify once so retry, logging, and artifact
+    metadata cannot disagree. ``Any`` avoids an import cycle: failure
+    classification itself imports the redaction primitives from this module.
+    """
     preview = redact_sensitive_text(details.message, max_chars=preview_chars)
-    summary = {
+    return {
         "operation": operation,
         "error_type": details.error_type,
         "root_cause_type": details.root_cause_type,
@@ -182,7 +201,6 @@ def summarize_exception(
         "host": details.host,
         "message_preview": preview or None,
     }
-    return summary
 
 
 def safe_error_payload(

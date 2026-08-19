@@ -2218,7 +2218,6 @@ def get_consultant_llm(
                 else settings.consultant_model
             ),
             quick_mode=quick_mode,
-            exc_info=True,
             **summarize_exception(e, operation="consultant_llm_init"),
         )
         return None

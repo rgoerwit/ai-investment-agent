@@ -34,12 +34,14 @@ from src.runtime_diagnostics.artifact_status import (
     is_publishable_analysis,
     stamp_provenance_contract,
     success_artifact,
+    unavailable_artifact,
 )
 from src.runtime_diagnostics.failure_classification import (
     ArtifactErrorKind,
     FailureDetails,
     FailureKind,
     ProviderName,
+    RetryDisposition,
     classify_failure,
     get_base_url,
     get_class_name,
@@ -48,6 +50,8 @@ from src.runtime_diagnostics.failure_classification import (
     get_runtime_provider,
     infer_provider,
     is_provider_content_block,
+    operator_failure_reason,
+    retry_disposition,
 )
 
 __all__ = [
@@ -56,6 +60,7 @@ __all__ = [
     "FailureKind",
     "ArtifactErrorKind",
     "FailureDetails",
+    "RetryDisposition",
     "infer_provider",
     "is_provider_content_block",
     "get_model_name",
@@ -64,6 +69,8 @@ __all__ = [
     "get_base_url",
     "get_endpoint_host",
     "classify_failure",
+    "retry_disposition",
+    "operator_failure_reason",
     # artifact_status — constants
     "FUNDAMENTALS_SYNC_FIELDS",
     "SYNC_CHECK_FIELDS",
@@ -79,6 +86,7 @@ __all__ = [
     "ArtifactStatus",
     "success_artifact",
     "failure_artifact",
+    "unavailable_artifact",
     "get_artifact_status",
     "is_artifact_complete",
     "is_artifact_valid",

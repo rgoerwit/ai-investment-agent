@@ -1000,7 +1000,6 @@ def _persist_analysis_outputs(
                 operation="saving analysis results",
                 provider="unknown",
             ),
-            exc_info=True,
         )
         if not args.quiet and not args.brief and console_obj is not None:
             console_obj.print(

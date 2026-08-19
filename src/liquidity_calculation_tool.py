@@ -309,9 +309,7 @@ Thresholds: ${LIQUIDITY_MIN_USD:,} USD minimum (MARGINAL), ${LIQUIDITY_PASS_USD:
 
     except Exception as e:
         summary = summarize_exception(e, operation="liquidity_calculation")
-        logger.error(
-            "liquidity_calculation_failed", ticker=ticker, exc_info=True, **summary
-        )
+        logger.error("liquidity_calculation_failed", ticker=ticker, **summary)
         return f"""Liquidity Analysis for {ticker}:
 Status: ERROR
 Error: {summary["error_type"]} (details in operator logs)

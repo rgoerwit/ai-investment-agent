@@ -904,7 +904,6 @@ async def run_analysis(
                 operation="running analysis",
                 provider="unknown",
             ),
-            exc_info=True,
         )
         console.print(
             f"\n[bold red]{_safe_cli_error_message('running analysis', e)}[/bold red]\n"
@@ -1132,7 +1131,6 @@ async def _run_retrospective_only(args: argparse.Namespace) -> int:
                 operation="running retrospective batch",
                 provider="unknown",
             ),
-            exc_info=True,
         )
         if not args.quiet and not args.brief:
             console.print(
@@ -1397,7 +1395,6 @@ def _finalize_baseline_capture(
                 operation="finalizing baseline capture",
                 provider="unknown",
             ),
-            exc_info=True,
         )
         return None
 
@@ -1791,7 +1788,6 @@ async def run_with_args(
                 operation="running CLI entrypoint",
                 provider="unknown",
             ),
-            exc_info=True,
         )
         message = _safe_cli_error_message("running CLI entrypoint", exc)
         if args and (getattr(args, "quiet", False) or getattr(args, "brief", False)):

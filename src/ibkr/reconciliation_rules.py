@@ -313,8 +313,13 @@ def check_staleness(
         age_str = "no date" if analysis.age_days >= 9999 else f"{analysis.age_days}d"
         reasons.append(f"age {age_str} > {max_age_days}d limit")
 
-    entry_price = analysis.entry_price or analysis.current_price
-    if entry_price and current_price_local and entry_price > 0:
+    # Freshness measures movement since the analysis was made, so its anchor is
+    # the observed market price saved with that analysis. An entry price is a
+    # desired execution level and can legitimately differ from spot on the
+    # same day; using it here turns an intact, freshly refreshed entry
+    # constraint into permanent "price drift".
+    analysis_price = analysis.current_price
+    if analysis_price and current_price_local and analysis_price > 0:
         # A drift percentage is only meaningful between same-denomination
         # prices: a GBp position against a GBP analysis reads as a ~99% fall on
         # a stock that has not moved (the GAMA.L/MEGP.L report lines). When the
@@ -322,17 +327,22 @@ def check_staleness(
         # check, which still has age and macro-event reasons to report.
         pair = (
             comparable_prices(
-                entry_price, analysis.currency, current_price_local, position_currency
+                analysis_price,
+                analysis.currency,
+                current_price_local,
+                position_currency,
             )
             if position_currency
             else None
         )
         if pair is not None:
-            entry_price, current_price_local = pair.left, pair.right
+            analysis_price, current_price_local = pair.left, pair.right
         if pair is not None or not position_currency:
-            drift_pct = abs((current_price_local - entry_price) / entry_price) * 100
+            drift_pct = (
+                abs((current_price_local - analysis_price) / analysis_price) * 100
+            )
             if drift_pct > drift_threshold_pct:
-                direction = "up" if current_price_local > entry_price else "down"
+                direction = "up" if current_price_local > analysis_price else "down"
                 reasons.append(f"price drift {drift_pct:.1f}% {direction}")
 
     if structural_macro_events and analysis.analysis_date:

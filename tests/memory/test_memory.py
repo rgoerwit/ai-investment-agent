@@ -331,7 +331,7 @@ class TestSituationStorage:
             "unknown_provider_error",
         }
         assert kwargs["error_type"] == "RuntimeError"
-        assert kwargs["exc_info"] is True
+        assert "exc_info" not in kwargs
 
     @pytest.mark.asyncio
     async def test_get_embedding_hard_timeout_bounds_stalled_call(self):

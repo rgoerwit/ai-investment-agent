@@ -197,7 +197,7 @@ class TestCheckStaleness:
         assert "age 20d" in reason
 
     def test_price_drift_up(self):
-        analysis = _make_analysis(entry_price=100.0)
+        analysis = _make_analysis(entry_price=100.0, current_price=100.0)
         is_stale, reason = check_staleness(
             analysis, current_price_local=120.0, drift_threshold_pct=15.0
         )
@@ -206,7 +206,7 @@ class TestCheckStaleness:
         assert "up" in reason
 
     def test_price_drift_down(self):
-        analysis = _make_analysis(entry_price=100.0)
+        analysis = _make_analysis(entry_price=100.0, current_price=100.0)
         is_stale, reason = check_staleness(
             analysis, current_price_local=80.0, drift_threshold_pct=15.0
         )
@@ -214,9 +214,19 @@ class TestCheckStaleness:
         assert "down" in reason
 
     def test_small_drift_ok(self):
-        analysis = _make_analysis(entry_price=100.0)
+        analysis = _make_analysis(entry_price=100.0, current_price=100.0)
         is_stale, _ = check_staleness(
             analysis, current_price_local=108.0, drift_threshold_pct=15.0
+        )
+        assert not is_stale
+
+    def test_entry_threshold_is_not_used_as_the_price_drift_anchor(self):
+        """An entry threshold is a future trade instruction, not the price at
+        which the analysis was made. Reaching it must not make a fresh analysis
+        look stale by itself."""
+        analysis = _make_analysis(entry_price=100.0, current_price=120.0)
+        is_stale, _ = check_staleness(
+            analysis, current_price_local=120.0, drift_threshold_pct=15.0
         )
         assert not is_stale
 
@@ -2574,6 +2584,7 @@ class TestProfitTakeClassification:
         pos = _make_position(avg_cost=2000, current_price=2550)
         analysis = _make_analysis(
             entry_price=2500,
+            current_price=2500,
             target_1=3000,
             capital_flag_types=("CAPITAL_IDLE_CASH_RISK",),
         )

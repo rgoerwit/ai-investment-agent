@@ -825,6 +825,33 @@ class TestProviderPartialResponseRetry:
         assert result.content == "recovered"
 
     @pytest.mark.asyncio
+    async def test_non_retryable_account_limit_does_not_use_quota_backoff(self):
+        """A terminal account cap must not sleep through 60-second quota retries."""
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(
+            side_effect=RuntimeError(
+                "Error code: 403 - Your team has either used all available credits "
+                "or reached its monthly spending limit."
+            )
+        )
+
+        with patch(
+            "src.agents.runtime.asyncio.sleep", new_callable=AsyncMock
+        ) as mock_sleep:
+            with pytest.raises(RuntimeError, match="monthly spending limit"):
+                await invoke_with_rate_limit_handling(
+                    runnable,
+                    {"input": "x"},
+                    max_attempts=3,
+                    context="AccountLimit",
+                    provider="xai",
+                    model_name="grok-4.6",
+                )
+
+        assert runnable.ainvoke.await_count == 1
+        mock_sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_partial_response_triggers_retry_and_recovers(self):
         """First call returns a partial; second returns a clean stop."""
         call_count = {"n": 0}

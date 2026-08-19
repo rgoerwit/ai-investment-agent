@@ -287,7 +287,6 @@ class SignalProcessor:
             logger.error(
                 "llm_signal_extraction_exception",
                 **summarize_exception(e, operation="llm_signal_extraction_exception"),
-                exc_info=True,
             )
             return "ERROR_PROCESSING_SIGNAL"
 

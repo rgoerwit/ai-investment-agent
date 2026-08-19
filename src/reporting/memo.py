@@ -520,7 +520,6 @@ def render_memo_for_state(state: dict) -> str:
         logger.warning(
             "memo_render_failed",
             **summarize_exception(exc, operation="render_memo_for_state"),
-            exc_info=True,
         )
         return (
             "## Investment Memo — UNAVAILABLE\n\n"

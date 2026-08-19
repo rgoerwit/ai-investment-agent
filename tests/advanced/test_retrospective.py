@@ -248,7 +248,7 @@ async def test_generate_lesson_logs_structured_failure_details():
     kwargs = mock_logger.error.call_args.kwargs
     assert kwargs["failure_kind"] == "unknown_provider_error"
     assert kwargs["error_type"] == "RuntimeError"
-    assert kwargs["exc_info"] is True
+    assert "exc_info" not in kwargs
 
 
 @pytest.mark.asyncio
@@ -264,7 +264,7 @@ async def test_run_retrospective_logs_memory_init_failure(tmp_path):
     kwargs = mock_logger.error.call_args.kwargs
     assert kwargs["error_type"] == "RuntimeError"
     assert kwargs["root_cause_type"] == "RuntimeError"
-    assert kwargs["exc_info"] is True
+    assert "exc_info" not in kwargs
 
 
 # ══════════════════════════════════════════════════════════════════════════════

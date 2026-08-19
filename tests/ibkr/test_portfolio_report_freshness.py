@@ -25,6 +25,7 @@ from src.ibkr.portfolio_presentation import (
     build_live_order_note,
     group_portfolio_actions,
 )
+from src.ibkr.portfolio_report_formatting import DETAIL_WRAP_WIDTH
 from src.ibkr.refresh_service import RefreshActivity
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
 from src.ibkr.ticker import Ticker
@@ -79,9 +80,9 @@ class TestAnalysisFreshnessReporting:
     def test_analysis_freshness_section_replaces_split_brain_deadlines(self):
         report = format_report(self._items(), _make_portfolio(), max_age_days=14)
         assert "ANALYSIS FRESHNESS" in report
-        assert "Needs review before action:" in report
-        assert "Already in refresh queue:" in report
-        assert "Due soon:" in report
+        assert "Urgent analysis refreshes:" in report
+        assert "Stale sell/trim decisions needing current analysis:" in report
+        assert "Normal-cycle eligible refreshes:" in report
         assert "Upcoming review deadlines" not in report
 
     def test_reviews_subtitle_uses_decision_safe_wording(self):
@@ -109,7 +110,7 @@ class TestAnalysisFreshnessReporting:
         assert "Skipped (read-only): 7203.T" in report
         assert (
             "User action: read-only mode blocked refresh — run "
-            f"{_portfolio_manager_command('--refresh-policy', 'blocking')}"
+            f"{_portfolio_manager_command('--refresh-policy', 'proactive')}"
         ) in report
 
     def test_successful_refresh_run_can_leave_no_manual_action(self):
@@ -125,6 +126,30 @@ class TestAnalysisFreshnessReporting:
         assert "Refreshed: 7203.T" in report
         assert "User action: none" in report
 
+    def test_operator_review_reason_uses_aligned_wrapped_detail_lines(self):
+        item = ReconciliationItem(
+            ticker="7203.T",
+            action="REVIEW",
+            reason=(
+                "Fundamentals remain intact, but a valuation, tax, and position-sizing "
+                "review is needed before changing this held position."
+            ),
+            urgency="MEDIUM",
+            ibkr_position=_make_position(ticker="7203.T"),
+            analysis=_make_analysis(ticker="7203.T", age_days=1),
+            action_basis="ENTRY_CONSTRAINT",
+        )
+
+        report = format_report([item], _make_portfolio())
+        operator_section = report.split(
+            "Operator decision points — will be re-run on normal cadence:", 1
+        )[1]
+        operator_section = operator_section.split("Refresh activity this run:", 1)[0]
+
+        assert "7203" in operator_section
+        assert "Fundamentals remain intact" in operator_section
+        assert max(map(len, operator_section.splitlines())) <= DETAIL_WRAP_WIDTH + 14
+
     def test_format_json_includes_freshness_summary(self):
         payload = json.loads(
             format_json(
@@ -134,9 +159,9 @@ class TestAnalysisFreshnessReporting:
             )
         )
         summary = payload["analysis_freshness_summary"]
-        assert summary["blocking_now_count"] == 1
+        assert summary["blocking_now_count"] == 0
         assert summary["stale_in_queue_count"] == 1
-        assert summary["due_soon_count"] == 1
+        assert summary["due_soon_count"] == 2
         assert summary["manual_action_required"] is True
 
     def test_format_report_shows_stale_screening_freshness(self):

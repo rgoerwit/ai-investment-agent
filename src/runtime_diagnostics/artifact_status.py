@@ -10,7 +10,9 @@ from src.data_block_utils import has_parseable_data_block
 from src.provenance_schema import DecisionTrace, SchemaDecodeError
 from src.runtime_diagnostics.failure_classification import (
     ArtifactErrorKind,
+    FailureDetails,
     classify_failure,
+    operator_failure_reason,
 )
 
 logger = structlog.get_logger(__name__)
@@ -176,6 +178,34 @@ def failure_artifact(
             retryable=False,
         )
 
+    return {
+        field: fallback_content,
+        "artifact_statuses": {field: status.as_dict()},
+    }
+
+
+def unavailable_artifact(
+    field: str,
+    *,
+    details: FailureDetails,
+    fallback_content: str,
+) -> dict[str, Any]:
+    """Build a graceful failure artifact without persisting provider prose.
+
+    Provider exception bodies can include account identifiers, request excerpts,
+    or endpoint details. Gracefully degraded nodes should classify the exception
+    once, render their own schema-valid fallback, and store only this stable
+    operator explanation in artifact metadata.
+    """
+    status = ArtifactStatus(
+        complete=True,
+        ok=False,
+        content=fallback_content or None,
+        error_kind=details.kind,
+        provider=details.provider,
+        message=operator_failure_reason(details),
+        retryable=details.retryable,
+    )
     return {
         field: fallback_content,
         "artifact_statuses": {field: status.as_dict()},

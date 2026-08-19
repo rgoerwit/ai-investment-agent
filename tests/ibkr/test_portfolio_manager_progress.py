@@ -446,7 +446,7 @@ def _make_bundle(**overrides) -> PortfolioRecommendationBundle:
     return PortfolioRecommendationBundle(**values)
 
 
-def test_main_recommend_mode_builds_request_with_blocking_refresh(capsys):
+def test_main_recommend_mode_builds_request_with_weighted_refresh(capsys):
     """CLI recommend mode should delegate to the recommendation service with the resolved policy."""
     args = _make_args(
         recommend=True,
@@ -478,7 +478,7 @@ def test_main_recommend_mode_builds_request_with_blocking_refresh(capsys):
     request = mock_build.await_args.args[0]
     assert request.recommend is True
     assert request.read_only is False
-    assert request.refresh_policy == "blocking"
+    assert request.refresh_policy == "proactive"
     assert request.refresh_limit == 1
     assert request.watchlist_name == "watchlist-2026"
     assert request.cash_buffer == 0.08

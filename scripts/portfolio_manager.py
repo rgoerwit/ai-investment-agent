@@ -477,7 +477,9 @@ def parse_args(
         default=None,
         help=(
             "Auto-refresh policy: off (default for reports), blocking "
-            "(default for --recommend), or proactive (also refresh due-soon holds)"
+            "(urgent first, then normal work if none are urgent), or proactive "
+            "(default for --recommend; "
+            "weighted urgent and normal-cycle refreshes)"
         ),
     )
     parser.add_argument(
@@ -1324,6 +1326,7 @@ def format_json(
             "stale_in_queue_count": len(freshness_summary.stale_in_queue),
             "due_soon_count": len(freshness_summary.due_soon),
             "candidate_blocked_count": len(freshness_summary.candidate_blocked),
+            "operator_review_count": len(freshness_summary.operator_review),
             "refreshed_this_run": refresh_activity.refreshed,
             "refresh_failed": refresh_activity.failed,
             "refresh_policy": refresh_activity.policy,
