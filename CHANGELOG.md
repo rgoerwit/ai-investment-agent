@@ -14,6 +14,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rationale adjuncts, with provider-summary fallback, automatic budgets, and
   telemetry-only persistence.
 
+### Changed
+
+- **Cooled dependency round (August 2026)** — Nineteen dependencies move to
+  releases at least fourteen days old, resolved as exact pins in three grouped
+  commits: the LangChain/LangGraph/LangSmith/Langfuse cluster with the OpenAI and
+  Anthropic SDKs, the Google GenAI SDK, and the development tools. `langchain`
+  itself is deliberately held at 1.3.14 — 1.3.15 and 1.3.16 require a
+  `langchain-core` newer than the cooldown allows. Each resolution was verified
+  by diffing the whole lockfile rather than the named packages, so no
+  unrequested transitive moved.
+- **Google GenAI SDK advances past its 1.x cap** — `google-genai` moves to
+  2.17.0. Version 2.0.0's only breaking changes are Interactions-only, with
+  upstream stating `GenerateContent` is unaffected; nothing in `src/` imports the
+  SDK directly, and the two behaviours this repository couples to — service-tier
+  enums and optional aiohttp — landed in 1.70.0 and 1.65.0, below the version
+  already in use. Verified by a live quick-mode analysis confirming the
+  service-tier stamp still reaches the request config.
+- **The pre-commit ruff revision tracks the development pin** — The hook gates
+  every commit, so a drift between it and `pyproject.toml` let local runs and the
+  gate disagree about formatting.
+- **Model Context Protocol stays on 1.x deliberately** — `docs/MCP.md` records
+  why: three of the five client-side changes in v2 fail silently, including an
+  HTTP client swap that degrades server-initiated messages without raising, and
+  v2 offers no capability this repository uses.
+
+### Security
+
+- **Declared floors for `urllib3` and `starlette` now track their fixed
+  releases** — Both admitted versions predating known advisories while the
+  lockfile happened to resolve above them. Dependency scanners read the
+  lockfile, so this class of gap is invisible to CI by construction. Neither
+  correction moved a locked version.
+- **Security pins carry their rationale** — The `pyasn1`, `cryptography` and
+  `pypdf` pins name the advisories they remediate. `pyasn1` in particular looks
+  redundant, since the resolver reaches the pinned version unaided today, but
+  three of the five CVEs against the version its parent floors at are fixed only
+  at the pinned release.
+
 ### Fixed
 
 - **A closed position no longer manufactures urgent analysis work** — A sold
