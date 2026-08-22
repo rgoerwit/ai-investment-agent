@@ -343,8 +343,12 @@ def sanitize_handoff_telemetry(raw: Any) -> dict[str, Any]:
 
     structured_lengths = lengths("structured_lengths", structured_pair)
     native_lengths = lengths("native_lengths", native_pair)
-    structured_pair = structured_pair and any(structured_lengths.values())
-    native_pair = native_pair and any(native_lengths.values())
+    # Both legs, not either: the barrier publishes a component only when both
+    # roles produced it, so a record claiming a pair with one zero leg is false
+    # telemetry. `all` also never rejects a genuine pair — paired_handoff_telemetry
+    # requires both strings to be non-empty, hence both lengths >= 1.
+    structured_pair = structured_pair and all(structured_lengths.values())
+    native_pair = native_pair and all(native_lengths.values())
 
     version = values.get("policy_version")
     return {

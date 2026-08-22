@@ -63,6 +63,33 @@ def _is_flat_position(
     )
 
 
+def _is_contradictory_closed_row(
+    *,
+    quantity: float,
+    raw_market_value: float,
+    raw_unrealized_pnl: float | None,
+) -> bool:
+    """True when the broker reports no shares but a material value anyway.
+
+    The distinguishing signal is the *quantity*, not the anchor. An ordinary
+    holding whose ``mktPrice`` is simply absent from the payload also yields a
+    zero anchor (``quantity * price``), and for USD the no-anchor fallback
+    correctly resolves it as an identity. A row claiming zero shares beside a
+    material value is a different thing: the two legs contradict each other, and
+    no currency can classify it. Checked before the FX guard and the identity
+    fallback so it fails closed everywhere rather than only outside USD.
+    """
+    if not math.isfinite(quantity) or quantity != 0.0:
+        return False
+    if math.isfinite(raw_market_value) and abs(raw_market_value) > _FLAT_VALUE_EPSILON:
+        return True
+    return (
+        raw_unrealized_pnl is not None
+        and math.isfinite(raw_unrealized_pnl)
+        and abs(raw_unrealized_pnl) > _FLAT_VALUE_EPSILON
+    )
+
+
 def normalize_position_values(
     *,
     quantity: float,
@@ -94,14 +121,32 @@ def normalize_position_values(
         raw_market_value=raw_market_value,
         raw_unrealized_pnl=raw_unrealized_pnl,
     ):
+        # A flat row has no FX dependency, so report a rate only when it is
+        # usable; passing an unusable one through would let a non-finite value
+        # reach serializers and logs for a position worth nothing either way.
+        flat_rate = 1.0 if normalized_currency == "USD" else fx_rate
+        if flat_rate is not None and not (math.isfinite(flat_rate) and flat_rate > 0):
+            flat_rate = None
         return NormalizedPositionValues(
             market_value_usd=0.0,
             unrealized_pnl_usd=0.0,
-            fx_rate_to_usd=fx_rate if normalized_currency != "USD" else 1.0,
+            fx_rate_to_usd=flat_rate,
             market_value_basis="UNAVAILABLE",
             unrealized_pnl_basis="UNAVAILABLE",
             valuation_valid=True,
             position_flat=True,
+        )
+    if _is_contradictory_closed_row(
+        quantity=quantity,
+        raw_market_value=raw_market_value,
+        raw_unrealized_pnl=raw_unrealized_pnl,
+    ):
+        return _invalid_result(
+            fx_rate if fx_rate is not None and math.isfinite(fx_rate) else 0.0,
+            (
+                "Broker reports no shares held but a material market value or "
+                f"P&L ({normalized_currency}) — quantity and value legs disagree"
+            ),
         )
     if normalized_currency == "USD":
         fx_rate = 1.0

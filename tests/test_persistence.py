@@ -197,6 +197,48 @@ def test_policy_active_without_a_barrier_report_is_distinguishable(monkeypatch):
     assert handoffs["published_rounds"] == []
 
 
+@pytest.mark.parametrize(
+    ("component", "lengths"),
+    [
+        ("structured_lengths", {"bull": 12, "bear": "bad"}),
+        ("structured_lengths", {"bull": 0, "bear": 14}),
+        ("native_lengths", {"bull": 20, "bear": -1}),
+        ("native_lengths", {"bull": 20, "bear": 0}),
+    ],
+)
+def test_one_invalid_telemetry_leg_clears_the_whole_pair(
+    monkeypatch, component, lengths
+):
+    """The barrier publishes a component only when BOTH roles produced it.
+
+    A record claiming a pair with one zero leg is false audit telemetry — it
+    reports a balanced handoff that never happened. Guards `all(...)` against a
+    regression to `any(...)`, which passed the fully-malformed case while
+    letting a half-malformed one through.
+    """
+    raw = {
+        "policy_version": 5,
+        "policy_active": True,
+        "barrier_reported": True,
+        "published_rounds": [1],
+        "structured_pair": True,
+        "native_pair": True,
+        "structured_lengths": {"bull": 12, "bear": 14},
+        "native_lengths": {"bull": 20, "bear": 22},
+    }
+    raw[component] = lengths
+
+    summary = _min_summary(
+        monkeypatch,
+        {"investment_debate_state": {"count": 4, "handoff_telemetry": raw}},
+    )
+    handoffs = summary["debate_reasoning_handoffs"]
+    pair_key = component.replace("_lengths", "_pair")
+
+    assert handoffs[pair_key] is False
+    assert handoffs[component] == {"bull": 0, "bear": 0}
+
+
 def test_debate_handoff_telemetry_fails_closed_on_malformed_values(monkeypatch):
     summary = _min_summary(
         monkeypatch,
