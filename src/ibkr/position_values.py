@@ -142,7 +142,10 @@ def normalize_position_values(
         raw_unrealized_pnl=raw_unrealized_pnl,
     ):
         return _invalid_result(
-            fx_rate if fx_rate is not None and math.isfinite(fx_rate) else 0.0,
+            # None, not a 0.0 sentinel: this branch runs before the FX guard, so
+            # the rate may legitimately be absent, and every other unavailable
+            # rate in this module is reported as None.
+            fx_rate if fx_rate is not None and math.isfinite(fx_rate) else None,
             (
                 "Broker reports no shares held but a material market value or "
                 f"P&L ({normalized_currency}) — quantity and value legs disagree"
@@ -281,7 +284,7 @@ def _to_usd(value: float, basis: ValueBasis, fx_rate_to_usd: float) -> float:
 
 
 def _invalid_result(
-    fx_rate_to_usd: float,
+    fx_rate_to_usd: float | None,
     issue: str,
 ) -> NormalizedPositionValues:
     return NormalizedPositionValues(

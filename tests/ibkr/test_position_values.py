@@ -386,6 +386,20 @@ class TestContradictoryClosedRowFailsClosedEverywhere:
         assert result.market_value_usd == 0.0
         assert "no shares held" in (result.valuation_issue or "")
 
+    @pytest.mark.parametrize("rate", [None, math.nan, math.inf])
+    def test_unavailable_rate_is_reported_as_none_not_a_zero_sentinel(self, rate):
+        """Matches the FX-missing branch immediately below it in the module."""
+        result = _normalize(
+            quantity=0.0,
+            raw_market_value=5_000.0,
+            raw_unrealized_pnl=0.0,
+            currency="JPY",
+            fx_rate=rate,
+        )
+
+        assert result.valuation_valid is False
+        assert result.fx_rate_to_usd is None
+
     def test_material_pnl_without_shares_is_invalid(self):
         result = _normalize(
             quantity=0.0,
