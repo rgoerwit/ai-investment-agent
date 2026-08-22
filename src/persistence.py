@@ -28,6 +28,27 @@ logger = structlog.get_logger(__name__)
 _SOURCE_ARTIFACT_MAX_CHARS = 50_000
 
 
+def _debate_handoff_summary(result: dict[str, Any]) -> dict[str, Any]:
+    """Project the run's handoff telemetry into the saved artifact.
+
+    Reads only what the graph recorded. The telemetry object is seeded into the
+    initial debate state, so its absence here means a legacy or hand-built
+    result rather than "the feature was off" — which is why this must not
+    consult ambient run configuration: build_run_summary is reachable from
+    contexts with no bound RuntimeConfig, and a serializer that describes intent
+    instead of outcome is exactly the dishonest-flag pattern this file avoids
+    elsewhere.
+    """
+
+    # Local import: persistence keeps the agent stack off the CLI import path
+    # (same reason parse_consultant_conditions is imported inside its caller).
+    from src.agents.debate_handoffs import sanitize_handoff_telemetry
+
+    debate = result.get("investment_debate_state", {})
+    raw = debate.get("handoff_telemetry") if isinstance(debate, dict) else None
+    return sanitize_handoff_telemetry(raw)
+
+
 # Maps each saved-JSON artifact field to its originating graph agent and the
 # TokenTrackingCallback display name(s) owned by the seat registry and used in
 # src/graph/components.py.
@@ -369,6 +390,7 @@ def build_run_summary(
     # The models that actually answered, not the legacy defaults (see
     # ActiveModels). Same values the artifact metadata records.
     active = active_models_or_legacy(config, quick_mode=quick_mode)
+    handoff_telemetry = _debate_handoff_summary(result)
 
     summary = {
         "quick_mode": quick_mode,
@@ -387,6 +409,10 @@ def build_run_summary(
         # actual rounds = count // 2 (quick=1, full=2). `debate_turns` keeps the raw value.
         "debate_rounds": result.get("investment_debate_state", {}).get("count", 0) // 2,
         "debate_turns": result.get("investment_debate_state", {}).get("count", 0),
+        # Content remains transient graph state. Persist only balanced-pair
+        # presence and lengths so artifacts are auditable without retaining
+        # model reasoning or rationale prose.
+        "debate_reasoning_handoffs": handoff_telemetry,
         # Honest flag: reflects whether the quick-mode qualification note was actually
         # appended to the PM text (marker presence), never a recomputed `quick and BUY`
         # that would lie if the hook no-ops on PM-block parse drift.

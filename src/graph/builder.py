@@ -8,7 +8,11 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import RunnableConfig
 
 from src.agents import AgentState
+from src.agents.debate_handoffs import paired_handoff_telemetry
+from src.config import config as settings_config
+from src.error_safety import redact_sensitive_text
 from src.eval import BaselineCaptureManager
+from src.runtime_config import get_runtime_config
 
 from .components import build_graph_components
 from .routing import (
@@ -168,6 +172,13 @@ def create_trading_graph(
         debate = state.get("investment_debate_state", {})
         bull_r1 = debate.get("bull_round1", "")
         bear_r1 = debate.get("bear_round1", "")
+        bull_handoff = debate.get("bull_round1_handoff", {})
+        bear_handoff = debate.get("bear_round1_handoff", {})
+        handoff_telemetry = paired_handoff_telemetry(
+            policy=components.debate_reasoning_policy,
+            bull=bull_handoff,
+            bear=bear_handoff,
+        )
 
         history = f"""=== ROUND 1 ===
 
@@ -182,6 +193,30 @@ BEAR RESEARCHER:
             bull_r1_len=len(bull_r1),
             bear_r1_len=len(bear_r1),
         )
+        if components.debate_reasoning_policy.active:
+            logger.info(
+                "debate_reasoning_handoff_pair_resolved",
+                structured_pair=handoff_telemetry["structured_pair"],
+                native_pair=handoff_telemetry["native_pair"],
+                structured_lengths=handoff_telemetry["structured_lengths"],
+                native_lengths=handoff_telemetry["native_lengths"],
+            )
+            if get_runtime_config(settings_config).developer_debug_active:
+                logger.debug(
+                    "debate_reasoning_handoff_content",
+                    bull_structured=redact_sensitive_text(
+                        bull_handoff.get("structured", ""), max_chars=2_000
+                    ),
+                    bear_structured=redact_sensitive_text(
+                        bear_handoff.get("structured", ""), max_chars=2_000
+                    ),
+                    bull_native=redact_sensitive_text(
+                        bull_handoff.get("native", ""), max_chars=2_000
+                    ),
+                    bear_native=redact_sensitive_text(
+                        bear_handoff.get("native", ""), max_chars=2_000
+                    ),
+                )
 
         return {
             "investment_debate_state": {
@@ -190,6 +225,7 @@ BEAR RESEARCHER:
                 "bear_history": bear_r1,
                 "current_round": 2,
                 "count": 2,
+                "handoff_telemetry": handoff_telemetry,
             }
         }
 

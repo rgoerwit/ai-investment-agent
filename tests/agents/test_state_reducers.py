@@ -297,3 +297,41 @@ class TestMergeAndCapMessages:
 
         assert tool_message in result
         assert len(result) == 2 + MESSAGE_TAIL_LIMIT
+
+
+class TestPartialUpdatesDoNotClobberUnownedFields:
+    """A node update omits the fields it does not own; absence is not a value.
+
+    Before the handoff work the reducer resolved a missing key through
+    `default_state`, so a partial update that omitted `count` produced
+    `y_val = 0`, which is not None and therefore won. That silently reset the
+    debate turn counter, and `run_summary.debate_rounds` is `count // 2`.
+    Parallel Bull/Bear updates carry exactly this shape, so the defect was
+    reachable — it just had no guard.
+    """
+
+    def test_count_survives_an_update_that_does_not_carry_it(self):
+        counted = {"count": 2, "current_round": 2}
+        partial = {"bull_round1": "bull argument"}
+
+        forward = merge_invest_debate_state(counted, partial)
+        reverse = merge_invest_debate_state(partial, counted)
+
+        assert forward["count"] == 2
+        assert forward["current_round"] == 2
+        assert reverse["count"] == 2
+
+    def test_role_private_dicts_survive_the_opposite_role_update(self):
+        bull = {"bull_round1_handoff": {"structured": "bull", "native": ""}}
+        bear = {"bear_round1_handoff": {"structured": "bear", "native": ""}}
+
+        merged = merge_invest_debate_state(bull, bear)
+
+        assert merged["bull_round1_handoff"]["structured"] == "bull"
+        assert merged["bear_round1_handoff"]["structured"] == "bear"
+
+    def test_an_explicitly_empty_value_still_overwrites(self):
+        """Absence and an explicit reset must stay distinguishable."""
+        merged = merge_invest_debate_state({"count": 4}, {"count": 0})
+
+        assert merged["count"] == 0

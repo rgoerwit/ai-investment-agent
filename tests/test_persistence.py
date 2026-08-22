@@ -91,6 +91,148 @@ def test_debate_rounds_is_turns_over_two(monkeypatch):
     assert full["debate_turns"] == 4
 
 
+def test_debate_handoff_persistence_keeps_telemetry_not_content(monkeypatch):
+    secret_reasoning = "private model rationale that must not persist"
+    telemetry = {
+        "policy_version": 5,
+        "policy_active": True,
+        "barrier_reported": True,
+        "published_rounds": [1],
+        "structured_pair": True,
+        "native_pair": False,
+        "structured_lengths": {"bull": 12, "bear": 14},
+        "native_lengths": {"bull": 0, "bear": 0},
+        "unexpected_content": secret_reasoning,
+    }
+    summary = _min_summary(
+        monkeypatch,
+        {
+            "investment_debate_state": {
+                "count": 4,
+                "handoff_telemetry": telemetry,
+                "bull_round1_handoff": {"structured": secret_reasoning},
+                "bear_round1_handoff": {"structured": secret_reasoning},
+            }
+        },
+    )
+
+    expected = {
+        key: value for key, value in telemetry.items() if key != "unexpected_content"
+    }
+    assert summary["debate_reasoning_handoffs"] == expected
+    assert secret_reasoning not in json.dumps(summary)
+
+
+def test_barrier_telemetry_round_trips_through_the_one_producer(monkeypatch):
+    """Parity assertion two independent producers structurally cannot make."""
+    from src.agents.debate_handoffs import (
+        DebateReasoningPolicy,
+        paired_handoff_telemetry,
+        sanitize_handoff_telemetry,
+    )
+
+    produced = paired_handoff_telemetry(
+        policy=DebateReasoningPolicy(enabled=True, max_rounds=2),
+        bull={"structured": "bull capsule", "native": "bull summary"},
+        bear={"structured": "bear capsule", "native": "bear summary"},
+    )
+
+    assert sanitize_handoff_telemetry(produced) == produced
+
+    summary = _min_summary(
+        monkeypatch,
+        {"investment_debate_state": {"count": 4, "handoff_telemetry": produced}},
+    )
+    assert summary["debate_reasoning_handoffs"] == produced
+
+
+def test_absent_telemetry_never_consults_ambient_run_configuration(monkeypatch):
+    """build_run_summary runs outside a bound RuntimeConfig in several callers.
+
+    The serializer must describe what the graph recorded, not what the run was
+    configured to do — reading runtime config here is the dishonest-flag
+    pattern this module avoids for the quick-mode and DNI markers.
+    """
+    import src.persistence as persistence_module
+
+    monkeypatch.setattr(
+        persistence_module,
+        "get_runtime_config",
+        lambda _config: (_ for _ in ()).throw(
+            AssertionError("run configuration must not be read for handoff telemetry")
+        ),
+        raising=False,
+    )
+
+    summary = _min_summary(monkeypatch, {"investment_debate_state": {"count": 4}})
+
+    handoffs = summary["debate_reasoning_handoffs"]
+    assert handoffs["policy_active"] is False
+    assert handoffs["barrier_reported"] is False
+
+
+def test_policy_active_without_a_barrier_report_is_distinguishable(monkeypatch):
+    summary = _min_summary(
+        monkeypatch,
+        {
+            "investment_debate_state": {
+                "count": 4,
+                "handoff_telemetry": {
+                    "policy_version": 5,
+                    "policy_active": True,
+                    "barrier_reported": False,
+                    "published_rounds": [],
+                    "structured_pair": False,
+                    "native_pair": False,
+                    "structured_lengths": {"bull": 0, "bear": 0},
+                    "native_lengths": {"bull": 0, "bear": 0},
+                },
+            }
+        },
+    )
+
+    handoffs = summary["debate_reasoning_handoffs"]
+    assert handoffs["policy_active"] is True
+    assert handoffs["barrier_reported"] is False
+    assert handoffs["published_rounds"] == []
+
+
+def test_debate_handoff_telemetry_fails_closed_on_malformed_values(monkeypatch):
+    summary = _min_summary(
+        monkeypatch,
+        {
+            "investment_debate_state": {
+                "count": 4,
+                "handoff_telemetry": {
+                    "policy_version": "future",
+                    "policy_active": True,
+                    "barrier_reported": True,
+                    "published_rounds": [99],
+                    "structured_pair": True,
+                    "native_pair": False,
+                    "structured_lengths": {"bull": -1, "bear": "many"},
+                    "native_lengths": {"bull": 50, "bear": 50},
+                },
+            }
+        },
+    )
+
+    assert summary["debate_reasoning_handoffs"] == {
+        # Reported verbatim as unrecognized rather than downgraded to 1, so a
+        # reader can see the shape was written by different code.
+        "policy_version": None,
+        "policy_active": True,
+        "barrier_reported": True,
+        "published_rounds": [],
+        # A pair whose lengths are all unusable is not a published pair: the
+        # flag and the lengths can never disagree.
+        "structured_pair": False,
+        "native_pair": False,
+        "structured_lengths": {"bull": 0, "bear": 0},
+        "native_lengths": {"bull": 0, "bear": 0},
+    }
+
+
 def test_verdict_qualified_flag_reflects_marker(monkeypatch):
     qualified = _min_summary(
         monkeypatch,

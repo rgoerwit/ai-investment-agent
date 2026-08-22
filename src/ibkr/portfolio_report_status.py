@@ -332,6 +332,19 @@ def _append_analysis_freshness(
     else:
         lines.append("    None")
 
+    if summary.refreshed_this_run:
+        # No rerun command here by design: this run produced these analyses, and
+        # printing the command beside its own "Refreshed:" line is the
+        # contradiction this bucket exists to remove.
+        lines.extend(("", "  Refreshed this run — no further action needed:"))
+        for row in summary.refreshed_this_run:
+            refreshed_details = [row.reason_family]
+            if row.expires_date:
+                refreshed_details.append(f"expires {row.expires_date}")
+            lines.append(
+                f"    {row.display_ticker:<12} {'  ·  '.join(refreshed_details)}"
+            )
+
     if summary.operator_review:
         lines.extend(
             ("", "  Operator decision points — will be re-run on normal cadence:")

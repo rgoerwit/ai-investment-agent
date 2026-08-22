@@ -196,6 +196,25 @@ def test_reasoning_and_service_tier_overrides_reach_adapter_request() -> None:
     assert request.service_tier == "flex"
 
 
+def test_readable_reasoning_request_reaches_provider_adapter() -> None:
+    settings = _settings(llm_base_provider="openai")
+    plan = resolve_binding_plan(settings)
+    factory = RecordingFactory()
+
+    build_required_model_for_seat(
+        SeatId.BULL,
+        settings=settings,
+        plan=plan,
+        factory=factory,
+        output_tokens=7_168,
+        include_reasoning_output=True,
+    )
+
+    request = factory.requests[0]
+    assert request.include_reasoning_output is True
+    assert request.output_tokens == 7_168
+
+
 def test_portfolio_macro_classifier_preserves_deep_normal_and_fast_quick_modes() -> (
     None
 ):

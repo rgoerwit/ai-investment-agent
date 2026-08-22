@@ -81,6 +81,7 @@ class GoogleAdapter:
                 ),
                 api_key=settings.get_google_api_key(),
                 settings=settings,
+                include_thoughts=request.include_reasoning_output,
             )
 
         reasoning = request.reasoning_value
@@ -117,6 +118,7 @@ class GoogleAdapter:
             service_tier=request.service_tier,
             api_key=settings.get_google_api_key(),
             settings=settings,
+            include_thoughts=request.include_reasoning_output,
         )
         llm.rate_limiter = limiter_for_binding(
             settings,

@@ -1180,6 +1180,7 @@ def create_gemini_model(
     service_tier: str | None = None,
     api_key: str | None = None,
     settings: Any | None = None,
+    include_thoughts: bool = False,
 ) -> BaseChatModel:
     """
     Generic factory for Gemini models.
@@ -1260,6 +1261,8 @@ def create_gemini_model(
     if resolved_tier is not None:
         kwargs["service_tier"] = resolved_tier
         kwargs["flex_fallback_to_standard"] = settings.flex_fallback_to_standard
+    if include_thoughts:
+        kwargs["include_thoughts"] = True
 
     llm = _TieredChatGoogleGenerativeAI(**kwargs)
     _stamp_budget_metadata(
@@ -1289,6 +1292,7 @@ def create_quick_thinking_llm(
     thinking_level_bump: bool = False,
     api_key: str | None = None,
     settings: Any | None = None,
+    include_thoughts: bool = False,
 ) -> BaseChatModel:
     """
     Create a quick thinking LLM.
@@ -1340,6 +1344,7 @@ def create_quick_thinking_llm(
         service_tier=service_tier,
         api_key=api_key,
         settings=settings,
+        include_thoughts=include_thoughts,
     )
 
 
@@ -1352,6 +1357,7 @@ def create_deep_thinking_llm(
     max_output_tokens: int | None = None,
     api_key: str | None = None,
     settings: Any | None = None,
+    include_thoughts: bool = False,
 ) -> BaseChatModel:
     """
     Create a deep thinking LLM.
@@ -1383,6 +1389,7 @@ def create_deep_thinking_llm(
         reserve_class="deep",
         api_key=api_key,
         settings=settings,
+        include_thoughts=include_thoughts,
     )
 
 
@@ -2060,6 +2067,7 @@ def _build_openai_chat(
     unthrottled_kind: str,
     effort_preference: tuple[str, ...],
     settings: Any | None = None,
+    include_reasoning_output: bool = False,
 ) -> BaseChatModel:
     """Shared ChatOpenAI construction for the editor and writer-fallback tiers.
 
@@ -2095,6 +2103,12 @@ def _build_openai_chat(
     reasoning_effort = _apply_openai_reasoning_effort(
         kwargs, model_name=model_name, preference=effort_preference
     )
+    if include_reasoning_output:
+        kwargs.pop("reasoning_effort", None)
+        reasoning: dict[str, Any] = {"summary": "auto"}
+        if reasoning_effort is not None:
+            reasoning["effort"] = reasoning_effort
+        kwargs["reasoning"] = reasoning
     budget = _apply_openai_generation_budget(
         kwargs,
         model_name=model_name,

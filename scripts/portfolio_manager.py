@@ -1327,6 +1327,7 @@ def format_json(
             "due_soon_count": len(freshness_summary.due_soon),
             "candidate_blocked_count": len(freshness_summary.candidate_blocked),
             "operator_review_count": len(freshness_summary.operator_review),
+            "refreshed_this_run_count": len(freshness_summary.refreshed_this_run),
             "refreshed_this_run": refresh_activity.refreshed,
             "refresh_failed": refresh_activity.failed,
             "refresh_policy": refresh_activity.policy,

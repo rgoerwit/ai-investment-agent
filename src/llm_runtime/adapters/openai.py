@@ -38,6 +38,7 @@ class OpenAIAdapter:
                 unthrottled_kind=request.seat.seat_id.value,
                 effort_preference=preference,
                 settings=settings,
+                include_reasoning_output=request.include_reasoning_output,
             )
         else:
             from langchain_openai import ChatOpenAI
@@ -65,7 +66,12 @@ class OpenAIAdapter:
                 # Binding validation has already proved that this is an
                 # OpenAI-owned endpoint under the provider-scoped schema.
                 kwargs["base_url"] = base_url
-            if request.reasoning_value is not None:
+            if request.include_reasoning_output:
+                reasoning: dict[str, Any] = {"summary": "auto"}
+                if request.reasoning_value is not None:
+                    reasoning["effort"] = request.reasoning_value
+                kwargs["reasoning"] = reasoning
+            elif request.reasoning_value is not None:
                 kwargs["reasoning_effort"] = request.reasoning_value
             temperature = resolve_sampling_temperature(
                 request.binding.profile,

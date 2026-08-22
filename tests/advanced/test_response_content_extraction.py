@@ -141,6 +141,17 @@ class TestExtractStringContentDictHandling:
         result = extract_string_content(reasoning_dict)
         assert result == ""
 
+    @pytest.mark.parametrize("block_type", ["thinking", "redacted_thinking"])
+    def test_provider_thinking_blocks_never_leak_into_visible_output(self, block_type):
+        result = extract_string_content(
+            {
+                "type": block_type,
+                "thinking": "private reasoning",
+                "signature": "opaque signature",
+            }
+        )
+        assert result == ""
+
     def test_function_call_type_dict_returns_empty_string(self):
         """A tool-call block must not stringify into content (3679.T: a raw
         function_call dict was persisted as the consultant review, suppressing

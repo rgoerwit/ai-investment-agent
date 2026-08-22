@@ -212,7 +212,13 @@ def extract_string_content(content: Any) -> str:
         # function_call/tool_use dict here once persisted a raw tool-call as a
         # consultant review (3679.T 2026-07-11): the non-empty garbage
         # suppressed the loop's empty-content forced-synthesis fallback.
-        if content.get("type") in ("reasoning", "function_call", "tool_use"):
+        if content.get("type") in (
+            "reasoning",
+            "thinking",
+            "redacted_thinking",
+            "function_call",
+            "tool_use",
+        ):
             return ""
         logger.debug("response_content_is_dict", keys=list(content.keys()))
         return str(content)

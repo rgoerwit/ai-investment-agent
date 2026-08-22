@@ -303,6 +303,7 @@ def normalize_positions(
             unrealized_pnl_basis=normalized_values.unrealized_pnl_basis,
             valuation_valid=normalized_values.valuation_valid,
             valuation_issue=normalized_values.valuation_issue,
+            position_flat=normalized_values.position_flat,
             currency=currency,
             current_price_local=current_price_local,
             ticker_identity_verified=p.ticker_identity_verified,

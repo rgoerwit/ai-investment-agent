@@ -30,6 +30,7 @@ class LegacySeatRequest:
     output_tokens: int | None
     model_override: str | None
     resolved_model: str
+    include_reasoning_output: bool = False
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,9 @@ def build_legacy_model(
     callbacks = list(request.callbacks)
     output_tokens = request.output_tokens
     model_override = request.model_override
+    reasoning_output_kwargs = (
+        {"include_thoughts": True} if request.include_reasoning_output else {}
+    )
     quick_factory = (
         graph_factories.quick if graph_factories else llms.create_quick_thinking_llm
     )
@@ -235,6 +239,7 @@ def build_legacy_model(
             thinking_level_bump=(seat_id is SeatId.VALUE_TRAP and not quick_mode),
             api_key=settings.get_google_api_key(),
             settings=settings,
+            **reasoning_output_kwargs,
         )
     return deep_factory(
         model=model_override or request.resolved_model,
@@ -248,6 +253,7 @@ def build_legacy_model(
         max_output_tokens=output_tokens,
         api_key=settings.get_google_api_key(),
         settings=settings,
+        **reasoning_output_kwargs,
     )
 
 
@@ -267,6 +273,7 @@ def build_model_for_seat(
     service_tier: str | None = None,
     model_override: str | None = None,
     legacy_builder: LegacyBuilder | None = None,
+    include_reasoning_output: bool = False,
 ) -> BaseChatModel | None:
     """Construct one fresh client from a canonical seat binding."""
 
@@ -292,6 +299,7 @@ def build_model_for_seat(
                 output_tokens=output_tokens,
                 model_override=model_override,
                 resolved_model=binding.model,
+                include_reasoning_output=include_reasoning_output,
             )
         )
 
@@ -351,6 +359,7 @@ def build_model_for_seat(
             reasoning_value=reasoning_value,
             service_tier=service_tier,
             settings=settings,
+            include_reasoning_output=include_reasoning_output,
         )
     )
     if model is None and status.enabled:

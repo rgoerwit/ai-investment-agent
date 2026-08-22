@@ -16,6 +16,7 @@ from src.ibkr.portfolio_defaults import (
     DEFAULT_REFRESH_CYCLE_WEIGHT,
     DEFAULT_REFRESH_FAILURE_BACKOFF_HOURS,
     DEFAULT_REFRESH_URGENT_WEIGHT,
+    DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS,
 )
 from src.ibkr.types import (
     AnalysisRunner,
@@ -64,6 +65,10 @@ class AnalysisFreshnessSummary:
     candidate_blocked: list[AnalysisFreshnessRow] = field(default_factory=list)
     operator_review: list[AnalysisFreshnessRow] = field(default_factory=list)
     fresh: list[AnalysisFreshnessRow] = field(default_factory=list)
+    # Display-only, and deliberately absent from plan()'s inputs: this run has
+    # already produced the analysis the queue would ask for, so re-issuing its
+    # command would contradict the report's own "Refreshed:" line.
+    refreshed_this_run: list[AnalysisFreshnessRow] = field(default_factory=list)
 
 
 @dataclass
@@ -143,6 +148,7 @@ class AnalysisRefreshService:
         items: list[ReconciliationItem],
         *,
         max_age_days: int,
+        already_refreshed: frozenset[str] = frozenset(),
     ) -> AnalysisFreshnessSummary:
         summary = AnalysisFreshnessSummary()
         for item in items:
@@ -200,6 +206,30 @@ class AnalysisRefreshService:
                 summary.due_soon.append(replace(row, bucket="due_soon"))
                 continue
             summary.fresh.append(row)
+        return self._withdraw_refreshed(summary, already_refreshed)
+
+    @staticmethod
+    def _withdraw_refreshed(
+        summary: AnalysisFreshnessSummary, already_refreshed: frozenset[str]
+    ) -> AnalysisFreshnessSummary:
+        """Move rows this run already refreshed out of every command-bearing bucket.
+
+        Applied as a post-pass rather than threaded through each branch: the
+        classification logic is about evidence, and "we just ran it" is a fact
+        about the run. Only buckets that render a rerun command are drained —
+        ``operator_review`` and ``fresh`` carry no command and stay put.
+        """
+        if not already_refreshed:
+            return summary
+        for name in ("blocking_now", "stale_in_queue", "due_soon", "candidate_blocked"):
+            bucket: list[AnalysisFreshnessRow] = getattr(summary, name)
+            kept = [row for row in bucket if row.run_ticker not in already_refreshed]
+            summary.refreshed_this_run.extend(
+                replace(row, bucket="refreshed_this_run")
+                for row in bucket
+                if row.run_ticker in already_refreshed
+            )
+            setattr(summary, name, kept)
         return summary
 
     def plan(
@@ -404,10 +434,17 @@ class AnalysisRefreshService:
                         else "operator_review",
                     )
                 )
-            else:
+            elif AnalysisRefreshService._confirmation_reachable(analysis):
                 # A hard, unconfirmed reject needs a second full analysis
                 # before a held position can gain exit authority.
                 summary.blocking_now.append(replace(row, bucket="blocking_now"))
+            else:
+                # Re-running today cannot change the disposition, because
+                # confirmation also requires the two rejecting analyses to be
+                # at least DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS apart.
+                # Without this the same ticker re-entered the urgent queue on
+                # every single run for a week (7047.T: 08-15 x2, 08-18, 08-19).
+                summary.operator_review.append(replace(row, bucket="operator_review"))
             return
         if basis in {"DATA_QUALITY", "STOP_LOSS"}:
             # Evidence or a review-level breach is indeterminate evidence:
@@ -435,6 +472,35 @@ class AnalysisRefreshService:
             summary.due_soon.append(replace(row, bucket="due_soon"))
             return
         summary.operator_review.append(replace(row, bucket="operator_review"))
+
+    @staticmethod
+    def _confirmation_reachable(analysis: AnalysisRecord) -> bool:
+        """Whether a refresh today could confirm an unconfirmed reject.
+
+        ``reject_confirmed`` needs provably full-mode analyses on both sides,
+        at least ``DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS`` apart. Two
+        cases, and the distinction matters:
+
+        * The artifact on disk is quick-mode or mode-unknown. It carries no
+          sell authority at all, so a full re-run supplies something the record
+          lacks and could confirm against an older full prior regardless of the
+          current artifact's age. Always reachable.
+        * The artifact is provably full-mode. A refresh replaces it with a
+          today-dated analysis, and ``reject_confirmed`` then measures spacing
+          against the most recent full prior — which is the artifact being
+          replaced. So the spacing a re-run can achieve is exactly that
+          artifact's age, and below the threshold the re-run is *guaranteed*
+          not to change the disposition.
+
+        Convergence is unaffected: an unconfirmed reject still becomes urgent
+        on the first day confirmation is achievable, and confirms then. What
+        this removes is the six intervening days on which the same ticker
+        re-entered the urgent queue every run and could not possibly settle
+        (7047.T was fully re-analysed on 08-15 twice, 08-18 and 08-19).
+        """
+        if analysis.is_quick_mode is not False:
+            return True
+        return analysis.age_days >= DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS
 
     @staticmethod
     def _dedupe_rows(

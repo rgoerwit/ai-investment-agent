@@ -170,7 +170,12 @@ def evaluate_positions(
     held_tickers: set[str] = set()
 
     for pos in positions:
-        if pos.quantity <= 0 and pos.valuation_valid:
+        # A closed position is not portfolio work. Keyed on the validated flat
+        # predicate rather than `quantity <= 0 and valuation_valid`: a closed
+        # non-USD position used to fail valuation (zero anchor, no fallback
+        # basis outside USD), escape this skip, and surface as an urgent
+        # DATA_QUALITY refresh for stock the operator no longer owned.
+        if pos.position_flat:
             continue
 
         yf_key = pos.ticker.yf
@@ -241,6 +246,29 @@ def evaluate_positions(
                     and analysis_key.split(".")[0].upper() == held_base
                 ):
                     held_tickers.add(analysis_key)
+
+        if pos.quantity < 0:
+            # Shorts are outside this strategy. Route them visibly rather than
+            # skipping: falling through reaches the SELL branch, whose
+            # abs(quantity) would propose selling more of an already-short
+            # position.
+            items.append(
+                ReconciliationItem(
+                    ticker=item_ticker,
+                    action="REVIEW",
+                    reason=(
+                        f"Short position ({pos.quantity:,.0f} shares) — this "
+                        "strategy is long-only; confirm the position in IBKR "
+                        "before any order"
+                    ),
+                    urgency="HIGH",
+                    ibkr_position=pos,
+                    analysis=analysis,
+                    sell_type="DATA_QUALITY_REVIEW",
+                    action_basis="DATA_QUALITY",
+                )
+            )
+            continue
 
         if not pos.valuation_valid:
             items.append(

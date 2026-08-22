@@ -104,6 +104,7 @@ def _make_position(
     currency: str = "JPY",
     conid: int = 123456,
     tax_term: str = "UNKNOWN",
+    position_flat: bool | None = None,
 ) -> NormalizedPosition:
     from src.ibkr.ticker import Ticker
 
@@ -118,6 +119,15 @@ def _make_position(
         tax_term=tax_term,
         ticker_identity_verified=True,
         ticker_resolution_source="exchange_map",
+        # Mirror what normalize_position_values would derive: a position is flat
+        # only when the quantity AND the value agree that nothing is held. A zero
+        # quantity beside a non-zero value is a broker inconsistency (or an
+        # unparseable quantity), which must stay on the data-quality path.
+        position_flat=(
+            (quantity == 0 and market_value_usd == 0)
+            if position_flat is None
+            else position_flat
+        ),
     )
 
 
@@ -489,14 +499,14 @@ class TestReconcile:
         Previously this produced a spurious SELL with no share count or proceeds.
         Use DO_NOT_INITIATE verdict so Phase 2 does not regenerate a BUY either.
         """
-        pos = _make_position(quantity=0, current_price=1700)
+        pos = _make_position(quantity=0, market_value_usd=0, current_price=1700)
         analysis = _make_analysis(verdict="DO_NOT_INITIATE", stop_price=1900)
         items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
         assert items == []
 
     def test_zero_quantity_position_with_verdict_conflict_ignored(self):
         """IBKR position with quantity=0 must not generate a REVIEW/SELL for verdict conflict."""
-        pos = _make_position(quantity=0)
+        pos = _make_position(quantity=0, market_value_usd=0)
         analysis = _make_analysis(verdict="DO_NOT_INITIATE")
         items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
         assert items == []

@@ -806,3 +806,115 @@ class TestExecute:
         )
 
         rejection_mock.assert_not_awaited()
+
+
+class TestRefreshedThisRunIsNotReAdvertised:
+    """A ticker this run refreshed must not carry a rerun command.
+
+    Regression (2026-08-19): RecommendationService re-reconciles after
+    executing refreshes, and the urgent classes carry no freshness floor, so
+    7047.T and HERDEZ.MX appeared under "Urgent analysis refreshes" with a
+    `--ticker` command in the same report whose "Refreshed:" line named them.
+    """
+
+    def test_refreshed_rows_leave_every_command_bearing_bucket(self):
+        service = AnalysisRefreshService()
+        items = [
+            _make_review_item("7203.T", action_basis="DATA_QUALITY"),
+            _make_review_item("6758.T", action_basis="DATA_QUALITY"),
+        ]
+
+        before = service.classify(items, max_age_days=14)
+        assert {row.run_ticker for row in before.blocking_now} == {"7203.T", "6758.T"}
+
+        after = service.classify(
+            items, max_age_days=14, already_refreshed=frozenset({"7203.T"})
+        )
+
+        assert [row.run_ticker for row in after.blocking_now] == ["6758.T"]
+        assert [row.run_ticker for row in after.refreshed_this_run] == ["7203.T"]
+        assert all(
+            row.bucket == "refreshed_this_run" for row in after.refreshed_this_run
+        )
+
+    def test_refreshed_rows_are_never_planned(self):
+        service = AnalysisRefreshService()
+        summary = service.classify(
+            [_make_review_item("7203.T", action_basis="DATA_QUALITY")],
+            max_age_days=14,
+            already_refreshed=frozenset({"7203.T"}),
+        )
+
+        activity = service.plan(summary, options=_plan_options(policy="blocking"))
+
+        assert activity.queued == []
+
+    def test_operator_review_is_untouched_because_it_renders_no_command(self):
+        service = AnalysisRefreshService()
+        summary = service.classify(
+            [_make_review_item("7203.T", action_basis="ENTRY_CONSTRAINT", age_days=1)],
+            max_age_days=14,
+            already_refreshed=frozenset({"7203.T"}),
+        )
+
+        assert [row.run_ticker for row in summary.operator_review] == ["7203.T"]
+        assert summary.refreshed_this_run == []
+
+
+class TestUnconfirmedRejectWaitsForItsConfirmationWindow:
+    """A refresh that cannot change the disposition is cycle work, not urgent.
+
+    reject_confirmed needs the two rejecting analyses at least
+    DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS apart, so a refresh today can
+    only confirm when the analysis on disk is already that old. Without this the
+    same ticker re-entered the urgent queue on every run for a week.
+    """
+
+    @pytest.mark.parametrize("age_days", [0, 1, 6])
+    def test_inside_the_window_it_is_operator_review(self, age_days):
+        service = AnalysisRefreshService()
+
+        summary = service.classify(
+            [
+                _make_review_item(
+                    "7203.T", action_basis="THESIS_REASSESSMENT", age_days=age_days
+                )
+            ],
+            max_age_days=14,
+        )
+
+        assert summary.blocking_now == []
+        assert [row.run_ticker for row in summary.operator_review] == ["7203.T"]
+
+    @pytest.mark.parametrize("age_days", [7, 8, 20])
+    def test_at_or_past_the_window_it_is_urgent(self, age_days):
+        service = AnalysisRefreshService()
+
+        summary = service.classify(
+            [
+                _make_review_item(
+                    "7203.T", action_basis="THESIS_REASSESSMENT", age_days=age_days
+                )
+            ],
+            max_age_days=14,
+        )
+
+        assert [row.run_ticker for row in summary.blocking_now] == ["7203.T"]
+
+    def test_soft_reject_is_unaffected_by_the_window(self):
+        """A SOFT_REJECT was already on staleness cadence; nothing changes."""
+        service = AnalysisRefreshService()
+
+        summary = service.classify(
+            [
+                _make_review_item(
+                    "7203.T",
+                    action_basis="THESIS_REASSESSMENT",
+                    sell_type="SOFT_REJECT",
+                    age_days=1,
+                )
+            ],
+            max_age_days=14,
+        )
+
+        assert summary.blocking_now == []

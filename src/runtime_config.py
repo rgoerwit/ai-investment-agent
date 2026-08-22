@@ -20,6 +20,8 @@ class RuntimeConfig:
     quick_mode_active: bool
     images_dir: Path
     quiet_mode: bool
+    debate_reasoning_handoffs: bool = False
+    developer_debug_active: bool = False
     # Run-scoped `--quick-model` / `--deep-model`, applied to the BASE group's
     # `fast` and `reasoning` intents under the multi-provider schema. Kept
     # separate from `quick_think_llm`/`deep_think_llm` (which always carry a
@@ -48,6 +50,8 @@ class RuntimeConfig:
             quick_mode_active=getattr(base_config, "quick_mode_active", False),
             images_dir=Path(base_config.images_dir),
             quiet_mode=getattr(base_config, "quiet_mode", False),
+            debate_reasoning_handoffs=False,
+            developer_debug_active=False,
         )
 
     def with_overrides(self, **changes: Any) -> RuntimeConfig:
@@ -90,6 +94,10 @@ def build_runtime_config(args: Any, base_config: Any) -> RuntimeConfig:
         runtime_config = runtime_config.with_overrides(enable_memory=False)
     if getattr(args, "quiet", False) or getattr(args, "brief", False):
         runtime_config = runtime_config.with_overrides(quiet_mode=True)
+    if getattr(args, "debate_reasoning_handoffs", False):
+        runtime_config = runtime_config.with_overrides(debate_reasoning_handoffs=True)
+    if getattr(args, "debug", False):
+        runtime_config = runtime_config.with_overrides(developer_debug_active=True)
     if getattr(args, "enable_langfuse", False) or getattr(
         args, "trace_langfuse", False
     ):

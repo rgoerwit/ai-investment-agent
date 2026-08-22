@@ -125,6 +125,9 @@ class NormalizedPosition(BaseModel):
     )
     valuation_valid: bool = True
     valuation_issue: str | None = None
+    # A genuinely closed position (quantity and both value legs zero). Distinct
+    # from `quantity == 0` alone, which an inconsistent broker row can also show.
+    position_flat: bool = False
     currency: str = "USD"  # ISO code for the LOCAL currency above
     current_price_local: float = 0.0  # LOCAL currency
     acquired_date: str | None = None  # YYYY-MM-DD if lot/history data is available

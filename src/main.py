@@ -25,6 +25,7 @@ import src.cli as cli
 # Import config FIRST to set telemetry/system env vars before any library imports
 import src.output as output
 import src.persistence as persistence
+from src.agents.debate_handoffs import seed_handoff_telemetry
 from src.async_utils import run_with_hard_timeout
 from src.config import Settings, config, validate_environment_variables
 from src.error_safety import format_error_message, summarize_exception
@@ -249,6 +250,7 @@ def _build_analysis_trace_metadata(
         "quick_mode": quick_mode,
         "deep_model": runtime_config.deep_think_llm,
         "quick_model": runtime_config.quick_think_llm,
+        "debate_reasoning_handoffs": runtime_config.debate_reasoning_handoffs,
         "prompt_source": (
             "langfuse" if config.langfuse_prompt_fetch_enabled else "local"
         ),
@@ -742,6 +744,11 @@ async def run_analysis(
                     bear_round1="",
                     bull_round2="",
                     bear_round2="",
+                    bull_round1_handoff={},
+                    bear_round1_handoff={},
+                    handoff_telemetry=seed_handoff_telemetry(
+                        policy_active=runtime_config.debate_reasoning_handoffs
+                    ),
                     current_round=1,
                     bull_history="",
                     bear_history="",

@@ -215,6 +215,9 @@ def _serialize_freshness(bundle: PortfolioRecommendationBundle) -> dict[str, Any
         "candidate_blocked": [
             _serialize_freshness_row(row) for row in summary.candidate_blocked
         ],
+        "refreshed_this_run": [
+            _serialize_freshness_row(row) for row in summary.refreshed_this_run
+        ],
         "fresh_count": len(summary.fresh),
         "refresh_activity": {
             "policy": bundle.refresh_activity.policy,

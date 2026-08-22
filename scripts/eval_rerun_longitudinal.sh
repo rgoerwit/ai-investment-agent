@@ -8,6 +8,13 @@
 # Full mode (not --quick) to match the mode most of that history was run in
 # ("--quick is a screener, not investment-grade output" per CLAUDE.md).
 #
+# Usage:
+#   scripts/eval_rerun_longitudinal.sh [ticker-file] [-- analyzer-args...]
+#
+# Arguments after `--` are forwarded verbatim to every analyzer invocation.
+# The script's quiet/brief defaults are omitted when an explicit logging mode
+# (--quiet, --brief, --verbose, or --debug) is supplied after the separator.
+#
 # Wraps the whole run in `caffeinate -i` so the Mac doesn't sleep mid-batch.
 # The JSON artifact for each run lands in the normal RESULTS_DIR (results/)
 # via the standard save path -- this script does not need to know that path.
@@ -32,7 +39,21 @@ DEFAULT_TICKERS=(1681.HK PINFRA.MX AGS.BR 7740.T 8002.T 1088.HK)
 
 COOLDOWN_SECONDS="${COOLDOWN_SECONDS:-15}"
 
-TICKER_FILE="${1:-}"
+TICKER_FILE=""
+ANALYZER_ARGS=()
+if [[ $# -gt 0 && "$1" != "--" ]]; then
+    TICKER_FILE="$1"
+    shift
+fi
+if [[ $# -gt 0 ]]; then
+    if [[ "$1" != "--" ]]; then
+        echo "Unexpected argument: $1 (put analyzer arguments after --)" >&2
+        exit 2
+    fi
+    shift
+    ANALYZER_ARGS=("$@")
+fi
+
 if [[ -n "$TICKER_FILE" ]]; then
     if [[ ! -f "$TICKER_FILE" ]]; then
         echo "Ticker file not found: $TICKER_FILE" >&2
@@ -72,6 +93,41 @@ MODE_LABEL="full"
 if [[ "$QUICK_MODE" != "0" ]]; then
     MODE_ARGS=(--quick)
     MODE_LABEL="quick"
+fi
+
+# The runner owns identity, destinations, and quick/full mode. Rejecting those
+# flags prevents a forwarded argument from silently changing the ticker being
+# checked by scan_batch_health, writing outside the run directory, or making the
+# directory's mode label false. All other analyzer flags remain generic.
+OUTPUT_ARGS=(--quiet --brief)
+OUTPUT_MODE_COUNT=0
+for arg in "${ANALYZER_ARGS[@]+"${ANALYZER_ARGS[@]}"}"; do
+    case "$arg" in
+        --ticker|--ticker=*|--output|--output=*|--imagedir|--imagedir=*|--quick)
+            echo "Analyzer argument is owned by this runner and cannot be forwarded: $arg" >&2
+            exit 2
+            ;;
+        --quiet|--brief|--verbose|--debug)
+            # cli.py intentionally gives quiet/brief precedence over debug and
+            # verbose. An explicit logging choice must therefore replace, not
+            # merely follow, the batch defaults.
+            OUTPUT_ARGS=()
+            OUTPUT_MODE_COUNT=$((OUTPUT_MODE_COUNT + 1))
+            ;;
+    esac
+done
+if [[ $OUTPUT_MODE_COUNT -gt 1 ]]; then
+    echo "Forward at most one logging mode: --quiet, --brief, --verbose, or --debug" >&2
+    exit 2
+fi
+
+if [[ "$QUICK_MODE" != "0" ]]; then
+    for arg in "${ANALYZER_ARGS[@]+"${ANALYZER_ARGS[@]}"}"; do
+        if [[ "$arg" == "--debate-reasoning-handoffs" ]]; then
+            echo "--debate-reasoning-handoffs requires a full two-round run; unset QUICK_MODE" >&2
+            exit 2
+        fi
+    done
 fi
 
 RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
@@ -127,7 +183,9 @@ for ticker in "${TICKERS[@]}"; do
     if "${PYTHON_CMD[@]}" -m src.main --ticker "$ticker" \
             --imagedir "$IMAGE_DIR" --output "$REPORT_PATH" \
             "${MODE_ARGS[@]+"${MODE_ARGS[@]}"}" \
-            --quiet --brief >> "$LOG_FILE" 2>&1; then
+            "${OUTPUT_ARGS[@]+"${OUTPUT_ARGS[@]}"}" \
+            "${ANALYZER_ARGS[@]+"${ANALYZER_ARGS[@]}"}" \
+            >> "$LOG_FILE" 2>&1; then
         if VALIDITY_RESULT="$("${PYTHON_CMD[@]}" scripts/scan_batch_health.py \
                 --modified-since "$ANALYSIS_STARTED_AT" \
                 --require-publishable-ticker "$ticker" 2>> "$LOG_FILE")"; then
@@ -171,8 +229,8 @@ done
     echo ""
     echo "Corresponding *_analysis.json artifacts were written to \$RESULTS_DIR"
     echo "(results/ by default) with a fresh timestamp -- diff those against"
-    echo "the prior history for the same tickers under results/ and"
-    echo "~/Developer/results_archive/ for the longitudinal comparison."
+    echo "the prior history for the same tickers under results/ and the"
+    echo "configured archive directories for the longitudinal comparison."
 } | tee -a "$SUMMARY_FILE" "$LOG_FILE"
 
 echo ""

@@ -7,8 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Balanced debate reasoning handoffs** — An opt-in full-run mode gives both
+  second-round researchers and Research Manager symmetric, bounded Round-1
+  rationale adjuncts, with provider-summary fallback, automatic budgets, and
+  telemetry-only persistence.
+
+### Fixed
+
+- **A closed position no longer manufactures urgent analysis work** — A sold
+  holding still present in the IBKR snapshot has quantity 0, so the unit anchor
+  `quantity × price` was 0 and value classification fell back to "unclassifiable"
+  for every non-USD currency. That marked the position valuation-invalid, which
+  let it slip past the evaluator's closed-position skip and surface as an
+  *urgent* data-quality refresh for stock the operator no longer owned (7047.T
+  and HERDEZ.MX, 2026-08-19, two full-mode analyses). A closed position is now a
+  validated condition established before any FX or unit work, and short
+  positions route to review instead of being silently skipped.
+- **A refreshed ticker is no longer re-advertised as urgent** — The reconciler
+  re-reconciles after executing refreshes, so a ticker it had just analysed
+  returned to the urgent bucket complete with the command to analyse it again,
+  in the same report whose "Refreshed:" line named it. Those rows now render in
+  a command-free `Refreshed this run` state. Separately, an unconfirmed hard
+  reject waits for the day its confirmation window is actually reachable rather
+  than re-entering the urgent queue on every run for a week; convergence still
+  lands on the same day, without the intervening re-analyses.
+- **Debate handoff telemetry has one producer** — Persistence rebuilt the
+  telemetry shape independently of the graph and had already drifted on
+  `policy_version`. It now projects the graph's own record through a single
+  allowlisting function, and reports `policy_active` (what the run was
+  configured to do) separately from `barrier_reported` (whether the debate
+  barrier ran) instead of inferring both from one flag plus ambient run
+  configuration.
+- **Native reasoning summaries mark their truncation** — Every observed summary
+  reached the character cap exactly, so the next agent received an incomplete
+  text that read as complete.
+
 ### Changed
 
+- **Round-1 rationale capsules are appended, not prefixed** — The canonical
+  argument is the deliverable, so a response cut off at the output cap now loses
+  only the adjunct. The parser already read either order.
 - **Cooled dependency refresh (August 2026)** — Move the LangChain, LangGraph,
   Gemini/OpenAI/Anthropic, LangSmith/Langfuse, yfinance, scientific, optional
   OpenTelemetry, and development-tool dependencies to deliberately reviewed

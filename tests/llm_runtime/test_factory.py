@@ -51,6 +51,82 @@ def test_factory_builds_fresh_instance_per_call(monkeypatch) -> None:
     assert first is not second
 
 
+def test_google_reasoning_handoff_requests_readable_thoughts(monkeypatch) -> None:
+    from src import llms
+
+    settings = Settings(
+        _env_file=None,
+        llm_base_provider="google",
+        llm_review_provider="openai",
+        google_api_key="g",
+        openai_api_key="o",
+        claude_api_key="a",
+        deepseek_api_key="d",
+    )
+    plan = resolve_binding_plan(settings)
+    captured = {}
+    model = MagicMock()
+
+    def fake_gemini(*args, **kwargs):
+        captured.update(kwargs)
+        return model
+
+    monkeypatch.setattr(llms, "create_gemini_model", fake_gemini)
+    request = SeatModelRequest(
+        plan.bindings[SeatId.BULL],
+        SEATS[SeatId.BULL],
+        False,
+        output_tokens=7_168,
+        reasoning_value="high",
+        settings=settings,
+        include_reasoning_output=True,
+    )
+
+    assert SeatModelFactory().build(request) is model
+    assert captured["include_thoughts"] is True
+    assert captured["max_output_tokens"] == 7_168
+
+
+def test_openai_reasoning_handoff_requests_summary_without_duplicate_effort(
+    monkeypatch,
+) -> None:
+    import langchain_openai
+
+    settings = Settings(
+        _env_file=None,
+        llm_base_provider="openai",
+        llm_review_provider="google",
+        google_api_key="g",
+        openai_api_key="o",
+        claude_api_key="a",
+        deepseek_api_key="d",
+        openai_service_tier="auto",
+    )
+    plan = resolve_binding_plan(settings)
+    captured = {}
+    model = MagicMock()
+
+    def fake_openai(**kwargs):
+        captured.update(kwargs)
+        return model
+
+    monkeypatch.setattr(langchain_openai, "ChatOpenAI", fake_openai)
+    request = SeatModelRequest(
+        plan.bindings[SeatId.BULL],
+        SEATS[SeatId.BULL],
+        False,
+        output_tokens=7_168,
+        reasoning_value="medium",
+        settings=settings,
+        include_reasoning_output=True,
+    )
+
+    assert SeatModelFactory().build(request) is model
+    assert captured["reasoning"] == {"effort": "medium", "summary": "auto"}
+    assert "reasoning_effort" not in captured
+    assert captured["use_responses_api"] is True
+
+
 def test_compat_adapter_rejects_unqualified_tool_seat() -> None:
     plan = _plan()
     binding = plan.bindings[SeatId.APAC]

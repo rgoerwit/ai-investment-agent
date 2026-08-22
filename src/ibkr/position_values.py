@@ -11,6 +11,9 @@ ValueBasis = Literal["BROKER_USD", "LOCAL_CONVERTED", "UNAVAILABLE"]
 _MARKET_VALUE_TOLERANCE = 0.35
 _PNL_TOLERANCE = 0.35
 _MIN_EXPECTED_VALUE = 1e-9
+# Broker payloads round; _MIN_EXPECTED_VALUE sits below their reporting precision,
+# so "materially zero" needs its own, looser constant. Do not merge the two.
+_FLAT_VALUE_EPSILON = 1e-6
 
 
 @dataclass(frozen=True)
@@ -24,6 +27,40 @@ class NormalizedPositionValues:
     unrealized_pnl_basis: ValueBasis
     valuation_valid: bool
     valuation_issue: str | None = None
+    # A genuinely closed position, established before any FX or unit work.
+    position_flat: bool = False
+
+
+def _is_flat_position(
+    *,
+    quantity: float,
+    raw_market_value: float,
+    raw_unrealized_pnl: float | None,
+) -> bool:
+    """True when the broker reports a genuinely closed position.
+
+    Every value leg must agree that nothing is held. A zero quantity reported
+    beside a material market value is a broker inconsistency, not a flat
+    position, and must stay on the data-quality path.
+
+    Parse validity is guaranteed by the caller: ``normalize_positions`` routes
+    any row with ``malformed_fields`` straight to an invalid result without
+    reaching this function, so an unparseable quantity (which also arrives as
+    0.0) can never be mistaken for a closed one. Finiteness is still checked
+    here because ``float("inf")`` parses successfully.
+    """
+    if not math.isfinite(quantity) or quantity != 0.0:
+        return False
+    if not math.isfinite(raw_market_value):
+        return False
+    if abs(raw_market_value) > _FLAT_VALUE_EPSILON:
+        return False
+    if raw_unrealized_pnl is None:
+        return True
+    return (
+        math.isfinite(raw_unrealized_pnl)
+        and abs(raw_unrealized_pnl) <= _FLAT_VALUE_EPSILON
+    )
 
 
 def normalize_position_values(
@@ -48,6 +85,24 @@ def normalize_position_values(
     not fetch rates itself.
     """
     normalized_currency = currency.strip().upper() or "USD"
+    # A closed position is settled before any unit question arises: zero converts
+    # to zero under either convention, and no FX rate is needed to say so. This
+    # must precede the FX guard below, which would otherwise fail a flat position
+    # in a currency whose rate could not be resolved.
+    if _is_flat_position(
+        quantity=quantity,
+        raw_market_value=raw_market_value,
+        raw_unrealized_pnl=raw_unrealized_pnl,
+    ):
+        return NormalizedPositionValues(
+            market_value_usd=0.0,
+            unrealized_pnl_usd=0.0,
+            fx_rate_to_usd=fx_rate if normalized_currency != "USD" else 1.0,
+            market_value_basis="UNAVAILABLE",
+            unrealized_pnl_basis="UNAVAILABLE",
+            valuation_valid=True,
+            position_flat=True,
+        )
     if normalized_currency == "USD":
         fx_rate = 1.0
     if fx_rate is None or fx_rate <= 0:
@@ -149,7 +204,16 @@ def _classify_basis(
     tolerance: float,
     fallback_basis: ValueBasis | None = "LOCAL_CONVERTED",
 ) -> ValueBasis | None:
-    """Return the unit convention whose independently expected value is closest."""
+    """Return the unit convention whose independently expected value is closest.
+
+    With no usable anchor the caller's fallback decides, and the asymmetry there
+    is deliberate: for USD the fallback is an identity (a USD position's value is
+    USD by construction, so there is no unit question to answer), while for any
+    other currency it is None because local-vs-USD is genuinely undecidable
+    without an anchor. IBKR routinely omits mktPrice, so this branch is the
+    normal path for an ordinary USD holding — not a degenerate one. A closed
+    position never reaches it at all (see _is_flat_position).
+    """
     if abs(expected_local) <= _MIN_EXPECTED_VALUE:
         return fallback_basis
 

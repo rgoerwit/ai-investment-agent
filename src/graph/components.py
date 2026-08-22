@@ -22,6 +22,7 @@ from src.agents import (
     create_trader_node,
     create_valuation_calculator_node,
 )
+from src.agents.debate_handoffs import DebateReasoningPolicy
 from src.charts.chart_node import create_chart_generator_node
 from src.config import config
 from src.llm_budgets import get_agent_output_budget
@@ -72,6 +73,7 @@ class GraphComponents:
     consultant_enabled: bool
     auditor_enabled: bool
     apac_specialist_enabled: bool
+    debate_reasoning_policy: DebateReasoningPolicy
 
 
 def create_auditor_llm(*args: Any, **kwargs: Any) -> Any:
@@ -136,6 +138,7 @@ def build_seat_model(
     quick_mode: bool,
     callbacks: Sequence[BaseCallbackHandler],
     output_tokens: int | None,
+    include_reasoning_output: bool = False,
 ) -> Any:
     """Build one fresh model from a canonical seat and resolved binding."""
 
@@ -146,6 +149,7 @@ def build_seat_model(
         quick_mode=quick_mode,
         callbacks=list(callbacks),
         output_tokens=output_tokens,
+        include_reasoning_output=include_reasoning_output,
         # The quick-mode APEX standard-tier pin is seat data
         # (``standard_tier_in_quick_mode``), so every caller inherits it — not
         # only the graph.
@@ -270,32 +274,62 @@ def build_graph_components(
 
     tracker = get_tracker()
     base_output_tokens = config.llm_base_output_tokens
+    debate_reasoning_policy = DebateReasoningPolicy(
+        enabled=bool(getattr(runtime_config, "debate_reasoning_handoffs", False)),
+        max_rounds=max_debate_rounds,
+    )
     plan = binding_plan or resolve_binding_plan(config)
     factory = model_factory or SeatModelFactory()
 
     def output_budget(agent_name: str) -> int:
-        return get_agent_output_budget(agent_name, base_output_tokens)
+        return get_agent_output_budget(
+            agent_name, base_output_tokens
+        ) + debate_reasoning_policy.output_bonus(agent_name)
 
-    def tracked_callbacks(agent_name: str) -> list[TokenTrackingCallback]:
+    def tracked_callbacks(
+        agent_name: str, *, output_token_cap: int | None = None
+    ) -> list[TokenTrackingCallback]:
         return [
             TokenTrackingCallback(
                 agent_name,
                 tracker,
-                output_token_cap=output_budget(agent_name),
+                output_token_cap=(
+                    output_budget(agent_name)
+                    if output_token_cap is None
+                    else output_token_cap
+                ),
             )
         ]
 
-    def seat_model(seat_id: SeatId, *, tracked: bool = True) -> Any:
+    def seat_model(
+        seat_id: SeatId,
+        *,
+        tracked: bool = True,
+        include_reasoning_output: bool = False,
+        use_quick_binding: bool = False,
+        output_tokens_override: int | None = None,
+    ) -> Any:
         spec = SEATS[seat_id]
-        budget = output_budget(spec.budget_key) if spec.budget_key else None
-        callbacks = tracked_callbacks(spec.callback_name) if tracked else []
+        budget = (
+            output_tokens_override
+            if output_tokens_override is not None
+            else output_budget(spec.budget_key)
+            if spec.budget_key
+            else None
+        )
+        callbacks = (
+            tracked_callbacks(spec.callback_name, output_token_cap=budget)
+            if tracked
+            else []
+        )
         return build_seat_model(
             seat_id,
             plan=plan,
             model_factory=factory,
-            quick_mode=quick_mode,
+            quick_mode=quick_mode or use_quick_binding,
             callbacks=callbacks,
             output_tokens=budget,
+            include_reasoning_output=include_reasoning_output,
         )
 
     market_llm = seat_model(SeatId.MARKET)
@@ -347,6 +381,41 @@ def build_graph_components(
     )
     bull_llm = seat_model(SeatId.BULL)
     bear_llm = seat_model(SeatId.BEAR)
+    bull_r1_llm = (
+        seat_model(SeatId.BULL, include_reasoning_output=True)
+        if debate_reasoning_policy.active
+        else bull_llm
+    )
+    bear_r1_llm = (
+        seat_model(SeatId.BEAR, include_reasoning_output=True)
+        if debate_reasoning_policy.active
+        else bear_llm
+    )
+    # Formatting a completed canonical argument is not a second investment
+    # opinion. Use each role's reviewed fast binding, no native-reasoning output,
+    # and a small explicit cap instead of exposing the full researcher allowance.
+    bull_repair_llm = (
+        seat_model(
+            SeatId.BULL,
+            use_quick_binding=True,
+            output_tokens_override=(
+                debate_reasoning_policy.structured_repair_output_tokens
+            ),
+        )
+        if debate_reasoning_policy.active
+        else None
+    )
+    bear_repair_llm = (
+        seat_model(
+            SeatId.BEAR,
+            use_quick_binding=True,
+            output_tokens_override=(
+                debate_reasoning_policy.structured_repair_output_tokens
+            ),
+        )
+        if debate_reasoning_policy.active
+        else None
+    )
     res_mgr_llm = seat_model(SeatId.RESEARCH_MANAGER)
     risky_llm = seat_model(SeatId.RISKY)
     safe_llm = seat_model(SeatId.SAFE)
@@ -560,20 +629,60 @@ def build_graph_components(
         toolkit.get_value_trap_tools(), "value_trap_detector"
     )
 
-    bull_r1 = create_researcher_node(
-        bull_llm, bull_memory, "bull_researcher", round_num=1
+    researcher_handoff_kwargs: dict[str, Any] = (
+        {"handoff_policy": debate_reasoning_policy}
+        if debate_reasoning_policy.active
+        else {}
     )
-    bear_r1 = create_researcher_node(
-        bear_llm, bear_memory, "bear_researcher", round_num=1
+    bull_r1 = (
+        create_researcher_node(
+            bull_r1_llm,
+            bull_memory,
+            "bull_researcher",
+            round_num=1,
+            fallback_llm=bull_llm,
+            structured_repair_llm=bull_repair_llm,
+            **researcher_handoff_kwargs,
+        )
+        if debate_reasoning_policy.active
+        else create_researcher_node(
+            bull_r1_llm, bull_memory, "bull_researcher", round_num=1
+        )
+    )
+    bear_r1 = (
+        create_researcher_node(
+            bear_r1_llm,
+            bear_memory,
+            "bear_researcher",
+            round_num=1,
+            fallback_llm=bear_llm,
+            structured_repair_llm=bear_repair_llm,
+            **researcher_handoff_kwargs,
+        )
+        if debate_reasoning_policy.active
+        else create_researcher_node(
+            bear_r1_llm, bear_memory, "bear_researcher", round_num=1
+        )
     )
     bull_r2 = create_researcher_node(
-        bull_llm, bull_memory, "bull_researcher", round_num=2
+        bull_llm,
+        bull_memory,
+        "bull_researcher",
+        round_num=2,
+        **researcher_handoff_kwargs,
     )
     bear_r2 = create_researcher_node(
-        bear_llm, bear_memory, "bear_researcher", round_num=2
+        bear_llm,
+        bear_memory,
+        "bear_researcher",
+        round_num=2,
+        **researcher_handoff_kwargs,
     )
     res_mgr = create_research_manager_node(
-        res_mgr_llm, invest_judge_memory, strict_mode=strict_mode
+        res_mgr_llm,
+        invest_judge_memory,
+        strict_mode=strict_mode,
+        **researcher_handoff_kwargs,
     )
     trader = create_trader_node(trader_llm, trader_memory)
     risky = create_risk_debater_node(risky_llm, "risky_analyst")
@@ -669,4 +778,5 @@ def build_graph_components(
         consultant_enabled=consultant_enabled,
         auditor_enabled=auditor_enabled,
         apac_specialist_enabled=apac_specialist_enabled,
+        debate_reasoning_policy=debate_reasoning_policy,
     )

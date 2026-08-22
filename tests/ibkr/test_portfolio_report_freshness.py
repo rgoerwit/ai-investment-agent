@@ -26,7 +26,7 @@ from src.ibkr.portfolio_presentation import (
     group_portfolio_actions,
 )
 from src.ibkr.portfolio_report_formatting import DETAIL_WRAP_WIDTH
-from src.ibkr.refresh_service import RefreshActivity
+from src.ibkr.refresh_service import AnalysisRefreshService, RefreshActivity
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
 from src.ibkr.ticker import Ticker
 from src.ibkr.watchlist_optimization import resolve_watchlist_optimization
@@ -635,3 +635,87 @@ class TestOrderMatcherAuthority:
         order["conid"] = "not-a-number"
         report = format_report([item], _make_portfolio(), live_orders=[order])
         assert "ORDER ALREADY SUBMITTED" in report
+
+
+class TestRefreshedThisRunRendersWithoutACommand:
+    """The report must not print a command for work it just did.
+
+    Regression (2026-08-19): the same report said `Refreshed: 7047.T, HERDEZ.MX`
+    and, above it, listed both under "Urgent analysis refreshes" with a
+    `--ticker` command each. Asserted on the rendered text rather than on bucket
+    membership, because the contradiction the operator saw was a rendering fact:
+    routing the rows to `due_soon` moves the bucket and still prints a command.
+    """
+
+    def _item(self, ticker: str = "7203.T"):
+        return ReconciliationItem(
+            ticker=ticker,
+            action="REVIEW",
+            reason="Gate scores unreliable — re-run before acting",
+            urgency="HIGH",
+            ibkr_position=_make_position(ticker=ticker),
+            analysis=_make_analysis(ticker=ticker, age_days=0),
+            sell_type="DATA_QUALITY_REVIEW",
+            action_basis="DATA_QUALITY",
+        )
+
+    @staticmethod
+    def _freshness_section(report: str) -> str:
+        """The ANALYSIS FRESHNESS block only.
+
+        Scope note: the REVIEWS section renders its own refresh command from
+        `portfolio_report_positions`, attached to the position's disposition
+        rather than to the refresh queue. That command is left in place — it
+        answers "how do I re-analyse this holding", which stays valid — and
+        suppressing it would mean threading the refreshed set through three
+        further shared renderers. The defect being guarded here is the *queue*
+        advertising work the same run just performed.
+        """
+        _, _, rest = report.partition("ANALYSIS FRESHNESS")
+        section, _, _ = rest.partition("DIP WATCH")
+        return section
+
+    def test_refreshed_ticker_is_not_re_advertised_by_the_queue(self):
+        service = AnalysisRefreshService()
+        items = [self._item()]
+        summary = service.classify(
+            items, max_age_days=14, already_refreshed=frozenset({"7203.T"})
+        )
+
+        report = format_report(
+            items,
+            _make_portfolio(),
+            max_age_days=14,
+            freshness_summary=summary,
+            refresh_activity=RefreshActivity(
+                policy="blocking", limit=10, refreshed=["7203.T"]
+            ),
+        )
+        section = self._freshness_section(report)
+
+        assert "Refreshed this run" in section
+        assert "Refreshed: 7203.T" in section
+        # The exact contradiction from the 2026-08-19 report.
+        assert "--ticker 7203.T" not in section
+
+    def test_unrefreshed_ticker_still_gets_its_command(self):
+        """The suppression must be scoped to what this run actually refreshed."""
+        service = AnalysisRefreshService()
+        items = [self._item(), self._item("0005.HK")]
+        summary = service.classify(
+            items, max_age_days=14, already_refreshed=frozenset({"7203.T"})
+        )
+
+        report = format_report(
+            items,
+            _make_portfolio(),
+            max_age_days=14,
+            freshness_summary=summary,
+            refresh_activity=RefreshActivity(
+                policy="blocking", limit=10, refreshed=["7203.T"]
+            ),
+        )
+        section = self._freshness_section(report)
+
+        assert "--ticker 7203.T" not in section
+        assert "--ticker 0005.HK" in section

@@ -907,6 +907,143 @@ class TestQuickModeGraphContracts:
         assert all(kwargs["retry_llm"] is None for kwargs in analyst_kwargs)
 
 
+class TestDebateReasoningHandoffWiring:
+    """The opt-in policy must alter only the three intended debate seats."""
+
+    def test_active_policy_builds_two_r1_reasoning_clients_and_expands_budgets(
+        self, monkeypatch
+    ):
+        from src.config import Settings, config
+        from src.graph.components import build_graph_components
+        from src.llm_budgets import get_agent_output_budget
+        from src.llm_runtime.bindings import resolve_binding_plan
+        from src.llm_runtime.seats import SeatId
+        from src.runtime_config import RuntimeConfig, use_runtime_config
+
+        components = _stub_graph_component_dependencies(monkeypatch)
+        researcher_calls: list[tuple[tuple, dict]] = []
+        manager_calls: list[tuple[tuple, dict]] = []
+
+        def researcher_node(*args, **kwargs):
+            researcher_calls.append((args, kwargs))
+            return lambda state, runtime: {}
+
+        def manager_node(*args, **kwargs):
+            manager_calls.append((args, kwargs))
+            return lambda state, runtime: {}
+
+        monkeypatch.setattr(components, "create_researcher_node", researcher_node)
+        monkeypatch.setattr(components, "create_research_manager_node", manager_node)
+
+        settings = Settings(
+            _env_file=None,
+            llm_base_provider="openai",
+            llm_review_provider="google",
+            llm_regional_provider="deepseek",
+            google_api_key="g",
+            openai_api_key="o",
+            claude_api_key="a",
+            deepseek_api_key="d",
+            llm_consultant_mode="off",
+            llm_auditor_mode="off",
+            llm_editor_mode="off",
+            llm_apac_mode="off",
+        )
+        plan = resolve_binding_plan(settings)
+        requests = []
+
+        class RecordingFactory:
+            def build(self, request):
+                requests.append(request)
+                return Mock(name=f"{request.seat.seat_id.value}-{len(requests)}")
+
+        runtime_config = RuntimeConfig.from_config(settings).with_overrides(
+            debate_reasoning_handoffs=True
+        )
+        with use_runtime_config(runtime_config):
+            graph_components = build_graph_components(
+                max_debate_rounds=2,
+                enable_memory=False,
+                ticker="TEST",
+                cleanup_previous=False,
+                quick_mode=False,
+                strict_mode=False,
+                chart_format="png",
+                transparent_charts=False,
+                image_dir=None,
+                skip_charts=True,
+                binding_plan=plan,
+                model_factory=RecordingFactory(),
+            )
+
+        bull_requests = [r for r in requests if r.seat.seat_id is SeatId.BULL]
+        bear_requests = [r for r in requests if r.seat.seat_id is SeatId.BEAR]
+        manager_requests = [
+            r for r in requests if r.seat.seat_id is SeatId.RESEARCH_MANAGER
+        ]
+        assert [r.include_reasoning_output for r in bull_requests] == [
+            False,
+            True,
+            False,
+        ]
+        assert [r.include_reasoning_output for r in bear_requests] == [
+            False,
+            True,
+            False,
+        ]
+        assert [r.include_reasoning_output for r in manager_requests] == [False]
+
+        base_tokens = config.llm_base_output_tokens
+        full_bull_budget = (
+            get_agent_output_budget("Bull Researcher", base_tokens) + 1_024
+        )
+        full_bear_budget = (
+            get_agent_output_budget("Bear Researcher", base_tokens) + 1_024
+        )
+        assert [r.output_tokens for r in bull_requests] == [
+            full_bull_budget,
+            full_bull_budget,
+            1_024,
+        ]
+        assert [r.output_tokens for r in bear_requests] == [
+            full_bear_budget,
+            full_bear_budget,
+            1_024,
+        ]
+        for repair_request in (bull_requests[-1], bear_requests[-1]):
+            assert repair_request.quick_mode is True
+            assert repair_request.include_reasoning_output is False
+            assert repair_request.callbacks[0].output_token_cap == 1_024
+        assert manager_requests[0].output_tokens == (
+            get_agent_output_budget("Research Manager", base_tokens) + 1_024
+        )
+
+        by_role_round = {
+            (args[2], kwargs["round_num"]): (args, kwargs)
+            for args, kwargs in researcher_calls
+        }
+        for role in ("bull_researcher", "bear_researcher"):
+            r1_args, r1_kwargs = by_role_round[(role, 1)]
+            r2_args, r2_kwargs = by_role_round[(role, 2)]
+            assert (
+                r1_kwargs["handoff_policy"] is graph_components.debate_reasoning_policy
+            )
+            assert (
+                r2_kwargs["handoff_policy"] is graph_components.debate_reasoning_policy
+            )
+            assert r1_kwargs["fallback_llm"] is r2_args[0]
+            assert r1_kwargs["structured_repair_llm"] not in {
+                r1_args[0],
+                r2_args[0],
+            }
+            assert r1_args[0] is not r2_args[0]
+            assert "fallback_llm" not in r2_kwargs
+            assert "structured_repair_llm" not in r2_kwargs
+        assert manager_calls[0][1]["handoff_policy"] is (
+            graph_components.debate_reasoning_policy
+        )
+
+
 class TestTradingContext:
     """Test TradingContext dataclass."""
 

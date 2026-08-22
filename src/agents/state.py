@@ -23,6 +23,9 @@ class InvestDebateState(TypedDict):
     bear_round1: str
     bull_round2: str
     bear_round2: str
+    bull_round1_handoff: dict[str, str]
+    bear_round1_handoff: dict[str, str]
+    handoff_telemetry: dict[str, Any]
     current_round: int
     bull_history: str
     bear_history: str
@@ -168,6 +171,9 @@ def merge_invest_debate_state(
         bear_round1="",
         bull_round2="",
         bear_round2="",
+        bull_round1_handoff={},
+        bear_round1_handoff={},
+        handoff_telemetry={},
         current_round=1,
         bull_history="",
         bear_history="",
@@ -181,11 +187,22 @@ def merge_invest_debate_state(
     if y is None:
         return x
 
+    x_values = cast(dict[str, Any], x)
+    y_values = cast(dict[str, Any], y)
     result: dict[str, Any] = {}
-    all_keys = set(x.keys()) | set(y.keys())
+    all_keys = set(x_values) | set(y_values)
     for key in all_keys:
-        x_val = x.get(key, default_state.get(key))
-        y_val = y.get(key, default_state.get(key))
+        # Partial node updates omit fields they do not own. Distinguish absence
+        # from an explicit empty value before consulting defaults; otherwise a
+        # Bear update carrying no Bull handoff can erase the Bull's parallel dict.
+        if key not in y_values:
+            result[key] = x_values[key]
+            continue
+        if key not in x_values:
+            result[key] = y_values[key]
+            continue
+        x_val = x_values.get(key, default_state.get(key))
+        y_val = y_values.get(key, default_state.get(key))
         if isinstance(x_val, str) and isinstance(y_val, str):
             result[key] = y_val if y_val else x_val
         else:

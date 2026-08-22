@@ -232,6 +232,10 @@ class PortfolioRecommendationService:
                 positions=positions,
                 portfolio=portfolio,
                 watchlist_tickers=watchlist_tickers,
+                # This pass reflects the analyses this run just produced, so a
+                # refreshed ticker must not be re-advertised with a command the
+                # operator has in effect already run.
+                already_refreshed=frozenset(refresh_activity.refreshed),
             )
 
         return PortfolioRecommendationBundle(
@@ -278,6 +282,7 @@ class PortfolioRecommendationService:
         positions: list[NormalizedPosition],
         portfolio: PortfolioSummary,
         watchlist_tickers: set[str],
+        already_refreshed: frozenset[str] = frozenset(),
     ) -> tuple[list[ReconciliationItem], list[str], AnalysisFreshnessSummary, int]:
         diagnostics = ReconciliationDiagnostics()
         items = self._reconcile_fn(
@@ -305,6 +310,7 @@ class PortfolioRecommendationService:
         freshness_summary = self._refresh_service.classify(
             items,
             max_age_days=request.max_age_days,
+            already_refreshed=already_refreshed,
         )
         # The report count is derived from retained items, not a parallel
         # diagnostic side channel, so it cannot disagree with the merit pool.

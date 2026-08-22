@@ -233,3 +233,114 @@ def test_position_model_rejects_unknown_value_basis_token():
             quantity=100,
             market_value_basis="LOCAL",  # type: ignore[arg-type]
         )
+
+
+class TestFlatPositionIsValidatedNotFailed:
+    """A closed position is a settled fact, not a valuation failure.
+
+    Regression (2026-08-19): a sold JPY/MXN holding still in the broker snapshot
+    had quantity 0, so the unit anchor `quantity * price` was 0 and
+    `_classify_basis` fell back to None for every non-USD currency. That marked
+    the position `valuation_valid=False`, which let it slip past the evaluator's
+    closed-position skip and surface as an *urgent* DATA_QUALITY analysis
+    refresh for stock the operator no longer owned.
+    """
+
+    @pytest.mark.parametrize(
+        ("currency", "rate"),
+        [("JPY", 0.0067), ("MXN", 0.052), ("GBp", 0.0135), ("USD", 1.0)],
+    )
+    def test_closed_position_is_flat_and_valid_in_every_currency(self, currency, rate):
+        # Parametrized across currencies deliberately: the defect was invisible
+        # because the USD case alone behaved correctly.
+        result = _normalize(
+            quantity=0.0,
+            raw_market_value=0.0,
+            raw_unrealized_pnl=0.0,
+            currency=currency,
+            fx_rate=rate,
+        )
+
+        assert result.position_flat is True
+        assert result.valuation_valid is True
+        assert result.valuation_issue is None
+        assert result.market_value_usd == 0.0
+
+    def test_closed_position_needs_no_fx_rate(self):
+        """The second, independent door: the FX guard runs before classification."""
+        result = _normalize(
+            quantity=0.0,
+            raw_market_value=0.0,
+            raw_unrealized_pnl=0.0,
+            currency="ZZZ",
+            fx_rate=None,
+        )
+
+        assert result.position_flat is True
+        assert result.valuation_valid is True
+
+    def test_closed_position_without_pnl_reported_is_still_flat(self):
+        result = _normalize(quantity=0.0, raw_market_value=0.0, raw_unrealized_pnl=None)
+
+        assert result.position_flat is True
+        assert result.valuation_valid is True
+
+    @pytest.mark.parametrize(("currency", "rate"), [("JPY", 0.0067), ("USD", 1.0)])
+    def test_zero_quantity_with_material_value_is_not_flat(self, currency, rate):
+        """A broker inconsistency must stay on the data-quality path."""
+        result = _normalize(
+            quantity=0.0,
+            raw_market_value=5_000.0,
+            raw_unrealized_pnl=0.0,
+            currency=currency,
+            fx_rate=rate,
+        )
+
+        assert result.position_flat is False
+
+    def test_zero_quantity_with_material_pnl_is_not_flat(self):
+        result = _normalize(
+            quantity=0.0, raw_market_value=0.0, raw_unrealized_pnl=250.0
+        )
+
+        assert result.position_flat is False
+
+    @pytest.mark.parametrize("value", [math.inf, -math.inf, math.nan])
+    def test_non_finite_legs_are_never_flat(self, value):
+        assert (
+            _normalize(
+                quantity=0.0, raw_market_value=value, raw_unrealized_pnl=0.0
+            ).position_flat
+            is False
+        )
+        assert (
+            _normalize(
+                quantity=value, raw_market_value=0.0, raw_unrealized_pnl=0.0
+            ).position_flat
+            is False
+        )
+
+    def test_held_position_is_never_flat(self):
+        assert _normalize().position_flat is False
+
+    def test_usd_identity_fallback_survives_a_missing_price(self):
+        """IBKR routinely omits mktPrice; a USD value needs no unit inference.
+
+        Guards the asymmetry in `_classify_basis`: for USD the no-anchor
+        fallback is an identity, while for any other currency it is None
+        because local-vs-USD is genuinely undecidable.
+        """
+        result = _normalize(
+            currency="USD",
+            fx_rate=1.0,
+            quantity=10.0,
+            current_price_local=0.0,
+            avg_cost_local=0.0,
+            raw_market_value=1_800.0,
+            raw_unrealized_pnl=0.0,
+        )
+
+        assert result.valuation_valid is True
+        assert result.position_flat is False
+        assert result.market_value_basis == "BROKER_USD"
+        assert result.market_value_usd == pytest.approx(1_800.0)
