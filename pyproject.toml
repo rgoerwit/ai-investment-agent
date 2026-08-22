@@ -17,8 +17,13 @@ langchain-core = "1.5.3"
 langchain-community = ">=0.4.0,<1.0.0"
 # Primary LLM: Google Gemini
 langchain-google-genai = "4.3.2"
-# ADDED: Google GenAI SDK for direct access if needed
-google-genai = ">=1.0.0,<2.0.0"
+# Transitive of langchain-google-genai (nothing in src/ imports it directly).
+# Moved off the old <2.0.0 cap in Aug 2026: 2.0.0's only breaking changes are
+# Interactions-only — upstream states GenerateContent is unaffected — and the two
+# behaviours this repo couples to (service_tier enums, optional aiohttp) landed
+# in 1.70.0 / 1.65.0, below the 1.75.0 we were already on. Exact, not a range:
+# a range resolves to the newest release, which was 3 days old at pin time.
+google-genai = "2.17.0"
 # OPTIONAL: OpenAI for consultant node (cross-validation)
 # The consultant node uses OpenAI to provide independent review of Gemini analysis
 langchain-openai = "1.4.2"
