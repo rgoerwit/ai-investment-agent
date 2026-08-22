@@ -634,50 +634,53 @@ def build_graph_components(
         if debate_reasoning_policy.active
         else {}
     )
-    bull_r1 = (
-        create_researcher_node(
-            bull_r1_llm,
-            bull_memory,
-            "bull_researcher",
-            round_num=1,
-            fallback_llm=bull_llm,
-            structured_repair_llm=bull_repair_llm,
+
+    def researcher(
+        seat_llm: Any,
+        memory: Any,
+        agent_key: str,
+        *,
+        round_num: int,
+        r1_llm: Any | None = None,
+        repair_llm: Any | None = None,
+    ) -> Any:
+        # Only the R1 seats emit a handoff. The fallback exists to recover a
+        # response the capsule contract degraded, so it is meaningless when the
+        # policy is inactive — that omission is what keeps the feature inert by
+        # default. The recovery kwargs are omitted rather than passed as None so
+        # a caller (and the wiring tests) can see which seats are handoff-bearing
+        # from the call itself.
+        recovery: dict[str, Any] = {}
+        if debate_reasoning_policy.active and r1_llm is not None:
+            recovery["fallback_llm"] = seat_llm
+            recovery["structured_repair_llm"] = repair_llm
+        return create_researcher_node(
+            r1_llm or seat_llm,
+            memory,
+            agent_key,
+            round_num=round_num,
+            **recovery,
             **researcher_handoff_kwargs,
         )
-        if debate_reasoning_policy.active
-        else create_researcher_node(
-            bull_r1_llm, bull_memory, "bull_researcher", round_num=1
-        )
-    )
-    bear_r1 = (
-        create_researcher_node(
-            bear_r1_llm,
-            bear_memory,
-            "bear_researcher",
-            round_num=1,
-            fallback_llm=bear_llm,
-            structured_repair_llm=bear_repair_llm,
-            **researcher_handoff_kwargs,
-        )
-        if debate_reasoning_policy.active
-        else create_researcher_node(
-            bear_r1_llm, bear_memory, "bear_researcher", round_num=1
-        )
-    )
-    bull_r2 = create_researcher_node(
+
+    bull_r1 = researcher(
         bull_llm,
         bull_memory,
         "bull_researcher",
-        round_num=2,
-        **researcher_handoff_kwargs,
+        round_num=1,
+        r1_llm=bull_r1_llm,
+        repair_llm=bull_repair_llm,
     )
-    bear_r2 = create_researcher_node(
+    bear_r1 = researcher(
         bear_llm,
         bear_memory,
         "bear_researcher",
-        round_num=2,
-        **researcher_handoff_kwargs,
+        round_num=1,
+        r1_llm=bear_r1_llm,
+        repair_llm=bear_repair_llm,
     )
+    bull_r2 = researcher(bull_llm, bull_memory, "bull_researcher", round_num=2)
+    bear_r2 = researcher(bear_llm, bear_memory, "bear_researcher", round_num=2)
     res_mgr = create_research_manager_node(
         res_mgr_llm,
         invest_judge_memory,

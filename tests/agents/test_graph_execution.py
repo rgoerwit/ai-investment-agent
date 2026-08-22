@@ -910,6 +910,62 @@ class TestQuickModeGraphContracts:
 class TestDebateReasoningHandoffWiring:
     """The opt-in policy must alter only the three intended debate seats."""
 
+    def test_inactive_policy_leaves_every_debate_seat_untouched(self, monkeypatch):
+        """Inert by default, pinned rather than re-derived by a reader.
+
+        With the policy off no seat may request reasoning output and no
+        researcher may receive the recovery clients — the fallback exists only
+        to repair a response the capsule contract degraded, so carrying one
+        here would arm a retry path that has nothing to recover.
+        """
+        from src.config import Settings
+        from src.graph.components import build_graph_components
+        from src.llm_runtime.bindings import resolve_binding_plan
+
+        components = _stub_graph_component_dependencies(monkeypatch)
+        researcher_calls: list[dict] = []
+
+        def researcher_node(*args, **kwargs):
+            researcher_calls.append(kwargs)
+            return lambda state, runtime: {}
+
+        monkeypatch.setattr(components, "create_researcher_node", researcher_node)
+
+        settings = Settings(
+            _env_file=None,
+            google_api_key="g",
+            quick_think_llm="gemini-2.5-flash",
+            deep_think_llm="gemini-2.5-pro",
+        )
+        requests = []
+
+        class RecordingFactory:
+            def build(self, request):
+                requests.append(request)
+                return Mock(name=request.seat.seat_id.value)
+
+        build_graph_components(
+            max_debate_rounds=2,
+            enable_memory=False,
+            ticker="TEST",
+            cleanup_previous=False,
+            quick_mode=False,
+            strict_mode=False,
+            chart_format="png",
+            transparent_charts=False,
+            image_dir=None,
+            skip_charts=True,
+            binding_plan=resolve_binding_plan(settings),
+            model_factory=RecordingFactory(),
+        )
+
+        assert len(researcher_calls) == 4
+        assert not any(r.include_reasoning_output for r in requests)
+        for kwargs in researcher_calls:
+            assert "fallback_llm" not in kwargs
+            assert "structured_repair_llm" not in kwargs
+            assert "handoff_policy" not in kwargs
+
     def test_active_policy_builds_two_r1_reasoning_clients_and_expands_budgets(
         self, monkeypatch
     ):
