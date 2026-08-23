@@ -620,7 +620,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - Comprehensive README.md with architecture diagrams (Mermaid)
-- CLAUDE.md developer guide for AI assistants
+- Developer guide for AI assistants
 - Honest limitations section ("Not a Get-Rich-Quick Bot")
 - Performance benchmarks and cost estimates
 - Troubleshooting guide for common issues

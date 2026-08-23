@@ -1,7 +1,7 @@
 # Multi-Agent Investment Analysis System - Makefile
 # Convenient commands for development and deployment
 
-.PHONY: help install install-dev test test-ci test-cov test-watch security-tests test-prompts replay eval-semantic lint lint-fix format format-check typecheck check-all clean docker-build docker-run run-quick run-deep refresh-injection-corpus refresh-judge-fixtures pre-commit ci ci-full
+.PHONY: help install install-dev test test-ci test-cov test-watch security-tests test-prompts replay eval-semantic lint lint-fix format format-check typecheck docs-guards check-all clean docker-build docker-run run-quick run-deep refresh-injection-corpus refresh-judge-fixtures pre-commit ci ci-full
 
 # Default target
 .DEFAULT_GOAL := help
@@ -126,7 +126,17 @@ typecheck: ## Run type checking with MyPy
 	$(POETRY) run mypy src/
 	@echo "$(GREEN)Type checking complete!$(NC)"
 
-check-all: format-check lint typecheck ## Run all code quality checks
+# --others --exclude-standard is load-bearing: plain `git ls-files` lists only TRACKED
+# files, so a brand-new doc -- the one most likely to carry a bad reference -- is
+# silently skipped locally and only caught once it is already committed.
+DOC_GUARD_FILES = git ls-files --cached --others --exclude-standard '*.md'
+
+docs-guards: ## Verify docs cite nothing unobtainable and no agent metadata
+	@bash scripts/check_tracked_deps.sh $$($(DOC_GUARD_FILES))
+	@bash scripts/check_doc_layering.sh $$($(DOC_GUARD_FILES))
+	@echo "$(GREEN)Docs guards passed!$(NC)"
+
+check-all: format-check lint typecheck docs-guards ## Run all code quality checks
 	@echo "$(GREEN)All checks passed!$(NC)"
 
 clean: ## Clean up generated files

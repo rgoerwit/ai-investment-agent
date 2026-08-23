@@ -11,9 +11,10 @@ not the recommended agent-facing integration surface for this repo.
 
 ## Vendor surface notes (verified May 2026)
 
-Run `python /tmp/mcp_list_tools.py` (or the equivalent of `session.list_tools()`)
-against any new vendor before adding it to the registry — assumed tool names
-are unreliable.
+Call `session.list_tools()` against any new vendor before adding it to the
+registry — assumed tool names are unreliable, and a vendor's REST documentation
+routinely does not match its MCP surface. `scripts/mcp_smoke.py` exercises a
+configured server through the full hook chain without an LLM in the loop.
 
 - **FMP** uses a *dispatcher* pattern. Top-level tools (`statements`, `quote`,
   `analyst`, `chart`, etc.) take an `endpoint` enum argument that selects the
@@ -21,8 +22,8 @@ are unreliable.
   `tool="statements", arguments={"symbol": ..., "endpoint": "metrics-ratios-ttm"}`.
   The consultant wrapper's `_FMP_METRIC_DISPATCH` table in
   `src/consultant_tools.py` encodes the metric → (tool, endpoint) mapping.
-  When adding a new metric, run `mcp_list_tools.py` and pick from the printed
-  `endpoint_enum` for the relevant tool.
+  When adding a new metric, call `session.list_tools()` and pick from the
+  advertised `endpoint_enum` for the relevant tool.
 - **Twelve Data** is intentionally **not exposed** in this repo. Their public
   MCP only publishes `u-tool` (a free-form AI router) and `doc-tool`. Neither
   fits the consultant's narrow-allowlist + structured-payload contract; the

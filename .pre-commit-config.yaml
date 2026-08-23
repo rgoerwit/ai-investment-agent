@@ -79,3 +79,28 @@ repos:
         files: '^Dockerfile$'
         verbose: true
         stages: [pre-commit]
+      # A tracked file must not depend on a gitignored INPUT: a cloner has none of
+      # it, so the reference is broken on arrival and invisible in the diff.
+      # Obtainable paths (results/, runtime/, .env) are fine; anything else needs
+      # the marker `tracked-deps-ok` on the line, as a machine-checkable caveat.
+      - id: tracked-deps
+        name: Tracked files must not depend on unobtainable paths
+        language: script
+        entry: scripts/check_tracked_deps.sh
+        # Every tracked Markdown file, with no exclusions. Obtainability applies to
+        # the agent layer too: a rule whose `Full history:` pointer resolves into the
+        # operator-only notes directory is exactly the defect this catches.
+        files: '\.md$'
+        stages: [pre-commit]
+      # Agent metadata is not human-facing documentation. This is a LAYERING test and
+      # deliberately separate from tracked-deps above: once the agent directory becomes
+      # tracked, obtainability stops objecting to citations of it while this still does.
+      - id: doc-layering
+        name: Documentation must not cite agent metadata
+        language: script
+        entry: scripts/check_doc_layering.sh
+        files: '\.md$'
+        # Mirror of AGENT_DIRS in scripts/check_doc_layering.sh, which is the
+        # authority and self-skips these regardless of what this line says.
+        exclude: '^\.(claude|agents|codex|gemini|cursor|windsurf|aider|cline|continue|roo|junie|amp)/'
+        stages: [pre-commit]

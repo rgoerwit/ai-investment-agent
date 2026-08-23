@@ -736,9 +736,8 @@ Contributions are welcome. Good targets include:
 
 For orientation, start with:
 
-1. `AGENTS.md`
-2. `docs/CODEBASE_MEMORY.md`
-3. this README
+1. `docs/CODEBASE_MEMORY.md`
+2. this README
 
 ## License & Disclaimer
 

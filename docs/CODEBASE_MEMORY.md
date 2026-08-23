@@ -62,28 +62,27 @@ The system is no longer just “analyze one ticker.” It also supports:
 
 Read in this order:
 
-1. `AGENTS.md`
-2. `README.md`
-3. top of `CHANGELOG.md`
-4. `src/main.py`
-5. `src/cli.py`
-6. `src/persistence.py`
-7. `src/output.py`
-8. `src/runtime_services.py`
-9. `src/tooling/`
-10. `src/graph/`
-11. `src/agents/`
-12. `src/tools/`
-13. `src/data/fetcher.py`
-14. `src/runtime_diagnostics/` (package: `failure_classification` + `artifact_status`)
-15. `src/validators/red_flag_detector.py`
-16. `src/validators/sector_classifier.py`
-17. `src/validators/metric_extractor.py`
-18. `src/validators/financial_rules.py`
-19. `src/validators/supplemental_extractors.py`
-20. `src/validators/supplemental_flags.py`
-21. `src/memory.py`
-22. `src/ibkr/`
+1. `README.md`
+2. top of `CHANGELOG.md`
+3. `src/main.py`
+4. `src/cli.py`
+5. `src/persistence.py`
+6. `src/output.py`
+7. `src/runtime_services.py`
+8. `src/tooling/`
+9. `src/graph/`
+10. `src/agents/`
+11. `src/tools/`
+12. `src/data/fetcher.py`
+13. `src/runtime_diagnostics/` (package: `failure_classification` + `artifact_status`)
+14. `src/validators/red_flag_detector.py`
+15. `src/validators/sector_classifier.py`
+16. `src/validators/metric_extractor.py`
+17. `src/validators/financial_rules.py`
+18. `src/validators/supplemental_extractors.py`
+19. `src/validators/supplemental_flags.py`
+20. `src/memory.py`
+21. `src/ibkr/`
 
 ## Runtime Spine
 
@@ -398,7 +397,7 @@ Already split:
 - `src/validators/red_flag_detector.py` -> facade plus validator ownership submodules
 - `src/runtime_diagnostics.py` -> `src/runtime_diagnostics/` package (`failure_classification` + `artifact_status` behind a re-exporting `__init__` with explicit `__all__`) — Stage 6, July 2026
 
-Provenance typing (Stage 6, July 2026): the gate-critical snapshot / decision-trace / scorecard payloads now have versioned typed codecs in `src/provenance_schema.py` (`Scorecard`, `DecisionTrace`, `SchemaStatus`) plus `AnalysisSnapshot` in `analysis_snapshot.py`. `to_dict` appends `schema_version` (the only additive wire delta); `from_dict` fails closed on a future/corrupt gate-critical payload → `build_analysis_validity` marks it non-publishable. The `detect_red_flags` dict adapter and the `pm_claim_audit`/`article_audit` modules were deliberately left as-is (see the Stage 6 note in `CLAUDE.md`).
+Provenance typing (Stage 6, July 2026): the gate-critical snapshot / decision-trace / scorecard payloads now have versioned typed codecs in `src/provenance_schema.py` (`Scorecard`, `DecisionTrace`, `SchemaStatus`) plus `AnalysisSnapshot` in `analysis_snapshot.py`. `to_dict` appends `schema_version` (the only additive wire delta); `from_dict` fails closed on a future/corrupt gate-critical payload → `build_analysis_validity` marks it non-publishable. The `detect_red_flags` dict adapter and the `pm_claim_audit`/`article_audit` modules were deliberately left as-is (see `docs/PROVENANCE.md`).
 
 Recent completed control-plane/security work:
 

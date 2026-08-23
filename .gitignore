@@ -3,14 +3,28 @@ runtime/*
 
 # Multi-Agent Investment Analysis System - .gitignore
 CLAUDE*.md
-.claude
+# .claude/* excludes contents but NOT the .claude directory itself: git cannot
+# re-include a file whose parent DIRECTORY is excluded, so a bare `.claude` line
+# would make the negations below silently do nothing.
 .claude/*
+!.claude/rules/
+!.claude/rules/**
+!.claude/skills/
+!.claude/skills/**
+# The migration ledger stays IGNORED on purpose. It is keyed on line numbers of the
+# root instruction file, which is itself never committed, so every row is unusable in
+# a clone even where the destination it names is tracked. Operator-local by nature.
+# "synced" is reserved for skills downloaded from the account. It is a cache, not
+# source, and must never become committable even though skills/ is now tracked.
+.claude/skills/synced/
 .gemini
 .gemini/*
 GEMINI*.md
 AGENTS*.md
 
 # Local things we ignore
+# Operator-only notes. Nothing tracked may depend on anything in here.
+docs/internal/
 examples/~*
 data_cache/
 data_cache/*
@@ -24,12 +38,13 @@ scratch/*
 
 # Byte-compiled / optimized / DLL files
 
-# Environment variables
-.env
-.env-*
-.env.old
-.env.local
-.env.*.local
+# Environment variables. DEFAULT-DENY: anything beginning `.env` is secret-bearing and
+# only the tracked template is exempt. The previous enumeration (.env, .env-*, .env.old,
+# .env.local, .env.*.local) left .env.production, .env.staging, .env.prod, .env.test,
+# .env.backup, .env.save and .envrc committable -- a real leak vector for anyone whose
+# deployment convention differs from the author's.
+.env*
+!.env.example
 
 # Python
 __pycache__/
