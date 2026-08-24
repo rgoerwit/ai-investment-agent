@@ -328,6 +328,11 @@ def validate_environment_variables() -> None:
 # --- Pydantic Settings Class ---
 
 
+def _default_settings_env_file() -> str | None:
+    """Keep pytest from ingesting operator configuration during collection."""
+    return None if os.environ.get("PYTEST_DISABLE_DOTENV") == "true" else ".env"
+
+
 class Settings(BaseSettings):
     """
     Configuration class for the Multi-Agent Trading System.
@@ -1488,8 +1493,9 @@ class Settings(BaseSettings):
 
     # --- Pydantic Settings Configuration ---
     model_config = SettingsConfigDict(
-        # Load from .env file
-        env_file=".env",
+        # Tests receive explicit dummy process values and must never ingest the
+        # operator's ignored environment file during collection.
+        env_file=_default_settings_env_file(),
         env_file_encoding="utf-8",
         # Ignore extra environment variables (don't fail on unknown vars)
         extra="ignore",

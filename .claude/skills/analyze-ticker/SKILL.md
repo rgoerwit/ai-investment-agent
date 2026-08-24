@@ -55,11 +55,11 @@ Recommend flex for unattended batches, standard when waiting on a result.
 ```bash
 ./scripts/run_tickers.sh --quick
 caffeinate -i ./scripts/run_tickers.sh        # prevent sleep on macOS
-COOLDOWN_SECONDS=10 ./scripts/run_tickers.sh  # paid tier; default 60 s
 ```
 
-The batch script reads a ticker list you supply. Export `GRPC_VERBOSITY=ERROR` and
-`GRPC_TRACE=""` first to suppress macOS gRPC warnings.
+The batch script reads a ticker list you supply. Use its public command-line and
+configuration contract when changing pacing or suppressing transport diagnostics;
+do not copy local environment assignments into this skill.
 
 ## Eval baselines
 

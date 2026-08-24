@@ -62,12 +62,22 @@ AGENT_MISC_RE='\.cursorrules|\.clinerules|\.windsurfrules|\.roomodes|\.aiderigno
 
 status=0
 
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)
+
+is_repository_root_agents_file() {
+    local file="$1"
+    local file_dir
+    file_dir=$(CDPATH='' cd -- "$(dirname -- "$file")" 2>/dev/null && pwd -P) || return 1
+    [ "$file_dir/$(basename -- "$file")" = "$repo_root/AGENTS.md" ]
+}
+
 for file in "$@"; do
     [ -f "$file" ] || continue
 
     # A file that IS agent layer may cite agent metadata freely. Derived from the one
     # list above, so widening the vendor set cannot leave this behind.
-    if printf '%s' "$file" | grep -qE "(^|/)\.(${AGENT_DIRS})/"; then
+    if printf '%s' "$file" | grep -qE "(^|/)\.(${AGENT_DIRS})/" \
+        || is_repository_root_agents_file "$file"; then
         continue
     fi
 

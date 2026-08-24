@@ -20,7 +20,14 @@ CLAUDE*.md
 .gemini
 .gemini/*
 GEMINI*.md
+# Codex reads AGENTS.override.md before AGENTS.md. Overrides and historical variants
+# remain local; only the repository-root contract is eligible for version control.
 AGENTS*.md
+!/AGENTS.md
+
+# No project Codex configuration is shipped today. Keep accidental local settings out
+# of version control; unignore individual portable files only after explicit review.
+.codex/*
 
 # Local things we ignore
 # Operator-only notes. Nothing tracked may depend on anything in here.

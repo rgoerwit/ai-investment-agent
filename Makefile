@@ -1,7 +1,7 @@
 # Multi-Agent Investment Analysis System - Makefile
 # Convenient commands for development and deployment
 
-.PHONY: help install install-dev test test-ci test-cov test-watch security-tests test-prompts replay eval-semantic lint lint-fix format format-check typecheck docs-guards check-all clean docker-build docker-run run-quick run-deep refresh-injection-corpus refresh-judge-fixtures pre-commit ci ci-full
+.PHONY: help install install-dev test test-ci test-cov test-watch security-tests test-prompts replay eval-semantic lint lint-fix format format-check typecheck docs-guards claude-metadata-guards agent-metadata-guards check-all clean docker-build docker-run run-quick run-deep refresh-injection-corpus refresh-judge-fixtures pre-commit ci ci-full
 
 # Default target
 .DEFAULT_GOAL := help
@@ -130,13 +130,24 @@ typecheck: ## Run type checking with MyPy
 # files, so a brand-new doc -- the one most likely to carry a bad reference -- is
 # silently skipped locally and only caught once it is already committed.
 DOC_GUARD_FILES = git ls-files --cached --others --exclude-standard '*.md'
+CLAUDE_METADATA_FILES = git ls-files --cached --others --exclude-standard -- .claude
+AGENT_METADATA_FILES = git ls-files --cached --others --exclude-standard -- AGENTS.md .agents .codex
 
 docs-guards: ## Verify docs cite nothing unobtainable and no agent metadata
 	@bash scripts/check_tracked_deps.sh $$($(DOC_GUARD_FILES))
 	@bash scripts/check_doc_layering.sh $$($(DOC_GUARD_FILES))
 	@echo "$(GREEN)Docs guards passed!$(NC)"
 
-check-all: format-check lint typecheck docs-guards ## Run all code quality checks
+claude-metadata-guards: ## Verify public Claude metadata is portable and self-contained
+	@$(POETRY) run python scripts/check_claude_metadata.py $$($(CLAUDE_METADATA_FILES))
+	@echo "$(GREEN)Claude metadata guards passed!$(NC)"
+
+agent-metadata-guards: ## Verify public Codex metadata is portable and self-contained
+	@bash scripts/check_agents_size.sh AGENTS.md 12288
+	@$(POETRY) run python scripts/check_agent_metadata.py $$($(AGENT_METADATA_FILES))
+	@echo "$(GREEN)Agent metadata guards passed!$(NC)"
+
+check-all: format-check lint typecheck docs-guards claude-metadata-guards agent-metadata-guards ## Run all code quality checks
 	@echo "$(GREEN)All checks passed!$(NC)"
 
 clean: ## Clean up generated files

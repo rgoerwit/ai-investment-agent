@@ -81,8 +81,10 @@ repos:
         stages: [pre-commit]
       # A tracked file must not depend on a gitignored INPUT: a cloner has none of
       # it, so the reference is broken on arrival and invisible in the diff.
-      # Obtainable paths (results/, runtime/, .env) are fine; anything else needs
-      # the marker `tracked-deps-ok` on the line, as a machine-checkable caveat.
+      # Generated paths (results/, runtime/) and `.env` backed by the tracked
+      # `.env.example` template are obtainable. Private environment-file variants and
+      # contents remain taboo. Anything else needs the marker `tracked-deps-ok` on the
+      # line, as a machine-checkable caveat.
       - id: tracked-deps
         name: Tracked files must not depend on unobtainable paths
         language: script
@@ -103,4 +105,26 @@ repos:
         # Mirror of AGENT_DIRS in scripts/check_doc_layering.sh, which is the
         # authority and self-skips these regardless of what this line says.
         exclude: '^\.(claude|agents|codex|gemini|cursor|windsurf|aider|cline|continue|roo|junie|amp)/'
+        stages: [pre-commit]
+      - id: claude-metadata
+        name: Public Claude metadata is portable and self-contained
+        language: python
+        entry: scripts/check_claude_metadata.py
+        additional_dependencies: [pyyaml]
+        files: '^\.claude/'
+        stages: [pre-commit]
+      - id: agents-size
+        name: Root Codex guidance stays within the repository size budget
+        language: script
+        entry: scripts/check_agents_size.sh
+        args: [AGENTS.md, '12288']
+        always_run: true
+        pass_filenames: false
+        stages: [pre-commit]
+      - id: agent-metadata
+        name: Public Codex metadata is portable and self-contained
+        language: python
+        entry: scripts/check_agent_metadata.py
+        additional_dependencies: [pyyaml]
+        files: '^(AGENTS\.md|\.agents/|\.codex/)'
         stages: [pre-commit]

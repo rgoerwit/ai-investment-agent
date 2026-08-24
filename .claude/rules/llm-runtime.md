@@ -14,7 +14,7 @@ architecture test enforces that.
 
 ## Seats, not call sites
 
-`seats.py` holds the canonical `SeatId` → `SeatSpec` registry, keyed to name spaces
+`src/llm_runtime/seats.py` holds the canonical `SeatId` → `SeatSpec` registry, keyed to name spaces
 that already exist: `prompt_key` matches the prompt filename, `budget_key` matches an
 output-budget entry, `callback_name` matches the token-tracking display name. **Do not
 invent a second key space.**

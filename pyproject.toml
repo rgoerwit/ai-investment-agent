@@ -227,7 +227,13 @@ filterwarnings = [
 
 [tool.pytest_env]
 ENVIRONMENT = "test"
+PYTEST_DISABLE_DOTENV = "true"
 LOG_LEVEL = "DEBUG"
 ENABLE_MEMORY = "false"
 ONLINE_TOOLS = "false"
 DEFAULT_TICKER = "TEST"
+# Import-time tool registration happens before session fixtures. Public dummy values
+# keep collection deterministic without reading an operator's ignored environment file.
+GOOGLE_API_KEY = "test-key"
+TAVILY_API_KEY = "test-key"
+FINNHUB_API_KEY = "test-key"

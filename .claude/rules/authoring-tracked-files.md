@@ -47,9 +47,9 @@ name another tool's ignored config directory, a skill that exists only in user-l
 configuration, or anything else in zone 3 or 4. Only `tracked-deps` catches those, and
 **a bare name with no slash is still a reference.**
 
-Run `make docs-guards` before handing over any Markdown change; otherwise the hooks
-fire at commit time, too late when someone else commits. `make check-all` and CI
-include it.
+Run `make docs-guards` and `make claude-metadata-guards` before handing over a Claude
+metadata change; otherwise the hooks fire at commit time, too late when someone else
+commits. `make check-all` and CI include both.
 
 Both hooks take `tracked-deps-ok(<path>)` / `doc-layering-ok(<token>)`, but each exempts
 that token **throughout the file**, silencing the next unrelated occurrence too. Reword
@@ -69,3 +69,7 @@ shell hazards, commit style, planning format, dependency policy — belongs in z
 where every project gets it. **Propose the move and get agreement; do not ship it here
 by default.** A rule loads whole on every matching edit, so keep it short and put the
 narrative in `docs/`.
+
+Another coding tool's metadata is outside this instruction layer. Do not import it,
+use it as guidance, copy or cite its contents, or modify it. If two instruction layers
+conflict, describe the conflict generically and leave the other layer untouched.

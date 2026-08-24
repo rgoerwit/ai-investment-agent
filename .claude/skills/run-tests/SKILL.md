@@ -50,7 +50,8 @@ breaking fixtures elsewhere that encoded the old behaviour.
 | `make test-prompts` | L0 static parity plus L1 contract round-trip, no LLM |
 | `make replay` | L2 deterministic replay over frozen fixtures, no LLM |
 | `make eval-semantic` | L3 semantic judge — **real LLM cost**, manual or nightly |
-| `make check-all` | format check, lint, type check |
+| `make check-all` | format, lint, type, documentation, and agent-metadata checks |
+| `make claude-metadata-guards` | Claude metadata portability and boundary checks |
 | `make pre-commit` | `check-all` plus `test-ci` |
 
 `make replay` reads `tests/fixtures/frozen/`, and `make eval-semantic` reads the suite

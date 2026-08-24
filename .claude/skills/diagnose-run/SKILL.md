@@ -53,13 +53,13 @@ poetry run python scripts/eval_longitudinal_compare.py --run-log <path>
 poetry run python scripts/cost_report.py --baseline <dir> --candidate <dir>
 ```
 
-`eval_longitudinal_compare.py` breaks DNS failures out by operation and host and
+`scripts/eval_longitudinal_compare.py` breaks DNS failures out by operation and host and
 groups classified failures by provider — use it so a genuinely new network dependency
 does not hide inside a familiar-looking one. Pass the **analysis** log, not a file you
 teed the wrapper script into: the latter contains only the wrapper's own echo lines
 and no event records, so scanning it finds nothing by construction.
 
-`cost_report.py` is read-only and diffs two run sets, which is how you attribute a
+`scripts/cost_report.py` is read-only and diffs two run sets, which is how you attribute a
 cost change to a lever rather than to noise.
 
 ## Attributing a change

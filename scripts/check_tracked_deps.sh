@@ -12,7 +12,6 @@
 #   obtainable   - an ignored path the reader CREATES by using the project
 #                  (analysis output, capture bundles, runtime state), or one with a
 #                  tracked *.example.* template beside it
-#
 # A reference to an unobtainable path must be exempted EXPLICITLY AND INDIVIDUALLY:
 #
 #     tracked-deps-ok(path/to/the/private/thing)
@@ -78,9 +77,17 @@ HOME_LOCAL_RE='(^|[^A-Za-z0-9_`])(~/[A-Za-z.]|\$\{?HOME|[A-Za-z]:\\)'
 # convention already used in this repo.
 has_example_sibling() {
     local p="$1"
-    [ -f "${p}.example" ] && return 0
+    local candidate="${p}.example"
+    if [ -f "$candidate" ] && git ls-files --error-unmatch -- "$candidate" >/dev/null 2>&1; then
+        return 0
+    fi
     case "$p" in
-        *.*) [ -f "${p%.*}.example.${p##*.}" ] && return 0 ;;
+        *.*)
+            candidate="${p%.*}.example.${p##*.}"
+            [ -f "$candidate" ] \
+                && git ls-files --error-unmatch -- "$candidate" >/dev/null 2>&1 \
+                && return 0
+            ;;
     esac
     return 1
 }

@@ -113,6 +113,13 @@ def test_runtime_config_field_is_consumed_outside_runtime_config(field):
 
 # --- Env-var overrides are honored ------------------------------------------
 
+
+def test_pytest_does_not_load_operator_environment_file():
+    # Settings.model_config is fixed when src.config is imported. Keep this assertion:
+    # it detects any import-order regression that runs before pytest-env sets the flag.
+    assert Settings.model_config.get("env_file") is None
+
+
 _SETTINGS_ENV_CASES = [
     ("api_retry_attempts", "API_RETRY_ATTEMPTS", "7", 7),
     ("gemini_rpm_limit", "GEMINI_RPM_LIMIT", "123", 123),
