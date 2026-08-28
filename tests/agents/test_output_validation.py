@@ -10,6 +10,7 @@ from src.agents.management_guidance import (
     backfill_guidance_contract,
 )
 from src.agents.output_validation import (
+    classify_output_contract_failure,
     extract_completion_tokens,
     get_configured_output_cap,
     log_output_diagnostics,
@@ -834,3 +835,57 @@ def test_log_output_diagnostics_reads_openai_object_metadata_on_final_response()
     assert payload["visible_output_tokens"] == 318
     assert payload["intent_utilization_ratio"] == 0.0388
     assert payload["api_utilization_ratio"] == 0.0814
+
+
+def test_classify_output_contract_failure_detects_exact_api_cap_exhaustion():
+    runnable = SimpleNamespace(
+        _configured_max_completion_tokens=10923,
+        _configured_api_completion_tokens=12971,
+    )
+    response = SimpleNamespace(
+        usage_metadata={"output_tokens": 12971},
+        response_metadata={},
+    )
+
+    assert (
+        classify_output_contract_failure(
+            runnable=runnable,
+            response=response,
+            truncated=True,
+            validation={"ok": False, "missing": ["guidance_coverage"]},
+        )
+        == "output_cap_exhausted"
+    )
+
+
+def test_classify_output_contract_failure_keeps_below_cap_omission_distinct():
+    runnable = SimpleNamespace(
+        _configured_max_completion_tokens=10923,
+        _configured_api_completion_tokens=12971,
+    )
+    response = SimpleNamespace(
+        usage_metadata={"output_tokens": 2048},
+        response_metadata={},
+    )
+
+    assert (
+        classify_output_contract_failure(
+            runnable=runnable,
+            response=response,
+            truncated=False,
+            validation={"ok": False, "missing": ["guidance_coverage"]},
+        )
+        == "output_contract_violation"
+    )
+
+
+def test_classify_output_contract_failure_without_usage_reports_incomplete_structure():
+    assert (
+        classify_output_contract_failure(
+            runnable=SimpleNamespace(),
+            response=SimpleNamespace(usage_metadata=None, response_metadata={}),
+            truncated=True,
+            validation={"ok": False, "missing": ["data_block"]},
+        )
+        == "incomplete_structured_output"
+    )

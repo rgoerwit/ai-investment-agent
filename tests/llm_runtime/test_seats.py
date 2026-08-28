@@ -61,6 +61,30 @@ def test_editor_and_quality_path_requirements_are_not_silent() -> None:
     )
 
 
+def test_quick_mode_disables_the_complete_auditor_path() -> None:
+    assert SEATS[SeatId.AUDITOR].disabled_in_quick_mode is True
+    assert SEATS[SeatId.AUDITOR_ESCALATION].disabled_in_quick_mode is True
+
+
+def test_structural_recovery_is_text_only_and_available_in_quick_mode() -> None:
+    recovery = SEATS[SeatId.ANALYST_RETRY]
+
+    assert recovery.requires == frozenset({Capability.TEXT_GENERATION})
+    assert recovery.disabled_in_quick_mode is False
+    assert recovery.execution_policy.standard_tier_in_quick_mode is True
+
+
+def test_quick_mode_service_tier_policy_only_unpins_the_portfolio_manager() -> None:
+    assert (
+        SEATS[SeatId.SENIOR_FUNDAMENTALS].execution_policy.standard_tier_in_quick_mode
+        is True
+    )
+    assert (
+        SEATS[SeatId.PORTFOLIO_MANAGER].execution_policy.standard_tier_in_quick_mode
+        is False
+    )
+
+
 def test_callback_names_are_unique_except_intentional_fallback_aliases() -> None:
     duplicates: dict[str, list[SeatId]] = {}
     for seat_id, spec in SEATS.items():

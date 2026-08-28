@@ -169,7 +169,7 @@ def test_moonshot_review_adapter_honors_reasoning_override(monkeypatch) -> None:
     assert SeatModelFactory().build(request) is model
     assert captured["reasoning_effort"] == "low"
     assert captured["base_url"] == "https://api.moonshot.ai/v1"
-    assert captured["max_completion_tokens"] == 4096 + 2048
+    assert captured["max_completion_tokens"] == 4096 + 8192
     assert captured["max_retries"] == 0
     assert captured["timeout"] == settings.api_timeout
     assert "service_tier" not in captured

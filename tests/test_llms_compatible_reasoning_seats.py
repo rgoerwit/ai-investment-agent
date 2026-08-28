@@ -36,6 +36,8 @@ def _mock_config(*, base_url: str | None = MOONSHOT_BASE, **attrs):
     cfg.enable_consultant = True
     cfg.get_openai_api_key.return_value = "test-key"
     cfg.get_openai_api_base.return_value = base_url
+    cfg.llm_default_reasoning_reserve_tokens = DEFAULT_RESERVE
+    cfg.llm_deep_reasoning_reserve_tokens = DEEP_RESERVE
     for key, value in attrs.items():
         setattr(cfg, key, value)
     return cfg
@@ -80,7 +82,7 @@ class TestConsultantSeat:
         assert kwargs["max_completion_tokens"] == 4096 + DEFAULT_RESERVE
         assert llm._configured_max_completion_tokens == 4096
 
-    def test_gpt5_seat_is_unchanged_by_the_generalization(self):
+    def test_gpt5_full_reasoning_seat_uses_the_intent_reserve(self):
         cfg = _mock_config(base_url=None, consultant_model="gpt-5.4")
 
         llm, kwargs = _build(
@@ -88,8 +90,8 @@ class TestConsultantSeat:
         )
 
         assert kwargs["reasoning_effort"] == "medium"
-        assert kwargs["max_completion_tokens"] == 4096 + DEFAULT_RESERVE
-        assert llm._configured_reasoning_reserve_tokens == DEFAULT_RESERVE
+        assert kwargs["max_completion_tokens"] == 4096 + DEEP_RESERVE
+        assert llm._configured_reasoning_reserve_tokens == DEEP_RESERVE
 
     def test_non_reasoning_model_gets_no_parameter_and_no_reserve(self):
         cfg = _mock_config(base_url=None, consultant_model="gpt-4o")

@@ -7,6 +7,8 @@ from typing_extensions import TypedDict
 
 from src.tooling.structured_ingress import merge_structured_inputs
 
+from .message_utils import message_agent_key, tool_call_ids
+
 PROVENANCE_MARKERS = ('"_field_sources"', '"_source_conflicts"')
 MESSAGE_TAIL_LIMIT = 12
 
@@ -71,16 +73,80 @@ def _is_provenance_tool_message(message: BaseMessage) -> bool:
     return any(marker in content for marker in PROVENANCE_MARKERS)
 
 
+def _message_units(messages: list[BaseMessage]) -> list[tuple[int, ...]]:
+    """Group assistant tool calls and their results into indivisible units."""
+
+    owned_calls: dict[tuple[str | None, str], int] = {}
+    calls_by_id: dict[str, list[int]] = {}
+    unit_indices: dict[int, list[int]] = {}
+    standalone: list[int] = []
+    for index, message in enumerate(messages):
+        call_ids = tool_call_ids(message)
+        if call_ids:
+            unit_indices[index] = [index]
+            owner = message_agent_key(message)
+            for call_id in call_ids:
+                owned_calls[(owner, call_id)] = index
+                calls_by_id.setdefault(call_id, []).append(index)
+            continue
+        if isinstance(message, ToolMessage):
+            owner = message_agent_key(message)
+            call_index = owned_calls.get((owner, message.tool_call_id))
+            if call_index is None:
+                candidates = calls_by_id.get(message.tool_call_id, [])
+                call_index = candidates[0] if len(candidates) == 1 else None
+            if call_index is not None:
+                unit_indices[call_index].append(index)
+                continue
+        standalone.append(index)
+
+    units = [tuple(indices) for indices in unit_indices.values()]
+    units.extend((index,) for index in standalone)
+    return sorted(units, key=lambda unit: unit[0])
+
+
+def _unit_agent_key(messages: list[BaseMessage], unit: tuple[int, ...]) -> str | None:
+    for index in unit:
+        if owner := message_agent_key(messages[index]):
+            return owner
+    return None
+
+
+def _select_recent_units(
+    units: list[tuple[int, ...]], *, message_limit: int
+) -> set[int]:
+    """Select recent complete units without splitting a tool exchange."""
+
+    selected: set[int] = set()
+    used = 0
+    for unit in reversed(units):
+        size = len(unit)
+        if selected and used + size > message_limit:
+            break
+        selected.update(unit)
+        used += size
+        if used >= message_limit:
+            break
+    return selected
+
+
 def merge_and_cap_messages(
     x: list[BaseMessage] | None, y: list[BaseMessage] | BaseMessage | None
 ) -> list[BaseMessage]:
-    """Merge messages using LangGraph semantics, then cap generic history."""
+    """Merge messages while retaining bounded, complete per-agent transcripts.
+
+    Parallel analysts share this state field but models consume it per agent.
+    Capping one global tail allowed one provider's permissive tool parsing to
+    mask orphaned results. Retention therefore follows the same ownership
+    boundary as invocation and treats each tool-call/result exchange atomically.
+    """
     merged = cast(
         list[BaseMessage], add_messages(cast(Any, x or []), cast(Any, y or []))
     )
     if not merged:
         return []
 
+    units = _message_units(merged)
     preserved_indices: set[int] = set()
 
     for idx, message in enumerate(merged):
@@ -88,14 +154,19 @@ def merge_and_cap_messages(
             preserved_indices.add(idx)
             break
 
+    unit_by_index = {index: unit for unit in units for index in unit}
     for idx, message in enumerate(merged):
         if _is_provenance_tool_message(message):
-            preserved_indices.add(idx)
+            preserved_indices.update(unit_by_index[idx])
 
-    tail_candidates = [
-        idx for idx in range(len(merged)) if idx not in preserved_indices
-    ]
-    preserved_indices.update(tail_candidates[-MESSAGE_TAIL_LIMIT:])
+    units_by_owner: dict[str | None, list[tuple[int, ...]]] = {}
+    for unit in units:
+        owner = _unit_agent_key(merged, unit)
+        units_by_owner.setdefault(owner, []).append(unit)
+    for owner_units in units_by_owner.values():
+        preserved_indices.update(
+            _select_recent_units(owner_units, message_limit=MESSAGE_TAIL_LIMIT)
+        )
 
     result: list[BaseMessage] = []
     seen_keys: set[tuple[str, str, str, int]] = set()
@@ -229,6 +300,7 @@ class AgentState(TypedDict, total=False):
     fundamentals_report: Annotated[str, take_last]
     auditor_report: Annotated[str, take_last]
     auditor_budget: Annotated[dict[str, Any], take_last]
+    research_budgets: Annotated[dict[str, dict[str, Any]], merge_dicts]
     value_trap_report: Annotated[str, take_last]
     investment_debate_state: Annotated[InvestDebateState, merge_invest_debate_state]
     investment_plan: Annotated[str, take_last]

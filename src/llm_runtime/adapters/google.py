@@ -1,12 +1,11 @@
 """Google-native chat adapter."""
 
-from typing import Any
-
 from langchain_core.language_models import BaseChatModel
 
 from src.llm_runtime.adapters.base import SeatModelRequest
+from src.llm_runtime.budgets import reserve_class_for_request
 from src.llm_runtime.rate_limits import limiter_for_binding
-from src.llm_runtime.seats import ModelIntent, SeatSpec
+from src.llm_runtime.seats import ModelIntent
 
 
 class GoogleAdapter:
@@ -109,12 +108,7 @@ class GoogleAdapter:
             callbacks=list(request.callbacks),
             thinking_level=reasoning,
             max_output_tokens=request.output_tokens,
-            reserve_class=(
-                "deep"
-                if request.binding.intent
-                in {ModelIntent.REASONING, ModelIntent.CRITICAL, ModelIntent.ESCALATION}
-                else "default"
-            ),
+            reserve_class=reserve_class_for_request(request.binding.intent, reasoning),
             service_tier=request.service_tier,
             api_key=settings.get_google_api_key(),
             settings=settings,
@@ -126,9 +120,3 @@ class GoogleAdapter:
             request.binding.endpoint_host,
         )
         return llm
-
-    def prepare_messages(self, messages: list[Any], *, seat: SeatSpec) -> list[Any]:
-        del seat
-        from src.agents.message_utils import filter_messages_for_gemini
-
-        return filter_messages_for_gemini(messages)

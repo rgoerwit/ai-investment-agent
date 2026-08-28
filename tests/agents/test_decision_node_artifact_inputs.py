@@ -8,7 +8,7 @@ injected into downstream agent prompts as if it were a real report; the
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -291,7 +291,9 @@ PE_RATIO_TTM: 16.55
 
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")
-    async def test_pm_gets_one_semantic_trace_correction(self, mock_get_prompt):
+    async def test_pm_reconciles_invalid_trace_without_a_model_correction(
+        self, mock_get_prompt
+    ):
         mock_get_prompt.return_value = SimpleNamespace(
             system_message="portfolio manager prompt",
             agent_name="Portfolio Manager",
@@ -313,8 +315,7 @@ PE_RATIO_TTM: 16.55
         responses = [
             SimpleNamespace(
                 content=response_template.format(claim_id="claim:not-registered")
-            ),
-            SimpleNamespace(content=response_template.format(claim_id="claim:pe")),
+            )
         ]
         fundamentals = (
             "### --- START DATA_BLOCK ---\n"
@@ -351,6 +352,128 @@ PE_RATIO_TTM: 16.55
         ) as mock_invoke:
             result = await create_portfolio_manager_node(_mock_llm(), None)(state, {})
 
+        assert mock_invoke.await_count == 1
+        # Reconciliation may remove an invented claim ID, but it must not invent a
+        # different eligible claim as the model's rationale. The trace therefore
+        # remains fail-closed without buying a second model call.
+        assert result["decision_trace"]["status"] == "INVALID"
+        assert result["decision_trace"]["decision_facts"] == []
+
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_pm_uses_one_recovery_binding_for_truncated_structure(
+        self, mock_get_prompt
+    ):
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="portfolio manager prompt",
+            agent_name="Portfolio Manager",
+        )
+        initial = SimpleNamespace(
+            content=(
+                "### --- START PM_BLOCK ---\n"
+                "VERDICT: HOLD\n"
+                "ZONE: MODERATE\n"
+                "DECISION_FACTS: NONE"
+            ),
+            usage_metadata={"output_tokens": 4096},
+            response_metadata={},
+        )
+        recovered = SimpleNamespace(
+            content=(
+                "### PORTFOLIO MANAGER VERDICT: HOLD\n"
+                "### THESIS COMPLIANCE SUMMARY\n"
+                "Hard Fail Checks: PASS\n"
+                "### FINAL EXECUTION PARAMETERS\n"
+                "- Action: HOLD\n"
+                "### --- START PM_BLOCK ---\n"
+                "VERDICT: HOLD\n"
+                "RISK_TALLY: 0.5\n"
+                "ZONE: MODERATE\n"
+                "DECISION_FACTS: NONE\n"
+                "DECISION_GATES: NONE\n"
+                "### --- END PM_BLOCK ---"
+            ),
+            usage_metadata={"output_tokens": 1024},
+            response_metadata={},
+        )
+        recovery_llm = MagicMock(model_name="gpt-recovery")
+        fundamentals = (
+            "### --- START DATA_BLOCK ---\n"
+            "PE_RATIO_TTM: 12.0\n"
+            "VALUATION_INPUT_RELIABILITY: USABLE\n"
+            "### --- END DATA_BLOCK ---"
+        )
+        state = {
+            "company_of_interest": "TEST",
+            "fundamentals_report": fundamentals,
+            "pre_screening_result": "PASS",
+            "red_flags": [],
+            "artifact_statuses": _ok("fundamentals_report", fundamentals),
+        }
+
+        with patch(
+            "src.agents.decision_nodes.agent_runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(side_effect=[initial, recovered]),
+        ) as mock_invoke:
+            result = await create_portfolio_manager_node(
+                _mock_llm(),
+                None,
+                recovery_llm=recovery_llm,
+            )(state, {})
+
         assert mock_invoke.await_count == 2
-        assert result["decision_trace"]["status"] == "VALID"
-        assert result["decision_trace"]["decision_facts"] == ["claim:pe"]
+        # Recovery callbacks are attached once when the canonical recovery seat
+        # is constructed; the node must not wrap it in a second callback layer.
+        assert mock_invoke.await_args_list[1].args[0] is recovery_llm
+        recovery_llm.with_config.assert_not_called()
+        assert result["artifact_statuses"]["final_trade_decision"]["ok"] is True
+
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_pm_recovery_failure_preserves_initial_fragment(
+        self, mock_get_prompt
+    ):
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="portfolio manager prompt",
+            agent_name="Portfolio Manager",
+        )
+        initial_content = (
+            "### --- START PM_BLOCK ---\n"
+            "VERDICT: HOLD\n"
+            "ZONE: MODERATE\n"
+            "DECISION_FACTS: NONE"
+        )
+        initial = SimpleNamespace(
+            content=initial_content,
+            usage_metadata={"output_tokens": 4096},
+            response_metadata={},
+        )
+        recovery_llm = MagicMock(model_name="gpt-recovery")
+        recovery_llm.with_config.return_value = MagicMock(name="tracked-recovery")
+        fundamentals = (
+            "### --- START DATA_BLOCK ---\n"
+            "PE_RATIO_TTM: 12.0\n"
+            "VALUATION_INPUT_RELIABILITY: USABLE\n"
+            "### --- END DATA_BLOCK ---"
+        )
+        state = {
+            "company_of_interest": "TEST",
+            "fundamentals_report": fundamentals,
+            "pre_screening_result": "PASS",
+            "red_flags": [],
+            "artifact_statuses": _ok("fundamentals_report", fundamentals),
+        }
+
+        with patch(
+            "src.agents.decision_nodes.agent_runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(side_effect=[initial, TimeoutError("recovery timed out")]),
+        ):
+            result = await create_portfolio_manager_node(
+                _mock_llm(),
+                None,
+                recovery_llm=recovery_llm,
+            )(state, {})
+
+        status = result["artifact_statuses"]["final_trade_decision"]
+        assert status["ok"] is False
+        assert result["final_trade_decision"] == initial_content

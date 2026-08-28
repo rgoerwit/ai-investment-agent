@@ -85,6 +85,99 @@ def test_reversing_only_group_providers_selects_scoped_models() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("base_provider", "review_provider", "quick_overrides", "expected_model"),
+    (
+        ("google", "openai", {}, "gemini-3.1-pro-preview"),
+        (
+            "google",
+            "openai",
+            {
+                "fundamentals_analyst": "gemini-3.7-flash",
+                "portfolio_manager": "gemini-3.7-flash",
+            },
+            "gemini-3.7-flash",
+        ),
+        ("openai", "google", {}, "gpt-5.4"),
+        (
+            "openai",
+            "google",
+            {
+                "fundamentals_analyst": "gpt-5.4-mini",
+                "portfolio_manager": "gpt-5.4-mini",
+            },
+            "gpt-5.4-mini",
+        ),
+    ),
+)
+def test_quick_critical_seats_resolve_defaults_and_explicit_cost_pins(
+    base_provider: str,
+    review_provider: str,
+    quick_overrides: dict[str, str],
+    expected_model: str,
+) -> None:
+    plan = resolve_binding_plan(
+        _new_settings(
+            llm_base_provider=base_provider,
+            llm_review_provider=review_provider,
+            llm_seat_quick_model_overrides=quick_overrides,
+        )
+    )
+
+    assert (
+        plan.for_seat(SeatId.SENIOR_FUNDAMENTALS, quick_mode=True).model
+        == expected_model
+    )
+    assert (
+        plan.for_seat(SeatId.PORTFOLIO_MANAGER, quick_mode=True).model == expected_model
+    )
+
+
+def test_reversed_provider_setup_supports_quick_evaluation() -> None:
+    plan = resolve_binding_plan(
+        _new_settings(
+            llm_base_provider="openai",
+            llm_review_provider="google",
+            llm_regional_provider="zai",
+            llm_writer_provider="anthropic",
+            llm_operational_provider="google",
+            llm_judge_provider="google",
+            zai_api_key="zai-key",
+            llm_seat_quick_model_overrides={},
+        )
+    )
+
+    assert plan.for_seat(SeatId.MARKET, quick_mode=True).model == "gpt-5.4-mini"
+    assert plan.for_seat(SeatId.BULL, quick_mode=True).model == "gpt-5.4-mini"
+    assert plan.for_seat(SeatId.SENIOR_FUNDAMENTALS, quick_mode=True).model == "gpt-5.4"
+    assert plan.for_seat(SeatId.PORTFOLIO_MANAGER, quick_mode=True).model == "gpt-5.4"
+    assert plan.for_seat(SeatId.CONSULTANT, quick_mode=True).provider == "google"
+    assert plan.status_for(SeatId.AUDITOR, quick_mode=True).enabled is False
+    assert plan.status_for(SeatId.APAC, quick_mode=True).enabled is False
+    assert plan.bindings[SeatId.ARTICLE_WRITER].provider == "anthropic"
+    assert plan.bindings[SeatId.CONTENT_INSPECTOR].provider == "google"
+    assert plan.bindings[SeatId.SEMANTIC_JUDGE].provider == "google"
+
+
+def test_provider_switch_rejects_stale_quick_model_pins() -> None:
+    with pytest.raises(BindingConfigurationError) as exc_info:
+        resolve_binding_plan(
+            _new_settings(
+                llm_base_provider="openai",
+                llm_review_provider="google",
+                llm_seat_quick_model_overrides={
+                    "fundamentals_analyst": "gemini-3.7-flash",
+                    "portfolio_manager": "gemini-3.7-flash",
+                },
+            )
+        )
+
+    joined = "\n".join(exc_info.value.errors)
+    assert "fundamentals_analyst (quick)" in joined
+    assert "portfolio_manager (quick)" in joined
+    assert "belongs to 'google', not 'openai'" in joined
+
+
 def test_mixed_legacy_and_new_schema_fails_with_names() -> None:
     settings = _new_settings(quick_think_llm="gemini-3.1-flash-lite")
     with pytest.raises(
@@ -137,12 +230,17 @@ def test_real_legacy_override_plus_new_selector_is_actionable(tmp_path) -> None:
 
 
 def test_collapsed_review_fails_before_construction() -> None:
-    with pytest.raises(BindingConfigurationError, match="review binding must differ"):
+    with pytest.raises(BindingConfigurationError) as exc_info:
         resolve_binding_plan(_new_settings(llm_review_provider="google"))
+    message = str(exc_info.value)
+    assert "LLM_REVIEW_PROVIDER" in message
+    assert "LLM_BASE_PROVIDER" in message
+    assert message.count("vendor 'google'") >= 2
+    assert "model lineage" in message
 
 
 def test_review_independence_still_applies_when_consultant_is_off() -> None:
-    with pytest.raises(BindingConfigurationError, match="review binding must differ"):
+    with pytest.raises(BindingConfigurationError, match="LLM_REVIEW_PROVIDER"):
         resolve_binding_plan(
             _new_settings(
                 llm_review_provider="google",
@@ -192,7 +290,7 @@ def test_transport_capability_does_not_qualify_anthropic_for_base() -> None:
     with pytest.raises(BindingConfigurationError) as exc_info:
         resolve_binding_plan(_new_settings(llm_base_provider="anthropic"))
     message = str(exc_info.value)
-    assert "not application-qualified" in message
+    assert "not allowed for binding group" in message
     assert "binding group 'base'" in message
     assert "has no configured 'fast' model" not in message
 

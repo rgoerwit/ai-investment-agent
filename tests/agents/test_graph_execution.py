@@ -67,12 +67,17 @@ class TestGraphRouting:
 
     def test_should_continue_analyst_with_tools(self):
         """Test routing when analyst has tool calls."""
+        from langchain_core.messages import AIMessage
+
         from src.graph import should_continue_analyst
 
-        mock_message = MagicMock()
-        mock_message.tool_calls = ["tool1"]
+        mock_message = AIMessage(
+            content="",
+            tool_calls=[{"name": "tool", "args": {}, "id": "1"}],
+            name="market_analyst",
+        )
 
-        state = {"messages": [mock_message]}
+        state = {"messages": [mock_message], "sender": "market_analyst"}
         config = {}
 
         result = should_continue_analyst(state, config)
@@ -80,16 +85,57 @@ class TestGraphRouting:
 
     def test_should_continue_analyst_without_tools(self):
         """Test routing when analyst has no tool calls."""
+        from langchain_core.messages import AIMessage
+
         from src.graph import should_continue_analyst
 
-        mock_message = MagicMock()
-        mock_message.tool_calls = []
+        mock_message = AIMessage(content="done", name="market_analyst")
 
-        state = {"messages": [mock_message]}
+        state = {"messages": [mock_message], "sender": "market_analyst"}
         config = {}
 
         result = should_continue_analyst(state, config)
         assert result == "continue"
+
+    def test_should_continue_uses_sender_owned_message_under_parallel_interleaving(
+        self,
+    ):
+        """Another branch finishing later must not control this branch's edge."""
+        from langchain_core.messages import AIMessage
+
+        from src.graph import should_continue_analyst
+
+        state = {
+            "sender": "news_analyst",
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "get_news", "args": {}, "id": "news-call"}],
+                    name="news_analyst",
+                ),
+                AIMessage(content="market complete", name="market_analyst"),
+            ],
+        }
+
+        assert should_continue_analyst(state, {}) == "tools"
+
+    def test_should_continue_ends_turn_when_sender_has_no_owned_response(self):
+        from langchain_core.messages import AIMessage
+
+        from src.graph import should_continue_analyst
+
+        state = {
+            "sender": "news_analyst",
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "tool", "args": {}, "id": "market"}],
+                    name="market_analyst",
+                )
+            ],
+        }
+
+        assert should_continue_analyst(state, {}) == "continue"
 
 
 class TestDebateRouter:
@@ -136,12 +182,9 @@ class TestDebateRouter:
 class TestSyncCheckRouter:
     """Test sync_check_router for parallel debate fan-out."""
 
-    @patch("src.graph.routing.config")
-    def test_sync_check_returns_end_when_incomplete(self, mock_config):
+    def test_sync_check_returns_end_when_incomplete(self):
         """Test router returns __end__ when not all analysts complete."""
         from src.graph import sync_check_router
-
-        mock_config.enable_consultant = False
 
         state = {
             "market_report": "done",
@@ -151,17 +194,12 @@ class TestSyncCheckRouter:
         }
         config = {}
 
-        result = sync_check_router(state, config)
+        result = sync_check_router(state, config, auditor_required=False)
         assert result == "__end__"
 
-    @patch("src.graph.routing.config")
-    def test_sync_check_proceeds_when_required_branch_failed_but_completed(
-        self, mock_config
-    ):
+    def test_sync_check_proceeds_when_required_branch_failed_but_completed(self):
         """Router should wait for completion, not success, at the sync barrier."""
         from src.graph import sync_check_router
-
-        mock_config.enable_consultant = False
 
         state = {
             "market_report": "Error: DNS failure",
@@ -182,16 +220,13 @@ class TestSyncCheckRouter:
             },
         }
 
-        result = sync_check_router(state, {})
+        result = sync_check_router(state, {}, auditor_required=False)
         assert isinstance(result, list)
         assert "Bull Researcher R1" in result
 
-    @patch("src.graph.routing.config")
-    def test_sync_check_returns_pm_fast_fail_on_reject(self, mock_config):
+    def test_sync_check_returns_pm_fast_fail_on_reject(self):
         """Test router returns PM Fast-Fail on REJECT (separate node to avoid edge conflicts)."""
         from src.graph import sync_check_router
-
-        mock_config.enable_consultant = False
 
         state = {
             "market_report": "done",
@@ -202,15 +237,12 @@ class TestSyncCheckRouter:
         }
         config = {}
 
-        result = sync_check_router(state, config)
+        result = sync_check_router(state, config, auditor_required=False)
         assert result == "PM Fast-Fail"
 
-    @patch("src.graph.routing.config")
-    def test_sync_check_returns_list_for_parallel_r1(self, mock_config):
+    def test_sync_check_returns_list_for_parallel_r1(self):
         """Test router returns list for parallel Bull/Bear R1 on PASS."""
         from src.graph import sync_check_router
-
-        mock_config.enable_consultant = False
 
         state = {
             "market_report": "done",
@@ -221,7 +253,7 @@ class TestSyncCheckRouter:
         }
         config = {}
 
-        result = sync_check_router(state, config)
+        result = sync_check_router(state, config, auditor_required=False)
         assert isinstance(result, list)
         assert "Bull Researcher R1" in result
         assert "Bear Researcher R1" in result
@@ -231,91 +263,44 @@ class TestSyncCheckRouter:
 class TestAuditorIntegration:
     """Test auditor node integration with graph routing."""
 
-    @patch("src.graph.routing.config")
-    def test_is_auditor_enabled_when_consultant_disabled(self, mock_config):
-        """Test _is_auditor_enabled returns False when consultant disabled."""
-        from src.graph.routing import _is_auditor_enabled
-
-        mock_config.enable_consultant = False
-        mock_config.get_openai_api_key.return_value = "test-key"
-
-        assert _is_auditor_enabled() is False
-
-    @patch("src.graph.routing.is_openai_consultant_available")
-    @patch("src.graph.routing.config")
-    def test_is_auditor_enabled_when_no_api_key(self, mock_config, mock_available):
-        """Test _is_auditor_enabled returns False when API key missing."""
-        from src.graph.routing import _is_auditor_enabled
-
-        mock_config.enable_consultant = True
-        mock_available.return_value = False
-
-        assert _is_auditor_enabled() is False
-
-    @patch("src.graph.routing.is_openai_consultant_available")
-    @patch("src.graph.routing.config")
-    def test_is_auditor_enabled_when_all_conditions_met(
-        self, mock_config, mock_available
-    ):
-        """Test _is_auditor_enabled returns True when all conditions met."""
-        from src.graph.routing import _is_auditor_enabled
-
-        mock_config.enable_consultant = True
-        mock_available.return_value = True
-
-        assert _is_auditor_enabled() is True
-
-    @patch("src.graph.routing._is_auditor_enabled")
-    def test_fan_out_includes_auditor_when_enabled(self, mock_auditor_enabled):
+    def test_fan_out_includes_auditor_when_enabled(self):
         """Test fan_out_to_analysts includes Auditor when enabled."""
         from src.graph import fan_out_to_analysts
 
-        mock_auditor_enabled.return_value = True
-
-        result = fan_out_to_analysts({}, {})
+        result = fan_out_to_analysts({}, {}, include_auditor=True)
         assert "Auditor" in result
         assert "Value Trap Detector" in result
         assert len(result) == 8  # 7 analysts + Auditor
 
-    @patch("src.graph.routing._is_auditor_enabled")
-    def test_fan_out_excludes_auditor_when_disabled(self, mock_auditor_enabled):
+    def test_fan_out_excludes_auditor_when_disabled(self):
         """Test fan_out_to_analysts excludes Auditor when disabled."""
         from src.graph import fan_out_to_analysts
 
-        mock_auditor_enabled.return_value = False
-
-        result = fan_out_to_analysts({}, {})
+        result = fan_out_to_analysts({}, {}, include_auditor=False)
         assert "Auditor" not in result
         assert "Value Trap Detector" in result
         assert len(result) == 7
 
-    @patch("src.graph.routing._is_auditor_enabled")
-    def test_sync_check_waits_for_auditor_when_enabled(self, mock_auditor_enabled):
+    def test_sync_check_waits_for_auditor_when_enabled(self):
         """Test sync_check_router waits for auditor_report when enabled."""
         from src.graph import sync_check_router
-
-        mock_auditor_enabled.return_value = True
 
         # All reports present except auditor_report
         state = {
             "market_report": "done",
             "sentiment_report": "done",
             "news_report": "done",
+            "value_trap_report": "done",
             "pre_screening_result": "PASS",
             "auditor_report": "",  # Empty = not done
         }
 
-        result = sync_check_router(state, {})
+        result = sync_check_router(state, {}, auditor_required=True)
         assert result == "__end__"  # Should wait
 
-    @patch("src.graph.routing._is_auditor_enabled")
-    def test_sync_check_proceeds_when_auditor_failed_but_completed(
-        self, mock_auditor_enabled
-    ):
+    def test_sync_check_proceeds_when_auditor_failed_but_completed(self):
         """A failed enabled auditor branch should still satisfy sync completion."""
         from src.graph import sync_check_router
-
-        mock_auditor_enabled.return_value = True
 
         state = {
             "market_report": "done",
@@ -334,16 +319,13 @@ class TestAuditorIntegration:
             },
         }
 
-        result = sync_check_router(state, {})
+        result = sync_check_router(state, {}, auditor_required=True)
         assert isinstance(result, list)
         assert "Bull Researcher R1" in result
 
-    @patch("src.graph.routing._is_auditor_enabled")
-    def test_sync_check_proceeds_when_auditor_complete(self, mock_auditor_enabled):
+    def test_sync_check_proceeds_when_auditor_complete(self):
         """Test sync_check_router proceeds when auditor_report complete."""
         from src.graph import sync_check_router
-
-        mock_auditor_enabled.return_value = True
 
         state = {
             "market_report": "done",
@@ -354,7 +336,7 @@ class TestAuditorIntegration:
             "auditor_report": "Forensic audit complete",
         }
 
-        result = sync_check_router(state, {})
+        result = sync_check_router(state, {}, auditor_required=True)
         assert isinstance(result, list)
         assert "Bull Researcher R1" in result
 
@@ -503,46 +485,8 @@ class TestAuditorLLMConfiguration:
                 assert kw["reasoning_effort"] == "low"
 
 
-class TestAuditorEnablementContract:
-    """Ensure routing and LLM creation stay aligned on auditor availability."""
-
-    def test_auditor_disabled_contract_stays_aligned(self, monkeypatch):
-        import src.graph.routing as routing
-        import src.llms as llms
-
-        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: False)
-        monkeypatch.setattr(routing.config, "enable_consultant", False)
-        monkeypatch.setattr(llms.config, "enable_consultant", False)
-
-        assert routing._is_auditor_enabled() is False
-        assert llms.create_auditor_llm() is None
-
-    def test_auditor_enabled_contract_stays_aligned(self, monkeypatch):
-        import src.graph.routing as routing
-        import src.llms as llms
-
-        stub_module = ModuleType("langchain_openai")
-
-        class StubChatOpenAI:
-            def __init__(self, **kwargs):
-                self.model_name = kwargs["model"]
-
-        stub_module.ChatOpenAI = StubChatOpenAI
-
-        monkeypatch.setitem(sys.modules, "langchain_openai", stub_module)
-        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: True)
-        monkeypatch.setattr(routing.config, "enable_consultant", True)
-        monkeypatch.setattr(llms.config, "enable_consultant", True)
-        monkeypatch.setattr(
-            type(llms.config), "get_openai_api_key", lambda self: "fake-key"
-        )
-        monkeypatch.setattr(llms.config, "auditor_model", "gpt-5-mini")
-        monkeypatch.setattr(llms.config, "consultant_model", "gpt-5")
-
-        assert routing._is_auditor_enabled() is True
-        llm = llms.create_auditor_llm()
-        assert llm is not None
-        assert llm.model_name == "gpt-5-mini"
+class TestAuditorLLMReasoning:
+    """Keep the full-mode Auditor's reviewed reasoning construction unchanged."""
 
     def test_auditor_gpt5_uses_medium_reasoning_effort(self, monkeypatch):
         import src.llms as llms
@@ -574,14 +518,14 @@ class TestAuditorEnablementContract:
 class TestQuickModeGraphContracts:
     """Lock down consultant/auditor behavior in quick mode."""
 
-    def test_build_graph_components_keeps_consultant_and_auditor_in_quick_mode(
+    def test_build_graph_components_keeps_consultant_but_disables_auditor_in_quick_mode(
         self, monkeypatch
     ):
         from src.graph.components import build_graph_components
 
         components = _stub_graph_component_dependencies(monkeypatch)
         quick_consultant = Mock(name="quick-consultant")
-        auditor_llm = Mock(name="auditor")
+        auditor_factory = Mock(return_value=Mock(name="auditor"))
 
         consultant_calls = []
 
@@ -590,10 +534,7 @@ class TestQuickModeGraphContracts:
             return quick_consultant
 
         monkeypatch.setattr(components, "get_consultant_llm", fake_get_consultant_llm)
-        monkeypatch.setattr(components, "_is_auditor_enabled", lambda: True)
-        monkeypatch.setattr(
-            components, "create_auditor_llm", lambda **kwargs: auditor_llm
-        )
+        monkeypatch.setattr(components, "create_auditor_llm", auditor_factory)
 
         graph_components = build_graph_components(
             max_debate_rounds=1,
@@ -609,9 +550,11 @@ class TestQuickModeGraphContracts:
         )
 
         assert graph_components.consultant_enabled is True
-        assert graph_components.auditor_enabled is True
+        assert graph_components.auditor_enabled is False
         assert "Consultant" in graph_components.nodes
-        assert "Auditor" in graph_components.nodes
+        assert "Auditor" not in graph_components.nodes
+        assert "auditor_tools" not in graph_components.tool_nodes
+        auditor_factory.assert_not_called()
         assert consultant_calls
         assert consultant_calls[0]["quick_mode"] is True
 
@@ -622,7 +565,6 @@ class TestQuickModeGraphContracts:
 
         components = _stub_graph_component_dependencies(monkeypatch)
         monkeypatch.setattr(components, "get_consultant_llm", lambda **kwargs: None)
-        monkeypatch.setattr(components, "_is_auditor_enabled", lambda: False)
 
         graph_components = build_graph_components(
             max_debate_rounds=1,
@@ -642,14 +584,18 @@ class TestQuickModeGraphContracts:
         assert "Consultant" not in graph_components.nodes
         assert "Auditor" not in graph_components.nodes
 
-    def test_quick_mode_raises_when_auditor_routing_and_creation_disagree(
+    def test_full_mode_raises_when_auditor_routing_and_creation_disagree(
         self, monkeypatch
     ):
         from src.graph.components import build_graph_components
 
         components = _stub_graph_component_dependencies(monkeypatch)
         monkeypatch.setattr(components, "get_consultant_llm", lambda **kwargs: Mock())
-        monkeypatch.setattr(components, "_is_auditor_enabled", lambda: True)
+        monkeypatch.setattr(
+            components,
+            "_is_auditor_enabled",
+            lambda *_args, **_kwargs: True,
+        )
         monkeypatch.setattr(components, "create_auditor_llm", lambda **kwargs: None)
 
         with pytest.raises(RuntimeError, match="Auditor routing was enabled"):
@@ -658,7 +604,7 @@ class TestQuickModeGraphContracts:
                 enable_memory=False,
                 ticker="TEST",
                 cleanup_previous=False,
-                quick_mode=True,
+                quick_mode=False,
                 strict_mode=False,
                 chart_format="png",
                 transparent_charts=False,
@@ -679,7 +625,11 @@ class TestQuickModeGraphContracts:
             return Mock(name="full-consultant")
 
         monkeypatch.setattr(components, "get_consultant_llm", fake_get_consultant_llm)
-        monkeypatch.setattr(components, "_is_auditor_enabled", lambda: True)
+        monkeypatch.setattr(
+            components,
+            "_is_auditor_enabled",
+            lambda *_args, **_kwargs: True,
+        )
         monkeypatch.setattr(components, "create_auditor_llm", lambda **kwargs: Mock())
 
         graph_components = build_graph_components(
@@ -713,7 +663,11 @@ class TestQuickModeGraphContracts:
             return None if kwargs.get("quick_mode") else Mock(name="apac")
 
         monkeypatch.setattr(components, "get_consultant_llm", lambda **kwargs: None)
-        monkeypatch.setattr(components, "_is_auditor_enabled", lambda: False)
+        monkeypatch.setattr(
+            components,
+            "_is_auditor_enabled",
+            lambda *_args, **_kwargs: False,
+        )
         monkeypatch.setattr(
             components, "create_apac_specialist_llm", fake_create_apac_llm
         )
@@ -761,7 +715,11 @@ class TestQuickModeGraphContracts:
 
         components = _stub_graph_component_dependencies(monkeypatch)
         monkeypatch.setattr(components, "get_consultant_llm", lambda **kwargs: None)
-        monkeypatch.setattr(components, "_is_auditor_enabled", lambda: False)
+        monkeypatch.setattr(
+            components,
+            "_is_auditor_enabled",
+            lambda *_args, **_kwargs: False,
+        )
 
         bump_flags = []
 
@@ -854,6 +812,82 @@ class TestQuickModeGraphContracts:
         assert analyst_kwargs
         assert all(kwargs["allow_retry"] is True for kwargs in analyst_kwargs)
         assert all(kwargs["retry_llm"] is not None for kwargs in analyst_kwargs)
+
+    def test_quick_mode_arms_recovery_only_for_gate_critical_seats(self, monkeypatch):
+        from src.config import Settings
+        from src.graph.components import build_graph_components
+        from src.llm_runtime.bindings import resolve_binding_plan
+        from src.llm_runtime.seats import SeatId
+
+        components = _stub_graph_component_dependencies(monkeypatch)
+        analyst_calls = []
+        pm_calls = []
+
+        def analyst_node(_llm, agent_key, _tools, _field, **kwargs):
+            analyst_calls.append((agent_key, kwargs))
+            return lambda state, config: {}
+
+        def pm_node(*args, **kwargs):
+            pm_calls.append(kwargs)
+            return lambda state, config: {}
+
+        monkeypatch.setattr(components, "create_analyst_node", analyst_node)
+        monkeypatch.setattr(components, "create_portfolio_manager_node", pm_node)
+        plan = resolve_binding_plan(
+            Settings(
+                _env_file=None,
+                llm_base_provider="openai",
+                llm_review_provider="google",
+                llm_regional_provider="deepseek",
+                google_api_key="g",
+                openai_api_key="o",
+                claude_api_key="a",
+                deepseek_api_key="d",
+                llm_consultant_mode="off",
+                llm_auditor_mode="off",
+                llm_editor_mode="off",
+                llm_apac_mode="off",
+            )
+        )
+        requests = []
+
+        class RecordingFactory:
+            def build(self, request):
+                requests.append(request)
+                return Mock(
+                    name=f"{request.seat.seat_id.value}-{request.output_tokens}"
+                )
+
+        build_graph_components(
+            max_debate_rounds=1,
+            enable_memory=False,
+            ticker="TEST",
+            cleanup_previous=False,
+            quick_mode=True,
+            strict_mode=False,
+            chart_format="png",
+            transparent_charts=False,
+            image_dir=None,
+            skip_charts=True,
+            binding_plan=plan,
+            model_factory=RecordingFactory(),
+        )
+
+        retry_requests = [
+            request
+            for request in requests
+            if request.seat.seat_id is SeatId.ANALYST_RETRY
+        ]
+        assert {request.output_tokens for request in retry_requests} == {10923, 16384}
+        by_agent = dict(analyst_calls)
+        assert by_agent["fundamentals_analyst"]["allow_retry"] is True
+        assert by_agent["fundamentals_analyst"]["retry_llm"] is not None
+        for agent_key, kwargs in analyst_calls:
+            if agent_key != "fundamentals_analyst":
+                assert kwargs["allow_retry"] is False
+                assert kwargs["retry_llm"] is None
+        assert len(pm_calls) == 2
+        assert all(kwargs["recovery_llm"] is not None for kwargs in pm_calls)
 
     def test_legacy_pre_gemini_3_floor_keeps_retry_disabled(self, monkeypatch):
         """The compatibility bridge must preserve the old retry eligibility gate."""
@@ -1384,7 +1418,11 @@ class TestPostResearchSync:
             return _node
 
         monkeypatch.setattr(components, "_create_legacy_memories", lambda: (None,) * 5)
-        monkeypatch.setattr(components, "_is_auditor_enabled", lambda: True)
+        monkeypatch.setattr(
+            components,
+            "_is_auditor_enabled",
+            lambda *_args, **_kwargs: True,
+        )
         monkeypatch.setattr(components, "create_quick_thinking_llm", lambda **_: Mock())
         monkeypatch.setattr(components, "create_deep_thinking_llm", lambda **_: Mock())
         monkeypatch.setattr(components, "get_consultant_llm", lambda **_: Mock())
@@ -1491,16 +1529,7 @@ if __name__ == "__main__":
 
 
 class TestAuditorGateFollowsTheBindingPlan:
-    """The router and the graph builder must agree on the auditor seat.
-
-    The pre-existing guard only catches the *loud* direction — routing enabled
-    while creation returns None raises. The opposite direction is **silent**: the
-    node gets wired and simply never receives control, so the cross-check
-    disappears with no error and only `auditor_review_status='NOT_RUN'` in the
-    saved artifact to show for it. That is what happened on a migrated Moonshot
-    review plane, where OPENAI_API_KEY is legitimately absent because the vendor
-    key is MOONSHOT_API_KEY.
-    """
+    """The binding plan owns full-versus-quick Auditor availability."""
 
     @staticmethod
     def _new_schema_settings(**over):
@@ -1517,30 +1546,37 @@ class TestAuditorGateFollowsTheBindingPlan:
             **over,
         )
 
-    def test_auditor_enabled_on_a_non_openai_review_plane(self, monkeypatch):
-        from src.graph import routing
+    def test_auditor_is_full_only_on_a_non_openai_review_plane(self):
+        from src.graph.routing import dispatch_destinations
+        from src.llm_runtime.bindings import resolve_binding_plan
+        from src.llm_runtime.seats import SeatId
 
         settings = self._new_schema_settings()
-        monkeypatch.setattr(routing, "config", settings)
-        # The legacy predicate would say no: there is no OpenAI key to find.
-        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: False)
+        plan = resolve_binding_plan(settings)
 
-        assert routing._is_auditor_enabled() is True
-        assert "Auditor" in routing.dispatch_destinations(
-            include_auditor=routing._is_auditor_enabled()
+        assert plan.status_for(SeatId.AUDITOR).enabled is True
+        assert plan.status_for(SeatId.AUDITOR, quick_mode=True).enabled is False
+        assert "Auditor" in dispatch_destinations(
+            include_auditor=plan.status_for(SeatId.AUDITOR).enabled
+        )
+        assert "Auditor" not in dispatch_destinations(
+            include_auditor=plan.status_for(SeatId.AUDITOR, quick_mode=True).enabled
         )
 
-    def test_auditor_disabled_when_the_seat_mode_is_off(self, monkeypatch):
-        from src.graph import routing
+    def test_auditor_disabled_when_the_seat_mode_is_off(self):
+        from src.llm_runtime.bindings import resolve_binding_plan
+        from src.llm_runtime.seats import SeatId
 
         settings = self._new_schema_settings(llm_auditor_mode="off")
-        monkeypatch.setattr(routing, "config", settings)
+        plan = resolve_binding_plan(settings)
 
-        assert routing._is_auditor_enabled() is False
+        assert plan.status_for(SeatId.AUDITOR).enabled is False
+        assert plan.status_for(SeatId.AUDITOR, quick_mode=True).enabled is False
 
-    def test_auditor_disabled_when_the_review_credential_is_missing(self, monkeypatch):
+    def test_auditor_disabled_when_the_review_credential_is_missing(self):
         from src.config import Settings
-        from src.graph import routing
+        from src.llm_runtime.bindings import resolve_binding_plan
+        from src.llm_runtime.seats import SeatId
 
         settings = Settings(
             _env_file=None,
@@ -1550,22 +1586,43 @@ class TestAuditorGateFollowsTheBindingPlan:
             llm_base_provider="google",
             llm_review_provider="moonshot",
         )
-        monkeypatch.setattr(routing, "config", settings)
+        plan = resolve_binding_plan(settings)
 
-        assert routing._is_auditor_enabled() is False
+        assert plan.status_for(SeatId.AUDITOR).enabled is False
+        assert plan.status_for(SeatId.AUDITOR, quick_mode=True).enabled is False
 
-    def test_legacy_schema_still_requires_the_openai_key(self, monkeypatch):
+    def test_legacy_schema_uses_the_same_full_only_policy(self):
         from src.config import Settings
-        from src.graph import routing
+        from src.llm_runtime.bindings import resolve_binding_plan
+        from src.llm_runtime.seats import SeatId
 
         legacy = Settings(
             _env_file=None,
             google_api_key="g",
+            openai_api_key="o",
             finnhub_api_key="f",
             tavily_api_key="t",
             enable_consultant=True,
         )
-        monkeypatch.setattr(routing, "config", legacy)
-        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: False)
+        plan = resolve_binding_plan(legacy)
 
-        assert routing._is_auditor_enabled() is False
+        assert plan.status_for(SeatId.AUDITOR).enabled is True
+        assert plan.status_for(SeatId.AUDITOR, quick_mode=True).enabled is False
+
+    def test_legacy_schema_disables_auditor_without_the_openai_credential(self):
+        from src.config import Settings
+        from src.llm_runtime.bindings import resolve_binding_plan
+        from src.llm_runtime.seats import SeatId
+
+        legacy = Settings(
+            _env_file=None,
+            google_api_key="g",
+            openai_api_key="",
+            finnhub_api_key="f",
+            tavily_api_key="t",
+            enable_consultant=True,
+        )
+        plan = resolve_binding_plan(legacy)
+
+        assert plan.status_for(SeatId.AUDITOR).enabled is False
+        assert plan.status_for(SeatId.AUDITOR, quick_mode=True).enabled is False

@@ -54,6 +54,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Quick-mode provider comparisons no longer pay for known-useless repeats** — An
+  explicit provider output-cap stop is handed to structural validation instead of
+  repeating the same capped request. Every shared graph tool loop now uses one
+  code-owned ledger for model turns, rounds, fan-out, evidence, tool, purpose,
+  duplicate, and failure-circuit limits, with forced synthesis and persisted budget
+  telemetry. This bounds Value Trap reformulation loops as well as foreign-language
+  research.
+- **Provider swaps no longer change verdict correctness or hide recovery cost** — The
+  Portfolio Manager validates the growth hard-fail and its evidence-backed exceptions
+  against one canonical policy. Trace IDs and policy-owned verdict surfaces are
+  reconciled deterministically; model recovery remains only for structural failure.
+  Recovery
+  calls retain human-readable attribution to their originating analyst while saved
+  telemetry also identifies the canonical recovery seat and origin; run summaries
+  separately count retained tool messages and actual tool executions.
+- **Critical-seat reasoning reserves are provider-neutral** — Reasoning, critical, and
+  escalation intents receive the deep reserve regardless of whether the provider maps
+  the request to medium or high effort. Saved usage and attempt records carry visible
+  and thinking output plus intent/API/reserve caps, and `cost_report.py --efficiency`
+  surfaces cap, recovery, PM-correction, and research-loop regressions.
+- **Provider-success responses now fail truthfully and recover narrowly** — Canonical
+  structured blocks cannot be marked complete without an end marker, prefixed fields
+  no longer satisfy shorter required names, and saved failures distinguish output-cap
+  exhaustion from incomplete structure and ordinary contract violations. Structural
+  recovery is text-only and provider-neutral; quick mode pays for it only at Senior
+  Fundamentals and Portfolio Manager.
+
 - **A closed position no longer manufactures urgent analysis work** — A sold
   holding still present in the IBKR snapshot has quantity 0, so the unit anchor
   `quantity × price` was 0 and value classification fell back to "unclassifiable"

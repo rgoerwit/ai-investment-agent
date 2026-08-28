@@ -1,6 +1,6 @@
 # The agent roster and the workflow
 
-Last updated: 2026-08-22
+Last updated: 2026-08-25
 
 What each agent contributes, how the graph is sequenced, and the design decisions
 behind the specialist nodes. This document explains the rationale and intended
@@ -49,6 +49,12 @@ it in a failure result, and the flag detector keys on that to emit an unavailabi
 flag that blocks a BUY at zero penalty. Filling in "uncertain" tokens there would
 manufacture findings from a provider outage.
 
+Legal Counsel's code-owned preflight, bounded tool loop, and forced JSON synthesis are
+one self-contained transaction. Other tool-using analyst seats use the graph's shared
+tool node, but both paths obey the same provider-neutral transcript rule: an assistant
+tool call and every matching result are retained as one exchange and validated before
+another model request. Provider tolerance is never used to repair malformed history.
+
 **Value-trap detector.** Identifies businesses that are cheap and will stay cheap:
 entrenched ownership, capital hoarding, no catalyst. Its distinctive move is searching
 jurisdiction-specific governance terminology that English-only searches miss —
@@ -60,6 +66,10 @@ contradiction marks the score untrusted rather than trusting the model's number.
 and filing-level cash flow that English aggregators miss — data that is genuinely
 unavailable rather than merely inconvenient. Reaches the senior analyst through
 context injection rather than the message list, to avoid polluting parallel agents.
+Its search menu is prioritized coverage, not a checklist: a shared code-owned research
+ledger caps rounds, fan-out, tools and purposes; suppresses equivalent calls; opens
+circuits for repeated failures; and forces a tool-free final synthesis when research
+closes. Prompt wording may choose what evidence matters but cannot expand those caps.
 
 **Forensic auditor.** An independent accounting check on a different vendor, working
 from primary documents through multilingual search, testing for earnings quality,
@@ -74,8 +84,9 @@ a verdict once, which is what the partial policy exists to prevent.
 
 The consultant and auditor gate on the **same** review plane, and neither is
 subordinate to the other: the auditor has independent consumers, so switching off the
-consultant must not disable it. When asking "should this run in quick mode", check the
-artifact's *consumers*, not intuition.
+consultant must not disable it. Full mode preserves that independent forensic path.
+Quick mode deliberately disables the auditor because its constrained screening tools
+do not provide diligence-grade coverage; promoted candidates restore it in full mode.
 
 ## Red-flag screening
 
@@ -103,10 +114,22 @@ of deterministic business rules with model reasoning is the core pattern, and it
 why prompt and parser must be kept in agreement mechanically. See
 `docs/PROMPT_CONTRACTS.md`.
 
+Provider transport completion is not the same as contract completion. A transient
+partial response without a terminal reason may receive the invocation runtime's
+ordinary provider retry; an explicit output-cap stop does not repeat the same request.
+Once a provider returns successfully, the owning node separately validates required blocks,
+field vocabularies, and end markers. Eligible full-mode analysts may receive one
+text-only structural regeneration; quick mode reserves that recovery for Senior
+Fundamentals and Portfolio Manager. The recovery binding stays in the base provider,
+uses a reasoning intent, inherits the originating seat's output budget, and cannot
+restart tool gathering.
+
 ## Quick mode is a screener
 
 Cheaper models, one debate round, and judgement-layer scores that flap near the gates.
 A quick-mode BUY is qualified as a candidate for full analysis rather than investable
 output, and reconciliation treats it as a review. The verdict token itself is never
 rewritten — downstream parsers all still read it — so the qualification rides the
-persisted text and a derived run-summary flag.
+persisted text and a derived run-summary flag. The forensic auditor does not run in
+quick mode; its full-mode review is part of the diligence restored for promoted
+candidates.

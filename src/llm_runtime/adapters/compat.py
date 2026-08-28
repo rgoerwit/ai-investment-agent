@@ -8,11 +8,11 @@ from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.budgets import resolve_generation_budget, stamp_budget_metadata
 from src.llm_runtime.profiles import resolve_sampling_temperature
 from src.llm_runtime.provider_policy import (
-    is_provider_qualified,
+    is_provider_allowed,
     provider_default_headers,
 )
 from src.llm_runtime.rate_limits import limiter_for_binding
-from src.llm_runtime.seats import SeatId, SeatSpec
+from src.llm_runtime.seats import SeatId
 
 # Providers whose effort comes from the seat's resolved intent rather than an
 # explicit per-binding override.
@@ -45,9 +45,9 @@ class CompatibleAdapter:
         policy = request.seat.execution_policy
 
         provider = request.binding.provider
-        if not is_provider_qualified(provider, request.seat.binding_group):
+        if not is_provider_allowed(provider, request.seat.binding_group):
             raise ValueError(
-                f"provider {provider!r} is not qualified for "
+                f"provider {provider!r} is not allowed for "
                 f"{request.seat.binding_group.value!r} compatible seats"
             )
 
@@ -76,6 +76,7 @@ class CompatibleAdapter:
             settings,
             intent_tokens=request.output_tokens or 8192,
             reasoning_value=reasoning_value,
+            intent=request.binding.intent,
         )
         kwargs: dict[str, Any] = {
             "model": request.binding.model,
@@ -130,7 +131,3 @@ class CompatibleAdapter:
             api_attr="_configured_api_completion_tokens",
         )
         return llm
-
-    def prepare_messages(self, messages: list[Any], *, seat: SeatSpec) -> list[Any]:
-        del seat
-        return list(messages)

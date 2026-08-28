@@ -114,6 +114,22 @@ def create_trading_graph(
         skip_charts=skip_charts,
     )
 
+    def analyst_fan_out_router(state: AgentState, config: RunnableConfig) -> list[str]:
+        return fan_out_to_analysts(
+            state,
+            config,
+            include_auditor=components.auditor_enabled,
+        )
+
+    def analyst_sync_router(
+        state: AgentState, config: RunnableConfig
+    ) -> Literal["PM Fast-Fail", "__end__"] | list[str]:
+        return sync_check_router(
+            state,
+            config,
+            auditor_required=components.auditor_enabled,
+        )
+
     workflow = StateGraph(AgentState)
 
     async def dispatcher_node(state: AgentState, config: RunnableConfig):
@@ -319,7 +335,7 @@ BEAR RESEARCHER:
 
     workflow.add_conditional_edges(
         "Dispatcher",
-        fan_out_to_analysts,
+        analyst_fan_out_router,
         dispatch_destinations(include_auditor=components.auditor_enabled),
     )
 
@@ -358,12 +374,11 @@ BEAR RESEARCHER:
     )
     workflow.add_edge("foreign_tools", "Foreign Language Analyst")
 
-    workflow.add_conditional_edges(
-        "Legal Counsel",
-        should_continue_analyst,
-        {"tools": "legal_tools", "continue": "Fundamentals Sync Check"},
-    )
-    workflow.add_edge("legal_tools", "Legal Counsel")
+    # Legal Counsel owns a bounded private tool loop because its deterministic
+    # preflight, JSON contract, and forced final synthesis form one transaction.
+    # Do not also wire the generic graph tool loop: two owners for one transcript
+    # create provider-dependent behavior and a misleading, unreachable path.
+    workflow.add_edge("Legal Counsel", "Fundamentals Sync Check")
 
     workflow.add_conditional_edges(
         "Value Trap Detector",
@@ -392,7 +407,7 @@ BEAR RESEARCHER:
 
     workflow.add_conditional_edges(
         "Sync Check",
-        sync_check_router,
+        analyst_sync_router,
         ["__end__", "PM Fast-Fail", "Bull Researcher R1", "Bear Researcher R1"],
     )
 

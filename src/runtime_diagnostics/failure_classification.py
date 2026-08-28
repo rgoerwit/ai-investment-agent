@@ -47,7 +47,15 @@ FailureKind = Literal[
     "provider_partial_response",
     "unknown_provider_error",
 ]
-ArtifactErrorKind = FailureKind | Literal["application_error"]
+ArtifactErrorKind = (
+    FailureKind
+    | Literal[
+        "application_error",
+        "output_cap_exhausted",
+        "incomplete_structured_output",
+        "output_contract_violation",
+    ]
+)
 
 
 class RetryDisposition(StrEnum):
@@ -421,7 +429,7 @@ def classify_failure(
         # Expected data absence (delisted/migrated tickers), not a system fault.
         kind = "data_unavailable"
         retryable = False
-    elif isinstance(
+    elif type(root).__name__ == "ToolHistoryIntegrityError" or isinstance(
         root,
         TypeError | AttributeError | ImportError | NotImplementedError | AssertionError,
     ):

@@ -89,6 +89,154 @@ class TestAnalystNode:
         assert result["sender"] == "market_analyst"
 
     @pytest.mark.asyncio
+    async def test_closed_research_budget_forces_tool_free_synthesis(self):
+        from src.agents import create_analyst_node
+        from src.forensic_budget import ForeignLanguageBudgetPolicy
+
+        mock_llm = MagicMock()
+        response = SimpleNamespace(content="bounded final report", tool_calls=None)
+        policy = ForeignLanguageBudgetPolicy(
+            search_calls=3,
+            document_calls=2,
+            filing_calls=1,
+            guidance_calls=1,
+            max_tool_iterations=2,
+            max_llm_calls=4,
+            max_tool_calls_per_turn=2,
+        )
+        node = create_analyst_node(
+            mock_llm,
+            "foreign_language_analyst",
+            [MagicMock(name="search_foreign_sources")],
+            "foreign_language_report",
+            research_budget_policy=policy,
+        )
+        state = {
+            "messages": [],
+            "company_of_interest": "TEST.T",
+            "company_name": "Test Corp",
+            "trade_date": "2026-08-26",
+            "management_guidance_evidence": "preflight complete",
+            "research_budgets": {
+                "foreign_language_analyst": {
+                    "stop_reason": "TOOL_ROUND_LIMIT",
+                }
+            },
+        }
+        config = {
+            "configurable": {
+                "context": MagicMock(ticker="TEST.T", trade_date="2026-08-26")
+            }
+        }
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(return_value=response),
+        ) as invoke:
+            result = await node(state, config)
+
+        mock_llm.bind_tools.assert_not_called()
+        invocation_messages = invoke.await_args.args[1]["messages"]
+        assert "research budget is closed" in invocation_messages[0].content
+        assert "do not request more tools" in invocation_messages[0].content
+        telemetry = result["research_budgets"]["foreign_language_analyst"]
+        assert telemetry["llm_calls"] == 1
+        assert telemetry["stop_reason"] == "TOOL_ROUND_LIMIT"
+
+    @pytest.mark.asyncio
+    async def test_exhausted_research_model_budget_fails_before_invocation(self):
+        from src.agents import create_analyst_node
+        from src.forensic_budget import GraphResearchBudgetPolicy
+
+        policy = GraphResearchBudgetPolicy(
+            tool_limits={"get_news": 1},
+            max_tool_iterations=1,
+            max_llm_calls=1,
+            max_tool_calls_per_turn=1,
+        )
+        node = create_analyst_node(
+            MagicMock(),
+            "news_analyst",
+            [],
+            "news_report",
+            research_budget_policy=policy,
+        )
+        state = {
+            "messages": [],
+            "company_of_interest": "TEST",
+            "research_budgets": {"news_analyst": {"llm_calls": 1}},
+        }
+        invoke = AsyncMock()
+
+        with patch("src.agents.runtime.invoke_with_rate_limit_handling", invoke):
+            result = await node(state, {"configurable": {}})
+
+        invoke.assert_not_awaited()
+        assert result["artifact_statuses"]["news_report"]["ok"] is False
+        telemetry = result["research_budgets"]["news_analyst"]
+        assert telemetry["llm_calls"] == 1
+        assert "LLM_CALL_BUDGET_EXHAUSTED" in telemetry["outcomes"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_tool_history_fails_branch_before_llm_invocation(self):
+        from langchain_core.messages import HumanMessage, ToolMessage
+
+        from src.agents import create_analyst_node
+
+        mock_llm = MagicMock()
+        mock_llm._llm_adapter_kind = "openai_native"
+        invoke = AsyncMock()
+        node = create_analyst_node(mock_llm, "market_analyst", [], "market_report")
+        state = {
+            "messages": [
+                HumanMessage(content="analyze AAPL"),
+                ToolMessage(
+                    content="orphaned",
+                    tool_call_id="call-1",
+                    additional_kwargs={"agent_key": "market_analyst"},
+                ),
+            ],
+            "company_of_interest": "AAPL",
+            "trade_date": "2024-01-01",
+        }
+        config = {
+            "configurable": {
+                "context": MagicMock(ticker="AAPL", trade_date="2024-01-01")
+            }
+        }
+
+        with patch("src.agents.runtime.invoke_with_rate_limit_handling", invoke):
+            result = await node(state, config)
+
+        invoke.assert_not_awaited()
+        status = result["artifact_statuses"]["market_report"]
+        assert status["ok"] is False
+        assert status["error_kind"] == "application_error"
+        assert "tool history is incomplete or inconsistent" in status["message"]
+
+    @pytest.mark.asyncio
+    async def test_shared_runtime_rejects_invalid_tool_history_for_every_agent_loop(
+        self,
+    ):
+        from langchain_core.messages import ToolMessage
+
+        from src.agents.runtime import invoke_with_rate_limit_handling
+
+        runnable = MagicMock()
+        runnable.ainvoke = AsyncMock()
+
+        with pytest.raises(ValueError, match="orphaned tool outputs=1"):
+            await invoke_with_rate_limit_handling(
+                runnable,
+                [ToolMessage(content="orphaned", tool_call_id="call-1")],
+                context="Any Agent",
+                provider="openai",
+                model_name="test-model",
+            )
+
+        runnable.ainvoke.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_valuation_calculator_receives_cross_check_context(self):
         """Valuation node must see earnings-quality flags outside DATA_BLOCK."""
         from src.agents import create_valuation_calculator_node
@@ -889,7 +1037,56 @@ Score details here.
             "Do NOT use markdown tables inside DATA_BLOCK."
             in retry_messages[-1].content
         )
+        retry_llm.bind_tools.assert_not_called()
         assert "### --- START DATA_BLOCK ---" in result["fundamentals_report"]
+
+    @pytest.mark.asyncio
+    async def test_fundamentals_cap_exhaustion_is_saved_as_distinct_failure_kind(self):
+        from src.agents import create_analyst_node
+
+        mock_llm = MagicMock()
+        mock_llm._configured_max_completion_tokens = 10923
+        mock_llm._configured_api_completion_tokens = 12971
+        response = SimpleNamespace(
+            content=(
+                "### --- START DATA_BLOCK ---\n"
+                "RAW_HEALTH_SCORE: 9.5/12\n"
+                "RAW_GROWTH_SCORE: 3/6\n"
+                "DE_RATIO:"
+            ),
+            tool_calls=None,
+            usage_metadata={"output_tokens": 12971},
+            response_metadata={},
+        )
+
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(return_value=response),
+        ):
+            result = await create_analyst_node(
+                mock_llm,
+                "fundamentals_analyst",
+                [],
+                "fundamentals_report",
+            )(
+                {
+                    "messages": [],
+                    "company_of_interest": "TEST",
+                    "trade_date": "2026-08-25",
+                },
+                {
+                    "configurable": {
+                        "context": MagicMock(
+                            ticker="TEST",
+                            trade_date="2026-08-25",
+                        )
+                    }
+                },
+            )
+
+        status = result["artifact_statuses"]["fundamentals_report"]
+        assert status["ok"] is False
+        assert status["error_kind"] == "output_cap_exhausted"
 
     @pytest.mark.asyncio
     async def test_fundamentals_analyst_enforces_quarantined_forward_metrics_and_quarter_date(

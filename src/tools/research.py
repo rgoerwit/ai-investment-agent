@@ -1,7 +1,7 @@
 """Foreign-source research tool implementations."""
 
 import asyncio
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 
 import structlog
@@ -17,6 +17,21 @@ logger = structlog.get_logger(__name__)
 
 OFFICIAL_FILINGS_TIMEOUT_SECONDS = 20.0
 GUIDANCE_EXTRACTION_MAX_URLS = 3
+ResearchPurpose = Literal[
+    "latest_results",
+    "management_guidance",
+    "cash_flow",
+    "segments",
+    "ownership",
+    "capital_policy",
+    "analyst_coverage",
+    "backlog_capacity",
+    "governance",
+    "m_and_a",
+    "drawdown",
+    "legal_regulatory",
+    "general",
+]
 
 
 @tool
@@ -27,6 +42,10 @@ async def search_foreign_sources(
         list[str] | None,
         "Optional domain terms that should anchor excerpts when results are long",
     ] = None,
+    purpose: Annotated[
+        ResearchPurpose,
+        "Stable research purpose used for coverage accounting and deduplication",
+    ] = "general",
 ) -> str:
     """
     Search for financial data from foreign-language and premium English sources.
@@ -113,6 +132,7 @@ async def search_foreign_sources(
         return f"""STATUS: RESULTS_FOUND
 ### Foreign Source Search Results
 Query: {search_query}
+Purpose: {purpose}
 Ticker: {ticker} ({company_name if company_resolved else "UNVERIFIED COMPANY"})
 {source_note}
 

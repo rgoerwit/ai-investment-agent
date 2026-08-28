@@ -8,7 +8,6 @@ from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.budgets import resolve_generation_budget, stamp_budget_metadata
 from src.llm_runtime.profiles import resolve_sampling_temperature
 from src.llm_runtime.rate_limits import limiter_for_binding
-from src.llm_runtime.seats import SeatSpec
 
 
 class OpenAIAdapter:
@@ -37,6 +36,7 @@ class OpenAIAdapter:
                 service_tier=request.service_tier,
                 unthrottled_kind=request.seat.seat_id.value,
                 effort_preference=preference,
+                intent=request.binding.intent,
                 settings=settings,
                 include_reasoning_output=request.include_reasoning_output,
             )
@@ -47,6 +47,7 @@ class OpenAIAdapter:
                 settings,
                 intent_tokens=request.output_tokens or 8192,
                 reasoning_value=request.reasoning_value,
+                intent=request.binding.intent,
             )
             kwargs: dict[str, Any] = {
                 "model": request.binding.model,
@@ -120,7 +121,3 @@ class OpenAIAdapter:
                 output_version="responses/v1",
             )
         return ChatOpenAI(**kwargs)
-
-    def prepare_messages(self, messages: list[Any], *, seat: SeatSpec) -> list[Any]:
-        del seat
-        return list(messages)

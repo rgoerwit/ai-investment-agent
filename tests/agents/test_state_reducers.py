@@ -298,6 +298,150 @@ class TestMergeAndCapMessages:
         assert tool_message in result
         assert len(result) == 2 + MESSAGE_TAIL_LIMIT
 
+    def test_parallel_tool_exchanges_are_capped_per_agent_and_never_split(self):
+        initial = HumanMessage(content="analyze AAPL")
+        calls = [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "tool", "args": {}, "id": f"call-{idx}"}],
+                name=f"agent-{idx}",
+            )
+            for idx in range(7)
+        ]
+        outputs = [
+            ToolMessage(
+                content=f"result-{idx}",
+                tool_call_id=f"call-{idx}",
+                additional_kwargs={"agent_key": f"agent-{idx}"},
+            )
+            for idx in range(7)
+        ]
+
+        result = merge_and_cap_messages([initial], [*calls, *outputs])
+
+        retained_calls = {
+            tool_call["id"]
+            for message in result
+            if isinstance(message, AIMessage)
+            for tool_call in message.tool_calls
+        }
+        retained_outputs = {
+            message.tool_call_id
+            for message in result
+            if isinstance(message, ToolMessage)
+        }
+        assert retained_calls == retained_outputs == {f"call-{idx}" for idx in range(7)}
+
+    def test_multi_tool_response_is_an_atomic_retention_unit(self):
+        initial = HumanMessage(content="analyze AAPL")
+        old_tail = [AIMessage(content=f"old-{idx}") for idx in range(20)]
+        call = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "first", "args": {}, "id": "first"},
+                {"name": "second", "args": {}, "id": "second"},
+            ],
+            name="agent",
+        )
+        outputs = [
+            ToolMessage(
+                content="one",
+                tool_call_id="first",
+                additional_kwargs={"agent_key": "agent"},
+            ),
+            ToolMessage(
+                content="two",
+                tool_call_id="second",
+                additional_kwargs={"agent_key": "agent"},
+            ),
+        ]
+
+        result = merge_and_cap_messages([initial, *old_tail], [call, *outputs])
+
+        assert call in result
+        assert all(output in result for output in outputs)
+
+    def test_pending_call_for_each_parallel_agent_survives_cap_pressure(self):
+        initial = HumanMessage(content="analyze AAPL")
+        calls = [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "tool", "args": {}, "id": f"call-{idx}"}],
+                name=f"agent-{idx}",
+            )
+            for idx in range(20)
+        ]
+
+        result = merge_and_cap_messages([initial], calls)
+
+        assert all(call in result for call in calls)
+
+    def test_same_provider_call_id_remains_isolated_by_agent_owner(self):
+        initial = HumanMessage(content="analyze AAPL")
+        first_call = AIMessage(
+            content="",
+            tool_calls=[{"name": "first", "args": {}, "id": "shared-id"}],
+            name="first-agent",
+        )
+        second_call = AIMessage(
+            content="",
+            tool_calls=[{"name": "second", "args": {}, "id": "shared-id"}],
+            name="second-agent",
+        )
+        first_output = ToolMessage(
+            content="first result",
+            tool_call_id="shared-id",
+            additional_kwargs={"agent_key": "first-agent"},
+        )
+        second_output = ToolMessage(
+            content="second result",
+            tool_call_id="shared-id",
+            additional_kwargs={"agent_key": "second-agent"},
+        )
+
+        result = merge_and_cap_messages(
+            [initial],
+            [first_call, second_call, first_output, second_output],
+        )
+
+        assert result == [
+            initial,
+            first_call,
+            second_call,
+            first_output,
+            second_output,
+        ]
+
+    def test_retention_stops_at_first_complete_unit_that_does_not_fit(self):
+        initial = HumanMessage(content="analyze AAPL")
+        oldest = AIMessage(content="old-small", name="agent")
+        call = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "tool", "args": {}, "id": f"call-{idx}"} for idx in range(11)
+            ],
+            name="agent",
+        )
+        outputs = [
+            ToolMessage(
+                content=f"result-{idx}",
+                tool_call_id=f"call-{idx}",
+                additional_kwargs={"agent_key": "agent"},
+            )
+            for idx in range(11)
+        ]
+        newest = AIMessage(content="newest", name="agent")
+
+        result = merge_and_cap_messages(
+            [initial],
+            [oldest, call, *outputs, newest],
+        )
+
+        assert newest in result
+        assert oldest not in result
+        assert call not in result
+        assert not any(output in result for output in outputs)
+
 
 class TestPartialUpdatesDoNotClobberUnownedFields:
     """A node update omits the fields it does not own; absence is not a value.

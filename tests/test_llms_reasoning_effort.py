@@ -8,8 +8,8 @@ registered in the table must behave identically whichever base URL serves it.
 import pytest
 
 import src.llms as llms_mod
+from src.llm_runtime.budgets import reserve_class_for_request
 from src.llms import (
-    _DEEP_REASONING_EFFORTS,
     _EFFORT_PREFERENCE_DEEPEST,
     _EFFORT_PREFERENCE_FULL,
     _EFFORT_PREFERENCE_PROSE,
@@ -17,7 +17,6 @@ from src.llms import (
     _OPENAI_REASONING_EFFORTS,
     _effort_preference_for_mode,
     _openai_reasoning_effort,
-    _reserve_class_for_effort,
 )
 
 GPT5_MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.4-mini", "gpt-5"]
@@ -55,7 +54,7 @@ class TestGpt5BehaviorUnchanged:
         """GPT-5 never resolves deep, so its reserve class is untouched."""
         for quick_mode in (True, False):
             effort = _effort(model, quick_mode=quick_mode)
-            assert _reserve_class_for_effort(effort) == "default"
+            assert reserve_class_for_request(None, effort) == "default"
 
 
 class TestKimiFamily:
@@ -86,9 +85,13 @@ class TestKimiFamily:
         This is the 1088.HK fix: a high-effort model needs more completion-cap
         headroom than the small default reserve provides.
         """
-        assert _reserve_class_for_effort(_effort("kimi-k3", quick_mode=False)) == "deep"
         assert (
-            _reserve_class_for_effort(_effort("kimi-k3", quick_mode=True)) == "default"
+            reserve_class_for_request(None, _effort("kimi-k3", quick_mode=False))
+            == "deep"
+        )
+        assert (
+            reserve_class_for_request(None, _effort("kimi-k3", quick_mode=True))
+            == "default"
         )
 
     @pytest.mark.parametrize(
@@ -156,7 +159,6 @@ class TestTableInvariants:
         for prefix, efforts in _OPENAI_REASONING_EFFORTS:
             assert efforts <= known, f"{prefix} declares an unknown effort"
 
-    def test_deep_efforts_are_the_expensive_tail(self):
-        assert _DEEP_REASONING_EFFORTS == {"high", "xhigh", "max"}
-        assert _reserve_class_for_effort(None) == "default"
-        assert _reserve_class_for_effort("minimal") == "default"
+    def test_non_deep_efforts_keep_the_default_reserve(self):
+        assert reserve_class_for_request(None, None) == "default"
+        assert reserve_class_for_request(None, "minimal") == "default"

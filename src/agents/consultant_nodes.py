@@ -416,7 +416,7 @@ def create_consultant_node(
         investment_plan = state.get("investment_plan", "N/A")
         foreign_language = state.get("foreign_language_report", "N/A")
         value_trap = state.get("value_trap_report", "N/A")
-        auditor = state.get("auditor_report", "N/A")
+        auditor = state.get("auditor_report") or "N/A"
         apac = state.get("apac_regional_report", "N/A")
         consultant_profile = (
             _select_quick_consultant_profile(state) if quick_mode else "full"

@@ -25,6 +25,7 @@ from src.agents import (
 from src.agents.debate_handoffs import DebateReasoningPolicy
 from src.charts.chart_node import create_chart_generator_node
 from src.config import config
+from src.forensic_budget import graph_research_budget_policies
 from src.llm_budgets import get_agent_output_budget
 from src.llm_runtime.bindings import BindingPlan, resolve_binding_plan
 from src.llm_runtime.capabilities import Capability
@@ -40,10 +41,15 @@ from src.runtime_config import get_runtime_config
 from src.token_tracker import TokenTrackingCallback, get_tracker
 from src.tools.registry import toolkit
 
-from .routing import _is_auditor_enabled
 from .tool_nodes import create_agent_tool_node
 
 logger = structlog.get_logger(__name__)
+
+
+def _is_auditor_enabled(plan: BindingPlan, *, quick_mode: bool) -> bool:
+    """Return the binding plan's effective Auditor availability for this graph."""
+
+    return plan.status_for(SeatId.AUDITOR, quick_mode=quick_mode).enabled
 
 
 @dataclass
@@ -280,6 +286,7 @@ def build_graph_components(
     )
     plan = binding_plan or resolve_binding_plan(config)
     factory = model_factory or SeatModelFactory()
+    research_policies = graph_research_budget_policies(quick_mode=quick_mode)
 
     def output_budget(agent_name: str) -> int:
         return get_agent_output_budget(
@@ -287,7 +294,10 @@ def build_graph_components(
         ) + debate_reasoning_policy.output_bonus(agent_name)
 
     def tracked_callbacks(
-        agent_name: str, *, output_token_cap: int | None = None
+        agent_name: str,
+        *,
+        output_token_cap: int | None = None,
+        originating_seat_id: SeatId | None = None,
     ) -> list[TokenTrackingCallback]:
         return [
             TokenTrackingCallback(
@@ -297,6 +307,9 @@ def build_graph_components(
                     output_budget(agent_name)
                     if output_token_cap is None
                     else output_token_cap
+                ),
+                originating_seat_id=(
+                    originating_seat_id.value if originating_seat_id else None
                 ),
             )
         ]
@@ -308,6 +321,8 @@ def build_graph_components(
         include_reasoning_output: bool = False,
         use_quick_binding: bool = False,
         output_tokens_override: int | None = None,
+        tracking_agent_name: str | None = None,
+        originating_seat_id: SeatId | None = None,
     ) -> Any:
         spec = SEATS[seat_id]
         budget = (
@@ -318,7 +333,11 @@ def build_graph_components(
             else None
         )
         callbacks = (
-            tracked_callbacks(spec.callback_name, output_token_cap=budget)
+            tracked_callbacks(
+                tracking_agent_name or spec.callback_name,
+                output_token_cap=budget,
+                originating_seat_id=originating_seat_id,
+            )
             if tracked
             else []
         )
@@ -344,10 +363,22 @@ def build_graph_components(
     senior_fund_llm = seat_model(SeatId.SENIOR_FUNDAMENTALS)
     pm_llm = seat_model(SeatId.PORTFOLIO_MANAGER)
 
-    retry_llm = None
+    retry_llms: dict[SeatId, Any] = {}
     allow_retry = False
-    if not quick_mode:
-        retry_binding = plan.bindings[SeatId.ANALYST_RETRY]
+    retry_binding = (plan.quick_bindings if quick_mode else plan.bindings)[
+        SeatId.ANALYST_RETRY
+    ]
+    recovery_origins: tuple[SeatId, ...]
+    if quick_mode:
+        # Quick mode pays for structural recovery only at the two required,
+        # gate-critical seats. The recovery binding uses a reasoning intent but
+        # inherits the originating seat's visible-output budget.
+        allow_retry = plan.status_for(SeatId.ANALYST_RETRY, quick_mode=True).enabled
+        recovery_origins = (
+            SeatId.SENIOR_FUNDAMENTALS,
+            SeatId.PORTFOLIO_MANAGER,
+        )
+    else:
         if plan.schema == "legacy":
             # The compatibility window promises byte-for-byte legacy behavior:
             # older Gemini quick floors did not opt into RETRY-HIGH.
@@ -355,24 +386,46 @@ def build_graph_components(
 
             allow_retry = is_gemini_v3_or_greater(runtime_config.quick_think_llm)
         else:
-            allow_retry = Capability.TOOL_CALLING in retry_binding.profile.capabilities
-        # No bound token-tracking callback: this deep-model instance is shared
-        # across every analyst's retry path, so its cost is attributed to the
-        # ORIGINATING agent at the retry call site (analyst_nodes) via a per-call
-        # callback — not pooled into a synthetic "Retry Agent (Deep)" bucket.
-        if allow_retry:
-            retry_llm = seat_model(SeatId.ANALYST_RETRY, tracked=False)
-            logger.debug("retry_llm_enabled", ticker=ticker)
-        else:
-            logger.warning(
-                "retry_llm_disabled_binding_capability",
-                ticker=ticker,
-                provider=retry_binding.provider,
-                model=retry_binding.model,
-                reason="retry binding lacks the reviewed tool-calling policy",
+            allow_retry = (
+                Capability.TEXT_GENERATION in retry_binding.profile.capabilities
             )
-    elif quick_mode:
-        logger.debug("retry_llm_disabled_quick_mode", ticker=ticker)
+        recovery_origins = (
+            SeatId.MARKET,
+            SeatId.SENTIMENT,
+            SeatId.NEWS,
+            SeatId.JUNIOR_FUNDAMENTALS,
+            SeatId.SENIOR_FUNDAMENTALS,
+            SeatId.FOREIGN_LANGUAGE,
+            SeatId.VALUE_TRAP,
+            SeatId.PORTFOLIO_MANAGER,
+        )
+    if allow_retry:
+        for origin in recovery_origins:
+            budget_key = SEATS[origin].budget_key
+            if budget_key is None:
+                continue
+            retry_model = seat_model(
+                SeatId.ANALYST_RETRY,
+                output_tokens_override=output_budget(budget_key),
+                tracking_agent_name=SEATS[origin].callback_name,
+                originating_seat_id=origin,
+            )
+            if retry_model is not None:
+                retry_llms[origin] = retry_model
+        logger.debug(
+            "structural_recovery_models_enabled",
+            ticker=ticker,
+            quick_mode=quick_mode,
+            origins=[seat.value for seat in retry_llms],
+        )
+    else:
+        logger.warning(
+            "structural_recovery_binding_unavailable",
+            ticker=ticker,
+            provider=retry_binding.provider,
+            model=retry_binding.model,
+            reason="recovery binding lacks the required text-generation policy",
+        )
 
     logger.debug(
         "synthesis_llm_mode",
@@ -447,11 +500,7 @@ def build_graph_components(
         else None
     )
 
-    auditor_requested = (
-        plan.statuses[SeatId.AUDITOR].enabled
-        if plan.schema == "new"
-        else _is_auditor_enabled()
-    )
+    auditor_requested = _is_auditor_enabled(plan, quick_mode=quick_mode)
     auditor_llm = (
         build_seat_model(
             SeatId.AUDITOR,
@@ -527,7 +576,7 @@ def build_graph_components(
         quick_mode=quick_mode,
         quick_model_name=runtime_config.quick_think_llm,
         deep_model_name=runtime_config.deep_think_llm,
-        retry_llm_enabled=allow_retry,
+        retry_llm_enabled=bool(retry_llms),
         consultant_enabled=consultant_enabled,
         auditor_enabled=auditor_enabled,
         apac_specialist_enabled=apac_specialist_enabled,
@@ -538,24 +587,27 @@ def build_graph_components(
         "market_analyst",
         toolkit.get_technical_tools(),
         "market_report",
-        retry_llm=retry_llm,
-        allow_retry=allow_retry,
+        retry_llm=retry_llms.get(SeatId.MARKET),
+        allow_retry=SeatId.MARKET in retry_llms,
+        research_budget_policy=research_policies["market_analyst"],
     )
     sentiment = create_analyst_node(
         social_llm,
         "sentiment_analyst",
         toolkit.get_sentiment_tools(),
         "sentiment_report",
-        retry_llm=retry_llm,
-        allow_retry=allow_retry,
+        retry_llm=retry_llms.get(SeatId.SENTIMENT),
+        allow_retry=SeatId.SENTIMENT in retry_llms,
+        research_budget_policy=research_policies["sentiment_analyst"],
     )
     news = create_analyst_node(
         news_llm,
         "news_analyst",
         toolkit.get_news_tools(),
         "news_report",
-        retry_llm=retry_llm,
-        allow_retry=allow_retry,
+        retry_llm=retry_llms.get(SeatId.NEWS),
+        allow_retry=SeatId.NEWS in retry_llms,
+        research_budget_policy=research_policies["news_analyst"],
     )
 
     foreign_llm = seat_model(SeatId.FOREIGN_LANGUAGE)
@@ -564,8 +616,9 @@ def build_graph_components(
         "foreign_language_analyst",
         toolkit.get_foreign_language_tools(),
         "foreign_language_report",
-        retry_llm=retry_llm,
-        allow_retry=allow_retry,
+        retry_llm=retry_llms.get(SeatId.FOREIGN_LANGUAGE),
+        allow_retry=SeatId.FOREIGN_LANGUAGE in retry_llms,
+        research_budget_policy=research_policies["foreign_language_analyst"],
     )
 
     legal_llm = seat_model(SeatId.LEGAL_COUNSEL)
@@ -577,8 +630,9 @@ def build_graph_components(
         "value_trap_detector",
         toolkit.get_value_trap_tools(),
         "value_trap_report",
-        retry_llm=retry_llm,
-        allow_retry=allow_retry,
+        retry_llm=retry_llms.get(SeatId.VALUE_TRAP),
+        allow_retry=SeatId.VALUE_TRAP in retry_llms,
+        research_budget_policy=research_policies["value_trap_detector"],
     )
 
     auditor = None
@@ -600,33 +654,49 @@ def build_graph_components(
         "junior_fundamentals_analyst",
         toolkit.get_junior_fundamental_tools(),
         "raw_fundamentals_data",
-        retry_llm=retry_llm,
-        allow_retry=allow_retry,
+        retry_llm=retry_llms.get(SeatId.JUNIOR_FUNDAMENTALS),
+        allow_retry=SeatId.JUNIOR_FUNDAMENTALS in retry_llms,
+        research_budget_policy=research_policies["junior_fundamentals_analyst"],
     )
     senior_fund = create_analyst_node(
         senior_fund_llm,
         "fundamentals_analyst",
         toolkit.get_senior_fundamental_tools(),
         "fundamentals_report",
-        retry_llm=retry_llm,
-        allow_retry=allow_retry,
+        retry_llm=retry_llms.get(SeatId.SENIOR_FUNDAMENTALS),
+        allow_retry=SeatId.SENIOR_FUNDAMENTALS in retry_llms,
     )
     validator = create_financial_health_validator_node(strict_mode=strict_mode)
 
-    market_tools = create_agent_tool_node(toolkit.get_market_tools(), "market_analyst")
-    sentiment_tools = create_agent_tool_node(
-        toolkit.get_sentiment_tools(), "sentiment_analyst"
+    market_tools = create_agent_tool_node(
+        toolkit.get_market_tools(),
+        "market_analyst",
+        budget_policy=research_policies["market_analyst"],
     )
-    news_tools = create_agent_tool_node(toolkit.get_news_tools(), "news_analyst")
+    sentiment_tools = create_agent_tool_node(
+        toolkit.get_sentiment_tools(),
+        "sentiment_analyst",
+        budget_policy=research_policies["sentiment_analyst"],
+    )
+    news_tools = create_agent_tool_node(
+        toolkit.get_news_tools(),
+        "news_analyst",
+        budget_policy=research_policies["news_analyst"],
+    )
     junior_fund_tools = create_agent_tool_node(
-        toolkit.get_junior_fundamental_tools(), "junior_fundamentals_analyst"
+        toolkit.get_junior_fundamental_tools(),
+        "junior_fundamentals_analyst",
+        budget_policy=research_policies["junior_fundamentals_analyst"],
     )
     foreign_tools = create_agent_tool_node(
-        toolkit.get_foreign_language_tools(), "foreign_language_analyst"
+        toolkit.get_foreign_language_tools(),
+        "foreign_language_analyst",
+        budget_policy=research_policies["foreign_language_analyst"],
     )
-    legal_tools = create_agent_tool_node(toolkit.get_legal_tools(), "legal_counsel")
     value_trap_tools = create_agent_tool_node(
-        toolkit.get_value_trap_tools(), "value_trap_detector"
+        toolkit.get_value_trap_tools(),
+        "value_trap_detector",
+        budget_policy=research_policies["value_trap_detector"],
     )
 
     researcher_handoff_kwargs: dict[str, Any] = (
@@ -692,10 +762,16 @@ def build_graph_components(
     safe = create_risk_debater_node(safe_llm, "safe_analyst")
     neutral = create_risk_debater_node(neutral_llm, "neutral_analyst")
     pm = create_portfolio_manager_node(
-        pm_llm, risk_manager_memory, strict_mode=strict_mode
+        pm_llm,
+        risk_manager_memory,
+        strict_mode=strict_mode,
+        recovery_llm=retry_llms.get(SeatId.PORTFOLIO_MANAGER),
     )
     pm_fast_fail = create_portfolio_manager_node(
-        pm_llm, risk_manager_memory, strict_mode=strict_mode
+        pm_llm,
+        risk_manager_memory,
+        strict_mode=strict_mode,
+        recovery_llm=retry_llms.get(SeatId.PORTFOLIO_MANAGER),
     )
 
     consultant = None
@@ -761,7 +837,6 @@ def build_graph_components(
         "news_tools": news_tools,
         "junior_fund_tools": junior_fund_tools,
         "foreign_tools": foreign_tools,
-        "legal_tools": legal_tools,
         "value_trap_tools": value_trap_tools,
     }
 

@@ -151,6 +151,11 @@ def build_legacy_model(
             max_completion_tokens=output_tokens,
             model=request.resolved_model,
             settings=settings,
+            model_intent=(
+                SEATS[seat_id].quick_intent
+                if quick_mode
+                else SEATS[seat_id].normal_intent
+            ),
         )
     if seat_id in {SeatId.AUDITOR, SeatId.AUDITOR_ESCALATION}:
         return auditor_factory(
@@ -159,6 +164,11 @@ def build_legacy_model(
             max_completion_tokens=output_tokens,
             model_name_override=request.resolved_model,
             settings=settings,
+            model_intent=(
+                SEATS[seat_id].quick_intent
+                if quick_mode
+                else SEATS[seat_id].normal_intent
+            ),
         )
     if seat_id in {SeatId.APAC, SeatId.APAC_DIRECT_RETRY}:
         return apac_factory(

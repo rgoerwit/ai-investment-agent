@@ -8,11 +8,14 @@ import pytest
 
 from src.agents.verdict_policy import (
     DNI_REVIEW_CANDIDATE_MARKER,
+    apply_required_verdict,
+    assess_verdict_policy,
     maybe_demote_buy_on_blocking_flags,
     maybe_floor_verdict_to_hold,
     maybe_qualify_buy_in_quick_mode,
     maybe_qualify_weak_asymmetry_buy,
     maybe_tag_dni_review_candidate,
+    normalize_pm_block_contract,
 )
 from src.charts.extractors.pm_block import extract_pm_block
 from src.decision_inputs import DecisionInputs
@@ -68,11 +71,12 @@ def _full_pm_output(verdict_display: str, verdict_block: str) -> str:
     )
 
 
-def _data_block(health, pe, growth, cagr) -> str:
+def _data_block(health, pe, growth, cagr, *, available=4) -> str:
     return (
         "### --- START DATA_BLOCK ---\n"
         f"ADJUSTED_HEALTH_SCORE: {health}% (based on 12 available points)\n"
-        f"ADJUSTED_GROWTH_SCORE: {growth}% (based on 6 available points)\n"
+        f"ADJUSTED_GROWTH_SCORE: {growth}% (based on {available} available points)\n"
+        f"RAW_GROWTH_SCORE: 1/{available}\n"
         f"PE_RATIO_TTM: {pe}\n"
         f"REVENUE_CAGR_3Y: {cagr}%\n"
         "### --- END DATA_BLOCK ---"
@@ -127,6 +131,126 @@ def test_apr_floored_to_hold():
     assert "VERDICT FLOOR APPLIED" in out
     # consultant-resolution VERDICT lines must be untouched
     assert "VERDICT: CONFIRMED_RISK" in out
+
+
+class TestGrowthHardFailVerdictValidation:
+    def test_hold_without_pe_does_not_invent_data_vacuum_exception(self):
+        violation = assess_verdict_policy(
+            _pm_output("HOLD", "HOLD"),
+            decision_inputs=_inputs(_data_block(75, "N/A", 40, 16.0)),
+        )
+
+        assert violation is not None
+        assert violation.rule == "growth_transition_hard_fail"
+        assert violation.reason == "pe_ratio_required_for_growth_exception"
+        assert violation.required_verdict == "DO_NOT_INITIATE"
+
+    def test_dni_is_compliant_when_growth_exception_is_not_established(self):
+        violation = assess_verdict_policy(
+            _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+            decision_inputs=_inputs(_data_block(75, "N/A", 40, 16.0)),
+        )
+
+        assert violation is None
+
+    def test_hold_is_allowed_for_established_data_vacuum_exception(self):
+        violation = assess_verdict_policy(
+            _pm_output("HOLD", "HOLD"),
+            decision_inputs=_inputs(_data_block(75, 14.0, 40, 16.0, available=4)),
+        )
+
+        assert violation is None
+
+    def test_one_missing_growth_point_is_not_a_data_vacuum(self):
+        violation = assess_verdict_policy(
+            _pm_output("HOLD", "HOLD"),
+            decision_inputs=_inputs(_data_block(75, 14.0, 40, 16.0, available=5)),
+        )
+
+        assert violation is not None
+        assert violation.reason == "data_vacuum_growth_inputs_not_established"
+
+    def test_unreliable_growth_score_remains_hold_class(self):
+        inputs = DecisionInputs.from_metrics_and_snapshot(
+            {
+                **extract_metrics(_data_block(75, "N/A", 40, 16.0)),
+                "growth_score_consistency": "SUSPECT",
+            },
+            None,
+            None,
+            ticker="TEST",
+        )
+
+        assert (
+            assess_verdict_policy(
+                _pm_output("HOLD", "HOLD"),
+                decision_inputs=inputs,
+            )
+            is None
+        )
+
+    def test_policy_correction_is_deterministic_conservative_and_idempotent(self):
+        source = (
+            _full_pm_output("HOLD", "HOLD") + "\n**Recommended Position Size**: 2.5%\n"
+        )
+
+        corrected, changed = apply_required_verdict(
+            source,
+            required_verdict="DO_NOT_INITIATE",
+            rule="growth_transition_hard_fail",
+            reason="pe_ratio_required_for_growth_exception",
+            ticker="TEST",
+        )
+
+        assert changed is True
+        assert extract_pm_block(corrected).verdict == "DO_NOT_INITIATE"
+        assert "PORTFOLIO MANAGER VERDICT: DO NOT INITIATE" in corrected
+        assert "Actual Decision: DO NOT INITIATE" in corrected
+        assert "**Action**: DO NOT INITIATE" in corrected
+        assert "SHOW_VALUATION_CHART: NO" in corrected
+        assert "VALUATION_DISCOUNT: 0.0" in corrected
+        assert "Recommended Position Size**: 0.0%" in corrected
+        assert "PRIOR RATIONALE SUPERSEDED" in corrected
+
+        repeated, repeated_changed = apply_required_verdict(
+            corrected,
+            required_verdict="DO_NOT_INITIATE",
+            rule="growth_transition_hard_fail",
+            reason="pe_ratio_required_for_growth_exception",
+            ticker="TEST",
+        )
+        assert repeated_changed is False
+        assert repeated == corrected
+
+    def test_policy_rewriter_rejects_an_upgrade_target(self):
+        with pytest.raises(ValueError, match="may only require DNI"):
+            apply_required_verdict(
+                _pm_output("HOLD", "HOLD"),
+                required_verdict="BUY",
+                rule="bad_rule",
+                reason="bad_reason",
+            )
+
+    def test_policy_corrected_dni_is_not_floored_back_to_hold(self):
+        inputs = _inputs(_data_block(75, "N/A", 40, 16.0))
+        corrected, changed = apply_required_verdict(
+            _pm_output("HOLD", "HOLD"),
+            required_verdict="DO_NOT_INITIATE",
+            rule="growth_transition_hard_fail",
+            reason="pe_ratio_required_for_growth_exception",
+        )
+        assert changed is True
+
+        final, floored = maybe_floor_verdict_to_hold(
+            corrected,
+            decision_inputs=inputs,
+            red_flags=[],
+            code_subtotal=0.5,
+            pre_screening_result="PASS",
+        )
+
+        assert floored is False
+        assert "VERDICT: DO_NOT_INITIATE" in final
 
 
 def test_kty_not_floored_pe_and_negative_cagr():
@@ -495,6 +619,68 @@ def _dni_output(health: str = "60", growth: str = "70") -> str:
         "POSITION_SIZE: 0.0%\n"
         "### --- END PM_BLOCK ---\n"
     )
+
+
+@pytest.mark.parametrize(
+    ("source", "rewrite"),
+    (
+        pytest.param(
+            _full_pm_output("HOLD", "HOLD") + "\n**Recommended Position Size**: 2.5%\n",
+            lambda text: normalize_pm_block_contract(text),
+            id="position-size-normalizer",
+        ),
+        pytest.param(
+            _full_pm_output("HOLD", "HOLD"),
+            lambda text: apply_required_verdict(
+                text,
+                required_verdict="DO_NOT_INITIATE",
+                rule="growth_transition_hard_fail",
+                reason="pe_ratio_required_for_growth_exception",
+            )[0],
+            id="required-verdict",
+        ),
+        pytest.param(
+            _buy_output(),
+            lambda text: maybe_demote_buy_on_blocking_flags(
+                text, red_flags=[_UNRELIABLE]
+            )[0],
+            id="buy-demotion",
+        ),
+        pytest.param(
+            _buy_output(),
+            lambda text: maybe_qualify_buy_in_quick_mode(text, quick_mode=True)[0],
+            id="quick-buy-qualification",
+        ),
+        pytest.param(
+            _buy_output(),
+            lambda text: maybe_qualify_weak_asymmetry_buy(
+                text, weighted_upside=0.04, downside_probability=20.0
+            )[0],
+            id="weak-asymmetry-qualification",
+        ),
+        pytest.param(
+            _dni_output(),
+            lambda text: maybe_tag_dni_review_candidate(text, red_flags=[])[0],
+            id="dni-review-candidate",
+        ),
+        pytest.param(
+            _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+            lambda text: maybe_floor_verdict_to_hold(
+                text,
+                decision_inputs=_inputs(APR_BLOCK),
+                red_flags=[],
+                code_subtotal=1.0,
+                pre_screening_result="PASS",
+            )[0],
+            id="verdict-floor",
+        ),
+    ),
+)
+def test_public_verdict_rewriters_are_idempotent_projections(source, rewrite):
+    once = rewrite(source)
+    twice = rewrite(once)
+
+    assert twice == once
 
 
 class TestDniReviewCandidate:

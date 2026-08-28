@@ -14,6 +14,10 @@ from src.agents.network_breaker import (
     NetworkBreakerOpenError,
     get_network_breaker,
 )
+from src.agents.output_validation import (
+    get_configured_api_output_cap,
+    get_configured_output_cap,
+)
 from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
 from src.error_safety import summarize_exception
@@ -34,6 +38,22 @@ from src.token_tracker import canonical_display_name
 logger = structlog.get_logger(__name__)
 
 
+def _attempt_budget_fields(runnable: Any, usage: Any) -> dict[str, int | None]:
+    """Return secret-free generation-budget fields for one attempt record."""
+
+    target = getattr(runnable, "last", None) or runnable
+    reserve = getattr(target, "_configured_reasoning_reserve_tokens", None)
+    return {
+        "thinking_tokens": usage.thinking_tokens,
+        "visible_output_tokens": usage.visible_output_tokens,
+        "intent_output_cap_tokens": get_configured_output_cap(runnable),
+        "api_output_cap_tokens": get_configured_api_output_cap(runnable),
+        "configured_reasoning_reserve_tokens": (
+            int(reserve) if isinstance(reserve, int | float) else None
+        ),
+    }
+
+
 # Graph node labels (agent_name / context) of the two gate-critical APEX seats.
 # These run the biggest, most rule-dense prompts on the APEX model and need a
 # larger --quick per-call budget than the flat quick cap sized for cheap flash
@@ -43,6 +63,26 @@ APEX_SEAT_CONTEXTS = frozenset({"Fundamentals Analyst", "Portfolio Manager"})
 # Canonical display names — see canonical_display_name() below on why these are
 # not the raw context strings.
 CROSS_CHECK_SEAT_CONTEXTS = frozenset({"Consultant", "Global Forensic Auditor"})
+
+
+def _validate_llm_input_tool_history(
+    input_data: dict[str, Any] | list[Any], *, agent_key: str
+) -> None:
+    """Apply the tool transcript invariant at the shared invocation boundary."""
+
+    from langchain_core.messages import BaseMessage
+
+    from src.agents.message_utils import validate_tool_history
+
+    raw_messages: Any = (
+        input_data.get("messages") if isinstance(input_data, dict) else input_data
+    )
+    if not isinstance(raw_messages, list):
+        return
+    messages = [message for message in raw_messages if isinstance(message, BaseMessage)]
+    if len(messages) != len(raw_messages):
+        return
+    validate_tool_history(messages, agent_key=agent_key)
 
 
 def quick_mode_hard_timeout_seconds(
@@ -422,6 +462,10 @@ async def invoke_with_rate_limit_handling(
     joins; when omitted the token tracker derives it from ``context`` (which may
     carry a round/retry suffix).
     """
+    _validate_llm_input_tool_history(
+        input_data,
+        agent_key=canonical_agent or context,
+    )
     runtime_config = get_runtime_config(settings_config)
     quiet_mode = runtime_config.quiet_mode
     resolved_model = model_name or get_model_name(runnable)
@@ -527,27 +571,114 @@ async def invoke_with_rate_limit_handling(
                     )
                     raise ProviderRefusalError(refusal)
             # Inspect finish_reason: providers occasionally return a "200 OK"
-            # with truncated content and no finish_reason under load. Raise
-            # the marker exception so the existing transient-retry branch
-            # handles it like any other recoverable failure.
+            # with truncated content. A declared output-cap stop is deterministic
+            # for this request shape, so return the fragment to the owning contract
+            # validator without paying for an identical transport retry. Missing
+            # finish metadata and other partials remain transient-retry candidates.
             partial_reason = _detect_provider_partial_response(result)
+            output_cap_exhausted = response_hit_output_cap(result)
             transient_max_attempts = max(1, min(max_attempts, max_transient_attempts))
-            if partial_reason is None and breaker is not None:
+            provider_call_completed = partial_reason is None or output_cap_exhausted
+            if provider_call_completed and breaker is not None:
                 breaker.record_outcome(
                     agent_name=context,
                     provider=resolved_provider,
                     model_name=resolved_model or "",
                     ok=True,
                 )
-            if partial_reason is None and network_breaker is not None:
+            if provider_call_completed and network_breaker is not None:
                 # Any successful call demonstrates the host network is fine.
                 network_breaker.record_outcome(ok=True)
-            if partial_reason is not None and attempt < transient_max_attempts - 1:
+            if (
+                partial_reason is not None
+                and not output_cap_exhausted
+                and attempt < transient_max_attempts - 1
+            ):
                 raise ProviderPartialResponseError(
                     f"provider_partial_response: {partial_reason} "
                     f"(context={context}, provider={resolved_provider}, "
                     f"model={resolved_model})"
                 )
+            if output_cap_exhausted:
+                token_usage = _extract_token_usage(result)
+                response_metadata = getattr(result, "response_metadata", None)
+                response_model = None
+                if isinstance(response_metadata, dict):
+                    response_model = response_metadata.get(
+                        "model_name"
+                    ) or response_metadata.get("model")
+                with _accounting_hook("capture_manager_output_cap"):
+                    capture_manager = _get_capture_manager()
+                    if capture_manager is not None:
+                        capture_manager.record_llm_call(
+                            {
+                                "status": "failure",
+                                "context": context,
+                                "provider": resolved_provider,
+                                "model": resolved_model,
+                                "response_model": response_model,
+                                "runnable_class": class_name,
+                                "reasoning_level": _normalize_reasoning_level(
+                                    runnable, resolved_model
+                                ),
+                                "thinking_config_raw": _extract_vendor_reasoning_config(
+                                    runnable, resolved_provider
+                                ),
+                                "attempt": attempt + 1,
+                                **token_usage,
+                                "input": _normalize_for_json(input_data),
+                                "response": _normalize_for_json(result),
+                                "failure_kind": "output_cap_exhausted",
+                                "retryable": False,
+                                "error_type": "ProviderOutputCap",
+                                "root_cause_type": "ProviderOutputCap",
+                                "host": None,
+                                "endpoint_host": None,
+                                "error_message": (
+                                    "The provider stopped generation at the configured "
+                                    "output cap."
+                                ),
+                            }
+                        )
+                with _accounting_hook("token_tracker_output_cap"):
+                    from src.token_tracker import get_tracker
+
+                    usage = extract_token_usage_breakdown(result)
+                    attempt_budget = _attempt_budget_fields(runnable, usage)
+                    get_tracker().record_call_attempt(
+                        agent_name=context,
+                        canonical_agent=canonical_agent,
+                        provider=resolved_provider,
+                        model_name=resolved_model or "",
+                        status="failure",
+                        attempt=attempt + 1,
+                        elapsed_seconds=time.monotonic() - attempt_started,
+                        prompt_tokens=usage.input_tokens,
+                        completion_tokens=usage.total_output_tokens,
+                        total_tokens=usage.total_tokens,
+                        thinking_tokens=attempt_budget["thinking_tokens"],
+                        visible_output_tokens=attempt_budget["visible_output_tokens"],
+                        intent_output_cap_tokens=attempt_budget[
+                            "intent_output_cap_tokens"
+                        ],
+                        api_output_cap_tokens=attempt_budget["api_output_cap_tokens"],
+                        configured_reasoning_reserve_tokens=attempt_budget[
+                            "configured_reasoning_reserve_tokens"
+                        ],
+                        failure_kind="output_cap_exhausted",
+                        failure_origin="provider_completion",
+                        retryable=False,
+                    )
+                logger.warning(
+                    "llm_output_cap_exhausted",
+                    context=context,
+                    provider=resolved_provider,
+                    model=resolved_model,
+                    runnable_class=class_name,
+                    attempt=attempt + 1,
+                    partial_reason=partial_reason,
+                )
+                return result
             with _accounting_hook("capture_manager_success"):
                 capture_manager = _get_capture_manager()
                 if capture_manager is not None:
@@ -582,6 +713,7 @@ async def invoke_with_rate_limit_handling(
                 from src.token_tracker import get_tracker
 
                 usage = extract_token_usage_breakdown(result)
+                attempt_budget = _attempt_budget_fields(runnable, usage)
                 get_tracker().record_call_attempt(
                     agent_name=context,
                     canonical_agent=canonical_agent,
@@ -593,6 +725,13 @@ async def invoke_with_rate_limit_handling(
                     prompt_tokens=usage.input_tokens,
                     completion_tokens=usage.total_output_tokens,
                     total_tokens=usage.total_tokens,
+                    thinking_tokens=attempt_budget["thinking_tokens"],
+                    visible_output_tokens=attempt_budget["visible_output_tokens"],
+                    intent_output_cap_tokens=attempt_budget["intent_output_cap_tokens"],
+                    api_output_cap_tokens=attempt_budget["api_output_cap_tokens"],
+                    configured_reasoning_reserve_tokens=attempt_budget[
+                        "configured_reasoning_reserve_tokens"
+                    ],
                 )
             if not quiet_mode:
                 logger.info(

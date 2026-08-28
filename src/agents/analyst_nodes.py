@@ -26,15 +26,11 @@ from src.data_block_utils import (
     replace_or_append_block_line,
 )
 from src.error_safety import summarize_exception
+from src.forensic_budget import ResearchBudgetLedger, ResearchBudgetPolicy
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import failure_artifact, success_artifact
 from src.service_tiers import floor_llm_hard_timeout
 from src.thesis_constants import DRAWDOWN_52WK_RATIO, DRAWDOWN_SMA200_RATIO
-from src.token_tracker import (
-    TokenTrackingCallback,
-    canonical_display_name,
-    get_tracker,
-)
 from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
@@ -63,6 +59,7 @@ from .management_guidance import (
 )
 from .output_limits import cap_state_value
 from .output_validation import (
+    classify_output_contract_failure,
     log_output_diagnostics,
     log_truncation_diagnostic,
     should_fail_closed,
@@ -1026,6 +1023,7 @@ def create_analyst_node(
     output_field: str,
     retry_llm: Any | None = None,
     allow_retry: bool = False,
+    research_budget_policy: ResearchBudgetPolicy | None = None,
 ) -> Callable:
     """
     Factory function creating data analyst agent nodes.
@@ -1045,8 +1043,24 @@ def create_analyst_node(
 
         messages_template = [MessagesPlaceholder(variable_name="messages")]
         prompt_template = ChatPromptTemplate.from_messages(messages_template)
+        research_budget = (state.get("research_budgets", {}) or {}).get(agent_key, {})
+        research_ledger = (
+            ResearchBudgetLedger.from_telemetry(
+                research_budget_policy,
+                research_budget,
+            )
+            if research_budget_policy is not None
+            else None
+        )
+        force_research_synthesis = bool(
+            research_ledger is not None
+            and research_ledger.stop_reason
+            and research_ledger.stop_reason != "MODEL_FINAL"
+        )
         runnable = (
-            prompt_template | llm.bind_tools(tools) if tools else prompt_template | llm
+            prompt_template | llm.bind_tools(tools)
+            if tools and not force_research_synthesis
+            else prompt_template | llm
         )
 
         try:
@@ -1101,6 +1115,14 @@ def create_analyst_node(
             trusted_context_instructions = ""
             macro_context_injected_into_news = False
             management_guidance_evidence = ""
+
+            if force_research_synthesis:
+                trusted_context_instructions += (
+                    "\nThe code-enforced research budget is closed "
+                    f"({research_budget.get('stop_reason')}). Synthesize the final "
+                    "required output now from evidence already gathered. Mark "
+                    "unresolved fields UNKNOWN/N/A and do not request more tools.\n"
+                )
 
             if agent_key == "foreign_language_analyst":
                 management_guidance_evidence = state.get(
@@ -1284,6 +1306,21 @@ def create_analyst_node(
                 )
             invocation_messages.extend(filtered_messages)
 
+            if research_ledger is not None:
+                budget_reason = research_ledger.consume_llm()
+                if budget_reason:
+                    result = failure_artifact(
+                        output_field,
+                        f"{agent_key} exhausted its code-owned model-turn budget",
+                        provider=support.infer_provider_name(llm),
+                        error_kind="application_error",
+                    )
+                    result["sender"] = agent_key
+                    result["research_budgets"] = {
+                        agent_key: research_ledger.telemetry()
+                    }
+                    return result
+
             response = await agent_runtime.invoke_with_rate_limit_handling(
                 runnable,
                 {"messages": invocation_messages},
@@ -1292,12 +1329,15 @@ def create_analyst_node(
                 model_name=support.get_model_name(llm),
             )
             response.name = agent_key
+            response_runnable = llm
 
             new_state: dict[str, Any] = {
                 "sender": agent_key,
                 "messages": [response],
                 "prompts_used": prompts_used,
             }
+            if research_ledger is not None:
+                new_state["research_budgets"] = {agent_key: research_ledger.telemetry()}
             if agent_key == "news_analyst":
                 new_state["macro_context_injected_into_news"] = (
                     macro_context_injected_into_news
@@ -1319,6 +1359,10 @@ def create_analyst_node(
             if has_tool_calls:
                 return new_state
 
+            if research_ledger is not None and not force_research_synthesis:
+                research_ledger.record_model_final()
+                new_state["research_budgets"] = {agent_key: research_ledger.telemetry()}
+
             content_str = message_utils.extract_string_content(response.content)
             content_str = _normalize_structured_output(
                 agent_key,
@@ -1339,121 +1383,156 @@ def create_analyst_node(
                 and retry_llm is not None
                 and _should_retry_output(content_str, agent_key)
             ):
-                logger.warning(
-                    "analyst_retry_with_deep_thinking",
-                    agent_key=agent_key,
-                    ticker=ticker,
-                    original_length=len(content_str),
-                    has_datablock=has_parseable_data_block(content_str),
-                    message="Insufficient or unparseable output from quick LLM, retrying once with deep thinking",
+                retry_budget_reason = (
+                    research_ledger.consume_llm()
+                    if research_ledger is not None
+                    else None
                 )
-                retry_messages = _build_retry_invocation_messages(
-                    invocation_messages, agent_key, content_str
-                )
-                _retry_base = (
-                    prompt_template | retry_llm.bind_tools(tools)
-                    if tools
-                    else prompt_template | retry_llm
-                )
-                # Attribute the deep-model retry cost to the ORIGINATING agent
-                # (not a pooled "Retry Agent (Deep)" bucket): retry_llm carries no
-                # bound token-tracking callback, so attach one per-call via config.
-                retry_runnable = _retry_base.with_config(
-                    {
-                        "callbacks": [
-                            TokenTrackingCallback(
-                                canonical_display_name(agent_prompt.agent_name),
-                                get_tracker(),
-                            )
-                        ]
+                if retry_budget_reason:
+                    assert research_ledger is not None
+                    research_ledger.record_outcome("LLM_RECOVERY_NOT_BUDGETED")
+                    new_state["research_budgets"] = {
+                        agent_key: research_ledger.telemetry()
                     }
-                )
+                else:
+                    from src.utils import detect_truncation
 
-                # In --quick, base the retry's overall budget on the same
-                # per-seat cap the main path uses (larger for gate-critical APEX
-                # seats), so a retry can't clip an APEX seat below its 180s
-                # allowance. Full mode keeps the standard hard cap.
-                _retry_rc = get_runtime_config(settings_config)
-                _retry_base_seconds = (
-                    agent_runtime.quick_mode_hard_timeout_seconds(
-                        agent_prompt.agent_name, settings_config
+                    initial_truncation = detect_truncation(content_str, agent=agent_key)
+                    initial_validation = validate_required_output(
+                        agent_key, content_str
                     )
-                    if _retry_rc.quick_mode_active
-                    else float(_retry_rc.llm_call_hard_timeout_seconds)
-                )
-                try:
-                    retry_response = (
-                        await agent_runtime.invoke_with_rate_limit_handling(
-                            retry_runnable,
-                            {"messages": retry_messages},
-                            context=f"{agent_prompt.agent_name} (RETRY-HIGH)",
-                            canonical_agent=agent_prompt.agent_name,
-                            provider=support.infer_provider_name(retry_llm),
-                            model_name=support.get_model_name(retry_llm),
-                            # Floor for flex: an un-floored overall budget
-                            # would clamp the flex-aware hard cap back down.
-                            overall_timeout_seconds=floor_llm_hard_timeout(
-                                _retry_base_seconds,
-                                provider=support.infer_provider_name(retry_llm),
-                                label="analyst_retry_overall_timeout",
-                            ),
-                        )
+                    initial_failure_kind = classify_output_contract_failure(
+                        runnable=llm,
+                        response=response,
+                        truncated=initial_truncation["truncated"],
+                        validation=initial_validation,
                     )
-                    retry_response.name = agent_key
-                    retry_content_str = message_utils.extract_string_content(
-                        retry_response.content
-                    )
-                    retry_content_str = _normalize_structured_output(
-                        agent_key,
-                        retry_content_str,
-                        ticker,
-                        raw_data=raw_data
-                        if agent_key == "fundamentals_analyst"
-                        else "",
-                        foreign_data=foreign_data
-                        if agent_key == "fundamentals_analyst"
-                        else "",
-                        legal_data=legal_data
-                        if agent_key == "fundamentals_analyst"
-                        else "",
-                        management_guidance_evidence=management_guidance_evidence,
-                        evidence_messages=filtered_messages,
-                        canonical_snapshot=state.get("analysis_snapshot"),
-                    )
-                    retry_tool_calls = getattr(retry_response, "tool_calls", None)
-                    retry_has_tool_calls = (
-                        isinstance(retry_tool_calls, list) and len(retry_tool_calls) > 0
-                    )
-
-                    if retry_has_tool_calls:
-                        new_state["messages"] = [retry_response]
-                        logger.debug(
-                            "analyst_retry_produced_tool_calls",
-                            agent_key=agent_key,
-                            ticker=ticker,
-                        )
-                        return new_state
-
-                    logger.debug(
-                        "analyst_retry_complete",
+                    log_truncation_diagnostic(
                         agent_key=agent_key,
                         ticker=ticker,
+                        runnable=llm,
+                        response=response,
+                        content=content_str,
+                        trunc_info=initial_truncation,
+                    )
+                    logger.warning(
+                        "analyst_structural_recovery",
+                        agent_key=agent_key,
+                        ticker=ticker,
+                        failure_kind=initial_failure_kind,
                         original_length=len(content_str),
-                        retry_length=len(retry_content_str),
-                        retry_has_datablock=has_parseable_data_block(retry_content_str),
-                        retry_improved=len(retry_content_str) > len(content_str),
-                    )
-                    content_str = retry_content_str
-                    response = retry_response
-                except Exception as retry_error:
-                    logger.error(
-                        "analyst_retry_failed",
-                        agent_key=agent_key,
-                        ticker=ticker,
-                        **summarize_exception(
-                            retry_error, operation="analyst_retry_failed"
+                        has_datablock=has_parseable_data_block(content_str),
+                        message=(
+                            "Output contract failed; regenerating once from existing "
+                            "evidence with the reasoning recovery binding"
                         ),
                     )
+                    retry_messages = _build_retry_invocation_messages(
+                        invocation_messages, agent_key, content_str
+                    )
+                    # Structural recovery re-renders from evidence already gathered by
+                    # the owning analyst. It deliberately exposes no tools: another tool
+                    # loop would be a second analysis attempt, not a bounded correction.
+                    # The recovery model is constructed with a seat-bound callback
+                    # labeled for this originating agent. That keeps agent totals
+                    # intuitive while preserving the actual analyst_retry billing
+                    # seat and origin in persisted binding telemetry.
+                    retry_runnable = prompt_template | retry_llm
+
+                    # In --quick, base the retry's overall budget on the same
+                    # per-seat cap the main path uses (larger for gate-critical APEX
+                    # seats), so a retry can't clip an APEX seat below its 180s
+                    # allowance. Full mode keeps the standard hard cap.
+                    _retry_rc = get_runtime_config(settings_config)
+                    _retry_base_seconds = (
+                        agent_runtime.quick_mode_hard_timeout_seconds(
+                            agent_prompt.agent_name, settings_config
+                        )
+                        if _retry_rc.quick_mode_active
+                        else float(_retry_rc.llm_call_hard_timeout_seconds)
+                    )
+                    try:
+                        retry_response = (
+                            await agent_runtime.invoke_with_rate_limit_handling(
+                                retry_runnable,
+                                {"messages": retry_messages},
+                                context=f"{agent_prompt.agent_name} (RETRY-HIGH)",
+                                canonical_agent=agent_prompt.agent_name,
+                                provider=support.infer_provider_name(retry_llm),
+                                model_name=support.get_model_name(retry_llm),
+                                # Floor for flex: an un-floored overall budget
+                                # would clamp the flex-aware hard cap back down.
+                                overall_timeout_seconds=floor_llm_hard_timeout(
+                                    _retry_base_seconds,
+                                    provider=support.infer_provider_name(retry_llm),
+                                    label="analyst_retry_overall_timeout",
+                                ),
+                            )
+                        )
+                        retry_response.name = agent_key
+                        retry_content_str = message_utils.extract_string_content(
+                            retry_response.content
+                        )
+                        retry_content_str = _normalize_structured_output(
+                            agent_key,
+                            retry_content_str,
+                            ticker,
+                            raw_data=raw_data
+                            if agent_key == "fundamentals_analyst"
+                            else "",
+                            foreign_data=foreign_data
+                            if agent_key == "fundamentals_analyst"
+                            else "",
+                            legal_data=legal_data
+                            if agent_key == "fundamentals_analyst"
+                            else "",
+                            management_guidance_evidence=management_guidance_evidence,
+                            evidence_messages=filtered_messages,
+                            canonical_snapshot=state.get("analysis_snapshot"),
+                        )
+                        retry_tool_calls = getattr(retry_response, "tool_calls", None)
+                        retry_has_tool_calls = (
+                            isinstance(retry_tool_calls, list)
+                            and len(retry_tool_calls) > 0
+                        )
+
+                        if retry_has_tool_calls:
+                            logger.error(
+                                "analyst_recovery_returned_tool_calls",
+                                agent_key=agent_key,
+                                ticker=ticker,
+                                action="discard_recovery_response",
+                            )
+                        else:
+                            logger.debug(
+                                "analyst_retry_complete",
+                                agent_key=agent_key,
+                                ticker=ticker,
+                                original_length=len(content_str),
+                                retry_length=len(retry_content_str),
+                                retry_has_datablock=has_parseable_data_block(
+                                    retry_content_str
+                                ),
+                                retry_improved=len(retry_content_str)
+                                > len(content_str),
+                            )
+                            content_str = retry_content_str
+                            response = retry_response
+                            response_runnable = retry_llm
+                    except Exception as retry_error:
+                        logger.error(
+                            "analyst_retry_failed",
+                            agent_key=agent_key,
+                            ticker=ticker,
+                            **summarize_exception(
+                                retry_error, operation="analyst_retry_failed"
+                            ),
+                        )
+
+                    if research_ledger is not None:
+                        new_state["research_budgets"] = {
+                            agent_key: research_ledger.telemetry()
+                        }
 
             from src.utils import detect_truncation
 
@@ -1461,7 +1540,7 @@ def create_analyst_node(
             log_truncation_diagnostic(
                 agent_key=agent_key,
                 ticker=ticker,
-                runnable=llm if response is not None else llm,
+                runnable=response_runnable,
                 response=response,
                 content=content_str,
                 trunc_info=trunc_info,
@@ -1471,7 +1550,7 @@ def create_analyst_node(
             log_output_diagnostics(
                 agent_key=agent_key,
                 ticker=ticker,
-                runnable=llm if response is not None else llm,
+                runnable=response_runnable,
                 response=response,
                 content=content_str,
                 truncated=trunc_info["truncated"],
@@ -1501,6 +1580,12 @@ def create_analyst_node(
                     failure_message,
                     provider=support.infer_provider_name(llm),
                     fallback_content=content_str,
+                    error_kind=classify_output_contract_failure(
+                        runnable=response_runnable,
+                        response=response,
+                        truncated=trunc_info["truncated"],
+                        validation=validation,
+                    ),
                 )
                 new_state.update(result)
                 return new_state
@@ -1543,10 +1628,14 @@ def create_analyst_node(
             error_message.name = agent_key
             result = failure_artifact(
                 output_field,
-                exc,
+                str(exc)
+                if isinstance(exc, message_utils.ToolHistoryIntegrityError)
+                else exc,
                 provider=support.infer_provider_name(llm),
             )
             result["messages"] = [error_message]
+            if research_ledger is not None:
+                result["research_budgets"] = {agent_key: research_ledger.telemetry()}
             return result
 
     return analyst_node

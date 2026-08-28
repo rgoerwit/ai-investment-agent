@@ -1,8 +1,8 @@
-"""End-to-end regression for the APR.WA false-reject class (and KTY counter-case).
+"""End-to-end regression for the APR.WA value-trap class (and KTY counter-case).
 
 CI-safe: embeds the decisive DATA_BLOCK / VALUE_TRAP field values (results/ is gitignored)
-and drives the real flag-assembly + verdict-floor path. Asserts the fix flips APR
-DO_NOT_INITIATE -> HOLD while KTY (a genuine ex-growth payer) still fails.
+and drives the real flag-assembly + verdict-policy path. The value-trap downgrade is
+retained, while the later explicit growth-exception contract remains authoritative.
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ def test_apr_value_trap_downgraded_no_rqf_subtotal_below_zone1():
     assert subtotal < 2.0
 
 
-def test_apr_verdict_floored_to_hold():
+def test_apr_does_not_invent_data_vacuum_from_low_growth_score():
     _, subtotal = _assemble(APR_DB, _value_trap(35, "TRAP"))
     out, floored = maybe_floor_verdict_to_hold(
         _pm_dni(),
@@ -117,8 +117,10 @@ def test_apr_verdict_floored_to_hold():
         pre_screening_result="PASS",
         ticker="APR.WA",
     )
-    assert floored is True
-    assert "VERDICT: HOLD" in out and "VERDICT: DO_NOT_INITIATE" not in out
+    # All six growth inputs were available and P/E is above the <=13 marginal-
+    # turnaround ceiling. A low score by itself is not proof of a data vacuum.
+    assert floored is False
+    assert "VERDICT: DO_NOT_INITIATE" in out
 
 
 def test_kty_value_trap_not_downgraded():

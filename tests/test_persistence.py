@@ -81,6 +81,15 @@ def _min_summary(monkeypatch, result: dict):
     )
 
 
+def test_absent_auditor_is_persisted_as_not_run(monkeypatch):
+    summary = _min_summary(monkeypatch, {})
+
+    assert summary["auditor_completed"] is False
+    assert summary["auditor_finished"] is False
+    assert summary["auditor_successful"] is False
+    assert summary["auditor_review_status"] == "NOT_RUN"
+
+
 def test_debate_rounds_is_turns_over_two(monkeypatch):
     # `count` tallies bull+bear turns: quick=2 → 1 round, full=4 → 2 rounds.
     quick = _min_summary(monkeypatch, {"investment_debate_state": {"count": 2}})
@@ -89,6 +98,32 @@ def test_debate_rounds_is_turns_over_two(monkeypatch):
     full = _min_summary(monkeypatch, {"investment_debate_state": {"count": 4}})
     assert full["debate_rounds"] == 2
     assert full["debate_turns"] == 4
+
+
+def test_run_summary_distinguishes_retained_messages_from_tool_executions(monkeypatch):
+    records = [
+        SimpleNamespace(agent_key="foreign_language_analyst", source="toolnode"),
+        SimpleNamespace(agent_key="foreign_language_analyst", source="toolnode"),
+        SimpleNamespace(agent_key="foreign_language_analyst", source="preflight"),
+    ]
+    monkeypatch.setattr(
+        "src.runtime_services.get_current_evidence_records",
+        lambda: records,
+    )
+    summary = _min_summary(
+        monkeypatch,
+        {
+            "messages": [
+                ToolMessage(content="retained", tool_call_id="one", name="search")
+            ]
+        },
+    )
+
+    assert summary["tool_calls"] == 1
+    assert summary["tool_messages_retained"] == 1
+    assert summary["tool_executions"] == 3
+    assert summary["tool_executions_by_agent"] == {"foreign_language_analyst": 3}
+    assert summary["tool_executions_by_source"] == {"toolnode": 2, "preflight": 1}
 
 
 def test_debate_handoff_persistence_keeps_telemetry_not_content(monkeypatch):

@@ -22,11 +22,14 @@ from src.agents.pm_verdict_metadata import (
     pm_verdict_metadata_from_text,
 )
 from src.agents.verdict_policy import (
+    apply_required_verdict,
+    assess_verdict_policy,
     maybe_demote_buy_on_blocking_flags,
     maybe_floor_verdict_to_hold,
     maybe_qualify_buy_in_quick_mode,
     maybe_qualify_weak_asymmetry_buy,
     maybe_tag_dni_review_candidate,
+    normalize_pm_block_contract,
 )
 from src.data_block_utils import (
     extract_data_block_field,
@@ -61,6 +64,7 @@ from .fundamentals_reconciler import stamp_trade_block_price_currency
 from .governance_prompt import governance_block, governance_card
 from .output_limits import cap_state_value
 from .output_validation import (
+    classify_output_contract_failure,
     log_output_diagnostics,
     log_truncation_diagnostic,
     should_fail_closed,
@@ -355,69 +359,6 @@ def _ensure_capital_structure_resolution_block(
         "consolidation scope, valuation basis, and double-counting treatment align."
     )
     return _insert_block_before_pm_block(pm_output, "\n".join(lines))
-
-
-def _normalize_pm_block_contract(pm_output: str) -> str:
-    """Reconcile PM sizing surfaces with the (final) PM_BLOCK verdict.
-
-    For a no-initiation verdict (HOLD / DO_NOT_INITIATE / SELL) this clamps BOTH the
-    machine ``POSITION_SIZE`` token AND the human-facing ``Recommended Position Size: X%``
-    prose line (PM prompt v9.19) to zero, so the persisted PM text is internally
-    coherent. Called at the PM-node tail *after* the deterministic verdict modifiers
-    (floor/demote), so a BUY→HOLD demotion cannot leave a stale nonzero size behind
-    (3773.T 2026-07-12: ``Recommended Position Size: 2.5%`` under VERDICT: HOLD; and the
-    demotion path, where ``_rewrite_pm_decision_surfaces`` rewrites only the decision
-    line, not the sizing fields).
-    """
-    blocks = list(fenced_block_pattern("PM_BLOCK").finditer(pm_output))
-    if not blocks:
-        return pm_output
-
-    last = blocks[-1]
-    body = last.group(1)
-    verdict_match = re.search(r"(?im)^VERDICT:\s*([^\n]+)", body)
-    if not verdict_match:
-        return pm_output
-
-    verdict = canonicalize_pm_verdict(verdict_match.group(1))
-    if verdict not in {"HOLD", "DO_NOT_INITIATE", "SELL"}:
-        return pm_output
-
-    # 1) PM_BLOCK POSITION_SIZE token (skip if absent or already zero).
-    token_rewritten = False
-    size_match = re.search(r"(?im)^(POSITION_SIZE:\s*)([\d.]+)", body)
-    if size_match:
-        try:
-            emitted_size = float(size_match.group(2))
-        except ValueError:
-            emitted_size = 0.0
-        if emitted_size != 0.0:
-            rewritten_body = re.sub(
-                r"(?im)^(POSITION_SIZE:\s*)[\d.]+",
-                r"\g<1>0.0",
-                body,
-                count=1,
-            )
-            pm_output = (
-                pm_output[: last.start(1)] + rewritten_body + pm_output[last.end(1) :]
-            )
-            token_rewritten = True
-
-    # 2) Human-facing prose line, outside the block (prompt v9.19).
-    pm_output, prose_lines_rewritten = re.subn(
-        r"(?im)^(\**Recommended Position Size\**:\s*)[\d.]+%?",
-        r"\g<1>0.0% (monitor only — no initiation)",
-        pm_output,
-    )
-
-    if token_rewritten or prose_lines_rewritten:
-        logger.warning(
-            "pm_block_position_size_rewritten",
-            verdict=verdict,
-            token_rewritten=token_rewritten,
-            prose_lines_rewritten=prose_lines_rewritten,
-        )
-    return pm_output
 
 
 def _ensure_apac_resolution_block(pm_output: str, apac_report: str | None) -> str:
@@ -848,7 +789,10 @@ def _log_pm_discipline_checks(
 
 
 def create_portfolio_manager_node(
-    llm, memory: Any | None, strict_mode: bool = False
+    llm,
+    memory: Any | None,
+    strict_mode: bool = False,
+    recovery_llm: Any | None = None,
 ) -> Callable:
     async def pm_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
@@ -1306,6 +1250,34 @@ RISK TEAM DEBATE:
             "Make Portfolio Manager Verdict."
         )
 
+        async def invoke_structure_correction(
+            instruction: str,
+            *,
+            context_suffix: str,
+        ) -> tuple[Any, str, Any]:
+            correction_model = recovery_llm or llm
+            correction_runnable = correction_model
+            corrected_response = await agent_runtime.invoke_with_rate_limit_handling(
+                correction_runnable,
+                [HumanMessage(content=f"{prompt}\n\n{instruction}")],
+                context=f"{agent_prompt.agent_name} {context_suffix}",
+                canonical_agent=agent_prompt.agent_name,
+                provider=support.infer_provider_name(correction_model),
+                model_name=support.get_model_name(correction_model),
+            )
+            corrected_content = message_utils.extract_string_content(
+                corrected_response.content
+            )
+            corrected_content = _ensure_pm_resolution_blocks(
+                corrected_content,
+                consultant=consultant or None,
+                apac=apac or None,
+                auditor=state.get("auditor_report") or None,
+                red_flags=red_flags,
+            )
+            return corrected_response, corrected_content, correction_model
+
+        content_str = ""
         try:
             response = await agent_runtime.invoke_with_rate_limit_handling(
                 llm,
@@ -1322,6 +1294,8 @@ RISK TEAM DEBATE:
                 auditor=state.get("auditor_report") or None,
                 red_flags=red_flags,
             )
+            response_runnable = llm
+            correction_used = False
 
             from src.utils import detect_truncation
 
@@ -1343,28 +1317,62 @@ RISK TEAM DEBATE:
                 and not trunc_info["truncated"]
             ):
                 correction_prompt = (
-                    f"{prompt}\n\nYour prior response omitted required decision-trace "
+                    "Your prior response omitted required decision-trace "
                     "fields. Return the complete corrected response, including exactly "
                     "one complete PM_BLOCK with DECISION_FACTS and DECISION_GATES. "
-                    "Do not return a patch.\n\nPRIOR RESPONSE:\n"
-                    f"{content_str}"
+                    "Do not return a patch and do not call tools."
                 )
-                response = await agent_runtime.invoke_with_rate_limit_handling(
-                    llm,
-                    [HumanMessage(content=correction_prompt)],
-                    context=f"{agent_prompt.agent_name} structure correction",
-                    canonical_agent=agent_prompt.agent_name,
-                    provider=support.infer_provider_name(llm),
-                    model_name=support.get_model_name(llm),
-                )
-                content_str = message_utils.extract_string_content(response.content)
-                content_str = _ensure_pm_resolution_blocks(
+                (
+                    response,
                     content_str,
-                    consultant=consultant or None,
-                    apac=apac or None,
-                    auditor=state.get("auditor_report") or None,
-                    red_flags=red_flags,
+                    response_runnable,
+                ) = await invoke_structure_correction(
+                    correction_prompt,
+                    context_suffix="structure correction",
                 )
+                correction_used = True
+                trunc_info = detect_truncation(
+                    content_str,
+                    agent="portfolio_manager",
+                )
+                validation = validate_required_output(
+                    "portfolio_manager",
+                    content_str,
+                )
+            if (
+                recovery_llm is not None
+                and not correction_used
+                and should_fail_closed(
+                    "portfolio_manager",
+                    validation=validation,
+                    truncated=trunc_info["truncated"],
+                    content=content_str,
+                )
+            ):
+                failure_kind = classify_output_contract_failure(
+                    runnable=response_runnable,
+                    response=response,
+                    truncated=trunc_info["truncated"],
+                    validation=validation,
+                )
+                logger.warning(
+                    "portfolio_manager_structural_recovery",
+                    ticker=ticker,
+                    failure_kind=failure_kind,
+                    missing_sections=validation["missing"],
+                )
+                (
+                    response,
+                    content_str,
+                    response_runnable,
+                ) = await invoke_structure_correction(
+                    "STRUCTURAL RECOVERY: Return one concise, complete response. "
+                    "Emit PM_BLOCK before supporting prose, include every required "
+                    "field, and close the block with its exact END marker. Do not "
+                    "return a patch and do not call tools.",
+                    context_suffix="structural recovery",
+                )
+                correction_used = True
                 trunc_info = detect_truncation(
                     content_str,
                     agent="portfolio_manager",
@@ -1380,71 +1388,25 @@ RISK TEAM DEBATE:
                 truncated=trunc_info["truncated"],
                 content=content_str,
             ):
-                decision_trace = validate_decision_trace(
+                content_str, decision_trace = reconcile_final_decision_trace(
                     content_str,
                     state.get("analysis_snapshot"),
                     red_flags,
                 )
-                snapshot = state.get("analysis_snapshot")
-                if (
-                    decision_trace["status"] == "INVALID"
-                    and isinstance(snapshot, dict)
-                    and snapshot.get("contract_status") == "VALID"
-                ):
-                    trace_errors = {
-                        key: decision_trace.get(key)
-                        for key in (
-                            "invalid_facts",
-                            "invalid_gates",
-                            "missing_gates",
-                            "missing_fields",
-                            "support_facts",
-                            "reason",
-                        )
-                        if decision_trace.get(key)
-                    }
-                    correction_prompt = (
-                        f"{prompt}\n\nYour prior response violated the deterministic "
-                        f"decision-trace contract: {trace_errors}. Return one complete "
-                        "corrected response, not a patch. Preserve the investment "
-                        "reasoning, but cite only allowed claim IDs, include every "
-                        "active gate, and ensure a BUY cites a SUPPORT claim.\n\n"
-                        f"PRIOR RESPONSE:\n{content_str}"
-                    )
-                    response = await agent_runtime.invoke_with_rate_limit_handling(
-                        llm,
-                        [HumanMessage(content=correction_prompt)],
-                        context=f"{agent_prompt.agent_name} trace correction",
-                        canonical_agent=agent_prompt.agent_name,
-                        provider=support.infer_provider_name(llm),
-                        model_name=support.get_model_name(llm),
-                    )
-                    content_str = message_utils.extract_string_content(response.content)
-                    content_str = _ensure_pm_resolution_blocks(
-                        content_str,
-                        consultant=consultant or None,
-                        apac=apac or None,
-                        auditor=state.get("auditor_report") or None,
-                        red_flags=red_flags,
-                    )
-                    trunc_info = detect_truncation(
-                        content_str,
-                        agent="portfolio_manager",
-                    )
-                    validation = validate_required_output(
-                        "portfolio_manager",
-                        content_str,
-                    )
-                    decision_trace = validate_decision_trace(
-                        content_str,
-                        state.get("analysis_snapshot"),
-                        red_flags,
-                    )
 
+            if correction_used:
+                log_truncation_diagnostic(
+                    agent_key="portfolio_manager",
+                    ticker=ticker,
+                    runnable=response_runnable,
+                    response=response,
+                    content=content_str,
+                    trunc_info=trunc_info,
+                )
             log_output_diagnostics(
                 agent_key="portfolio_manager",
                 ticker=ticker,
-                runnable=llm,
+                runnable=response_runnable,
                 response=response,
                 content=content_str,
                 truncated=trunc_info["truncated"],
@@ -1477,6 +1439,12 @@ RISK TEAM DEBATE:
                     "Portfolio Manager output missing required structure",
                     provider=support.infer_provider_name(llm),
                     fallback_content=content_str,
+                    error_kind=classify_output_contract_failure(
+                        runnable=response_runnable,
+                        response=response,
+                        truncated=trunc_info["truncated"],
+                        validation=validation,
+                    ),
                 )
 
             decision_trace = decision_trace or validate_decision_trace(
@@ -1512,6 +1480,60 @@ RISK TEAM DEBATE:
                 state.get("analysis_snapshot"),
                 ticker=ticker,
             )
+            policy_violation = assess_verdict_policy(
+                content_str,
+                decision_inputs=floor_inputs,
+            )
+            if policy_violation is not None:
+                logger.warning(
+                    "portfolio_manager_policy_correction",
+                    ticker=ticker,
+                    rule=policy_violation.rule,
+                    reason=policy_violation.reason,
+                    required_verdict=policy_violation.required_verdict,
+                )
+                content_str, policy_corrected = apply_required_verdict(
+                    content_str,
+                    required_verdict=policy_violation.required_verdict,
+                    rule=policy_violation.rule,
+                    reason=policy_violation.reason,
+                    ticker=ticker,
+                )
+                if policy_corrected:
+                    content_str, decision_trace = reconcile_final_decision_trace(
+                        content_str,
+                        state.get("analysis_snapshot"),
+                        red_flags,
+                    )
+                policy_violation = assess_verdict_policy(
+                    content_str,
+                    decision_inputs=floor_inputs,
+                )
+            if policy_violation is not None:
+                logger.error(
+                    "portfolio_manager_policy_violation",
+                    ticker=ticker,
+                    rule=policy_violation.rule,
+                    reason=policy_violation.reason,
+                    correction_used=correction_used,
+                )
+                present_inputs, missing_inputs = _present_pm_inputs(state)
+                logger.info(
+                    "final_verdict_formed",
+                    ticker=ticker,
+                    verdict="POLICY_FAILURE",
+                    pre_screening_result=state.get("pre_screening_result"),
+                    direct_pm_inputs_present=present_inputs,
+                    direct_pm_inputs_missing=missing_inputs,
+                    strict_mode=strict_mode,
+                )
+                return failure_artifact(
+                    "final_trade_decision",
+                    "Portfolio Manager output violated deterministic verdict policy",
+                    provider=support.infer_provider_name(llm),
+                    fallback_content=content_str,
+                    error_kind="output_contract_violation",
+                )
             content_str, verdict_floored = maybe_floor_verdict_to_hold(
                 content_str,
                 decision_inputs=floor_inputs,
@@ -1552,7 +1574,7 @@ RISK TEAM DEBATE:
             # Reconcile sizing (token + prose) against the FINAL verdict, i.e. after
             # any floor/demote rewrite above — so a BUY→HOLD demotion cannot leave a
             # stale nonzero POSITION_SIZE or "Recommended Position Size" prose.
-            content_str = _normalize_pm_block_contract(content_str)
+            content_str = normalize_pm_block_contract(content_str)
             content_str, decision_trace = reconcile_final_decision_trace(
                 content_str,
                 state.get("analysis_snapshot"),
@@ -1610,6 +1632,7 @@ RISK TEAM DEBATE:
                 "final_trade_decision",
                 exc,
                 provider=support.infer_provider_name(llm),
+                fallback_content=content_str,
             )
 
     return pm_node

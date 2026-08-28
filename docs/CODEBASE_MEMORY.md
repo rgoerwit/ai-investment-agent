@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-08-05
+Last updated: 2026-08-25
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
@@ -38,6 +38,14 @@ converted into a substantive legal finding. Retryability is owned by
 runtime only retains a separate rate-limit branch because its backoff policy
 differs. Consultant timeout floors use the inferred provider rather than assuming
 OpenAI-compatible seats are OpenAI.
+
+Model-response validity has two independent layers. `src/agents/runtime.py` owns
+transient provider retries; the producing node then validates its output contract.
+Canonical fenced blocks require their end marker and legacy fields match exact logical
+keys, so `RAW_HEALTH_SCORE` cannot satisfy `HEALTH_SCORE`. Invalid responses are
+classified as cap exhaustion, incomplete structure, or ordinary contract violation.
+Structural recovery is text-only and bounded: full mode applies it to eligible analyst
+outputs, while quick mode limits it to Senior Fundamentals and Portfolio Manager.
 
 ## What This Repo Is
 
@@ -167,6 +175,17 @@ single-source tool records on distinct domains.
 Related listed tickers must occur in the same supporting evidence, so an
 unsupported FLA ticker cannot re-enter through Senior's restatement.
 
+Every shared graph tool loop—Market, Sentiment, News, Junior Fundamentals, Foreign
+Language, and Value Trap—is bounded by `ResearchBudgetLedger`. The policy instance is
+shared by its analyst and tool node, so model turns, tool rounds, fan-out, per-tool and
+purpose counts, duplicates, failed-tool/host circuits, and cumulative model-facing
+evidence all close through one authority. Evidence capping truncates ToolMessage text;
+it never drops the call/result pair or alters the complete structured-ingress record.
+When a limit closes research, the next model invocation has no tools bound and must
+synthesize from retained evidence. Saved `research_budgets.llm_calls` counts logical
+application model turns; `token_usage.call_attempts` separately counts provider
+transport attempts.
+
 `src/tooling/` owns cross-cutting tool execution, audit hooks, argument policy, and untrusted-content inspection.
 
 `src/runtime_diagnostics/` owns artifact completion/validity and publishability checks.
@@ -180,6 +199,13 @@ guard for prompt marker form, parser shape parity, and source-level marker drift
 ## Information Flow Model
 
 Primary agent-to-agent flow is through typed state fields, not just message history.
+Parallel tool transcripts still share the graph's `messages` field, but retention and
+invocation use the same agent ownership boundary. Assistant tool calls and matching
+results are atomic retention units, bounded per agent and validated before any native
+or compatible provider request. A permissive provider accepting malformed history is
+never treated as an application compatibility feature. Legal Counsel keeps a private
+bounded loop because its deterministic preflight and forced JSON synthesis are one
+transaction; it has no duplicate graph tool-node path.
 
 Material factual claims flow through the canonical claim envelope. Policy and roles
 live in `src/claim_policy.py`; `src/tooling/structured_ingress.py` captures registered
@@ -247,6 +273,29 @@ Current semantics:
 - `complete=True, ok=True`: agent ran and produced valid output
 - `complete=True, ok=False`: agent ran but failed; may still leave conservative fallback content
 - `complete=False`: agent did not complete
+
+Run-summary tool counters have two intentionally different meanings:
+
+- `tool_calls`: compatibility count of retained `ToolMessage` objects
+- `tool_executions`: actual run-scoped evidence-ledger executions, with agent and
+  source breakdowns
+
+Likewise, structural-recovery token cost remains attributed to the originating analyst
+in the primary rollup, while `token_usage.by_seat` and `token_usage.recovery_usage`
+preserve the canonical recovery seat and origin. Use the explicit execution/recovery
+fields for cost comparisons; transcript retention is not a billing ledger.
+
+`scripts/cost_report.py --efficiency` summarizes recovery share, output-cap attempts,
+legacy PM model corrections, and research-budget activity. Its A/B report also warns
+when ticker baskets, code commits, prompts, thesis configuration, mode, or dirty-tree
+state make a provider comparison uncontrolled; binding digests may differ as the
+intended comparison axis.
+
+Interpret research stop reasons across a batch, not as isolated failures. Predominant
+`MODEL_FINAL` means the budget is protective. Predominant `TOOL_ROUND_LIMIT` with
+`forced_synthesis_used=true` means the cap is binding and substituting for a natural
+stopping condition; investigate the prompt or stopping behavior, or re-evaluate the
+cap from paired evidence, rather than reflexively lowering it.
 
 Graph barriers use completion, not validity.
 Downstream decision logic should use valid content helpers where correctness matters.
@@ -404,7 +453,8 @@ Recent completed control-plane/security work:
 - runtime-scoped service container via `RuntimeServices`
 - provider-neutral LLM control plane via `src/llm_runtime/`: canonical seats,
   immutable per-run binding plans, reviewed model identity/capabilities,
-  separate provider/group application qualification, native/compatible adapters,
+  separate provider/group allowlisting and evidence qualification,
+  native/compatible adapters,
   provider-neutral retry/reasoning policies, conservative provider-specific rate
   ceilings (including direct-construction fallbacks), and secret-free persisted
   binding telemetry; seat execution policy also owns sampling, client bounds,

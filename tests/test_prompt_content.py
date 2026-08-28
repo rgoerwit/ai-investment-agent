@@ -99,9 +99,10 @@ class TestFundamentalsPromptContent:
 
 
 class TestForeignLanguageGuidancePromptContent:
-    def test_latest_results_and_tax_baseline_search_is_mandatory(self):
+    def test_latest_results_and_tax_baseline_search_is_top_priority(self):
         msg = get_prompt("foreign_language_analyst").system_message
-        assert "Search K: Management Guidance & Earnings Baseline (MANDATORY)" in msg
+        assert "Search K: Management Guidance & Earnings Baseline (TOP PRIORITY)" in msg
+        assert "coverage menu, not a checklist" in msg
         assert "賃上げ促進税制" in msg
         assert "MANAGEMENT_GUIDANCE" in msg
         assert "NOT_DISCLOSED_AFTER_TARGETED_SEARCH" in msg
@@ -125,7 +126,7 @@ class TestForeignLanguageGuidancePromptContent:
 
     def test_latest_results_snapshot_requires_inspected_same_statement_values(self):
         msg = get_prompt("foreign_language_analyst").system_message
-        assert "Search L: Latest Official Results Snapshot (MANDATORY)" in msg
+        assert "Search L: Latest Official Results Snapshot (TOP PRIORITY)" in msg
         assert "call `get_official_document`" in msg
         assert "current and year-ago comparative revenue and earnings" in msg
         assert "same statement presentation" in msg

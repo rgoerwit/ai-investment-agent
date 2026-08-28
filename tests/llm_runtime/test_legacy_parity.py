@@ -167,11 +167,19 @@ _REVIEW_OUTPUT_TOKENS = {
     SeatId.ARTICLE_WRITER_REVIEW_FALLBACK: 16_384,
 }
 
+_OPENAI_REVIEW_PARITY_CASES = tuple(
+    (seat_id, quick_mode)
+    for seat_id in _OPENAI_REVIEW_PARITY_SEATS
+    for quick_mode in (False, True)
+    if not (quick_mode and SEATS[seat_id].disabled_in_quick_mode)
+)
+
 
 @pytest.mark.parametrize(
-    "seat_id", _OPENAI_REVIEW_PARITY_SEATS, ids=lambda seat: seat.value
+    ("seat_id", "quick_mode"),
+    _OPENAI_REVIEW_PARITY_CASES,
+    ids=lambda value: value.value if isinstance(value, SeatId) else str(value),
 )
-@pytest.mark.parametrize("quick_mode", (False, True), ids=("normal", "quick"))
 def test_openai_review_legacy_and_provider_scoped_contracts_match(
     monkeypatch, seat_id: SeatId, quick_mode: bool
 ) -> None:
@@ -202,6 +210,13 @@ def test_openai_review_legacy_and_provider_scoped_contracts_match(
     assert _contract(current, seat_id) == _contract(legacy, seat_id)
 
 
+def test_openai_auditor_parity_is_full_mode_only() -> None:
+    for settings in (_legacy_openai_settings(), _new_openai_settings()):
+        plan = resolve_binding_plan(settings)
+        assert plan.status_for(SeatId.AUDITOR).enabled is True
+        assert plan.status_for(SeatId.AUDITOR, quick_mode=True).enabled is False
+
+
 def test_provider_scoped_auditor_escalation_is_deliberately_stronger_than_legacy(
     monkeypatch,
 ) -> None:
@@ -230,8 +245,14 @@ def test_provider_scoped_auditor_escalation_is_deliberately_stronger_than_legacy
     current_contract = _contract(current, SeatId.AUDITOR_ESCALATION)
     assert legacy_contract.reasoning_intent == "medium"
     assert current_contract.reasoning_intent == "xhigh"
-    assert current_contract.configured_reasoning_reserve_tokens > (
+    # Both paths now reserve against the seat's escalation intent. The explicit
+    # reasoning control can remain stronger on the provider-scoped path without
+    # creating divergent output-cap accounting.
+    assert current_contract.configured_reasoning_reserve_tokens == (
         legacy_contract.configured_reasoning_reserve_tokens
+    )
+    assert (
+        current_contract.api_output_cap_tokens == legacy_contract.api_output_cap_tokens
     )
 
 

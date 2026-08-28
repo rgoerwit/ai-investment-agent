@@ -59,6 +59,126 @@ def stub_observability(monkeypatch):
     monkeypatch.setattr("src.observability.flush_traces", lambda: None)
 
 
+class TestConfigurationErrorSurface:
+    @staticmethod
+    def _binding_error():
+        from src.llm_runtime.bindings import BindingConfigurationError
+
+        return BindingConfigurationError(
+            [
+                "fundamentals_analyst (quick): model 'old-model' belongs to "
+                "'provider-a', not 'provider-b'",
+                "portfolio_manager (quick): model 'old-model' belongs to "
+                "'provider-a', not 'provider-b'",
+            ]
+        )
+
+    def test_structured_binding_errors_preserve_every_actionable_detail(self):
+        from src.main import _safe_configuration_error_message
+
+        message = _safe_configuration_error_message(
+            "validating environment configuration", self._binding_error()
+        )
+
+        assert "BindingConfigurationError" in message
+        assert "fundamentals_analyst (quick)" in message
+        assert "portfolio_manager (quick)" in message
+        assert "belongs to 'provider-a', not 'provider-b'" in message
+        assert "preview:" not in message
+
+    def test_quiet_mode_keeps_details_and_generic_corrective_guidance(self, capsys):
+        from src.main import _print_configuration_error
+
+        _print_configuration_error(
+            SimpleNamespace(quiet=True, brief=False),
+            "validating environment configuration",
+            self._binding_error(),
+        )
+
+        output = capsys.readouterr().out
+        assert "fundamentals_analyst (quick)" in output
+        assert "portfolio_manager (quick)" in output
+        assert "update the referenced settings" in output
+        assert "ensure all required API keys are set" not in output
+
+    def test_interactive_mode_keeps_the_same_actionable_details(self):
+        from src.main import _print_configuration_error
+
+        with patch("src.main.console") as mock_console:
+            _print_configuration_error(
+                SimpleNamespace(quiet=False, brief=False),
+                "validating environment configuration",
+                self._binding_error(),
+            )
+
+        output = "\n".join(
+            str(call.args[0]) for call in mock_console.print.call_args_list if call.args
+        )
+        assert "fundamentals_analyst (quick)" in output
+        assert "portfolio_manager (quick)" in output
+
+        assert "update the referenced settings" in output
+        assert "ensure all required API keys are set" not in output
+
+    def test_generic_configuration_error_keeps_its_specific_problem(self):
+        from src.main import _safe_configuration_error_message
+
+        message = _safe_configuration_error_message(
+            "validating environment configuration",
+            ValueError(
+                "Missing required environment variables: FIRST_REQUIRED_SETTING, "
+                "SECOND_REQUIRED_SETTING"
+            ),
+        )
+
+        assert "FIRST_REQUIRED_SETTING" in message
+        assert "SECOND_REQUIRED_SETTING" in message
+
+    def test_structured_details_remain_secret_safe(self):
+        from src.llm_runtime.bindings import BindingConfigurationError
+        from src.main import _safe_configuration_error_message
+
+        secret = "sk-1234567890abcdefghijklmnop"
+        message = _safe_configuration_error_message(
+            "validating environment configuration",
+            BindingConfigurationError([f"credential api_key={secret}"]),
+        )
+
+        assert secret not in message
+        assert "api_key=[REDACTED]" in message
+
+
+class TestAnalysisProcessExitCode:
+    def test_complete_analytical_rejection_is_process_success(self):
+        from src.main import _analysis_process_exit_code
+
+        result = {
+            "pre_screening_result": "REJECT",
+            "analysis_validity": {"publishable": True, "required_failures": {}},
+            "run_summary": {"required_failures": []},
+        }
+
+        assert _analysis_process_exit_code(result) == 0
+
+    def test_saved_result_with_required_failures_is_technical_failure(self):
+        from src.main import _analysis_process_exit_code
+
+        result = {
+            "analysis_validity": {
+                "publishable": False,
+                "required_failures": {"news_report": {"ok": False}},
+            },
+            "run_summary": {"required_failures": ["news_report"]},
+        }
+
+        assert _analysis_process_exit_code(result) == 2
+
+    def test_legacy_or_test_result_without_validity_details_remains_success(self):
+        from src.main import _analysis_process_exit_code
+
+        assert _analysis_process_exit_code({"analysis_validity": {}}) == 0
+
+
 class TestStrictModeCLI:
     """Test --strict CLI flag is wired correctly."""
 

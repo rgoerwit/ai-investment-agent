@@ -7,9 +7,11 @@ from typing import Any
 from src.llm_runtime.identities import sanitize_endpoint_host
 from src.llm_runtime.seats import BindingGroup, SeatId
 
-PROVIDER_GROUP_QUALIFICATIONS: dict[str, frozenset[BindingGroup]] = {
-    # Google and OpenAI have offline contracts for reversible base/review use and
-    # established operational, judge, and article fallback paths.
+PROVIDER_GROUP_ALLOWLIST: dict[str, frozenset[BindingGroup]] = {
+    # This is an application allowlist, not a claim of live qualification.
+    # Evidence levels are owned by qualification.py and docs/LLM_PROVIDERS.md.
+    # Google and OpenAI have reviewed contracts for reversible base/review use
+    # and established operational, judge, and article fallback paths.
     "google": frozenset(
         {
             BindingGroup.BASE,
@@ -42,10 +44,10 @@ PROVIDER_GROUP_QUALIFICATIONS: dict[str, frozenset[BindingGroup]] = {
 }
 
 
-def is_provider_qualified(provider: str, group: BindingGroup) -> bool:
-    """Return whether repository evidence qualifies *provider* for *group*."""
+def is_provider_allowed(provider: str, group: BindingGroup) -> bool:
+    """Return whether the application permits *provider* for *group*."""
 
-    return group in PROVIDER_GROUP_QUALIFICATIONS.get(provider, frozenset())
+    return group in PROVIDER_GROUP_ALLOWLIST.get(provider, frozenset())
 
 
 _LEGACY_GROUP_PROVIDERS = {

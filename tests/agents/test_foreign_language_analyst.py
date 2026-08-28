@@ -94,6 +94,19 @@ class TestForeignLanguageAnalystPrompt:
             or "morningstar" in system_message.lower()
         )
 
+    def test_prompt_obeys_code_owned_research_budget_contract(self):
+        data = json.loads(
+            Path("prompts/foreign_language_analyst.json").read_text(encoding="utf-8")
+        )
+        system_message = data["system_message"]
+
+        assert "coverage menu, not a checklist" in system_message
+        assert "Every `search_foreign_sources` call MUST set one stable `purpose`" in (
+            system_message
+        )
+        assert "Do not retry a blocked call" in system_message
+        assert "synthesize immediately" in system_message
+
 
 class TestForeignLanguageGuidanceRetry:
     def test_missing_guidance_block_triggers_retry(self):
@@ -1360,15 +1373,11 @@ class TestFundamentalsSyncRouter:
 class TestGraphStructure:
     """Tests for graph structure with Foreign Language Analyst."""
 
-    @patch("src.graph.routing._is_auditor_enabled")
-    def test_fan_out_includes_foreign_analyst(self, mock_auditor_enabled):
+    def test_fan_out_includes_foreign_analyst(self):
         """Test that fan_out_to_analysts includes Foreign Language Analyst."""
         from src.graph import fan_out_to_analysts
 
-        # Disable auditor for this test to check base analyst count
-        mock_auditor_enabled.return_value = False
-
-        destinations = fan_out_to_analysts({}, {})
+        destinations = fan_out_to_analysts({}, {}, include_auditor=False)
 
         assert "Foreign Language Analyst" in destinations
         assert "Value Trap Detector" in destinations

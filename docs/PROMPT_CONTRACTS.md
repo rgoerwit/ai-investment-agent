@@ -1,6 +1,6 @@
 # Prompt contracts and the drift harness
 
-Last updated: 2026-08-22
+Last updated: 2026-08-26
 
 This file records *why* the prompt-editing rules exist and what happened when they
 were absent. It explains the rationale and intended behaviour; the implementation and
@@ -83,6 +83,12 @@ but fatal to a parser.
 **Bump `version` and add a `changes` line.** The metadata block is the only record of
 why a prompt says what it says, and several rules in the current prompts exist to
 prevent a specific recurring model behaviour.
+
+**Research menus are priorities, not executable budgets.** A prompt may tell an agent
+which evidence gaps to pursue and require stable purpose labels, but code owns tool,
+round, fan-out, duplicate, and failure-circuit limits. When the graph closes research,
+the final request binds no tools. This keeps provider differences in tool persistence
+from turning prose such as “search A–J” into vendor-dependent cost.
 
 ## The rule that generalizes
 

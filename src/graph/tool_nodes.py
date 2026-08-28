@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from src.agents import AgentState
 from src.claim_policy import STRUCTURED_INGRESS_SOURCES
 from src.error_safety import summarize_exception
+from src.forensic_budget import ResearchBudgetLedger, ResearchBudgetPolicy
 from src.runtime_services import get_current_tool_service
 from src.tooling.runtime import ToolInvocation
 from src.tooling.structured_ingress import (
@@ -41,7 +42,12 @@ def _cap_tool_output(content: str, tool_name: str) -> str:
     )
 
 
-def create_agent_tool_node(tools: list, agent_key: str):
+def create_agent_tool_node(
+    tools: list,
+    agent_key: str,
+    *,
+    budget_policy: ResearchBudgetPolicy | None = None,
+):
     """
     Create a tool execution node that only processes tool_calls from a specific agent.
     """
@@ -99,14 +105,20 @@ def create_agent_tool_node(tools: list, agent_key: str):
             "findings": findings or [],
         }
 
-    def _error_message(tool_name: str, tool_id: str, content: str) -> ToolMessage:
+    def _error_message(
+        tool_name: str,
+        tool_id: str,
+        content: str,
+        *,
+        blocked: bool = False,
+    ) -> ToolMessage:
         msg = ToolMessage(
             content=content,
             tool_call_id=tool_id,
             name=tool_name,
             status="error",
         )
-        msg.additional_kwargs = _base_additional_kwargs()
+        msg.additional_kwargs = _base_additional_kwargs(blocked=blocked)
         return msg
 
     def _success_message(
@@ -143,7 +155,7 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 _error_message(
                     tool_name,
                     tool_id,
-                    f"Error: Unknown tool '{tool_name}'",
+                    "TOOL_ERROR: UNKNOWN_TOOL",
                 ),
                 _structured_record(
                     tool_name,
@@ -207,8 +219,7 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 _error_message(
                     tool_name,
                     tool_id,
-                    f"Error: Tool '{tool_name}' timed out after"
-                    f" {_TOOL_CALL_TIMEOUT_SECONDS}s",
+                    "TOOL_ERROR: TOOL_TIMEOUT",
                 ),
                 _structured_record(
                     tool_name,
@@ -224,7 +235,14 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 **summarize_exception(exc, operation="tool_call_error"),
             )
             return (
-                _error_message(tool_name, tool_id, f"Error: {exc}"),
+                # The operator log carries a safe exception summary. The model
+                # receives a stable classification rather than raw exception
+                # prose, and the shared research ledger can open its tool circuit.
+                _error_message(
+                    tool_name,
+                    tool_id,
+                    "TOOL_ERROR: TOOL_EXECUTION_FAILED",
+                ),
                 _structured_record(
                     tool_name,
                     "",
@@ -246,10 +264,12 @@ def create_agent_tool_node(tools: list, agent_key: str):
                 if getattr(msg, "name", None) != agent_key:
                     continue
 
-                msg_tool_names = {_tool_name(tc) for tc in msg.tool_calls}
-                if msg_tool_names & tool_names:
-                    target_message = msg
-                    break
+                # Ownership identifies the pending exchange. Do not require one
+                # requested name to be registered here: an unknown-only request
+                # still needs one matching error ToolMessage per call or the next
+                # provider invocation receives an invalid, orphaned transcript.
+                target_message = msg
+                break
 
         if target_message is None:
             logger.warning(
@@ -268,14 +288,103 @@ def create_agent_tool_node(tools: list, agent_key: str):
             total_messages=len(messages),
         )
 
-        outcomes = list(
-            await asyncio.gather(
-                *[_execute_one(tc) for tc in target_message.tool_calls]
+        ledger: ResearchBudgetLedger | None = None
+        policy = budget_policy
+        telemetry_by_agent = state.get("research_budgets", {}) or {}
+        if policy is not None:
+            ledger = ResearchBudgetLedger.from_telemetry(
+                policy,
+                telemetry_by_agent.get(agent_key),
             )
+            ledger.record_tool_round(
+                [_tool_name(tc) for tc in target_message.tool_calls]
+            )
+
+        outcomes: list[tuple[ToolMessage, dict[str, dict[str, Any]]] | None] = [
+            None
+        ] * len(target_message.tool_calls)
+        authorized: list[tuple[int, Any]] = []
+        for index, tc in enumerate(target_message.tool_calls):
+            tool_name = _tool_name(tc)
+            tool_args = _tool_args(tc)
+            tool_id = tc.get("id", tool_name) if isinstance(tc, dict) else tool_name
+            tool_id = tool_id if isinstance(tool_id, str) else tool_name
+            block_reason: str | None = None
+            if ledger is not None and policy is not None:
+                if index >= policy.max_tool_calls_per_turn:
+                    block_reason = ledger.block_tool(
+                        tool_name,
+                        "TOOL_TURN_FANOUT_LIMIT",
+                    )
+                elif ledger.tool_rounds_used > policy.max_tool_iterations:
+                    block_reason = ledger.block_tool(
+                        tool_name,
+                        "TOOL_ROUND_LIMIT",
+                    )
+                else:
+                    block_reason = ledger.authorize_tool(tool_name, tool_args)
+            if block_reason:
+                outcomes[index] = (
+                    _error_message(
+                        tool_name,
+                        tool_id,
+                        f"TOOL_BLOCKED: {block_reason}",
+                        blocked=True,
+                    ),
+                    _structured_record(
+                        tool_name,
+                        "",
+                        blocked=True,
+                        failure_reason=block_reason,
+                    ),
+                )
+            else:
+                authorized.append((index, tc))
+
+        executed = list(
+            await asyncio.gather(*[_execute_one(tc) for _, tc in authorized])
         )
-        result_messages = [message for message, _ in outcomes]
+        for (index, _), outcome in zip(authorized, executed, strict=True):
+            outcomes[index] = outcome
+        resolved_outcomes = [outcome for outcome in outcomes if outcome is not None]
+
+        if ledger is not None and policy is not None:
+            for tc, (message, _) in zip(
+                target_message.tool_calls,
+                resolved_outcomes,
+                strict=True,
+            ):
+                ledger.record_tool_result(
+                    _tool_name(tc),
+                    message.content,
+                    blocked=bool(message.additional_kwargs.get("blocked")),
+                    args=_tool_args(tc),
+                )
+                content = (
+                    message.content
+                    if isinstance(message.content, str)
+                    else str(message.content)
+                )
+                useful_evidence = (
+                    message.status != "error"
+                    and not bool(message.additional_kwargs.get("blocked"))
+                    and not content.lstrip()
+                    .upper()
+                    .startswith("STATUS: INSUFFICIENT_DATA")
+                )
+                if useful_evidence:
+                    # Preserve one ToolMessage per requested call. Only the text
+                    # re-entering the model is cumulatively capped; structured
+                    # ingress above retains the complete inspected payload.
+                    message.content = ledger.cap_evidence(content)
+            if ledger.tool_rounds_used >= policy.max_tool_iterations:
+                ledger.record_forced_synthesis("TOOL_ROUND_LIMIT")
+            elif not authorized:
+                ledger.record_forced_synthesis("NO_PRODUCTIVE_TOOL_CALLS")
+
+        result_messages = [message for message, _ in resolved_outcomes]
         structured_inputs: dict[str, dict[str, Any]] = {}
-        for _, records in outcomes:
+        for _, records in resolved_outcomes:
             structured_inputs = merge_structured_inputs(
                 structured_inputs,
                 records,
@@ -284,6 +393,8 @@ def create_agent_tool_node(tools: list, agent_key: str):
         result: dict[str, Any] = {"messages": result_messages}
         if structured_inputs:
             result["structured_inputs"] = structured_inputs
+        if ledger is not None:
+            result["research_budgets"] = {agent_key: ledger.telemetry()}
 
         result_msg_count = len(result.get("messages", []))
         expected_count = len(target_message.tool_calls)

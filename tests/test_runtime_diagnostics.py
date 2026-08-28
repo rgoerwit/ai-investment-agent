@@ -2,6 +2,7 @@ import socket
 
 import pytest
 
+from src.agents.message_utils import ToolHistoryIntegrityError
 from src.runtime_diagnostics import (
     FUNDAMENTALS_SYNC_FIELDS,
     OPTIONAL_PUBLISHABLE_ARTIFACTS,
@@ -46,6 +47,21 @@ class TestRuntimeFailureClassification:
         assert details.kind == "dns_resolution"
         assert details.provider == "google"
         assert details.retryable is True
+
+    def test_classifies_invalid_tool_history_as_local_application_error(self):
+        exc = ToolHistoryIntegrityError(
+            "market_analyst",
+            orphaned_outputs=1,
+        )
+
+        details = classify_failure(
+            exc,
+            provider="openai",
+            model_name="gpt-5.4-mini",
+        )
+
+        assert details.kind == "application_error"
+        assert details.retryable is False
 
     def test_classifies_rate_limit(self):
         exc = Exception("HTTP 429: Too Many Requests")

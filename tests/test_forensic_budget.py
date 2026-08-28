@@ -1,4 +1,12 @@
-from src.forensic_budget import AuditorBudgetLedger, AuditorBudgetPolicy
+import pytest
+
+from src.forensic_budget import (
+    AuditorBudgetLedger,
+    AuditorBudgetPolicy,
+    ForeignLanguageBudgetPolicy,
+    ResearchBudgetLedger,
+    graph_research_budget_policies,
+)
 
 
 def _policy(**overrides) -> AuditorBudgetPolicy:
@@ -116,3 +124,121 @@ def test_successful_tool_result_is_not_recorded_as_failure() -> None:
     ledger.record_tool_result("get_official_document", "STATUS: FOUND\nRevenue: 10")
 
     assert ledger.failed_tools == []
+
+
+def _foreign_policy(**overrides) -> ForeignLanguageBudgetPolicy:
+    values = {
+        "search_calls": 3,
+        "document_calls": 2,
+        "filing_calls": 1,
+        "guidance_calls": 1,
+        "max_tool_iterations": 2,
+        "max_llm_calls": 4,
+        "max_tool_calls_per_turn": 3,
+        "purpose_call_limit": 2,
+    }
+    values.update(overrides)
+    return ForeignLanguageBudgetPolicy(**values)
+
+
+def test_shared_research_ledger_blocks_equivalent_calls() -> None:
+    ledger = ResearchBudgetLedger(_foreign_policy())
+    args = {
+        "ticker": "TEST",
+        "search_query": "issuer latest results",
+        "purpose": "latest_results",
+    }
+
+    assert ledger.authorize_tool("search_foreign_sources", args) is None
+    assert ledger.authorize_tool("search_foreign_sources", args) == (
+        "DUPLICATE_TOOL_CALL"
+    )
+    assert ledger.telemetry()["blocked_reasons"] == {"DUPLICATE_TOOL_CALL": 1}
+
+
+def test_shared_research_ledger_caps_refinements_by_purpose() -> None:
+    ledger = ResearchBudgetLedger(_foreign_policy(purpose_call_limit=2))
+    for query in ("latest results", "latest official income statement"):
+        assert (
+            ledger.authorize_tool(
+                "search_foreign_sources",
+                {
+                    "ticker": "TEST",
+                    "search_query": query,
+                    "purpose": "latest_results",
+                },
+            )
+            is None
+        )
+    assert (
+        ledger.authorize_tool(
+            "search_foreign_sources",
+            {
+                "ticker": "TEST",
+                "search_query": "latest filing revenue",
+                "purpose": "latest_results",
+            },
+        )
+        == "PURPOSE_CALL_BUDGET_EXHAUSTED"
+    )
+
+
+def test_shared_research_ledger_opens_failed_host_circuit_after_threshold() -> None:
+    ledger = ResearchBudgetLedger(_foreign_policy(host_failure_limit=2))
+    first = {"url": "https://ir.example.com/a.pdf"}
+    second = {"url": "https://ir.example.com/b.pdf"}
+    third = {"url": "https://ir.example.com/c.pdf"}
+    for args in (first, second):
+        assert ledger.authorize_tool("get_official_document", args) is None
+        ledger.record_tool_result(
+            "get_official_document",
+            "STATUS: INSUFFICIENT_DATA\nREASON: DOCUMENT_DNS_FAILED",
+            args=args,
+        )
+
+    assert ledger.authorize_tool("get_official_document", third) == (
+        "HOST_FAILURE_CIRCUIT_OPEN"
+    )
+    assert ledger.telemetry()["host_failures"] == {"ir.example.com": 2}
+
+
+def test_shared_research_ledger_round_trips_persisted_telemetry() -> None:
+    policy = _foreign_policy()
+    ledger = ResearchBudgetLedger(policy)
+    args = {
+        "ticker": "TEST",
+        "search_query": "issuer guidance",
+        "purpose": "management_guidance",
+    }
+    assert ledger.authorize_tool("search_foreign_sources", args) is None
+    ledger.record_tool_round(["search_foreign_sources"])
+    ledger.record_forced_synthesis("TOOL_ROUND_LIMIT")
+
+    restored = ResearchBudgetLedger.from_telemetry(policy, ledger.telemetry())
+
+    assert restored.authorize_tool("search_foreign_sources", args) == (
+        "DUPLICATE_TOOL_CALL"
+    )
+    assert restored.stop_reason == "TOOL_ROUND_LIMIT"
+
+
+def test_value_trap_policy_bounds_the_observed_reformulation_pathology() -> None:
+    policy = graph_research_budget_policies(quick_mode=True)["value_trap_detector"]
+
+    assert policy.tool_limit("get_ownership_structure") == 1
+    assert policy.tool_limit("get_official_filings") == 1
+    assert policy.tool_limit("get_news") == 2
+    assert policy.tool_limit("search_foreign_sources") == 6
+    assert policy.max_tool_iterations == 4
+    assert policy.max_llm_calls == 6
+
+
+@pytest.mark.parametrize("quick_mode", (False, True))
+def test_graph_research_policies_reserve_one_structural_recovery_turn(
+    quick_mode: bool,
+) -> None:
+    policies = graph_research_budget_policies(quick_mode=quick_mode)
+
+    assert len(policies) == 6
+    for agent, policy in policies.items():
+        assert policy.max_llm_calls == policy.max_tool_iterations + 2, agent

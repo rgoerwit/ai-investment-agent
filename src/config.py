@@ -764,6 +764,51 @@ class Settings(BaseSettings):
     auditor_max_llm_calls: int = Field(
         default=4, ge=2, le=6, validation_alias="AUDITOR_MAX_LLM_CALLS"
     )
+    foreign_research_search_call_budget: int = Field(
+        default=8,
+        ge=1,
+        le=20,
+        validation_alias="FOREIGN_RESEARCH_SEARCH_CALL_BUDGET",
+        description="Foreign Language Analyst search calls in full mode",
+    )
+    foreign_research_quick_search_call_budget: int = Field(
+        default=6,
+        ge=1,
+        le=12,
+        validation_alias="FOREIGN_RESEARCH_QUICK_SEARCH_CALL_BUDGET",
+        description="Foreign Language Analyst search calls in quick mode",
+    )
+    foreign_research_document_call_budget: int = Field(
+        default=3,
+        ge=0,
+        le=8,
+        validation_alias="FOREIGN_RESEARCH_DOCUMENT_CALL_BUDGET",
+    )
+    foreign_research_guidance_call_budget: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        validation_alias="FOREIGN_RESEARCH_GUIDANCE_CALL_BUDGET",
+    )
+    foreign_research_max_tool_iterations: int = Field(
+        default=4,
+        ge=1,
+        le=8,
+        validation_alias="FOREIGN_RESEARCH_MAX_TOOL_ITERATIONS",
+    )
+    foreign_research_quick_max_tool_iterations: int = Field(
+        default=3,
+        ge=1,
+        le=6,
+        validation_alias="FOREIGN_RESEARCH_QUICK_MAX_TOOL_ITERATIONS",
+    )
+    foreign_research_max_tool_calls_per_turn: int = Field(
+        default=6,
+        ge=1,
+        le=12,
+        validation_alias="FOREIGN_RESEARCH_MAX_TOOL_CALLS_PER_TURN",
+        description="Maximum parallel Foreign Language Analyst calls in one turn",
+    )
     enable_apac_specialist: bool = Field(
         default=False,
         validation_alias="ENABLE_APAC_SPECIALIST",

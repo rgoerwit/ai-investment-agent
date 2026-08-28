@@ -201,14 +201,21 @@ class TestCanonicalAgentName:
 
 
 class TestRetryCostAttribution:
-    """A6: deep-model retry cost lands on the originating agent, not a pool."""
+    """Recovery spend preserves both billing seat and originating agent."""
 
-    def test_per_call_callback_routes_to_originating_agent(self, tracker):
-        # Mirrors the analyst retry path: retry_llm carries no bound callback; a
-        # per-call TokenTrackingCallback labeled with the (canonicalized)
-        # originating agent is attached at invoke time.
+    def test_bound_recovery_callback_preserves_seat_and_origin(self, tracker):
         cb = TokenTrackingCallback(
-            canonical_display_name("Fundamentals Analyst"), tracker=tracker
+            canonical_display_name("Fundamentals Analyst"),
+            tracker=tracker,
+            originating_seat_id="fundamentals_analyst",
+        )
+        cb.bind_identity(
+            seat_id="analyst_retry",
+            binding_group="base",
+            vendor_id="openai",
+            model_lineage="gpt-5.4",
+            adapter_kind="openai_native",
+            endpoint_host="api.openai.com",
         )
         message = AIMessage(
             content="ok",
@@ -222,6 +229,19 @@ class TestRetryCostAttribution:
         stats = tracker.get_total_stats()
         assert "Fundamentals Analyst" in stats["agents"]
         assert "Retry Agent (Deep)" not in stats["agents"]
+        assert stats["by_seat"]["analyst_retry"]["calls"] == 1
+        assert "legacy_or_external" not in stats["by_seat"]
+        assert stats["recovery_usage"] == [
+            {
+                "recovery_seat_id": "analyst_retry",
+                "originating_seat_id": "fundamentals_analyst",
+                "calls": 1,
+                "tokens": 10_500,
+                "cost_usd": pytest.approx(
+                    stats["agents"]["Fundamentals Analyst"]["cost_usd"]
+                ),
+            }
+        ]
 
 
 class TestUnpricedModelsSurfaced:

@@ -296,7 +296,10 @@ class TestDataFormatEdgeCases:
         assert status["error_kind"] == "application_error"
 
     @pytest.mark.asyncio
-    async def test_quick_consultant_prompt_addendum_and_context_caps(self):
+    @pytest.mark.parametrize("auditor_report", ["Auditor", "", None])
+    async def test_quick_consultant_prompt_addendum_and_context_caps(
+        self, auditor_report
+    ):
         """Quick prompt keeps evidence channels while using smaller section caps."""
         mock_llm = Mock()
         mock_response = Mock()
@@ -339,7 +342,7 @@ class TestDataFormatEdgeCases:
                         "fundamentals_report": "Fundamentals",
                         "investment_debate_state": {"history": "Debate"},
                         "investment_plan": "Research",
-                        "auditor_report": "Auditor",
+                        "auditor_report": auditor_report,
                         "red_flags": [],
                         "pre_screening_result": "PASS",
                     }
@@ -367,7 +370,11 @@ class TestDataFormatEdgeCases:
         assert ("market", 900) in summarize_calls
         assert ("fundamentals", 2500) in summarize_calls
         assert ("research", 1400) in summarize_calls
-        assert ("auditor", 1200) in summarize_calls
+        if auditor_report:
+            assert ("auditor", 1200) in summarize_calls
+        else:
+            assert not any(section == "auditor" for section, _ in summarize_calls)
+            assert "=== INDEPENDENT FORENSIC AUDIT ===\nN/A" in prompt
         assert result["consultant_quick_profile"] == "quick_standard"
 
     def test_quick_consultant_profile_expands_for_borderline_inputs(self):

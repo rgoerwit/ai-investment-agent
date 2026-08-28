@@ -253,6 +253,7 @@ def build_run_summary(
     from langchain_core.messages import ToolMessage
 
     from src.llm_runtime.bindings import active_models_or_legacy, resolve_binding_plan
+    from src.runtime_services import get_current_evidence_records
     from src.service_tiers import flex_degradation_snapshot
     from src.token_tracker import get_tracker
 
@@ -305,6 +306,15 @@ def build_run_summary(
     binding_telemetry = resolve_binding_plan(config).telemetry(config)
     messages = result.get("messages", []) or []
     tool_messages = [msg for msg in messages if isinstance(msg, ToolMessage)]
+    tool_execution_records = get_current_evidence_records()
+    tool_executions_by_agent: dict[str, int] = {}
+    tool_executions_by_source: dict[str, int] = {}
+    for record in tool_execution_records:
+        agent = record.agent_key or "unattributed"
+        tool_executions_by_agent[agent] = tool_executions_by_agent.get(agent, 0) + 1
+        tool_executions_by_source[record.source] = (
+            tool_executions_by_source.get(record.source, 0) + 1
+        )
     tool_failures = manual_tool_failures + sum(
         1
         for msg in tool_messages
@@ -451,6 +461,13 @@ def build_run_summary(
         "llm_attempts": tracker_stats["total_calls"] + tracker_stats["failed_attempts"],
         "llm_failures": tracker_stats["failed_attempts"],
         "tool_calls": len(tool_messages),
+        # ``tool_calls`` is retained for compatibility and counts only ToolMessages
+        # still present in capped graph state. These counters come from the
+        # run-scoped execution ledger and therefore measure actual work.
+        "tool_messages_retained": len(tool_messages),
+        "tool_executions": len(tool_execution_records),
+        "tool_executions_by_agent": tool_executions_by_agent,
+        "tool_executions_by_source": tool_executions_by_source,
         "tool_failures": tool_failures,
         "llm_providers_used": providers_used,
         "llm_provider": providers_used[0]
@@ -705,6 +722,7 @@ def save_results_to_file(
         "memory_statistics": memory_stats,
         "entity_governance_card": result.get("entity_governance_card") or None,
         "auditor_budget": result.get("auditor_budget") or None,
+        "research_budgets": result.get("research_budgets") or None,
         "source_artifacts": {
             "management_guidance_evidence": _persisted_source_artifact(
                 result.get("management_guidance_evidence"),

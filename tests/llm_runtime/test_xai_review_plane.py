@@ -19,7 +19,7 @@ from src.llm_runtime.profiles import resolve_profile
 from src.llm_runtime.provider_policy import (
     _reset_cache_affinity_for_tests,
     cache_affinity_id,
-    is_provider_qualified,
+    is_provider_allowed,
     provider_default_headers,
 )
 from src.llm_runtime.rate_limits import reset_fallback_limiters_for_tests
@@ -34,6 +34,10 @@ _REVIEW_SEATS = (
     SeatId.AUDITOR_ESCALATION,
     SeatId.EDITOR,
     SeatId.ARTICLE_WRITER_REVIEW_FALLBACK,
+)
+
+_QUICK_REVIEW_SEATS = tuple(
+    seat_id for seat_id in _REVIEW_SEATS if not SEATS[seat_id].disabled_in_quick_mode
 )
 
 
@@ -93,10 +97,10 @@ class TestProfile:
 
 class TestQualification:
     def test_review_only(self) -> None:
-        assert is_provider_qualified("xai", BindingGroup.REVIEW)
+        assert is_provider_allowed("xai", BindingGroup.REVIEW)
         for group in BindingGroup:
             if group is not BindingGroup.REVIEW:
-                assert not is_provider_qualified("xai", group)
+                assert not is_provider_allowed("xai", group)
 
     def test_base_binding_is_rejected_by_name(self) -> None:
         with pytest.raises(BindingConfigurationError) as exc_info:
@@ -406,7 +410,7 @@ class TestQuickMode:
         assert binding.provider == "xai"
         assert binding.model == "grok-4.6"
 
-    @pytest.mark.parametrize("seat_id", _REVIEW_SEATS)
+    @pytest.mark.parametrize("seat_id", _QUICK_REVIEW_SEATS)
     def test_quick_seats_still_resolve_an_effort(self, seat_id: SeatId) -> None:
         plan = resolve_binding_plan(_xai_settings())
         spec = SEATS[seat_id]
@@ -416,6 +420,12 @@ class TestQuickMode:
             adjust=False,
         )
         assert effort is not None, seat_id
+
+    @pytest.mark.parametrize("seat_id", (SeatId.AUDITOR, SeatId.AUDITOR_ESCALATION))
+    def test_quick_auditor_path_is_disabled(self, seat_id: SeatId) -> None:
+        plan = resolve_binding_plan(_xai_settings())
+        assert plan.status_for(seat_id).enabled is True
+        assert plan.status_for(seat_id, quick_mode=True).enabled is False
 
     def test_transport_builds_in_quick_mode(self) -> None:
         model = build_model_for_seat(

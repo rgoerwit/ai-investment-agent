@@ -3,10 +3,10 @@ from __future__ import annotations
 from typing import Literal
 
 import structlog
+from langchain_core.messages import AIMessage, BaseMessage
 from langgraph.types import RunnableConfig
 
 from src.agents import AgentState
-from src.config import config
 from src.runtime_diagnostics import get_artifact_status, is_artifact_complete
 
 logger = structlog.get_logger(__name__)
@@ -20,14 +20,6 @@ ANALYST_FAN_OUT_DESTINATIONS = (
     "Legal Counsel",
     "Value Trap Detector",
 )
-
-
-def is_openai_consultant_available() -> bool:
-    from src.llms import (
-        is_openai_consultant_available as _is_openai_consultant_available,
-    )
-
-    return _is_openai_consultant_available()
 
 
 def dispatch_destinations(*, include_auditor: bool) -> list[str]:
@@ -47,9 +39,23 @@ def should_continue_analyst(
     """
     messages = state.get("messages", [])
     sender = state.get("sender", "unknown")
-    has_tool_calls = (
-        messages and hasattr(messages[-1], "tool_calls") and messages[-1].tool_calls
+    target_message: BaseMessage | None = next(
+        (
+            message
+            for message in reversed(messages)
+            if isinstance(message, AIMessage)
+            and getattr(message, "name", None) == sender
+        ),
+        None,
     )
+    if target_message is None and messages:
+        logger.warning(
+            "analyst_routing_owner_response_missing",
+            sender=sender,
+            message_count=len(messages),
+            action="end_analyst_turn",
+        )
+    has_tool_calls = bool(getattr(target_message, "tool_calls", None))
 
     result: Literal["tools", "continue"] = "tools" if has_tool_calls else "continue"
 
@@ -60,46 +66,20 @@ def should_continue_analyst(
     return result
 
 
-def _is_auditor_enabled() -> bool:
-    """
-    Check if auditor node should be enabled.
-
-    Must match the seat the graph actually built, or the node is wired and never
-    dispatched to — a *silent* loss of the cross-check, since an undispatched
-    node raises nothing. Under the multi-provider schema the authority is the
-    binding plan, exactly as in ``graph/components.build_graph_components``:
-    gating on ``OPENAI_API_KEY`` there would disable the auditor for every
-    non-OpenAI review binding (observed on a Moonshot review plane, where the
-    OpenAI key is legitimately absent because the vendor key is
-    ``MOONSHOT_API_KEY``).
-
-    Legacy schema is unchanged: ENABLE_CONSULTANT gates the shared OpenAI
-    cross-check plane, so it applies to the auditor path too even though the
-    setting name is narrower, and the OpenAI key must be present.
-    """
-    from src.config import Settings
-
-    # Same guard as validate_environment_variables/validate_llm_bindings: a test
-    # double is not a Settings, and the resolver reads ~30 typed fields off it.
-    if isinstance(config, Settings):
-        from src.llm_runtime.bindings import resolve_binding_plan
-        from src.llm_runtime.seats import SeatId
-
-        plan = resolve_binding_plan(config)
-        if plan.schema == "new":
-            return plan.statuses[SeatId.AUDITOR].enabled
-    if not config.enable_consultant:
-        return False
-    return is_openai_consultant_available()
-
-
-def fan_out_to_analysts(state: AgentState, config: RunnableConfig) -> list[str]:
+def fan_out_to_analysts(
+    state: AgentState,
+    config: RunnableConfig,
+    *,
+    include_auditor: bool,
+) -> list[str]:
     """
     Fan-out router that triggers all parallel analyst streams.
+    ``include_auditor`` is fixed when the graph is compiled, so dispatch cannot
+    disagree with the model and node set built for the run.
     Returns a list of destinations for parallel execution.
     """
-    destinations = dispatch_destinations(include_auditor=_is_auditor_enabled())
-    return destinations
+    del state, config
+    return dispatch_destinations(include_auditor=include_auditor)
 
 
 def fundamentals_sync_router(
@@ -130,7 +110,10 @@ def fundamentals_sync_router(
 
 
 def sync_check_router(
-    state: AgentState, config: RunnableConfig
+    state: AgentState,
+    config: RunnableConfig,
+    *,
+    auditor_required: bool,
 ) -> Literal["PM Fast-Fail", "__end__"] | list[str]:
     """
     Synchronization barrier for parallel analyst streams (fan-in pattern).
@@ -143,9 +126,9 @@ def sync_check_router(
     pre_screening = state.get("pre_screening_result")
     validator_done = pre_screening in ["PASS", "REJECT"]
 
-    auditor_done = True
-    if _is_auditor_enabled():
-        auditor_done = is_artifact_complete(state, "auditor_report")
+    auditor_done = (
+        is_artifact_complete(state, "auditor_report") if auditor_required else True
+    )
 
     all_done = all(
         [
@@ -244,9 +227,8 @@ def post_research_sync_router(
 
 CONSULTANT_SKIP_SENTINEL = (
     "SKIPPED_BY_GATE: External Consultant bypass active for quick-mode screening. "
-    "Reason: {reason}. The internal analysis (analyst reports, debate, Research "
-    "Manager synthesis, and forensic audit) was retained for the Portfolio "
-    "Manager's decision."
+    "Reason: {reason}. The internal analysis (analyst reports, debate, and Research "
+    "Manager synthesis) was retained for the Portfolio Manager's decision."
 )
 
 # Warning-level flags that should keep the Consultant active even on a clean

@@ -7,6 +7,7 @@ from langchain_core.messages import BaseMessage
 from src.agents.message_utils import (
     filter_messages_by_agent,
     filter_messages_for_gemini,
+    validate_tool_history,
 )
 
 
@@ -27,8 +28,10 @@ def adapter_kind_for_model(llm: Any) -> str:
 def prepare_messages_for_model(
     llm: Any, messages: list[BaseMessage], *, agent_key: str
 ) -> list[BaseMessage]:
-    """Apply agent isolation to all providers and transport cleanup only to Google."""
+    """Apply one provider-neutral transcript contract before transport cleanup."""
 
+    filtered = filter_messages_by_agent(messages, agent_key)
+    validate_tool_history(filtered, agent_key=agent_key)
     if adapter_kind_for_model(llm) == "google_native":
-        return filter_messages_for_gemini(messages, agent_key=agent_key)
-    return filter_messages_by_agent(messages, agent_key)
+        return filter_messages_for_gemini(filtered)
+    return filtered
