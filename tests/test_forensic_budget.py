@@ -87,6 +87,7 @@ def test_typed_insufficient_tool_result_is_recorded_separately() -> None:
     # No REJECTED_HOST line in this result — must not fire on unrelated
     # insufficient-data reasons (e.g. a plain DOCUMENT_SIZE_LIMIT rejection).
     assert ledger.rejected_hosts == []
+    assert ledger.tool_outcome_events == {"ordinary_insufficient": 1}
 
 
 def test_rejected_host_is_recorded_and_deduplicated() -> None:
@@ -116,6 +117,32 @@ def test_blocked_and_failed_tool_results_are_distinct() -> None:
     assert ledger.blocked_tools == ["get_official_document"]
     assert ledger.failed_tools == ["get_news"]
     assert ledger.insufficient_tools == []
+    assert ledger.tool_outcome_events == {"execution_error": 1}
+
+
+def test_block_name_dedup_does_not_erase_block_event_count() -> None:
+    ledger = ResearchBudgetLedger(_foreign_policy())
+
+    ledger.block_tool("search_foreign_sources", "TOOL_ROUND_LIMIT")
+    ledger.block_tool("search_foreign_sources", "TOOL_ROUND_LIMIT")
+
+    assert ledger.blocked_tools == ["search_foreign_sources"]
+    assert ledger.blocked_reasons == {"TOOL_ROUND_LIMIT": 2}
+
+
+def test_acquisition_failure_is_not_ordinary_insufficient() -> None:
+    ledger = AuditorBudgetLedger(_policy())
+
+    ledger.record_tool_result(
+        "get_official_document",
+        "STATUS: INSUFFICIENT_DATA\nREASON: DOCUMENT_DNS_FAILED",
+    )
+
+    assert ledger.insufficient_tools == ["get_official_document"]
+    assert ledger.tool_outcome_events == {"evidence_acquisition_failure": 1}
+    assert ledger.tool_outcome_events_by_name == {
+        "evidence_acquisition_failure": {"get_official_document": 1}
+    }
 
 
 def test_successful_tool_result_is_not_recorded_as_failure() -> None:
@@ -231,6 +258,18 @@ def test_value_trap_policy_bounds_the_observed_reformulation_pathology() -> None
     assert policy.tool_limit("search_foreign_sources") == 6
     assert policy.max_tool_iterations == 4
     assert policy.max_llm_calls == 6
+
+
+def test_junior_fundamentals_budget_is_one_parallel_tool_round_plus_synthesis() -> None:
+    policy = graph_research_budget_policies(quick_mode=True)[
+        "junior_fundamentals_analyst"
+    ]
+
+    assert policy.max_tool_iterations == 1
+    assert policy.max_tool_calls_per_turn == 2
+    assert policy.tool_limit("get_financial_metrics") == 1
+    assert policy.tool_limit("get_fundamental_analysis") == 1
+    assert policy.max_llm_calls == 3
 
 
 @pytest.mark.parametrize("quick_mode", (False, True))

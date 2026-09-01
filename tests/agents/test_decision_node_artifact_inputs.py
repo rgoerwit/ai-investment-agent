@@ -218,12 +218,108 @@ ADJUSTED_HEALTH_SCORE: 75%
 
         result = await create_financial_health_validator_node()(state, {})
 
+        assert result["financial_validation_complete"] is True
         assert result["pre_screening_result"] == "REJECT"
         assert result["red_flags"][0]["type"] == "DATA_CONTRACT_INVALID"
         assert "GUIDANCE_COVERAGE_STATUS=MISSING" in result["red_flags"][0]["detail"]
 
 
 class TestPortfolioManagerArtifactInputs:
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_pm_receives_code_owned_growth_gate(self, mock_get_prompt):
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="portfolio manager prompt",
+            agent_name="Portfolio Manager",
+        )
+        fundamentals = (
+            "### --- START DATA_BLOCK ---\n"
+            "ADJUSTED_HEALTH_SCORE: 75%\n"
+            "ADJUSTED_GROWTH_SCORE: 40%\n"
+            "PE_RATIO_TTM: 14.0\n"
+            "REVENUE_CAGR_3Y: 16.0%\n"
+            "### --- END DATA_BLOCK ---"
+        )
+        state = {
+            "company_of_interest": "TEST",
+            "fundamentals_report": fundamentals,
+            "pre_screening_result": "PASS",
+            "artifact_statuses": _ok("fundamentals_report", fundamentals),
+        }
+
+        prompt = await _captured_prompt(
+            create_portfolio_manager_node(_mock_llm(), None), state
+        )
+
+        assert "CODE-OWNED GROWTH GATE" in prompt
+        assert "STATUS: HARD_FAIL" in prompt
+        assert "MISSING_CURRENT_GROWTH_FIELDS: NONE" in prompt
+
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_pm_auto_reject_handoff_corrects_hold_to_dni(self, mock_get_prompt):
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="portfolio manager prompt",
+            agent_name="Portfolio Manager",
+        )
+        response = SimpleNamespace(
+            content=(
+                "### PORTFOLIO MANAGER VERDICT: HOLD\n"
+                "### THESIS COMPLIANCE SUMMARY\n"
+                "Hard Fail Checks: PASS\n"
+                "### FINAL EXECUTION PARAMETERS\n"
+                "- Action: HOLD\n"
+                "### --- START PM_BLOCK ---\n"
+                "VERDICT: HOLD\n"
+                "RISK_TALLY: 0.5\n"
+                "ZONE: MODERATE\n"
+                "DECISION_FACTS: NONE\n"
+                "DECISION_GATES: NONE\n"
+                "### --- END PM_BLOCK ---"
+            )
+        )
+        fundamentals = (
+            "### --- START DATA_BLOCK ---\n"
+            "PE_RATIO_TTM: 12.0\n"
+            "VALUATION_INPUT_RELIABILITY: USABLE\n"
+            "### --- END DATA_BLOCK ---"
+        )
+        state = {
+            "company_of_interest": "TEST",
+            "fundamentals_report": fundamentals,
+            "pre_screening_result": "REJECT",
+            "red_flags": [
+                {
+                    "type": "LIQUIDITY_HARD_FAIL",
+                    "severity": "CRITICAL",
+                    "action": "AUTO_REJECT",
+                    "blocks_buy": True,
+                }
+            ],
+            "artifact_statuses": _ok("fundamentals_report", fundamentals),
+        }
+
+        with patch(
+            "src.agents.decision_nodes.agent_runtime.invoke_with_rate_limit_handling",
+            new=AsyncMock(return_value=response),
+        ):
+            result = await create_portfolio_manager_node(_mock_llm(), None)(state, {})
+
+        assert result["artifact_statuses"]["final_trade_decision"]["ok"] is True
+        assert (
+            "PORTFOLIO MANAGER VERDICT: DO NOT INITIATE"
+            in result["final_trade_decision"]
+        )
+        assert result["decision_policy"]["adjustments"] == [
+            {
+                "kind": "required_verdict",
+                "rule": "pre_screening_auto_reject",
+                "reason": "auto_reject_flags=LIQUIDITY_HARD_FAIL",
+                "from": "HOLD",
+                "to": "DO_NOT_INITIATE",
+            }
+        ]
+
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")
     async def test_pm_uses_structured_coverage_instead_of_raw_fla(
@@ -427,6 +523,11 @@ PE_RATIO_TTM: 16.55
         assert mock_invoke.await_args_list[1].args[0] is recovery_llm
         recovery_llm.with_config.assert_not_called()
         assert result["artifact_statuses"]["final_trade_decision"]["ok"] is True
+        recovery_event = result["structural_recovery_events"][0]
+        assert recovery_event["originating_agent"] == "portfolio_manager"
+        assert recovery_event["recovery_model"] == "gpt-recovery"
+        assert recovery_event["outcome"] == "accepted_text"
+        assert recovery_event["final_output_valid"] is True
 
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")

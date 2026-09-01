@@ -21,6 +21,7 @@ from src.pm_claim_audit import (
     render_decision_trace_instruction,
     validate_decision_trace,
 )
+from src.thesis_constants import HEALTH_SCORE_CRITERIA
 from src.tooling.structured_ingress import build_structured_ingress_record
 
 
@@ -29,6 +30,14 @@ def _fundamentals(*lines: str) -> str:
         "### --- START DATA_BLOCK ---\n"
         + "\n".join(f"- {line}" for line in lines)
         + "\n### --- END DATA_BLOCK ---"
+    )
+
+
+def _health_breakdown(**awards: str) -> str:
+    values = dict.fromkeys(HEALTH_SCORE_CRITERIA, "N/A")
+    values.update(awards)
+    return "HEALTH_SCORE_BREAKDOWN: " + "; ".join(
+        f"{criterion}={values[criterion]}" for criterion in HEALTH_SCORE_CRITERIA
     )
 
 
@@ -770,7 +779,8 @@ def test_score_derivation_requires_complete_coherent_breakdown() -> None:
         _with_structured_metrics(
             {
                 "raw_fundamentals_data": (
-                    '{"trailingPE": 12.5, "revenueGrowth": 0.2, "earningsGrowth": 0.3}'
+                    '{"trailingPE": 12.5, "revenueGrowth": 0.2, '
+                    '"earningsGrowth": 0.3, "roa_change_yoy": 0.0}'
                 )
             }
         )
@@ -808,7 +818,7 @@ def test_score_derivation_requires_complete_coherent_breakdown() -> None:
     assert score["kind"] == "DERIVED_ASSESSMENT"
     assert score["decision_eligible"] is False
     assert score["decision_role"] == "GATE_INPUT"
-    assert len(score["derived_from"]) == 2
+    assert len(score["derived_from"]) == 3
     # R_AND_D_CAPEX_BACKLOG=1 is a class-1 advisory award (no evidence producer),
     # so it is excluded from the decision score: 3/6 = 50.0% (raw 4/6 = 66.7%
     # remains as advisory_percentage). Eligibility is still False here because of
@@ -833,7 +843,8 @@ def test_structurally_unbacked_criteria_do_not_veto_eligibility() -> None:
             {
                 "raw_fundamentals_data": (
                     '{"trailingPE": 12.5, "revenueGrowth": 0.2, '
-                    '"earningsGrowth": 0.3, "grossMargins": 0.4}'
+                    '"earningsGrowth": 0.3, "grossMargins": 0.4, '
+                    '"roa_change_yoy": 0.0}'
                 )
             }
         )
@@ -874,7 +885,8 @@ def test_fully_backed_scorecard_decision_equals_advisory() -> None:
             {
                 "raw_fundamentals_data": (
                     '{"trailingPE": 12.5, "revenueGrowth": 0.2, '
-                    '"earningsGrowth": 0.3, "grossMargins": 0.4}'
+                    '"earningsGrowth": 0.3, "grossMargins": 0.4, '
+                    '"roa_change_yoy": 0.0}'
                 )
             }
         )
@@ -894,6 +906,239 @@ def test_fully_backed_scorecard_decision_equals_advisory() -> None:
     assert scorecard["advisory_only_awards"] == []
     assert scorecard["percentage"] == scorecard["advisory_percentage"] == 50.0
     assert scorecard["decision_eligible"] is True
+
+
+def test_profitability_growth_threshold_is_strictly_greater_than_thirty_percent() -> (
+    None
+):
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics(
+            {},
+            {
+                "revenueGrowth": 0.2,
+                "earningsGrowth": 0.3,
+                "grossMargins": 0.4,
+                "roa_change_yoy": 0.30,
+            },
+        )
+    )
+    report = _fundamentals(
+        "GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=1; "
+        "ROA_ROE_IMPROVING=0; GROSS_MARGIN=1; GLOBAL_EXPANSION=0; "
+        "R_AND_D_CAPEX_BACKLOG=0",
+        "ADJUSTED_GROWTH_SCORE: 50.0% (based on 6 available points)",
+    )
+
+    derived = add_validated_derivations(snapshot, report)
+
+    assert (
+        derived["scorecards"]["GROWTH"]["criteria"]["ROA_ROE_IMPROVING"]["award"] == "0"
+    )
+    assert derived["scorecards"]["GROWTH"]["percentage"] == 50.0
+
+
+def test_profitability_growth_model_award_is_overridden_by_code_owned_yoy() -> None:
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics(
+            {},
+            {
+                "revenueGrowth": 0.2,
+                "earningsGrowth": 0.3,
+                "grossMargins": 0.4,
+                "roe_change_yoy": 0.301,
+            },
+        )
+    )
+    report = _fundamentals(
+        "GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=1; "
+        "ROA_ROE_IMPROVING=0; GROSS_MARGIN=1; GLOBAL_EXPANSION=0; "
+        "R_AND_D_CAPEX_BACKLOG=0",
+        "ADJUSTED_GROWTH_SCORE: 50.0% (based on 6 available points)",
+    )
+
+    derived = add_validated_derivations(snapshot, report)
+    scorecard = derived["scorecards"]["GROWTH"]
+
+    assert scorecard["criteria"]["ROA_ROE_IMPROVING"]["award"] == "1"
+    assert scorecard["percentage"] == 66.7
+    assert any(
+        conflict.get("field") == "ROA_ROE_IMPROVING"
+        and conflict.get("reason") == "CODE_OWNED_RUBRIC_OVERRIDE"
+        for conflict in derived["conflicts"]
+    )
+
+
+def test_net_debt_ebitda_award_uses_canonical_raw_components() -> None:
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics(
+            {},
+            {
+                "totalDebt": 17.0,
+                "totalCash": 2_516.0,
+                "ebitda": 754.0,
+                "currentRatio": 0.8,
+            },
+        )
+    )
+    report = _fundamentals(
+        "SECTOR: Industrials",
+        "NET_DEBT_EBITDA: -3.31",
+        _health_breakdown(NET_DEBT_EBITDA="N/A", CURRENT_RATIO="0"),
+        "ADJUSTED_HEALTH_SCORE: 0.0% (based on 1 available points)",
+    )
+
+    derived = add_validated_derivations(snapshot, report)
+    criterion = derived["scorecards"]["HEALTH"]["criteria"]["NET_DEBT_EBITDA"]
+
+    assert criterion["award"] == "1"
+    assert len(criterion["derived_from"]) == 3
+    assert any(
+        conflict.get("field") == "NET_DEBT_EBITDA"
+        and conflict.get("reason") == "CODE_OWNED_RUBRIC_OVERRIDE"
+        for conflict in derived["conflicts"]
+    )
+
+
+def test_conflicting_fcf_bases_withhold_both_cash_generation_awards() -> None:
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics(
+            {},
+            {
+                "freeCashflow": -11_024_706_560.0,
+                "marketCap": 635_358_085_120.0,
+                "currentRatio": 4.5,
+            },
+        )
+    )
+    report = _fundamentals(
+        "SECTOR: Materials",
+        "FREE_CASH_FLOW: ₩18.6B",
+        _health_breakdown(CURRENT_RATIO="0", FCF_POSITIVE="1", FCF_YIELD="0"),
+        "ADJUSTED_HEALTH_SCORE: 33.3% (based on 3 available points)",
+    )
+
+    derived = add_validated_derivations(snapshot, report)
+    criteria = derived["scorecards"]["HEALTH"]["criteria"]
+
+    assert criteria["FCF_POSITIVE"]["award"] == "N/A"
+    assert criteria["FCF_YIELD"]["award"] == "N/A"
+    assert criteria["FCF_POSITIVE"]["derived_from"] == []
+    assert {
+        conflict["field"]
+        for conflict in derived["conflicts"]
+        if conflict.get("reason") == "CANONICAL_METRIC_BASIS_CONFLICT"
+    } >= {"FCF_POSITIVE", "FCF_YIELD"}
+
+
+def test_matching_positive_fcf_code_owns_sign_and_sector_yield_threshold() -> None:
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics(
+            {},
+            {
+                "freeCashflow": 7.0,
+                "marketCap": 200.0,
+            },
+        )
+    )
+    report = _fundamentals(
+        "SECTOR: Utilities",
+        "FREE_CASH_FLOW: $7.0M",
+        _health_breakdown(FCF_POSITIVE="0", FCF_YIELD="0"),
+        "ADJUSTED_HEALTH_SCORE: 0.0% (based on 2 available points)",
+    )
+
+    derived = add_validated_derivations(snapshot, report)
+    criteria = derived["scorecards"]["HEALTH"]["criteria"]
+
+    assert criteria["FCF_POSITIVE"]["award"] == "1"
+    assert criteria["FCF_YIELD"]["award"] == "1"  # 3.5% clears Utilities' 3% bar
+    assert len(criteria["FCF_YIELD"]["derived_from"]) == 2
+
+
+def test_zero_ebitda_does_not_manufacture_a_leverage_award() -> None:
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics(
+            {},
+            {"totalDebt": 100.0, "totalCash": 20.0, "ebitda": 0.0},
+        )
+    )
+    report = _fundamentals(
+        "SECTOR: Industrials",
+        "NET_DEBT_EBITDA: N/A",
+        _health_breakdown(NET_DEBT_EBITDA="N/A"),
+        "ADJUSTED_HEALTH_SCORE: 0.0% (based on 0 available points)",
+    )
+
+    derived = add_validated_derivations(snapshot, report)
+
+    assert "HEALTH" not in derived.get("scorecards", {})
+
+
+def test_nonpositive_ebitda_with_direct_ratio_is_still_withheld() -> None:
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics(
+            {},
+            {
+                "netDebtToEbitda": -1.0,
+                "ebitda": -100.0,
+                "currentRatio": 0.8,
+            },
+        )
+    )
+    report = _fundamentals(
+        "SECTOR: Industrials",
+        "NET_DEBT_EBITDA: -1.0",
+        _health_breakdown(NET_DEBT_EBITDA="1", CURRENT_RATIO="0"),
+        "ADJUSTED_HEALTH_SCORE: 50.0% (based on 2 available points)",
+    )
+
+    derived = add_validated_derivations(snapshot, report)
+
+    assert (
+        derived["scorecards"]["HEALTH"]["criteria"]["NET_DEBT_EBITDA"]["award"] == "N/A"
+    )
+
+
+def test_negative_it_fcf_cannot_receive_a_full_positive_fcf_point() -> None:
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics(
+            {},
+            {"freeCashflow": -10.0, "marketCap": 100.0, "currentRatio": 0.8},
+        )
+    )
+    report = _fundamentals(
+        "SECTOR: Information Technology",
+        "FREE_CASH_FLOW: -$10M",
+        _health_breakdown(CURRENT_RATIO="0", FCF_POSITIVE="1", FCF_YIELD="N/A"),
+        "ADJUSTED_HEALTH_SCORE: 50.0% (based on 2 available points)",
+    )
+
+    derived = add_validated_derivations(snapshot, report)
+
+    assert derived["scorecards"]["HEALTH"]["criteria"]["FCF_POSITIVE"]["award"] == "0"
+
+
+def test_snapshot_refresh_promotes_typed_liquidity_claims() -> None:
+    from src.liquidity_assessment import LiquidityAssessment
+
+    state = _with_structured_metrics({}, {"trailingPE": 12.5})
+    snapshot = build_pre_senior_snapshot(state)
+    assessment = LiquidityAssessment(
+        status="FAIL_INSUFFICIENT_LIQUIDITY",
+        average_daily_turnover_usd=86_436,
+    )
+
+    refreshed = refresh_analysis_snapshot(
+        snapshot,
+        {**state, "liquidity_assessment": assessment.to_dict()},
+        [],
+        version=2,
+    )
+    claims = {claim["field"]: claim for claim in refreshed["claims"].values()}
+
+    assert claims["LIQUIDITY_STATUS"]["value"] == "FAIL_INSUFFICIENT_LIQUIDITY"
+    assert claims["LIQUIDITY_STATUS"]["decision_eligible"] is True
+    assert claims["AVERAGE_DAILY_TURNOVER_USD"]["value"] == "86436.00"
 
 
 def test_missing_structured_ingress_fails_closed_instead_of_minting_na_truth() -> None:
@@ -952,7 +1197,8 @@ def test_canonical_scorecard_replaces_stale_score_detail() -> None:
         _with_structured_metrics(
             {
                 "raw_fundamentals_data": (
-                    '{"revenueGrowth": 0.2, "earningsGrowth": 0.3, "grossMargins": 0.4}'
+                    '{"revenueGrowth": 0.2, "earningsGrowth": 0.3, '
+                    '"grossMargins": 0.4, "roa_change_yoy": 0.0}'
                 )
             }
         )

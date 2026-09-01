@@ -19,6 +19,7 @@ from src.agents import (
     create_research_manager_node,
     create_researcher_node,
     create_risk_debater_node,
+    create_screen_rejection_node,
     create_trader_node,
     create_valuation_calculator_node,
 )
@@ -767,12 +768,7 @@ def build_graph_components(
         strict_mode=strict_mode,
         recovery_llm=retry_llms.get(SeatId.PORTFOLIO_MANAGER),
     )
-    pm_fast_fail = create_portfolio_manager_node(
-        pm_llm,
-        risk_manager_memory,
-        strict_mode=strict_mode,
-        recovery_llm=retry_llms.get(SeatId.PORTFOLIO_MANAGER),
-    )
+    pm_fast_fail = create_screen_rejection_node()
 
     consultant = None
     if consultant_enabled:

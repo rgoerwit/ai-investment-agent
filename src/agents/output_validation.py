@@ -334,6 +334,10 @@ def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
     issues: dict[str, str] = {}
 
     if agent_key == "foreign_language_analyst":
+        from src.agents.foreign_language_evidence import (
+            has_foreign_language_protocol_residue,
+        )
+
         checks.extend(
             [
                 (
@@ -341,6 +345,10 @@ def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
                     _has_valid_management_guidance_block(content),
                 ),
                 ("latest_results_block", _has_valid_latest_results_block(content)),
+                (
+                    "protocol_residue_absent",
+                    not has_foreign_language_protocol_residue(content),
+                ),
             ]
         )
     elif agent_key == "fundamentals_analyst":

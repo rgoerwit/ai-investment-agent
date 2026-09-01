@@ -35,8 +35,14 @@ from src.charts.extractors.valuation import (
 )
 from src.data_block_utils import extract_data_block_field, extract_last_fenced_block
 from src.pm_decision_parser import PM_VERDICT_HEADER_RE, canonicalize_pm_verdict
+from src.reporting.decision_policy import (
+    decision_policy_basis,
+    get_decision_policy,
+    policy_final_verdict,
+)
 from src.reporting.source_confidence import (
     SourceRow,
+    auditor_review_status,
     build_source_confidence_rows,
     render_source_confidence_markdown,
 )
@@ -76,6 +82,7 @@ class InvestmentMemo:
     confidence: str = "Confidence signals unavailable."
     source_confidence: list[SourceRow] = field(default_factory=list)
     business_quality: str | None = None
+    decision_basis: str | None = None
 
 
 def extract_pm_verdict(pm_text: str) -> str:
@@ -345,6 +352,8 @@ def _is_material_risk_flag(flag: dict) -> bool:
         return False
     if flag.get("action") == "AUTO_REJECT" or flag.get("severity") == "CRITICAL":
         return True
+    if flag.get("blocks_buy") is True:
+        return True
     penalty = flag.get("risk_penalty")
     if isinstance(penalty, bool):
         return False
@@ -414,9 +423,12 @@ def summarize_confidence(state: dict) -> str:
         bits.append("consultant review unparsed")
     elif run_summary.get("consultant_completed"):
         bits.append("consultant ran but did not approve")
-    if run_summary.get("auditor_successful"):
+    forensic_status = auditor_review_status(state)
+    if forensic_status == "COMPLETED":
         bits.append("forensic auditor reported clean within the evidence reviewed")
-    elif run_summary.get("auditor_completed"):
+    elif forensic_status == "UNRECONCILED":
+        bits.append("forensic auditor findings remain unreconciled")
+    elif forensic_status != "NOT_RUN":
         bits.append("forensic auditor ran with caveats")
     if run_summary.get("apac_specialist_successful"):
         bits.append("APAC specialist engaged")
@@ -436,10 +448,16 @@ def build_memo(state: dict) -> InvestmentMemo:
     fundamentals = get_fundamentals_report(state)
     bear_text = get_bear_history(state)
     red_flags = get_effective_red_flags(state)
+    decision_policy = get_decision_policy(state)
+    policy_verdict = policy_final_verdict(decision_policy)
+    policy_changed = bool(decision_policy.get("verdict_changed"))
 
     return InvestmentMemo(
-        decision=extract_pm_verdict(pm),
-        one_line_thesis=extract_pm_thesis(pm),
+        decision=policy_verdict or extract_pm_verdict(pm),
+        # A verdict-changing policy intervention makes the PM rationale an audit
+        # transcript, not canonical summary content. Keep it out of the memo so
+        # stale entry/sizing language appears only in the labeled appendix.
+        one_line_thesis="" if policy_changed else extract_pm_thesis(pm),
         variant_view=extract_variant_view(state),
         key_numbers=extract_key_metrics(fundamentals),
         valuation=format_scenario_summary(state) or extract_legacy_target_range(state),
@@ -448,6 +466,7 @@ def build_memo(state: dict) -> InvestmentMemo:
         confidence=summarize_confidence(state),
         source_confidence=build_source_confidence_rows(state),
         business_quality=business_quality_line(fundamentals, red_flags),
+        decision_basis=decision_policy_basis(decision_policy),
     )
 
 
@@ -470,7 +489,10 @@ def render_memo_markdown(memo: InvestmentMemo) -> str:
             "*New-candidate HOLD: monitor only — this analysis does not "
             "initiate a position.*\n\n"
         )
-    parts.append(f"**Thesis.** {memo.one_line_thesis}\n\n")
+    if memo.decision_basis:
+        parts.append(f"**Decision basis.** {memo.decision_basis}\n\n")
+    if memo.one_line_thesis:
+        parts.append(f"**Thesis.** {memo.one_line_thesis}\n\n")
     # Tranche 5, Step 8: omit the line entirely when the placeholder fires.
     # Rendering "Not explicitly stated." as a bolded section adds visual noise
     # for the reader and lets the quality judge false-positive on a marker

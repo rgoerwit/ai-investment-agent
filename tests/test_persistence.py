@@ -66,6 +66,9 @@ def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
     assert summary["optional_failures"] == ["consultant_review"]
     assert summary["llm_attempts"] == 5
     assert summary["llm_failures"] == 2
+    assert (
+        summary["evidence_promotion"]["external_document_extraction_enabled"] is False
+    )
 
 
 def _min_summary(monkeypatch, result: dict):
@@ -88,6 +91,30 @@ def test_absent_auditor_is_persisted_as_not_run(monkeypatch):
     assert summary["auditor_finished"] is False
     assert summary["auditor_successful"] is False
     assert summary["auditor_review_status"] == "NOT_RUN"
+
+
+def test_unreconciled_auditor_findings_override_clean_artifact_status(monkeypatch):
+    summary = _min_summary(
+        monkeypatch,
+        {
+            "artifact_statuses": {
+                "auditor_report": {
+                    "complete": True,
+                    "ok": True,
+                    "content": "STATUS: CLEAN\nPaper Profit anomaly named.",
+                }
+            },
+            "final_trade_decision": (
+                "AUDITOR_RESOLUTION:\n"
+                "- FINDING: Auditor concern was not reconciled.\n"
+                "- DATA_CHECK: NOT_PROVIDED\n"
+                "- VERDICT: UNVERIFIABLE\n"
+            ),
+        },
+    )
+
+    assert summary["auditor_successful"] is False
+    assert summary["auditor_review_status"] == "UNRECONCILED"
 
 
 def test_debate_rounds_is_turns_over_two(monkeypatch):

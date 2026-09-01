@@ -11,7 +11,9 @@ Color Support:
 """
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from src import thesis_constants
 
@@ -109,7 +111,11 @@ class ThesisVisualizer:
     RISK_HIGH = thesis_constants.RISK_ZONE_HIGH
     RISK_MODERATE = thesis_constants.RISK_ZONE_MODERATE
 
-    def __init__(self, final_decision_text: str):
+    def __init__(
+        self,
+        final_decision_text: str,
+        decision_policy: Mapping[str, Any] | None = None,
+    ):
         """
         Initialize visualizer with Portfolio Manager output.
 
@@ -117,6 +123,7 @@ class ThesisVisualizer:
             final_decision_text: The final_trade_decision text from result dict
         """
         self.text = final_decision_text
+        self.decision_policy = decision_policy or {}
         self.metrics = self._extract_metrics()
 
     def _extract_metrics(self) -> ThesisMetrics:
@@ -264,12 +271,16 @@ class ThesisVisualizer:
 
         # Decision: BUY/SELL/HOLD
         decision_match = re.search(
-            r"(?:PORTFOLIO MANAGER VERDICT|FINAL DECISION|Action)[:\s]*\*?\*?(BUY|SELL|HOLD)\*?\*?",
+            r"(?:PORTFOLIO MANAGER VERDICT|FINAL DECISION|Action)[:\s]*\*?\*?"
+            r"(BUY|SELL|HOLD|DO[_ ]NOT[_ ]INITIATE)\*?\*?",
             self.text,
             re.IGNORECASE,
         )
         if decision_match:
-            metrics.decision = decision_match.group(1).upper()
+            metrics.decision = decision_match.group(1).upper().replace(" ", "_")
+        policy_verdict = self.decision_policy.get("final_verdict")
+        if isinstance(policy_verdict, str) and policy_verdict:
+            metrics.decision = policy_verdict
 
         return metrics
 
@@ -389,13 +400,33 @@ class ThesisVisualizer:
             if m.growth_score is not None:
                 bar = self._bar(m.growth_score, 100.0)
                 threshold_ok = m.growth_score >= self.GROWTH_MIN
-                growth_ok = m.growth_pass if m.growth_pass is not None else threshold_ok
+                growth_gate = self.decision_policy.get("growth_gate")
+                growth_gate = growth_gate if isinstance(growth_gate, Mapping) else {}
+                if growth_gate.get("hard_fail") is True:
+                    growth_ok: bool | None = False
+                    suffix = (
+                        "(policy hard fail: "
+                        f"{str(growth_gate.get('reason') or 'no exception').replace('_', ' ')})"
+                    )
+                elif growth_gate.get("exception"):
+                    growth_ok = True
+                    suffix = (
+                        "(exception: "
+                        f"{str(growth_gate['exception']).replace('_', ' ')})"
+                    )
+                elif growth_gate.get("reason") == "growth_score_unreliable":
+                    growth_ok = None
+                    suffix = "(score unreliable)"
+                else:
+                    growth_ok = (
+                        m.growth_pass if m.growth_pass is not None else threshold_ok
+                    )
+                    suffix = (
+                        f"(min {self.GROWTH_MIN:.0f}%)"
+                        if growth_ok == threshold_ok
+                        else "(model-reported gate)"
+                    )
                 check = self._check(growth_ok, c)
-                suffix = (
-                    f"(min {self.GROWTH_MIN:.0f}%)"
-                    if growth_ok == threshold_ok
-                    else "(PM gate)"
-                )
                 lines.append(
                     f"Growth Transition {bar} {m.growth_score:5.1f}% {check} {suffix}"
                 )
@@ -495,7 +526,11 @@ class ThesisVisualizer:
         return "\n".join(lines)
 
 
-def generate_thesis_visual(final_decision_text: str, use_color: bool = False) -> str:
+def generate_thesis_visual(
+    final_decision_text: str,
+    use_color: bool = False,
+    decision_policy: Mapping[str, Any] | None = None,
+) -> str:
     """
     Convenience function to generate thesis compliance visual.
 
@@ -512,5 +547,5 @@ def generate_thesis_visual(final_decision_text: str, use_color: bool = False) ->
     """
     if not final_decision_text:
         return ""
-    visualizer = ThesisVisualizer(final_decision_text)
+    visualizer = ThesisVisualizer(final_decision_text, decision_policy)
     return visualizer.generate(use_color=use_color)

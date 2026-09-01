@@ -25,6 +25,7 @@ from src.agents.analyst_nodes import (
 )
 from src.agents.management_guidance import (
     _discover_local_issuer_name,
+    _entity_matched_result_urls,
     _management_guidance_queries,
     _preload_management_guidance_evidence,
 )
@@ -259,6 +260,20 @@ LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND
         assert "annual report" in malaysia["results_package"]
         assert "insentif cukai" in malaysia["earnings_bridge"]
 
+    def test_entity_match_accepts_two_character_local_issuer_name(self):
+        url = "https://issuer.example/results"
+        payload = f"<result><title>腾讯 业绩</title><url>{url}</url></result>"
+
+        assert _entity_matched_result_urls(payload, "0700.HK", "腾讯") == [url]
+
+    def test_entity_match_rejects_numeric_ticker_substring(self):
+        payload = (
+            "<result><title>Unrelated issuer 16745 results</title>"
+            "<url>https://example.com/wrong</url></result>"
+        )
+
+        assert _entity_matched_result_urls(payload, "6745.T", "AB") == []
+
     @pytest.mark.asyncio
     async def test_preflight_records_code_owned_query_outcomes(self):
         from src.tooling.runtime import ToolResult
@@ -292,6 +307,9 @@ LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND
         search_calls = [call for call in calls if call.name == "search_foreign_sources"]
         assert all(
             "賃上げ促進税制" in call.args["priority_terms"] for call in search_calls
+        )
+        assert all(
+            call.args["purpose"] == "management_guidance" for call in search_calls
         )
         telemetry = next(
             call
@@ -426,6 +444,81 @@ LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND
         )
         assert bridge_call.args["search_query"].startswith("6745 ホーチキ ")
         assert "LOCAL_ISSUER_NAME: ホーチキ" in evidence
+
+    @pytest.mark.asyncio
+    async def test_preflight_extracts_only_entity_matched_bridge_results(self):
+        from src.tooling.runtime import ToolResult
+
+        calls = []
+        target_url = "https://finance.example/hochiki-guidance"
+        local_target_url = "https://disclosure.example/6745-results"
+
+        class FakeToolService:
+            async def execute(self, call, runner):
+                calls.append(call)
+                if call.name == "get_official_filings":
+                    return ToolResult(value="STATUS: UNAVAILABLE")
+                if call.name == "extract_guidance_sources":
+                    return ToolResult(value="STATUS: EVIDENCE_FOUND\nmatched evidence")
+                if "決算説明資料" in call.args["search_query"]:
+                    return ToolResult(
+                        value=(
+                            "<result><title>ホーチキ(株)【6745】：決算情報</title>"
+                            "<url>https://example.com/results</url></result>"
+                        )
+                    )
+                return ToolResult(
+                    value=(
+                        "<result><title>Unrelated 6368 issuer plan</title>"
+                        "<url>https://example.com/wrong-plan</url></result>"
+                        f"<result><title>Hochiki guidance</title><url>{target_url}"
+                        "</url></result>"
+                        f"<result><title>ホーチキ 決算説明会</title><url>{local_target_url}"
+                        "</url></result>"
+                    )
+                )
+
+        with patch(
+            "src.runtime_services.get_current_tool_service",
+            return_value=FakeToolService(),
+        ):
+            await _preload_management_guidance_evidence("6745.T", "Hochiki Corporation")
+
+        extraction_call = next(
+            call for call in calls if call.name == "extract_guidance_sources"
+        )
+        assert extraction_call.args["urls"] == [target_url, local_target_url]
+        assert "https://example.com/wrong-plan" not in extraction_call.args["urls"]
+
+    @pytest.mark.asyncio
+    async def test_preflight_skips_extraction_without_entity_matched_result(self):
+        from src.tooling.runtime import ToolResult
+
+        calls = []
+
+        class FakeToolService:
+            async def execute(self, call, runner):
+                calls.append(call)
+                if call.name == "get_official_filings":
+                    return ToolResult(value="STATUS: UNAVAILABLE")
+                return ToolResult(
+                    value=(
+                        "<result><title>Unrelated 6368 issuer plan</title>"
+                        "<url>https://example.com/wrong-plan</url></result>"
+                    )
+                )
+
+        with patch(
+            "src.runtime_services.get_current_tool_service",
+            return_value=FakeToolService(),
+        ):
+            evidence = await _preload_management_guidance_evidence(
+                "6745.T", "Hochiki Corporation"
+            )
+
+        assert not any(call.name == "extract_guidance_sources" for call in calls)
+        assert "#### guidance_extract" in evidence
+        assert "REASON: NO_ENTITY_MATCHING_URLS" in evidence
 
     def test_normalizer_overwrites_self_attested_search_coverage(self):
         content = """### --- START MANAGEMENT_GUIDANCE ---

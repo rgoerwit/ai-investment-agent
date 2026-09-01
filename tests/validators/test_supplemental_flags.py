@@ -8,7 +8,7 @@ from tests.validators.red_flag_validator_cases import (
 __all__ = ["TestConsultantConditionEnforcement", "TestConsultantVerdictVariants"]
 
 import src.validators.supplemental_flags as supplemental_flags
-from src.validators.red_flag_detector import RedFlagDetector
+from src.validators.red_flag_detector import RedFlagDetector, Sector
 from src.validators.supplemental_extractors import (
     extract_material_unverified_operating_signal,
 )
@@ -134,6 +134,51 @@ def test_capital_efficiency_skips_base_metric_parse_without_signals(monkeypatch)
     assert (
         supplemental_flags.detect_capital_efficiency_flags("no structured block") == []
     )
+
+
+def test_unverified_value_trap_plan_cannot_mitigate_underinvestment(monkeypatch):
+    monkeypatch.setattr(
+        supplemental_flags,
+        "extract_capital_efficiency_signals",
+        lambda _report: {
+            "roic_quality": "STRONG",
+            "leverage_quality": "GENUINE",
+            "roic": 0.2,
+            "capex_to_da_status": "UNDERINVESTING",
+        },
+    )
+
+    flags = supplemental_flags.detect_capital_efficiency_flags(
+        "fundamentals without a canonical capital plan",
+        value_trap_report="CATALYSTS:\nMID_TERM_PLAN: FY2028 ROE target 10%",
+        sector=Sector.INDUSTRIALS,
+        base_metrics={},
+    )
+
+    assert [flag["type"] for flag in flags] == ["CAPITAL_EFFICIENCY_BONUS_SUPPRESSED"]
+
+
+def test_canonical_capital_plan_still_mitigates_underinvestment(monkeypatch):
+    monkeypatch.setattr(
+        supplemental_flags,
+        "extract_capital_efficiency_signals",
+        lambda _report: {
+            "roic_quality": "STRONG",
+            "leverage_quality": "GENUINE",
+            "roic": 0.2,
+            "capex_to_da_status": "UNDERINVESTING",
+            "capital_plan_status": "EXPLICIT",
+        },
+    )
+
+    flags = supplemental_flags.detect_capital_efficiency_flags(
+        "fundamentals with an explicit canonical capital plan",
+        value_trap_report="malformed value trap output",
+        sector=Sector.INDUSTRIALS,
+        base_metrics={},
+    )
+
+    assert [flag["type"] for flag in flags] == ["CAPITAL_EFFICIENT"]
 
 
 # Verbatim FINAL VERDICT section from results/3393.T_20260704_160529_analysis.json

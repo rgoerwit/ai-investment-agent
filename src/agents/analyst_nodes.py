@@ -1142,7 +1142,10 @@ def create_analyst_node(
                     "\nA code-owned management-guidance preflight is supplied below. "
                     "Use it before optional follow-up searches. SEARCHES_COMPLETED "
                     "must reflect its recorded outcomes plus any tool calls you "
-                    "actually make; never infer source-class coverage.\n"
+                    "actually make; never infer source-class coverage. Do not repeat "
+                    "a completed preflight search for the same purpose. Run a "
+                    "follow-up only when it targets a specifically unresolved field "
+                    "or source class.\n"
                 )
                 extra_context += f"\n\n{management_guidance_evidence}\n"
 
@@ -1344,6 +1347,18 @@ def create_analyst_node(
                 )
             if agent_key == "foreign_language_analyst":
                 new_state["management_guidance_evidence"] = management_guidance_evidence
+            if agent_key == "market_analyst":
+                from src.liquidity_assessment import (
+                    latest_liquidity_assessment,
+                    liquidity_fast_fail_update,
+                )
+
+                liquidity = latest_liquidity_assessment(
+                    message_utils.tool_evidence_records(filtered_messages)
+                )
+                if liquidity is not None:
+                    new_state["liquidity_assessment"] = liquidity.to_dict()
+                    new_state.update(liquidity_fast_fail_update(liquidity.to_dict()))
 
             tool_calls = getattr(response, "tool_calls", None)
             has_tool_calls = isinstance(tool_calls, list) and len(tool_calls) > 0
@@ -1378,6 +1393,8 @@ def create_analyst_node(
                 canonical_snapshot=state.get("analysis_snapshot"),
             )
 
+            recovery_event: dict[str, Any] | None = None
+
             if (
                 allow_retry
                 and retry_llm is not None
@@ -1407,6 +1424,25 @@ def create_analyst_node(
                         truncated=initial_truncation["truncated"],
                         validation=initial_validation,
                     )
+                    reasoning_setting = next(
+                        (
+                            str(value)
+                            for attr in ("reasoning_effort", "thinking_level")
+                            if isinstance((value := getattr(llm, attr, None)), str)
+                        ),
+                        None,
+                    )
+                    recovery_event = {
+                        "schema_version": 1,
+                        "originating_agent": agent_key,
+                        "failure_kind": initial_failure_kind,
+                        "original_model": support.get_model_name(llm),
+                        "recovery_model": support.get_model_name(retry_llm),
+                        "reasoning_setting": reasoning_setting,
+                        "original_output_chars": len(content_str),
+                        "outcome": "attempted",
+                    }
+                    new_state["structural_recovery_events"] = [recovery_event]
                     log_truncation_diagnostic(
                         agent_key=agent_key,
                         ticker=ticker,
@@ -1497,6 +1533,7 @@ def create_analyst_node(
                         )
 
                         if retry_has_tool_calls:
+                            recovery_event["outcome"] = "rejected_tool_calls"
                             logger.error(
                                 "analyst_recovery_returned_tool_calls",
                                 agent_key=agent_key,
@@ -1519,7 +1556,9 @@ def create_analyst_node(
                             content_str = retry_content_str
                             response = retry_response
                             response_runnable = retry_llm
+                            recovery_event["outcome"] = "accepted_text"
                     except Exception as retry_error:
+                        recovery_event["outcome"] = "failed"
                         logger.error(
                             "analyst_retry_failed",
                             agent_key=agent_key,
@@ -1556,12 +1595,15 @@ def create_analyst_node(
                 truncated=trunc_info["truncated"],
                 validation=validation if validation["checks"] else None,
             )
-            if should_fail_closed(
+            final_output_invalid = should_fail_closed(
                 agent_key,
                 validation=validation,
                 truncated=trunc_info["truncated"],
                 content=content_str,
-            ):
+            )
+            if recovery_event is not None:
+                recovery_event["final_output_valid"] = not final_output_invalid
+            if final_output_invalid:
                 logger.error(
                     "analyst_invalid_structure",
                     agent=agent_key,

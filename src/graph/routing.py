@@ -7,7 +7,12 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langgraph.types import RunnableConfig
 
 from src.agents import AgentState
-from src.runtime_diagnostics import get_artifact_status, is_artifact_complete
+from src.runtime_diagnostics import (
+    get_analysis_outcome,
+    get_artifact_status,
+    is_artifact_complete,
+    parse_auditor_status,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -124,7 +129,8 @@ def sync_check_router(
     value_trap_done = is_artifact_complete(state, "value_trap_report")
 
     pre_screening = state.get("pre_screening_result")
-    validator_done = pre_screening in ["PASS", "REJECT"]
+    analysis_outcome = get_analysis_outcome(state)
+    validator_done = state.get("financial_validation_complete") is True
 
     auditor_done = (
         is_artifact_complete(state, "auditor_report") if auditor_required else True
@@ -154,16 +160,30 @@ def sync_check_router(
         news_error=get_artifact_status(state, "news_report").error_kind,
         fundamentals_error=get_artifact_status(state, "fundamentals_report").error_kind,
         pre_screening=pre_screening,
+        screening_eligibility=analysis_outcome["eligibility"],
+        analysis_run_status=analysis_outcome["run_status"],
         all_done=all_done,
     )
 
     if not all_done:
         return "__end__"
 
-    if pre_screening == "REJECT":
+    if analysis_outcome["eligibility"] == "UNASSESSABLE":
+        logger.warning(
+            "sync_routing_unassessable",
+            run_status=analysis_outcome["run_status"],
+            reason_codes=analysis_outcome["reason_codes"],
+            message="Required analysis evidence unavailable - ending without verdict",
+        )
+        return "__end__"
+
+    if analysis_outcome["eligibility"] == "REJECTED":
         logger.info(
             "sync_routing_to_pm_reject",
-            message="Red flags detected - skipping debate, routing to PM Fast-Fail",
+            message=(
+                "Issuer-level rejection established - skipping debate and routing "
+                "to deterministic fast-fail"
+            ),
         )
         return "PM Fast-Fail"
 
@@ -267,23 +287,6 @@ _GATE_DATA_DISCREPANCY_FLAGS = frozenset(
 )
 
 _AUDITOR_CLEAN_STATUSES = frozenset({"CLEAN", "INSUFFICIENT_DATA", "UNAVAILABLE"})
-
-
-def parse_auditor_status(auditor_report: object) -> str | None:
-    """Return the auditor report's declared STATUS token (upper-case), or None.
-
-    Shared by the Consultant-gate cleanliness check and the run-summary success
-    flag so both read the auditor's `STATUS:` line through one regex.
-    """
-    if not isinstance(auditor_report, str):
-        return None
-    text = auditor_report.strip()
-    if not text or text.upper() == "N/A":
-        return "N/A"
-    import re
-
-    match = re.search(r"(?im)^\s*STATUS\s*[:=]\s*([A-Z_]+)", text)
-    return match.group(1).upper() if match else None
 
 
 def _auditor_status_clean(auditor_report: object) -> bool:

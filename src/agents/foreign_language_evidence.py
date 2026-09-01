@@ -107,6 +107,13 @@ _LATEST_RESULTS_NUMERIC_FIELDS = (
 )
 _NUMBER_TOKEN_RE = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?(?![\w.])")
 _URL_RE = URL_RE
+_REQUIRED_BLOCK_START_RE = re.compile(
+    r"(?im)^###\s+---\s+START\s+(?:MANAGEMENT_GUIDANCE|LATEST_RESULTS)\s+---\s*$"
+)
+_TOOL_PROTOCOL_LINE_RE = re.compile(
+    r"(?im)^\s*(?:assistant\s+)?(?:to|recipient)\s*=\s*functions\.[\w.-]+"
+)
+_TOOL_ARGUMENT_LINE_RE = re.compile(r"^\s*\{.*\}\s*$")
 
 
 def _field(report: str, label: str) -> str:
@@ -115,6 +122,43 @@ def _field(report: str, label: str) -> str:
         report,
     )
     return match.group(1).strip() if match else ""
+
+
+def has_foreign_language_protocol_residue(report: str) -> bool:
+    """Whether provider tool-call wire syntax leaked into the report text."""
+    return bool(_TOOL_PROTOCOL_LINE_RE.search(report))
+
+
+def _strip_leading_protocol_preamble(report: str) -> str:
+    """Remove only a contiguous tool-call transcript before the first contract block."""
+    block_start = _REQUIRED_BLOCK_START_RE.search(report)
+    if block_start is None:
+        return report
+    prefix_lines = report[: block_start.start()].splitlines(keepends=True)
+    protocol_lines = [
+        index
+        for index, line in enumerate(prefix_lines)
+        if _TOOL_PROTOCOL_LINE_RE.match(line)
+    ]
+    if not protocol_lines:
+        return report
+
+    preamble_start = protocol_lines[0]
+    while preamble_start > 0 and (
+        not prefix_lines[preamble_start - 1].strip()
+        or _TOOL_ARGUMENT_LINE_RE.fullmatch(prefix_lines[preamble_start - 1].strip())
+    ):
+        preamble_start -= 1
+
+    candidate = prefix_lines[preamble_start:]
+    if any(
+        line.strip()
+        and not _TOOL_PROTOCOL_LINE_RE.match(line)
+        and not _TOOL_ARGUMENT_LINE_RE.fullmatch(line.strip())
+        for line in candidate
+    ):
+        return report
+    return "".join(prefix_lines[:preamble_start]) + report[block_start.start() :]
 
 
 def _split_search_result_records(
@@ -843,6 +887,7 @@ def normalize_foreign_language_evidence(
 
     if not report.strip():
         return report
+    report = _strip_leading_protocol_preamble(report)
     records = _split_search_result_records(
         [
             *tool_evidence_records(evidence_messages),

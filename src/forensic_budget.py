@@ -202,6 +202,9 @@ def graph_research_budget_policies(
             max_llm_calls=5,
             max_tool_calls_per_turn=4,
         ),
+        # One round is intentional: both deterministic data tools fit in the
+        # same two-call turn. The two extra model calls reserve synthesis plus
+        # one structural recovery; another tool round would repeat acquisition.
         "junior_fundamentals_analyst": GraphResearchBudgetPolicy(
             tool_limits={
                 "get_financial_metrics": 1,
@@ -253,6 +256,8 @@ class ResearchBudgetLedger:
     host_failures: dict[str, int] = field(default_factory=dict)
     tool_failures_by_name: dict[str, int] = field(default_factory=dict)
     blocked_reasons: dict[str, int] = field(default_factory=dict)
+    tool_outcome_events: dict[str, int] = field(default_factory=dict)
+    tool_outcome_events_by_name: dict[str, dict[str, int]] = field(default_factory=dict)
 
     @classmethod
     def from_telemetry(
@@ -270,6 +275,7 @@ class ResearchBudgetLedger:
             "host_failures",
             "tool_failures_by_name",
             "blocked_reasons",
+            "tool_outcome_events",
         ):
             value = telemetry.get(name)
             if isinstance(value, Mapping):
@@ -282,6 +288,17 @@ class ResearchBudgetLedger:
                         if isinstance(count, int | float)
                     },
                 )
+        raw_events_by_name = telemetry.get("tool_outcome_events_by_name")
+        if isinstance(raw_events_by_name, Mapping):
+            ledger.tool_outcome_events_by_name = {
+                str(category): {
+                    str(tool_name): int(count)
+                    for tool_name, count in values.items()
+                    if isinstance(count, int | float)
+                }
+                for category, values in raw_events_by_name.items()
+                if isinstance(values, Mapping)
+            }
         for name in (
             "llm_calls",
             "evidence_chars",
@@ -415,6 +432,13 @@ class ResearchBudgetLedger:
         if tool_name not in self.insufficient_tools:
             self.insufficient_tools.append(tool_name)
 
+    def _record_tool_outcome_event(self, category: str, tool_name: str) -> None:
+        self.tool_outcome_events[category] = (
+            self.tool_outcome_events.get(category, 0) + 1
+        )
+        by_name = self.tool_outcome_events_by_name.setdefault(category, {})
+        by_name[tool_name] = by_name.get(tool_name, 0) + 1
+
     def record_rejected_host(self, value: object) -> None:
         """Extract a REJECTED_HOST: line (e.g. from get_official_document's
         UNAPPROVED_DOCUMENT_HOST reply) so allowlist gaps are deterministically
@@ -447,15 +471,21 @@ class ResearchBudgetLedger:
                 "GUIDANCE_EXTRACTION_AUTH_ERROR",
                 "LOOKUP_TIMEOUT",
             }:
+                self._record_tool_outcome_event(
+                    "evidence_acquisition_failure", tool_name
+                )
                 self.tool_failures_by_name[tool_name] = (
                     self.tool_failures_by_name.get(tool_name, 0) + 1
                 )
+            else:
+                self._record_tool_outcome_event("ordinary_insufficient", tool_name)
             if reason in {"DOCUMENT_DNS_FAILED", "UNAPPROVED_DOCUMENT_HOST"} and args:
                 host = self._host(args)
                 if host:
                     self.host_failures[host] = self.host_failures.get(host, 0) + 1
         elif text.startswith("TOOL_ERROR:"):
             self.record_tool_failure(tool_name)
+            self._record_tool_outcome_event("execution_error", tool_name)
             self.tool_failures_by_name[tool_name] = (
                 self.tool_failures_by_name.get(tool_name, 0) + 1
             )
@@ -494,6 +524,11 @@ class ResearchBudgetLedger:
             "host_failures": dict(self.host_failures),
             "tool_failures_by_name": dict(self.tool_failures_by_name),
             "blocked_reasons": dict(self.blocked_reasons),
+            "tool_outcome_events": dict(self.tool_outcome_events),
+            "tool_outcome_events_by_name": {
+                category: dict(values)
+                for category, values in self.tool_outcome_events_by_name.items()
+            },
         }
 
 

@@ -239,7 +239,7 @@ class TestCodeIdentity:
         try:
             commit, dirty = module._code_metadata()
             assert commit is None
-            assert dirty is False
+            assert dirty is True
         finally:
             reset_fingerprint_caches()
 
@@ -249,8 +249,17 @@ class TestCodeIdentity:
         reset_fingerprint_caches()
         monkeypatch.setenv("PATH", str(tmp_path))
         try:
-            commit, _dirty = module._code_metadata()
+            commit, dirty = module._code_metadata()
             assert commit is None
+            assert dirty is True
+            fingerprint = RunFingerprint(
+                code_commit=commit,
+                code_dirty=dirty,
+                prompt_set_digest="sha256:p",
+                binding_digest="sha256:b",
+                thesis_digest="sha256:t",
+            )
+            assert fingerprint.compare(fingerprint) == CONTEXT_UNKNOWN
         finally:
             monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
             reset_fingerprint_caches()

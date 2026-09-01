@@ -37,6 +37,7 @@ from src.reporting.state_access import get_effective_red_flags
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import (
     build_analysis_validity,
+    get_analysis_outcome,
     is_publishable_analysis,
 )
 from src.thesis_constants import ANALYST_COVERAGE_MAX
@@ -1095,6 +1096,9 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
 
         # Get final decision with comprehensive error handling
         final_decision_raw = self._get_final_decision_text(result)
+        from src.reporting.decision_policy import get_decision_policy
+
+        decision_policy = get_decision_policy(result)
         publishable = is_publishable_analysis(result)
         pm_contract = extract_pm_block(final_decision_raw)
         block_verdict = canonicalize_pm_verdict(pm_contract.verdict)
@@ -1170,18 +1174,40 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                 memo_state["valuation_context"] = self.valuation_context
             report_parts.append("\n")
             report_parts.append(render_memo_for_state(memo_state))
-        except Exception:  # pragma: no cover — defense-in-depth
+        except Exception as exc:  # pragma: no cover — defense-in-depth
             # Memo rendering should never block report publication.
-            pass
+            logger.warning(
+                "report_memo_section_failed",
+                ticker=self.ticker,
+                **summarize_exception(exc, operation="rendering report memo section"),
+            )
+
+        try:
+            from src.reporting.decision_evidence import (
+                render_decision_evidence_markdown,
+            )
+
+            decision_evidence = render_decision_evidence_markdown(result)
+            if decision_evidence:
+                report_parts.append(decision_evidence)
+        except Exception as exc:  # pragma: no cover — defense-in-depth
+            logger.warning(
+                "report_decision_evidence_section_failed",
+                ticker=self.ticker,
+                **summarize_exception(
+                    exc,
+                    operation="rendering report decision evidence section",
+                ),
+            )
 
         # Red Flag Pre-Screening (if applicable)
         red_flags = get_effective_red_flags(result)
-        pre_screening_result = result.get("pre_screening_result", "PASS")
+        screening_eligibility = get_analysis_outcome(result)["eligibility"]
 
-        if red_flags or pre_screening_result == "REJECT":
+        if red_flags or screening_eligibility == "REJECTED":
             report_parts.append("\n## 🚨 Red Flag Pre-Screening\n\n")
 
-            if pre_screening_result == "REJECT":
+            if screening_eligibility == "REJECTED":
                 report_parts.append(
                     "**Status**: CRITICAL RED FLAGS DETECTED - AUTO-REJECT\n\n"
                 )
@@ -1198,12 +1224,13 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
 
                     report_parts.append(f"- **{flag_type}** ({severity}): {detail}\n")
 
-            if pre_screening_result == "REJECT":
+            if screening_eligibility == "REJECTED":
                 report_parts.append(
                     "\n*Debate phase skipped due to critical red flags. "
                 )
                 report_parts.append(
-                    "Stock routed directly to Portfolio Manager for final decision.*\n"
+                    "The code-owned screen produced the terminal do-not-initiate "
+                    "decision.*\n"
                 )
 
             report_parts.append("\n---\n\n")
@@ -1212,7 +1239,10 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
         try:
             from src.thesis_visualizer import generate_thesis_visual
 
-            thesis_visual = generate_thesis_visual(final_decision_raw)
+            thesis_visual = generate_thesis_visual(
+                final_decision_raw,
+                decision_policy=decision_policy,
+            )
             if thesis_visual:
                 report_parts.append("## Thesis Compliance at a Glance\n\n")
                 report_parts.append(f"{thesis_visual}\n\n---\n")
@@ -1254,9 +1284,25 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
 
             report_parts.append(f"![Football Field Chart]({chart_link})\n\n---\n")
 
-        # Executive Summary (always included)
+        # The memo above is the policy-authoritative summary. When deterministic
+        # policy changed the PM verdict, preserve the original PM narrative only
+        # as an explicitly labeled audit transcript so stale BUY/HOLD prose cannot
+        # masquerade as the final recommendation.
         if final_decision_raw:
-            report_parts.append("## Executive Summary\n\n")
+            from src.reporting.decision_policy import (
+                render_decision_policy_notice,
+            )
+
+            policy_changed = bool(decision_policy.get("verdict_changed"))
+            heading = (
+                "Portfolio Manager Transcript (Pre-Policy Audit Appendix)"
+                if policy_changed
+                else "Executive Summary"
+            )
+            report_parts.append(f"## {heading}\n\n")
+            policy_notice = render_decision_policy_notice(decision_policy)
+            if policy_notice:
+                report_parts.append(f"{policy_notice}\n")
             # Demote headers (### → ####) since we're nesting under ## Executive Summary
             cleaned = self._clean_text(final_decision_raw, demote_headers=True)
             report_parts.append(f"{cleaned}\n\n---\n")
@@ -1267,8 +1313,9 @@ Re-run analysis with verbose logging: `poetry run python -m src.main --ticker {s
                 "**Error**: No decision output available from any agent.\n\n---\n"
             )
 
-        # If brief mode, skip adding duplicate Decision Rationale
-        # The Executive Summary already contains the full decision with rationale
+        # If brief mode, skip adding duplicate Decision Rationale. The PM section
+        # above already contains the full model rationale (and is explicitly
+        # labeled as pre-policy when deterministic enforcement changed it).
         if brief_mode:
             # Footer
             mode_indicator = (

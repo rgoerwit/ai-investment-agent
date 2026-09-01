@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.liquidity_assessment import LiquidityAssessment
 from src.liquidity_calculation_tool import calculate_liquidity_metrics
 
 
@@ -83,12 +84,19 @@ class TestLiquidityThresholdAlignment:
         """$100k daily turnover → MARGINAL (lower boundary, inclusive)."""
         result = await _run("TEST.US", mean_price=2.0, volume=50_000)
         assert "Status: MARGINAL" in result
+        assessment = LiquidityAssessment.from_tool_output(result)
+        assert assessment is not None
+        assert assessment.status == "MARGINAL"
+        assert assessment.hard_fail is False
 
     @pytest.mark.asyncio
     async def test_just_below_100k_is_fail(self):
         """$75k daily turnover → FAIL (Insufficient Liquidity)."""
         result = await _run("TEST.US", mean_price=1.5, volume=50_000)
         assert "FAIL (Insufficient Liquidity)" in result
+        assessment = LiquidityAssessment.from_tool_output(result)
+        assert assessment is not None
+        assert assessment.hard_fail is True
 
     @pytest.mark.asyncio
     async def test_output_string_references_250k(self):

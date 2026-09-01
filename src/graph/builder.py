@@ -149,7 +149,7 @@ def create_trading_graph(
             "value_trap_report",
         )
         ready = all(is_artifact_complete(state, field) for field in required)
-        ready = ready and state.get("pre_screening_result") in {"PASS", "REJECT"}
+        ready = ready and state.get("financial_validation_complete") is True
         if components.auditor_enabled:
             ready = ready and is_artifact_complete(state, "auditor_report")
         if not ready:
@@ -161,7 +161,7 @@ def create_trading_graph(
                 state,
                 get_current_evidence_records(),
                 version=max(2, int(prior.get("version", 1)) + 1),
-            )
+            ),
         }
 
     async def fundamentals_sync_node(state: AgentState, config: RunnableConfig):

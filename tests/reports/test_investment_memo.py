@@ -377,6 +377,25 @@ def test_summarize_confidence_when_nothing_ran() -> None:
     assert "did not run" in out
 
 
+def test_summarize_confidence_prefers_unreconciled_auditor_truth() -> None:
+    out = summarize_confidence(
+        {
+            "run_summary": {
+                "auditor_successful": True,
+                "auditor_review_status": "COMPLETED",
+            },
+            "final_trade_decision": (
+                "AUDITOR_RESOLUTION:\n"
+                "- DATA_CHECK: NOT_PROVIDED\n"
+                "- VERDICT: UNVERIFIABLE\n"
+            ),
+        }
+    )
+
+    assert "findings remain unreconciled" in out
+    assert "reported clean" not in out
+
+
 def test_summarize_confidence_consultant_error_is_validation_failure() -> None:
     out = summarize_confidence(
         {
@@ -464,6 +483,50 @@ def test_build_memo_surfaces_unsuppressed_ocf_discrepancy() -> None:
     memo = build_memo(state)
     assert "Filing/API OCF conflict" in memo.source_confidence[0][1]
     assert "period mismatch" not in memo.source_confidence[0][1]
+
+
+def test_build_memo_leads_with_canonical_policy_and_buy_blocker() -> None:
+    state = {
+        "final_trade_decision": (
+            "### PORTFOLIO MANAGER VERDICT: DO_NOT_INITIATE\n"
+            "### DECISION RATIONALE\nCurrent fundamentals are solid.\n"
+            "### --- START PM_BLOCK ---\nVERDICT: DO_NOT_INITIATE\n"
+            "### --- END PM_BLOCK ---\n"
+        ),
+        "decision_policy": {
+            "original_verdict": "HOLD",
+            "final_verdict": "DO_NOT_INITIATE",
+            "verdict_changed": True,
+            "adjustments": [
+                {
+                    "rule": "growth_transition_hard_fail",
+                    "reason": "pe_ratio_above_growth_exception_ceiling",
+                    "from": "HOLD",
+                    "to": "DO_NOT_INITIATE",
+                }
+            ],
+        },
+        "red_flags": [
+            {
+                "type": "MANAGEMENT_GUIDANCE_EVIDENCE_GAP",
+                "detail": "Guidance was not verified.",
+                "risk_penalty": 0.0,
+                "blocks_buy": True,
+            }
+        ],
+    }
+
+    memo = build_memo(state)
+
+    assert memo.decision == "DO_NOT_INITIATE"
+    assert memo.decision_basis and "HOLD to DO_NOT_INITIATE" in memo.decision_basis
+    assert memo.one_line_thesis == ""
+    assert memo.top_risks == [
+        "MANAGEMENT_GUIDANCE_EVIDENCE_GAP: Guidance was not verified."
+    ]
+    rendered = render_memo_markdown(memo)
+    assert "**Model context.**" not in rendered
+    assert "Current fundamentals are solid" not in rendered
 
 
 def test_render_memo_markdown_happy_path_renders_all_sections() -> None:

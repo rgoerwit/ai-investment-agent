@@ -695,11 +695,13 @@ class TokenTracker:
                             "calls": 0,
                             "tokens": 0,
                             "cost_usd": 0.0,
+                            "elapsed_seconds": 0.0,
                         },
                     )
                     recovery_row["calls"] += 1
                     recovery_row["tokens"] += usage.total_tokens
                     recovery_row["cost_usd"] += usage.estimated_cost_usd
+                    recovery_row["elapsed_seconds"] += usage.elapsed_seconds or 0.0
 
             return {
                 "failed_attempts": len(self.failed_attempts),

@@ -73,6 +73,15 @@ INTENTIONAL_ADDITIONS = frozenset(
         "retry_disposition",
         "operator_failure_reason",
         "unavailable_artifact",
+        # Aug 2026: canonical separation between issuer eligibility and
+        # analysis execution status.
+        "ScreeningEligibility",
+        "AnalysisRunStatus",
+        "AnalysisOutcome",
+        "build_analysis_outcome",
+        "get_analysis_outcome",
+        "has_unreconciled_auditor_resolution",
+        "parse_auditor_status",
     }
 )
 

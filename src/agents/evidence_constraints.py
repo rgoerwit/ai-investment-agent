@@ -223,12 +223,11 @@ def downstream_evidence_constraints(state: Mapping[str, Any]) -> str:
     )
 
     constraints.append(
-        "Assess trading liquidity relative to the proposed order, not as an "
-        "institutional absolute. It is a hard fail only when the order would exceed "
-        "10% of 30-day average daily turnover, market access is impaired, or patient "
-        "limit execution is impracticable. Below that threshold, note liquidity and "
-        "sizing, but do not make it a primary rejection reason. If order notional is "
-        "unknown, do not infer a hard fail."
+        "Use the code-owned liquidity assessment without reinterpreting its "
+        "thresholds relative to a proposed order. Measured average daily turnover "
+        "below the canonical minimum is a hard fail for initiating a position; "
+        "MARGINAL passes with constrained sizing; PASS permits standard sizing. "
+        "INSUFFICIENT_DATA or ERROR is uncertainty, not proof of issuer illiquidity."
     )
 
     if not constraints:

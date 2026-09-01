@@ -18,10 +18,11 @@ repo disagree, trust the repo.
 3. **Senior fundamentals.** Cross-validates cash flow against filing data, flags
    segment deterioration and ownership concentration, and produces the scored data
    block the hard gates read.
-4. **Red-flag pre-screening.** Deterministic. On a catastrophic finding it skips the
-   debate entirely and routes to the portfolio manager — a fast fail that saves most
-   of a doomed candidate's token cost and prevents the debate rationalising a fatal
-   flaw.
+4. **Red-flag pre-screening.** Deterministic. It emits one analysis outcome that
+   separates issuer eligibility from run status. A supported catastrophic finding
+   skips the debate and produces a deterministic do-not-initiate decision; missing
+   required data or validator failure ends the run as unassessable, without inventing
+   an investment verdict.
 5. **Adversarial debate.** Bull and bear argue in parallel rounds. Quick mode runs one
    round, full mode two.
 6. **Research synthesis**, then a parallel valuation calculator and external

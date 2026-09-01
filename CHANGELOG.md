@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Canonical decision-policy and evidence reporting** — Saved artifacts now retain
+  deterministic verdict interventions, scoped tool-outcome telemetry, external-
+  evidence promotion counts, and structural-recovery triggers; report memos,
+  compliance visuals, Portfolio Manager transcript labels, and decision-evidence
+  tables consume the canonical records while legacy `tool_failures` remains available
+  for comparison.
+
 - **Balanced debate reasoning handoffs** — An opt-in full-run mode gives both
   second-round researchers and Research Manager symmetric, bounded Round-1
   rationale adjuncts, with provider-summary fallback, automatic budgets, and
@@ -53,6 +60,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at the pinned release.
 
 ### Fixed
+
+- **Run fingerprinting cannot block artifact completion indefinitely** — Git metadata
+  probes now carry a hard subprocess timeout, and an unavailable worktree status is
+  treated as non-comparable rather than silently clean.
+- **Screen rejection no longer masks analysis failure** — The completed gate inputs
+  now derive one canonical outcome separating issuer eligibility from run status.
+  Evidence-backed rejects bypass debate and model calls through a deterministic
+  do-not-initiate decision, while missing required data and validator failures end as
+  unassessable and fail publication closed. Persistence and reports consume the same
+  outcome, and unreconciled auditor findings can no longer be labeled clean.
+- **Quick/full screens now share code-owned growth and liquidity gates** — Annual
+  statement data deterministically owns the ROA/ROE-improvement point, the data-vacuum
+  exception checks the four current TTM/MRQ growth fields rather than an unrelated
+  rubric denominator, and one typed liquidity assessment flows from the market tool
+  through state, snapshot, fast-fail routing, and the generic post-PM `AUTO_REJECT`
+  defense. Missing liquidity data remains uncertainty; measured turnover below the
+  canonical minimum remains an initiation hard fail. Parallel gate aggregation is
+  reject-dominant, while financial-validator completion is tracked separately from
+  the gate outcome so an early liquidity rejection cannot release the Portfolio
+  Manager twice. Verdict-changing policy also keeps superseded actionable prose out
+  of the canonical memo and confines it to the labeled audit appendix.
+- **Longitudinal comparisons separate mode and structural regressions** — Quick runs
+  compare with prior quick runs and full runs with prior full runs; the report now
+  flags lost contracts or publishability, missing scores, full-mode evidence loss,
+  disappearing decision-material flags, rising execution/recovery failures, and
+  material same-mode cost increases.
 
 - **Quick-mode provider comparisons no longer pay for known-useless repeats** — An
   explicit provider output-cap stop is handed to structural validation instead of

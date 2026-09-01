@@ -658,6 +658,8 @@ class TestGraphIntegration:
             "news_report": "done",
             "value_trap_report": "done",
             "pre_screening_result": "PASS",
+            "red_flags": [],
+            "financial_validation_complete": True,
         }
 
         result = sync_check_router(state, {}, auditor_required=False)

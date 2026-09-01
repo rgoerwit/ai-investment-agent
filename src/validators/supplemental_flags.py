@@ -999,7 +999,6 @@ def detect_capital_efficiency_flags(
     from src.config import config
 
     metrics = extract_capital_efficiency_signals(fundamentals_report)
-    value_trap_metrics = extract_value_trap_score(value_trap_report or "")
     if not metrics:
         return flags
     if base_metrics is None:
@@ -1016,8 +1015,6 @@ def detect_capital_efficiency_flags(
     revenue_backlog_coverage = metrics.get("revenue_backlog_coverage")
     payout_ratio = base_metrics.get("payout_ratio")
     capital_plan_status = metrics.get("capital_plan_status")
-    if capital_plan_status is None and value_trap_metrics.get("mid_term_plan"):
-        capital_plan_status = "EXPLICIT"
     if sector is None:
         sector = detect_sector(fundamentals_report)
     deployment_mitigated = capital_plan_status == "EXPLICIT" or (

@@ -22,7 +22,17 @@ def test_extract_row_surfaces_validity_and_data_quality(tmp_path: Path) -> None:
                     "required_failures": ["fundamentals_report"],
                     "consultant_verdict": "CLEAN",
                     "auditor_status": "PARTIAL_DATA",
+                    "tool_outcomes": {
+                        "research_ledgers": {
+                            "blocks": {"events": 2},
+                            "evidence_acquisition_failure": {"events": 1},
+                            "execution_error": {"events": 0},
+                        }
+                    },
+                    "evidence_promotion": {"external_decision_facts": 0},
+                    "structural_recovery": {"events": [{"failure_kind": "timeout"}]},
                 },
+                "token_usage": {"total_cost_usd": 0.4321},
                 "final_decision": {"decision": ""},
                 "structured_inputs": {
                     "raw_financial_metrics": {
@@ -51,12 +61,44 @@ def test_extract_row_surfaces_validity_and_data_quality(tmp_path: Path) -> None:
     assert row.data_coverage_pct == 70.5
     assert row.growth_gap_count == 2
     assert row.source_conflict_count == 1
+    assert row.cost_usd == 0.4321
+    assert row.evidence_acquisition_failures == 1
+    assert row.execution_errors == 0
+    assert row.structural_recovery_count == 1
 
     rendered = compare.render_timeline_markdown("1681.HK", [row])
     assert "INCOMPLETE: fundamentals_report" in rendered
     assert "coverage 70.5%; growth gaps 2; conflicts 1" in rendered
+    assert "tools block=2/acq=1/error=0; external facts=0; recovery=1" in rendered
+    assert "$0.4321" in rendered
     assert "2026-08-02 19:08:54" in rendered
     assert f"[artifact]({artifact.resolve().as_uri()})" in rendered
+
+
+def test_extract_row_classifies_only_decision_material_flags(tmp_path: Path) -> None:
+    artifact = _artifact(
+        tmp_path,
+        "AAA_20260802_161755_analysis.json",
+        decision_text=_PM_TEXT,
+        snapshot={},
+    )
+    payload = json.loads(artifact.read_text())
+    payload["red_flags"] = [
+        {"type": "AUTO", "action": "AUTO_REJECT"},
+        {"type": "BLOCKER", "blocks_buy": True},
+        {"type": "CRITICAL_REVIEW", "severity": "CRITICAL"},
+        {"type": "WARNING", "severity": "WARNING"},
+    ]
+    artifact.write_text(json.dumps(payload))
+
+    row = compare.extract_row(artifact)
+
+    assert row.red_flag_types == ["AUTO", "BLOCKER", "CRITICAL_REVIEW", "WARNING"]
+    assert row.decision_material_flag_types == [
+        "AUTO",
+        "BLOCKER",
+        "CRITICAL_REVIEW",
+    ]
 
 
 def _artifact(tmp_path, name, *, decision_text, snapshot):
@@ -121,6 +163,111 @@ def test_absent_or_malformed_snapshot_does_not_crash(tmp_path):
             snapshot=snapshot,
         )
         assert extract_row(p).risk_total == -0.5
+
+
+def test_same_mode_regression_alerts_cover_contract_evidence_errors_and_cost() -> None:
+    previous = compare.RunRow(
+        ticker="AAA",
+        timestamp="20260801_120000",
+        path="previous.json",
+        is_quick=False,
+        publishable=True,
+        contract_status="VALID",
+        health_adj=75,
+        growth_adj=60,
+        cost_usd=0.50,
+        external_decision_facts=2,
+        evidence_acquisition_failures=0,
+        execution_errors=0,
+        structural_recovery_count=0,
+        decision_material_flag_types=["LIQUIDITY_HARD_FAIL", "DATA_GAP"],
+    )
+    current = compare.RunRow(
+        ticker="AAA",
+        timestamp="20260802_120000",
+        path="current.json",
+        is_quick=False,
+        publishable=False,
+        required_failures=["fundamentals_report"],
+        contract_status="INVALID",
+        health_adj=None,
+        growth_adj=60,
+        cost_usd=0.70,
+        external_decision_facts=0,
+        evidence_acquisition_failures=2,
+        execution_errors=1,
+        structural_recovery_count=1,
+        decision_material_flag_types=["DATA_GAP"],
+    )
+
+    alerts = compare._regression_alerts(previous, current)
+
+    assert "publishability lost" in alerts
+    assert "contract VALID→INVALID" in alerts
+    assert "new required failures: fundamentals_report" in alerts
+    assert "health score became unavailable" in alerts
+    assert "external decision facts 2→0" in alerts
+    assert "evidence acquisition failures 0→2" in alerts
+    assert "execution errors 0→1" in alerts
+    assert "structural recoveries 0→1" in alerts
+    assert "decision-material flags disappeared: LIQUIDITY_HARD_FAIL" in alerts
+    assert "cost +40%" in alerts
+
+
+def test_quick_mode_does_not_treat_zero_external_promotion_as_regression() -> None:
+    previous = compare.RunRow(
+        ticker="AAA",
+        timestamp="20260801_120000",
+        path="previous.json",
+        is_quick=True,
+        external_decision_facts=2,
+    )
+    current = compare.RunRow(
+        ticker="AAA",
+        timestamp="20260802_120000",
+        path="current.json",
+        is_quick=True,
+        external_decision_facts=0,
+    )
+
+    assert compare._regression_alerts(previous, current) == []
+
+
+def test_timeline_compares_flags_within_mode_not_across_quick_and_full() -> None:
+    rows = [
+        compare.RunRow(
+            ticker="AAA",
+            timestamp="20260801_120000",
+            path="full.json",
+            is_quick=False,
+            red_flag_types=["SHARED_FLAG"],
+        ),
+        compare.RunRow(
+            ticker="AAA",
+            timestamp="20260802_120000",
+            path="quick.json",
+            is_quick=True,
+            red_flag_types=["SHARED_FLAG"],
+        ),
+    ]
+
+    rendered = compare.render_timeline_markdown("AAA", rows)
+
+    assert "SHARED_FLAG[NEW]" not in rendered
+
+
+def test_malformed_cost_is_ignored(tmp_path: Path) -> None:
+    artifact = _artifact(
+        tmp_path,
+        "AAA_20260802_161755_analysis.json",
+        decision_text=_PM_TEXT,
+        snapshot={},
+    )
+    payload = json.loads(artifact.read_text())
+    payload["token_usage"] = {"total_cost_usd": "not-a-number"}
+    artifact.write_text(json.dumps(payload))
+
+    assert compare.extract_row(artifact).cost_usd is None
 
 
 # Real lines from scratch/eval_rerun_20260814_173135/run.log, the batch whose

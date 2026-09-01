@@ -209,6 +209,20 @@ def merge_flag_lists(
     return merged
 
 
+def merge_pre_screening_results(x: str | None, y: str | None) -> str:
+    """Merge parallel gate results without allowing PASS to erase REJECT.
+
+    Pre-screening is monotonic within one analysis run: once a deterministic
+    branch establishes a rejection, a later-finishing branch cannot make that
+    finding disappear merely because it independently passed its own checks.
+    """
+    if "REJECT" in {x, y}:
+        return "REJECT"
+    if "PASS" in {x, y}:
+        return "PASS"
+    return y or x or ""
+
+
 def merge_risk_state(
     x: RiskDebateState | None, y: RiskDebateState | None
 ) -> RiskDebateState:
@@ -291,6 +305,7 @@ class AgentState(TypedDict, total=False):
     sender: Annotated[str, take_last]
 
     market_report: Annotated[str, take_last]
+    liquidity_assessment: Annotated[dict[str, Any], take_last]
     sentiment_report: Annotated[str, take_last]
     news_report: Annotated[str, take_last]
     raw_fundamentals_data: Annotated[str, take_last]
@@ -316,9 +331,12 @@ class AgentState(TypedDict, total=False):
     artifact_statuses: Annotated[dict[str, dict[str, Any]], merge_dicts]
     consultant_tool_failures: Annotated[int, take_last]
     red_flags: Annotated[list[dict[str, Any]], merge_flag_lists]
-    pre_screening_result: Annotated[str, take_last]
+    pre_screening_result: Annotated[str, merge_pre_screening_results]
+    financial_validation_complete: Annotated[bool, take_last]
     chart_paths: Annotated[dict[str, str], take_last]
     macro_context_injected_into_news: Annotated[bool, take_last]
     entity_governance_card: Annotated[dict[str, Any], take_last]
     analysis_snapshot: Annotated[dict[str, Any], take_last]
     decision_trace: Annotated[dict[str, Any], take_last]
+    decision_policy: Annotated[dict[str, Any], take_last]
+    structural_recovery_events: Annotated[list[dict[str, Any]], merge_flag_lists]

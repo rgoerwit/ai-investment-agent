@@ -19,6 +19,8 @@ class TestAgentState:
         assert "trade_date" in annotations
         assert "sender" in annotations
         assert "market_report" in annotations
+        assert "liquidity_assessment" in annotations
+        assert "financial_validation_complete" in annotations
 
 
 class TestHelperFunctions:
@@ -87,6 +89,57 @@ class TestAnalystNode:
             "market_report" in result
         )  # Simplified assertion - mock works, exact value check complex
         assert result["sender"] == "market_analyst"
+
+    @pytest.mark.asyncio
+    async def test_market_node_promotes_typed_liquidity_tool_result(self):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        from src.agents import create_analyst_node
+        from src.liquidity_assessment import LiquidityAssessment
+
+        assessment = LiquidityAssessment(
+            status="FAIL_INSUFFICIENT_LIQUIDITY",
+            average_daily_turnover_usd=86_436,
+        )
+        filtered = [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "calculate_liquidity_metrics",
+                        "args": {"ticker": "TEST"},
+                        "id": "liquidity-1",
+                    }
+                ],
+                name="market_analyst",
+            ),
+            ToolMessage(
+                content=assessment.render_block(),
+                tool_call_id="liquidity-1",
+                name="calculate_liquidity_metrics",
+            ),
+        ]
+        response = SimpleNamespace(content="Test analysis report", tool_calls=None)
+        node = create_analyst_node(MagicMock(), "market_analyst", [], "market_report")
+
+        with (
+            patch(
+                "src.llm_runtime.messages.prepare_messages_for_model",
+                return_value=filtered,
+            ),
+            patch(
+                "src.agents.runtime.invoke_with_rate_limit_handling",
+                new=AsyncMock(return_value=response),
+            ),
+        ):
+            result = await node(
+                {"messages": [], "company_of_interest": "TEST"},
+                {"configurable": {}},
+            )
+
+        assert result["liquidity_assessment"] == assessment.to_dict()
+        assert result["pre_screening_result"] == "REJECT"
+        assert result["red_flags"][0]["type"] == "LIQUIDITY_HARD_FAIL"
 
     @pytest.mark.asyncio
     async def test_closed_research_budget_forces_tool_free_synthesis(self):
@@ -1039,6 +1092,19 @@ Score details here.
         )
         retry_llm.bind_tools.assert_not_called()
         assert "### --- START DATA_BLOCK ---" in result["fundamentals_report"]
+        assert result["structural_recovery_events"] == [
+            {
+                "schema_version": 1,
+                "originating_agent": "fundamentals_analyst",
+                "failure_kind": "incomplete_structured_output",
+                "original_model": None,
+                "recovery_model": None,
+                "reasoning_setting": None,
+                "original_output_chars": len(initial_response.content),
+                "outcome": "accepted_text",
+                "final_output_valid": True,
+            }
+        ]
 
     @pytest.mark.asyncio
     async def test_fundamentals_cap_exhaustion_is_saved_as_distinct_failure_kind(self):

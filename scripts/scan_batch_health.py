@@ -25,8 +25,9 @@ Batch selection (mutually exclusive):
 - ``--run-date YYYY-MM-DD`` — analyses whose *filename* date matches (manual, retrospective).
 - neither — defaults to ``--run-date`` = today.
 
-The verdict-flip comparison always loads full history regardless of which selector picks
-the batch. Always exits 0 (informational) unless ``--strict`` is given.
+The verdict-flip comparison reads only the matching ticker's newest prior artifacts
+until it finds the same mode. Always exits 0 (informational) unless ``--strict`` is
+given.
 
 Usage:
     poetry run python scripts/scan_batch_health.py [--run-date YYYY-MM-DD |
@@ -39,7 +40,7 @@ import argparse
 import json
 import re
 import sys
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -82,42 +83,54 @@ class Record:
         return f"{self.date}{self.time}"
 
 
-def load_records(results_dir: Path) -> list[Record]:
-    """Load every parseable ``*_analysis.json`` into a Record (skips malformed/unreadable)."""
-    records: list[Record] = []
+def _artifact_candidates(
+    results_dir: Path,
+) -> Iterator[tuple[Path, re.Match[str], float]]:
+    """Yield cheap filename/stat metadata without opening artifact contents."""
     for path in results_dir.glob("*_analysis.json"):
-        m = _FILENAME_RE.match(path.name)
-        if not m:
+        match = _FILENAME_RE.match(path.name)
+        if match is None:
             continue
         try:
             mtime = path.stat().st_mtime
-            data = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
+        except OSError:
             continue
-        if not isinstance(data, dict):
-            continue
-        snapshot = data.get("prediction_snapshot") or {}
-        run_summary = data.get("run_summary") or {}
-        raw_quick = snapshot.get("is_quick_mode")
-        records.append(
-            Record(
-                ticker=m.group("ticker"),
-                date=m.group("date"),
-                time=m.group("time"),
-                path=path,
-                verdict=_normalize_verdict(snapshot.get("verdict")),
-                is_quick=bool(raw_quick) if raw_quick is not None else None,
-                run_summary=run_summary if isinstance(run_summary, dict) else {},
-                validity=(
-                    data.get("analysis_validity")
-                    if isinstance(data.get("analysis_validity"), dict)
-                    else {}
-                )
-                or {},
-                mtime=mtime,
-            )
+        yield path, match, mtime
+
+
+def load_record(path: Path, *, mtime: float | None = None) -> Record | None:
+    """Load one parseable analysis artifact; malformed or unreadable means absent."""
+    match = _FILENAME_RE.match(path.name)
+    if match is None:
+        return None
+    try:
+        resolved_mtime = path.stat().st_mtime if mtime is None else mtime
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    snapshot = data.get("prediction_snapshot") or {}
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    run_summary = data.get("run_summary") or {}
+    raw_quick = snapshot.get("is_quick_mode")
+    return Record(
+        ticker=match.group("ticker"),
+        date=match.group("date"),
+        time=match.group("time"),
+        path=path,
+        verdict=_normalize_verdict(snapshot.get("verdict")),
+        is_quick=bool(raw_quick) if raw_quick is not None else None,
+        run_summary=run_summary if isinstance(run_summary, dict) else {},
+        validity=(
+            data.get("analysis_validity")
+            if isinstance(data.get("analysis_validity"), dict)
+            else {}
         )
-    return records
+        or {},
+        mtime=resolved_mtime,
+    )
 
 
 def prior_verdict(record: Record, all_records: list[Record]) -> str | None:
@@ -146,6 +159,38 @@ def prior_verdict(record: Record, all_records: list[Record]) -> str | None:
     return max(earlier, key=lambda r: r.sort_key).verdict
 
 
+def _prior_verdict_from_candidates(
+    record: Record,
+    candidates: Iterable[tuple[Path, re.Match[str], float]],
+) -> str | None:
+    """Read newest matching ticker artifacts only until a same-mode prior appears."""
+    if record.is_quick is None:
+        return None
+    earlier = sorted(
+        (
+            candidate
+            for candidate in candidates
+            if candidate[1].group("ticker") == record.ticker
+            and (
+                candidate[1].group("date") + candidate[1].group("time")
+                < record.sort_key
+            )
+        ),
+        key=lambda candidate: candidate[1].group("date") + candidate[1].group("time"),
+        reverse=True,
+    )
+    for path, _, mtime in earlier:
+        prior = load_record(path, mtime=mtime)
+        if (
+            prior is not None
+            and prior.is_quick is not None
+            and prior.is_quick == record.is_quick
+            and prior.verdict
+        ):
+            return prior.verdict
+    return None
+
+
 def detect_anomalies(record: Record, prior: str | None) -> list[str]:
     """Pure predicate: return human-readable anomaly strings for one record."""
     rs = record.run_summary
@@ -161,8 +206,19 @@ def detect_anomalies(record: Record, prior: str | None) -> list[str]:
     if fatal:
         anomalies.append(f"fatal failures: {', '.join(map(str, fatal))}")
 
-    if (rs.get("llm_failures") or 0) > 0:
-        anomalies.append(f"llm_failures={rs.get('llm_failures')}")
+    llm_failures = rs.get("llm_failures", 0)
+    if isinstance(llm_failures, bool) or not isinstance(llm_failures, int | float):
+        anomalies.append("invalid llm_failures telemetry")
+    elif llm_failures > 0:
+        anomalies.append(f"llm_failures={llm_failures}")
+
+    pre_screening = str(rs.get("pre_screening_result") or "").strip().upper()
+    eligibility = str(rs.get("screening_eligibility") or "").strip().upper()
+    if (pre_screening, eligibility) in {
+        ("REJECT", "QUALIFIES"),
+        ("PASS", "REJECTED"),
+    }:
+        anomalies.append(f"screening outcome mismatch: {pre_screening} / {eligibility}")
 
     if rs.get("consultant_verdict") in _CONSULTANT_BAD_VERDICTS:
         anomalies.append(f"consultant {rs.get('consultant_verdict')}")
@@ -237,11 +293,13 @@ def check_fresh_ticker_output(
     modified_since: float,
 ) -> FreshOutputCheck:
     """Require exactly one fresh, publishable artifact for a completed invocation."""
-    matches = [
-        record
-        for record in load_records(results_dir)
-        if record.ticker == ticker and record.mtime >= modified_since
-    ]
+    matches = []
+    for path, match, mtime in _artifact_candidates(results_dir):
+        if match.group("ticker") != ticker or mtime < modified_since:
+            continue
+        record = load_record(path, mtime=mtime)
+        if record is not None:
+            matches.append(record)
     if not matches:
         return FreshOutputCheck("MISSING", detail="no fresh analysis artifact")
     if len(matches) > 1:
@@ -291,15 +349,27 @@ def scan(
     Selection precedence: ``modified_since`` (file mtime) wins when set; otherwise the
     filename-date match. Exactly one is normally supplied.
     """
-    all_records = load_records(results_dir)
+    candidates = list(_artifact_candidates(results_dir))
     if modified_since is not None:
-        batch = [r for r in all_records if r.mtime >= modified_since]
+        selected = [
+            candidate for candidate in candidates if candidate[2] >= modified_since
+        ]
         label = f"since {datetime.fromtimestamp(modified_since):%Y-%m-%d %H:%M}"
         run_date_display = None
     else:
-        batch = [r for r in all_records if r.date == run_date_compact]
+        selected = [
+            candidate
+            for candidate in candidates
+            if candidate[1].group("date") == run_date_compact
+        ]
         run_date_display = _compact_to_display_date(run_date_compact)
         label = run_date_display
+
+    batch = [
+        record
+        for path, _, mtime in selected
+        if (record := load_record(path, mtime=mtime)) is not None
+    ]
 
     result = ScanResult(
         label=label,
@@ -308,7 +378,10 @@ def scan(
         modified_since=modified_since,
     )
     for rec in sorted(batch, key=lambda r: r.sort_key):
-        anomalies = detect_anomalies(rec, prior_verdict(rec, all_records))
+        anomalies = detect_anomalies(
+            rec,
+            _prior_verdict_from_candidates(rec, candidates),
+        )
         if anomalies:
             result.flagged.append((rec, anomalies))
     return result

@@ -240,6 +240,7 @@ class TestRetryCostAttribution:
                 "cost_usd": pytest.approx(
                     stats["agents"]["Fundamentals Analyst"]["cost_usd"]
                 ),
+                "elapsed_seconds": 0.0,
             }
         ]
 

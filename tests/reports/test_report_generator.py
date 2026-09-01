@@ -35,6 +35,82 @@ class TestRegulatoryScoreAuthority:
         assert _calculate_regulatory_score({}, raw) == 40.0
 
 
+def test_policy_changed_pm_output_is_labeled_as_pre_policy_transcript() -> None:
+    reporter = QuietModeReporter("TEST")
+    result = {
+        "final_trade_decision": (
+            "### PORTFOLIO MANAGER VERDICT: DO_NOT_INITIATE\n"
+            "### DECISION RATIONALE\n"
+            "This is a small, low-turnover starter buy at the current entry price.\n"
+        ),
+        "decision_policy": {
+            "original_verdict": "HOLD",
+            "final_verdict": "DO_NOT_INITIATE",
+            "verdict_changed": True,
+            "adjustments": [
+                {
+                    "from": "HOLD",
+                    "to": "DO_NOT_INITIATE",
+                    "reason": "growth_transition_hard_fail",
+                }
+            ],
+            "qualifications": [],
+        },
+    }
+
+    report = reporter.generate_report(result)
+
+    heading = "## Portfolio Manager Transcript (Pre-Policy Audit Appendix)"
+    canonical_summary = report[: report.index(heading)]
+    summary = report[report.index(heading) :]
+    assert "## Executive Summary" not in report
+    assert "starter buy" not in canonical_summary
+    assert "starter buy" in summary
+    assert "Model context" not in canonical_summary
+    assert summary.index("Canonical decision-policy result") < summary.index(
+        "PORTFOLIO MANAGER VERDICT"
+    )
+    assert "canonical verdict govern if prose conflicts" in summary
+
+
+def test_decision_evidence_render_failure_is_safely_logged(mocker) -> None:
+    reporter = QuietModeReporter("TEST")
+    mocker.patch(
+        "src.reporting.decision_evidence.render_decision_evidence_markdown",
+        side_effect=RuntimeError("api_key=sk-FAKE-API-KEY-SHOULD-NOT-LEAK"),
+    )
+    warning = mocker.patch("src.report_generator.logger.warning")
+
+    reporter.generate_report(
+        {"final_trade_decision": "### PORTFOLIO MANAGER VERDICT: HOLD\n"}
+    )
+
+    matching = [
+        call
+        for call in warning.call_args_list
+        if call.args == ("report_decision_evidence_section_failed",)
+    ]
+    assert len(matching) == 1
+    fields = matching[0].kwargs
+    assert fields["ticker"] == "TEST"
+    assert fields["error_type"] == "RuntimeError"
+    assert "sk-FAKE-API-KEY-SHOULD-NOT-LEAK" not in str(fields)
+
+
+def test_malformed_decision_policy_falls_back_to_normal_summary() -> None:
+    reporter = QuietModeReporter("TEST")
+
+    report = reporter.generate_report(
+        {
+            "final_trade_decision": "### PORTFOLIO MANAGER VERDICT: HOLD\n",
+            "decision_policy": "corrupt-wire-value",
+        }
+    )
+
+    assert "## Executive Summary" in report
+    assert "Pre-Policy Audit Appendix" not in report
+
+
 class TestNormalizeString:
     """Test _normalize_string() edge cases."""
 

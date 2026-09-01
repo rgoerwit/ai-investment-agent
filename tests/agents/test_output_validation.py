@@ -412,6 +412,32 @@ GUIDANCE_BRIDGE_STATUS: UNRESOLVED
     assert validation["ok"] is True
 
 
+def test_foreign_language_validation_rejects_protocol_residue_inside_report():
+    content = """
+### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: UNRESOLVED_AFTER_TARGETED_SEARCH
+SEARCHES_COMPLETED: results_package=COMPLETED; earnings_bridge=INSUFFICIENT_DATA
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+EARNINGS_BASELINE_STATUS: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: UNRESOLVED
+### --- END MANAGEMENT_GUIDANCE ---
+to=functions.search_foreign_sources
+"""
+
+    validation = validate_required_output(
+        "foreign_language_analyst", _with_latest_results(content)
+    )
+
+    assert validation["ok"] is False
+    assert validation["missing"] == ["protocol_residue_absent"]
+    assert should_fail_closed(
+        "foreign_language_analyst",
+        validation=validation,
+        truncated=False,
+        content=content,
+    )
+
+
 def test_foreign_language_validation_rejects_false_durable_divergence():
     content = """
 ### --- START MANAGEMENT_GUIDANCE ---

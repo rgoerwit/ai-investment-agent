@@ -132,6 +132,39 @@ class TestCalculateReturnTrends:
 
         # Trend should be IMPROVING (increasing NI with constant assets)
         assert result["profitability_trend"] == "IMPROVING"
+        assert result["roa_change_yoy"] == pytest.approx(0.111111)
+        assert result["roe_change_yoy"] == pytest.approx(0.111111)
+
+    def test_yoy_change_requires_adjacent_current_and_prior_periods(self, fetcher):
+        financials = pd.DataFrame(
+            {"2024": [100], "2023": [90], "2022": [80], "2021": [70]},
+            index=["Net Income"],
+        )
+        balance_sheet = pd.DataFrame(
+            {"2024": [1000], "2023": [0], "2022": [1000], "2021": [1000]},
+            index=["Total Assets"],
+        )
+
+        result = fetcher._calculate_return_trends(financials, balance_sheet, "TEST.T")
+
+        assert "roa_change_yoy" not in result
+        assert "roa_5y_avg" in result
+
+    def test_yoy_change_handles_zero_prior_return_without_nonfinite_value(
+        self, fetcher
+    ):
+        financials = pd.DataFrame(
+            {"2024": [100], "2023": [0], "2022": [80]},
+            index=["Net Income"],
+        )
+        balance_sheet = pd.DataFrame(
+            {"2024": [1000], "2023": [1000], "2022": [1000]},
+            index=["Total Assets"],
+        )
+
+        result = fetcher._calculate_return_trends(financials, balance_sheet, "TEST.T")
+
+        assert result["roa_change_yoy"] == 1.0
 
     def test_insufficient_years(self, fetcher):
         """Test that insufficient years returns empty dict."""

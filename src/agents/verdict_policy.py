@@ -43,8 +43,6 @@ ZONE_1_THRESHOLD = 2.0
 HEALTH_FLOOR_MIN = 65.0
 PE_FLOOR_MAX = 18.0
 GROWTH_FAIL_MAX = 50.0
-GROWTH_SCORE_TOTAL_POINTS = 6.0
-DATA_VACUUM_MIN_MISSING_GROWTH_POINTS = 2.0
 
 # REJECT canonicalizes to DO_NOT_INITIATE (src.pm_decision_parser), so the gate accepts
 # a "VERDICT: REJECT" block; the rewrite must therefore match it too, or the floor
@@ -433,6 +431,19 @@ def _has_hard_flag(red_flags: list[dict]) -> bool:
     )
 
 
+def _auto_reject_flag_types(red_flags: list[dict]) -> tuple[str, ...]:
+    """Return the canonical deterministic findings that require rejection."""
+    return tuple(
+        sorted(
+            {
+                str(flag.get("type") or "UNKNOWN")
+                for flag in red_flags
+                if str(flag.get("action") or "").upper() == "AUTO_REJECT"
+            }
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class GrowthGateAssessment:
     """One authoritative interpretation of the PM growth hard-fail contract."""
@@ -449,6 +460,25 @@ class VerdictPolicyViolation:
     rule: str
     reason: str
     required_verdict: str
+
+
+def render_growth_gate_context(decision_inputs: DecisionInputs) -> str:
+    """Render the code-owned growth decision for the PM without restating policy."""
+    assessment = assess_growth_gate(decision_inputs)
+    status = (
+        f"EXCEPTION_{assessment.exception.upper()}"
+        if assessment.exception
+        else "HARD_FAIL"
+        if assessment.hard_fail
+        else "PASS"
+    )
+    missing = ",".join(sorted(decision_inputs.missing_current_growth_fields)) or "NONE"
+    return (
+        "CODE-OWNED GROWTH GATE (binding; do not infer a different exception):\n"
+        f"- STATUS: {status}\n"
+        f"- REASON: {assessment.reason or 'NONE'}\n"
+        f"- MISSING_CURRENT_GROWTH_FIELDS: {missing}"
+    )
 
 
 def assess_growth_gate(decision_inputs: DecisionInputs) -> GrowthGateAssessment:
@@ -493,17 +523,7 @@ def assess_growth_gate(decision_inputs: DecisionInputs) -> GrowthGateAssessment:
             exception="marginal_turnaround",
         )
 
-    available = metrics.get("growth_score_available")
-    missing_points = (
-        GROWTH_SCORE_TOTAL_POINTS - float(available)
-        if isinstance(available, int | float)
-        else None
-    )
-    if (
-        pe <= PE_FLOOR_MAX
-        and missing_points is not None
-        and missing_points >= DATA_VACUUM_MIN_MISSING_GROWTH_POINTS
-    ):
+    if pe <= PE_FLOOR_MAX and decision_inputs.growth_data_vacuum:
         return GrowthGateAssessment(
             hard_fail=False,
             exception="data_vacuum",
@@ -523,6 +543,7 @@ def assess_verdict_policy(
     content_str: str,
     *,
     decision_inputs: DecisionInputs,
+    red_flags: list[dict] | None = None,
 ) -> VerdictPolicyViolation | None:
     """Return a deterministic policy violation for an impermissive verdict.
 
@@ -534,6 +555,13 @@ def assess_verdict_policy(
     verdict = pm_verdict_metadata_from_text(content_str).verdict
     if verdict not in {"BUY", "HOLD"}:
         return None
+    auto_reject_flags = _auto_reject_flag_types(red_flags or [])
+    if auto_reject_flags:
+        return VerdictPolicyViolation(
+            rule="pre_screening_auto_reject",
+            reason="auto_reject_flags=" + ",".join(auto_reject_flags),
+            required_verdict="DO_NOT_INITIATE",
+        )
     if decision_inputs.decision_metrics.get("m_and_a_status") == "ACTIVE_TENDER":
         return None
 

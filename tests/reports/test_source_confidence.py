@@ -259,6 +259,27 @@ def test_build_rows_auditor_ran_with_caveats_medium() -> None:
     assert "caveats" in source
 
 
+def test_unreconciled_auditor_resolution_cannot_render_clean_high_confidence() -> None:
+    state = {
+        "run_summary": {
+            "auditor_completed": True,
+            "auditor_successful": True,
+            "auditor_review_status": "COMPLETED",
+        },
+        "final_trade_decision": (
+            "AUDITOR_RESOLUTION:\n"
+            "- FINDING: anomaly not addressed\n"
+            "- DATA_CHECK: NOT_PROVIDED\n"
+            "- VERDICT: UNVERIFIABLE\n"
+        ),
+    }
+
+    rows = build_source_confidence_rows(state)
+    _, source, conf = _claim(rows, "Forensic check")
+    assert source == "Auditor findings unreconciled"
+    assert conf == "LOW"
+
+
 def test_build_rows_auditor_not_run() -> None:
     rows = build_source_confidence_rows({})
     _, source, conf = _claim(rows, "Forensic check")

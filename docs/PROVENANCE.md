@@ -1,6 +1,6 @@
 # Provenance: which layer owns which decision
 
-Last updated: 2026-08-22
+Last updated: 2026-08-28
 
 This file records how evidence moves through the pipeline and why the boundaries sit
 where they do. It explains the rationale and intended behaviour; the implementation
@@ -23,6 +23,7 @@ Which source may each deterministic consumer read?
 | Consumer | Authoritative source |
 |---|---|
 | Pre-screening red-flag engine | typed decision inputs, snapshot-backed |
+| Analysis outcome | merged pre-screening result and persisted red-flag ledger |
 | Verdict floor | typed decision inputs, snapshot-backed |
 | Review-candidate tagging | the PM decision text — deliberately |
 | Portfolio flag index | the persisted red-flag ledger |
@@ -32,6 +33,11 @@ Which source may each deterministic consumer read?
 The cross-layer test suite asserts *which source* each consumer reads when two layers
 disagree. Per-consumer unit tests structurally cannot catch this, because each layer
 is individually correct.
+
+`analysis_outcome` is a persisted projection, not writable graph authority. Runtime
+validity derives it from the merged gate primitives; persistence stores that same
+derived value only after validity has been built. A contradictory legacy projection
+fails publication instead of overriding the merged rejection.
 
 **A deterministic check may consume projected text only when that text is guaranteed
 to be a valid canonical projection.** Anything that changes a gate, a score, BUY
@@ -132,6 +138,74 @@ because re-deriving a business rule inside a wire codec couples them and they dr
 
 At the boundary, a decode failure maps to a distinct status and the artifact is
 non-publishable.
+
+## Verdict interventions are durable data
+
+The saved `decision_policy` record captures the model's original verdict, the final
+verdict, each deterministic verdict-changing adjustment, verdict-preserving
+qualifications, the growth-gate assessment, and BUY-blocking flags. Reports consume
+that record before showing model prose. When a verdict changed, the policy notice is
+canonical, pre-policy rationale is omitted from the memo, and the original narrative
+appears only in the explicitly labeled audit appendix.
+
+This avoids a second natural-language rewrite. Rewriting every sentence would add a
+new model-owned interpretation layer; retaining the original narrative without a
+structured intervention record allowed stale HOLD/BUY language to contradict the
+final header.
+
+## Gate inputs are code-owned where the data permits
+
+The growth rubric's `ROA_ROE_IMPROVING` point is calculated from adjacent annual
+statement periods. The model still supplies its complete rubric projection for
+coherence checking, but code replaces that one award with `1`, `0`, or `N/A` from the
+canonical ROA/ROE YoY claims. A disagreement is retained as a derivation conflict; it
+cannot change the decision score.
+
+The growth data-vacuum exception is a field-coverage rule, not score arithmetic. It is
+available only when a valid snapshot shows all four current growth observations absent:
+revenue and earnings at both TTM and MRQ horizons. Missing expansion, margin, or other
+rubric criteria cannot manufacture the exception.
+
+Liquidity follows the same authority pattern. The market tool emits a typed assessment
+using the thresholds in `src/thesis_constants.py`; the market node carries it through
+graph state and maps a measured hard fail to the existing `REJECT`/`AUTO_REJECT`
+contract; snapshot refresh records its status and USD turnover. Gate aggregation is
+reject-dominant, and the sync barrier waits on explicit financial-validator completion
+rather than treating a gate outcome as a completion sentinel. Retrieval or
+currency-resolution failure is recorded as uncertainty and does not become issuer
+risk. The verdict-policy boundary consumes the generic `AUTO_REJECT` contract after
+the Portfolio Manager runs, so a model-authored BUY or HOLD cannot weaken a
+deterministic rejection; no liquidity threshold is duplicated in the verdict layer.
+
+## Tool outcomes have declared scope
+
+`run_summary.tool_failures` is a deprecated compatibility field. It counts manual
+failure counters plus error-like `ToolMessage` objects still retained in capped graph
+state, so it is neither a run-wide execution-failure count nor a budget-block count.
+
+New artifacts carry `run_summary.tool_outcomes`, which keeps these scopes separate:
+
+- shared research-budget ledgers distinguish policy blocks, ordinary insufficient
+  results, evidence-acquisition failures, and execution errors;
+- the run-scoped evidence recorder reports the executed calls it observed; and
+- manual consultant-style counters remain separately identified.
+
+Unique tool-name lists are not event counters. A tool blocked twice appears once in
+`blocked_tools` and twice in `blocked_reasons`.
+
+## External evidence promotion is observable
+
+The source-required promotion path is deliberately strict: discovery result → selected
+document → inspected evidence → structured source-required field → bound canonical
+claim → decision eligibility → optional decision-fact reference. Search-result URLs
+cannot skip the document-inspection step.
+
+`run_summary.evidence_promotion` records the counts at the final four stages, and the
+report's Decision Evidence section renders only decision-trace claims. A link appears
+only when a decision-eligible claim is bound to an inspected evidence record. Zero
+links are stated explicitly rather than hidden behind a general bibliography. Quick
+screens also record that external-document extraction was disabled by design, so their
+expected zero-promotion result is not misclassified as a full-mode regression.
 
 ## What was deliberately not done
 

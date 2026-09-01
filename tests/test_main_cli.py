@@ -1849,6 +1849,17 @@ class TestSavedDiagnostics:
         result = {
             "analysis_validity": {"publishable": True},
             "consultant_tool_failures": 1,
+            "analysis_snapshot": {
+                "claims": {
+                    "claim:guidance": {
+                        "field": "GUIDANCE_REVENUE",
+                        "source_url": "https://issuer.example/results",
+                        "evidence_id": "evidence:1:abcdef",
+                        "decision_eligible": True,
+                    }
+                }
+            },
+            "decision_trace": {"decision_facts": ["claim:guidance"]},
             "artifact_statuses": {
                 "consultant_review": {
                     "complete": True,
@@ -1877,6 +1888,29 @@ class TestSavedDiagnostics:
         )
 
         assert summary["tool_failures"] == 3
+        assert summary["tool_outcomes"]["legacy_tool_failures"] == {
+            "value": 3,
+            "scope": "retained_tool_messages_plus_manual_counters",
+            "deprecated": True,
+        }
+        assert summary["tool_outcomes"]["manual_failure_counters"] == 1
+        assert summary["evidence_promotion"] == {
+            "schema_version": 1,
+            "external_document_extraction_enabled": True,
+            "source_required_claims": 1,
+            "source_urls_declared": 1,
+            "inspected_evidence_bound": 1,
+            "decision_eligible": 1,
+            "external_decision_facts": 1,
+            "by_field": [
+                {
+                    "field": "GUIDANCE_REVENUE",
+                    "source_url_declared": True,
+                    "inspected_evidence_bound": True,
+                    "decision_eligible": True,
+                }
+            ],
+        }
         assert summary["llm_provider"] == "multi-provider"
         assert summary["llm_providers_used"] == ["google", "openai"]
 

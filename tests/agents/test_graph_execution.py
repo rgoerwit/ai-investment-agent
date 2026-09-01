@@ -191,6 +191,7 @@ class TestSyncCheckRouter:
             "sentiment_report": "",  # Not complete
             "news_report": "done",
             "pre_screening_result": "PASS",
+            "financial_validation_complete": True,
         }
         config = {}
 
@@ -207,6 +208,7 @@ class TestSyncCheckRouter:
             "news_report": "done",
             "value_trap_report": "done",
             "pre_screening_result": "PASS",
+            "financial_validation_complete": True,
             "artifact_statuses": {
                 "market_report": {
                     "complete": True,
@@ -234,11 +236,69 @@ class TestSyncCheckRouter:
             "news_report": "done",
             "value_trap_report": "done",
             "pre_screening_result": "REJECT",
+            "financial_validation_complete": True,
         }
         config = {}
 
         result = sync_check_router(state, config, auditor_required=False)
         assert result == "PM Fast-Fail"
+
+    def test_sync_check_waits_for_validator_even_when_parallel_gate_rejects(self):
+        from src.graph import sync_check_router
+
+        state = {
+            "market_report": "done",
+            "sentiment_report": "done",
+            "news_report": "done",
+            "value_trap_report": "done",
+            "pre_screening_result": "REJECT",
+            "financial_validation_complete": False,
+        }
+
+        assert sync_check_router(state, {}, auditor_required=False) == "__end__"
+
+    def test_sync_check_routes_only_from_committed_pre_screening_state(self):
+        from src.graph import sync_check_router
+        from src.liquidity_assessment import LiquidityAssessment
+
+        state = {
+            "market_report": "done",
+            "sentiment_report": "done",
+            "news_report": "done",
+            "value_trap_report": "done",
+            "pre_screening_result": "PASS",
+            "financial_validation_complete": True,
+            "liquidity_assessment": LiquidityAssessment(
+                status="FAIL_INSUFFICIENT_LIQUIDITY",
+                average_daily_turnover_usd=86_436,
+            ).to_dict(),
+        }
+
+        result = sync_check_router(state, {}, auditor_required=False)
+
+        assert result == ["Bull Researcher R1", "Bear Researcher R1"]
+
+    def test_sync_check_does_not_treat_liquidity_error_as_issuer_hard_fail(self):
+        from src.graph import sync_check_router
+        from src.liquidity_assessment import LiquidityAssessment
+
+        state = {
+            "market_report": "done",
+            "sentiment_report": "done",
+            "news_report": "done",
+            "value_trap_report": "done",
+            "pre_screening_result": "PASS",
+            "financial_validation_complete": True,
+            "liquidity_assessment": LiquidityAssessment(
+                status="ERROR",
+                reason="DNS_FAILURE",
+            ).to_dict(),
+        }
+
+        result = sync_check_router(state, {}, auditor_required=False)
+
+        assert isinstance(result, list)
+        assert result == ["Bull Researcher R1", "Bear Researcher R1"]
 
     def test_sync_check_returns_list_for_parallel_r1(self):
         """Test router returns list for parallel Bull/Bear R1 on PASS."""
@@ -250,6 +310,7 @@ class TestSyncCheckRouter:
             "news_report": "done",
             "value_trap_report": "done",
             "pre_screening_result": "PASS",
+            "financial_validation_complete": True,
         }
         config = {}
 
@@ -292,6 +353,7 @@ class TestAuditorIntegration:
             "news_report": "done",
             "value_trap_report": "done",
             "pre_screening_result": "PASS",
+            "financial_validation_complete": True,
             "auditor_report": "",  # Empty = not done
         }
 
@@ -308,6 +370,7 @@ class TestAuditorIntegration:
             "news_report": "done",
             "value_trap_report": "done",
             "pre_screening_result": "PASS",
+            "financial_validation_complete": True,
             "auditor_report": "",
             "artifact_statuses": {
                 "auditor_report": {
@@ -333,6 +396,7 @@ class TestAuditorIntegration:
             "news_report": "done",
             "value_trap_report": "done",
             "pre_screening_result": "PASS",
+            "financial_validation_complete": True,
             "auditor_report": "Forensic audit complete",
         }
 
@@ -886,8 +950,8 @@ class TestQuickModeGraphContracts:
             if agent_key != "fundamentals_analyst":
                 assert kwargs["allow_retry"] is False
                 assert kwargs["retry_llm"] is None
-        assert len(pm_calls) == 2
-        assert all(kwargs["recovery_llm"] is not None for kwargs in pm_calls)
+        assert len(pm_calls) == 1
+        assert pm_calls[0]["recovery_llm"] is not None
 
     def test_legacy_pre_gemini_3_floor_keeps_retry_disabled(self, monkeypatch):
         """The compatibility bridge must preserve the old retry eligibility gate."""
@@ -1270,7 +1334,7 @@ class TestStrictGraphWiring:
         mock_pm,
         mock_validator,
     ):
-        """strict_mode=True is forwarded to create_portfolio_manager_node (both instances)."""
+        """strict_mode=True reaches the sole discretionary PM factory."""
         from src.graph import create_trading_graph
 
         for m in (
@@ -1295,10 +1359,10 @@ class TestStrictGraphWiring:
         mock_toolkit.get_value_trap_tools.return_value = []
 
         create_trading_graph(strict_mode=True, enable_memory=False)
-        # PM factory is called twice (main PM + fast-fail PM)
+        # The rejection path is deterministic and does not construct another PM.
         calls = mock_pm.call_args_list
-        assert len(calls) == 2
-        assert all(call.kwargs.get("strict_mode") is True for call in calls)
+        assert len(calls) == 1
+        assert calls[0].kwargs.get("strict_mode") is True
 
     @patch("src.graph.components.create_financial_health_validator_node")
     @patch("src.graph.components.create_portfolio_manager_node")
@@ -1354,9 +1418,10 @@ class TestStrictGraphWiring:
 class TestPostResearchSync:
     """Regression coverage for the post-research fan-in before Trader."""
 
+    @pytest.mark.parametrize("liquidity_reject", [False, True])
     @pytest.mark.asyncio
     async def test_trader_tail_runs_once_after_valuation_and_consultant_complete(
-        self, monkeypatch
+        self, monkeypatch, liquidity_reject
     ):
         import src.graph.components as components
         from src.runtime_diagnostics import success_artifact
@@ -1371,11 +1436,39 @@ class TestPostResearchSync:
             return _node
 
         def analyst_node(_llm, _agent_key, _tools, output_field, **_kwargs):
-            return artifact_node(output_field, f"{output_field} done")
+            node = artifact_node(output_field, f"{output_field} done")
+            if output_field != "market_report" or not liquidity_reject:
+                return node
+
+            async def _illiquid_market(state, config):
+                from src.liquidity_assessment import (
+                    LiquidityAssessment,
+                    liquidity_fast_fail_update,
+                )
+
+                result = await node(state, config)
+                assessment = LiquidityAssessment(
+                    status="FAIL_INSUFFICIENT_LIQUIDITY",
+                    average_daily_turnover_usd=86_436,
+                )
+                result["liquidity_assessment"] = assessment.to_dict()
+                result.update(liquidity_fast_fail_update(assessment.to_dict()))
+                return result
+
+            return _illiquid_market
 
         async def validator_node(state, config):
             calls.append("validator")
-            return {"pre_screening_result": "PASS"}
+            return {
+                "pre_screening_result": "PASS",
+                "analysis_outcome": {
+                    "schema_version": 1,
+                    "eligibility": "QUALIFIES",
+                    "run_status": "COMPLETED",
+                    "reason_codes": [],
+                },
+                "financial_validation_complete": True,
+            }
 
         def researcher_node(_llm, _memory, agent_key, round_num=1):
             prefix = "bull" if agent_key == "bull_researcher" else "bear"
@@ -1516,12 +1609,23 @@ class TestPostResearchSync:
         graph = create_trading_graph(enable_memory=False, ticker="TEST")
         result = await graph.ainvoke({"company_of_interest": "TEST"})
 
-        assert result["final_trade_decision"] == "pm done"
-        assert calls.count("trader_investment_plan") == 1
-        assert calls.count("risky_analyst") == 1
-        assert calls.count("safe_analyst") == 1
-        assert calls.count("neutral_analyst") == 1
-        assert calls.count("final_trade_decision") == 1
+        if liquidity_reject:
+            assert "VERDICT: DO NOT INITIATE" in result["final_trade_decision"]
+            assert result["decision_policy"]["source"] == "deterministic_screen"
+            assert calls.count("final_trade_decision") == 0
+            assert result["pre_screening_result"] == "REJECT"
+            assert calls.count("trader_investment_plan") == 0
+            assert calls.count("research_manager") == 0
+            assert calls.count("risky_analyst") == 0
+            assert calls.count("safe_analyst") == 0
+            assert calls.count("neutral_analyst") == 0
+        else:
+            assert result["final_trade_decision"] == "pm done"
+            assert calls.count("final_trade_decision") == 1
+            assert calls.count("trader_investment_plan") == 1
+            assert calls.count("risky_analyst") == 1
+            assert calls.count("safe_analyst") == 1
+            assert calls.count("neutral_analyst") == 1
 
 
 if __name__ == "__main__":

@@ -1054,6 +1054,23 @@ def compute_trend_regression(values: list[float], mean_val: float) -> str:
     return "STABLE"
 
 
+def _relative_return_change(current: float, prior: float) -> float:
+    """Return a signed relative change without dividing by zero.
+
+    The growth rubric asks whether ROA or ROE improved by more than 30% YoY,
+    so the code-owned metric is a ratio (``0.30`` means 30%).  Crossing zero
+    is treated as a full improvement/deterioration rather than becoming
+    undefined; unchanged zero remains flat.
+    """
+    if prior == 0:
+        if current > 0:
+            return 1.0
+        if current < 0:
+            return -1.0
+        return 0.0
+    return (current - prior) / abs(prior)
+
+
 def calculate_return_trends(
     financials: pd.DataFrame, balance_sheet: pd.DataFrame, symbol: str
 ) -> dict[str, Any]:
@@ -1071,6 +1088,7 @@ def calculate_return_trends(
     try:
         if "Net Income" in financials.index and "Total Assets" in balance_sheet.index:
             roas: list[float] = []
+            roa_by_period_index: dict[int, float] = {}
             for i in range(years_available):
                 try:
                     ni = financials.loc["Net Income"].iloc[i]
@@ -1079,8 +1097,16 @@ def calculate_return_trends(
                         roa = float(ni) / float(assets)
                         if -0.50 < roa < 0.50:
                             roas.append(roa)
+                            roa_by_period_index[i] = roa
                 except (ValueError, TypeError, IndexError):
                     continue
+            if 0 in roa_by_period_index and 1 in roa_by_period_index:
+                signals["roa_change_yoy"] = round(
+                    _relative_return_change(
+                        roa_by_period_index[0], roa_by_period_index[1]
+                    ),
+                    6,
+                )
             if len(roas) >= 3:
                 avg_roa = statistics.mean(roas)
                 signals["roa_5y_avg"] = round(avg_roa * 100, 2)
@@ -1112,6 +1138,7 @@ def calculate_return_trends(
         )
         if "Net Income" in financials.index and equity_key:
             roes: list[float] = []
+            roe_by_period_index: dict[int, float] = {}
             for i in range(years_available):
                 try:
                     ni = financials.loc["Net Income"].iloc[i]
@@ -1120,8 +1147,16 @@ def calculate_return_trends(
                         roe = float(ni) / float(equity)
                         if -1.0 < roe < 1.0:
                             roes.append(roe)
+                            roe_by_period_index[i] = roe
                 except (ValueError, TypeError, IndexError):
                     continue
+            if 0 in roe_by_period_index and 1 in roe_by_period_index:
+                signals["roe_change_yoy"] = round(
+                    _relative_return_change(
+                        roe_by_period_index[0], roe_by_period_index[1]
+                    ),
+                    6,
+                )
             if len(roes) >= 3:
                 signals["roe_5y_avg"] = round(statistics.mean(roes) * 100, 2)
                 signals["_roe_5y_years"] = len(roes)
