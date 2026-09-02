@@ -9,6 +9,7 @@
 #
 # Options:
 #   --force             Re-run even if output files exist (disables resumability)
+#   --max-age-days N    Reuse same-mode reports up to N days old (default: 60; 0 = exact run date)
 #   --skip-scrape FILE  Use existing ticker list instead of running find_gems.py
 #   --include-us        Pass --include-us to find_gems.py
 #   --cooldown N        Override COOLDOWN_SECONDS (default: 10)
@@ -30,7 +31,8 @@ export GRPC_VERBOSITY=ERROR
 export GRPC_TRACE=""
 
 # --- Configuration ---
-DATE=$(date +%Y-%m-%d)
+WALL_CLOCK_DATE=$(date +%Y-%m-%d)
+DATE="$WALL_CLOCK_DATE"
 SCRATCH="scratch"
 TICKER_LIST="${SCRATCH}/gems_${DATE}.txt"
 BUY_LIST="${SCRATCH}/buys_${DATE}.txt"
@@ -44,6 +46,9 @@ STAGE2_TICKER_TIMEOUT_SECONDS="${STAGE2_TICKER_TIMEOUT_SECONDS:-2400}"
 # Stable id for this pipeline invocation, stamped into the durable failures log.
 PIPELINE_RUN_ID="${DATE}-$$"
 FORCE=false
+MAX_REPORT_AGE_DAYS=60
+REPORT_WINDOW_START=""
+REPORT_WINDOW_END=""
 SKIP_SCRAPE=""
 INCLUDE_US=""
 START_STAGE=0
@@ -151,6 +156,43 @@ report_is_complete() {
     local verdict
     verdict=$(extract_report_verdict "$file")
     [[ -n "$verdict" && "$verdict" != "ANALYSIS FAILED" ]]
+}
+
+# Return the newest complete report for a ticker in the requested mode within
+# the active freshness window. Same-mode reuse is deliberate: Stage 1 builds a
+# like-for-like quick screening history, so a full report does not satisfy it.
+find_recent_report() {
+    local ticker="$1" mode="$2"
+    local dash prefix suffix candidate report_date i
+    local candidates=()
+
+    dash=$(ticker_to_dash "$ticker")
+    prefix="${SCRATCH}/README-${dash}-"
+    case "$mode" in
+        quick) suffix="_quick.md" ;;
+        full) suffix=".md" ;;
+        *) return 2 ;;
+    esac
+
+    # Bash 3.2 leaves an unmatched glob as a literal array element. Keep the
+    # guard local instead of changing global nullglob behavior for the pipeline.
+    candidates=("${prefix}"????-??-??"${suffix}")
+    for ((i=${#candidates[@]} - 1; i >= 0; i--)); do
+        candidate=${candidates[$i]}
+        [[ -f "$candidate" ]] || continue
+
+        report_date=${candidate#"$prefix"}
+        report_date=${report_date%"$suffix"}
+        [[ "$report_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue
+        [[ "$report_date" > "$REPORT_WINDOW_END" ]] && continue
+        [[ "$report_date" < "$REPORT_WINDOW_START" ]] && break
+
+        if report_is_complete "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Append a durable, dated record of a ticker failure. The per-ticker LOGFILE is
@@ -386,6 +428,13 @@ while [[ $# -gt 0 ]]; do
         --force)
             FORCE=true
             shift ;;
+        --max-age-days)
+            if [[ $# -lt 2 ]]; then
+                fail "--max-age-days requires a non-negative integer"
+                exit 1
+            fi
+            MAX_REPORT_AGE_DAYS="$2"
+            shift 2 ;;
         --skip-scrape)
             SKIP_SCRAPE="$2"
             shift 2 ;;
@@ -424,8 +473,10 @@ STAGES:
 
 OPTIONS:
   --force             Re-run even if output files exist (disables resumability)
+  --max-age-days N    Reuse same-mode reports up to N days old (default: 60).
+                      Use 0 for exact run-date matching (legacy behavior).
   --skip-scrape FILE  Use existing ticker list instead of running find_gems.py
-  --include-us        Include US exchanges in scrape phase
+  --include-us        Include US exchanges and US-domiciled issuers in screening
   --cooldown N        Seconds between ticker analyses (default: 10)
   --stage N           Start from stage N (0, 1, or 2)
   --run-date DATE     Force the pipeline/output date (YYYY-MM-DD) for cross-day resume
@@ -481,6 +532,11 @@ HELPEOF
     esac
 done
 
+if ! [[ "$MAX_REPORT_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+    fail "--max-age-days must be a non-negative integer"
+    exit 1
+fi
+
 # Resolve TICKER_LIST from --skip-scrape immediately (not deferred to stage 0 block)
 # This ensures --stage 1 --skip-scrape FILE works without going through stage 0.
 if [[ -n "$SKIP_SCRAPE" ]]; then
@@ -503,6 +559,26 @@ if [[ -n "$SKIP_SCRAPE" && -z "$RUN_DATE_OVERRIDE" && ! $BUY_LIST_EXPLICIT && $S
     DETECTED_STAGE1_DATE=$(detect_stage1_resume_date "$TICKER_LIST" "$DATE" "$(date +%Y-%m-%d)")
     if [[ -n "$DETECTED_STAGE1_DATE" && "$DETECTED_STAGE1_DATE" != "$DATE" ]]; then
         apply_run_date "existing quick outputs" "$DETECTED_STAGE1_DATE"
+    fi
+fi
+
+# Freshness is wall-clock based, independent of the logical output/resume date.
+# The zero-day override intentionally preserves the pre-window exact-date policy.
+if [[ "$MAX_REPORT_AGE_DAYS" -eq 0 ]]; then
+    REPORT_WINDOW_START="$DATE"
+    REPORT_WINDOW_END="$DATE"
+else
+    REPORT_WINDOW_END="$WALL_CLOCK_DATE"
+    if REPORT_WINDOW_START=$(date -j -v-"${MAX_REPORT_AGE_DAYS}"d \
+        -f '%Y-%m-%d' "$REPORT_WINDOW_END" '+%Y-%m-%d' 2>/dev/null); then
+        :
+    elif REPORT_WINDOW_START=$(date -d \
+        "${REPORT_WINDOW_END} - ${MAX_REPORT_AGE_DAYS} days" \
+        '+%Y-%m-%d' 2>/dev/null); then
+        :
+    else
+        fail "Unable to compute the report freshness cutoff; refusing to risk duplicate paid analyses."
+        exit 1
     fi
 fi
 
@@ -562,14 +638,22 @@ if [[ $START_STAGE -le 0 ]]; then
     # --- Confirmation before Stage 1 ---
     # Count how many would actually be processed (not skipped by resumability)
     STAGE1_TODO=0
+    STAGE1_REUSED_CURRENT=0
+    STAGE1_REUSED_OLDER=0
     while IFS= read -r ticker || [[ -n "$ticker" ]]; do
         [[ -z "$ticker" || "$ticker" =~ ^[[:space:]]*# ]] && continue
         ticker=$(echo "$ticker" | xargs)
         [[ -z "$ticker" ]] && continue
-        DASH=$(echo "$ticker" | tr '._' '-')
-        OUTFILE="${SCRATCH}/README-${DASH}-${DATE}_quick.md"
-        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! report_is_complete "$OUTFILE"; then
+        FOUND=""
+        if ! $FORCE; then
+            FOUND=$(find_recent_report "$ticker" quick) || FOUND=""
+        fi
+        if $FORCE || [[ -z "$FOUND" ]]; then
             STAGE1_TODO=$((STAGE1_TODO + 1))
+        elif [[ "$FOUND" == *-"${REPORT_WINDOW_END}"_quick.md ]]; then
+            STAGE1_REUSED_CURRENT=$((STAGE1_REUSED_CURRENT + 1))
+        else
+            STAGE1_REUSED_OLDER=$((STAGE1_REUSED_OLDER + 1))
         fi
     done < "$TICKER_LIST"
 
@@ -580,7 +664,10 @@ if [[ $START_STAGE -le 0 ]]; then
     # matching reports than the resume date we settled on, the operator
     # probably handed us the wrong saved file. Surface a hint before they
     # confirm the run — silent otherwise.
-    BETTER_DATE_HINT=$(suggest_better_resume_date "$TICKER_LIST" "$DATE" "$STAGE1_SKIP")
+    BETTER_DATE_HINT=""
+    if [[ "$MAX_REPORT_AGE_DAYS" -eq 0 ]]; then
+        BETTER_DATE_HINT=$(suggest_better_resume_date "$TICKER_LIST" "$DATE" "$STAGE1_SKIP")
+    fi
     if [[ -n "$BETTER_DATE_HINT" ]]; then
         BETTER_DATE=${BETTER_DATE_HINT%% *}
         BETTER_COUNT=${BETTER_DATE_HINT##* }
@@ -594,8 +681,9 @@ if [[ $START_STAGE -le 0 ]]; then
     echo -e "${CYAN}━━━ Stage 1 Preview ━━━━━━━━━━━━━━━━━━━━${NC}"
     info "Tickers to analyze:  $STAGE1_TODO (of $TICKER_COUNT candidates)"
     if [[ $STAGE1_SKIP -gt 0 ]]; then
-        info "Already completed:   $STAGE1_SKIP (will be skipped)"
+        info "Reusable reports:    $STAGE1_SKIP (${STAGE1_REUSED_CURRENT} dated ${REPORT_WINDOW_END}, ${STAGE1_REUSED_OLDER} older)"
     fi
+    info "Stage 2 workload:    calculated after Stage 1 verdict extraction"
     info "Est. time:           ~$(format_duration $STAGE1_SECS) (${COOLDOWN}s cooldown)"
     info "Mode:                --quick --brief --no-memory"
     info "Per-ticker watchdog: ${STAGE1_TICKER_TIMEOUT_SECONDS}s (SIGTERM if exceeded)"
@@ -630,14 +718,22 @@ if [[ $START_STAGE -le 1 ]]; then
         TICKER_COUNT=$(grep -c '^[[:space:]]*[^[:space:]#]' "$TICKER_LIST" || true)
 
         STAGE1_TODO=0
+        STAGE1_REUSED_CURRENT=0
+        STAGE1_REUSED_OLDER=0
         while IFS= read -r ticker || [[ -n "$ticker" ]]; do
             [[ -z "$ticker" || "$ticker" =~ ^[[:space:]]*# ]] && continue
             ticker=$(echo "$ticker" | xargs)
             [[ -z "$ticker" ]] && continue
-            DASH=$(echo "$ticker" | tr '._' '-')
-            OUTFILE="${SCRATCH}/README-${DASH}-${DATE}_quick.md"
-            if $FORCE || ! [[ -f "$OUTFILE" ]] || ! report_is_complete "$OUTFILE"; then
+            FOUND=""
+            if ! $FORCE; then
+                FOUND=$(find_recent_report "$ticker" quick) || FOUND=""
+            fi
+            if $FORCE || [[ -z "$FOUND" ]]; then
                 STAGE1_TODO=$((STAGE1_TODO + 1))
+            elif [[ "$FOUND" == *-"${REPORT_WINDOW_END}"_quick.md ]]; then
+                STAGE1_REUSED_CURRENT=$((STAGE1_REUSED_CURRENT + 1))
+            else
+                STAGE1_REUSED_OLDER=$((STAGE1_REUSED_OLDER + 1))
             fi
         done < "$TICKER_LIST"
 
@@ -648,8 +744,9 @@ if [[ $START_STAGE -le 1 ]]; then
         echo -e "${CYAN}━━━ Stage 1 Preview ━━━━━━━━━━━━━━━━━━━━${NC}"
         info "Tickers to analyze:  $STAGE1_TODO (of $TICKER_COUNT candidates)"
         if [[ $STAGE1_SKIP -gt 0 ]]; then
-            info "Already completed:   $STAGE1_SKIP (will be skipped)"
+            info "Reusable reports:    $STAGE1_SKIP (${STAGE1_REUSED_CURRENT} dated ${REPORT_WINDOW_END}, ${STAGE1_REUSED_OLDER} older)"
         fi
+        info "Stage 2 workload:    calculated after Stage 1 verdict extraction"
         info "Est. time:           ~$(format_duration $STAGE1_SECS) (${COOLDOWN}s cooldown)"
         info "Mode:                --quick --brief --no-memory"
         info "Per-ticker watchdog: ${STAGE1_TICKER_TIMEOUT_SECONDS}s (SIGTERM if exceeded)"
@@ -684,10 +781,14 @@ if [[ $START_STAGE -le 1 ]]; then
         LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}_quick.txt"
         DETAIL_LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}_quick-${PIPELINE_RUN_ID}.txt"
 
-        # Resumability: skip if output already has a verdict line
-        if ! $FORCE && [[ -f "$OUTFILE" ]] && report_is_complete "$OUTFILE"; then
+        # Resumability: reuse the newest complete same-mode report in the window.
+        FOUND=""
+        if ! $FORCE; then
+            FOUND=$(find_recent_report "$ticker" quick) || FOUND=""
+        fi
+        if [[ -n "$FOUND" ]]; then
             STAGE1_SKIPPED=$((STAGE1_SKIPPED + 1))
-            info "SKIP $ticker (already done)"
+            info "SKIP $ticker (reusing ${FOUND##*/})"
             continue
         fi
 
@@ -756,11 +857,10 @@ if [[ $START_STAGE -le 1 ]]; then
         ticker=$(echo "$ticker" | xargs)
         [[ -z "$ticker" ]] && continue
 
-        DASH=$(echo "$ticker" | tr '._' '-')
-        OUTFILE="${SCRATCH}/README-${DASH}-${DATE}_quick.md"
+        OUTFILE=$(find_recent_report "$ticker" quick) || OUTFILE=""
 
-        if [[ ! -f "$OUTFILE" ]]; then
-            warn "MISSING: $ticker (no output file)"
+        if [[ -z "$OUTFILE" ]]; then
+            warn "MISSING: $ticker (no complete quick report within ${MAX_REPORT_AGE_DAYS} days)"
             OTHER_COUNT=$((OTHER_COUNT + 1))
             continue
         fi
@@ -830,14 +930,22 @@ if [[ $START_STAGE -le 2 ]]; then
 
     # Count how many would actually be processed
     STAGE2_TODO=0
+    STAGE2_REUSED_CURRENT=0
+    STAGE2_REUSED_OLDER=0
     while IFS= read -r ticker || [[ -n "$ticker" ]]; do
         [[ -z "$ticker" || "$ticker" =~ ^[[:space:]]*# ]] && continue
         ticker=$(echo "$ticker" | xargs)
         [[ -z "$ticker" ]] && continue
-        DASH=$(echo "$ticker" | tr '._' '-')
-        OUTFILE="${SCRATCH}/README-${DASH}-${DATE}.md"
-        if $FORCE || ! [[ -f "$OUTFILE" ]] || ! report_is_complete "$OUTFILE"; then
+        FOUND=""
+        if ! $FORCE; then
+            FOUND=$(find_recent_report "$ticker" full) || FOUND=""
+        fi
+        if $FORCE || [[ -z "$FOUND" ]]; then
             STAGE2_TODO=$((STAGE2_TODO + 1))
+        elif [[ "$FOUND" == *-"${REPORT_WINDOW_END}".md ]]; then
+            STAGE2_REUSED_CURRENT=$((STAGE2_REUSED_CURRENT + 1))
+        else
+            STAGE2_REUSED_OLDER=$((STAGE2_REUSED_OLDER + 1))
         fi
     done < "$BUY_LIST"
 
@@ -848,7 +956,7 @@ if [[ $START_STAGE -le 2 ]]; then
     echo -e "${CYAN}━━━ Stage 2 Preview ━━━━━━━━━━━━━━━━━━━━${NC}"
     info "BUY tickers to analyze: $STAGE2_TODO (of $BUY_TOTAL)"
     if [[ $STAGE2_SKIP -gt 0 ]]; then
-        info "Already completed:     $STAGE2_SKIP (will be skipped)"
+        info "Reusable reports:      $STAGE2_SKIP (${STAGE2_REUSED_CURRENT} dated ${REPORT_WINDOW_END}, ${STAGE2_REUSED_OLDER} older)"
     fi
     info "Est. time:             ~$(format_duration $STAGE2_SECS) (${COOLDOWN}s cooldown)"
     info "Mode:                  Full analysis with charts"
@@ -881,10 +989,14 @@ if [[ $START_STAGE -le 2 ]]; then
         LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}.txt"
         DETAIL_LOGFILE="${SCRATCH}/${DASH}-LOG-${DATE}-${PIPELINE_RUN_ID}.txt"
 
-        # Resumability: skip if full analysis output already has a verdict
-        if ! $FORCE && [[ -f "$OUTFILE" ]] && report_is_complete "$OUTFILE"; then
+        # Resumability: reuse the newest complete full report in the window.
+        FOUND=""
+        if ! $FORCE; then
+            FOUND=$(find_recent_report "$ticker" full) || FOUND=""
+        fi
+        if [[ -n "$FOUND" ]]; then
             STAGE2_SKIPPED=$((STAGE2_SKIPPED + 1))
-            info "SKIP $ticker (full analysis exists)"
+            info "SKIP $ticker (reusing ${FOUND##*/})"
             continue
         fi
 

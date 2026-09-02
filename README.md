@@ -407,12 +407,12 @@ Outputs land in `scratch/`. In practice you will see:
 Practical notes:
 
 - Stage 1 is a broad quick screen: `--quick --no-charts --brief --no-memory`, not strict mode.
-- The upstream `find_gems.py` filter starts conservative, with a modest higher-P/E band allowed when profitability, leverage, cash-flow quality, and coverage are stronger.
+- The upstream `find_gems.py` filter starts conservative, with a modest higher-P/E band allowed when profitability, leverage, cash-flow quality, and coverage are stronger. By default it excludes both US venues and US-domiciled secondary listings, retains the more liquid listing for exact duplicate issuer names, and writes candidates in a stable mixed order; `--include-us` restores US issuers and venues.
 - Paid-tier cost for a full pipeline pass with all optional agents enabled is roughly **$0.12 × Stage 1 basket size + $0.22 × Stage 2 BUYs** — e.g., a ~1,000-ticker basket with a ~14% Stage-1 BUY rate lands near **$150**. Free-tier or optional-agent-off runs are substantially cheaper.
 
 Resumption is built in:
 
-- Re-running the same command family skips completed outputs.
+- Re-running the same command family reuses complete same-mode reports from the last 60 days: quick reports satisfy Stage 1 and full reports satisfy Stage 2. Use `--max-age-days 0` for exact run-date matching or `--force` to rerun everything.
 - If Stage 2 was interrupted and you need to resume from an earlier day, point `--buys-file` at the original `scratch/buys_YYYY-MM-DD.txt`.
 - If you already have your own ticker list, skip scraping and feed it directly to the pipeline.
 

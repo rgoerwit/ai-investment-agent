@@ -16,6 +16,7 @@ Both original scripts remain untouched for backward compatibility.
 """
 
 import argparse
+import hashlib
 import io
 import json
 import logging
@@ -113,6 +114,7 @@ PAD_CLEAN_RULE_WIDTHS = {
 ENRICHED_COLUMNS = [
     "YF_Ticker",
     "Company_YF",
+    "Issuer_Country",
     "P/E",
     "Forward_PE",
     "Debt_to_Equity",
@@ -754,6 +756,7 @@ def _process_row(row, *, fx_rates=None, min_mcap=None, min_volume=None, debug=Fa
 
             # --- Populate standard fields ---
             row["Company_YF"] = info.get("longName") or info.get("shortName")
+            row["Issuer_Country"] = info.get("country")
             pe = info.get("trailingPE")
             if pe is None:
                 pe = _compute_market_cap_income_pe(info)
@@ -901,6 +904,28 @@ def _handle_enriched_row_result(
     all_enriched.append(data)
     if _passes_filters(data, criteria=criteria, debug=debug):
         passing.append(data)
+
+
+def _exclude_us_issuer_rows(
+    passing: list[dict], *, include_us: bool
+) -> tuple[list[dict], int, int]:
+    """Apply issuer-domicile policy after enrichment without extra data calls."""
+    kept: list[dict] = []
+    removed = 0
+    unknown = 0
+
+    for row in passing:
+        raw_country = row.get("Issuer_Country")
+        country = str(raw_country).strip().casefold() if raw_country is not None else ""
+        if not country:
+            unknown += 1
+        if not include_us and country in {"united states", "united states of america"}:
+            row["_reject_reason"] = "us_issuer"
+            removed += 1
+            continue
+        kept.append(row)
+
+    return kept, removed, unknown
 
 
 def _log_filter_progress(
@@ -1368,6 +1393,7 @@ def fetch_and_filter(
     min_volume: float = DEFAULT_MIN_VOLUME,
     max_coverage: int = DEFAULT_MAX_COVERAGE,
     ocf_waiver: bool = True,
+    include_us: bool = False,
     workers: int = 4,
     debug: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -1407,6 +1433,23 @@ def fetch_and_filter(
         workers=workers,
         debug=debug,
     )
+
+    passing, us_issuers_removed, issuer_country_unknown = _exclude_us_issuer_rows(
+        passing,
+        include_us=include_us,
+    )
+    if include_us:
+        print(
+            "Issuer domicile filter disabled (--include-us); "
+            f"{issuer_country_unknown} passing rows have unknown domicile",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"Issuer domicile filter: removed {us_issuers_removed} US-domiciled "
+            f"rows; retained {issuer_country_unknown} with unknown domicile",
+            file=sys.stderr,
+        )
 
     passing_df = (
         pd.DataFrame(passing) if passing else pd.DataFrame(columns=ENRICHED_COLUMNS)
@@ -1461,6 +1504,54 @@ def _log_per_exchange_pass_rates(enriched_df, passing_df) -> None:
 # ============================================================
 
 
+def _select_issuer_listings(
+    filtered_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, int, int]:
+    """Select one liquid listing per exact, non-empty issuer name."""
+    if filtered_df.empty or "Company_YF" not in filtered_df.columns:
+        return filtered_df.copy(), 0, 0
+
+    grouped_positions: dict[str, list[int]] = {}
+    ungrouped_positions: list[int] = []
+    for position, raw_name in enumerate(filtered_df["Company_YF"]):
+        if raw_name is None or pd.isna(raw_name):
+            ungrouped_positions.append(position)
+            continue
+        issuer_name = str(raw_name).strip()
+        if not issuer_name:
+            ungrouped_positions.append(position)
+            continue
+        grouped_positions.setdefault(issuer_name, []).append(position)
+
+    def listing_rank(position: int) -> tuple[float, str]:
+        row = filtered_df.iloc[position]
+        turnover = _safe_float(row.get("Daily_Turnover_USD"))
+        if turnover is None or not math.isfinite(turnover):
+            turnover = float("-inf")
+        return -turnover, str(row.get("YF_Ticker") or "")
+
+    selected_positions = list(ungrouped_positions)
+    duplicate_groups = 0
+    discarded = 0
+    for positions in grouped_positions.values():
+        if len(positions) > 1:
+            duplicate_groups += 1
+            discarded += len(positions) - 1
+        selected_positions.append(min(positions, key=listing_rank))
+
+    selected_positions.sort()
+    return (
+        filtered_df.iloc[selected_positions].copy(),
+        duplicate_groups,
+        discarded,
+    )
+
+
+def _candidate_order_key(ticker: str) -> bytes:
+    """Stable pseudo-random order that survives candidate-set membership changes."""
+    return hashlib.sha256(f"stage1-v1:{ticker}".encode()).digest()
+
+
 def write_outputs(
     filtered_df: pd.DataFrame, output_path: str, details_path: str | None = None
 ):
@@ -1468,10 +1559,18 @@ def write_outputs(
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    tickers = filtered_df["YF_Ticker"].dropna().unique()
+    selected_df, duplicate_groups, discarded = _select_issuer_listings(filtered_df)
+    if discarded:
+        print(
+            f"Collapsed {discarded} secondary listings across "
+            f"{duplicate_groups} exact issuer groups",
+            file=sys.stderr,
+        )
+
+    tickers = selected_df["YF_Ticker"].dropna().unique()
 
     with open(out, "w") as f:
-        for t in sorted(tickers):
+        for t in sorted(tickers, key=_candidate_order_key):
             f.write(f"{t}\n")
 
     print(f"Wrote {len(tickers)} tickers to {out}", file=sys.stderr)
@@ -1479,9 +1578,9 @@ def write_outputs(
     if details_path:
         det = Path(details_path)
         det.parent.mkdir(parents=True, exist_ok=True)
-        available_cols = [c for c in ENRICHED_COLUMNS if c in filtered_df.columns]
-        extra_cols = [c for c in filtered_df.columns if c not in available_cols]
-        filtered_df[available_cols + extra_cols].to_csv(det, index=False)
+        available_cols = [c for c in ENRICHED_COLUMNS if c in selected_df.columns]
+        extra_cols = [c for c in selected_df.columns if c not in available_cols]
+        selected_df[available_cols + extra_cols].to_csv(det, index=False)
         print(f"Wrote enriched details to {det}", file=sys.stderr)
 
 
@@ -1544,7 +1643,10 @@ when profitability, leverage, cash-flow quality, and coverage are stronger.
     parser.add_argument(
         "--include-us",
         action="store_true",
-        help="Include US exchanges (excluded by default)",
+        help=(
+            "Include US exchanges and, in filter modes, US-domiciled issuers "
+            "(excluded by default)"
+        ),
     )
     parser.add_argument(
         "--max-pe",
@@ -1647,6 +1749,7 @@ def main():
             min_volume=args.min_volume,
             max_coverage=args.max_coverage,
             ocf_waiver=not args.no_ocf_waiver,
+            include_us=args.include_us,
             workers=args.workers,
             debug=args.debug,
         )
@@ -1679,6 +1782,7 @@ def main():
         min_volume=args.min_volume,
         max_coverage=args.max_coverage,
         ocf_waiver=not args.no_ocf_waiver,
+        include_us=args.include_us,
         workers=args.workers,
         debug=args.debug,
     )

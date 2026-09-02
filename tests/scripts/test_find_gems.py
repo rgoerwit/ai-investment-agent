@@ -864,6 +864,7 @@ class TestFetchAndFilter:
             "sector": "Industrials",
             "industry": "Auto Manufacturers",
             "longName": "Test Corp",
+            "country": "Japan",
             "currency": "JPY",
             "quoteType": "EQUITY",
         }
@@ -960,6 +961,52 @@ class TestFetchAndFilter:
         assert "P/E<=18 or <=24 with stronger quality" in stderr
         assert "Contextual band requires ROE>=16%/ROA>=7%" in stderr
 
+    def test_us_domiciled_foreign_listing_is_excluded_by_default(self):
+        df = self._make_tickers_df("AMZ.DE")
+        info = self._mock_info_good()
+        info.update({"longName": "Amazon.com, Inc.", "country": "United States"})
+        mock_ticker = MagicMock(info=info)
+
+        with (
+            patch("find_gems.yf.Ticker", return_value=mock_ticker),
+            patch("find_gems.time.sleep"),
+        ):
+            passing, enriched = find_gems.fetch_and_filter(df, workers=1)
+
+        assert passing.empty
+        assert len(enriched) == 1
+        assert enriched.iloc[0]["Issuer_Country"] == "United States"
+        assert enriched.iloc[0]["_reject_reason"] == "us_issuer"
+
+    def test_include_us_retains_us_domiciled_foreign_listing(self):
+        df = self._make_tickers_df("AMZ.DE")
+        info = self._mock_info_good()
+        info.update({"longName": "Amazon.com, Inc.", "country": "United States"})
+        mock_ticker = MagicMock(info=info)
+
+        with (
+            patch("find_gems.yf.Ticker", return_value=mock_ticker),
+            patch("find_gems.time.sleep"),
+        ):
+            passing, _ = find_gems.fetch_and_filter(df, include_us=True, workers=1)
+
+        assert passing["YF_Ticker"].tolist() == ["AMZ.DE"]
+
+    def test_missing_issuer_country_is_retained_and_reported(self, capsys):
+        df = self._make_tickers_df("UNKNOWN.DE")
+        info = self._mock_info_good()
+        info.pop("country")
+        mock_ticker = MagicMock(info=info)
+
+        with (
+            patch("find_gems.yf.Ticker", return_value=mock_ticker),
+            patch("find_gems.time.sleep"),
+        ):
+            passing, _ = find_gems.fetch_and_filter(df, workers=1)
+
+        assert passing["YF_Ticker"].tolist() == ["UNKNOWN.DE"]
+        assert "retained 1 with unknown domicile" in capsys.readouterr().err
+
     def test_threaded_collector_processes_all_rows(self):
         # Threaded (no-fork) enrichment must return every row's result. Results
         # complete unordered, so compare as sets.
@@ -1027,7 +1074,63 @@ class TestWriteOutputs:
         find_gems.write_outputs(df, str(out))
 
         lines = out.read_text().strip().split("\n")
-        assert lines == ["0005.HK", "2330.TW", "7203.T"]  # sorted
+        assert lines == sorted(lines, key=find_gems._candidate_order_key)
+        assert set(lines) == {"0005.HK", "2330.TW", "7203.T"}
+
+    def test_exact_duplicate_issuer_prefers_more_liquid_listing(self, tmp_path):
+        df = pd.DataFrame(
+            {
+                "YF_Ticker": ["ACME.DE", "ACME.SW", "OTHER.T"],
+                "Company_YF": ["Acme Holdings", "Acme Holdings", "Other Ltd"],
+                "Daily_Turnover_USD": [100_000.0, 900_000.0, 200_000.0],
+            }
+        )
+        out = tmp_path / "gems.txt"
+        details = tmp_path / "details.csv"
+
+        find_gems.write_outputs(df, str(out), details_path=str(details))
+
+        assert set(out.read_text().splitlines()) == {"ACME.SW", "OTHER.T"}
+        assert set(pd.read_csv(details)["YF_Ticker"]) == {"ACME.SW", "OTHER.T"}
+
+    def test_duplicate_issuer_missing_turnover_uses_lexical_ticker(self):
+        df = pd.DataFrame(
+            {
+                "YF_Ticker": ["ZZZ.DE", "AAA.SW"],
+                "Company_YF": ["Same Issuer", "Same Issuer"],
+                "Daily_Turnover_USD": [None, float("nan")],
+            }
+        )
+
+        selected, groups, discarded = find_gems._select_issuer_listings(df)
+
+        assert selected["YF_Ticker"].tolist() == ["AAA.SW"]
+        assert groups == 1
+        assert discarded == 1
+
+    def test_blank_and_similar_issuer_names_are_not_merged(self):
+        df = pd.DataFrame(
+            {
+                "YF_Ticker": ["A.DE", "B.DE", "C.DE", "D.DE"],
+                "Company_YF": [None, "", "Acme plc", "Acme PLC"],
+                "Daily_Turnover_USD": [1.0, 2.0, 3.0, 4.0],
+            }
+        )
+
+        selected, groups, discarded = find_gems._select_issuer_listings(df)
+
+        assert selected["YF_Ticker"].tolist() == ["A.DE", "B.DE", "C.DE", "D.DE"]
+        assert groups == 0
+        assert discarded == 0
+
+    def test_digest_order_is_stable_when_membership_changes(self):
+        original = ["0005.HK", "2330.TW", "7203.T", "ACME.DE"]
+        expanded = [*original, "NEW.SW"]
+
+        ordered = sorted(original, key=find_gems._candidate_order_key)
+        expanded_order = sorted(expanded, key=find_gems._candidate_order_key)
+
+        assert [ticker for ticker in expanded_order if ticker in original] == ordered
 
     def test_details_csv(self, tmp_path):
         df = pd.DataFrame(

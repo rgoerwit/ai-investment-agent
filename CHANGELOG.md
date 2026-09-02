@@ -54,12 +54,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lockfile, so this class of gap is invisible to CI by construction. Neither
   correction moved a locked version.
 - **Security pins carry their rationale** — The `pyasn1`, `cryptography` and
-  `pypdf` pins name the advisories they remediate. `pyasn1` in particular looks
-  redundant, since the resolver reaches the pinned version unaided today, but
-  three of the five CVEs against the version its parent floors at are fixed only
-  at the pinned release.
+  `pypdf` pins name the advisories they remediate. `pypdf` advances to 6.16.1 to
+  bound XForm text-extraction work under CVE-2026-84311. `pyasn1` in particular
+  looks redundant, since the resolver reaches the pinned version unaided today,
+  but three of the five CVEs against the version its parent floors at are fixed
+  only at the pinned release.
 
 ### Fixed
+
+- **Screening restarts no longer repay for recent analyses** — The batch pipeline
+  reuses complete same-mode reports from a configurable 60-day window, carries reused
+  quick BUY verdicts into Stage 2, rejects future-dated and failed artifacts, and
+  reports the saved workload before confirmation. Exact run-date and forced rerun
+  behavior remain available explicitly.
+- **Foreign listings no longer bypass US-issuer exclusion** — Screening now retains
+  issuer domicile from its existing enrichment payload, excludes US-domiciled
+  secondary listings by default, collapses exact duplicate issuer names to the most
+  liquid listing, and emits candidates in membership-stable digest order so an
+  interrupted run is not geographically sorted.
 
 - **Run fingerprinting cannot block artifact completion indefinitely** — Git metadata
   probes now carry a hard subprocess timeout, and an unavailable worktree status is

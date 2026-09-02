@@ -2,6 +2,7 @@
 
 import json
 import re
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -211,6 +212,167 @@ class TestRunDateDerivation:
             == "2026-03-19"
         )
 
+    @staticmethod
+    def _report_window(
+        *, wall_clock_date: str, logical_date: str, max_age_days: int
+    ) -> tuple[str, str]:
+        if max_age_days < 0:
+            raise ValueError("max_age_days must be non-negative")
+        if max_age_days == 0:
+            return logical_date, logical_date
+        end = date.fromisoformat(wall_clock_date)
+        return (end - timedelta(days=max_age_days)).isoformat(), end.isoformat()
+
+    def test_positive_freshness_window_uses_wall_clock_not_logical_date(self):
+        assert self._report_window(
+            wall_clock_date="2026-09-01",
+            logical_date="2026-08-22",
+            max_age_days=60,
+        ) == ("2026-07-03", "2026-09-01")
+
+    def test_zero_day_window_preserves_exact_logical_run_date(self):
+        assert self._report_window(
+            wall_clock_date="2026-09-01",
+            logical_date="2026-08-22",
+            max_age_days=0,
+        ) == ("2026-08-22", "2026-08-22")
+
+    def test_negative_freshness_window_is_rejected(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            self._report_window(
+                wall_clock_date="2026-09-01",
+                logical_date="2026-09-01",
+                max_age_days=-1,
+            )
+
+
+class TestRecentReportResolution:
+    HEADER_PATTERN = re.compile(r"^# .+: (?P<verdict>[^\r\n]+)$", re.MULTILINE)
+
+    @classmethod
+    def _is_complete(cls, path: Path) -> bool:
+        match = cls.HEADER_PATTERN.search(path.read_text())
+        return bool(match and match.group("verdict").strip() != "ANALYSIS FAILED")
+
+    @classmethod
+    def _find_recent_report(
+        cls,
+        scratch: Path,
+        ticker: str,
+        mode: str,
+        *,
+        window_start: str,
+        window_end: str,
+    ) -> Path | None:
+        dash = ticker.translate(str.maketrans("._", "--"))
+        suffix = "_quick.md" if mode == "quick" else ".md"
+        prefix = f"README-{dash}-"
+        candidates = sorted(scratch.glob(f"{prefix}????-??-??{suffix}"), reverse=True)
+        for candidate in candidates:
+            report_date = candidate.name.removeprefix(prefix).removesuffix(suffix)
+            if report_date > window_end:
+                continue
+            if report_date < window_start:
+                break
+            if cls._is_complete(candidate):
+                return candidate
+        return None
+
+    @staticmethod
+    def _write_report(path: Path, verdict: str = "HOLD") -> None:
+        path.write_text(f"# TEST.DE (Test AG): {verdict}\n")
+
+    def test_returns_newest_complete_same_mode_report(self, tmp_path):
+        older = tmp_path / "README-TEST-DE-2026-08-01_quick.md"
+        newer = tmp_path / "README-TEST-DE-2026-08-20_quick.md"
+        self._write_report(older)
+        self._write_report(newer, "BUY")
+
+        assert (
+            self._find_recent_report(
+                tmp_path,
+                "TEST.DE",
+                "quick",
+                window_start="2026-07-03",
+                window_end="2026-09-01",
+            )
+            == newer
+        )
+
+    def test_exact_cutoff_is_included_and_future_report_is_rejected(self, tmp_path):
+        cutoff = tmp_path / "README-TEST-DE-2026-07-03_quick.md"
+        future = tmp_path / "README-TEST-DE-2026-09-02_quick.md"
+        self._write_report(cutoff)
+        self._write_report(future, "BUY")
+
+        assert (
+            self._find_recent_report(
+                tmp_path,
+                "TEST.DE",
+                "quick",
+                window_start="2026-07-03",
+                window_end="2026-09-01",
+            )
+            == cutoff
+        )
+
+    def test_quick_and_full_reports_never_cross_satisfy(self, tmp_path):
+        full = tmp_path / "README-TEST-DE-2026-08-20.md"
+        self._write_report(full, "BUY")
+
+        assert (
+            self._find_recent_report(
+                tmp_path,
+                "TEST.DE",
+                "quick",
+                window_start="2026-07-03",
+                window_end="2026-09-01",
+            )
+            is None
+        )
+        assert (
+            self._find_recent_report(
+                tmp_path,
+                "TEST.DE",
+                "full",
+                window_start="2026-07-03",
+                window_end="2026-09-01",
+            )
+            == full
+        )
+
+    def test_newer_failed_report_falls_back_to_older_complete_report(self, tmp_path):
+        older = tmp_path / "README-TEST-DE-2026-08-01_quick.md"
+        failed = tmp_path / "README-TEST-DE-2026-08-20_quick.md"
+        self._write_report(older, "HOLD")
+        self._write_report(failed, "ANALYSIS FAILED")
+
+        assert (
+            self._find_recent_report(
+                tmp_path,
+                "TEST.DE",
+                "quick",
+                window_start="2026-07-03",
+                window_end="2026-09-01",
+            )
+            == older
+        )
+
+    def test_missing_or_too_old_report_returns_none(self, tmp_path):
+        too_old = tmp_path / "README-TEST-DE-2026-07-02_quick.md"
+        self._write_report(too_old)
+
+        assert (
+            self._find_recent_report(
+                tmp_path,
+                "TEST.DE",
+                "quick",
+                window_start="2026-07-03",
+                window_end="2026-09-01",
+            )
+            is None
+        )
+
 
 # ============================================================
 # TestResumability — skip logic
@@ -327,11 +489,14 @@ class TestAnalysisFailedHandling:
 
     def test_resumability_uses_report_is_complete(self):
         script = self._script_text()
-        # Both stage skip checks gate on report_is_complete, not a bare header.
-        assert (
-            'if ! $FORCE && [[ -f "$OUTFILE" ]] && report_is_complete "$OUTFILE"; then'
-            in script
-        )
+        assert "find_recent_report()" in script
+        assert 'report_is_complete "$candidate"' in script
+        assert script.count('find_recent_report "$ticker" quick') == 4
+        assert script.count('find_recent_report "$ticker" full') == 2
+        assert '[[ -f "$candidate" ]] || continue' in script
+        # Today's exact output paths remain only for new writes.
+        assert script.count('OUTFILE="${SCRATCH}/README-${DASH}-${DATE}_quick.md"') == 1
+        assert script.count('OUTFILE="${SCRATCH}/README-${DASH}-${DATE}.md"') == 1
 
     def test_no_analysis_is_warned_not_succeeded(self):
         script = self._script_text()
