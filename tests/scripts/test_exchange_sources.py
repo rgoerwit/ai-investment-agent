@@ -244,8 +244,7 @@ def test_configured_exchange_currency_coverage():
             currency = SUFFIX_TO_CURRENCY_CODE.get(suffix, "USD")
             if currency == "GBX":
                 currency = "GBP"
-            # Existing B3 live-FX omission is outside the Romanian addition.
-            assert currency in {*find_gems._FX_CURRENCIES, "USD", "BRL"}
+            assert currency in {*find_gems._FX_CURRENCIES, "USD"}
             assert currency in FALLBACK_RATES_TO_USD
 
 
@@ -387,8 +386,14 @@ def test_overlapping_pages_and_repeated_terminal_page(monkeypatch):
     assert session.get.call_count == 3
 
 
-@pytest.mark.parametrize("rate", [0.2193, None])
-def test_ron_live_and_fallback_rate_reach_screening(monkeypatch, rate):
+@pytest.mark.parametrize(
+    ("currency", "ticker_symbol", "live_rate"),
+    [("RON", "TLV.RO", 0.2193), ("BRL", "PETR4.SA", 0.197)],
+)
+@pytest.mark.parametrize("use_live_rate", [True, False], ids=["live", "fallback"])
+def test_configured_fx_rate_reaches_screening(
+    monkeypatch, currency, ticker_symbol, live_rate, use_live_rate
+):
     from src.fx_normalization import FALLBACK_RATES_TO_USD
 
     monkeypatch.setattr(find_gems.time, "sleep", lambda _: None)
@@ -396,14 +401,17 @@ def test_ron_live_and_fallback_rate_reach_screening(monkeypatch, rate):
     monkeypatch.setattr(
         find_gems,
         "_fetch_one_fx_rate",
-        lambda currency: (currency, rate if currency == "RON" else None),
+        lambda requested_currency: (
+            requested_currency,
+            live_rate if use_live_rate and requested_currency == currency else None,
+        ),
     )
     rates = find_gems._fetch_fx_rates()
-    expected = rate if rate else FALLBACK_RATES_TO_USD["RON"]
-    assert rates["RON"] == expected
+    expected = live_rate if use_live_rate else FALLBACK_RATES_TO_USD[currency]
+    assert rates[currency] == expected
     ticker = MagicMock(
         info={
-            "currency": "RON",
+            "currency": currency,
             "quoteType": "EQUITY",
             "currentPrice": 10,
             "marketCap": 1_000_000_000,
@@ -414,14 +422,17 @@ def test_ron_live_and_fallback_rate_reach_screening(monkeypatch, rate):
     )
     monkeypatch.setattr(find_gems.yf, "Ticker", lambda _: ticker)
     result = find_gems._process_row(
-        {"YF_Ticker": "TLV.RO"}, fx_rates=rates, min_mcap=50_000_000, min_volume=100_000
+        {"YF_Ticker": ticker_symbol},
+        fx_rates=rates,
+        min_mcap=50_000_000,
+        min_volume=100_000,
     )
     assert result["Market_Cap_USD"] == pytest.approx(1_000_000_000 * expected)
     assert result["Daily_Turnover_USD"] == pytest.approx(1_000_000 * expected)
     ticker.info["averageVolume"] = 10
     assert (
         find_gems._process_row(
-            {"YF_Ticker": "TLV.RO"}, fx_rates=rates, min_volume=100_000
+            {"YF_Ticker": ticker_symbol}, fx_rates=rates, min_volume=100_000
         )
         is None
     )

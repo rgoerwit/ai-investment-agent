@@ -96,6 +96,7 @@ _FX_CURRENCIES = [
     "INR",
     "KRW",
     "RON",
+    "BRL",
 ]
 
 SCRAPE_COLUMNS = [
