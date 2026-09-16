@@ -18,20 +18,22 @@
   ANALYSIS FRESHNESS  (what is stale, what is queued, what happens next)
 ══════════════════════════════════════════════════════
 
-  Needs review before action:
-    7203         review required  ·  7d old  ·  expires 2026-07-24  →  poetry run python -m src.main --ticker 7203.T
+  Urgent analysis refreshes:
+    7203         review required  ·  7d old  ·  expires 2026-07-24
+             →  poetry run python -m src.main --ticker 7203.T
 
-  Already in refresh queue:
+  Stale sell/trim decisions needing current analysis:
     None
 
-  Due soon:
-    9432         expires 2026-07-24  ·  7d remaining  →  poetry run python -m src.main --ticker 9432.T
+  Normal-cycle eligible refreshes:
+    9432         expires 2026-07-24  ·  7d remaining
+             →  poetry run python -m src.main --ticker 9432.T
 
   Refresh activity this run:
     Policy: off
     No refresh actions were needed.
 
-  User action: run poetry run python scripts/portfolio_manager.py --recommend --refresh-policy blocking
+  User action: run poetry run python scripts/portfolio_manager.py --recommend --refresh-policy proactive
 
 ══════════════════════════════════════════════════════
   POSITION REVIEWS  (tax, macro, or intact-thesis review before acting)

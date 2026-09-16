@@ -15,6 +15,7 @@ from src.ibkr.models import (
     PortfolioSummary,
     ReconciliationItem,
     TradeBlockData,
+    UnresolvedBrokerPosition,
 )
 from tests.ibkr.format_report_cases import (
     CORRELATED_SELL_EVENT_FLAG,
@@ -207,6 +208,29 @@ def _read_only_report() -> str:
             errors={"live_orders": "order endpoint unavailable"},
             portfolio_data_loaded=False,
         )
+
+
+def test_report_surfaces_unresolved_broker_identity_without_research_ticker():
+    portfolio = PortfolioSummary(
+        account_id="U-IDENTITY",
+        portfolio_value_usd=10_000,
+        unresolved_positions=[
+            UnresolvedBrokerPosition(
+                conid=17_382_285,
+                broker_token="IBCID17382285",
+                quantity=3,
+                currency="KRW",
+                market_value_usd=750,
+                reason="canonical security identity unavailable",
+            )
+        ],
+    )
+
+    report = format_report([], portfolio)
+
+    assert "BROKER IDENTITY REVIEW" in report
+    assert "conid 17382285" in report
+    assert "no research or order queued" in report
 
 
 @pytest.mark.parametrize(

@@ -568,13 +568,16 @@ class TestCreateEditorLLM:
                 mock_config.get_openai_api_key.return_value = "test-key"
                 mock_config.editor_model = "gpt-5"
                 mock_config.consultant_model = "gpt-4o"
+                mock_config.llm_default_reasoning_reserve_tokens = 2048
+                mock_config.llm_deep_reasoning_reserve_tokens = 8192
 
                 create_editor_llm()
 
         assert mock_chatgpt.call_args.kwargs["reasoning_effort"] == "medium"
-        assert mock_chatgpt.call_args.kwargs["max_completion_tokens"] == 10240
+        assert mock_chatgpt.call_args.kwargs["max_completion_tokens"] == 16384
         assert llm._configured_max_completion_tokens == 8192
-        assert llm._configured_api_completion_tokens == 10240
+        assert llm._configured_api_completion_tokens == 16384
+        assert llm._configured_reasoning_reserve_tokens == 8192
 
 
 # =============================================================================
@@ -1827,23 +1830,24 @@ class TestEditorToolCalling:
     @pytest.mark.asyncio
     async def test_review_calls_tool_for_references(self):
         """When LLM returns tool_calls, tools should be executed and results fed back."""
+        from langchain_core.messages import AIMessage
+
         editor = _create_article_editor()
 
         # First response: tool call for a URL
-        tool_call_response = MagicMock()
-        tool_call_response.tool_calls = [
-            {
-                "name": "fetch_reference_content",
-                "args": {"url": "https://example.com/article"},
-                "id": "call_1",
-            }
-        ]
-        tool_call_response.content = ""
+        tool_call_response = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "fetch_reference_content",
+                    "args": {"url": "https://example.com/article"},
+                    "id": "call_1",
+                }
+            ],
+        )
 
         # Second response: no more tool calls; final verdict comes from structured pass
-        final_response = MagicMock()
-        final_response.tool_calls = []
-        final_response.content = "Done reviewing."
+        final_response = AIMessage(content="Done reviewing.")
 
         structured_review_llm = AsyncMock()
         structured_review_llm.ainvoke = AsyncMock(
@@ -1895,23 +1899,24 @@ class TestEditorToolCalling:
     @pytest.mark.asyncio
     async def test_review_handles_tool_error_gracefully(self):
         """When tool returns FETCH_FAILED, editor should still produce valid JSON."""
+        from langchain_core.messages import AIMessage
+
         editor = _create_article_editor()
 
         # First response: tool call
-        tool_call_response = MagicMock()
-        tool_call_response.tool_calls = [
-            {
-                "name": "fetch_reference_content",
-                "args": {"url": "https://broken.com"},
-                "id": "call_1",
-            }
-        ]
-        tool_call_response.content = ""
+        tool_call_response = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "fetch_reference_content",
+                    "args": {"url": "https://broken.com"},
+                    "id": "call_1",
+                }
+            ],
+        )
 
         # Second response: no more tool calls; verdict comes from structured pass
-        final_response = MagicMock()
-        final_response.tool_calls = []
-        final_response.content = "Done reviewing."
+        final_response = AIMessage(content="Done reviewing.")
 
         structured_review_llm = AsyncMock()
         structured_review_llm.ainvoke = AsyncMock(
@@ -1962,18 +1967,24 @@ class TestEditorToolCalling:
     @pytest.mark.asyncio
     async def test_review_respects_max_iterations(self):
         """Tool loop should terminate after MAX_TOOL_ITERATIONS even if LLM keeps calling tools."""
+        from langchain_core.messages import AIMessage
+
         editor = _create_article_editor()
 
-        # Every response returns tool_calls — should be bounded
-        tool_call_response = MagicMock()
-        tool_call_response.tool_calls = [
-            {
-                "name": "fetch_reference_content",
-                "args": {"url": "https://example.com"},
-                "id": "call_1",
-            }
+        # Every response returns a distinct tool call — should be bounded.
+        tool_call_responses = [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "fetch_reference_content",
+                        "args": {"url": "https://example.com"},
+                        "id": f"call_{index}",
+                    }
+                ],
+            )
+            for index in range(editor.MAX_TOOL_ITERATIONS)
         ]
-        tool_call_response.content = ""
 
         structured_review_llm = AsyncMock()
         structured_review_llm.ainvoke = AsyncMock(
@@ -1982,7 +1993,7 @@ class TestEditorToolCalling:
 
         mock_llm_with_tools = AsyncMock()
         # Return tool calls for MAX_TOOL_ITERATIONS, then we fall through to structured review
-        mock_llm_with_tools.ainvoke = AsyncMock(return_value=tool_call_response)
+        mock_llm_with_tools.ainvoke = AsyncMock(side_effect=tool_call_responses)
 
         mock_tool = AsyncMock()
         mock_tool.ainvoke = AsyncMock(return_value="Some content")

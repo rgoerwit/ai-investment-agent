@@ -15,6 +15,9 @@ LIQUIDITY_PASS_USD = (
 PE_MAX = 18.0
 PEG_MAX = 1.2
 PB_MAX = 1.4
+NET_DEBT_EBITDA_MAX = 2.0
+FCF_YIELD_MIN_PCT = 4.0
+UTILITIES_FCF_YIELD_MIN_PCT = 3.0
 SECTOR_MEDIAN_PE: dict[str, float] = {
     "Energy": 12.0,
     "Materials": 14.0,

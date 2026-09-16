@@ -328,6 +328,11 @@ def validate_environment_variables() -> None:
 # --- Pydantic Settings Class ---
 
 
+def _default_settings_env_file() -> str | None:
+    """Keep pytest from ingesting operator configuration during collection."""
+    return None if os.environ.get("PYTEST_DISABLE_DOTENV") == "true" else ".env"
+
+
 class Settings(BaseSettings):
     """
     Configuration class for the Multi-Agent Trading System.
@@ -758,6 +763,51 @@ class Settings(BaseSettings):
     )
     auditor_max_llm_calls: int = Field(
         default=4, ge=2, le=6, validation_alias="AUDITOR_MAX_LLM_CALLS"
+    )
+    foreign_research_search_call_budget: int = Field(
+        default=8,
+        ge=1,
+        le=20,
+        validation_alias="FOREIGN_RESEARCH_SEARCH_CALL_BUDGET",
+        description="Foreign Language Analyst search calls in full mode",
+    )
+    foreign_research_quick_search_call_budget: int = Field(
+        default=6,
+        ge=1,
+        le=12,
+        validation_alias="FOREIGN_RESEARCH_QUICK_SEARCH_CALL_BUDGET",
+        description="Foreign Language Analyst search calls in quick mode",
+    )
+    foreign_research_document_call_budget: int = Field(
+        default=3,
+        ge=0,
+        le=8,
+        validation_alias="FOREIGN_RESEARCH_DOCUMENT_CALL_BUDGET",
+    )
+    foreign_research_guidance_call_budget: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        validation_alias="FOREIGN_RESEARCH_GUIDANCE_CALL_BUDGET",
+    )
+    foreign_research_max_tool_iterations: int = Field(
+        default=4,
+        ge=1,
+        le=8,
+        validation_alias="FOREIGN_RESEARCH_MAX_TOOL_ITERATIONS",
+    )
+    foreign_research_quick_max_tool_iterations: int = Field(
+        default=3,
+        ge=1,
+        le=6,
+        validation_alias="FOREIGN_RESEARCH_QUICK_MAX_TOOL_ITERATIONS",
+    )
+    foreign_research_max_tool_calls_per_turn: int = Field(
+        default=6,
+        ge=1,
+        le=12,
+        validation_alias="FOREIGN_RESEARCH_MAX_TOOL_CALLS_PER_TURN",
+        description="Maximum parallel Foreign Language Analyst calls in one turn",
     )
     enable_apac_specialist: bool = Field(
         default=False,
@@ -1242,7 +1292,7 @@ class Settings(BaseSettings):
         description="Environment (dev, prod, test)",
     )
     app_release: str = Field(
-        default="3.1.0",
+        default="4.0.0",
         validation_alias="APP_RELEASE",
         description="Application release/version tag for observability",
     )
@@ -1488,8 +1538,9 @@ class Settings(BaseSettings):
 
     # --- Pydantic Settings Configuration ---
     model_config = SettingsConfigDict(
-        # Load from .env file
-        env_file=".env",
+        # Tests receive explicit dummy process values and must never ingest the
+        # operator's ignored environment file during collection.
+        env_file=_default_settings_env_file(),
         env_file_encoding="utf-8",
         # Ignore extra environment variables (don't fail on unknown vars)
         extra="ignore",

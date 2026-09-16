@@ -39,6 +39,8 @@ def _args(**overrides) -> SimpleNamespace:
         "no_memory": False,
         "enable_langfuse": False,
         "trace_langfuse": False,
+        "debate_reasoning_handoffs": False,
+        "debug": False,
         "ticker": "TEST",
     }
     values.update(overrides)
@@ -128,6 +130,25 @@ def test_quiet_mode_and_image_directory_are_run_scoped() -> None:
 
     assert base.quiet_mode is False
     assert base.images_dir == Path("images")
+
+
+def test_debate_handoff_and_developer_debug_flags_are_run_scoped() -> None:
+    base = _config()
+    runtime_config = build_runtime_config(
+        _args(debate_reasoning_handoffs=True, debug=True, verbose=True),
+        base,
+    )
+
+    assert runtime_config.debate_reasoning_handoffs is True
+    assert runtime_config.developer_debug_active is True
+    assert RuntimeConfig.from_config(base).debate_reasoning_handoffs is False
+    assert RuntimeConfig.from_config(base).developer_debug_active is False
+
+
+def test_verbose_alone_does_not_enable_reasoning_content_logging() -> None:
+    runtime_config = build_runtime_config(_args(verbose=True), _config())
+
+    assert runtime_config.developer_debug_active is False
 
 
 def test_no_quick_mode_does_not_clamp() -> None:

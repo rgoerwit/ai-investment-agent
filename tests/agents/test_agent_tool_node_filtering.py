@@ -9,7 +9,8 @@ tool_call matched the tool names. This caused:
 2. Missing ToolMessages for the correct agent
 3. Empty LLM responses when agent didn't receive its own tool results
 
-The fix: Check `msg.name == agent_key` in addition to tool name intersection.
+The fix: use `msg.name == agent_key` as the ownership boundary. Known calls execute;
+unknown calls still receive matching error ToolMessages so transcripts remain valid.
 These tests ensure this bug doesn't regress.
 """
 
@@ -21,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from src.forensic_budget import ForeignLanguageBudgetPolicy
 from src.graph import create_agent_tool_node
 from src.tooling.structured_ingress import (
     build_structured_ingress_record,
@@ -41,6 +43,21 @@ class TestAgentToolNodeFiltering:
         tool2.name = "get_macroeconomic_news"
         tool2.ainvoke = AsyncMock(return_value="result2")
         return [tool1, tool2]
+
+    @staticmethod
+    def _research_policy(**overrides):
+        values = {
+            "search_calls": 4,
+            "document_calls": 2,
+            "filing_calls": 1,
+            "guidance_calls": 1,
+            "max_tool_iterations": 2,
+            "max_llm_calls": 4,
+            "max_tool_calls_per_turn": 2,
+            "purpose_call_limit": 2,
+        }
+        values.update(overrides)
+        return ForeignLanguageBudgetPolicy(**values)
 
     @pytest.mark.asyncio
     async def test_filters_by_agent_key_not_just_tool_name(self, mock_tools):
@@ -146,6 +163,148 @@ class TestAgentToolNodeFiltering:
         mock_tools[1].ainvoke.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_budget_blocks_duplicate_before_tool_execution(self):
+        tool = MagicMock()
+        tool.name = "search_foreign_sources"
+        tool.ainvoke = AsyncMock(return_value="STATUS: RESULTS_FOUND")
+        node = create_agent_tool_node(
+            [tool],
+            "foreign_language_analyst",
+            budget_policy=self._research_policy(max_tool_iterations=3),
+        )
+        call = {
+            "name": "search_foreign_sources",
+            "args": {
+                "ticker": "TEST",
+                "search_query": "issuer results",
+                "purpose": "latest_results",
+            },
+            "id": "search-1",
+            "type": "tool_call",
+        }
+        first = await node(
+            {
+                "messages": [
+                    AIMessage(
+                        name="foreign_language_analyst",
+                        content="",
+                        tool_calls=[call],
+                    )
+                ]
+            },
+            {"configurable": {}},
+        )
+        second_call = {**call, "id": "search-2"}
+        second = await node(
+            {
+                "messages": [
+                    AIMessage(
+                        name="foreign_language_analyst",
+                        content="",
+                        tool_calls=[second_call],
+                    )
+                ],
+                "research_budgets": first["research_budgets"],
+            },
+            {"configurable": {}},
+        )
+
+        tool.ainvoke.assert_awaited_once()
+        assert second["messages"][0].content == "TOOL_BLOCKED: DUPLICATE_TOOL_CALL"
+        assert second["messages"][0].additional_kwargs["blocked"] is True
+        telemetry = second["research_budgets"]["foreign_language_analyst"]
+        assert telemetry["stop_reason"] == "NO_PRODUCTIVE_TOOL_CALLS"
+
+    @pytest.mark.asyncio
+    async def test_budget_caps_parallel_fanout_and_preserves_call_results(self):
+        tool = MagicMock()
+        tool.name = "search_foreign_sources"
+        tool.ainvoke = AsyncMock(return_value="STATUS: RESULTS_FOUND")
+        node = create_agent_tool_node(
+            [tool],
+            "foreign_language_analyst",
+            budget_policy=self._research_policy(max_tool_calls_per_turn=2),
+        )
+        calls = [
+            {
+                "name": "search_foreign_sources",
+                "args": {
+                    "ticker": "TEST",
+                    "search_query": f"query {index}",
+                    "purpose": purpose,
+                },
+                "id": f"search-{index}",
+                "type": "tool_call",
+            }
+            for index, purpose in enumerate(
+                ("latest_results", "management_guidance", "cash_flow")
+            )
+        ]
+
+        result = await node(
+            {
+                "messages": [
+                    AIMessage(
+                        name="foreign_language_analyst",
+                        content="",
+                        tool_calls=calls,
+                    )
+                ]
+            },
+            {"configurable": {}},
+        )
+
+        assert tool.ainvoke.await_count == 2
+        assert len(result["messages"]) == 3
+        assert result["messages"][2].content == ("TOOL_BLOCKED: TOOL_TURN_FANOUT_LIMIT")
+
+    @pytest.mark.asyncio
+    async def test_budget_opens_tool_circuit_after_execution_failures(self):
+        tool = MagicMock()
+        tool.name = "search_foreign_sources"
+        tool.ainvoke = AsyncMock(side_effect=RuntimeError("provider failed"))
+        node = create_agent_tool_node(
+            [tool],
+            "foreign_language_analyst",
+            budget_policy=self._research_policy(max_tool_iterations=4),
+        )
+        telemetry = None
+
+        for index in range(3):
+            state = {
+                "messages": [
+                    AIMessage(
+                        name="foreign_language_analyst",
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "search_foreign_sources",
+                                "args": {
+                                    "ticker": "TEST",
+                                    "search_query": f"distinct query {index}",
+                                    "purpose": "general",
+                                },
+                                "id": f"search-{index}",
+                                "type": "tool_call",
+                            }
+                        ],
+                    )
+                ]
+            }
+            if telemetry is not None:
+                state["research_budgets"] = telemetry
+            result = await node(state, {"configurable": {}})
+            telemetry = result["research_budgets"]
+
+        assert tool.ainvoke.await_count == 2
+        assert result["messages"][0].content == (
+            "TOOL_BLOCKED: TOOL_FAILURE_CIRCUIT_OPEN"
+        )
+        budget = telemetry["foreign_language_analyst"]
+        assert budget["tool_failures_by_name"] == {"search_foreign_sources": 2}
+        assert budget["stop_reason"] == "NO_PRODUCTIVE_TOOL_CALLS"
+
+    @pytest.mark.asyncio
     async def test_registered_structured_output_is_captured_before_text_cap(self):
         tool = MagicMock()
         tool.name = "get_financial_metrics"
@@ -178,6 +337,56 @@ class TestAgentToolNodeFiltering:
         assert record["status"] == "VALID"
         assert record["payload"] == payload
         assert "TRUNCATED" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_cumulative_evidence_cap_preserves_each_tool_result(self):
+        tool = MagicMock()
+        tool.name = "search_foreign_sources"
+        tool.ainvoke = AsyncMock(return_value="x" * 30)
+        node = create_agent_tool_node(
+            [tool],
+            "foreign_language_analyst",
+            budget_policy=self._research_policy(
+                max_evidence_chars=40,
+                max_tool_calls_per_turn=2,
+            ),
+        )
+        calls = [
+            {
+                "name": "search_foreign_sources",
+                "args": {
+                    "search_query": f"query {index}",
+                    "purpose": f"purpose_{index}",
+                },
+                "id": f"call-{index}",
+                "type": "tool_call",
+            }
+            for index in range(2)
+        ]
+
+        result = await node(
+            {
+                "messages": [
+                    AIMessage(
+                        name="foreign_language_analyst",
+                        content="",
+                        tool_calls=calls,
+                    )
+                ]
+            },
+            {"configurable": {}},
+        )
+
+        assert len(result["messages"]) == 2
+        assert {message.tool_call_id for message in result["messages"]} == {
+            "call-0",
+            "call-1",
+        }
+        assert result["messages"][0].content == "x" * 30
+        assert "EVIDENCE_CHAR_LIMIT" in result["messages"][1].content
+        telemetry = result["research_budgets"]["foreign_language_analyst"]
+        assert telemetry["evidence_chars"] == 40
+        assert telemetry["evidence_truncated"] is True
 
     @pytest.mark.asyncio
     async def test_registered_structured_output_records_parse_failure(self):
@@ -390,6 +599,40 @@ class TestAgentToolNodeFiltering:
         for msg in result["messages"]:
             assert isinstance(msg, ToolMessage)
             assert msg.additional_kwargs.get("agent_key") == "news_analyst"
+
+    @pytest.mark.asyncio
+    async def test_unknown_only_request_receives_matching_error_result(
+        self, mock_tools
+    ):
+        """Unknown calls must not leave an owner transcript structurally orphaned."""
+        agent_tool_node = create_agent_tool_node(mock_tools, "news_analyst")
+        state = {
+            "messages": [
+                AIMessage(
+                    name="news_analyst",
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "invented_search_tool",
+                            "args": {"ticker": "TEST"},
+                            "id": "unknown-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            ]
+        }
+
+        result = await agent_tool_node(state, {"configurable": {}})
+
+        assert len(result["messages"]) == 1
+        message = result["messages"][0]
+        assert isinstance(message, ToolMessage)
+        assert message.tool_call_id == "unknown-1"
+        assert message.status == "error"
+        assert message.content == "TOOL_ERROR: UNKNOWN_TOOL"
+        for tool in mock_tools:
+            tool.ainvoke.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_error_tool_messages_include_default_block_metadata(self, mock_tools):
@@ -746,7 +989,7 @@ class TestToolCallTimeout:
         msg = result["messages"][0]
         assert isinstance(msg, ToolMessage)
         assert msg.status == "error"
-        assert "timed out" in msg.content
+        assert msg.content == "TOOL_ERROR: TOOL_TIMEOUT"
 
     @pytest.mark.asyncio
     async def test_normal_tool_unaffected_by_timeout(self):
@@ -806,7 +1049,7 @@ class TestToolCallTimeout:
         # Slow tool times out
         slow_msg = next(m for m in result["messages"] if m.tool_call_id == "t2")
         assert slow_msg.status == "error"
-        assert "timed out" in slow_msg.content
+        assert slow_msg.content == "TOOL_ERROR: TOOL_TIMEOUT"
         # Total time bounded by timeout, not by sleep(10)
         assert elapsed < 1.0
 
@@ -828,7 +1071,7 @@ class TestToolCallTimeout:
         assert len(result["messages"]) == 1
         msg = result["messages"][0]
         assert msg.status == "error"
-        assert "bad input" in msg.content
+        assert msg.content == "TOOL_ERROR: TOOL_EXECUTION_FAILED"
 
     @pytest.mark.asyncio
     async def test_timeout_logging(self, monkeypatch, caplog):

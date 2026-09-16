@@ -19,6 +19,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 
+from src.agents.message_utils import validate_tool_history
 from src.article_audit import (
     audit_article_citations,
     extract_source_confidence_context,
@@ -1789,6 +1790,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
         try:
             if self.llm_with_tools:
                 for iteration in range(self.MAX_TOOL_ITERATIONS):
+                    validate_tool_history(messages, agent_key="article_editor")
                     response = await self.llm_with_tools.ainvoke(
                         messages,
                         config=cast(
@@ -1841,6 +1843,8 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                 )
             )
         ]
+
+        validate_tool_history(final_messages, agent_key="article_editor")
 
         if self.review_llm:
             with _structured_review_warning_policy():

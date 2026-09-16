@@ -297,6 +297,21 @@ class TestReducerBehavior:
         assert not isinstance(result, list)
         assert isinstance(result, str)
 
+    @pytest.mark.parametrize(
+        ("first", "second", "expected"),
+        [
+            ("PASS", "REJECT", "REJECT"),
+            ("REJECT", "PASS", "REJECT"),
+            (None, "PASS", "PASS"),
+            (None, "REJECT", "REJECT"),
+            (None, None, ""),
+        ],
+    )
+    def test_pre_screening_reducer_is_reject_dominant(self, first, second, expected):
+        from src.agents.state import merge_pre_screening_results
+
+        assert merge_pre_screening_results(first, second) == expected
+
 
 class TestDataProviderTypes:
     """Test type safety for data coming from external providers."""

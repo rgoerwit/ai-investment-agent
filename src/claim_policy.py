@@ -35,6 +35,18 @@ STRUCTURED_INGRESS_SOURCES: dict[tuple[str, str], str] = {
     ): RAW_FINANCIAL_METRICS_INPUT,
 }
 
+# The data-vacuum exception is about missing current growth observations, not
+# about the adaptive score denominator (which also includes unrelated rubric
+# criteria). Keep the field set beside the claim registry that owns it.
+CURRENT_GROWTH_CLAIM_FIELDS = frozenset(
+    {
+        "REVENUE_GROWTH_TTM",
+        "REVENUE_GROWTH_MRQ",
+        "EARNINGS_GROWTH_TTM",
+        "EARNINGS_GROWTH_MRQ",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ClaimPolicy:
@@ -85,6 +97,18 @@ MATERIAL_CLAIM_POLICIES: dict[str, ClaimPolicy] = {
         source="DERIVED",
         kind="DERIVED_ASSESSMENT",
         decision_role="GATE_INPUT",
+    ),
+    "LIQUIDITY_STATUS": ClaimPolicy(
+        source="DERIVED",
+        kind="DERIVED_ASSESSMENT",
+        decision_role="GATE_INPUT",
+        project_to_report=False,
+    ),
+    "AVERAGE_DAILY_TURNOVER_USD": ClaimPolicy(
+        source="DERIVED",
+        kind="DERIVED_ASSESSMENT",
+        decision_role="GATE_INPUT",
+        project_to_report=False,
     ),
     "CURRENT_PRICE": ClaimPolicy(
         source="RAW_METRICS",
@@ -156,6 +180,20 @@ MATERIAL_CLAIM_POLICIES: dict[str, ClaimPolicy] = {
     "ROA_PERCENT": ClaimPolicy(
         source="RAW_METRICS",
         raw_field="returnOnAssets",
+        value_format="PERCENT_RATIO",
+        project_to_report=False,
+    ),
+    "ROA_YOY_CHANGE_PERCENT": ClaimPolicy(
+        source="RAW_METRICS",
+        raw_field="roa_change_yoy",
+        decision_role="GATE_INPUT",
+        value_format="PERCENT_RATIO",
+        project_to_report=False,
+    ),
+    "ROE_YOY_CHANGE_PERCENT": ClaimPolicy(
+        source="RAW_METRICS",
+        raw_field="roe_change_yoy",
+        decision_role="GATE_INPUT",
         value_format="PERCENT_RATIO",
         project_to_report=False,
     ),

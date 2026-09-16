@@ -24,6 +24,7 @@ from src.earnings_baseline import (
     canonical_guidance_enum,
 )
 from src.llm_usage import extract_token_usage_breakdown
+from src.runtime_diagnostics.failure_classification import ArtifactErrorKind
 from src.text_patterns import URL_RE
 
 logger = structlog.get_logger(__name__)
@@ -260,25 +261,58 @@ def extract_completion_tokens(response: Any) -> int:
 
 
 def get_configured_output_cap(runnable: Any) -> int | None:
-    for attr in (
-        "_configured_max_output_tokens",
-        "_configured_max_completion_tokens",
-    ):
-        coerced = _coerce_optional_int(getattr(runnable, attr, None))
-        if coerced is not None:
-            return coerced
+    for candidate in (runnable, getattr(runnable, "last", None)):
+        if candidate is None:
+            continue
+        for attr in (
+            "_configured_max_output_tokens",
+            "_configured_max_completion_tokens",
+        ):
+            coerced = _coerce_optional_int(getattr(candidate, attr, None))
+            if coerced is not None:
+                return coerced
     return None
 
 
 def get_configured_api_output_cap(runnable: Any) -> int | None:
-    for attr in (
-        "_configured_api_output_tokens",
-        "_configured_api_completion_tokens",
-    ):
-        coerced = _coerce_optional_int(getattr(runnable, attr, None))
-        if coerced is not None:
-            return coerced
+    for candidate in (runnable, getattr(runnable, "last", None)):
+        if candidate is None:
+            continue
+        for attr in (
+            "_configured_api_output_tokens",
+            "_configured_api_completion_tokens",
+        ):
+            coerced = _coerce_optional_int(getattr(candidate, attr, None))
+            if coerced is not None:
+                return coerced
     return None
+
+
+def classify_output_contract_failure(
+    *,
+    runnable: Any,
+    response: Any,
+    truncated: bool,
+    validation: dict[str, Any],
+) -> ArtifactErrorKind:
+    """Classify a provider-success response that failed its output contract."""
+
+    configured_intent_cap = get_configured_output_cap(runnable)
+    configured_api_cap = (
+        get_configured_api_output_cap(runnable) or configured_intent_cap
+    )
+    completion_tokens = extract_completion_tokens(response)
+    if (
+        configured_api_cap is not None
+        and completion_tokens > 0
+        and completion_tokens >= configured_api_cap
+    ):
+        return "output_cap_exhausted"
+    if truncated:
+        return "incomplete_structured_output"
+    if not validation.get("ok", False):
+        return "output_contract_violation"
+    return "application_error"
 
 
 def _has_parseable_forensic_block(content: str) -> bool:
@@ -300,6 +334,10 @@ def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
     issues: dict[str, str] = {}
 
     if agent_key == "foreign_language_analyst":
+        from src.agents.foreign_language_evidence import (
+            has_foreign_language_protocol_residue,
+        )
+
         checks.extend(
             [
                 (
@@ -307,6 +345,10 @@ def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
                     _has_valid_management_guidance_block(content),
                 ),
                 ("latest_results_block", _has_valid_latest_results_block(content)),
+                (
+                    "protocol_residue_absent",
+                    not has_foreign_language_protocol_residue(content),
+                ),
             ]
         )
     elif agent_key == "fundamentals_analyst":
@@ -402,6 +444,12 @@ def should_fail_closed(
     truncated: bool,
     content: str,
 ) -> bool:
+    # Senior Fundamentals consumes the separately captured structured ingress, so
+    # this does not halt the graph. It does keep a capped raw wrapper from being
+    # persisted as a valid analyst artifact.
+    if agent_key == "junior_fundamentals_analyst" and truncated:
+        return True
+
     if validation["ok"]:
         return False
 
@@ -458,6 +506,11 @@ def log_truncation_diagnostic(
     )
     near_cap = api_utilization is not None and api_utilization >= 0.90
     likely_real = explicit_or_structural or near_cap
+    cap_exhausted = bool(
+        configured_api_cap
+        and completion_tokens
+        and completion_tokens >= configured_api_cap
+    )
 
     suggestion = None
     if likely_real:
@@ -490,9 +543,14 @@ def log_truncation_diagnostic(
         "intent_utilization_ratio": intent_utilization,
         "api_utilization_ratio": api_utilization,
         "suggestion": suggestion,
+        "failure_kind": (
+            "output_cap_exhausted" if cap_exhausted else "incomplete_structured_output"
+        ),
     }
 
-    if likely_real:
+    if cap_exhausted:
+        logger.warning("agent_output_cap_exhausted", **payload)
+    elif likely_real:
         logger.warning("agent_output_truncated", **payload)
     else:
         logger.info("agent_output_truncation_suspected", **payload)
@@ -526,6 +584,14 @@ def log_output_diagnostics(
         if configured_api_cap and completion_tokens
         else None
     )
+    failure_kind = None
+    if validation is not None and (truncated or not validation["ok"]):
+        failure_kind = classify_output_contract_failure(
+            runnable=runnable,
+            response=response,
+            truncated=truncated,
+            validation=validation,
+        )
 
     logger.debug(
         "agent_output_diagnostics",
@@ -546,5 +612,6 @@ def log_output_diagnostics(
         truncated=truncated,
         required_structure_ok=validation["ok"] if validation is not None else None,
         missing_sections=validation["missing"] if validation is not None else [],
+        failure_kind=failure_kind,
         output_len=len(content),
     )

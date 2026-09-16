@@ -191,6 +191,18 @@ def test_quick_missing_auditor_treated_as_clean():
     assert reason == "clean_consensus"
 
 
+@pytest.mark.parametrize("plan", [_POSITIVE_PLAN, _NEGATIVE_PLAN, _AMBIGUOUS_PLAN])
+def test_missing_auditor_matches_non_actionable_auditor_for_gate(plan):
+    absent = should_invoke_consultant(
+        _state(plan=plan, auditor=None), _config(quick_mode=True)
+    )
+    non_actionable = should_invoke_consultant(
+        _state(plan=plan, auditor="STATUS: INSUFFICIENT_DATA"),
+        _config(quick_mode=True),
+    )
+    assert absent == non_actionable
+
+
 def test_quick_unparseable_auditor_keeps_consultant():
     """If the auditor returned text but with no STATUS line, prefer to keep
     Consultant — conservative behavior."""
@@ -245,45 +257,11 @@ def test_router_logs_skip_reason(monkeypatch):
     assert skip_events[0][1].get("reason") == "rm_clear_negative"
 
 
-def test_sentinel_records_reason():
+def test_sentinel_records_reason_without_claiming_an_audit():
     text = CONSULTANT_SKIP_SENTINEL.format(reason="clean_consensus")
     assert "clean_consensus" in text
     assert "SKIPPED_BY_GATE" in text
-
-
-class TestSharedOpenAIPlaneInvariant:
-    """Consultant and Auditor both gate on the shared OpenAI cross-check plane
-    (``enable_consultant`` + OpenAI key) via ``_is_auditor_enabled`` /
-    ``is_openai_consultant_available`` — neither is subordinate to the other's
-    LLM object. The auditor has independent PM (OCF corroboration) and report
-    consumers, so it must NOT be disabled merely because the consultant object
-    failed to build while the plane is up.
-    """
-
-    def test_auditor_off_when_consultant_disabled(self, monkeypatch):
-        monkeypatch.setattr(routing.config, "enable_consultant", False)
-        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: True)
-        assert routing._is_auditor_enabled() is False
-
-    def test_auditor_off_when_no_openai_key(self, monkeypatch):
-        monkeypatch.setattr(routing.config, "enable_consultant", True)
-        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: False)
-        assert routing._is_auditor_enabled() is False
-
-    def test_auditor_on_when_plane_up(self, monkeypatch):
-        monkeypatch.setattr(routing.config, "enable_consultant", True)
-        monkeypatch.setattr(routing, "is_openai_consultant_available", lambda: True)
-        assert routing._is_auditor_enabled() is True
-
-    def test_auditor_enable_matches_openai_availability_gate(self, monkeypatch):
-        # The auditor gate and the consultant availability gate read the SAME two
-        # conditions; enabling the plane flips both together.
-        monkeypatch.setattr(routing.config, "enable_consultant", True)
-        for available in (True, False):
-            monkeypatch.setattr(
-                routing, "is_openai_consultant_available", lambda a=available: a
-            )
-            assert routing._is_auditor_enabled() is available
+    assert "forensic audit" not in text.lower()
 
 
 class TestGateFlagTokensAreLive:

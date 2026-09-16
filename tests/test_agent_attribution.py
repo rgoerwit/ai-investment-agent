@@ -23,10 +23,10 @@ import pytest
 from src.persistence import _ARTIFACT_AGENT_MAP, save_results_to_file
 
 # Token-agent names produced by tracked_callbacks(...) that are intentionally
-# NOT mapped to a saved-JSON artifact. Empty since the deep-retry LLM stopped
-# carrying its own "Retry Agent (Deep)" callback (July 2026): retry cost is now
-# attributed to the originating agent via a per-call callback in analyst_nodes,
-# so there is no unmapped pooled bucket. Kept as the seam for future additions.
+# NOT mapped to a saved-JSON artifact. Empty because recovery models use a
+# seat-bound callback labeled with the originating agent: spend remains in the
+# originating artifact rollup while binding telemetry identifies analyst_retry.
+# Kept as the seam for future additions.
 _UNMAPPED_TOKEN_AGENTS: frozenset[str] = frozenset()
 
 
@@ -372,6 +372,14 @@ def _extract_tracked_callbacks_names() -> set[str]:
             if not tracked:
                 continue
             seat_id = SeatId[node.args[0].attr]
+            # The recovery seat is deliberately constructed with an originating
+            # analyst callback name. The AST cannot resolve SEATS[origin] inside
+            # the loop, but it can verify that the explicit override is present;
+            # do not invent the canonical "Analyst Retry" callback in that case.
+            if seat_id is SeatId.ANALYST_RETRY and any(
+                keyword.arg == "tracking_agent_name" for keyword in node.keywords
+            ):
+                continue
             names.add(SEATS[seat_id].callback_name)
     return names
 

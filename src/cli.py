@@ -169,6 +169,16 @@ Examples:
     )
 
     parser.add_argument(
+        "--debate-reasoning-handoffs",
+        action="store_true",
+        help=(
+            "Give the second Bull/Bear round and Research Manager balanced, "
+            "bounded Round-1 rationale adjuncts. Full two-round analyses only; "
+            "automatically expands the three affected output budgets."
+        ),
+    )
+
+    parser.add_argument(
         "--no-memory",
         action="store_true",
         help="Disable persistent memory (ChromaDB)",
@@ -344,8 +354,28 @@ def resolve_article_path(args, ticker: str) -> Path | None:
 
 def _validate_cli_args(args: argparse.Namespace, *, settings=config) -> None:
     """Validate incompatible flag combinations."""
-    del settings  # binding-schema validation now happens in the resolver
-    if not args.quick:
+    handoffs = bool(getattr(args, "debate_reasoning_handoffs", False))
+    if handoffs:
+        if getattr(args, "quick", False):
+            _cli_error(
+                "--debate-reasoning-handoffs requires the second debate round and "
+                "cannot be combined with --quick."
+            )
+        if int(getattr(settings, "max_debate_rounds", 2)) <= 1:
+            _cli_error("--debate-reasoning-handoffs requires MAX_DEBATE_ROUNDS=2.")
+        if getattr(args, "retrospective_only", False):
+            _cli_error(
+                "--debate-reasoning-handoffs applies only to a new analysis, not "
+                "--retrospective-only."
+            )
+        if getattr(args, "capture_baseline_cleanup", False) and not getattr(
+            args, "capture_baseline", False
+        ):
+            _cli_error(
+                "--debate-reasoning-handoffs has no effect during baseline cleanup."
+            )
+
+    if not getattr(args, "quick", False):
         return
 
     chart_flags = [
@@ -359,12 +389,14 @@ def _validate_cli_args(args: argparse.Namespace, *, settings=config) -> None:
     flags_str = " and ".join(chart_flags)
     verb = "has" if len(chart_flags) == 1 else "have"
     noun = "that flag" if len(chart_flags) == 1 else "those flags"
-    print(
-        f"error: {flags_str} {verb} no effect with --quick "
-        f"(chart generation is skipped in quick mode). "
-        f"Remove {noun} or drop --quick.",
-        file=sys.stderr,
+    _cli_error(
+        f"{flags_str} {verb} no effect with --quick "
+        f"(chart generation is skipped in quick mode). Remove {noun} or drop --quick."
     )
+
+
+def _cli_error(message: str) -> None:
+    print(f"error: {message}", file=sys.stderr)
     raise SystemExit(2)
 
 

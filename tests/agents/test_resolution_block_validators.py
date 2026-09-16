@@ -15,9 +15,9 @@ from src.agents.decision_nodes import (
     _ensure_apac_resolution_block,
     _ensure_auditor_resolution_block,
     _extract_apac_verdict_line,
-    _normalize_pm_block_contract,
     _requires_apac_resolution,
 )
+from src.agents.verdict_policy import normalize_pm_block_contract
 
 _PM_START_MARKER = "#### -- START PM_BLOCK --"
 _PM_WITH_BLOCK = (
@@ -179,7 +179,7 @@ def test_normalize_pm_block_contract_rewrites_no_initiation_size() -> None:
         "POSITION_SIZE: 3.0\n"
         "### --- END PM_BLOCK ---\n"
     )
-    out = _normalize_pm_block_contract(pm)
+    out = normalize_pm_block_contract(pm)
     assert "POSITION_SIZE: 0.0" in out
     assert "POSITION_SIZE: 3.0" not in out
 
@@ -192,7 +192,7 @@ def test_normalize_pm_block_contract_preserves_buy_size() -> None:
         "POSITION_SIZE: 3.0\n"
         "### --- END PM_BLOCK ---\n"
     )
-    assert _normalize_pm_block_contract(pm) == pm
+    assert normalize_pm_block_contract(pm) == pm
 
 
 def test_normalize_pm_block_contract_rewrites_only_final_block() -> None:
@@ -206,7 +206,7 @@ def test_normalize_pm_block_contract_rewrites_only_final_block() -> None:
         "POSITION_SIZE: 5.0\n"
         "## -- END PM_BLOCK --\n"
     )
-    out = _normalize_pm_block_contract(pm)
+    out = normalize_pm_block_contract(pm)
     assert "POSITION_SIZE: 2.0" in out
     assert "POSITION_SIZE: 0.0" in out
     assert "POSITION_SIZE: 5.0" not in out
@@ -221,10 +221,26 @@ def test_normalize_pm_block_contract_reconciles_prose_sizing() -> None:
         "POSITION_SIZE: 2.5\n"
         "### --- END PM_BLOCK ---\n"
     )
-    out = _normalize_pm_block_contract(pm)
+    out = normalize_pm_block_contract(pm)
     assert "POSITION_SIZE: 0.0" in out
     assert "2.5" not in out
     assert "Recommended Position Size**: 0.0% (monitor only — no initiation)" in out
+
+
+def test_normalize_pm_block_contract_is_idempotent() -> None:
+    pm = (
+        "**Recommended Position Size**: 2.5% (initial allocation)\n\n"
+        "### --- START PM_BLOCK ---\n"
+        "VERDICT: HOLD\n"
+        "POSITION_SIZE: 2.5\n"
+        "### --- END PM_BLOCK ---\n"
+    )
+
+    once = normalize_pm_block_contract(pm)
+    twice = normalize_pm_block_contract(once)
+
+    assert twice == once
+    assert once.count("monitor only — no initiation") == 1
 
 
 def test_normalize_pm_block_contract_reconciles_prose_when_token_already_zero() -> None:
@@ -237,7 +253,7 @@ def test_normalize_pm_block_contract_reconciles_prose_when_token_already_zero() 
         "POSITION_SIZE: 0.0\n"
         "### --- END PM_BLOCK ---\n"
     )
-    out = _normalize_pm_block_contract(pm)
+    out = normalize_pm_block_contract(pm)
     assert "Recommended Position Size**: 0.0% (monitor only — no initiation)" in out
 
 
@@ -249,7 +265,7 @@ def test_normalize_pm_block_contract_preserves_buy_prose() -> None:
         "POSITION_SIZE: 3.0\n"
         "### --- END PM_BLOCK ---\n"
     )
-    assert _normalize_pm_block_contract(pm) == pm
+    assert normalize_pm_block_contract(pm) == pm
 
 
 def test_demotion_then_normalize_zeroes_both_surfaces() -> None:
@@ -271,7 +287,9 @@ def test_demotion_then_normalize_zeroes_both_surfaces() -> None:
         pm, red_flags=red_flags, ticker="TEST"
     )
     assert was_demoted is True
-    out = _normalize_pm_block_contract(demoted)
+    out = normalize_pm_block_contract(demoted)
+    repeated = normalize_pm_block_contract(out)
     assert "POSITION_SIZE: 0.0" in out
     assert "POSITION_SIZE: 3.0" not in out
     assert "Recommended Position Size**: 0.0% (monitor only — no initiation)" in out
+    assert repeated == out

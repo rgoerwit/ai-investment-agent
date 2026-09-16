@@ -260,6 +260,11 @@ class TokenUsage:
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    thinking_tokens: int | None = None
+    visible_output_tokens: int | None = None
+    intent_output_cap_tokens: int | None = None
+    api_output_cap_tokens: int | None = None
+    configured_reasoning_reserve_tokens: int | None = None
     elapsed_seconds: float | None = None
     # Effective service tier for this call ("flex"/"standard"/"auto"/None).
     # Populated from provider response metadata (OpenAI echoes it natively;
@@ -277,6 +282,10 @@ class TokenUsage:
     model_lineage: str | None = None
     adapter_kind: str | None = None
     endpoint_host: str | None = None
+    # Set when this call used an auxiliary seat on behalf of a different
+    # originating seat (for example, structural recovery). The billing seat
+    # remains ``seat_id``; this field preserves why that seat was invoked.
+    originating_seat_id: str | None = None
 
     @property
     def estimated_cost_usd(self) -> float:
@@ -395,6 +404,11 @@ class LLMCallAttempt:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
+    thinking_tokens: int | None = None
+    visible_output_tokens: int | None = None
+    intent_output_cap_tokens: int | None = None
+    api_output_cap_tokens: int | None = None
+    configured_reasoning_reserve_tokens: int | None = None
     failure_kind: str | None = None
     failure_origin: str | None = None
     retryable: bool | None = None
@@ -445,6 +459,11 @@ class TokenTracker:
         model_name: str,
         prompt_tokens: int,
         completion_tokens: int,
+        thinking_tokens: int | None = None,
+        visible_output_tokens: int | None = None,
+        intent_output_cap_tokens: int | None = None,
+        api_output_cap_tokens: int | None = None,
+        configured_reasoning_reserve_tokens: int | None = None,
         elapsed_seconds: float | None = None,
         service_tier: str | None = None,
         cached_prompt_tokens: int = 0,
@@ -455,6 +474,7 @@ class TokenTracker:
         model_lineage: str | None = None,
         adapter_kind: str | None = None,
         endpoint_host: str | None = None,
+        originating_seat_id: str | None = None,
     ):
         """Record token usage for a specific agent."""
         usage = TokenUsage(
@@ -464,6 +484,11 @@ class TokenTracker:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens,
+            thinking_tokens=thinking_tokens,
+            visible_output_tokens=visible_output_tokens,
+            intent_output_cap_tokens=intent_output_cap_tokens,
+            api_output_cap_tokens=api_output_cap_tokens,
+            configured_reasoning_reserve_tokens=configured_reasoning_reserve_tokens,
             elapsed_seconds=elapsed_seconds,
             service_tier=service_tier,
             cached_prompt_tokens=cached_prompt_tokens,
@@ -474,6 +499,7 @@ class TokenTracker:
             model_lineage=model_lineage,
             adapter_kind=adapter_kind,
             endpoint_host=endpoint_host,
+            originating_seat_id=originating_seat_id,
         )
 
         with self._lock:
@@ -511,6 +537,11 @@ class TokenTracker:
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
         total_tokens: int | None = None,
+        thinking_tokens: int | None = None,
+        visible_output_tokens: int | None = None,
+        intent_output_cap_tokens: int | None = None,
+        api_output_cap_tokens: int | None = None,
+        configured_reasoning_reserve_tokens: int | None = None,
         failure_kind: str | None = None,
         failure_origin: str | None = None,
         retryable: bool | None = None,
@@ -538,6 +569,11 @@ class TokenTracker:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
+            thinking_tokens=thinking_tokens,
+            visible_output_tokens=visible_output_tokens,
+            intent_output_cap_tokens=intent_output_cap_tokens,
+            api_output_cap_tokens=api_output_cap_tokens,
+            configured_reasoning_reserve_tokens=configured_reasoning_reserve_tokens,
             failure_kind=failure_kind,
             failure_origin=failure_origin,
             retryable=retryable,
@@ -595,6 +631,7 @@ class TokenTracker:
             by_seat: dict[str, dict[str, float]] = {}
             by_group: dict[str, dict[str, float]] = {}
             binding_usage: dict[tuple[str, ...], dict[str, Any]] = {}
+            recovery_usage: dict[tuple[str, str], dict[str, Any]] = {}
             unpriced: set[str] = set()
             for usage in self.all_usages:
                 if not _is_model_priced(usage.model_name):
@@ -645,6 +682,26 @@ class TokenTracker:
                     identity_row["calls"] += 1
                     identity_row["tokens"] += usage.total_tokens
                     identity_row["cost_usd"] += usage.estimated_cost_usd
+                if usage.originating_seat_id:
+                    recovery_key = (
+                        usage.seat_id or "legacy_or_external",
+                        usage.originating_seat_id,
+                    )
+                    recovery_row = recovery_usage.setdefault(
+                        recovery_key,
+                        {
+                            "recovery_seat_id": usage.seat_id,
+                            "originating_seat_id": usage.originating_seat_id,
+                            "calls": 0,
+                            "tokens": 0,
+                            "cost_usd": 0.0,
+                            "elapsed_seconds": 0.0,
+                        },
+                    )
+                    recovery_row["calls"] += 1
+                    recovery_row["tokens"] += usage.total_tokens
+                    recovery_row["cost_usd"] += usage.estimated_cost_usd
+                    recovery_row["elapsed_seconds"] += usage.elapsed_seconds or 0.0
 
             return {
                 "failed_attempts": len(self.failed_attempts),
@@ -682,6 +739,7 @@ class TokenTracker:
                 "by_seat": by_seat,
                 "by_binding_group": by_group,
                 "binding_usage": list(binding_usage.values()),
+                "recovery_usage": list(recovery_usage.values()),
                 "unpriced_models": sorted(unpriced),
                 "failed_by_provider": self._count_failures("provider"),
                 "failed_by_kind": self._count_failures("failure_kind"),
@@ -901,6 +959,7 @@ class TokenTrackingCallback(BaseCallbackHandler):
         agent_name: str,
         tracker: TokenTracker | None = None,
         output_token_cap: int | None = None,
+        originating_seat_id: str | None = None,
     ):
         """
         Initialize callback with agent name.
@@ -913,6 +972,7 @@ class TokenTrackingCallback(BaseCallbackHandler):
         self.agent_name = agent_name
         self.tracker = tracker or TokenTracker()
         self.output_token_cap = output_token_cap
+        self.originating_seat_id = originating_seat_id
         self.api_output_token_cap = output_token_cap
         self.reasoning_reserve_tokens = 0
         self.seat_id: str | None = None
@@ -1154,6 +1214,11 @@ class TokenTrackingCallback(BaseCallbackHandler):
                 model_name=model_name,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                thinking_tokens=usage.thinking_tokens,
+                visible_output_tokens=usage.visible_output_tokens,
+                intent_output_cap_tokens=self.output_token_cap,
+                api_output_cap_tokens=self.api_output_token_cap,
+                configured_reasoning_reserve_tokens=self.reasoning_reserve_tokens,
                 elapsed_seconds=elapsed_seconds,
                 service_tier=service_tier,
                 cached_prompt_tokens=cached_prompt_tokens,
@@ -1164,6 +1229,7 @@ class TokenTrackingCallback(BaseCallbackHandler):
                 model_lineage=self.model_lineage,
                 adapter_kind=self.adapter_kind,
                 endpoint_host=self.endpoint_host,
+                originating_seat_id=self.originating_seat_id,
             )
             self._log_cache_diagnostics(
                 model_name=model_name,

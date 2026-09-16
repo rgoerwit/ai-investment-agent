@@ -66,6 +66,9 @@ def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
     assert summary["optional_failures"] == ["consultant_review"]
     assert summary["llm_attempts"] == 5
     assert summary["llm_failures"] == 2
+    assert (
+        summary["evidence_promotion"]["external_document_extraction_enabled"] is False
+    )
 
 
 def _min_summary(monkeypatch, result: dict):
@@ -81,6 +84,39 @@ def _min_summary(monkeypatch, result: dict):
     )
 
 
+def test_absent_auditor_is_persisted_as_not_run(monkeypatch):
+    summary = _min_summary(monkeypatch, {})
+
+    assert summary["auditor_completed"] is False
+    assert summary["auditor_finished"] is False
+    assert summary["auditor_successful"] is False
+    assert summary["auditor_review_status"] == "NOT_RUN"
+
+
+def test_unreconciled_auditor_findings_override_clean_artifact_status(monkeypatch):
+    summary = _min_summary(
+        monkeypatch,
+        {
+            "artifact_statuses": {
+                "auditor_report": {
+                    "complete": True,
+                    "ok": True,
+                    "content": "STATUS: CLEAN\nPaper Profit anomaly named.",
+                }
+            },
+            "final_trade_decision": (
+                "AUDITOR_RESOLUTION:\n"
+                "- FINDING: Auditor concern was not reconciled.\n"
+                "- DATA_CHECK: NOT_PROVIDED\n"
+                "- VERDICT: UNVERIFIABLE\n"
+            ),
+        },
+    )
+
+    assert summary["auditor_successful"] is False
+    assert summary["auditor_review_status"] == "UNRECONCILED"
+
+
 def test_debate_rounds_is_turns_over_two(monkeypatch):
     # `count` tallies bull+bear turns: quick=2 → 1 round, full=4 → 2 rounds.
     quick = _min_summary(monkeypatch, {"investment_debate_state": {"count": 2}})
@@ -89,6 +125,216 @@ def test_debate_rounds_is_turns_over_two(monkeypatch):
     full = _min_summary(monkeypatch, {"investment_debate_state": {"count": 4}})
     assert full["debate_rounds"] == 2
     assert full["debate_turns"] == 4
+
+
+def test_run_summary_distinguishes_retained_messages_from_tool_executions(monkeypatch):
+    records = [
+        SimpleNamespace(agent_key="foreign_language_analyst", source="toolnode"),
+        SimpleNamespace(agent_key="foreign_language_analyst", source="toolnode"),
+        SimpleNamespace(agent_key="foreign_language_analyst", source="preflight"),
+    ]
+    monkeypatch.setattr(
+        "src.runtime_services.get_current_evidence_records",
+        lambda: records,
+    )
+    summary = _min_summary(
+        monkeypatch,
+        {
+            "messages": [
+                ToolMessage(content="retained", tool_call_id="one", name="search")
+            ]
+        },
+    )
+
+    assert summary["tool_calls"] == 1
+    assert summary["tool_messages_retained"] == 1
+    assert summary["tool_executions"] == 3
+    assert summary["tool_executions_by_agent"] == {"foreign_language_analyst": 3}
+    assert summary["tool_executions_by_source"] == {"toolnode": 2, "preflight": 1}
+
+
+def test_debate_handoff_persistence_keeps_telemetry_not_content(monkeypatch):
+    secret_reasoning = "private model rationale that must not persist"
+    telemetry = {
+        "policy_version": 5,
+        "policy_active": True,
+        "barrier_reported": True,
+        "published_rounds": [1],
+        "structured_pair": True,
+        "native_pair": False,
+        "structured_lengths": {"bull": 12, "bear": 14},
+        "native_lengths": {"bull": 0, "bear": 0},
+        "unexpected_content": secret_reasoning,
+    }
+    summary = _min_summary(
+        monkeypatch,
+        {
+            "investment_debate_state": {
+                "count": 4,
+                "handoff_telemetry": telemetry,
+                "bull_round1_handoff": {"structured": secret_reasoning},
+                "bear_round1_handoff": {"structured": secret_reasoning},
+            }
+        },
+    )
+
+    expected = {
+        key: value for key, value in telemetry.items() if key != "unexpected_content"
+    }
+    assert summary["debate_reasoning_handoffs"] == expected
+    assert secret_reasoning not in json.dumps(summary)
+
+
+def test_barrier_telemetry_round_trips_through_the_one_producer(monkeypatch):
+    """Parity assertion two independent producers structurally cannot make."""
+    from src.agents.debate_handoffs import (
+        DebateReasoningPolicy,
+        paired_handoff_telemetry,
+        sanitize_handoff_telemetry,
+    )
+
+    produced = paired_handoff_telemetry(
+        policy=DebateReasoningPolicy(enabled=True, max_rounds=2),
+        bull={"structured": "bull capsule", "native": "bull summary"},
+        bear={"structured": "bear capsule", "native": "bear summary"},
+    )
+
+    assert sanitize_handoff_telemetry(produced) == produced
+
+    summary = _min_summary(
+        monkeypatch,
+        {"investment_debate_state": {"count": 4, "handoff_telemetry": produced}},
+    )
+    assert summary["debate_reasoning_handoffs"] == produced
+
+
+def test_absent_telemetry_never_consults_ambient_run_configuration(monkeypatch):
+    """build_run_summary runs outside a bound RuntimeConfig in several callers.
+
+    The serializer must describe what the graph recorded, not what the run was
+    configured to do — reading runtime config here is the dishonest-flag
+    pattern this module avoids for the quick-mode and DNI markers.
+    """
+    import src.persistence as persistence_module
+
+    monkeypatch.setattr(
+        persistence_module,
+        "get_runtime_config",
+        lambda _config: (_ for _ in ()).throw(
+            AssertionError("run configuration must not be read for handoff telemetry")
+        ),
+        raising=False,
+    )
+
+    summary = _min_summary(monkeypatch, {"investment_debate_state": {"count": 4}})
+
+    handoffs = summary["debate_reasoning_handoffs"]
+    assert handoffs["policy_active"] is False
+    assert handoffs["barrier_reported"] is False
+
+
+def test_policy_active_without_a_barrier_report_is_distinguishable(monkeypatch):
+    summary = _min_summary(
+        monkeypatch,
+        {
+            "investment_debate_state": {
+                "count": 4,
+                "handoff_telemetry": {
+                    "policy_version": 5,
+                    "policy_active": True,
+                    "barrier_reported": False,
+                    "published_rounds": [],
+                    "structured_pair": False,
+                    "native_pair": False,
+                    "structured_lengths": {"bull": 0, "bear": 0},
+                    "native_lengths": {"bull": 0, "bear": 0},
+                },
+            }
+        },
+    )
+
+    handoffs = summary["debate_reasoning_handoffs"]
+    assert handoffs["policy_active"] is True
+    assert handoffs["barrier_reported"] is False
+    assert handoffs["published_rounds"] == []
+
+
+@pytest.mark.parametrize(
+    ("component", "lengths"),
+    [
+        ("structured_lengths", {"bull": 12, "bear": "bad"}),
+        ("structured_lengths", {"bull": 0, "bear": 14}),
+        ("native_lengths", {"bull": 20, "bear": -1}),
+        ("native_lengths", {"bull": 20, "bear": 0}),
+    ],
+)
+def test_one_invalid_telemetry_leg_clears_the_whole_pair(
+    monkeypatch, component, lengths
+):
+    """The barrier publishes a component only when BOTH roles produced it.
+
+    A record claiming a pair with one zero leg is false audit telemetry — it
+    reports a balanced handoff that never happened. Guards `all(...)` against a
+    regression to `any(...)`, which passed the fully-malformed case while
+    letting a half-malformed one through.
+    """
+    raw = {
+        "policy_version": 5,
+        "policy_active": True,
+        "barrier_reported": True,
+        "published_rounds": [1],
+        "structured_pair": True,
+        "native_pair": True,
+        "structured_lengths": {"bull": 12, "bear": 14},
+        "native_lengths": {"bull": 20, "bear": 22},
+    }
+    raw[component] = lengths
+
+    summary = _min_summary(
+        monkeypatch,
+        {"investment_debate_state": {"count": 4, "handoff_telemetry": raw}},
+    )
+    handoffs = summary["debate_reasoning_handoffs"]
+    pair_key = component.replace("_lengths", "_pair")
+
+    assert handoffs[pair_key] is False
+    assert handoffs[component] == {"bull": 0, "bear": 0}
+
+
+def test_debate_handoff_telemetry_fails_closed_on_malformed_values(monkeypatch):
+    summary = _min_summary(
+        monkeypatch,
+        {
+            "investment_debate_state": {
+                "count": 4,
+                "handoff_telemetry": {
+                    "policy_version": "future",
+                    "policy_active": True,
+                    "barrier_reported": True,
+                    "published_rounds": [99],
+                    "structured_pair": True,
+                    "native_pair": False,
+                    "structured_lengths": {"bull": -1, "bear": "many"},
+                    "native_lengths": {"bull": 50, "bear": 50},
+                },
+            }
+        },
+    )
+
+    assert summary["debate_reasoning_handoffs"] == {
+        # Reported verbatim as unrecognized rather than downgraded to 1, so a
+        # reader can see the shape was written by different code.
+        "policy_version": None,
+        "policy_active": True,
+        "barrier_reported": True,
+        "published_rounds": [],
+        # A pair whose lengths are all unusable is not a published pair: the
+        # flag and the lengths can never disagree.
+        "structured_pair": False,
+        "native_pair": False,
+        "structured_lengths": {"bull": 0, "bear": 0},
+        "native_lengths": {"bull": 0, "bear": 0},
+    }
 
 
 def test_verdict_qualified_flag_reflects_marker(monkeypatch):

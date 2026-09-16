@@ -1654,7 +1654,6 @@ def load_past_snapshots(
             logger.warning(
                 "snapshot_load_error",
                 file=filepath.name,
-                exc_info=True,
                 **summarize_exception(e, operation="snapshot_load"),
             )
             emit_progress()
@@ -1810,7 +1809,6 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
             root_cause_type=details.root_cause_type,
             retryable=details.retryable,
             error_message=details.message,
-            exc_info=True,
         )
         return None
 
@@ -2585,7 +2583,6 @@ FAILURE_MODE: {UNRESOLVED_PRICE_ONLY} | CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_B
             root_cause_type=details.root_cause_type,
             retryable=details.retryable,
             error_message=details.message,
-            exc_info=True,
         )
         return None
 
@@ -3696,7 +3693,6 @@ async def run_retrospective(
         except Exception as e:
             logger.error(
                 "lessons_memory_init_failed",
-                exc_info=True,
                 **summarize_exception(e, operation="lessons_memory_init"),
             )
             _emit(_RunCounters())

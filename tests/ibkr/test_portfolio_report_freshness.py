@@ -16,6 +16,7 @@ from scripts.portfolio_manager import (
 from src.ibkr.models import (
     AnalysisRecord,
     NormalizedPosition,
+    PortfolioEvidence,
     PortfolioSummary,
     ReconciliationItem,
     TradeBlockData,
@@ -25,7 +26,8 @@ from src.ibkr.portfolio_presentation import (
     build_live_order_note,
     group_portfolio_actions,
 )
-from src.ibkr.refresh_service import RefreshActivity
+from src.ibkr.portfolio_report_formatting import DETAIL_WRAP_WIDTH
+from src.ibkr.refresh_service import AnalysisRefreshService, RefreshActivity
 from src.ibkr.screening_freshness import ScreeningFreshnessSummary
 from src.ibkr.ticker import Ticker
 from src.ibkr.watchlist_optimization import resolve_watchlist_optimization
@@ -79,9 +81,9 @@ class TestAnalysisFreshnessReporting:
     def test_analysis_freshness_section_replaces_split_brain_deadlines(self):
         report = format_report(self._items(), _make_portfolio(), max_age_days=14)
         assert "ANALYSIS FRESHNESS" in report
-        assert "Needs review before action:" in report
-        assert "Already in refresh queue:" in report
-        assert "Due soon:" in report
+        assert "Urgent analysis refreshes:" in report
+        assert "Stale sell/trim decisions needing current analysis:" in report
+        assert "Normal-cycle eligible refreshes:" in report
         assert "Upcoming review deadlines" not in report
 
     def test_reviews_subtitle_uses_decision_safe_wording(self):
@@ -109,7 +111,7 @@ class TestAnalysisFreshnessReporting:
         assert "Skipped (read-only): 7203.T" in report
         assert (
             "User action: read-only mode blocked refresh — run "
-            f"{_portfolio_manager_command('--refresh-policy', 'blocking')}"
+            f"{_portfolio_manager_command('--refresh-policy', 'proactive')}"
         ) in report
 
     def test_successful_refresh_run_can_leave_no_manual_action(self):
@@ -125,6 +127,181 @@ class TestAnalysisFreshnessReporting:
         assert "Refreshed: 7203.T" in report
         assert "User action: none" in report
 
+    def test_failed_urgent_refresh_shows_its_retry_time(self):
+        item = ReconciliationItem(
+            ticker="7203.T",
+            action="REVIEW",
+            reason="No analysis found",
+            urgency="HIGH",
+            ibkr_position=_make_position(ticker="7203.T"),
+        )
+        report = format_report(
+            [item],
+            _make_portfolio(),
+            refresh_activity=RefreshActivity(
+                policy="blocking",
+                limit=10,
+                failed=["7203.T"],
+                failed_retry_after={"7203.T": "2026-09-05T02:40:34.512873+00:00"},
+            ),
+        )
+
+        assert "auto-refresh failed; retry after 2026-09-05 02:40:34 UTC" in report
+        assert ".512873" not in report
+        assert "Backoff active for failed refreshes: 7203.T" in report
+        assert "Retry failed refreshes" not in report
+        assert (
+            "User action: refresh failed for 7203.T — backoff active; "
+            "rerun on a later refresh-enabled run"
+        ) in report
+
+    def test_failed_refresh_with_invalid_retry_time_degrades_safely(self):
+        item = ReconciliationItem(
+            ticker="7203.T",
+            action="REVIEW",
+            reason="No analysis found",
+            urgency="HIGH",
+            ibkr_position=_make_position(ticker="7203.T"),
+        )
+
+        report = format_report(
+            [item],
+            _make_portfolio(),
+            refresh_activity=RefreshActivity(
+                policy="blocking",
+                limit=10,
+                failed=["7203.T"],
+                failed_retry_after={"7203.T": "not-a-time"},
+            ),
+        )
+
+        assert "auto-refresh failed; retry on a later refresh-enabled run" in report
+
+    def test_unrepaired_refresh_backoff_is_not_reported_as_failure(self):
+        item = ReconciliationItem(
+            ticker="2173.T",
+            action="REVIEW",
+            reason="Gate scores unreliable (LEGAL_COUNSEL_UNAVAILABLE)",
+            urgency="HIGH",
+            ibkr_position=_make_position(ticker="2173.T"),
+            analysis=_make_analysis(ticker="2173.T", age_days=0),
+            action_basis="DATA_QUALITY",
+        )
+        item.analysis.evidence = PortfolioEvidence(
+            buy_blocking_flag_types=("LEGAL_COUNSEL_UNAVAILABLE",)
+        )
+        retry_after = "2026-09-12T02:40:34.512873+00:00"
+        report = format_report(
+            [item],
+            _make_portfolio(),
+            refresh_activity=RefreshActivity(
+                policy="blocking",
+                limit=10,
+                skipped_due_to_cooldown=["2173.T"],
+                skipped_due_to_unrepaired={"2173.T": retry_after},
+            ),
+        )
+
+        assert "a completed refresh left this review unchanged" in report
+        assert "retry after 2026-09-12 02:40:34 UTC" in report
+        assert "Deferred — a completed refresh left these unchanged: 2173.T" in report
+        assert "Deferred after failed refresh: 2173.T" not in report
+        assert "prior refresh did not repair active for 2173.T" in report
+
+        payload = json.loads(
+            format_json(
+                [item],
+                _make_portfolio(),
+                refresh_activity=RefreshActivity(
+                    policy="blocking",
+                    limit=10,
+                    skipped_due_to_cooldown=["2173.T"],
+                    skipped_due_to_unrepaired={"2173.T": retry_after},
+                ),
+            )
+        )
+        refresh = payload["analysis_freshness_summary"]
+        assert refresh["skipped_due_to_unrepaired"] == {"2173.T": retry_after}
+        assert refresh["skipped_due_to_failure_backoff"] == {}
+
+    def test_current_guidance_shows_freshness_without_requesting_a_rerun(self):
+        item = ReconciliationItem(
+            ticker="7203.T",
+            action="REVIEW",
+            reason=(
+                "Fundamentals remain intact, but a valuation, tax, and position-sizing "
+                "review is needed before changing this held position."
+            ),
+            urgency="MEDIUM",
+            ibkr_position=_make_position(ticker="7203.T"),
+            analysis=_make_analysis(ticker="7203.T", age_days=1),
+            action_basis="ENTRY_CONSTRAINT",
+        )
+
+        report = format_report([item], _make_portfolio())
+        operator_section = report.split(
+            "Current handling guidance — no refresh queued yet:", 1
+        )[1]
+        operator_section = operator_section.split("Refresh activity this run:", 1)[0]
+
+        assert "7203" in operator_section
+        assert "Fundamentals remain intact" in operator_section
+        assert "analysis 1d old" in operator_section
+        assert "expires " in operator_section
+        assert "normal-cycle refresh follows near expiry" in operator_section
+        assert max(map(len, operator_section.splitlines())) <= DETAIL_WRAP_WIDTH + 14
+
+    def test_operator_review_explains_common_decision_bases(self):
+        items = [
+            ReconciliationItem(
+                ticker="ENTRY.T",
+                action="REVIEW",
+                reason="Fundamentals intact; entry screen rejected the current price",
+                urgency="LOW",
+                ibkr_position=_make_position(ticker="ENTRY.T"),
+                analysis=_make_analysis(ticker="ENTRY.T", age_days=1),
+                action_basis="ENTRY_CONSTRAINT",
+            ),
+            ReconciliationItem(
+                ticker="THESIS.T",
+                action="REVIEW",
+                reason="Price weakness alone is not exit evidence",
+                urgency="LOW",
+                ibkr_position=_make_position(ticker="THESIS.T"),
+                analysis=_make_analysis(ticker="THESIS.T", age_days=1),
+                action_basis="THESIS_REASSESSMENT",
+            ),
+            ReconciliationItem(
+                ticker="VALUE.T",
+                action="REVIEW",
+                reason="Base-case valuation reference reached",
+                urgency="LOW",
+                ibkr_position=_make_position(ticker="VALUE.T"),
+                analysis=_make_analysis(ticker="VALUE.T", age_days=1),
+                action_basis="CAPITAL_ALLOCATION",
+            ),
+        ]
+
+        report = format_report(items, _make_portfolio())
+        operator_section = report.split(
+            "Current handling guidance — no refresh queued yet:",
+            1,
+        )[1]
+        operator_section = operator_section.split("Refresh activity this run:", 1)[0]
+
+        assert (
+            "ENTRY_CONSTRAINT — maintain position; do not add; no sell implied"
+            in operator_section
+        )
+        assert (
+            "THESIS_REASSESSMENT — recheck thesis; no exit until failure is confirmed"
+            in operator_section
+        )
+        assert (
+            "CAPITAL_ALLOCATION — decide whether to hold, trim, or redeploy capital"
+            in operator_section
+        )
+
     def test_format_json_includes_freshness_summary(self):
         payload = json.loads(
             format_json(
@@ -134,9 +311,9 @@ class TestAnalysisFreshnessReporting:
             )
         )
         summary = payload["analysis_freshness_summary"]
-        assert summary["blocking_now_count"] == 1
+        assert summary["blocking_now_count"] == 0
         assert summary["stale_in_queue_count"] == 1
-        assert summary["due_soon_count"] == 1
+        assert summary["due_soon_count"] == 2
         assert summary["manual_action_required"] is True
 
     def test_format_report_shows_stale_screening_freshness(self):
@@ -156,7 +333,10 @@ class TestAnalysisFreshnessReporting:
         )
         assert "SCREENING FRESHNESS" in report
         assert "Last completed sweep: 2026-01-05  (90 days ago)" in report
-        assert "Candidates screened: 245  ·  BUYs found: 12" in report
+        assert (
+            "Candidates screened: 245  ·  "
+            "Stage-1 BUY candidates: 12 (require full analysis)"
+        ) in report
 
     def test_format_report_omits_fresh_screening_freshness(self):
         report = format_report(
@@ -610,3 +790,91 @@ class TestOrderMatcherAuthority:
         order["conid"] = "not-a-number"
         report = format_report([item], _make_portfolio(), live_orders=[order])
         assert "ORDER ALREADY SUBMITTED" in report
+
+
+class TestRefreshedThisRunRendersWithoutACommand:
+    """The report must not print a command for work it just did.
+
+    Regression (2026-08-19): the same report said `Refreshed: 7047.T, HERDEZ.MX`
+    and, above it, listed both under "Urgent analysis refreshes" with a
+    `--ticker` command each. Asserted on the rendered text rather than on bucket
+    membership, because the contradiction the operator saw was a rendering fact:
+    routing the rows to `due_soon` moves the bucket and still prints a command.
+    """
+
+    def _item(self, ticker: str = "7203.T"):
+        item = ReconciliationItem(
+            ticker=ticker,
+            action="REVIEW",
+            reason="Gate scores unreliable — re-run before acting",
+            urgency="HIGH",
+            ibkr_position=_make_position(ticker=ticker),
+            analysis=_make_analysis(ticker=ticker, age_days=0),
+            sell_type="DATA_QUALITY_REVIEW",
+            action_basis="DATA_QUALITY",
+        )
+        item.analysis.evidence = PortfolioEvidence(
+            buy_blocking_flag_types=("TEST_EVIDENCE_UNAVAILABLE",)
+        )
+        return item
+
+    @staticmethod
+    def _freshness_section(report: str) -> str:
+        """The ANALYSIS FRESHNESS block only.
+
+        Scope note: the REVIEWS section renders its own refresh command from
+        `portfolio_report_positions`, attached to the position's disposition
+        rather than to the refresh queue. That command is left in place — it
+        answers "how do I re-analyse this holding", which stays valid — and
+        suppressing it would mean threading the refreshed set through three
+        further shared renderers. The defect being guarded here is the *queue*
+        advertising work the same run just performed.
+        """
+        _, _, rest = report.partition("ANALYSIS FRESHNESS")
+        section, _, _ = rest.partition("DIP WATCH")
+        return section
+
+    def test_refreshed_ticker_is_not_re_advertised_by_the_queue(self):
+        service = AnalysisRefreshService()
+        items = [self._item()]
+        summary = service.classify(
+            items, max_age_days=14, already_refreshed=frozenset({"7203.T"})
+        )
+
+        report = format_report(
+            items,
+            _make_portfolio(),
+            max_age_days=14,
+            freshness_summary=summary,
+            refresh_activity=RefreshActivity(
+                policy="blocking", limit=10, refreshed=["7203.T"]
+            ),
+        )
+        section = self._freshness_section(report)
+
+        assert "Refreshed this run" in section
+        assert "Refreshed: 7203.T" in section
+        # The exact contradiction from the 2026-08-19 report.
+        assert "--ticker 7203.T" not in section
+
+    def test_unrefreshed_ticker_still_gets_its_command(self):
+        """The suppression must be scoped to what this run actually refreshed."""
+        service = AnalysisRefreshService()
+        items = [self._item(), self._item("0005.HK")]
+        summary = service.classify(
+            items, max_age_days=14, already_refreshed=frozenset({"7203.T"})
+        )
+
+        report = format_report(
+            items,
+            _make_portfolio(),
+            max_age_days=14,
+            freshness_summary=summary,
+            refresh_activity=RefreshActivity(
+                policy="blocking", limit=10, refreshed=["7203.T"]
+            ),
+        )
+        section = self._freshness_section(report)
+
+        assert "--ticker 7203.T" not in section
+        assert "--ticker 0005.HK" in section

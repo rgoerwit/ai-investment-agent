@@ -11,9 +11,10 @@ not the recommended agent-facing integration surface for this repo.
 
 ## Vendor surface notes (verified May 2026)
 
-Run `python /tmp/mcp_list_tools.py` (or the equivalent of `session.list_tools()`)
-against any new vendor before adding it to the registry — assumed tool names
-are unreliable.
+Call `session.list_tools()` against any new vendor before adding it to the
+registry — assumed tool names are unreliable, and a vendor's REST documentation
+routinely does not match its MCP surface. `scripts/mcp_smoke.py` exercises a
+configured server through the full hook chain without an LLM in the loop.
 
 - **FMP** uses a *dispatcher* pattern. Top-level tools (`statements`, `quote`,
   `analyst`, `chart`, etc.) take an `endpoint` enum argument that selects the
@@ -21,13 +22,46 @@ are unreliable.
   `tool="statements", arguments={"symbol": ..., "endpoint": "metrics-ratios-ttm"}`.
   The consultant wrapper's `_FMP_METRIC_DISPATCH` table in
   `src/consultant_tools.py` encodes the metric → (tool, endpoint) mapping.
-  When adding a new metric, run `mcp_list_tools.py` and pick from the printed
-  `endpoint_enum` for the relevant tool.
+  When adding a new metric, call `session.list_tools()` and pick from the
+  advertised `endpoint_enum` for the relevant tool.
 - **Twelve Data** is intentionally **not exposed** in this repo. Their public
   MCP only publishes `u-tool` (a free-form AI router) and `doc-tool`. Neither
   fits the consultant's narrow-allowlist + structured-payload contract; the
   registry entry is left with `enabled: false` until they ship structured
   per-metric tools.
+
+## Why mcp stays on 1.x (audited Aug 2026)
+
+`pyproject.toml` pins `mcp = ">=1.26.0,<2.0.0"`. That cap is a researched
+decision, not routine major-safety — re-read this before "modernising" it.
+
+We are a **client only**: one server (FMP remote) over streamable HTTP, calling
+`list_tools` and `call_tool`. So most of upstream's v1→v2 migration guide (the
+`FastMCP`→`MCPServer` rename, the lowlevel `Server` handler rework, OAuth
+providers) does not apply. Five things do — and **three of them fail silently**,
+which is what decides it:
+
+| Site | v2 change | Failure mode |
+|---|---|---|
+| `src/mcp/client.py` (`_open_session`) | `httpx.AsyncClient` passed as `http_client=` | **Silent.** Upstream: an `httpx` client "degrades in subtle ways (server-initiated messages stop arriving) instead of raising immediately" |
+| `src/mcp/errors.py` (`classify_mcp_error`) | SDK raises `httpx2` exceptions | **Silent.** We declare `httpx` ourselves so `import httpx` still succeeds; `isinstance(exc, httpx.HTTPStatusError)` simply stops matching, collapsing every transport error to generic non-retryable and disabling the 2-attempt retry, the 300 s AUTH cooldown and the 429 backoff |
+| `src/mcp/errors.py` | `McpError` → `MCPError` | **Silent.** The import sits inside `try/except ImportError`, so it yields `mcp_error_type = None` and protocol errors misclassify |
+| `src/mcp/client.py` | `streamable_http_client` yields a 2-tuple | Loud `ValueError` — we unpack `(read, write, _)` |
+| `src/mcp/normalize.py`, `client.py` | `structuredContent`/`isError`/`inputSchema`/`outputSchema` → snake_case | Loud `AttributeError` |
+
+v2 also adds a substantial dependency surface — `httpx2`, `mcp-types`,
+`sse-starlette>=3` (two majors), `opentelemetry-api` as a **hard** dependency,
+`pyjwt[crypto]`, `python-multipart`, `uvicorn`, `jsonschema` — and moves TLS
+verification from `certifi` to the OS trust store via `truststore`, which needs
+checking against the `python:3.12-slim` base image in `Dockerfile` before any
+migration.
+
+Against all that, v2 offers **nothing this repo uses**.
+
+**Revisit when** we need a v2-only feature, or upstream ends security support
+for 1.x. If you do migrate, fix the three silent sites first and add a test that
+asserts a transport error still classifies as retryable — the loud two announce
+themselves, the silent three will not.
 
 ## Configuration
 

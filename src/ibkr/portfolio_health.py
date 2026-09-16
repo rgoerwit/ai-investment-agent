@@ -156,7 +156,9 @@ def compute_portfolio_health(
     exchange_limit_pct: float = DEFAULT_EXCHANGE_LIMIT_PCT,
 ) -> list[str]:
     """Compute portfolio-level health flags using data already in held analyses."""
-    if not positions or portfolio.portfolio_value_usd <= 0:
+    if (
+        not positions and not portfolio.unresolved_positions
+    ) or portfolio.portfolio_value_usd <= 0:
         return []
 
     flags: list[str] = []
@@ -209,6 +211,16 @@ def compute_portfolio_health(
                     stale_need_refresh_count += 1
 
         ccy = (pos.currency or "USD").upper()
+        currency_weights[ccy] = currency_weights.get(ccy, 0.0) + weight * 100
+
+    # Currency is broker-provided accounting data and does not require a
+    # research ticker. Retain that known risk exposure even when identity is
+    # quarantined and sector/exchange attribution is unavailable.
+    for unresolved_position in portfolio.unresolved_positions:
+        if not unresolved_position.valuation_valid:
+            continue
+        weight = unresolved_position.market_value_usd / portfolio.portfolio_value_usd
+        ccy = (unresolved_position.currency or "USD").upper()
         currency_weights[ccy] = currency_weights.get(ccy, 0.0) + weight * 100
 
     def _worst_detail(

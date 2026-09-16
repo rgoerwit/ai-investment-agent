@@ -13,6 +13,9 @@ from datetime import datetime, timedelta
 
 from src.ibkr.buy_stability import PriorVerdict
 from src.ibkr.models import NormalizedPosition, PortfolioEvidence
+from src.ibkr.portfolio_defaults import (
+    DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS,
+)
 from src.ibkr.portfolio_health import (
     compute_portfolio_health,
     is_macro_event_evidence,
@@ -316,12 +319,44 @@ class TestRefreshConvergence:
 
         return AnalysisRefreshService().classify(items, max_age_days=14)
 
-    def test_unconfirmed_reject_review_is_blocking_now(self):
+    def test_unconfirmed_reject_becomes_blocking_once_confirmation_is_reachable(self):
+        """Urgent on the first day a re-run could actually confirm.
+
+        Sharpened 2026-08: confirmation needs the two full-mode rejects at
+        least DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS apart, so re-running a
+        provably-full artifact younger than that is guaranteed not to change
+        the disposition. Convergence is unchanged — the reject still confirms on
+        day 7 — but the six intervening daily re-analyses are removed.
+        """
         pos = _make_position(current_price=2100)
-        a = _reject_analysis()
+        a = _make_analysis(
+            verdict="DO_NOT_INITIATE",
+            age_days=DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS,
+        )
+        a.health_adj = 70.0
         a.growth_adj = 30.0  # weak → THESIS_REASSESSMENT, sell_type HARD_REJECT
         items = reconcile([pos], {"7203.T": a}, _make_portfolio())
         assert items[0].action == "REVIEW"
+        summary = self._classify(items)
+        assert [r.run_ticker for r in summary.blocking_now] == ["7203.T"]
+
+    def test_unconfirmed_reject_inside_the_window_does_not_burn_urgent_budget(self):
+        pos = _make_position(current_price=2100)
+        a = _reject_analysis()  # age_days=0, provably full → cannot self-confirm
+        a.growth_adj = 30.0
+        items = reconcile([pos], {"7203.T": a}, _make_portfolio())
+        assert items[0].action == "REVIEW"
+        summary = self._classify(items)
+        assert not summary.blocking_now
+        assert [r.run_ticker for r in summary.operator_review] == ["7203.T"]
+
+    def test_quick_mode_reject_stays_urgent_because_a_full_rerun_adds_authority(self):
+        """A quick artifact carries no sell authority, so its age proves nothing."""
+        pos = _make_position(current_price=2100)
+        a = _reject_analysis()
+        a.growth_adj = 30.0
+        a.is_quick_mode = True
+        items = reconcile([pos], {"7203.T": a}, _make_portfolio())
         summary = self._classify(items)
         assert [r.run_ticker for r in summary.blocking_now] == ["7203.T"]
 

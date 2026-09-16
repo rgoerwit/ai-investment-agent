@@ -24,6 +24,33 @@ async def _async_result(value):
     return value
 
 
+def test_attach_runtime_evidence_records_uses_the_supplied_run_ledger():
+    from src.main import _attach_runtime_evidence_records
+
+    recorder = SimpleNamespace(
+        serialized_snapshot=MagicMock(return_value=[{"sequence": 1}])
+    )
+    result: dict = {}
+
+    _attach_runtime_evidence_records(
+        result,
+        SimpleNamespace(evidence_recorder=recorder),
+    )
+
+    assert result["evidence_records"] == [{"sequence": 1}]
+    recorder.serialized_snapshot.assert_called_once_with()
+
+
+def test_attach_runtime_evidence_records_allows_callers_without_services():
+    from src.main import _attach_runtime_evidence_records
+
+    result = {"existing": "value"}
+
+    _attach_runtime_evidence_records(result, None)
+
+    assert result == {"existing": "value"}
+
+
 @pytest.fixture(autouse=True)
 def restore_cli_logger_levels():
     from src.main import (
@@ -57,6 +84,126 @@ def stub_observability(monkeypatch):
         lambda *args, **kwargs: NoopObservabilityRuntime(),
     )
     monkeypatch.setattr("src.observability.flush_traces", lambda: None)
+
+
+class TestConfigurationErrorSurface:
+    @staticmethod
+    def _binding_error():
+        from src.llm_runtime.bindings import BindingConfigurationError
+
+        return BindingConfigurationError(
+            [
+                "fundamentals_analyst (quick): model 'old-model' belongs to "
+                "'provider-a', not 'provider-b'",
+                "portfolio_manager (quick): model 'old-model' belongs to "
+                "'provider-a', not 'provider-b'",
+            ]
+        )
+
+    def test_structured_binding_errors_preserve_every_actionable_detail(self):
+        from src.main import _safe_configuration_error_message
+
+        message = _safe_configuration_error_message(
+            "validating environment configuration", self._binding_error()
+        )
+
+        assert "BindingConfigurationError" in message
+        assert "fundamentals_analyst (quick)" in message
+        assert "portfolio_manager (quick)" in message
+        assert "belongs to 'provider-a', not 'provider-b'" in message
+        assert "preview:" not in message
+
+    def test_quiet_mode_keeps_details_and_generic_corrective_guidance(self, capsys):
+        from src.main import _print_configuration_error
+
+        _print_configuration_error(
+            SimpleNamespace(quiet=True, brief=False),
+            "validating environment configuration",
+            self._binding_error(),
+        )
+
+        output = capsys.readouterr().out
+        assert "fundamentals_analyst (quick)" in output
+        assert "portfolio_manager (quick)" in output
+        assert "update the referenced settings" in output
+        assert "ensure all required API keys are set" not in output
+
+    def test_interactive_mode_keeps_the_same_actionable_details(self):
+        from src.main import _print_configuration_error
+
+        with patch("src.main.console") as mock_console:
+            _print_configuration_error(
+                SimpleNamespace(quiet=False, brief=False),
+                "validating environment configuration",
+                self._binding_error(),
+            )
+
+        output = "\n".join(
+            str(call.args[0]) for call in mock_console.print.call_args_list if call.args
+        )
+        assert "fundamentals_analyst (quick)" in output
+        assert "portfolio_manager (quick)" in output
+
+        assert "update the referenced settings" in output
+        assert "ensure all required API keys are set" not in output
+
+    def test_generic_configuration_error_keeps_its_specific_problem(self):
+        from src.main import _safe_configuration_error_message
+
+        message = _safe_configuration_error_message(
+            "validating environment configuration",
+            ValueError(
+                "Missing required environment variables: FIRST_REQUIRED_SETTING, "
+                "SECOND_REQUIRED_SETTING"
+            ),
+        )
+
+        assert "FIRST_REQUIRED_SETTING" in message
+        assert "SECOND_REQUIRED_SETTING" in message
+
+    def test_structured_details_remain_secret_safe(self):
+        from src.llm_runtime.bindings import BindingConfigurationError
+        from src.main import _safe_configuration_error_message
+
+        secret = "sk-1234567890abcdefghijklmnop"
+        message = _safe_configuration_error_message(
+            "validating environment configuration",
+            BindingConfigurationError([f"credential api_key={secret}"]),
+        )
+
+        assert secret not in message
+        assert "api_key=[REDACTED]" in message
+
+
+class TestAnalysisProcessExitCode:
+    def test_complete_analytical_rejection_is_process_success(self):
+        from src.main import _analysis_process_exit_code
+
+        result = {
+            "pre_screening_result": "REJECT",
+            "analysis_validity": {"publishable": True, "required_failures": {}},
+            "run_summary": {"required_failures": []},
+        }
+
+        assert _analysis_process_exit_code(result) == 0
+
+    def test_saved_result_with_required_failures_is_technical_failure(self):
+        from src.main import _analysis_process_exit_code
+
+        result = {
+            "analysis_validity": {
+                "publishable": False,
+                "required_failures": {"news_report": {"ok": False}},
+            },
+            "run_summary": {"required_failures": ["news_report"]},
+        }
+
+        assert _analysis_process_exit_code(result) == 2
+
+    def test_legacy_or_test_result_without_validity_details_remains_success(self):
+        from src.main import _analysis_process_exit_code
+
+        assert _analysis_process_exit_code({"analysis_validity": {}}) == 0
 
 
 class TestStrictModeCLI:
@@ -217,7 +364,12 @@ class TestOutputCompanyNameLookup:
             "TRUE.ST",
         ]
 
-    def test_run_analysis_prefetches_macro_context_into_trading_context(self):
+    @pytest.mark.parametrize(
+        ("ticker", "region"), [("7203.T", "JAPAN"), ("TLV.RO", "EUROPE")]
+    )
+    def test_run_analysis_prefetches_macro_context_into_trading_context(
+        self, ticker, region, tmp_path
+    ):
         from src.main import run_analysis
         from src.ticker_utils import CompanyNameResult
 
@@ -226,6 +378,7 @@ class TestOutputCompanyNameLookup:
 
         async def _capture_ainvoke(_state, *, config):
             captured_context["context"] = config["configurable"]["context"]
+            captured_context["state"] = _state
             return {}
 
         fake_graph = MagicMock()
@@ -233,7 +386,7 @@ class TestOutputCompanyNameLookup:
 
         macro_result = {
             "report": "### EQUITY REGIME\n- Summary: Risk appetite is mixed.",
-            "region": "JAPAN",
+            "region": region,
             "status": "cached",
             "generated_at": None,
             "llm_invoked": False,
@@ -250,6 +403,14 @@ class TestOutputCompanyNameLookup:
             "regime_raw": "MACRO_REGIME_BLOCK:\nRISK_APPETITE: RISK_OFF",
         }
 
+        # Consume the same newline-delimited candidate format Stage 0 publishes.
+        import pandas as pd
+
+        from scripts.find_gems import write_outputs
+
+        candidates = tmp_path / "gems.txt"
+        write_outputs(pd.DataFrame({"YF_Ticker": [ticker]}), str(candidates))
+        pipeline_ticker = candidates.read_text().strip()
         with (
             patch(
                 "src.ticker_utils.resolve_company_name",
@@ -272,7 +433,7 @@ class TestOutputCompanyNameLookup:
         ):
             result = asyncio.run(
                 run_analysis(
-                    ticker="7203.T",
+                    ticker=pipeline_ticker,
                     quick_mode=True,
                     strict_mode=False,
                     skip_charts=True,
@@ -281,11 +442,13 @@ class TestOutputCompanyNameLookup:
 
         assert result["analysis_validity"] == {"ok": True}
         assert result["macro_context_status"] == "cached"
-        assert result["macro_context_region"] == "JAPAN"
+        assert result["macro_context_region"] == region
         assert result["macro_context_injected_into_news"] is False
         context = captured_context["context"]
         assert context.macro_context_report == macro_result["report"]
-        assert context.macro_context_region == "JAPAN"
+        assert context.macro_context_region == region
+        assert context.ticker == ticker
+        assert captured_context["state"]["company_of_interest"] == ticker
         assert context.macro_context_status == "cached"
         assert context.macro_regime["risk_appetite"] == "RISK_OFF"
         assert result["macro_regime_block"]["risk_appetite"] == "RISK_OFF"
@@ -1729,6 +1892,17 @@ class TestSavedDiagnostics:
         result = {
             "analysis_validity": {"publishable": True},
             "consultant_tool_failures": 1,
+            "analysis_snapshot": {
+                "claims": {
+                    "claim:guidance": {
+                        "field": "GUIDANCE_REVENUE",
+                        "source_url": "https://issuer.example/results",
+                        "evidence_id": "evidence:1:abcdef",
+                        "decision_eligible": True,
+                    }
+                }
+            },
+            "decision_trace": {"decision_facts": ["claim:guidance"]},
             "artifact_statuses": {
                 "consultant_review": {
                     "complete": True,
@@ -1757,6 +1931,29 @@ class TestSavedDiagnostics:
         )
 
         assert summary["tool_failures"] == 3
+        assert summary["tool_outcomes"]["legacy_tool_failures"] == {
+            "value": 3,
+            "scope": "retained_tool_messages_plus_manual_counters",
+            "deprecated": True,
+        }
+        assert summary["tool_outcomes"]["manual_failure_counters"] == 1
+        assert summary["evidence_promotion"] == {
+            "schema_version": 1,
+            "external_document_extraction_enabled": True,
+            "source_required_claims": 1,
+            "source_urls_declared": 1,
+            "inspected_evidence_bound": 1,
+            "decision_eligible": 1,
+            "external_decision_facts": 1,
+            "by_field": [
+                {
+                    "field": "GUIDANCE_REVENUE",
+                    "source_url_declared": True,
+                    "inspected_evidence_bound": True,
+                    "decision_eligible": True,
+                }
+            ],
+        }
         assert summary["llm_provider"] == "multi-provider"
         assert summary["llm_providers_used"] == ["google", "openai"]
 

@@ -28,6 +28,27 @@ logger = structlog.get_logger(__name__)
 _SOURCE_ARTIFACT_MAX_CHARS = 50_000
 
 
+def _debate_handoff_summary(result: dict[str, Any]) -> dict[str, Any]:
+    """Project the run's handoff telemetry into the saved artifact.
+
+    Reads only what the graph recorded. The telemetry object is seeded into the
+    initial debate state, so its absence here means a legacy or hand-built
+    result rather than "the feature was off" — which is why this must not
+    consult ambient run configuration: build_run_summary is reachable from
+    contexts with no bound RuntimeConfig, and a serializer that describes intent
+    instead of outcome is exactly the dishonest-flag pattern this file avoids
+    elsewhere.
+    """
+
+    # Local import: persistence keeps the agent stack off the CLI import path
+    # (same reason parse_consultant_conditions is imported inside its caller).
+    from src.agents.debate_handoffs import sanitize_handoff_telemetry
+
+    debate = result.get("investment_debate_state", {})
+    raw = debate.get("handoff_telemetry") if isinstance(debate, dict) else None
+    return sanitize_handoff_telemetry(raw)
+
+
 # Maps each saved-JSON artifact field to its originating graph agent and the
 # TokenTrackingCallback display name(s) owned by the seat registry and used in
 # src/graph/components.py.
@@ -232,6 +253,12 @@ def build_run_summary(
     from langchain_core.messages import ToolMessage
 
     from src.llm_runtime.bindings import active_models_or_legacy, resolve_binding_plan
+    from src.runtime_diagnostics import (
+        get_analysis_outcome,
+        has_unreconciled_auditor_resolution,
+        parse_auditor_status,
+    )
+    from src.runtime_services import get_current_evidence_records
     from src.service_tiers import flex_degradation_snapshot
     from src.token_tracker import get_tracker
 
@@ -274,6 +301,158 @@ def build_run_summary(
                 providers.add(provider)
         return sorted(providers)
 
+    def _increment(bucket: dict[str, int], key: object, count: object = 1) -> None:
+        if not isinstance(key, str) or not key:
+            return
+        if not isinstance(count, int | float) or isinstance(count, bool):
+            return
+        bucket[key] = bucket.get(key, 0) + int(count)
+
+    def _tool_outcome_summary(
+        *, legacy_tool_failures: int, manual_failures: int
+    ) -> dict[str, object]:
+        budgets = result.get("research_budgets") or {}
+        block_reasons: dict[str, int] = {}
+        blocked_tools: set[str] = set()
+        category_events: dict[str, int] = {
+            "ordinary_insufficient": 0,
+            "evidence_acquisition_failure": 0,
+            "execution_error": 0,
+        }
+        category_tools: dict[str, set[str]] = {
+            category: set() for category in category_events
+        }
+        by_agent: dict[str, dict[str, int]] = {}
+        if isinstance(budgets, dict):
+            for agent, raw_budget in budgets.items():
+                if not isinstance(raw_budget, dict):
+                    continue
+                agent_counts = {"blocks": 0, **dict.fromkeys(category_events, 0)}
+                reasons = raw_budget.get("blocked_reasons") or {}
+                if isinstance(reasons, dict):
+                    for reason, count in reasons.items():
+                        _increment(block_reasons, reason, count)
+                        if isinstance(count, int | float) and not isinstance(
+                            count, bool
+                        ):
+                            agent_counts["blocks"] += int(count)
+                names = raw_budget.get("blocked_tools") or []
+                if isinstance(names, list):
+                    blocked_tools.update(str(name) for name in names if name)
+                events = raw_budget.get("tool_outcome_events") or {}
+                if isinstance(events, dict):
+                    for category in category_events:
+                        count = events.get(category, 0)
+                        if isinstance(count, int | float) and not isinstance(
+                            count, bool
+                        ):
+                            category_events[category] += int(count)
+                            agent_counts[category] += int(count)
+                by_name = raw_budget.get("tool_outcome_events_by_name") or {}
+                if isinstance(by_name, dict):
+                    for category in category_tools:
+                        values = by_name.get(category) or {}
+                        if isinstance(values, dict):
+                            category_tools[category].update(
+                                str(name) for name in values if name
+                            )
+                by_agent[str(agent)] = agent_counts
+
+        execution_statuses: dict[str, int] = {}
+        evidence_statuses: dict[str, int] = {}
+        execution_reasons: dict[str, int] = {}
+        for record in tool_execution_records:
+            _increment(execution_statuses, getattr(record, "execution_status", None))
+            _increment(evidence_statuses, getattr(record, "evidence_status", None))
+            reason = getattr(record, "reason", None)
+            if reason:
+                _increment(execution_reasons, reason)
+
+        return {
+            "schema_version": 1,
+            "legacy_tool_failures": {
+                "value": legacy_tool_failures,
+                "scope": "retained_tool_messages_plus_manual_counters",
+                "deprecated": True,
+            },
+            "research_ledgers": {
+                "scope": "shared_research_budget_ledgers",
+                "agents_reported": sorted(by_agent),
+                "blocks": {
+                    "events": sum(block_reasons.values()),
+                    "unique_tools": sorted(blocked_tools),
+                    "by_reason": block_reasons,
+                },
+                **{
+                    category: {
+                        "events": category_events[category],
+                        "unique_tools": sorted(category_tools[category]),
+                    }
+                    for category in category_events
+                },
+                "by_agent": by_agent,
+            },
+            "recorded_executions": {
+                "scope": "run_scoped_evidence_recorder",
+                "events": len(tool_execution_records),
+                "by_execution_status": execution_statuses,
+                "by_evidence_status": evidence_statuses,
+                "by_reason": execution_reasons,
+            },
+            "manual_failure_counters": manual_failures,
+        }
+
+    def _evidence_promotion_summary() -> dict[str, object]:
+        from src.claim_policy import MATERIAL_CLAIM_POLICIES
+
+        snapshot = result.get("analysis_snapshot") or {}
+        claims = snapshot.get("claims") if isinstance(snapshot, dict) else {}
+        claims = claims if isinstance(claims, dict) else {}
+        source_required: list[dict[str, object]] = []
+        for claim in claims.values():
+            if not isinstance(claim, dict):
+                continue
+            field = str(claim.get("field") or "")
+            policy = MATERIAL_CLAIM_POLICIES.get(field)
+            if policy is None or not policy.source_required:
+                continue
+            evidence_id = str(claim.get("evidence_id") or "")
+            source_required.append(
+                {
+                    "field": field,
+                    "source_url_declared": bool(claim.get("source_url")),
+                    "inspected_evidence_bound": evidence_id.startswith("evidence:"),
+                    "decision_eligible": bool(claim.get("decision_eligible")),
+                }
+            )
+        trace = result.get("decision_trace") or {}
+        fact_ids = trace.get("decision_facts") if isinstance(trace, dict) else []
+        fact_ids = fact_ids if isinstance(fact_ids, list | tuple) else []
+        external_fact_count = sum(
+            1
+            for claim_id in fact_ids
+            if isinstance((claim := claims.get(str(claim_id))), dict)
+            and bool(claim.get("decision_eligible"))
+            and str(claim.get("evidence_id") or "").startswith("evidence:")
+            and bool(claim.get("source_url"))
+        )
+        return {
+            "schema_version": 1,
+            "external_document_extraction_enabled": not quick_mode,
+            "source_required_claims": len(source_required),
+            "source_urls_declared": sum(
+                int(bool(row["source_url_declared"])) for row in source_required
+            ),
+            "inspected_evidence_bound": sum(
+                int(bool(row["inspected_evidence_bound"])) for row in source_required
+            ),
+            "decision_eligible": sum(
+                int(bool(row["decision_eligible"])) for row in source_required
+            ),
+            "external_decision_facts": external_fact_count,
+            "by_field": source_required,
+        }
+
     manual_tool_failures = sum(
         value
         for key, value in result.items()
@@ -284,11 +463,25 @@ def build_run_summary(
     binding_telemetry = resolve_binding_plan(config).telemetry(config)
     messages = result.get("messages", []) or []
     tool_messages = [msg for msg in messages if isinstance(msg, ToolMessage)]
+    tool_execution_records = get_current_evidence_records()
+    tool_executions_by_agent: dict[str, int] = {}
+    tool_executions_by_source: dict[str, int] = {}
+    for record in tool_execution_records:
+        agent = record.agent_key or "unattributed"
+        tool_executions_by_agent[agent] = tool_executions_by_agent.get(agent, 0) + 1
+        tool_executions_by_source[record.source] = (
+            tool_executions_by_source.get(record.source, 0) + 1
+        )
     tool_failures = manual_tool_failures + sum(
         1
         for msg in tool_messages
         if getattr(msg, "status", None) == "error" or _tool_message_failed(msg.content)
     )
+    tool_outcomes = _tool_outcome_summary(
+        legacy_tool_failures=tool_failures,
+        manual_failures=manual_tool_failures,
+    )
+    evidence_promotion = _evidence_promotion_summary()
     artifact_statuses = result.get("artifact_statuses", {}) or {}
     consultant_status = artifact_statuses.get("consultant_review") or {}
     auditor_status = artifact_statuses.get("auditor_report") or {}
@@ -297,6 +490,7 @@ def build_run_summary(
     auditor_finished = bool(auditor_status.get("complete"))
     apac_finished = bool(apac_status.get("complete"))
     providers_used = _collect_used_providers()
+    analysis_outcome = get_analysis_outcome(result)
 
     # "Successful" must mean the auditor completed a verified audit, not merely that it
     # emitted well-formed prose. Caveated statuses are no data (INSUFFICIENT_DATA/
@@ -304,8 +498,6 @@ def build_run_summary(
     # unparseable STATUS line (parse → None) is *also* not a clean pass — we must not
     # let malformed output read as HIGH confidence. So success requires an explicitly
     # parsed, non-caveated status; everything else reads as "ran with caveats" (MEDIUM).
-    from src.graph.routing import parse_auditor_status
-
     _AUDITOR_CAVEATED_STATUSES = {
         "INSUFFICIENT_DATA",
         "UNAVAILABLE",
@@ -313,10 +505,13 @@ def build_run_summary(
         "PARTIAL_DATA",
     }
     auditor_report_status = parse_auditor_status(auditor_status.get("content"))
+    final_decision_text = result.get("final_trade_decision") or ""
+    auditor_unreconciled = has_unreconciled_auditor_resolution(final_decision_text)
     auditor_successful = (
         bool(auditor_status.get("ok"))
         and auditor_report_status is not None
         and auditor_report_status not in _AUDITOR_CAVEATED_STATUSES
+        and not auditor_unreconciled
     )
 
     # The consultant gets the same "ran vs approved" distinction the auditor has:
@@ -334,8 +529,8 @@ def build_run_summary(
     # Read from the machine-written marker, never recomputed, so the status cannot
     # disagree with the review the PM actually received.
     # Local import: this module keeps the heavy agent/LLM stack off the CLI's
-    # import path, the same reason `parse_consultant_conditions` and
-    # `parse_auditor_status` are imported inside their call sites.
+    # import path, the same reason `parse_consultant_conditions` is imported
+    # inside its call site.
     from src.agents.consultant_nodes import CONSULTANT_PARTIAL_REVIEW_MARKER
 
     consultant_partial = CONSULTANT_PARTIAL_REVIEW_MARKER in (
@@ -355,7 +550,9 @@ def build_run_summary(
         else "COMPLETED"
     )
     auditor_review_status = (
-        "NOT_RUN"
+        "UNRECONCILED"
+        if auditor_unreconciled
+        else "NOT_RUN"
         if not auditor_finished
         else "FAILED"
         if not auditor_status.get("ok")
@@ -369,6 +566,7 @@ def build_run_summary(
     # The models that actually answered, not the legacy defaults (see
     # ActiveModels). Same values the artifact metadata records.
     active = active_models_or_legacy(config, quick_mode=quick_mode)
+    handoff_telemetry = _debate_handoff_summary(result)
 
     summary = {
         "quick_mode": quick_mode,
@@ -383,10 +581,17 @@ def build_run_summary(
         # Empty mapping on a healthy run — an absent key would be ambiguous.
         "service_tier_downgrades": flex_degradation_snapshot(),
         "pre_screening_result": result.get("pre_screening_result", ""),
+        "screening_eligibility": analysis_outcome["eligibility"],
+        "analysis_run_status": analysis_outcome["run_status"],
+        "analysis_reason_codes": list(analysis_outcome["reason_codes"]),
         # `count` tallies debate *turns* (one Bull + one Bear per round → even), so
         # actual rounds = count // 2 (quick=1, full=2). `debate_turns` keeps the raw value.
         "debate_rounds": result.get("investment_debate_state", {}).get("count", 0) // 2,
         "debate_turns": result.get("investment_debate_state", {}).get("count", 0),
+        # Content remains transient graph state. Persist only balanced-pair
+        # presence and lengths so artifacts are auditable without retaining
+        # model reasoning or rationale prose.
+        "debate_reasoning_handoffs": handoff_telemetry,
         # Honest flag: reflects whether the quick-mode qualification note was actually
         # appended to the PM text (marker presence), never a recomputed `quick and BUY`
         # that would lie if the hook no-ops on PM-block parse drift.
@@ -425,7 +630,20 @@ def build_run_summary(
         "llm_attempts": tracker_stats["total_calls"] + tracker_stats["failed_attempts"],
         "llm_failures": tracker_stats["failed_attempts"],
         "tool_calls": len(tool_messages),
+        # ``tool_calls`` is retained for compatibility and counts only ToolMessages
+        # still present in capped graph state. These counters come from the
+        # run-scoped execution ledger and therefore measure actual work.
+        "tool_messages_retained": len(tool_messages),
+        "tool_executions": len(tool_execution_records),
+        "tool_executions_by_agent": tool_executions_by_agent,
+        "tool_executions_by_source": tool_executions_by_source,
         "tool_failures": tool_failures,
+        "tool_outcomes": tool_outcomes,
+        "evidence_promotion": evidence_promotion,
+        "structural_recovery": {
+            "events": list(result.get("structural_recovery_events") or []),
+            "usage": list(tracker_stats.get("recovery_usage") or []),
+        },
         "llm_providers_used": providers_used,
         "llm_provider": providers_used[0]
         if len(providers_used) == 1
@@ -485,6 +703,10 @@ def attach_run_summary(
     # setdefault) so a stale/lower version cannot survive.
     stamp_provenance_contract(result)
     result["analysis_validity"] = build_analysis_validity(result)
+    outcome_failures = {"analysis_outcome_schema", "analysis_outcome_consistency"}
+    required_failures = result["analysis_validity"].get("required_failures", {})
+    if not outcome_failures.intersection(required_failures):
+        result["analysis_outcome"] = result["analysis_validity"]["analysis_outcome"]
     result["run_summary"] = build_run_summary(
         result,
         quick_mode=quick_mode,
@@ -679,6 +901,7 @@ def save_results_to_file(
         "memory_statistics": memory_stats,
         "entity_governance_card": result.get("entity_governance_card") or None,
         "auditor_budget": result.get("auditor_budget") or None,
+        "research_budgets": result.get("research_budgets") or None,
         "source_artifacts": {
             "management_guidance_evidence": _persisted_source_artifact(
                 result.get("management_guidance_evidence"),
@@ -748,6 +971,7 @@ def save_results_to_file(
         },
         "red_flags": result.get("red_flags", []),
         "pre_screening_result": result.get("pre_screening_result", ""),
+        "analysis_outcome": result.get("analysis_outcome", {}),
         "run_summary": result.get("run_summary", {}),
         "analysis_validity": result.get("analysis_validity", {}),
         "artifact_statuses": result.get("artifact_statuses", {}),
@@ -755,6 +979,8 @@ def save_results_to_file(
         "structured_inputs": result.get("structured_inputs", {}),
         "analysis_snapshot": result.get("analysis_snapshot", {}),
         "decision_trace": result.get("decision_trace", {}),
+        "decision_policy": result.get("decision_policy", {}),
+        "structural_recovery_events": result.get("structural_recovery_events", []),
         "provenance_contract_version": result.get("provenance_contract_version"),
         "agent_attribution": _build_agent_attribution(
             result, (token_stats or {}).get("agents", {}) or {}
@@ -1000,7 +1226,6 @@ def _persist_analysis_outputs(
                 operation="saving analysis results",
                 provider="unknown",
             ),
-            exc_info=True,
         )
         if not args.quiet and not args.brief and console_obj is not None:
             console_obj.print(

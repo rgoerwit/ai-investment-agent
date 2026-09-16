@@ -94,9 +94,19 @@ def test_market_and_pnl_units_are_classified_independently():
 
 
 def test_usd_values_have_unambiguous_identity_conversion_without_price_context():
+    """A USD value needs no unit inference when the price context is missing.
+
+    Narrowed 2026-08-21. This previously asserted the same for `quantity=0.0`,
+    but a row claiming no shares beside a material value is a contradiction, not
+    an identity conversion: `market_value_usd` is unambiguous while *whether
+    anything is held* is not, and the reconciler went on to generate orders from
+    it. That shape is now a data-quality review (see
+    TestContradictoryClosedRowFailsClosedEverywhere); the identity conversion
+    this test exists for is preserved with a real share count.
+    """
     result = _normalize(
         currency="USD",
-        quantity=0.0,
+        quantity=25.0,
         current_price_local=0.0,
         avg_cost_local=0.0,
         raw_market_value=500.0,
@@ -233,3 +243,218 @@ def test_position_model_rejects_unknown_value_basis_token():
             quantity=100,
             market_value_basis="LOCAL",  # type: ignore[arg-type]
         )
+
+
+class TestFlatPositionIsValidatedNotFailed:
+    """A closed position is a settled fact, not a valuation failure.
+
+    Regression (2026-08-19): a sold JPY/MXN holding still in the broker snapshot
+    had quantity 0, so the unit anchor `quantity * price` was 0 and
+    `_classify_basis` fell back to None for every non-USD currency. That marked
+    the position `valuation_valid=False`, which let it slip past the evaluator's
+    closed-position skip and surface as an *urgent* DATA_QUALITY analysis
+    refresh for stock the operator no longer owned.
+    """
+
+    @pytest.mark.parametrize(
+        ("currency", "rate"),
+        [("JPY", 0.0067), ("MXN", 0.052), ("GBp", 0.0135), ("USD", 1.0)],
+    )
+    def test_closed_position_is_flat_and_valid_in_every_currency(self, currency, rate):
+        # Parametrized across currencies deliberately: the defect was invisible
+        # because the USD case alone behaved correctly.
+        result = _normalize(
+            quantity=0.0,
+            raw_market_value=0.0,
+            raw_unrealized_pnl=0.0,
+            currency=currency,
+            fx_rate=rate,
+        )
+
+        assert result.position_flat is True
+        assert result.valuation_valid is True
+        assert result.valuation_issue is None
+        assert result.market_value_usd == 0.0
+
+    def test_closed_position_needs_no_fx_rate(self):
+        """The second, independent door: the FX guard runs before classification."""
+        result = _normalize(
+            quantity=0.0,
+            raw_market_value=0.0,
+            raw_unrealized_pnl=0.0,
+            currency="ZZZ",
+            fx_rate=None,
+        )
+
+        assert result.position_flat is True
+        assert result.valuation_valid is True
+
+    def test_closed_position_without_pnl_reported_is_still_flat(self):
+        result = _normalize(quantity=0.0, raw_market_value=0.0, raw_unrealized_pnl=None)
+
+        assert result.position_flat is True
+        assert result.valuation_valid is True
+
+    @pytest.mark.parametrize(("currency", "rate"), [("JPY", 0.0067), ("USD", 1.0)])
+    def test_zero_quantity_with_material_value_is_not_flat(self, currency, rate):
+        """A broker inconsistency must stay on the data-quality path."""
+        result = _normalize(
+            quantity=0.0,
+            raw_market_value=5_000.0,
+            raw_unrealized_pnl=0.0,
+            currency=currency,
+            fx_rate=rate,
+        )
+
+        assert result.position_flat is False
+
+    def test_zero_quantity_with_material_pnl_is_not_flat(self):
+        result = _normalize(
+            quantity=0.0, raw_market_value=0.0, raw_unrealized_pnl=250.0
+        )
+
+        assert result.position_flat is False
+
+    @pytest.mark.parametrize("value", [math.inf, -math.inf, math.nan])
+    def test_non_finite_legs_are_never_flat(self, value):
+        assert (
+            _normalize(
+                quantity=0.0, raw_market_value=value, raw_unrealized_pnl=0.0
+            ).position_flat
+            is False
+        )
+        assert (
+            _normalize(
+                quantity=value, raw_market_value=0.0, raw_unrealized_pnl=0.0
+            ).position_flat
+            is False
+        )
+
+    def test_held_position_is_never_flat(self):
+        assert _normalize().position_flat is False
+
+    def test_usd_identity_fallback_survives_a_missing_price(self):
+        """IBKR routinely omits mktPrice; a USD value needs no unit inference.
+
+        Guards the asymmetry in `_classify_basis`: for USD the no-anchor
+        fallback is an identity, while for any other currency it is None
+        because local-vs-USD is genuinely undecidable.
+        """
+        result = _normalize(
+            currency="USD",
+            fx_rate=1.0,
+            quantity=10.0,
+            current_price_local=0.0,
+            avg_cost_local=0.0,
+            raw_market_value=1_800.0,
+            raw_unrealized_pnl=0.0,
+        )
+
+        assert result.valuation_valid is True
+        assert result.position_flat is False
+        assert result.market_value_basis == "BROKER_USD"
+        assert result.market_value_usd == pytest.approx(1_800.0)
+
+
+class TestContradictoryClosedRowFailsClosedEverywhere:
+    """Zero shares beside a material value is a broker inconsistency, not a holding.
+
+    Found 2026-08-21 after the flat-position work: the flat predicate correctly
+    declined these rows, but they then fell through to `_classify_basis`, whose
+    no-anchor fallback is an identity for USD. So a USD row claiming 0 shares
+    and a $5,000 value was accepted as a valid holding and could reach the
+    order path. The distinguishing signal is the *quantity*, not the anchor —
+    an ordinary holding whose `mktPrice` is absent also has a zero anchor, and
+    that case must stay valid (guarded below).
+    """
+
+    @pytest.mark.parametrize(
+        ("currency", "rate"),
+        [("USD", 1.0), ("JPY", 0.0067), ("MXN", 0.052), ("GBp", 0.0135)],
+    )
+    def test_material_market_value_without_shares_is_invalid(self, currency, rate):
+        result = _normalize(
+            quantity=0.0,
+            raw_market_value=5_000.0,
+            raw_unrealized_pnl=0.0,
+            currency=currency,
+            fx_rate=rate,
+        )
+
+        assert result.position_flat is False
+        assert result.valuation_valid is False
+        assert result.market_value_usd == 0.0
+        assert "no shares held" in (result.valuation_issue or "")
+
+    @pytest.mark.parametrize("rate", [None, math.nan, math.inf])
+    def test_unavailable_rate_is_reported_as_none_not_a_zero_sentinel(self, rate):
+        """Matches the FX-missing branch immediately below it in the module."""
+        result = _normalize(
+            quantity=0.0,
+            raw_market_value=5_000.0,
+            raw_unrealized_pnl=0.0,
+            currency="JPY",
+            fx_rate=rate,
+        )
+
+        assert result.valuation_valid is False
+        assert result.fx_rate_to_usd is None
+
+    def test_material_pnl_without_shares_is_invalid(self):
+        result = _normalize(
+            quantity=0.0,
+            current_price_local=0.0,
+            avg_cost_local=0.0,
+            raw_market_value=0.0,
+            raw_unrealized_pnl=250.0,
+            currency="USD",
+            fx_rate=1.0,
+        )
+
+        assert result.valuation_valid is False
+
+    def test_ordinary_holding_with_absent_price_is_still_valid(self):
+        """The regression guard for the fix above.
+
+        IBKR routinely omits `mktPrice`, which zeroes the anchor for a real
+        holding. Rejecting the whole no-anchor branch (an earlier attempt at
+        this fix) broke exactly this shape.
+        """
+        result = _normalize(
+            quantity=10.0,
+            current_price_local=0.0,
+            avg_cost_local=0.0,
+            raw_market_value=1_800.0,
+            raw_unrealized_pnl=0.0,
+            currency="USD",
+            fx_rate=1.0,
+        )
+
+        assert result.valuation_valid is True
+        assert result.market_value_basis == "BROKER_USD"
+        assert result.market_value_usd == pytest.approx(1_800.0)
+
+
+class TestFlatRowDropsAnUnusableFxRate:
+    """A flat row has no FX dependency, so it must not propagate a bad rate."""
+
+    @pytest.mark.parametrize("rate", [math.nan, math.inf, -math.inf, None, 0.0, -1.0])
+    def test_unusable_rate_becomes_none(self, rate):
+        result = _normalize(
+            quantity=0.0,
+            raw_market_value=0.0,
+            raw_unrealized_pnl=0.0,
+            currency="JPY",
+            fx_rate=rate,
+        )
+
+        assert result.position_flat is True
+        assert result.valuation_valid is True
+        assert result.fx_rate_to_usd is None
+
+    def test_usable_rate_is_preserved(self):
+        result = _normalize(
+            quantity=0.0, raw_market_value=0.0, raw_unrealized_pnl=0.0, fx_rate=0.0067
+        )
+
+        assert result.fx_rate_to_usd == pytest.approx(0.0067)

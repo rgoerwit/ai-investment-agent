@@ -94,3 +94,6 @@ def test_graph_facade_create_trading_graph_still_compiles(
     edge_sources = {edge.source for edge in compiled.edges}
     assert tool_nodes <= edge_sources
     assert "auditor_tools" in tool_nodes
+    assert "legal_tools" not in compiled.nodes
+    mock_auditor_enabled.assert_called_once()
+    assert mock_auditor_enabled.call_args.kwargs["quick_mode"] is False

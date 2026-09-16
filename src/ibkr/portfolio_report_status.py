@@ -4,10 +4,61 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from src.ibkr.portfolio_health import CORRELATED_EVENT_EVIDENCE_PATTERN
 from src.ibkr.portfolio_report import PortfolioReportContext
-from src.ibkr.portfolio_report_formatting import ReportBuffer
+from src.ibkr.portfolio_report_formatting import (
+    DETAIL_INDENT,
+    DETAIL_WRAP_WIDTH,
+    ReportBuffer,
+    normalize_reason,
+)
+from src.ibkr.refresh_service import (
+    format_refresh_retry_at,
+    parse_refresh_retry_at,
+)
+
+if TYPE_CHECKING:
+    from src.ibkr.refresh_service import AnalysisFreshnessRow
+
+
+_OPERATOR_DECISION_GLOSSES: dict[str, str] = {
+    "ENTRY_CONSTRAINT": "maintain position; do not add; no sell implied",
+    "THESIS_REASSESSMENT": "recheck thesis; no exit until failure is confirmed",
+    "CAPITAL_ALLOCATION": "decide whether to hold, trim, or redeploy capital",
+}
+
+
+def _operator_decision_label(row: AnalysisFreshnessRow) -> str:
+    """Return the decision basis with a concise operator-facing explanation."""
+    basis = row.action_basis or row.reason_family
+    gloss = _OPERATOR_DECISION_GLOSSES.get(basis)
+    return f"{basis} — {gloss}" if gloss else basis
+
+
+def _backoff_detail(cause: str, retry_after: str | None, *, fallback: str) -> str:
+    """Describe a deferred refresh without reading scheduler state in the renderer."""
+    retry_at = parse_refresh_retry_at(retry_after)
+    if retry_at is None:
+        return f"{cause}; {fallback}"
+    return f"{cause}; retry after {format_refresh_retry_at(retry_at)}"
+
+
+def _failed_refresh_detail(retry_after: str | None) -> str:
+    return _backoff_detail(
+        "auto-refresh failed",
+        retry_after,
+        fallback="retry on a later refresh-enabled run",
+    )
+
+
+def _unrepaired_detail(retry_after: str | None) -> str:
+    return _backoff_detail(
+        "a completed refresh left this review unchanged",
+        retry_after,
+        fallback="automatic retry on a later run",
+    )
 
 
 def _append_account_header(lines: list[str], context: PortfolioReportContext) -> None:
@@ -98,6 +149,35 @@ def _append_account_header(lines: list[str], context: PortfolioReportContext) ->
             )
         )
     lines.append("")
+    if portfolio.unresolved_positions:
+        lines.extend(
+            (
+                "⚠ BROKER IDENTITY REVIEW — no research or order queued",
+                "  These holdings remain included in portfolio accounting but have no safe ticker identity.",
+            )
+        )
+        for position in portfolio.unresolved_positions:
+            value = (
+                f"${position.market_value_usd:,.0f}"
+                if position.valuation_valid
+                else "value unavailable"
+            )
+            lines.append(
+                f"  conid {position.conid or 'unknown'}  ·  "
+                f"{position.quantity:,.4g} units  ·  {position.currency}  ·  {value}"
+            )
+            detail = f"{position.reason}; broker token {position.broker_token}"
+            if position.valuation_issue:
+                detail += f"; {position.valuation_issue}"
+            lines.extend(
+                ReportBuffer.wrap_banner_value(
+                    "      ",
+                    detail,
+                    width=DETAIL_WRAP_WIDTH,
+                    max_lines=2,
+                )
+            )
+        lines.append("")
 
 
 def _append_macro_banner(
@@ -215,7 +295,8 @@ def _append_screening_freshness(
             )
             buy_count = freshness.buy_count if freshness.buy_count is not None else "—"
             lines.append(
-                f"  Candidates screened: {candidate_count}  ·  BUYs found: {buy_count}"
+                f"  Candidates screened: {candidate_count}  ·  "
+                f"Stage-1 BUY candidates: {buy_count} (require full analysis)"
             )
         lines.append("  → Consider re-running: ./scripts/run_pipeline.sh")
     lines.append("")
@@ -236,17 +317,63 @@ def _append_analysis_freshness(
         or summary.stale_in_queue
         or summary.due_soon
         or summary.candidate_blocked
+        or summary.operator_review
         or activity.refreshed
         or activity.failed
         or activity.skipped_due_to_policy
         or activity.skipped_due_to_limit
         or activity.skipped_read_only
+        or activity.skipped_due_to_cooldown
     ):
         return
     writer.section(
         "ANALYSIS FRESHNESS", "what is stale, what is queued, what happens next"
     )
-    lines.append("  Needs review before action:")
+
+    def append_refresh_command(row: AnalysisFreshnessRow, details: list[str]) -> None:
+        """Render a refresh reason and its command on aligned detail lines.
+
+        Keeping the command off the summary line matches the report's REVIEW
+        layout and avoids a long ticker/expiry/command compound line.
+        """
+        # A backoff replaces the command rather than joining the reason line.
+        # Sharing that line meant the notice competed with the reason for a
+        # two-line budget and was silently truncated away when it grew.
+        if row.run_ticker in activity.failed:
+            follow_up = _failed_refresh_detail(
+                activity.failed_retry_after.get(row.run_ticker)
+            )
+        elif row.run_ticker in activity.skipped_due_to_failure_backoff:
+            follow_up = _failed_refresh_detail(
+                activity.skipped_due_to_failure_backoff.get(row.run_ticker)
+            )
+        elif row.run_ticker in activity.skipped_due_to_unrepaired:
+            follow_up = _unrepaired_detail(
+                activity.skipped_due_to_unrepaired.get(row.run_ticker)
+            )
+        else:
+            follow_up = None
+        prefix = f"    {row.display_ticker:<12} "
+        lines.extend(
+            writer.wrap_banner_value(
+                prefix,
+                "  ·  ".join(details),
+                width=DETAIL_WRAP_WIDTH + 14,
+                max_lines=2,
+            )
+        )
+        lines.extend(
+            writer.wrap_banner_value(
+                f"{DETAIL_INDENT}→  ",
+                follow_up
+                if follow_up is not None
+                else analysis_command(row.run_ticker),
+                width=DETAIL_WRAP_WIDTH + 14,
+                max_lines=2,
+            )
+        )
+
+    lines.append("  Urgent analysis refreshes:")
     if summary.blocking_now:
         for row in summary.blocking_now:
             details = [row.reason_family]
@@ -254,30 +381,24 @@ def _append_analysis_freshness(
                 details.append(f"{row.age_days}d old")
             if row.expires_date:
                 details.append(f"expires {row.expires_date}")
-            lines.append(
-                f"    {row.display_ticker:<12} {'  ·  '.join(details)}"
-                f"  →  {analysis_command(row.run_ticker)}"
-            )
+            append_refresh_command(row, details)
     else:
         lines.append("    None")
     lines.append("")
 
     if summary.candidate_blocked:
-        lines.append("  Candidates needing full refresh:")
+        lines.append("  Unheld candidates needing full refresh:")
         for row in summary.candidate_blocked:
             details = [row.reason_family]
             if row.age_days is not None:
                 details.append(f"{row.age_days}d old")
-            lines.append(
-                f"    {row.display_ticker:<12} {'  ·  '.join(details)}"
-                f"  →  {analysis_command(row.run_ticker)}"
-            )
+            append_refresh_command(row, details)
         lines.append("")
 
-    lines.append("  Already in refresh queue:")
+    lines.append("  Stale sell/trim decisions needing current analysis:")
     if summary.stale_in_queue:
         for row in summary.stale_in_queue:
-            details = [f"already in {row.action} queue"]
+            details = [f"current {row.action} decision"]
             if row.age_days is not None:
                 details.append(f"{row.age_days}d old")
             lines.append(f"    {row.display_ticker:<12} {'  ·  '.join(details)}")
@@ -285,7 +406,7 @@ def _append_analysis_freshness(
         lines.append("    None")
     lines.append("")
 
-    lines.append("  Due soon:")
+    lines.append("  Normal-cycle eligible refreshes:")
     if summary.due_soon:
         for row in sorted(
             summary.due_soon,
@@ -298,12 +419,59 @@ def _append_analysis_freshness(
                 due_details.append(f"expires {row.expires_date}")
             if row.days_until_due is not None:
                 due_details.append(f"{row.days_until_due}d remaining")
-            lines.append(
-                f"    {row.display_ticker:<12} {'  ·  '.join(due_details)}"
-                f"  →  {analysis_command(row.run_ticker)}"
-            )
+            append_refresh_command(row, due_details)
     else:
         lines.append("    None")
+
+    if summary.refreshed_this_run:
+        # No rerun command here by design: this run produced these analyses, and
+        # printing the command beside its own "Refreshed:" line is the
+        # contradiction this bucket exists to remove.
+        lines.extend(("", "  Refreshed this run — no further action needed:"))
+        for row in summary.refreshed_this_run:
+            refreshed_details = [row.reason_family]
+            if row.expires_date:
+                refreshed_details.append(f"expires {row.expires_date}")
+            lines.append(
+                f"    {row.display_ticker:<12} {'  ·  '.join(refreshed_details)}"
+            )
+
+    if summary.operator_review:
+        lines.extend(
+            (
+                "",
+                "  Current handling guidance — no refresh queued yet:",
+                "    Current dispositions; normal-cycle refresh follows near expiry.",
+            )
+        )
+        for row in summary.operator_review:
+            reason = normalize_reason(
+                row.reason_text.split("  [MACRO_PRICE:")[0]
+                .split("  [MACRO_STOP:")[0]
+                .split("  [MACRO_WATCH:")[0]
+            )
+            status = (
+                [f"analysis {row.age_days}d old"] if row.age_days is not None else []
+            )
+            if row.expires_date:
+                status.append(f"expires {row.expires_date}")
+            lines.extend(
+                writer.wrap_banner_value(
+                    f"    {row.display_ticker:<12} ",
+                    "  ·  ".join([_operator_decision_label(row), *status]),
+                    width=DETAIL_WRAP_WIDTH + 14,
+                    max_lines=2,
+                )
+            )
+            lines.extend(
+                writer.wrap_banner_value(
+                    DETAIL_INDENT,
+                    reason,
+                    width=DETAIL_WRAP_WIDTH + 14,
+                    max_lines=3,
+                )
+            )
+
     lines.extend(("", "  Refresh activity this run:"))
     lines.append(
         f"    Policy: {activity.policy}"
@@ -326,12 +494,36 @@ def _append_analysis_freshness(
             "    Deferred by refresh limit: will be retried on the next "
             "refresh-enabled run: " + ", ".join(activity.skipped_due_to_limit)
         )
+    if activity.skipped_due_to_cooldown:
+        if activity.skipped_due_to_failure_backoff:
+            lines.append(
+                "    Deferred after failed refresh: "
+                + ", ".join(activity.skipped_due_to_failure_backoff)
+            )
+        if activity.skipped_due_to_unrepaired:
+            lines.append(
+                "    Deferred — a completed refresh left these unchanged: "
+                + ", ".join(activity.skipped_due_to_unrepaired)
+            )
+    if activity.unrepaired_retry_after:
+        cooldown_details = ", ".join(
+            f"{ticker} after "
+            + (
+                format_refresh_retry_at(parsed)
+                if (parsed := parse_refresh_retry_at(retry_after)) is not None
+                else "a later run"
+            )
+            for ticker, retry_after in activity.unrepaired_retry_after.items()
+        )
+        lines.append(f"    Unrepaired-refresh backoff: {cooldown_details}")
     if not (
         activity.refreshed
         or activity.failed
         or activity.skipped_read_only
         or activity.skipped_due_to_policy
         or activity.skipped_due_to_limit
+        or activity.skipped_due_to_cooldown
+        or activity.unrepaired_retry_after
     ):
         lines.append("    No refresh actions were needed.")
     lines.extend(("", f"  User action: {user_action}", ""))

@@ -56,6 +56,14 @@ class RunCost:
     by_tier: dict[str, float] | None
     unpriced_models: list[str] = field(default_factory=list)
     approximate_provider: bool = False
+    recovery_cost: float | None = None
+    recovery_calls: int | None = None
+    cap_exhausted_attempts: int | None = None
+    cap_exhausted_tokens: int | None = None
+    pm_policy_corrections: int | None = None
+    pm_trace_corrections: int | None = None
+    research_budgets: dict[str, dict[str, Any]] | None = None
+    run_fingerprint: dict[str, Any] | None = None
 
 
 def _costs(bucket: dict[str, Any]) -> dict[str, float]:
@@ -76,6 +84,9 @@ def load_run(path: str | Path) -> RunCost | None:
         return None
     meta = data.get("metadata") or {}
     run_summary = data.get("run_summary") or {}
+    attempts = tu.get("call_attempts")
+    recovery = tu.get("recovery_usage")
+    research_budgets = data.get("research_budgets")
 
     by_agent = {name: float(row.get("cost_usd", 0.0)) for name, row in agents.items()}
 
@@ -101,6 +112,60 @@ def load_run(path: str | Path) -> RunCost | None:
         by_tier=_costs(tu["by_tier"]) if tu.get("by_tier") else None,
         unpriced_models=list(tu.get("unpriced_models") or []),
         approximate_provider=approximate,
+        recovery_cost=(
+            sum(float(row.get("cost_usd") or 0.0) for row in recovery)
+            if isinstance(recovery, list)
+            else None
+        ),
+        recovery_calls=(
+            sum(int(row.get("calls") or 0) for row in recovery)
+            if isinstance(recovery, list)
+            else None
+        ),
+        cap_exhausted_attempts=(
+            sum(
+                1
+                for attempt in attempts
+                if attempt.get("failure_kind") == "output_cap_exhausted"
+            )
+            if isinstance(attempts, list)
+            else None
+        ),
+        cap_exhausted_tokens=(
+            sum(
+                int(attempt.get("total_tokens") or 0)
+                for attempt in attempts
+                if attempt.get("failure_kind") == "output_cap_exhausted"
+            )
+            if isinstance(attempts, list)
+            else None
+        ),
+        pm_policy_corrections=(
+            sum(
+                1
+                for attempt in attempts
+                if "policy correction" in str(attempt.get("agent_name", "")).casefold()
+            )
+            if isinstance(attempts, list)
+            else None
+        ),
+        pm_trace_corrections=(
+            sum(
+                1
+                for attempt in attempts
+                if "trace correction" in str(attempt.get("agent_name", "")).casefold()
+            )
+            if isinstance(attempts, list)
+            else None
+        ),
+        research_budgets=(
+            research_budgets if isinstance(research_budgets, dict) else None
+        ),
+        run_fingerprint=(
+            data["run_fingerprint"]
+            if isinstance(data.get("run_fingerprint"), dict)
+            else None
+        ),
     )
 
 
@@ -182,6 +247,75 @@ def format_report(runs: list[RunCost], by: str) -> str:
     return "\n".join(out)
 
 
+def _sum_available(runs: list[RunCost], field_name: str) -> tuple[float, int]:
+    values = [getattr(run, field_name) for run in runs]
+    available = [float(value) for value in values if value is not None]
+    return sum(available), len(available)
+
+
+def format_efficiency_report(runs: list[RunCost]) -> str:
+    """Summarize recovery, cap, correction, and research-budget activity."""
+
+    if not runs:
+        return "No analysis runs matched."
+    total_cost = sum(run.total_cost for run in runs)
+    recovery_cost, recovery_available = _sum_available(runs, "recovery_cost")
+    recovery_calls, _ = _sum_available(runs, "recovery_calls")
+    cap_attempts, cap_available = _sum_available(runs, "cap_exhausted_attempts")
+    cap_tokens, _ = _sum_available(runs, "cap_exhausted_tokens")
+    policy_corrections, correction_available = _sum_available(
+        runs, "pm_policy_corrections"
+    )
+    trace_corrections, _ = _sum_available(runs, "pm_trace_corrections")
+    lines = ["Efficiency", "-" * 56]
+    recovery_share = (
+        f"{100 * recovery_cost / total_cost:.1f}%" if total_cost > 0 else "n/a"
+    )
+    lines.append(
+        f"  recovery: {int(recovery_calls)} call(s), ${recovery_cost:.4f}, "
+        f"{recovery_share} of spend"
+        if recovery_available
+        else "  recovery: unavailable in these artifacts"
+    )
+    lines.append(
+        f"  output-cap attempts: {int(cap_attempts)}, {int(cap_tokens):,} tokens"
+        if cap_available
+        else "  output-cap attempts: unavailable in these artifacts"
+    )
+    lines.append(
+        "  PM model corrections: "
+        f"policy={int(policy_corrections)}, trace={int(trace_corrections)}"
+        if correction_available
+        else "  PM model corrections: unavailable in these artifacts"
+    )
+
+    research_runs = [run for run in runs if run.research_budgets is not None]
+    if not research_runs:
+        lines.append("  research budgets: unavailable in these artifacts")
+        return "\n".join(lines)
+    totals: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"llm_calls": 0, "tool_rounds": 0, "forced": 0, "violations": 0}
+    )
+    for run in research_runs:
+        for agent, telemetry in (run.research_budgets or {}).items():
+            row = totals[agent]
+            row["llm_calls"] += int(telemetry.get("llm_calls") or 0)
+            row["tool_rounds"] += int(telemetry.get("tool_rounds_used") or 0)
+            row["forced"] += int(bool(telemetry.get("forced_synthesis_used")))
+            outcomes = telemetry.get("outcomes") or []
+            row["violations"] += sum(
+                1
+                for outcome in outcomes
+                if "EXHAUSTED" in str(outcome) or "LIMIT" in str(outcome)
+            )
+    for agent, row in sorted(totals.items()):
+        lines.append(
+            f"  {agent}: llm={row['llm_calls']}, rounds={row['tool_rounds']}, "
+            f"forced={row['forced']}, limits={row['violations']}"
+        )
+    return "\n".join(lines)
+
+
 def _basket_overlap_note(
     baseline: list[RunCost], candidate: list[RunCost]
 ) -> list[str]:
@@ -196,24 +330,50 @@ def _basket_overlap_note(
     """
     base_tickers = {r.ticker for r in baseline}
     cand_tickers = {r.ticker for r in candidate}
+    notes: list[str] = []
     if not base_tickers or not cand_tickers:
-        return []
+        return notes
     overlap = base_tickers & cand_tickers
     if not overlap:
-        return [
-            f"NOTE: baseline and candidate share no tickers "
-            f"({len(base_tickers)} vs {len(cand_tickers)}). Per-run cost reflects "
-            "basket composition as much as any code change -- read the totals as "
-            "tier cost, not as a per-name delta.",
-            "",
-        ]
-    if len(overlap) < min(len(base_tickers), len(cand_tickers)):
-        return [
-            f"NOTE: baskets overlap on {len(overlap)} of "
-            f"{len(base_tickers)}/{len(cand_tickers)} tickers -- partial comparison.",
-            "",
-        ]
-    return []
+        notes.extend(
+            [
+                f"NOTE: baseline and candidate share no tickers "
+                f"({len(base_tickers)} vs {len(cand_tickers)}). Per-run cost reflects "
+                "basket composition as much as any code change -- read the totals as "
+                "tier cost, not as a per-name delta.",
+                "",
+            ]
+        )
+    elif len(overlap) < min(len(base_tickers), len(cand_tickers)):
+        notes.extend(
+            [
+                f"NOTE: baskets overlap on {len(overlap)} of "
+                f"{len(base_tickers)}/{len(cand_tickers)} tickers -- partial comparison.",
+                "",
+            ]
+        )
+
+    base_fp = [run.run_fingerprint for run in baseline if run.run_fingerprint]
+    cand_fp = [run.run_fingerprint for run in candidate if run.run_fingerprint]
+    if not base_fp or not cand_fp:
+        notes.extend(["NOTE: run-fingerprint control check unavailable.", ""])
+        return notes
+    for key, label in (
+        ("code_commit", "code commit"),
+        ("prompt_set_digest", "prompt set"),
+        ("thesis_digest", "thesis configuration"),
+    ):
+        base_values = {str(fp.get(key)) for fp in base_fp}
+        cand_values = {str(fp.get(key)) for fp in cand_fp}
+        if base_values != cand_values or len(base_values) != 1 or len(cand_values) != 1:
+            notes.extend(
+                [f"NOTE: not controlled — {label} differs within/across sets.", ""]
+            )
+    if any(bool(fp.get("code_dirty")) for fp in [*base_fp, *cand_fp]):
+        notes.extend(["NOTE: at least one compared run used a dirty worktree.", ""])
+    if {run.quick_mode for run in baseline} != {run.quick_mode for run in candidate}:
+        notes.extend(["NOTE: not controlled — quick/full mode differs.", ""])
+    return notes
 
 
 def diff_report(baseline: list[RunCost], candidate: list[RunCost], by: str) -> str:
@@ -276,6 +436,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--json", action="store_true", help="emit machine-readable JSON"
     )
+    parser.add_argument(
+        "--efficiency",
+        action="store_true",
+        help="include recovery, output-cap, correction, and research-budget activity",
+    )
     args = parser.parse_args(argv)
 
     tickers = set(args.ticker) if args.ticker else None
@@ -297,7 +462,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         else:
-            print(diff_report(base, cand, args.by))
+            report = diff_report(base, cand, args.by)
+            if args.efficiency:
+                report += "\n\nBaseline " + format_efficiency_report(base)
+                report += "\n\nCandidate " + format_efficiency_report(cand)
+            print(report)
         return 0
 
     results_dir = args.results_dir or _default_results_dir()
@@ -306,7 +475,10 @@ def main(argv: list[str] | None = None) -> int:
         totals, _ = aggregate(runs, args.by)
         print(json.dumps({"runs": len(runs), f"by_{args.by}": totals}, indent=2))
     else:
-        print(format_report(runs, args.by))
+        report = format_report(runs, args.by)
+        if args.efficiency:
+            report += "\n\n" + format_efficiency_report(runs)
+        print(report)
     return 0
 
 

@@ -85,7 +85,7 @@ class TestOverrideApplication:
             "avgCost": 45.0,
             "conid": 12345,
         }
-        positions = normalize_positions([raw])
+        positions = normalize_positions([raw]).resolved
         assert len(positions) == 1
         assert positions[0].ticker.yf == "1264.TWO"
 
@@ -105,6 +105,6 @@ class TestOverrideApplication:
             "avgCost": 1.0,
             "conid": 1,
         }
-        position_key = normalize_positions([raw])[0].ticker.yf
+        position_key = normalize_positions([raw]).resolved[0].ticker.yf
         analysis_key = normalize_ticker("1264.TW")
         assert position_key == analysis_key == "1264.TWO"

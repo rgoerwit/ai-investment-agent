@@ -689,15 +689,17 @@ def refresh_analysis_snapshot(
             "SECONDARY": 2,
             "PRIMARY": 3,
         }
-        for claim_id, new_claim in candidate.get("claims", {}).items():
+        for candidate_claim_id, new_claim in candidate.get("claims", {}).items():
             field = str(new_claim.get("field") or "")
             old_claim_id = (
-                claim_id if claim_id in claims else claim_ids_by_field.get(field)
+                candidate_claim_id
+                if candidate_claim_id in claims
+                else claim_ids_by_field.get(field)
             )
             old_claim = claims.get(old_claim_id) if old_claim_id else None
             if not isinstance(old_claim, Mapping):
-                claims[claim_id] = new_claim
-                claim_ids_by_field[field] = claim_id
+                claims[candidate_claim_id] = new_claim
+                claim_ids_by_field[field] = candidate_claim_id
                 continue
             old_rank = authority_rank.get(str(old_claim.get("authority")), 0)
             new_rank = authority_rank.get(str(new_claim.get("authority")), 0)
@@ -713,10 +715,10 @@ def refresh_analysis_snapshot(
                 or new_rank > old_rank
                 or (new_rank == old_rank and newer_iso_period)
             ):
-                if old_claim_id and old_claim_id != claim_id:
+                if old_claim_id and old_claim_id != candidate_claim_id:
                     claims.pop(old_claim_id, None)
-                claims[claim_id] = new_claim
-                claim_ids_by_field[field] = claim_id
+                claims[candidate_claim_id] = new_claim
+                claim_ids_by_field[field] = candidate_claim_id
             elif old_claim.get("value") != new_claim.get("value") or old_claim.get(
                 "period"
             ) != new_claim.get("period"):
@@ -734,6 +736,50 @@ def refresh_analysis_snapshot(
             "claims": claims,
             "conflicts": conflicts,
         }
+    from src.liquidity_assessment import LiquidityAssessment
+
+    liquidity = LiquidityAssessment.from_dict(state.get("liquidity_assessment"))
+    if merged.get("contract_status") == "VALID" and liquidity is not None:
+        claims = dict(merged.get("claims", {}))
+        lineage_id = "derived:liquidity_calculator"
+        decision_eligible = liquidity.status not in {"ERROR", "INSUFFICIENT_DATA"}
+        liquidity_claims: tuple[tuple[str, str, Coverage], ...] = (
+            ("LIQUIDITY_STATUS", liquidity.status, "FOUND"),
+            (
+                "AVERAGE_DAILY_TURNOVER_USD",
+                (
+                    f"{liquidity.average_daily_turnover_usd:.2f}"
+                    if liquidity.average_daily_turnover_usd is not None
+                    else "N/A"
+                ),
+                "FOUND"
+                if liquidity.average_daily_turnover_usd is not None
+                else "MISSING",
+            ),
+        )
+        for field, value, coverage in liquidity_claims:
+            identifier = claim_id(field, None)
+            claims[identifier] = asdict(
+                ClaimRecord(
+                    id=identifier,
+                    field=field,
+                    value=value,
+                    period=None,
+                    authority="AGGREGATOR",
+                    exactness="CALCULATED",
+                    coverage=coverage,
+                    source_url=None,
+                    evidence_id=lineage_id,
+                    decision_eligible=decision_eligible and coverage == "FOUND",
+                    kind="DERIVED_ASSESSMENT",
+                    decision_role="GATE_INPUT",
+                    source_provider="liquidity_calculator",
+                    lineage_ids=(lineage_id,),
+                    derived_from=(),
+                )
+            )
+        merged = {**merged, "claims": claims}
+
     fundamentals = state.get("fundamentals_report")
     if isinstance(fundamentals, str) and fundamentals:
         return add_validated_derivations(merged, fundamentals)

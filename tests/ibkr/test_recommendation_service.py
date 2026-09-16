@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from src.ibkr.models import PortfolioSummary, ReconciliationItem
+from src.ibkr.models import PortfolioEvidence, PortfolioSummary, ReconciliationItem
 from src.ibkr.portfolio_data_service import PortfolioSnapshot, WatchlistSnapshot
 from src.ibkr.recommendation_service import (
     PortfolioRecommendationRequest,
@@ -246,7 +246,7 @@ async def test_refresh_runs_and_rereconciles():
     )
 
     bundle = await service.build_bundle(
-        _make_request(recommend=True, refresh_policy="blocking")
+        _make_request(recommend=True, refresh_policy="proactive")
     )
 
     assert refresh_calls == [("7203.T", False, True)]
@@ -255,6 +255,65 @@ async def test_refresh_runs_and_rereconciles():
     assert len(health_calls) == 2
     assert bundle.refresh_activity.refreshed == ["7203.T"]
     assert bundle.items == []
+
+
+@pytest.mark.asyncio
+async def test_unrepaired_analysis_refresh_is_backed_off_after_real_replanning(
+    tmp_path, monkeypatch
+):
+    """The production orchestration must base success cooldown on the new row."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("src.persistence._maybe_save_rejection_record", AsyncMock())
+    monkeypatch.setattr(
+        "src.ibkr.position_evaluator._load_prior_history", lambda analysis: []
+    )
+    monkeypatch.setattr("src.ibkr.reconciler._load_structural_macro_events", lambda: [])
+    ticker = "2173.T"
+    analysis = _make_analysis(ticker=ticker, verdict="DO_NOT_INITIATE", age_days=0)
+    analysis.health_adj = 30.0
+    analysis.growth_adj = 20.0
+    analysis.evidence = PortfolioEvidence(
+        buy_blocking_flag_types=("LEGAL_COUNSEL_UNAVAILABLE",)
+    )
+    snapshot = PortfolioSnapshot(
+        positions=[_make_position(ticker=ticker)],
+        portfolio=PortfolioSummary(portfolio_value_usd=100_000),
+        watchlist=WatchlistSnapshot(found=True, explicitly_requested=False),
+    )
+    refresh_calls: list[str] = []
+
+    async def fake_run_analysis(*, ticker: str, **kwargs):
+        refresh_calls.append(ticker)
+        return {"ticker": ticker}
+
+    service = PortfolioRecommendationService(
+        portfolio_data_service=FakePortfolioDataService(snapshot),
+        load_analyses_fn=lambda path: {ticker: analysis},
+        compute_portfolio_health_fn=lambda **kwargs: [],
+        run_analysis_fn=fake_run_analysis,
+        save_results_fn=lambda *args, **kwargs: tmp_path / "saved.json",
+    )
+    request = _make_request(
+        results_dir=tmp_path,
+        refresh_policy="blocking",
+        refresh_limit=1,
+    )
+
+    first = await service.build_bundle(request)
+
+    assert first.items[0].action_basis == "DATA_QUALITY"
+    assert [row.run_ticker for row in first.freshness_summary.refreshed_this_run] == [
+        ticker
+    ]
+    assert ticker in first.refresh_activity.unrepaired_retry_after
+
+    second = await service.build_bundle(request)
+
+    assert refresh_calls == [ticker]
+    assert second.refresh_activity.queued == []
+    assert ticker in second.refresh_activity.skipped_due_to_unrepaired
+    assert second.refresh_activity.skipped_due_to_failure_backoff == {}
 
 
 @pytest.mark.asyncio

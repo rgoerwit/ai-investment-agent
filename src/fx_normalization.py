@@ -145,6 +145,7 @@ FALLBACK_RATES_TO_USD = {
     "PLN": 0.268,  # Polish Zloty (PLN 3.74 = $1)
     "CZK": 0.0477,  # Czech Koruna (CZK 21.0 = $1)
     "HUF": 0.00318,  # Hungarian Forint (HUF 314 = $1)
+    "RON": 0.2193,  # Romanian Leu; Yahoo RONUSD=X spot, 2026-09-15
     # Other major currencies
     "CAD": 0.715,  # Canadian Dollar
     "AUD": 0.703,  # Australian Dollar

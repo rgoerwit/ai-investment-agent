@@ -83,6 +83,22 @@ CASES = [
     ),
     ("fundamentals_analyst.json", rf"P/E <={_PE}", "PE scoring threshold"),
     (
+        "fundamentals_analyst.json",
+        rf"NetDebt/EBITDA <{tc.NET_DEBT_EBITDA_MAX:g}",
+        "net-debt/EBITDA scoring threshold",
+    ),
+    (
+        "fundamentals_analyst.json",
+        rf"FCF Yield >{tc.FCF_YIELD_MIN_PCT:g}%",
+        "FCF-yield scoring threshold",
+    ),
+    (
+        "fundamentals_analyst.json",
+        rf"FCF Yield >{tc.UTILITIES_FCF_YIELD_MIN_PCT:g}% \(not "
+        rf"{tc.FCF_YIELD_MIN_PCT:g}%\)",
+        "Utilities FCF-yield scoring threshold",
+    ),
+    (
         # The PE_OR_PEG health point is trailing-only; quick-mode runs scored it
         # off the forward P/E until v9.32 pinned the basis (145020.KQ).
         "fundamentals_analyst.json",

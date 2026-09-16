@@ -12,7 +12,7 @@ from src.llm_runtime.identities import (
 )
 from src.llm_runtime.profiles import ModelProfile, resolve_profile
 from src.llm_runtime.provider_policy import (
-    is_provider_qualified,
+    is_provider_allowed,
     provider_credential,
     provider_endpoint_host,
     provider_for_group,
@@ -311,6 +311,10 @@ def _model_for(
             return str(settings.apac_specialist_model)
         if spec.seat_id is SeatId.ARTICLE_WRITER_BASE_FALLBACK:
             return str(settings.deep_think_llm)
+        if spec.seat_id is SeatId.ANALYST_RETRY:
+            # A quick-mode structural recovery must change model intent rather
+            # than repeat the quick floor that produced the invalid artifact.
+            return str(settings.deep_think_llm)
         if spec.seat_id is SeatId.SENIOR_FUNDAMENTALS:
             if quick_mode:
                 return str(settings.apex_quick_model or settings.quick_think_llm)
@@ -494,12 +498,12 @@ def resolve_binding_plan(settings: Any) -> BindingPlan:
         try:
             provider = provider_for_group(settings, schema, spec.binding_group)
             provider_group = (provider, spec.binding_group)
-            if schema == "new" and not is_provider_qualified(*provider_group):
+            if schema == "new" and not is_provider_allowed(*provider_group):
                 if provider_group not in rejected_provider_groups:
                     errors.append(
-                        f"provider {provider!r} is not application-qualified for "
-                        f"binding group {spec.binding_group.value!r}; transport "
-                        "capability alone is insufficient"
+                        f"provider {provider!r} is not allowed for binding group "
+                        f"{spec.binding_group.value!r}; no reviewed application "
+                        "contract permits that assignment"
                     )
                     rejected_provider_groups.add(provider_group)
                 continue
@@ -680,6 +684,7 @@ def _validate_independence(
     checks = (
         (
             "review",
+            "LLM_REVIEW_PROVIDER",
             bindings[SeatId.CONSULTANT].identity,
             bool(settings.llm_require_review_independence),
             settings.llm_review_independence_waiver_reason,
@@ -687,13 +692,14 @@ def _validate_independence(
         ),
         (
             "regional",
+            "LLM_REGIONAL_PROVIDER",
             bindings[SeatId.APAC].identity,
             bool(settings.llm_require_regional_independence),
             settings.llm_regional_independence_waiver_reason,
             statuses[SeatId.APAC].enabled,
         ),
     )
-    for label, other, required, reason, active in checks:
+    for label, selector, other, required, reason, active in checks:
         reason = str(reason).strip()
         if not required and not reason:
             errors.append(
@@ -706,5 +712,9 @@ def _validate_independence(
         )
         if active and required and collapsed:
             errors.append(
-                f"{label} binding must differ from base in vendor and model lineage"
+                f"{label} binding selected by {selector} resolves to vendor "
+                f"{other.vendor_id!r} and model lineage {other.model_lineage!r}; "
+                "base selected by LLM_BASE_PROVIDER resolves to vendor "
+                f"{base.vendor_id!r} and model lineage {base.model_lineage!r}. "
+                "The bindings must differ in both vendor and model lineage."
             )

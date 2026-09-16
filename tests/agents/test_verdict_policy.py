@@ -8,21 +8,53 @@ import pytest
 
 from src.agents.verdict_policy import (
     DNI_REVIEW_CANDIDATE_MARKER,
+    apply_required_verdict,
+    assess_verdict_policy,
     maybe_demote_buy_on_blocking_flags,
     maybe_floor_verdict_to_hold,
     maybe_qualify_buy_in_quick_mode,
     maybe_qualify_weak_asymmetry_buy,
     maybe_tag_dni_review_candidate,
+    normalize_pm_block_contract,
+    render_growth_gate_context,
 )
 from src.charts.extractors.pm_block import extract_pm_block
 from src.decision_inputs import DecisionInputs
 from src.validators.metric_extractor import extract_metrics
 
 
-def _inputs(fundamentals_report: str, snapshot: dict | None = None) -> DecisionInputs:
+def _inputs(
+    fundamentals_report: str,
+    snapshot: dict | None = None,
+    *,
+    current_growth_fields: frozenset[str] | None = None,
+) -> DecisionInputs:
     """Build the typed decision inputs the floor now consumes."""
+    metrics = extract_metrics(fundamentals_report or "")
+    if snapshot is None and current_growth_fields is not None:
+        snapshot = {
+            "contract_status": "VALID",
+            "claims": {
+                field: {
+                    "field": field,
+                    "coverage": "FOUND",
+                    "decision_eligible": True,
+                }
+                for field in current_growth_fields
+            },
+            "scorecards": {
+                "HEALTH": {
+                    "percentage": metrics.get("adjusted_health_score"),
+                    "decision_eligible": True,
+                },
+                "GROWTH": {
+                    "percentage": metrics.get("adjusted_growth_score"),
+                    "decision_eligible": True,
+                },
+            },
+        }
     return DecisionInputs.from_metrics_and_snapshot(
-        extract_metrics(fundamentals_report or ""),
+        metrics,
         None,
         snapshot,
         ticker="TEST",
@@ -68,11 +100,12 @@ def _full_pm_output(verdict_display: str, verdict_block: str) -> str:
     )
 
 
-def _data_block(health, pe, growth, cagr) -> str:
+def _data_block(health, pe, growth, cagr, *, available=4) -> str:
     return (
         "### --- START DATA_BLOCK ---\n"
         f"ADJUSTED_HEALTH_SCORE: {health}% (based on 12 available points)\n"
-        f"ADJUSTED_GROWTH_SCORE: {growth}% (based on 6 available points)\n"
+        f"ADJUSTED_GROWTH_SCORE: {growth}% (based on {available} available points)\n"
+        f"RAW_GROWTH_SCORE: 1/{available}\n"
         f"PE_RATIO_TTM: {pe}\n"
         f"REVENUE_CAGR_3Y: {cagr}%\n"
         "### --- END DATA_BLOCK ---"
@@ -88,7 +121,7 @@ KTY_BLOCK = _data_block(67, 20.54, 33, -2.5)
 def test_floor_normalizes_chart_control_fields():
     out, floored = maybe_floor_verdict_to_hold(
         _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
-        decision_inputs=_inputs(APR_BLOCK),
+        decision_inputs=_inputs(APR_BLOCK, current_growth_fields=frozenset()),
         red_flags=[],
         code_subtotal=1.0,
         pre_screening_result="PASS",
@@ -114,7 +147,7 @@ def test_floor_normalizes_chart_control_fields():
 def test_apr_floored_to_hold():
     out, floored = maybe_floor_verdict_to_hold(
         _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
-        decision_inputs=_inputs(APR_BLOCK),
+        decision_inputs=_inputs(APR_BLOCK, current_growth_fields=frozenset()),
         red_flags=[{"type": "VALUE_TRAP_MODERATE_RISK", "risk_penalty": 0.5}],
         code_subtotal=1.0,
         pre_screening_result="PASS",
@@ -127,6 +160,228 @@ def test_apr_floored_to_hold():
     assert "VERDICT FLOOR APPLIED" in out
     # consultant-resolution VERDICT lines must be untouched
     assert "VERDICT: CONFIRMED_RISK" in out
+
+
+class TestGrowthHardFailVerdictValidation:
+    def test_growth_gate_context_exposes_canonical_data_vacuum(self):
+        context = render_growth_gate_context(
+            _inputs(
+                _data_block(75, 14.0, 40, 16.0, available=4),
+                current_growth_fields=frozenset(),
+            )
+        )
+
+        assert "STATUS: EXCEPTION_DATA_VACUUM" in context
+        assert "MISSING_CURRENT_GROWTH_FIELDS: EARNINGS_GROWTH_MRQ" in context
+        assert "REVENUE_GROWTH_TTM" in context
+
+    def test_growth_gate_context_does_not_infer_from_score_denominator(self):
+        context = render_growth_gate_context(
+            _inputs(_data_block(75, 14.0, 40, 16.0, available=4))
+        )
+
+        assert "STATUS: HARD_FAIL" in context
+        assert "REASON: data_vacuum_growth_inputs_not_established" in context
+        assert "MISSING_CURRENT_GROWTH_FIELDS: NONE" in context
+
+    @pytest.mark.parametrize("verdict", ["BUY", "HOLD"])
+    def test_auto_reject_flag_requires_dni_after_pm(self, verdict):
+        violation = assess_verdict_policy(
+            _pm_output(verdict, verdict),
+            decision_inputs=_inputs(_data_block(75, 14.0, 70, 16.0)),
+            red_flags=[
+                {
+                    "type": "LIQUIDITY_HARD_FAIL",
+                    "severity": "CRITICAL",
+                    "action": "AUTO_REJECT",
+                }
+            ],
+        )
+
+        assert violation is not None
+        assert violation.rule == "pre_screening_auto_reject"
+        assert violation.reason == "auto_reject_flags=LIQUIDITY_HARD_FAIL"
+        assert violation.required_verdict == "DO_NOT_INITIATE"
+
+    def test_critical_review_flag_does_not_become_auto_reject(self):
+        violation = assess_verdict_policy(
+            _pm_output("HOLD", "HOLD"),
+            decision_inputs=_inputs(_data_block(75, 14.0, 70, 16.0)),
+            red_flags=[
+                {
+                    "type": "CAPITAL_VALUE_DESTRUCTION",
+                    "severity": "CRITICAL",
+                    "action": "REJECT_REVIEW",
+                }
+            ],
+        )
+
+        assert violation is None
+
+    def test_active_tender_does_not_override_auto_reject(self):
+        inputs = _inputs(_data_block(75, 14.0, 70, 16.0))
+        inputs.decision_metrics["m_and_a_status"] = "ACTIVE_TENDER"
+
+        violation = assess_verdict_policy(
+            _pm_output("HOLD", "HOLD"),
+            decision_inputs=inputs,
+            red_flags=[{"type": "EXTREME_LEVERAGE", "action": "AUTO_REJECT"}],
+        )
+
+        assert violation is not None
+        assert violation.rule == "pre_screening_auto_reject"
+
+    def test_hold_without_pe_does_not_invent_data_vacuum_exception(self):
+        violation = assess_verdict_policy(
+            _pm_output("HOLD", "HOLD"),
+            decision_inputs=_inputs(_data_block(75, "N/A", 40, 16.0)),
+        )
+
+        assert violation is not None
+        assert violation.rule == "growth_transition_hard_fail"
+        assert violation.reason == "pe_ratio_required_for_growth_exception"
+        assert violation.required_verdict == "DO_NOT_INITIATE"
+
+    def test_dni_is_compliant_when_growth_exception_is_not_established(self):
+        violation = assess_verdict_policy(
+            _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+            decision_inputs=_inputs(_data_block(75, "N/A", 40, 16.0)),
+        )
+
+        assert violation is None
+
+    def test_hold_is_allowed_for_established_data_vacuum_exception(self):
+        violation = assess_verdict_policy(
+            _pm_output("HOLD", "HOLD"),
+            decision_inputs=_inputs(
+                _data_block(75, 14.0, 40, 16.0, available=4),
+                current_growth_fields=frozenset(),
+            ),
+        )
+
+        assert violation is None
+
+    def test_adaptive_denominator_alone_cannot_establish_data_vacuum(self):
+        violation = assess_verdict_policy(
+            _pm_output("HOLD", "HOLD"),
+            decision_inputs=_inputs(_data_block(75, 14.0, 40, 16.0, available=4)),
+        )
+
+        assert violation is not None
+        assert violation.reason == "data_vacuum_growth_inputs_not_established"
+
+    def test_all_current_growth_fields_present_prevents_data_vacuum(self):
+        violation = assess_verdict_policy(
+            _pm_output("HOLD", "HOLD"),
+            decision_inputs=_inputs(
+                _data_block(75, 14.0, 40, 16.0, available=4),
+                current_growth_fields=frozenset(
+                    {
+                        "REVENUE_GROWTH_TTM",
+                        "REVENUE_GROWTH_MRQ",
+                        "EARNINGS_GROWTH_TTM",
+                        "EARNINGS_GROWTH_MRQ",
+                    }
+                ),
+            ),
+        )
+
+        assert violation is not None
+        assert violation.reason == "data_vacuum_growth_inputs_not_established"
+
+    def test_partial_current_growth_coverage_is_not_a_data_vacuum(self):
+        violation = assess_verdict_policy(
+            _pm_output("HOLD", "HOLD"),
+            decision_inputs=_inputs(
+                _data_block(75, 14.0, 40, 16.0, available=4),
+                current_growth_fields=frozenset({"REVENUE_GROWTH_TTM"}),
+            ),
+        )
+
+        assert violation is not None
+        assert violation.reason == "data_vacuum_growth_inputs_not_established"
+
+    def test_unreliable_growth_score_remains_hold_class(self):
+        inputs = DecisionInputs.from_metrics_and_snapshot(
+            {
+                **extract_metrics(_data_block(75, "N/A", 40, 16.0)),
+                "growth_score_consistency": "SUSPECT",
+            },
+            None,
+            None,
+            ticker="TEST",
+        )
+
+        assert (
+            assess_verdict_policy(
+                _pm_output("HOLD", "HOLD"),
+                decision_inputs=inputs,
+            )
+            is None
+        )
+
+    def test_policy_correction_is_deterministic_conservative_and_idempotent(self):
+        source = (
+            _full_pm_output("HOLD", "HOLD") + "\n**Recommended Position Size**: 2.5%\n"
+        )
+
+        corrected, changed = apply_required_verdict(
+            source,
+            required_verdict="DO_NOT_INITIATE",
+            rule="growth_transition_hard_fail",
+            reason="pe_ratio_required_for_growth_exception",
+            ticker="TEST",
+        )
+
+        assert changed is True
+        assert extract_pm_block(corrected).verdict == "DO_NOT_INITIATE"
+        assert "PORTFOLIO MANAGER VERDICT: DO NOT INITIATE" in corrected
+        assert "Actual Decision: DO NOT INITIATE" in corrected
+        assert "**Action**: DO NOT INITIATE" in corrected
+        assert "SHOW_VALUATION_CHART: NO" in corrected
+        assert "VALUATION_DISCOUNT: 0.0" in corrected
+        assert "Recommended Position Size**: 0.0%" in corrected
+        assert "PRIOR RATIONALE SUPERSEDED" in corrected
+
+        repeated, repeated_changed = apply_required_verdict(
+            corrected,
+            required_verdict="DO_NOT_INITIATE",
+            rule="growth_transition_hard_fail",
+            reason="pe_ratio_required_for_growth_exception",
+            ticker="TEST",
+        )
+        assert repeated_changed is False
+        assert repeated == corrected
+
+    def test_policy_rewriter_rejects_an_upgrade_target(self):
+        with pytest.raises(ValueError, match="may only require DNI"):
+            apply_required_verdict(
+                _pm_output("HOLD", "HOLD"),
+                required_verdict="BUY",
+                rule="bad_rule",
+                reason="bad_reason",
+            )
+
+    def test_policy_corrected_dni_is_not_floored_back_to_hold(self):
+        inputs = _inputs(_data_block(75, "N/A", 40, 16.0))
+        corrected, changed = apply_required_verdict(
+            _pm_output("HOLD", "HOLD"),
+            required_verdict="DO_NOT_INITIATE",
+            rule="growth_transition_hard_fail",
+            reason="pe_ratio_required_for_growth_exception",
+        )
+        assert changed is True
+
+        final, floored = maybe_floor_verdict_to_hold(
+            corrected,
+            decision_inputs=inputs,
+            red_flags=[],
+            code_subtotal=0.5,
+            pre_screening_result="PASS",
+        )
+
+        assert floored is False
+        assert "VERDICT: DO_NOT_INITIATE" in final
 
 
 def test_kty_not_floored_pe_and_negative_cagr():
@@ -145,7 +400,7 @@ def test_kty_not_floored_pe_and_negative_cagr():
 def test_not_floored_when_subtotal_at_zone1():
     _, floored = maybe_floor_verdict_to_hold(
         _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
-        decision_inputs=_inputs(APR_BLOCK),
+        decision_inputs=_inputs(APR_BLOCK, current_growth_fields=frozenset()),
         red_flags=[],
         code_subtotal=2.0,
         pre_screening_result="PASS",
@@ -157,7 +412,7 @@ def test_not_floored_when_subtotal_at_zone1():
 def test_not_floored_with_auto_reject_flag():
     _, floored = maybe_floor_verdict_to_hold(
         _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
-        decision_inputs=_inputs(APR_BLOCK),
+        decision_inputs=_inputs(APR_BLOCK, current_growth_fields=frozenset()),
         red_flags=[{"type": "EXTREME_LEVERAGE", "action": "AUTO_REJECT"}],
         code_subtotal=1.0,
         pre_screening_result="PASS",
@@ -223,7 +478,7 @@ def test_reject_synonym_is_floored():
     # Use the canonical-marker PM_BLOCK (the production format extract_pm_block parses).
     out, floored = maybe_floor_verdict_to_hold(
         _full_pm_output("REJECT", "REJECT"),
-        decision_inputs=_inputs(APR_BLOCK),
+        decision_inputs=_inputs(APR_BLOCK, current_growth_fields=frozenset()),
         red_flags=[],
         code_subtotal=1.0,
         pre_screening_result="PASS",
@@ -497,6 +752,71 @@ def _dni_output(health: str = "60", growth: str = "70") -> str:
     )
 
 
+@pytest.mark.parametrize(
+    ("source", "rewrite"),
+    (
+        pytest.param(
+            _full_pm_output("HOLD", "HOLD") + "\n**Recommended Position Size**: 2.5%\n",
+            lambda text: normalize_pm_block_contract(text),
+            id="position-size-normalizer",
+        ),
+        pytest.param(
+            _full_pm_output("HOLD", "HOLD"),
+            lambda text: apply_required_verdict(
+                text,
+                required_verdict="DO_NOT_INITIATE",
+                rule="growth_transition_hard_fail",
+                reason="pe_ratio_required_for_growth_exception",
+            )[0],
+            id="required-verdict",
+        ),
+        pytest.param(
+            _buy_output(),
+            lambda text: maybe_demote_buy_on_blocking_flags(
+                text, red_flags=[_UNRELIABLE]
+            )[0],
+            id="buy-demotion",
+        ),
+        pytest.param(
+            _buy_output(),
+            lambda text: maybe_qualify_buy_in_quick_mode(text, quick_mode=True)[0],
+            id="quick-buy-qualification",
+        ),
+        pytest.param(
+            _buy_output(),
+            lambda text: maybe_qualify_weak_asymmetry_buy(
+                text, weighted_upside=0.04, downside_probability=20.0
+            )[0],
+            id="weak-asymmetry-qualification",
+        ),
+        pytest.param(
+            _dni_output(),
+            lambda text: maybe_tag_dni_review_candidate(text, red_flags=[])[0],
+            id="dni-review-candidate",
+        ),
+        pytest.param(
+            _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+            lambda text: maybe_floor_verdict_to_hold(
+                text,
+                decision_inputs=_inputs(
+                    APR_BLOCK,
+                    current_growth_fields=frozenset(),
+                ),
+                red_flags=[],
+                code_subtotal=1.0,
+                pre_screening_result="PASS",
+            )[0],
+            id="verdict-floor",
+        ),
+    ),
+)
+def test_public_verdict_rewriters_are_idempotent_projections(source, rewrite):
+    once = rewrite(source)
+    twice = rewrite(once)
+
+    assert twice == once
+
+
 class TestDniReviewCandidate:
     """A gate-passing DNI is tagged as a review candidate; token stays DNI.
 
@@ -656,7 +976,10 @@ class TestDniReviewCandidate:
         pm = _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE")
         floored, did_floor = maybe_floor_verdict_to_hold(
             pm,
-            decision_inputs=_inputs(APR_BLOCK),
+            decision_inputs=_inputs(
+                APR_BLOCK,
+                current_growth_fields=frozenset(),
+            ),
             red_flags=[],
             code_subtotal=1.0,
             pre_screening_result="PASS",

@@ -138,7 +138,7 @@ class TestThesisMetricsExtraction:
         assert sell.metrics.growth_pass is False
 
     def test_growth_data_vacuum_exception_pass(self):
-        """3088.T-shape: gate PASS at 33% via Data-Vacuum Exception → ✓ (PM gate)."""
+        """A model-reported exception is labelled as model output without policy."""
         text = (
             "- **Growth Transition**: 33% (Adjusted) - PASS "
             "(Data-Vacuum Exception: Missing REVENUE_GROWTH_TTM and "
@@ -152,8 +152,25 @@ class TestThesisMetricsExtraction:
             ln for ln in visual.splitlines() if "Growth Transition" in ln
         )
         assert "✓" in growth_line and "✗" not in growth_line
-        assert "(PM gate)" in growth_line
+        assert "(model-reported gate)" in growth_line
         assert "(min 50%)" not in growth_line
+
+        policy_visual = generate_thesis_visual(
+            text,
+            decision_policy={
+                "final_verdict": "HOLD",
+                "growth_gate": {
+                    "hard_fail": False,
+                    "exception": "data_vacuum",
+                    "reason": None,
+                },
+            },
+        )
+        policy_line = next(
+            ln for ln in policy_visual.splitlines() if "Growth Transition" in ln
+        )
+        assert "✓" in policy_line
+        assert "(exception: data vacuum)" in policy_line
 
     def test_growth_fail_with_exception_mention_stays_cross(self):
         """2640.TWO-shape: FAIL token wins even when exception prose follows."""
@@ -170,7 +187,7 @@ class TestThesisMetricsExtraction:
         )
         assert "✗" in growth_line
         assert "(min 50%)" in growth_line
-        assert "(PM gate)" not in growth_line
+        assert "(model-reported gate)" not in growth_line
 
     def test_health_pm_gate_pass_below_threshold(self):
         """A health gate PASS below 50% renders ✓ with the PM-gate suffix."""

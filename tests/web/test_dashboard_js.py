@@ -185,6 +185,8 @@ return renderRefresh();
     assert "Needs review" in html
     assert "Refresh queue" in html
     assert "Needs full refresh" in html
+    assert "Stage-1 BUY candidates (require full analysis)" in html
+    assert "BUYs found" not in html
     assert "Queue action-required reruns (2)" in html
     assert "Blocking now" not in html
     assert "Stale in queue" not in html

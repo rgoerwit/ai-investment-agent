@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-08-05
+Last updated: 2026-09-15
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
@@ -39,6 +39,14 @@ runtime only retains a separate rate-limit branch because its backoff policy
 differs. Consultant timeout floors use the inferred provider rather than assuming
 OpenAI-compatible seats are OpenAI.
 
+Model-response validity has two independent layers. `src/agents/runtime.py` owns
+transient provider retries; the producing node then validates its output contract.
+Canonical fenced blocks require their end marker and legacy fields match exact logical
+keys, so `RAW_HEALTH_SCORE` cannot satisfy `HEALTH_SCORE`. Invalid responses are
+classified as cap exhaustion, incomplete structure, or ordinary contract violation.
+Structural recovery is text-only and bounded: full mode applies it to eligible analyst
+outputs, while quick mode limits it to Senior Fundamentals and Portfolio Manager.
+
 ## What This Repo Is
 
 This is a multi-agent international equity analysis system built on LangGraph.
@@ -58,32 +66,47 @@ The system is no longer just “analyze one ticker.” It also supports:
 - article generation
 - portfolio-aware recommendations and reconciliation
 
+## Screening Pipeline Semantics
+
+Stage 0 requires every enabled, applicable exchange source to succeed. Source
+floors count unique normalized tickers; repeated pagination pages cannot satisfy
+them. Source failure aborts before writing fresh screening output. BVB screening
+uses its official Regulated Market equity table and validates the active market
+selector; AeRO is excluded. Direct BVB HTTP availability remains an operational
+dependency, even when its browser interface is reachable. No size threshold is
+used as a substitute for exchange-segment membership.
+
+`scripts/run_pipeline.sh` runs quick Stage 1 screening, then full Stage 2
+analysis of its BUY list; same-mode reuse keeps quick reports from satisfying
+Stage 2. The marker's `buy_count` is the Stage-1 list size, not Stage-2
+completion. Verify full-run status from stage output and full reports; quick
+BUYs are screening candidates, not investable signals.
+
 ## Fast Orientation
 
 Read in this order:
 
-1. `AGENTS.md`
-2. `README.md`
-3. top of `CHANGELOG.md`
-4. `src/main.py`
-5. `src/cli.py`
-6. `src/persistence.py`
-7. `src/output.py`
-8. `src/runtime_services.py`
-9. `src/tooling/`
-10. `src/graph/`
-11. `src/agents/`
-12. `src/tools/`
-13. `src/data/fetcher.py`
-14. `src/runtime_diagnostics/` (package: `failure_classification` + `artifact_status`)
-15. `src/validators/red_flag_detector.py`
-16. `src/validators/sector_classifier.py`
-17. `src/validators/metric_extractor.py`
-18. `src/validators/financial_rules.py`
-19. `src/validators/supplemental_extractors.py`
-20. `src/validators/supplemental_flags.py`
-21. `src/memory.py`
-22. `src/ibkr/`
+1. `README.md`
+2. top of `CHANGELOG.md`
+3. `src/main.py`
+4. `src/cli.py`
+5. `src/persistence.py`
+6. `src/output.py`
+7. `src/runtime_services.py`
+8. `src/tooling/`
+9. `src/graph/`
+10. `src/agents/`
+11. `src/tools/`
+12. `src/data/fetcher.py`
+13. `src/runtime_diagnostics/` (package: `failure_classification` + `artifact_status`)
+14. `src/validators/red_flag_detector.py`
+15. `src/validators/sector_classifier.py`
+16. `src/validators/metric_extractor.py`
+17. `src/validators/financial_rules.py`
+18. `src/validators/supplemental_extractors.py`
+19. `src/validators/supplemental_flags.py`
+20. `src/memory.py`
+21. `src/ibkr/`
 
 ## Runtime Spine
 
@@ -96,6 +119,8 @@ For runtime/control-plane state design, use `docs/RUNTIME_MODEL.md` as the canon
 
 `src/runtime_services.py` owns runtime-scoped service binding.
 `RuntimeServices` uses `ContextVar` scoping so CLI runs, graph execution, dashboard snapshot loads, and worker jobs can bind their own tool execution, inspection, provider runtimes, and hooks without sharing mutable globals by accident.
+Provider runtimes may live for a process, but evidence recorders and issuer-authority
+registries are analysis-run scoped; long-lived workers rebuild those services per ticker.
 
 `src/graph/` owns:
 
@@ -168,6 +193,17 @@ single-source tool records on distinct domains.
 Related listed tickers must occur in the same supporting evidence, so an
 unsupported FLA ticker cannot re-enter through Senior's restatement.
 
+Every shared graph tool loop—Market, Sentiment, News, Junior Fundamentals, Foreign
+Language, and Value Trap—is bounded by `ResearchBudgetLedger`. The policy instance is
+shared by its analyst and tool node, so model turns, tool rounds, fan-out, per-tool and
+purpose counts, duplicates, failed-tool/host circuits, and cumulative model-facing
+evidence all close through one authority. Evidence capping truncates ToolMessage text;
+it never drops the call/result pair or alters the complete structured-ingress record.
+When a limit closes research, the next model invocation has no tools bound and must
+synthesize from retained evidence. Saved `research_budgets.llm_calls` counts logical
+application model turns; `token_usage.call_attempts` separately counts provider
+transport attempts.
+
 `src/tooling/` owns cross-cutting tool execution, audit hooks, argument policy, and untrusted-content inspection.
 
 `src/runtime_diagnostics/` owns artifact completion/validity and publishability checks.
@@ -181,6 +217,13 @@ guard for prompt marker form, parser shape parity, and source-level marker drift
 ## Information Flow Model
 
 Primary agent-to-agent flow is through typed state fields, not just message history.
+Parallel tool transcripts still share the graph's `messages` field, but retention and
+invocation use the same agent ownership boundary. Assistant tool calls and matching
+results are atomic retention units, bounded per agent and validated before any native
+or compatible provider request. A permissive provider accepting malformed history is
+never treated as an application compatibility feature. Legal Counsel keeps a private
+bounded loop because its deterministic preflight and forced JSON synthesis are one
+transaction; it has no duplicate graph tool-node path.
 
 Material factual claims flow through the canonical claim envelope. Policy and roles
 live in `src/claim_policy.py`; `src/tooling/structured_ingress.py` captures registered
@@ -248,6 +291,29 @@ Current semantics:
 - `complete=True, ok=True`: agent ran and produced valid output
 - `complete=True, ok=False`: agent ran but failed; may still leave conservative fallback content
 - `complete=False`: agent did not complete
+
+Run-summary tool counters have two intentionally different meanings:
+
+- `tool_calls`: compatibility count of retained `ToolMessage` objects
+- `tool_executions`: actual run-scoped evidence-ledger executions, with agent and
+  source breakdowns
+
+Likewise, structural-recovery token cost remains attributed to the originating analyst
+in the primary rollup, while `token_usage.by_seat` and `token_usage.recovery_usage`
+preserve the canonical recovery seat and origin. Use the explicit execution/recovery
+fields for cost comparisons; transcript retention is not a billing ledger.
+
+`scripts/cost_report.py --efficiency` summarizes recovery share, output-cap attempts,
+legacy PM model corrections, and research-budget activity. Its A/B report also warns
+when ticker baskets, code commits, prompts, thesis configuration, mode, or dirty-tree
+state make a provider comparison uncontrolled; binding digests may differ as the
+intended comparison axis.
+
+Interpret research stop reasons across a batch, not as isolated failures. Predominant
+`MODEL_FINAL` means the budget is protective. Predominant `TOOL_ROUND_LIMIT` with
+`forced_synthesis_used=true` means the cap is binding and substituting for a natural
+stopping condition; investigate the prompt or stopping behavior, or re-evaluate the
+cap from paired evidence, rather than reflexively lowering it.
 
 Graph barriers use completion, not validity.
 Downstream decision logic should use valid content helpers where correctness matters.
@@ -339,6 +405,50 @@ This path now includes:
 - recommendation/reconciliation logic
 - portfolio-health and macro-event handling
 
+### Why a rejected stock was re-analysed every run (September 2026)
+
+A held position was re-analysed on every portfolio invocation for days while its
+verdict was never in doubt, and no other position was refreshed at all. Both
+symptoms came from one conflation and one scheduling bug.
+
+`PortfolioEvidence.buy_blocking_flag_types` mixed two different claims. A
+measured gate failure (`LIQUIDITY_HARD_FAIL`, minted `action=AUTO_REJECT`) is
+settled for the current observation period — same-day research cannot move it.
+An evidence gap (`action=REVIEW`) might close. The scheduler treated any non-empty
+set as "indeterminate, so buy another analysis", making a liquidity rejection
+permanently urgent. Fresh settled failures now stay out of the urgent stream and
+rejoin the ordinary fair cycle near analysis expiry. The
+discriminator already existed at every mint site; across 400 sampled artifacts
+the `AUTO_REJECT`/`REVIEW` split was clean with no overlap, so the fix needed no
+new taxonomy — only that the index projection stop flattening the two families.
+This preserves the original anti-churn decision: evidence that cannot change today
+does not consume an urgent slot, while evidence old enough to expire is measured
+again through the same fair cycle as other aging analyses.
+
+The backoff meant to catch this never fired. It was keyed on the *sorted
+buy-blocking flag tuple*, which is downstream of search quality: across seven
+consecutive analyses of the same position the set changed on six of six
+transitions, so the stored key never matched, and the branch handling a changed
+key *deleted* the stored entry. The mechanism was self-erasing and
+anti-correlated with its purpose — flakier evidence meant more certain re-spend.
+The persisted map was empty on disk every time it was inspected. It is now keyed
+on the action basis, a closed enum, and the state file carries one entry per
+ticker rather than a nested per-condition map.
+
+Separately, `blocking` policy passed only the urgent stream to the planner, so
+every slot urgent did not fill was wasted: one permanently urgent row plus 64
+due-soon rows produced exactly one refresh per run. Strict priority is about
+ordering, not throughput.
+
+Two lessons worth keeping. Scheduler state must never be keyed on model or
+search output — measure the key's stability before trusting it. And a
+"conservative" default that keeps spending is not conservative: the safe
+direction for a paid action is to withhold it.
+
+Raw `contractDesc` values cross into research tickers through
+`src/ibkr/ticker.py::classify_ibkr_symbol`; broker bookkeeping instruments such as
+corporate-action receivables are rejected there rather than patched in callers.
+
 Ownership is now split across:
 
 - `src/ibkr/reconciler.py` for orchestration
@@ -398,14 +508,15 @@ Already split:
 - `src/validators/red_flag_detector.py` -> facade plus validator ownership submodules
 - `src/runtime_diagnostics.py` -> `src/runtime_diagnostics/` package (`failure_classification` + `artifact_status` behind a re-exporting `__init__` with explicit `__all__`) — Stage 6, July 2026
 
-Provenance typing (Stage 6, July 2026): the gate-critical snapshot / decision-trace / scorecard payloads now have versioned typed codecs in `src/provenance_schema.py` (`Scorecard`, `DecisionTrace`, `SchemaStatus`) plus `AnalysisSnapshot` in `analysis_snapshot.py`. `to_dict` appends `schema_version` (the only additive wire delta); `from_dict` fails closed on a future/corrupt gate-critical payload → `build_analysis_validity` marks it non-publishable. The `detect_red_flags` dict adapter and the `pm_claim_audit`/`article_audit` modules were deliberately left as-is (see the Stage 6 note in `CLAUDE.md`).
+Provenance typing (Stage 6, July 2026): the gate-critical snapshot / decision-trace / scorecard payloads now have versioned typed codecs in `src/provenance_schema.py` (`Scorecard`, `DecisionTrace`, `SchemaStatus`) plus `AnalysisSnapshot` in `analysis_snapshot.py`. `to_dict` appends `schema_version` (the only additive wire delta); `from_dict` fails closed on a future/corrupt gate-critical payload → `build_analysis_validity` marks it non-publishable. The `detect_red_flags` dict adapter and the `pm_claim_audit`/`article_audit` modules were deliberately left as-is (see `docs/PROVENANCE.md`).
 
 Recent completed control-plane/security work:
 
 - runtime-scoped service container via `RuntimeServices`
 - provider-neutral LLM control plane via `src/llm_runtime/`: canonical seats,
   immutable per-run binding plans, reviewed model identity/capabilities,
-  separate provider/group application qualification, native/compatible adapters,
+  separate provider/group allowlisting and evidence qualification,
+  native/compatible adapters,
   provider-neutral retry/reasoning policies, conservative provider-specific rate
   ceilings (including direct-construction fallbacks), and secret-free persisted
   binding telemetry; seat execution policy also owns sampling, client bounds,

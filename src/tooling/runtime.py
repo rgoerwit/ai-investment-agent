@@ -146,14 +146,6 @@ class ToolExecutionService:
             # Failed executions propagate immediately so callers keep the original
             # stack and error semantics.
             details = classify_failure(exc, provider="unknown")
-            is_mcp_error = False
-            try:  # Avoid import-time coupling for the non-MCP path.
-                from src.mcp.errors import MCPCallError
-
-                is_mcp_error = isinstance(exc, MCPCallError)
-            except Exception:  # pragma: no cover - defensive import fallback
-                is_mcp_error = False
-
             logger.error(
                 "tool_call_runner_failed",
                 tool=call.name,
@@ -165,7 +157,6 @@ class ToolExecutionService:
                 error_type=details.error_type,
                 root_cause_type=details.root_cause_type,
                 error_message=details.message,
-                exc_info=not is_mcp_error,
             )
             raise
 

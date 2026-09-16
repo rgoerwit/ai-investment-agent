@@ -510,9 +510,9 @@ def test_no_external_asyncio_timeout_wrapping_shared_llm_helper():
 #
 # Some providers occasionally return a "200 OK" with truncated content and
 # either a missing or `length` finish_reason — the call looks "successful"
-# but the response is half-baked. We detect the partial via finish_reason
-# and surface it as a transient failure so the existing retry loop can
-# reattempt before passing partial output downstream.
+# but the response is half-baked. Missing metadata remains transient; an
+# explicit length/output-cap stop returns immediately to the owning structural
+# validator because repeating the same request and cap is not a recovery.
 # ---------------------------------------------------------------------------
 
 
@@ -825,6 +825,33 @@ class TestProviderPartialResponseRetry:
         assert result.content == "recovered"
 
     @pytest.mark.asyncio
+    async def test_non_retryable_account_limit_does_not_use_quota_backoff(self):
+        """A terminal account cap must not sleep through 60-second quota retries."""
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(
+            side_effect=RuntimeError(
+                "Error code: 403 - Your team has either used all available credits "
+                "or reached its monthly spending limit."
+            )
+        )
+
+        with patch(
+            "src.agents.runtime.asyncio.sleep", new_callable=AsyncMock
+        ) as mock_sleep:
+            with pytest.raises(RuntimeError, match="monthly spending limit"):
+                await invoke_with_rate_limit_handling(
+                    runnable,
+                    {"input": "x"},
+                    max_attempts=3,
+                    context="AccountLimit",
+                    provider="xai",
+                    model_name="grok-4.6",
+                )
+
+        assert runnable.ainvoke.await_count == 1
+        mock_sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_partial_response_triggers_retry_and_recovers(self):
         """First call returns a partial; second returns a clean stop."""
         call_count = {"n": 0}
@@ -850,6 +877,60 @@ class TestProviderPartialResponseRetry:
 
         assert call_count["n"] == 2
         assert result.content == "clean output"
+
+    @pytest.mark.asyncio
+    async def test_explicit_output_cap_bypasses_identical_transport_retry(self):
+        """A deterministic cap stop must reach structural recovery immediately."""
+        from src.token_tracker import get_tracker
+
+        response = _resp("partial structured block", finish_reason="length")
+        response.usage_metadata = {
+            "input_tokens": 100,
+            "output_tokens": 200,
+            "total_tokens": 300,
+        }
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(return_value=response)
+
+        result = await invoke_with_rate_limit_handling(
+            runnable,
+            {"input": "x"},
+            max_attempts=3,
+            max_transient_attempts=2,
+            context="OutputCapNoRetry",
+            provider="openai",
+            model_name="gpt-test",
+        )
+
+        assert result is response
+        assert runnable.ainvoke.await_count == 1
+        attempt = get_tracker().get_total_stats()["call_attempts"][-1]
+        assert attempt["status"] == "failure"
+        assert attempt["failure_kind"] == "output_cap_exhausted"
+        assert attempt["retryable"] is False
+        assert attempt["completion_tokens"] == 200
+
+    @pytest.mark.asyncio
+    async def test_responses_api_output_cap_bypasses_transport_retry(self):
+        response = AIMessage(
+            content="partial structured block",
+            response_metadata={
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            },
+        )
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(return_value=response)
+
+        result = await invoke_with_rate_limit_handling(
+            runnable,
+            {"input": "x"},
+            max_attempts=3,
+            context="ResponsesOutputCapNoRetry",
+        )
+
+        assert result is response
+        assert runnable.ainvoke.await_count == 1
 
     @pytest.mark.asyncio
     async def test_clean_response_is_not_retried(self):

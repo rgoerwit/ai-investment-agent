@@ -76,6 +76,23 @@ def find_opportunities(
             )
             continue
 
+        if portfolio.unresolved_positions:
+            items.append(
+                ReconciliationItem(
+                    ticker=Ticker.from_yf(ticker),
+                    action="REVIEW",
+                    reason=(
+                        "New BUY blocked — portfolio contains unresolved broker "
+                        "identities; resolve the incomplete inventory before "
+                        "increasing exposure"
+                    ),
+                    urgency="HIGH",
+                    analysis=analysis,
+                    action_basis="ENTRY_CONSTRAINT",
+                )
+            )
+            continue
+
         # Opt-in BUY stability gate. Withhold a fresh BUY that is either
         # contradicted by recent same-ticker runs (verdict-noise defense) or
         # marginal (risk_tally >= margin) with an unresolved peak/transient

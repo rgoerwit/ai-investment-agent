@@ -125,6 +125,9 @@ def _populate_portfolio_weights(
     exchange_weights: dict[str, float] = {}
     currency_weights: dict[str, float] = {}
     valid_positions = [position for position in positions if position.valuation_valid]
+    # Sector and exchange attribution requires a resolved security identity.
+    # Missing identity is reported separately; it is not a fictitious bucket
+    # and must not silently change the historical identified-book denominator.
     total_position_value = sum(
         position.market_value_usd for position in valid_positions
     )

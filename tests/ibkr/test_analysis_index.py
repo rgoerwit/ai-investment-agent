@@ -86,6 +86,51 @@ class TestPortfolioEvidenceExtraction:
         assert record.evidence.compliance_flag_types == ("PFIC_PROBABLE",)
         assert record.evidence.mandatory_exit_flag_types == ()
 
+    def test_settled_rejects_split_from_indeterminate_gaps(self):
+        """AUTO_REJECT marks a resolved gate failure; REVIEW marks a real gap.
+
+        Both block a buy, so the union is unchanged — but only the gap is worth
+        paying to re-examine, and conflating them re-analysed 2173.T daily.
+        """
+        record = self._record(
+            {
+                "run_summary": {"verdict_dni_review_candidate": False},
+                "red_flags": [
+                    {
+                        "type": "LIQUIDITY_HARD_FAIL",
+                        "blocks_buy": True,
+                        "action": "AUTO_REJECT",
+                        "severity": "CRITICAL",
+                    },
+                    {
+                        "type": "MANAGEMENT_GUIDANCE_EVIDENCE_GAP",
+                        "blocks_buy": True,
+                        "action": "REVIEW",
+                        "severity": "WARNING",
+                    },
+                ],
+            }
+        )
+        assert record.evidence.buy_blocking_flag_types == (
+            "LIQUIDITY_HARD_FAIL",
+            "MANAGEMENT_GUIDANCE_EVIDENCE_GAP",
+        )
+        assert record.evidence.settled_reject_flag_types == ("LIQUIDITY_HARD_FAIL",)
+        assert record.evidence.indeterminate_flag_types == (
+            "MANAGEMENT_GUIDANCE_EVIDENCE_GAP",
+        )
+
+    def test_flag_without_action_is_treated_as_indeterminate(self):
+        """A legacy flag records no action; assume a gap and keep it visible."""
+        record = self._record(
+            {
+                "run_summary": {"verdict_dni_review_candidate": False},
+                "red_flags": [{"type": "GROWTH_SCORE_UNRELIABLE", "blocks_buy": True}],
+            }
+        )
+        assert record.evidence.settled_reject_flag_types == ()
+        assert record.evidence.indeterminate_flag_types == ("GROWTH_SCORE_UNRELIABLE",)
+
     def test_marker_false_still_counts_as_complete(self):
         """Key presence (not truthiness) distinguishes marker-aware artifacts."""
         record = self._record(

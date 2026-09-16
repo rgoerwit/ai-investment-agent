@@ -35,28 +35,42 @@ def _line_starts_with_any(text: str, patterns: tuple[str, ...]) -> bool:
 def _has_complete_legacy_block(
     text: str,
     header_patterns: tuple[str, ...],
-    required_fields: tuple[str, ...],
+    required_field_groups: tuple[tuple[str, ...], ...],
 ) -> bool:
     if not _line_starts_with_any(text, header_patterns):
         return False
-    return any(field in text for field in required_fields)
+    return _has_required_field_groups(text, required_field_groups)
+
+
+def _has_required_field_groups(
+    text: str, required_field_groups: tuple[tuple[str, ...], ...]
+) -> bool:
+    """Require one exact line-start field from every alternative group."""
+
+    return all(
+        any(
+            re.search(rf"^\s*{re.escape(field)}", text, re.MULTILINE)
+            for field in alternatives
+        )
+        for alternatives in required_field_groups
+    )
 
 
 def _has_complete_unfenced_block(
     text: str,
     block_name: str,
-    required_fields: tuple[str, ...],
+    required_field_groups: tuple[tuple[str, ...], ...],
 ) -> bool:
     label_pattern = rf"^\s*{re.escape(unfenced_label(block_name))}\s*$"
     if not _line_starts_with_any(text, (label_pattern,)):
         return False
-    return all(field in text for field in required_fields)
+    return _has_required_field_groups(text, required_field_groups)
 
 
 def _has_complete_structured_block(
     text: str,
     block_name: str,
-    required_fields: tuple[str, ...],
+    required_field_groups: tuple[tuple[str, ...], ...],
 ) -> bool:
     shape = BLOCK_SHAPES.get(block_name)
     if block_name == "DATA_BLOCK":
@@ -67,7 +81,7 @@ def _has_complete_structured_block(
         return _has_complete_unfenced_block(
             text,
             block_name,
-            required_fields,
+            required_field_groups,
         ) or has_parseable_fenced_block(text, block_name)
     return False
 
@@ -287,7 +301,6 @@ class SignalProcessor:
             logger.error(
                 "llm_signal_extraction_exception",
                 **summarize_exception(e, operation="llm_signal_extraction_exception"),
-                exc_info=True,
             )
             return "ERROR_PROCESSING_SIGNAL"
 
@@ -421,24 +434,31 @@ def detect_truncation(text: str, agent: str | None = None) -> dict:
             "confidence": "medium",
         }
 
-    # Check for incomplete structured blocks FIRST (MEDIUM confidence)
-    # These blocks should have a valid start marker plus required fields.
-    # We keep the current lenient "any required field" behavior for legacy
-    # line-start variants to avoid broad behavior changes.
+    # Check for incomplete structured blocks FIRST (MEDIUM confidence). Canonical
+    # fenced blocks require both markers; a legacy header may use the compatibility
+    # path, but only when every required field group has an exact line-start match.
     block_rules: tuple[
-        tuple[str, str, tuple[str, ...], tuple[str, ...], Callable[[str], bool]],
+        tuple[
+            str,
+            str,
+            tuple[str, ...],
+            tuple[str, ...],
+            tuple[tuple[str, ...], ...],
+            Callable[[str], bool],
+        ],
         ...,
     ] = (
         (
             "PM_BLOCK",
             "portfolio_manager",
+            (rf"^\s*{re.escape(unfenced_label('PM_BLOCK'))}\s*$",),
             (
                 rf"^\s*{re.escape(unfenced_label('PM_BLOCK'))}\s*$",
                 rf"^{fenced_marker_fragment('PM_BLOCK', 'START')}\s*$",
             ),
-            ("VERDICT:", "RISK_ZONE:", "ZONE:"),
+            (("VERDICT:",), ("RISK_ZONE:", "ZONE:")),
             lambda value: _has_complete_structured_block(
-                value, "PM_BLOCK", ("VERDICT:", "RISK_ZONE:", "ZONE:")
+                value, "PM_BLOCK", (("VERDICT:",), ("RISK_ZONE:", "ZONE:"))
             ),
         ),
         (
@@ -447,23 +467,28 @@ def detect_truncation(text: str, agent: str | None = None) -> dict:
             (
                 rf"^\s*{re.escape(unfenced_label('DATA_BLOCK'))}\s*$",
                 r"^\s*#{2,}\s+DATA_BLOCK(?:\b.*)?$",
+            ),
+            (
+                rf"^\s*{re.escape(unfenced_label('DATA_BLOCK'))}\s*$",
+                r"^\s*#{2,}\s+DATA_BLOCK(?:\b.*)?$",
                 rf"^{fenced_marker_fragment('DATA_BLOCK', 'START')}\s*$",
             ),
-            ("HEALTH_SCORE:", "GROWTH_SCORE:"),
+            (("HEALTH_SCORE:",), ("GROWTH_SCORE:",)),
             lambda value: _has_complete_structured_block(
-                value, "DATA_BLOCK", ("HEALTH_SCORE:", "GROWTH_SCORE:")
+                value, "DATA_BLOCK", (("HEALTH_SCORE:",), ("GROWTH_SCORE:",))
             ),
         ),
         (
             "FORENSIC_DATA_BLOCK",
             "global_forensic_auditor",
+            (rf"^\s*{re.escape(unfenced_label('FORENSIC_DATA_BLOCK'))}\s*$",),
             (
                 rf"^\s*{re.escape(unfenced_label('FORENSIC_DATA_BLOCK'))}\s*$",
                 rf"^{fenced_marker_fragment('FORENSIC_DATA_BLOCK', 'START')}\s*$",
             ),
-            ("VERDICT:", "STATUS:"),
+            (("VERDICT:",), ("STATUS:",)),
             lambda value: _has_complete_structured_block(
-                value, "FORENSIC_DATA_BLOCK", ("VERDICT:", "STATUS:")
+                value, "FORENSIC_DATA_BLOCK", (("VERDICT:",), ("STATUS:",))
             ),
         ),
         (
@@ -472,11 +497,15 @@ def detect_truncation(text: str, agent: str | None = None) -> dict:
             (
                 rf"^\s*{re.escape(unfenced_label('VALUE_TRAP_BLOCK'))}\s*$",
                 r"^\s*#{2,}\s+VALUE_TRAP_BLOCK(?:\b.*)?$",
+            ),
+            (
+                rf"^\s*{re.escape(unfenced_label('VALUE_TRAP_BLOCK'))}\s*$",
+                r"^\s*#{2,}\s+VALUE_TRAP_BLOCK(?:\b.*)?$",
                 rf"^{fenced_marker_fragment('VALUE_TRAP_BLOCK', 'START')}\s*$",
             ),
-            ("SCORE:", "VERDICT:"),
+            (("SCORE:",), ("VERDICT:",)),
             lambda value: _has_complete_structured_block(
-                value, "VALUE_TRAP_BLOCK", ("SCORE:", "VERDICT:")
+                value, "VALUE_TRAP_BLOCK", (("SCORE:",), ("VERDICT:",))
             ),
         ),
     )
@@ -484,17 +513,20 @@ def detect_truncation(text: str, agent: str | None = None) -> dict:
     for (
         block_name,
         owner,
+        legacy_start_patterns,
         start_patterns,
-        required_fields,
+        required_field_groups,
         parseable_check,
     ) in block_rules:
         if agent and agent != owner:
             continue
         shape = BLOCK_SHAPES.get(block_name)
         legacy_complete = (
-            _has_complete_unfenced_block(text, block_name, required_fields)
+            _has_complete_unfenced_block(text, block_name, required_field_groups)
             if shape is BlockShape.UNFENCED
-            else _has_complete_legacy_block(text, start_patterns, required_fields)
+            else _has_complete_legacy_block(
+                text, legacy_start_patterns, required_field_groups
+            )
         )
         if parseable_check(text) or legacy_complete:
             return {
@@ -507,7 +539,7 @@ def detect_truncation(text: str, agent: str | None = None) -> dict:
             return {
                 "truncated": True,
                 "source": "llm",
-                "marker": f"incomplete {block_name} block (missing {required_fields})",
+                "marker": f"incomplete {block_name} block",
                 "confidence": "medium",
             }
 

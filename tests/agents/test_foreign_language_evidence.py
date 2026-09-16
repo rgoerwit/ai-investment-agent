@@ -4,7 +4,10 @@ from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, ToolMessage
 
-from src.agents.foreign_language_evidence import normalize_foreign_language_evidence
+from src.agents.foreign_language_evidence import (
+    has_foreign_language_protocol_residue,
+    normalize_foreign_language_evidence,
+)
 from src.agents.message_utils import (
     ToolEvidenceRecord,
     evidence_record_to_tool_evidence,
@@ -101,6 +104,39 @@ Reporting unit: thousands
 Revenue 1,500 1,000
 Net income attributable to owners of parent 405 200
 """
+
+
+def test_leading_tool_protocol_preamble_is_removed_without_losing_narrative():
+    report = (
+        "Legitimate local-language summary.\n"
+        '{"ticker":"1401.T","purpose":"latest_results"}\n'
+        "to=functions.search_foreign_sources  ðjson\n" + _latest_results_report()
+    )
+
+    normalized = normalize_foreign_language_evidence(report, [], ticker="1401.T")
+
+    assert normalized.startswith("Legitimate local-language summary.\n### --- START")
+    assert not has_foreign_language_protocol_residue(normalized)
+
+
+def test_noncontiguous_protocol_residue_is_not_silently_sanitized():
+    report = (
+        "to=functions.search_foreign_sources\n"
+        "unrecognized transport fragment\n" + _latest_results_report()
+    )
+
+    normalized = normalize_foreign_language_evidence(report, [], ticker="1401.T")
+
+    assert has_foreign_language_protocol_residue(normalized)
+
+
+def test_protocol_words_in_legitimate_evidence_are_not_residue():
+    report = "The filing describes a tool function used in production.\n" + _report()
+
+    normalized = normalize_foreign_language_evidence(report, [], ticker="AAPL")
+
+    assert "tool function used in production" in normalized
+    assert not has_foreign_language_protocol_residue(normalized)
 
 
 def test_6782_equity_method_evidence_is_not_promoted_to_control():

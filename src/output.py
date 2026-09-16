@@ -646,7 +646,6 @@ async def handle_article_generation(
                 operation="generating article",
                 provider="unknown",
             ),
-            exc_info=True,
         )
         if not args.quiet and not args.brief:
             console_obj.print(
@@ -834,7 +833,6 @@ def _render_primary_output(
                     operation="writing markdown report",
                     provider="unknown",
                 ),
-                exc_info=True,
             )
             raise SystemExit(1) from exc
     else:

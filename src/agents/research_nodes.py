@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, cast
 
 import structlog
 from langchain_core.messages import HumanMessage
 from langgraph.types import RunnableConfig
 
 from src.config import config as settings_config
-from src.error_safety import summarize_exception
+from src.error_safety import redact_sensitive_text, summarize_exception
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import (
+    classify_failure,
     failure_artifact,
     get_valid_artifact_content,
     success_artifact,
@@ -19,6 +21,16 @@ from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .debate_handoffs import (
+    DebateReasoningPolicy,
+    extract_native_reasoning,
+    parse_structured_rationale_candidate,
+    render_balanced_handoffs,
+    render_opponent_handoff,
+    split_structured_rationale,
+    structured_rationale_addendum,
+    structured_rationale_repair_prompt,
+)
 from .evidence_constraints import downstream_evidence_constraints
 from .governance_prompt import governance_block
 from .output_limits import cap_state_value
@@ -95,8 +107,223 @@ def _build_research_report_bundle(state: AgentState, budgets: dict[str, int]) ->
     return "\n\n".join(parts)
 
 
+@dataclass(frozen=True)
+class _ResearcherSeat:
+    """Per-node invariants that response resolution needs.
+
+    Grouped so the resolver below takes one argument instead of seven; every
+    field is fixed at node-construction time.
+    """
+
+    agent_key: str
+    researcher_type: str
+    round_num: int
+    policy: DebateReasoningPolicy
+    llm: Any
+    fallback_llm: Any | None
+    structured_repair_llm: Any | None
+
+
+@dataclass(frozen=True)
+class _ResolvedResearcherOutput:
+    """What the researcher actually produced, after any recovery path ran."""
+
+    response: Any
+    # The model that produced `response` — not necessarily `seat.llm`, so
+    # truncation and output diagnostics must be attributed to this one.
+    runnable: Any
+    canonical: str
+    structured_rationale: str
+    native_reasoning: str
+
+
+async def _resolve_researcher_output(
+    seat: _ResearcherSeat,
+    *,
+    agent_name: str,
+    prompt: str,
+    canonical_prompt: str,
+    runtime_config: Any,
+) -> _ResolvedResearcherOutput:
+    """Run the researcher call and any recovery it needs, in one place.
+
+    Four paths converge here — the primary call, a transport fallback when a
+    provider rejects the reasoning-output request, a re-ask on a degraded or
+    empty response, and a narrow structuring repair. Extracted from
+    ``researcher_node`` so the node itself reads linearly; this is a move, not a
+    behaviour change. Exceptions propagate to the node's artifact-failure
+    handler exactly as before, except where a path documents its own recovery.
+    ``runtime_config`` is threaded as an object rather than a pre-read flag so
+    that ``developer_debug_active`` is still read only on the repair path — an
+    unconditional read here would be a behaviour change, not a move.
+    """
+
+    policy = seat.policy
+    round_num = seat.round_num
+
+    async def invoke(
+        target_llm: Any, target_prompt: str, *, context_suffix: str = ""
+    ) -> Any:
+        return await agent_runtime.invoke_with_rate_limit_handling(
+            target_llm,
+            [HumanMessage(content=target_prompt)],
+            context=f"{agent_name} R{round_num}{context_suffix}",
+            canonical_agent=agent_name,
+            provider=support.infer_provider_name(target_llm),
+            model_name=support.get_model_name(target_llm),
+        )
+
+    runnable = seat.llm
+    try:
+        response = await invoke(runnable, prompt)
+    except Exception as exc:
+        details = classify_failure(
+            exc,
+            provider=support.infer_provider_name(runnable),
+            model_name=support.get_model_name(runnable),
+        )
+        if seat.fallback_llm is None or details.kind != "bad_request":
+            raise
+        logger.warning(
+            "debate_reasoning_output_unsupported",
+            agent=seat.agent_key,
+            round=round_num,
+            provider=details.provider,
+            model=support.get_model_name(runnable),
+        )
+        runnable = seat.fallback_llm
+        response = await invoke(runnable, prompt)
+
+    canonical, structured_rationale = split_structured_rationale(
+        message_utils.extract_string_content(response.content),
+        policy=policy,
+        round_num=round_num,
+    )
+    partial_reason = agent_runtime.response_partial_reason(response)
+    if seat.fallback_llm is not None and (not canonical.strip() or partial_reason):
+        logger.warning(
+            "debate_reasoning_output_degraded",
+            agent=seat.agent_key,
+            round=round_num,
+            reason="empty_canonical_output"
+            if not canonical.strip()
+            else partial_reason,
+        )
+        runnable = seat.fallback_llm
+        response = await invoke(runnable, canonical_prompt)
+        canonical, structured_rationale = split_structured_rationale(
+            message_utils.extract_string_content(response.content),
+            policy=policy,
+            round_num=round_num,
+        )
+
+    native_reasoning = (
+        extract_native_reasoning(response, char_cap=policy.native_char_cap)
+        if policy.emits_in(round_num)
+        else ""
+    )
+    if policy.emits_in(round_num) and not structured_rationale:
+        structured_rationale = await _repair_structured_rationale(
+            seat,
+            invoke=invoke,
+            fallback_runnable=runnable,
+            canonical=canonical,
+            runtime_config=runtime_config,
+        )
+
+    return _ResolvedResearcherOutput(
+        response=response,
+        runnable=runnable,
+        canonical=canonical,
+        structured_rationale=structured_rationale,
+        native_reasoning=native_reasoning,
+    )
+
+
+async def _repair_structured_rationale(
+    seat: _ResearcherSeat,
+    *,
+    invoke: Any,
+    fallback_runnable: Any,
+    canonical: str,
+    runtime_config: Any,
+) -> str:
+    """Structure an already-written argument when the inline capsule is missing.
+
+    Live models may ignore an extra output block in a long debate prompt. This
+    follow-up sees only the canonical argument, so it restructures an existing
+    claim set rather than forming a second opinion, and it cannot introduce
+    source material the researcher did not cite. Failure is optional: a balanced
+    native pair can still carry the handoff, so every path returns "" rather
+    than raising.
+    """
+
+    repair_target = seat.structured_repair_llm or seat.fallback_llm or fallback_runnable
+    repair_prompt = (
+        structured_rationale_repair_prompt(seat.policy)
+        + "\n\n"
+        + format_untrusted_block(
+            canonical,
+            "CANONICAL ROUND-1 ARGUMENT TO STRUCTURE",
+            provenance=f"{seat.researcher_type} researcher canonical output",
+        )
+    )
+    repair_content = ""
+    structured_rationale = ""
+    try:
+        repair_response = await invoke(
+            repair_target, repair_prompt, context_suffix=" structured handoff"
+        )
+        repair_partial_reason = agent_runtime.response_partial_reason(repair_response)
+        if not repair_partial_reason:
+            repair_content = message_utils.extract_string_content(
+                repair_response.content
+            )
+            structured_rationale = parse_structured_rationale_candidate(
+                repair_content, policy=seat.policy
+            )
+        if structured_rationale:
+            logger.info(
+                "debate_structured_rationale_repaired",
+                agent=seat.agent_key,
+                round=seat.round_num,
+                content_length=len(structured_rationale),
+            )
+        else:
+            logger.warning(
+                "debate_structured_rationale_unavailable",
+                agent=seat.agent_key,
+                round=seat.round_num,
+                reason=repair_partial_reason or "invalid_repair_shape",
+            )
+            if runtime_config.developer_debug_active:
+                logger.debug(
+                    "debate_structured_rationale_invalid_content",
+                    agent=seat.agent_key,
+                    round=seat.round_num,
+                    content_preview=redact_sensitive_text(
+                        repair_content, max_chars=2_000
+                    ),
+                )
+    except Exception as exc:
+        logger.warning(
+            "debate_structured_rationale_unavailable",
+            agent=seat.agent_key,
+            round=seat.round_num,
+            **summarize_exception(exc, operation="debate_structured_rationale_repair"),
+        )
+    return structured_rationale
+
+
 def create_researcher_node(
-    llm, memory: Any | None, agent_key: str, round_num: int = 1
+    llm,
+    memory: Any | None,
+    agent_key: str,
+    round_num: int = 1,
+    *,
+    handoff_policy: DebateReasoningPolicy | None = None,
+    fallback_llm: Any | None = None,
+    structured_repair_llm: Any | None = None,
 ) -> Callable:
     """
     Create a researcher node for Bull/Bear debate.
@@ -104,6 +331,16 @@ def create_researcher_node(
     is_bull = agent_key == "bull_researcher"
     researcher_type = "bull" if is_bull else "bear"
     opponent_type = "bear" if is_bull else "bull"
+    policy = handoff_policy or DebateReasoningPolicy(enabled=False, max_rounds=2)
+    seat = _ResearcherSeat(
+        agent_key=agent_key,
+        researcher_type=researcher_type,
+        round_num=round_num,
+        policy=policy,
+        llm=llm,
+        fallback_llm=fallback_llm,
+        structured_repair_llm=structured_repair_llm,
+    )
 
     async def researcher_node(
         state: AgentState, config: RunnableConfig
@@ -145,6 +382,23 @@ OPPONENT'S ROUND 1 ARGUMENT (REBUT THIS):
 === END ROUND 1 ===
 
 Now provide your Round 2 rebuttal, addressing the opponent's key points."""
+            if policy.consumes_in(round_num):
+                opponent_handoff = render_opponent_handoff(
+                    opponent_role=opponent_type,
+                    opponent=cast(
+                        dict[str, str],
+                        debate_state.get(f"{opponent_type}_round1_handoff", {}),
+                    ),
+                    telemetry=cast(
+                        dict[str, Any], debate_state.get("handoff_telemetry", {})
+                    ),
+                )
+                if opponent_handoff:
+                    debate_history += "\n\n" + format_untrusted_block(
+                        opponent_handoff,
+                        "OPPONENT ROUND-1 REASONING ADJUNCT",
+                        provenance=f"{opponent_type} researcher model output",
+                    )
             round_instruction = (
                 "Provide your rebuttal to the opponent's Round 1 argument. "
                 "Use the factual anchors and round-1 arguments as your basis, "
@@ -261,29 +515,33 @@ Only use data explicitly related to {ticker} ({company_name}).{governance_block(
                     f"\n\n{macro_context}" if context_block else macro_context
                 )
 
-        prompt = (
+        canonical_prompt = (
             f"{agent_prompt.system_message}\n{negative_constraint}\n\n{context_section_title}:\n"
             f"{reports}\n{context_block}\n\nDEBATE CONTEXT:\n{debate_history}\n\n"
             f"{round_instruction}"
         )
+        prompt = canonical_prompt + structured_rationale_addendum(policy, round_num)
 
         try:
-            response = await agent_runtime.invoke_with_rate_limit_handling(
-                llm,
-                [HumanMessage(content=prompt)],
-                context=f"{agent_prompt.agent_name} R{round_num}",
-                canonical_agent=agent_prompt.agent_name,
-                provider=support.infer_provider_name(llm),
-                model_name=support.get_model_name(llm),
+            resolved = await _resolve_researcher_output(
+                seat,
+                agent_name=agent_prompt.agent_name,
+                prompt=prompt,
+                canonical_prompt=canonical_prompt,
+                runtime_config=runtime_config,
             )
-            content_str = message_utils.extract_string_content(response.content)
+            response = resolved.response
+            content_str = resolved.canonical
+            structured_rationale = resolved.structured_rationale
+            native_reasoning = resolved.native_reasoning
+
             from src.utils import detect_truncation
 
             trunc_info = detect_truncation(content_str, agent=agent_key)
             log_truncation_diagnostic(
                 agent_key=agent_key,
                 ticker=ticker,
-                runnable=llm,
+                runnable=resolved.runnable,
                 response=response,
                 content=content_str,
                 trunc_info=trunc_info,
@@ -291,7 +549,7 @@ Only use data explicitly related to {ticker} ({company_name}).{governance_block(
             log_output_diagnostics(
                 agent_key=agent_key,
                 ticker=ticker,
-                runnable=llm,
+                runnable=resolved.runnable,
                 response=response,
                 content=content_str,
                 truncated=trunc_info["truncated"],
@@ -308,7 +566,13 @@ Only use data explicitly related to {ticker} ({company_name}).{governance_block(
                 content_length=len(content_str),
             )
 
-            return {"investment_debate_state": {field_name: argument}}
+            debate_update: dict[str, Any] = {field_name: argument}
+            if policy.emits_in(round_num):
+                debate_update[f"{researcher_type}_round1_handoff"] = {
+                    "structured": structured_rationale,
+                    "native": native_reasoning,
+                }
+            return {"investment_debate_state": debate_update}
         except Exception as exc:
             logger.error(
                 "researcher_error",
@@ -329,8 +593,14 @@ Only use data explicitly related to {ticker} ({company_name}).{governance_block(
 
 
 def create_research_manager_node(
-    llm, memory: Any | None, strict_mode: bool = False
+    llm,
+    memory: Any | None,
+    strict_mode: bool = False,
+    *,
+    handoff_policy: DebateReasoningPolicy | None = None,
 ) -> Callable:
+    policy = handoff_policy or DebateReasoningPolicy(enabled=False, max_rounds=2)
+
     async def research_manager_node(
         state: AgentState, config: RunnableConfig
     ) -> dict[str, Any]:
@@ -366,6 +636,18 @@ def create_research_manager_node(
         bull_history = debate.get("bull_history", "N/A")
         bear_history = debate.get("bear_history", "N/A")
         all_reports = f"""MARKET ANALYST REPORT:\n{support.summarize_for_pm(market_report, "market", 1800) if market_report != "N/A" else "N/A"}\n\nSENTIMENT ANALYST REPORT:\n{support.summarize_for_pm(sentiment_report, "sentiment", 1200) if sentiment_report != "N/A" else "N/A"}\n\nNEWS ANALYST REPORT:\n{support.summarize_for_pm(news_report, "news", 1800) if news_report != "N/A" else "N/A"}\n\nFUNDAMENTALS ANALYST REPORT:\n{support.summarize_for_pm(fundamentals_report, "fundamentals", 4000) if fundamentals_report != "N/A" else "N/A"}{attribution_note}\n\nVALUE TRAP ANALYSIS:\n{support.summarize_for_pm(value_trap, "value_trap", 2200) if value_trap != "N/A" else "N/A"}\n\nBULL RESEARCHER:\n{support.summarize_for_pm(bull_history, "research", 2500) if bull_history != "N/A" else "N/A"}\n\nBEAR RESEARCHER:\n{support.summarize_for_pm(bear_history, "research", 2500) if bear_history != "N/A" else "N/A"}"""
+        if policy.active:
+            balanced_handoffs = render_balanced_handoffs(
+                bull=debate.get("bull_round1_handoff", {}),
+                bear=debate.get("bear_round1_handoff", {}),
+                telemetry=debate.get("handoff_telemetry", {}),
+            )
+            if balanced_handoffs:
+                all_reports += "\n\n" + format_untrusted_block(
+                    balanced_handoffs,
+                    "BALANCED ROUND-1 REASONING ADJUNCTS",
+                    provenance="Bull and Bear researcher model outputs",
+                )
         system_msg = agent_prompt.system_message
         if strict_mode:
             system_msg += _STRICT_RM_ADDENDUM

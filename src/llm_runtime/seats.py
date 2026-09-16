@@ -302,15 +302,18 @@ SEATS: dict[SeatId, SeatSpec] = {
         state_field="final_trade_decision",
         normal=ModelIntent.CRITICAL,
         quick=ModelIntent.CRITICAL,
-        execution_policy=SeatExecutionPolicy(standard_tier_in_quick_mode=True),
+        # The PM normally fits within the quick flex-attempt cap and retains the
+        # standard fallback, so it follows the configured tier. Senior Fundamentals
+        # keeps the standard pin because its calls exceed the current flex cap.
+        execution_policy=SeatExecutionPolicy(),
     ),
     SeatId.ANALYST_RETRY: _seat(
         SeatId.ANALYST_RETRY,
         "Analyst Retry",
         normal=ModelIntent.REASONING,
         quick=ModelIntent.REASONING,
-        requires=_TOOLS,
-        disabled_in_quick_mode=True,
+        requires=_TEXT,
+        execution_policy=SeatExecutionPolicy(standard_tier_in_quick_mode=True),
     ),
     SeatId.CONSULTANT: _seat(
         SeatId.CONSULTANT,
@@ -336,6 +339,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         normal=ModelIntent.REASONING,
         requires=_TOOLS,
         optional_mode_field="llm_auditor_mode",
+        disabled_in_quick_mode=True,
     ),
     SeatId.AUDITOR_ESCALATION: _seat(
         SeatId.AUDITOR_ESCALATION,
@@ -348,6 +352,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         quick=ModelIntent.ESCALATION,
         requires=_TOOLS,
         optional_mode_field="llm_auditor_mode",
+        disabled_in_quick_mode=True,
     ),
     SeatId.APAC: _seat(
         SeatId.APAC,

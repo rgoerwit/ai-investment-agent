@@ -20,10 +20,10 @@ class SeatModelRequest:
     reasoning_value: str | None = None
     service_tier: str | None = None
     settings: Any | None = None
+    include_reasoning_output: bool = False
 
 
 class ChatModelAdapter(Protocol):
     kind: str
 
     def build(self, request: SeatModelRequest) -> BaseChatModel | None: ...
-    def prepare_messages(self, messages: list[Any], *, seat: SeatSpec) -> list[Any]: ...

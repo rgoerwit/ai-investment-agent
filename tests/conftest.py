@@ -10,8 +10,37 @@ from unittest.mock import patch
 import pytest
 import structlog
 
+from scripts.check_macos_cloud_files import (
+    collection_input_files,
+    find_dataless_files,
+    format_pytest_error,
+    materialize_files,
+)
+
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# iCloud's Optimize Mac Storage can leave source, tests, and fixtures as
+# ``compressed,dataless`` placeholders. Letting collection discover them one by one
+# produces long silent stalls inside importlib and can look like a broken native
+# library. Materialize public inputs before importing application modules; if macOS
+# cannot fetch them, fail with the explicit public-file-only recovery command.
+if sys.platform == "darwin":
+    _repository_root = Path(__file__).parent.parent
+    _collection_inputs = collection_input_files(_repository_root)
+    _dataless_files = find_dataless_files(_collection_inputs)
+    if _dataless_files:
+        print(
+            f"pytest preflight: materializing {len(_dataless_files)} "
+            "macOS cloud placeholder(s)",
+            file=sys.stderr,
+        )
+        materialize_files(_dataless_files)
+        _dataless_files = find_dataless_files(_collection_inputs)
+        if _dataless_files:
+            raise pytest.UsageError(
+                format_pytest_error(_dataless_files, _repository_root)
+            )
 
 # macOS fork-safety: apply the same mitigation the app uses, but at test-session
 # import time (before any test forks). Several tests + scripts/find_gems.py use

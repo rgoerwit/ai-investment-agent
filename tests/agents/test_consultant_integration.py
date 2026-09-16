@@ -13,6 +13,7 @@ from langgraph.types import RunnableConfig
 
 from src.agents import create_consultant_node, create_portfolio_manager_node
 from src.graph import create_trading_graph
+from src.llm_runtime.seats import ModelIntent
 from src.llms import create_consultant_llm, get_consultant_llm
 from src.tooling.runtime import ToolResult
 
@@ -254,10 +255,14 @@ class TestConsultantNodeExecution:
                 result = await consultant_node(state, config)
 
                 assert "consultant_review" in result
-                assert result["consultant_review"] == ""
+                assert result["consultant_review"].startswith(
+                    "CONSULTANT REVIEW: UNAVAILABLE"
+                )
                 status = result["artifact_statuses"]["consultant_review"]
                 assert status["ok"] is False
-                assert status["message"] == "OpenAI API timeout"
+                assert status["message"] == (
+                    "The provider call exceeded its configured time limit."
+                )
 
     @pytest.mark.asyncio
     async def test_consultant_tool_loop_routes_through_tool_service(self):
@@ -1607,16 +1612,18 @@ class TestConsultantQuickMode:
                 mock_config.enable_consultant = True
                 mock_config.consultant_model = "gpt-5.4"
                 mock_config.get_openai_api_key.return_value = "test-key"
+                mock_config.llm_default_reasoning_reserve_tokens = 2048
+                mock_config.llm_deep_reasoning_reserve_tokens = 8192
                 llm = create_consultant_llm()
 
                 assert llm is not None
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-5.4"
                 assert call_kwargs["reasoning_effort"] == "medium"
-                assert call_kwargs["max_completion_tokens"] == 10240
+                assert call_kwargs["max_completion_tokens"] == 16384
                 assert llm._configured_max_completion_tokens == 8192
-                assert llm._configured_api_completion_tokens == 10240
-                assert llm._configured_reasoning_reserve_tokens == 2048
+                assert llm._configured_api_completion_tokens == 16384
+                assert llm._configured_reasoning_reserve_tokens == 8192
 
     def test_consultant_quick_gpt5_mini_uses_low_reasoning_effort(self):
         """Quick-mode gpt-5-mini variants should use 'low' (mini rejects 'minimal')."""
@@ -1635,6 +1642,8 @@ class TestConsultantQuickMode:
                 mock_config.consultant_quick_model = "gpt-5.4-mini"
                 mock_config.consultant_model = "gpt-5.4"
                 mock_config.get_openai_api_key.return_value = "test-key"
+                mock_config.llm_default_reasoning_reserve_tokens = 2048
+                mock_config.llm_deep_reasoning_reserve_tokens = 8192
 
                 llm = create_consultant_llm(quick_mode=True)
 
@@ -1716,6 +1725,7 @@ class TestConsultantQuickMode:
             max_completion_tokens=2048,
             model=None,
             settings=mock_config,
+            model_intent=ModelIntent.FAST,
         )
 
     def test_get_consultant_llm_does_not_reuse_wrong_mode_instance(self):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Literal, TypedDict, cast
 
 import structlog
 
@@ -10,10 +10,187 @@ from src.data_block_utils import has_parseable_data_block
 from src.provenance_schema import DecisionTrace, SchemaDecodeError
 from src.runtime_diagnostics.failure_classification import (
     ArtifactErrorKind,
+    FailureDetails,
     classify_failure,
+    operator_failure_reason,
 )
 
 logger = structlog.get_logger(__name__)
+
+
+ScreeningEligibility = Literal["QUALIFIES", "REJECTED", "UNASSESSABLE"]
+AnalysisRunStatus = Literal[
+    "COMPLETED",
+    "INSUFFICIENT_DATA",
+    "FAILED_INFRASTRUCTURE",
+]
+
+
+class AnalysisOutcome(TypedDict):
+    """One code-owned interpretation of screening and run completion.
+
+    ``pre_screening_result`` remains on graph state for compatibility, but its
+    historical ``REJECT`` token conflates an issuer-level screen rejection with
+    a run whose required data contract could not be established.  This compact
+    record is the authority for routing, publication, and persistence.
+    """
+
+    schema_version: int
+    eligibility: ScreeningEligibility
+    run_status: AnalysisRunStatus
+    reason_codes: list[str]
+
+
+_UNASSESSABLE_REASON_PREFIXES = ("DATA_CONTRACT_",)
+_INFRASTRUCTURE_REASON_CODES = frozenset({"VALIDATOR_EXECUTION_FAILED"})
+
+
+def has_unreconciled_auditor_resolution(value: Any) -> bool:
+    """Recognize the canonical fail-closed auditor-resolution stub."""
+
+    return bool(
+        isinstance(value, str)
+        and "AUDITOR_RESOLUTION" in value
+        and "DATA_CHECK: NOT_PROVIDED" in value
+        and "VERDICT: UNVERIFIABLE" in value
+    )
+
+
+def parse_auditor_status(auditor_report: object) -> str | None:
+    """Return the declared auditor STATUS token, or ``None`` if malformed."""
+
+    if not isinstance(auditor_report, str):
+        return None
+    text = auditor_report.strip()
+    if not text or text.upper() == "N/A":
+        return "N/A"
+    import re
+
+    match = re.search(r"(?im)^\s*STATUS\s*[:=]\s*([A-Z_]+)", text)
+    return match.group(1).upper() if match else None
+
+
+def build_analysis_outcome(
+    pre_screening_result: Any,
+    red_flags: Any,
+) -> AnalysisOutcome:
+    """Classify a validator result without converting run failure into a verdict."""
+
+    flags = red_flags if isinstance(red_flags, list | tuple) else []
+    binding_codes: list[str] = []
+    all_codes: list[str] = []
+    for flag in flags:
+        if not isinstance(flag, Mapping):
+            continue
+        code = str(flag.get("type") or "UNKNOWN")
+        all_codes.append(code)
+        if (
+            str(flag.get("action") or "").upper() == "AUTO_REJECT"
+            or str(flag.get("severity") or "").upper() == "CRITICAL"
+        ):
+            binding_codes.append(code)
+
+    reason_codes = list(dict.fromkeys(binding_codes))
+    unassessable = [
+        code
+        for code in all_codes
+        if code in _INFRASTRUCTURE_REASON_CODES
+        or code.startswith(_UNASSESSABLE_REASON_PREFIXES)
+    ]
+    if unassessable:
+        infrastructure_failure = any(
+            code in _INFRASTRUCTURE_REASON_CODES for code in unassessable
+        )
+        return AnalysisOutcome(
+            schema_version=1,
+            eligibility="UNASSESSABLE",
+            run_status=(
+                "FAILED_INFRASTRUCTURE"
+                if infrastructure_failure
+                else "INSUFFICIENT_DATA"
+            ),
+            reason_codes=list(dict.fromkeys(unassessable)),
+        )
+
+    gate = str(pre_screening_result or "").strip().upper()
+    if gate == "REJECT":
+        return AnalysisOutcome(
+            schema_version=1,
+            eligibility="REJECTED",
+            run_status="COMPLETED",
+            reason_codes=reason_codes or ["PRE_SCREENING_REJECTED"],
+        )
+    if gate == "PASS":
+        return AnalysisOutcome(
+            schema_version=1,
+            eligibility="QUALIFIES",
+            run_status="COMPLETED",
+            reason_codes=[],
+        )
+    return AnalysisOutcome(
+        schema_version=1,
+        eligibility="UNASSESSABLE",
+        run_status="INSUFFICIENT_DATA",
+        reason_codes=["PRE_SCREENING_RESULT_MISSING"],
+    )
+
+
+def _decode_analysis_outcome(raw: Any) -> AnalysisOutcome | None:
+    """Decode a persisted outcome without treating it as live graph authority."""
+
+    if isinstance(raw, Mapping):
+        schema_version = raw.get("schema_version")
+        eligibility = raw.get("eligibility")
+        run_status = raw.get("run_status")
+        reason_codes = raw.get("reason_codes")
+        valid_pair = (
+            run_status == "COMPLETED"
+            if eligibility in {"QUALIFIES", "REJECTED"}
+            else run_status in {"INSUFFICIENT_DATA", "FAILED_INFRASTRUCTURE"}
+            if eligibility == "UNASSESSABLE"
+            else False
+        )
+        valid_reasons = (
+            isinstance(reason_codes, list)
+            and all(isinstance(code, str) and code.strip() for code in reason_codes)
+            and (not reason_codes if eligibility == "QUALIFIES" else bool(reason_codes))
+        )
+        if (
+            type(schema_version) is int
+            and schema_version == 1
+            and eligibility in {"QUALIFIES", "REJECTED", "UNASSESSABLE"}
+            and valid_pair
+            and valid_reasons
+        ):
+            return AnalysisOutcome(
+                schema_version=1,
+                eligibility=eligibility,
+                run_status=cast(AnalysisRunStatus, run_status),
+                reason_codes=list(cast(list[str], reason_codes)),
+            )
+    return None
+
+
+def get_analysis_outcome(state: Mapping[str, Any]) -> AnalysisOutcome:
+    """Project the outcome from merged primitives, with a legacy artifact fallback.
+
+    ``pre_screening_result`` and ``red_flags`` have reducers that intentionally merge
+    parallel analyst output. A stored ``analysis_outcome`` does not, so complete
+    primitives always win. The stored form is read only for older artifacts that lack
+    one of those fields.
+    """
+
+    if "pre_screening_result" in state and "red_flags" in state:
+        return build_analysis_outcome(
+            state.get("pre_screening_result"), state.get("red_flags")
+        )
+
+    decoded = _decode_analysis_outcome(state.get("analysis_outcome"))
+    if decoded is not None:
+        return decoded
+    return build_analysis_outcome(
+        state.get("pre_screening_result"), state.get("red_flags")
+    )
 
 
 def _decode_snapshot_status(snapshot: Any) -> str | None:
@@ -182,6 +359,34 @@ def failure_artifact(
     }
 
 
+def unavailable_artifact(
+    field: str,
+    *,
+    details: FailureDetails,
+    fallback_content: str,
+) -> dict[str, Any]:
+    """Build a graceful failure artifact without persisting provider prose.
+
+    Provider exception bodies can include account identifiers, request excerpts,
+    or endpoint details. Gracefully degraded nodes should classify the exception
+    once, render their own schema-valid fallback, and store only this stable
+    operator explanation in artifact metadata.
+    """
+    status = ArtifactStatus(
+        complete=True,
+        ok=False,
+        content=fallback_content or None,
+        error_kind=details.kind,
+        provider=details.provider,
+        message=operator_failure_reason(details),
+        retryable=details.retryable,
+    )
+    return {
+        field: fallback_content,
+        "artifact_statuses": {field: status.as_dict()},
+    }
+
+
 def get_artifact_status(state: Mapping[str, Any], field: str) -> ArtifactStatus:
     statuses = state.get("artifact_statuses", {}) or {}
     raw = statuses.get(field)
@@ -263,6 +468,9 @@ def build_analysis_validity(result: dict[str, Any]) -> dict[str, Any]:
     snapshot_status = _decode_snapshot_status(snapshot)
     decision_trace = result.get("decision_trace")
     decision_trace_status = _decode_trace_status(decision_trace)
+    analysis_outcome = get_analysis_outcome(result)
+    stored_analysis_outcome = _decode_analysis_outcome(result.get("analysis_outcome"))
+    stored_analysis_outcome_present = "analysis_outcome" in result
 
     for field in required_artifacts:
         status = get_artifact_status(result, field)
@@ -284,6 +492,44 @@ def build_analysis_validity(result: dict[str, Any]) -> dict[str, Any]:
             "error_kind": "application_error",
             "provider": "unknown",
             "message": "Pre-screening result missing or invalid",
+            "retryable": False,
+        }
+    if analysis_outcome["eligibility"] == "UNASSESSABLE":
+        required_failures["analysis_outcome"] = {
+            "complete": True,
+            "ok": False,
+            "content": None,
+            "error_kind": "data_contract_error",
+            "provider": "deterministic",
+            "message": (
+                "Analysis is unassessable: "
+                + ", ".join(analysis_outcome["reason_codes"])
+            ),
+            "retryable": analysis_outcome["run_status"] == "FAILED_INFRASTRUCTURE",
+        }
+    if stored_analysis_outcome_present and stored_analysis_outcome is None:
+        required_failures["analysis_outcome_schema"] = {
+            "complete": True,
+            "ok": False,
+            "content": None,
+            "error_kind": "data_contract_error",
+            "provider": "deterministic",
+            "message": "Stored analysis outcome is malformed or semantically invalid",
+            "retryable": False,
+        }
+    elif (
+        stored_analysis_outcome is not None
+        and "pre_screening_result" in result
+        and "red_flags" in result
+        and stored_analysis_outcome != analysis_outcome
+    ):
+        required_failures["analysis_outcome_consistency"] = {
+            "complete": True,
+            "ok": False,
+            "content": None,
+            "error_kind": "application_error",
+            "provider": "deterministic",
+            "message": "Stored analysis outcome conflicts with merged screening state",
             "retryable": False,
         }
     provenance_required = has_provenance_contract(result)
@@ -331,6 +577,7 @@ def build_analysis_validity(result: dict[str, Any]) -> dict[str, Any]:
         "has_valid_pre_screening": has_valid_pre_screening,
         "analysis_snapshot_status": snapshot_status,
         "decision_trace_status": decision_trace_status,
+        "analysis_outcome": analysis_outcome,
         "required_artifacts": sorted(required_artifacts),
         "optional_artifacts": sorted(optional_artifacts),
         "required_failures": required_failures,

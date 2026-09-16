@@ -234,6 +234,7 @@ class FreshnessOverviewView:
     stale_in_queue: int
     due_soon: int
     candidate_blocked: int
+    operator_review: int
     fresh_count: int
     refreshed_count: int
     failed_count: int
@@ -741,6 +742,7 @@ def build_freshness_overview(
         stale_in_queue=len(freshness_summary.stale_in_queue),
         due_soon=len(freshness_summary.due_soon),
         candidate_blocked=len(freshness_summary.candidate_blocked),
+        operator_review=len(freshness_summary.operator_review),
         fresh_count=len(freshness_summary.fresh),
         refreshed_count=len(refresh_activity.refreshed),
         failed_count=len(refresh_activity.failed),

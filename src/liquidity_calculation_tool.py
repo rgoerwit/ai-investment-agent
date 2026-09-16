@@ -11,6 +11,7 @@ from src.fx_normalization import (
     is_near_minor_unit_ratio,
     normalize_minor_unit_currency,
 )
+from src.liquidity_assessment import LiquidityAssessment, LiquidityStatus
 from src.runtime_services import get_current_market_data_fetcher
 from src.thesis_constants import LIQUIDITY_MIN_USD, LIQUIDITY_PASS_USD
 from src.ticker_utils import normalize_ticker
@@ -121,6 +122,10 @@ def _near_100x_mismatch(left: float | None, right: float | None) -> bool:
     return is_near_minor_unit_ratio(ratio)
 
 
+def _with_assessment(text: str, assessment: LiquidityAssessment) -> str:
+    return text.rstrip() + "\n\n" + assessment.render_block() + "\n"
+
+
 @tool
 async def calculate_liquidity_metrics(
     ticker: Annotated[str | None, "Stock ticker symbol"] = None,
@@ -150,11 +155,17 @@ async def calculate_liquidity_metrics(
 
         if hist.empty:
             logger.warning("no_history_found", ticker=ticker)
-            return f"""Liquidity Analysis for {ticker}:
+            return _with_assessment(
+                f"""Liquidity Analysis for {ticker}:
 Status: FAIL - Insufficient Data
 Avg Daily Volume (3mo): N/A
 Avg Daily Turnover (USD): N/A
-"""
+""",
+                LiquidityAssessment(
+                    status="INSUFFICIENT_DATA",
+                    reason="NO_PRICE_HISTORY",
+                ),
+            )
 
         # Calculate metrics
         avg_volume = hist["Volume"].mean()
@@ -194,10 +205,16 @@ Avg Daily Turnover (USD): N/A
                         anchor_price=turnover_price.value,
                         history_scaled=history_scaled,
                     )
-                    return f"""Liquidity Analysis for {ticker}:
+                    return _with_assessment(
+                        f"""Liquidity Analysis for {ticker}:
 Status: ERROR
 Error: liquidity unit mismatch detected (turnover off by ~100x); rerun after unit reconciliation.
-"""
+""",
+                        LiquidityAssessment(
+                            status="ERROR",
+                            reason="UNIT_MISMATCH",
+                        ),
+                    )
 
         # --- HEARTBEAT CHECK (Trap A: Liquidity Distortion) ---
         # Detect irregular trading patterns that create stale/manipulated pricing
@@ -226,10 +243,16 @@ Error: liquidity unit mismatch detected (turnover off by ~100x); rerun after uni
                 ticker=ticker,
                 resolution_source=res.source,
             )
-            return f"""Liquidity Analysis for {ticker}:
+            return _with_assessment(
+                f"""Liquidity Analysis for {ticker}:
 Status: ERROR
 Error: Could not determine trading currency for turnover conversion.
-"""
+""",
+                LiquidityAssessment(
+                    status="ERROR",
+                    reason="CURRENCY_UNRESOLVED",
+                ),
+            )
 
         # Get FX rate dynamically (with fallback to static rates)
         fx_rate, fx_source = await get_fx_rate(currency, "USD", allow_fallback=True)
@@ -263,10 +286,12 @@ Error: Could not determine trading currency for turnover conversion.
 
         # Determine status with priority: heartbeat issues > insufficient liquidity > marginal > pass
         status = "PASS"
+        assessment_status: LiquidityStatus = "PASS"
         reasons = []
 
         if fails_zero_vol or fails_flat_price:
             status = "FAIL (Irregular Trading)"
+            assessment_status = "FAIL_IRREGULAR_TRADING"
             if fails_zero_vol:
                 reasons.append(f"{int(pct_zero)}% zero-volume days")
             if fails_flat_price:
@@ -274,12 +299,14 @@ Error: Could not determine trading currency for turnover conversion.
 
         elif avg_turnover_usd < THRESHOLD_MARGINAL:
             status = "FAIL (Insufficient Liquidity)"
+            assessment_status = "FAIL_INSUFFICIENT_LIQUIDITY"
             reasons.append(
                 f"${int(avg_turnover_usd):,} < ${THRESHOLD_MARGINAL:,} minimum"
             )
 
         elif avg_turnover_usd < THRESHOLD_PASS:
             status = "MARGINAL"
+            assessment_status = "MARGINAL"
             reasons.append(f"Low liquidity (${int(avg_turnover_usd):,})")
 
         # else: status remains "PASS"
@@ -298,21 +325,33 @@ Error: Could not determine trading currency for turnover conversion.
                 "Report this ticker as illiquid on this exchange."
             )
 
-        return f"""Liquidity Analysis for {ticker}:
+        assessment = LiquidityAssessment(
+            status=assessment_status,
+            average_daily_turnover_usd=float(avg_turnover_usd),
+            average_daily_volume=float(avg_volume),
+            zero_volume_days_pct=float(pct_zero),
+            flat_price_days_pct=float(pct_flat),
+            reason="; ".join(reasons) or None,
+        )
+        return _with_assessment(
+            f"""Liquidity Analysis for {ticker}:
 Status: {status_line}
 Avg Daily Volume (3mo): {int(avg_volume):,}
 Avg Daily Turnover (USD): ${int(avg_turnover_usd):,}
 Trading Regularity: {pct_zero:.0f}% zero-volume days, {pct_flat:.0f}% flat-price days (last 3mo)
 Details: {currency} turnover converted at FX rate {fx_rate:.6f} (source: {fx_source}); price_source={turnover_price.source}, unit={turnover_price.reason}
 Thresholds: ${LIQUIDITY_MIN_USD:,} USD minimum (MARGINAL), ${LIQUIDITY_PASS_USD:,} USD recommended (PASS), <15% zero-volume days, <30% flat-price days{agent_note}
-"""
+""",
+            assessment,
+        )
 
     except Exception as e:
         summary = summarize_exception(e, operation="liquidity_calculation")
-        logger.error(
-            "liquidity_calculation_failed", ticker=ticker, exc_info=True, **summary
-        )
-        return f"""Liquidity Analysis for {ticker}:
+        logger.error("liquidity_calculation_failed", ticker=ticker, **summary)
+        return _with_assessment(
+            f"""Liquidity Analysis for {ticker}:
 Status: ERROR
 Error: {summary["error_type"]} (details in operator logs)
-"""
+""",
+            LiquidityAssessment(status="ERROR", reason=summary["error_type"]),
+        )

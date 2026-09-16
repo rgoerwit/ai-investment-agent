@@ -377,3 +377,45 @@ def test_active_tender_routes_to_special_situation_review():
     # sell_type still carries the M&A tag for grouping/conditional-cash logic
     assert item.sell_type == "SPECIAL_SITUATION_EXIT"
     assert get_action_label(item) == "M&A TENDER REVIEW"
+
+
+class TestClosedAndShortPositions:
+    """Closed positions are skipped; shorts are surfaced, never silently dropped."""
+
+    def test_flat_position_produces_no_portfolio_work(self):
+        """A sold holding still in the snapshot must not reach the evaluator.
+
+        Regression (2026-08-19): 7047.T and HERDEZ.MX, both sold and both
+        non-USD, appeared under "Urgent analysis refreshes" and consumed two
+        full-mode analyses. The skip used to require `valuation_valid`, which a
+        closed non-USD position could not satisfy.
+        """
+        for currency in ("JPY", "MXN", "USD"):
+            pos = _make_position(
+                ticker="7203.T",
+                quantity=0,
+                market_value_usd=0,
+                currency=currency,
+            )
+            analysis = _make_analysis(ticker="7203.T", verdict="DO_NOT_INITIATE")
+            analysis.zone = "HIGH"
+
+            items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+
+            assert items == [], f"{currency} closed position produced {items}"
+
+    def test_short_position_is_reviewed_and_never_sold(self):
+        """Falling through would reach the SELL branch, whose abs(quantity)
+        would propose selling *more* of an already-short position."""
+        pos = _make_position(ticker="7203.T", quantity=-100, market_value_usd=-1400)
+        analysis = _make_analysis(ticker="7203.T", verdict="DO_NOT_INITIATE")
+        analysis.zone = "HIGH"
+
+        items = reconcile([pos], {"7203.T": analysis}, _make_portfolio())
+        item = _first_item_for_ticker(items, "7203.T")
+
+        assert item.action == "REVIEW"
+        assert item.action_basis == "DATA_QUALITY"
+        assert item.suggested_quantity is None
+        assert "long-only" in item.reason
+        assert not any(other.action in {"SELL", "TRIM"} for other in items)

@@ -10,6 +10,7 @@ from src.agents.management_guidance import (
     backfill_guidance_contract,
 )
 from src.agents.output_validation import (
+    classify_output_contract_failure,
     extract_completion_tokens,
     get_configured_output_cap,
     log_output_diagnostics,
@@ -411,6 +412,32 @@ GUIDANCE_BRIDGE_STATUS: UNRESOLVED
     assert validation["ok"] is True
 
 
+def test_foreign_language_validation_rejects_protocol_residue_inside_report():
+    content = """
+### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: UNRESOLVED_AFTER_TARGETED_SEARCH
+SEARCHES_COMPLETED: results_package=COMPLETED; earnings_bridge=INSUFFICIENT_DATA
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+EARNINGS_BASELINE_STATUS: UNKNOWN
+GUIDANCE_BRIDGE_STATUS: UNRESOLVED
+### --- END MANAGEMENT_GUIDANCE ---
+to=functions.search_foreign_sources
+"""
+
+    validation = validate_required_output(
+        "foreign_language_analyst", _with_latest_results(content)
+    )
+
+    assert validation["ok"] is False
+    assert validation["missing"] == ["protocol_residue_absent"]
+    assert should_fail_closed(
+        "foreign_language_analyst",
+        validation=validation,
+        truncated=False,
+        content=content,
+    )
+
+
 def test_foreign_language_validation_rejects_false_durable_divergence():
     content = """
 ### --- START MANAGEMENT_GUIDANCE ---
@@ -512,6 +539,30 @@ def test_consultant_validation_does_not_fail_closed_on_short_nontruncated_output
             validation=validation,
             truncated=False,
             content="CONSULTANT REVIEW: APPROVED",
+        )
+        is False
+    )
+
+
+def test_junior_fundamentals_truncation_fails_closed():
+    assert (
+        should_fail_closed(
+            "junior_fundamentals_analyst",
+            validation={"ok": True, "checks": [], "missing": []},
+            truncated=True,
+            content="=== RAW FINANCIAL DATA FOR TEST ===",
+        )
+        is True
+    )
+
+
+def test_junior_fundamentals_complete_output_remains_valid():
+    assert (
+        should_fail_closed(
+            "junior_fundamentals_analyst",
+            validation={"ok": True, "checks": [], "missing": []},
+            truncated=False,
+            content="=== RAW FINANCIAL DATA FOR TEST ===\n=== END RAW DATA ===",
         )
         is False
     )
@@ -834,3 +885,57 @@ def test_log_output_diagnostics_reads_openai_object_metadata_on_final_response()
     assert payload["visible_output_tokens"] == 318
     assert payload["intent_utilization_ratio"] == 0.0388
     assert payload["api_utilization_ratio"] == 0.0814
+
+
+def test_classify_output_contract_failure_detects_exact_api_cap_exhaustion():
+    runnable = SimpleNamespace(
+        _configured_max_completion_tokens=10923,
+        _configured_api_completion_tokens=12971,
+    )
+    response = SimpleNamespace(
+        usage_metadata={"output_tokens": 12971},
+        response_metadata={},
+    )
+
+    assert (
+        classify_output_contract_failure(
+            runnable=runnable,
+            response=response,
+            truncated=True,
+            validation={"ok": False, "missing": ["guidance_coverage"]},
+        )
+        == "output_cap_exhausted"
+    )
+
+
+def test_classify_output_contract_failure_keeps_below_cap_omission_distinct():
+    runnable = SimpleNamespace(
+        _configured_max_completion_tokens=10923,
+        _configured_api_completion_tokens=12971,
+    )
+    response = SimpleNamespace(
+        usage_metadata={"output_tokens": 2048},
+        response_metadata={},
+    )
+
+    assert (
+        classify_output_contract_failure(
+            runnable=runnable,
+            response=response,
+            truncated=False,
+            validation={"ok": False, "missing": ["guidance_coverage"]},
+        )
+        == "output_contract_violation"
+    )
+
+
+def test_classify_output_contract_failure_without_usage_reports_incomplete_structure():
+    assert (
+        classify_output_contract_failure(
+            runnable=SimpleNamespace(),
+            response=SimpleNamespace(usage_metadata=None, response_metadata={}),
+            truncated=True,
+            validation={"ok": False, "missing": ["data_block"]},
+        )
+        == "incomplete_structured_output"
+    )

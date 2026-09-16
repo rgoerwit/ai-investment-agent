@@ -7,7 +7,6 @@ from langchain_core.language_models import BaseChatModel
 from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.profiles import ReasoningApiMode
 from src.llm_runtime.rate_limits import limiter_for_binding
-from src.llm_runtime.seats import SeatSpec
 
 # Long-form default for a seat that expresses no preference. Anthropic counts
 # thinking tokens against max_tokens, so this must stay generous enough for an
@@ -61,7 +60,3 @@ class AnthropicAdapter:
             request.binding.endpoint_host,
         )
         return model
-
-    def prepare_messages(self, messages: list[Any], *, seat: SeatSpec) -> list[Any]:
-        del seat
-        return list(messages)

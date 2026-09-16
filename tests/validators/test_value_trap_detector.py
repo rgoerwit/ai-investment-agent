@@ -624,22 +624,17 @@ VERDICT: TRAP
 class TestGraphIntegration:
     """Test Value Trap Detector integration with graph."""
 
-    @patch("src.graph.routing._is_auditor_enabled")
-    def test_fan_out_includes_value_trap_detector(self, mock_auditor):
+    def test_fan_out_includes_value_trap_detector(self):
         """Test fan_out_to_analysts includes Value Trap Detector."""
         from src.graph import fan_out_to_analysts
 
-        mock_auditor.return_value = False
-        destinations = fan_out_to_analysts({}, {})
+        destinations = fan_out_to_analysts({}, {}, include_auditor=False)
 
         assert "Value Trap Detector" in destinations
 
-    @patch("src.graph.routing._is_auditor_enabled")
-    def test_sync_check_waits_for_value_trap(self, mock_auditor):
+    def test_sync_check_waits_for_value_trap(self):
         """Test sync_check_router waits for value_trap_report."""
         from src.graph import sync_check_router
-
-        mock_auditor.return_value = False
 
         # Missing value_trap_report
         state = {
@@ -650,15 +645,12 @@ class TestGraphIntegration:
             # value_trap_report missing
         }
 
-        result = sync_check_router(state, {})
+        result = sync_check_router(state, {}, auditor_required=False)
         assert result == "__end__"  # Should wait
 
-    @patch("src.graph.routing._is_auditor_enabled")
-    def test_sync_check_proceeds_with_value_trap(self, mock_auditor):
+    def test_sync_check_proceeds_with_value_trap(self):
         """Test sync_check_router proceeds when value_trap_report present."""
         from src.graph import sync_check_router
-
-        mock_auditor.return_value = False
 
         state = {
             "market_report": "done",
@@ -666,9 +658,11 @@ class TestGraphIntegration:
             "news_report": "done",
             "value_trap_report": "done",
             "pre_screening_result": "PASS",
+            "red_flags": [],
+            "financial_validation_complete": True,
         }
 
-        result = sync_check_router(state, {})
+        result = sync_check_router(state, {}, auditor_required=False)
         assert isinstance(result, list)
         assert "Bull Researcher R1" in result
 

@@ -13,6 +13,7 @@ price against a live broker price and none of them checked.
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -258,7 +259,7 @@ class TestConsumersAreNeutralisedByTheLoader:
         )
         return AnalysisRecord(
             ticker="GAMA.L",
-            analysis_date="2026-08-15",
+            analysis_date=date.today().isoformat(),
             verdict="HOLD",
             current_price=GAMA_PRICE,
             currency="GBP",

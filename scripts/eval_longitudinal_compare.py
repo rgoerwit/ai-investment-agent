@@ -109,6 +109,13 @@ class RunRow:
     growth_gap_count: int = 0
     source_conflict_count: int = 0
     red_flag_types: list[str] = field(default_factory=list)
+    decision_material_flag_types: list[str] = field(default_factory=list)
+    runtime_diagnostics: str | None = None
+    cost_usd: float | None = None
+    external_decision_facts: int | None = None
+    evidence_acquisition_failures: int | None = None
+    execution_errors: int | None = None
+    structural_recovery_count: int | None = None
 
     @property
     def dt(self) -> datetime | None:
@@ -170,10 +177,18 @@ def extract_row(path: Path) -> RunRow:
 
     red_flags = d.get("red_flags")
     flag_types: list[str] = []
+    decision_material_flag_types: list[str] = []
     if isinstance(red_flags, list):
         for f in red_flags:
             if isinstance(f, dict) and f.get("type"):
-                flag_types.append(f["type"])
+                flag_type = str(f["type"])
+                flag_types.append(flag_type)
+                if (
+                    f.get("blocks_buy") is True
+                    or str(f.get("action") or "").upper() == "AUTO_REJECT"
+                    or str(f.get("severity") or "").upper() == "CRITICAL"
+                ):
+                    decision_material_flag_types.append(flag_type)
             elif isinstance(f, str):
                 flag_types.append(f[:40])
 
@@ -212,6 +227,58 @@ def extract_row(path: Path) -> RunRow:
     if not isinstance(required_failures, list):
         required_failures = [str(required_failures)]
 
+    diagnostic_parts: list[str] = []
+    evidence_acquisition_failures: int | None = None
+    execution_errors: int | None = None
+    structural_recovery_count: int | None = None
+    tool_outcomes = run_summary.get("tool_outcomes") or {}
+    research = (
+        tool_outcomes.get("research_ledgers", {})
+        if isinstance(tool_outcomes, dict)
+        else {}
+    )
+    if isinstance(research, dict) and research:
+        blocks = research.get("blocks") or {}
+        block_events = blocks.get("events", 0) if isinstance(blocks, dict) else 0
+        acquisition = research.get("evidence_acquisition_failure") or {}
+        acquisition_events = (
+            acquisition.get("events", 0) if isinstance(acquisition, dict) else 0
+        )
+        execution = research.get("execution_error") or {}
+        execution_events = (
+            execution.get("events", 0) if isinstance(execution, dict) else 0
+        )
+        evidence_acquisition_failures = int(acquisition_events)
+        execution_errors = int(execution_events)
+        diagnostic_parts.append(
+            f"tools block={block_events}/acq={acquisition_events}/error={execution_events}"
+        )
+    elif run_summary.get("tool_failures") is not None:
+        diagnostic_parts.append(f"legacy tool_failures={run_summary['tool_failures']}")
+    promotion = run_summary.get("evidence_promotion") or {}
+    external_decision_facts: int | None = None
+    if isinstance(promotion, dict) and promotion:
+        raw_external_facts = promotion.get("external_decision_facts", 0)
+        if isinstance(raw_external_facts, int | float) and not isinstance(
+            raw_external_facts, bool
+        ):
+            external_decision_facts = int(raw_external_facts)
+        diagnostic_parts.append("external facts=" + str(external_decision_facts or 0))
+    recovery = run_summary.get("structural_recovery") or {}
+    if isinstance(recovery, dict) and recovery:
+        events = recovery.get("events") or []
+        structural_recovery_count = len(events) if isinstance(events, list) else 0
+        diagnostic_parts.append(f"recovery={structural_recovery_count}")
+
+    token_usage = d.get("token_usage") or {}
+    raw_cost = (
+        token_usage.get("total_cost_usd") if isinstance(token_usage, dict) else None
+    )
+    try:
+        cost_usd = float(raw_cost) if raw_cost is not None else None
+    except (TypeError, ValueError):
+        cost_usd = None
+
     # Mode belongs in the timeline: a quick run is a *screener*, so shallower
     # artifacts and a qualified verdict are the designed behavior, not a
     # regression. Without the column a quick row read as a code-quality drop.
@@ -242,6 +309,13 @@ def extract_row(path: Path) -> RunRow:
         growth_gap_count=growth_gap_count,
         source_conflict_count=source_conflict_count,
         red_flag_types=sorted(set(flag_types)),
+        decision_material_flag_types=sorted(set(decision_material_flag_types)),
+        runtime_diagnostics="; ".join(diagnostic_parts) or None,
+        cost_usd=cost_usd,
+        external_decision_facts=external_decision_facts,
+        evidence_acquisition_failures=evidence_acquisition_failures,
+        execution_errors=execution_errors,
+        structural_recovery_count=structural_recovery_count,
     )
 
 
@@ -294,15 +368,16 @@ def render_timeline_markdown(ticker: str, rows: list[RunRow]) -> str:
 
     lines = [f"### {ticker}", ""]
     lines.append(
-        "| Timestamp | Mode | Artifact | Outcome | Verdict | Health | Growth | Risk | Data quality | Contract | Consultant | Auditor | Flags |"
+        "| Timestamp | Mode | Artifact | Outcome | Verdict | Health | Growth | Risk | Cost | Data quality | Runtime diagnostics | Regression alerts | Contract | Consultant | Auditor | Flags |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 
     # None until the first retained row is emitted: that row is a *baseline*,
     # not a change. Seeding with an empty set marked every one of its flags
     # [NEW], which reads as a regression that never happened — the comparison
     # window simply starts there.
-    prev_flags: set[str] | None = None
+    previous_by_mode: dict[bool | None, RunRow] = {}
+    previous_flags_by_mode: dict[bool | None, set[str]] = {}
     for i, r in enumerate(rows):
         date_disp = r.dt.strftime("%Y-%m-%d %H:%M:%S") if r.dt else r.timestamp
         if i == len(rows) - 1:
@@ -317,14 +392,15 @@ def render_timeline_markdown(ticker: str, rows: list[RunRow]) -> str:
                 return f"{v:g}{suffix}"
             return f"{v}{suffix}"
 
+        prior_flags = previous_flags_by_mode.get(r.is_quick)
         new_flags = (
-            set(r.red_flag_types) - prev_flags if prev_flags is not None else set()
+            set(r.red_flag_types) - prior_flags if prior_flags is not None else set()
         )
         flag_cells = []
         for ft in r.red_flag_types:
             flag_cells.append(f"**{ft}[NEW]**" if ft in new_flags else ft)
         flags_disp = ", ".join(flag_cells) or "—"
-        prev_flags = set(r.red_flag_types)
+        previous_flags_by_mode[r.is_quick] = set(r.red_flag_types)
 
         if r.publishable is True:
             outcome = "PUBLISHABLE"
@@ -345,15 +421,84 @@ def render_timeline_markdown(ticker: str, rows: list[RunRow]) -> str:
         quality_disp = "; ".join(quality_parts) or "—"
 
         mode_disp = "—" if r.is_quick is None else ("quick" if r.is_quick else "full")
+        previous = previous_by_mode.get(r.is_quick)
+        regression_alerts = _regression_alerts(previous, r) if previous else []
+        regression_disp = "; ".join(regression_alerts) or "—"
+        previous_by_mode[r.is_quick] = r
+        cost_disp = "—" if r.cost_usd is None else f"${r.cost_usd:.4f}"
 
         lines.append(
             f"| {date_disp} | {mode_disp} | {artifact_disp} | {outcome} | {fmt(r.verdict)} | "
             f"{fmt(r.health_adj, '%')} | {fmt(r.growth_adj, '%')} | "
-            f"{fmt(r.risk_total)} | {quality_disp} | {fmt(r.contract_status)} | "
+            f"{fmt(r.risk_total)} | {cost_disp} | {quality_disp} | "
+            f"{fmt(r.runtime_diagnostics)} | {regression_disp} | "
+            f"{fmt(r.contract_status)} | "
             f"{fmt(r.consultant_verdict)} | {fmt(r.auditor_status)} | {flags_disp} |"
         )
     lines.append("")
     return "\n".join(lines)
+
+
+def _regression_alerts(previous: RunRow, current: RunRow) -> list[str]:
+    """Flag same-mode structural regressions without judging verdict changes."""
+    alerts: list[str] = []
+    if previous.publishable is True and current.publishable is False:
+        alerts.append("publishability lost")
+    if previous.contract_status == "VALID" and current.contract_status != "VALID":
+        alerts.append(f"contract VALID→{current.contract_status or 'missing'}")
+    newly_required = sorted(
+        set(current.required_failures) - set(previous.required_failures)
+    )
+    if newly_required:
+        alerts.append("new required failures: " + ", ".join(newly_required))
+    disappeared_flags = sorted(
+        set(previous.decision_material_flag_types)
+        - set(current.decision_material_flag_types)
+    )
+    if disappeared_flags:
+        alerts.append(
+            "decision-material flags disappeared: " + ", ".join(disappeared_flags)
+        )
+    for label, before, after in (
+        ("health score", previous.health_adj, current.health_adj),
+        ("growth score", previous.growth_adj, current.growth_adj),
+    ):
+        if before is not None and after is None:
+            alerts.append(f"{label} became unavailable")
+    if (
+        current.is_quick is False
+        and previous.external_decision_facts is not None
+        and current.external_decision_facts is not None
+        and current.external_decision_facts < previous.external_decision_facts
+    ):
+        alerts.append(
+            "external decision facts "
+            f"{previous.external_decision_facts}→{current.external_decision_facts}"
+        )
+    for label, before, after in (
+        (
+            "evidence acquisition failures",
+            previous.evidence_acquisition_failures,
+            current.evidence_acquisition_failures,
+        ),
+        ("execution errors", previous.execution_errors, current.execution_errors),
+        (
+            "structural recoveries",
+            previous.structural_recovery_count,
+            current.structural_recovery_count,
+        ),
+    ):
+        if before is not None and after is not None and after > before:
+            alerts.append(f"{label} {before}→{after}")
+    if (
+        previous.cost_usd is not None
+        and current.cost_usd is not None
+        and previous.cost_usd > 0
+        and current.cost_usd - previous.cost_usd >= 0.02
+        and current.cost_usd > previous.cost_usd * 1.25
+    ):
+        alerts.append(f"cost +{(current.cost_usd / previous.cost_usd - 1) * 100:.0f}%")
+    return alerts
 
 
 # --------------------------------------------------------------------------

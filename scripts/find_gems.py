@@ -16,23 +16,27 @@ Both original scripts remain untouched for backward compatibility.
 """
 
 import argparse
+import hashlib
 import io
 import json
 import logging
 import math
 import queue
 import random
+import re
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pandas as pd
 import requests
 import yfinance as yf
 
+from src.error_safety import summarize_exception
 from src.fx_normalization import normalize_minor_unit_amount
 from src.thesis_constants import LIQUIDITY_MIN_USD, PE_MAX
 from src.ticker_utils import to_yfinance
@@ -91,6 +95,8 @@ _FX_CURRENCIES = [
     "THB",
     "INR",
     "KRW",
+    "RON",
+    "BRL",
 ]
 
 SCRAPE_COLUMNS = [
@@ -113,6 +119,7 @@ PAD_CLEAN_RULE_WIDTHS = {
 ENRICHED_COLUMNS = [
     "YF_Ticker",
     "Company_YF",
+    "Issuer_Country",
     "P/E",
     "Forward_PE",
     "Debt_to_Equity",
@@ -310,8 +317,13 @@ def _check_deps():
     import importlib.util
 
     missing = []
-    for pkg in ("openpyxl", "xlrd", "lxml"):
-        if importlib.util.find_spec(pkg) is None:
+    for pkg, module in (
+        ("openpyxl", "openpyxl"),
+        ("xlrd", "xlrd"),
+        ("lxml", "lxml"),
+        ("beautifulsoup4", "bs4"),
+    ):
+        if importlib.util.find_spec(module) is None:
             missing.append(pkg)
     if missing:
         print(f"WARNING: Missing optional deps: {', '.join(missing)}", file=sys.stderr)
@@ -336,8 +348,9 @@ def _standardize_dataframe(df, config):
 
     ticker_col = params.get("ticker_col")
     actual_ticker = _find_col_fuzzy(df, ticker_col)
-    if actual_ticker:
-        rename_dict[actual_ticker] = "Ticker_Raw"
+    if actual_ticker is None:
+        raise ValueError("Source missing configured ticker column")
+    rename_dict[actual_ticker] = "Ticker_Raw"
 
     name_col = params.get("name_col")
     actual_name = _find_col_fuzzy(df, name_col)
@@ -350,7 +363,9 @@ def _standardize_dataframe(df, config):
         if actual_source:
             rename_dict[actual_source] = std_col
 
-    df = df.rename(columns=rename_dict)
+    # Excel sources such as XETRA can arrive as highly fragmented frames.  A copy
+    # consolidates their internal blocks before the standardized columns are added.
+    df = df.rename(columns=rename_dict).copy()
     df["Country"] = config["country"]
     df["Exchange"] = config["exchange_name"]
 
@@ -396,8 +411,7 @@ def _generate_yf_ticker(row, config):
 
 
 def _handle_download_json(config, session):
-    response = session.get(config["source_url"])
-    response.raise_for_status()
+    response = _fetch_source(session, config["source_url"])
     data = response.json()
     params = config.get("params", {})
     root = params.get("root_key")
@@ -412,8 +426,7 @@ def _handle_download_json(config, session):
 
 
 def _handle_download_csv(config, session):
-    response = session.get(config["source_url"])
-    response.raise_for_status()
+    response = _fetch_source(session, config["source_url"], expect_csv=True)
     params = config["params"]
     skip = params.get("skip_rows", 0)
     sep = params.get("delimiter", ",")
@@ -435,38 +448,67 @@ def _handle_download_csv(config, session):
 
 
 def _handle_download_excel(config, session):
-    response = session.get(config["source_url"])
-    response.raise_for_status()
+    response = _fetch_source(session, config["source_url"])
     params = config["params"]
     sheet = params.get("sheet_name", 0)
     skip = params.get("skip_rows", 0)
     return pd.read_excel(io.BytesIO(response.content), sheet_name=sheet, skiprows=skip)
 
 
+def _fetch_source(session, url, *, expect_csv=False):
+    """Share one retry across transport, server and CSV HTML-response failures."""
+    for attempt in range(2):
+        try:
+            response = session.get(url)
+            response.raise_for_status()
+            if expect_csv and re.search(
+                rb"<(?:!doctype\s+html|html)\b", response.content[:1024], re.I
+            ):
+                response.close()
+                if attempt:
+                    raise ValueError(
+                        "CSV source returned HTML instead of a symbol directory"
+                    )
+                time.sleep(0.5)
+                continue
+            return response
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if attempt or status not in {500, 502, 503, 504}:
+                raise
+            response.close()
+            time.sleep(0.5)
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        ):
+            if attempt:
+                raise
+            time.sleep(0.5)
+
+
 def _handle_scrape_html(config, session):
     params = config["params"]
     base_url = config["source_url"]
     max_pages = params.get("paginate_max_pages", 1)
-    page_param = params.get("page_param", "p")
+    page_param = params.get("page_param", "page")
     idx = params.get("table_index", 0)
     target_col = params.get("ticker_col")
     source_encoding = params.get("source_encoding")
 
     all_frames = []
     first_page_len = None
+    seen_keys: set[str] = set()
 
     for page_num in range(1, max_pages + 1):
         url = base_url if page_num == 1 else f"{base_url}?{page_param}={page_num}"
-        try:
-            response = session.get(url)
-            response.raise_for_status()
-        except Exception:
-            if page_num == 1:
-                raise
-            break  # Stop on HTTP error for pages 2+
+        response = _fetch_source(session, url)
 
         if source_encoding:
             response.encoding = source_encoding
+        elif "charset=" not in response.headers.get("Content-Type", "").lower():
+            response.encoding = response.apparent_encoding
 
         if "<table" not in response.text.lower():
             if page_num == 1:
@@ -486,12 +528,19 @@ def _handle_scrape_html(config, session):
                     df = candidate
                     break
 
-        if df is None or df.empty:
-            if page_num == 1:
-                raise ValueError(f"Table containing '{target_col}' not found")
+        if df is None:
+            raise ValueError(f"Table containing '{target_col}' not found")
+        if df.empty:
             break
 
-        all_frames.append(df)
+        ticker_col = _find_col_fuzzy(df, target_col)
+        keys = df[ticker_col].astype("string").str.strip()
+        valid = keys.notna() & keys.ne("")
+        new_rows = valid & ~keys.isin(seen_keys) & ~keys.duplicated()
+        if not new_rows.any():
+            break
+        seen_keys.update(keys[valid])
+        all_frames.append(df.loc[new_rows])
 
         if first_page_len is None:
             first_page_len = len(df)
@@ -511,11 +560,67 @@ def _handle_scrape_html(config, session):
     )
 
 
+def _handle_bvb_shares(config, session):
+    """Read the official regulated equity table; reject an ambiguous segment."""
+    from bs4 import BeautifulSoup
+
+    response = _fetch_source(session, config["source_url"])
+    soup = BeautifulSoup(response.content, "html.parser")
+    selected = soup.select_one("#ms1")
+    if (
+        selected is None
+        or not selected.has_attr("disabled")
+        or selected.get("value") != "Piata Reglementata"
+    ):
+        raise ValueError("BVB regulated-market selection not confirmed")
+    table = soup.select_one("table#gv")
+    expected = [
+        "Simbol / ISIN",
+        "Societate",
+        "Pret (RON)",
+        "Var. (%)",
+        "Data",
+        "Categoria",
+    ]
+    if (
+        table is None
+        or [h.get_text(" ", strip=True) for h in table.select("th")] != expected
+    ):
+        raise ValueError("BVB shares table schema changed")
+    rows = []
+    for row in table.select("tr"):
+        cells = row.find_all("td", recursive=False)
+        if not cells:
+            continue
+        if len(cells) != len(expected):
+            raise ValueError("Malformed BVB share row")
+        link = cells[0].find("a", href=True)
+        symbol = link.get_text(strip=True) if link else ""
+        href = str(link["href"]) if link else ""
+        if (
+            not re.fullmatch(r"[A-Z0-9]+", symbol)
+            or parse_qs(urlsplit(href).query).get("s") != [symbol]
+            or not cells[1].get_text(strip=True)
+        ):
+            raise ValueError("Malformed BVB symbol identity")
+        rows.append(
+            {
+                "Symbol": symbol,
+                "Company": cells[1].get_text(" ", strip=True),
+                "Currency": "RON",
+            }
+        )
+    if not rows:
+        raise ValueError("Empty BVB regulated equity table")
+    return pd.DataFrame(rows)
+
+
 _HANDLERS = {
     "download_csv": _handle_download_csv,
     "download_excel": _handle_download_excel,
     "scrape_html": _handle_scrape_html,
     "download_json": _handle_download_json,
+    "bvb_shares": _handle_bvb_shares,
 }
 
 
@@ -529,6 +634,8 @@ def _apply_filters(df, config):
     if filter_rules:
         for col, value in filter_rules.items():
             actual_col = _find_col_fuzzy(df, col)
+            if actual_col is None:
+                raise ValueError("Source missing configured filter column")
             if actual_col:
                 df = df[df[actual_col].astype(str).str.strip() == str(value)]
 
@@ -537,6 +644,8 @@ def _apply_filters(df, config):
     if exclude_rules:
         for col, values in exclude_rules.items():
             actual_col = _find_col_fuzzy(df, col)
+            if actual_col is None:
+                raise ValueError("Source missing configured exclusion column")
             if actual_col:
                 if isinstance(values, list):
                     df = df[~df[actual_col].astype(str).str.strip().isin(values)]
@@ -563,6 +672,7 @@ def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
     session = _get_session()
     all_dfs = []
     degraded_exchanges: list[tuple[str, int, int]] = []
+    failed_exchanges: list[str] = []
 
     print(f"Loaded {config['meta']['description']}", file=sys.stderr)
 
@@ -583,29 +693,34 @@ def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
         handler = _HANDLERS.get(ex["method"])
         if not handler:
             print(f"Unknown method: {ex['method']}", file=sys.stderr)
+            failed_exchanges.append(ex["exchange_name"])
             continue
 
         try:
             df = handler(ex, session)
 
             if df is None or df.empty:
-                print("Empty DataFrame", file=sys.stderr)
-                continue
+                raise ValueError("Empty source")
 
             raw_cols = list(df.columns)
 
             df = _apply_filters(df, ex)
 
             if df.empty:
-                print("Empty after filtering", file=sys.stderr)
-                continue
+                raise ValueError("Empty after filtering")
 
             df = _standardize_dataframe(df, ex)
             df["YF_Ticker"] = df.apply(
                 lambda r, _ex=ex: _generate_yf_ticker(r, _ex), axis=1
             )
 
-            final_df = df[SCRAPE_COLUMNS].dropna(subset=["YF_Ticker"])
+            final_df = (
+                df[SCRAPE_COLUMNS]
+                .dropna(subset=["YF_Ticker"])
+                .drop_duplicates(subset=["YF_Ticker"])
+            )
+            if final_df.empty:
+                raise ValueError("No valid tickers")
             all_dfs.append(final_df)
 
             min_expected = int(ex.get("min_expected_rows") or 0)
@@ -628,7 +743,18 @@ def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
             time.sleep(1.0)
 
         except Exception as e:
-            print(f"FAILED: {e}", file=sys.stderr)
+            failed_exchanges.append(ex["exchange_name"])
+            print(
+                f"FAILED: {summarize_exception(e, operation='exchange_scrape')}",
+                file=sys.stderr,
+            )
+
+    if failed_exchanges:
+        raise RuntimeError(
+            "Required exchange source(s) failed: "
+            + ", ".join(failed_exchanges)
+            + ". No screening output published; repair or disable the source."
+        )
 
     if not all_dfs:
         print("No data extracted from any exchange.", file=sys.stderr)
@@ -754,6 +880,7 @@ def _process_row(row, *, fx_rates=None, min_mcap=None, min_volume=None, debug=Fa
 
             # --- Populate standard fields ---
             row["Company_YF"] = info.get("longName") or info.get("shortName")
+            row["Issuer_Country"] = info.get("country")
             pe = info.get("trailingPE")
             if pe is None:
                 pe = _compute_market_cap_income_pe(info)
@@ -901,6 +1028,28 @@ def _handle_enriched_row_result(
     all_enriched.append(data)
     if _passes_filters(data, criteria=criteria, debug=debug):
         passing.append(data)
+
+
+def _exclude_us_issuer_rows(
+    passing: list[dict], *, include_us: bool
+) -> tuple[list[dict], int, int]:
+    """Apply issuer-domicile policy after enrichment without extra data calls."""
+    kept: list[dict] = []
+    removed = 0
+    unknown = 0
+
+    for row in passing:
+        raw_country = row.get("Issuer_Country")
+        country = str(raw_country).strip().casefold() if raw_country is not None else ""
+        if not country:
+            unknown += 1
+        if not include_us and country in {"united states", "united states of america"}:
+            row["_reject_reason"] = "us_issuer"
+            removed += 1
+            continue
+        kept.append(row)
+
+    return kept, removed, unknown
 
 
 def _log_filter_progress(
@@ -1368,6 +1517,7 @@ def fetch_and_filter(
     min_volume: float = DEFAULT_MIN_VOLUME,
     max_coverage: int = DEFAULT_MAX_COVERAGE,
     ocf_waiver: bool = True,
+    include_us: bool = False,
     workers: int = 4,
     debug: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -1407,6 +1557,23 @@ def fetch_and_filter(
         workers=workers,
         debug=debug,
     )
+
+    passing, us_issuers_removed, issuer_country_unknown = _exclude_us_issuer_rows(
+        passing,
+        include_us=include_us,
+    )
+    if include_us:
+        print(
+            "Issuer domicile filter disabled (--include-us); "
+            f"{issuer_country_unknown} passing rows have unknown domicile",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"Issuer domicile filter: removed {us_issuers_removed} US-domiciled "
+            f"rows; retained {issuer_country_unknown} with unknown domicile",
+            file=sys.stderr,
+        )
 
     passing_df = (
         pd.DataFrame(passing) if passing else pd.DataFrame(columns=ENRICHED_COLUMNS)
@@ -1461,6 +1628,54 @@ def _log_per_exchange_pass_rates(enriched_df, passing_df) -> None:
 # ============================================================
 
 
+def _select_issuer_listings(
+    filtered_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, int, int]:
+    """Select one liquid listing per exact, non-empty issuer name."""
+    if filtered_df.empty or "Company_YF" not in filtered_df.columns:
+        return filtered_df.copy(), 0, 0
+
+    grouped_positions: dict[str, list[int]] = {}
+    ungrouped_positions: list[int] = []
+    for position, raw_name in enumerate(filtered_df["Company_YF"]):
+        if raw_name is None or pd.isna(raw_name):
+            ungrouped_positions.append(position)
+            continue
+        issuer_name = str(raw_name).strip()
+        if not issuer_name:
+            ungrouped_positions.append(position)
+            continue
+        grouped_positions.setdefault(issuer_name, []).append(position)
+
+    def listing_rank(position: int) -> tuple[float, str]:
+        row = filtered_df.iloc[position]
+        turnover = _safe_float(row.get("Daily_Turnover_USD"))
+        if turnover is None or not math.isfinite(turnover):
+            turnover = float("-inf")
+        return -turnover, str(row.get("YF_Ticker") or "")
+
+    selected_positions = list(ungrouped_positions)
+    duplicate_groups = 0
+    discarded = 0
+    for positions in grouped_positions.values():
+        if len(positions) > 1:
+            duplicate_groups += 1
+            discarded += len(positions) - 1
+        selected_positions.append(min(positions, key=listing_rank))
+
+    selected_positions.sort()
+    return (
+        filtered_df.iloc[selected_positions].copy(),
+        duplicate_groups,
+        discarded,
+    )
+
+
+def _candidate_order_key(ticker: str) -> bytes:
+    """Stable pseudo-random order that survives candidate-set membership changes."""
+    return hashlib.sha256(f"stage1-v1:{ticker}".encode()).digest()
+
+
 def write_outputs(
     filtered_df: pd.DataFrame, output_path: str, details_path: str | None = None
 ):
@@ -1468,10 +1683,18 @@ def write_outputs(
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    tickers = filtered_df["YF_Ticker"].dropna().unique()
+    selected_df, duplicate_groups, discarded = _select_issuer_listings(filtered_df)
+    if discarded:
+        print(
+            f"Collapsed {discarded} secondary listings across "
+            f"{duplicate_groups} exact issuer groups",
+            file=sys.stderr,
+        )
+
+    tickers = selected_df["YF_Ticker"].dropna().unique()
 
     with open(out, "w") as f:
-        for t in sorted(tickers):
+        for t in sorted(tickers, key=_candidate_order_key):
             f.write(f"{t}\n")
 
     print(f"Wrote {len(tickers)} tickers to {out}", file=sys.stderr)
@@ -1479,9 +1702,9 @@ def write_outputs(
     if details_path:
         det = Path(details_path)
         det.parent.mkdir(parents=True, exist_ok=True)
-        available_cols = [c for c in ENRICHED_COLUMNS if c in filtered_df.columns]
-        extra_cols = [c for c in filtered_df.columns if c not in available_cols]
-        filtered_df[available_cols + extra_cols].to_csv(det, index=False)
+        available_cols = [c for c in ENRICHED_COLUMNS if c in selected_df.columns]
+        extra_cols = [c for c in selected_df.columns if c not in available_cols]
+        selected_df[available_cols + extra_cols].to_csv(det, index=False)
         print(f"Wrote enriched details to {det}", file=sys.stderr)
 
 
@@ -1544,7 +1767,10 @@ when profitability, leverage, cash-flow quality, and coverage are stronger.
     parser.add_argument(
         "--include-us",
         action="store_true",
-        help="Include US exchanges (excluded by default)",
+        help=(
+            "Include US exchanges and, in filter modes, US-domiciled issuers "
+            "(excluded by default)"
+        ),
     )
     parser.add_argument(
         "--max-pe",
@@ -1647,6 +1873,7 @@ def main():
             min_volume=args.min_volume,
             max_coverage=args.max_coverage,
             ocf_waiver=not args.no_ocf_waiver,
+            include_us=args.include_us,
             workers=args.workers,
             debug=args.debug,
         )
@@ -1679,6 +1906,7 @@ def main():
         min_volume=args.min_volume,
         max_coverage=args.max_coverage,
         ocf_waiver=not args.no_ocf_waiver,
+        include_us=args.include_us,
         workers=args.workers,
         debug=args.debug,
     )

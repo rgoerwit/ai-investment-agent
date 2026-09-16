@@ -25,6 +25,7 @@ from typing import Any
 
 import structlog
 
+from src.claim_policy import CURRENT_GROWTH_CLAIM_FIELDS
 from src.provenance_schema import Scorecard
 
 logger = structlog.get_logger(__name__)
@@ -73,6 +74,28 @@ def _scores_close(a: float | None, b: float | None) -> bool:
     if a is None or b is None:
         return a is b
     return abs(a - b) <= 0.1
+
+
+def _missing_current_growth_fields(
+    snapshot: Mapping[str, Any] | None,
+    *,
+    authoritative: bool,
+) -> frozenset[str]:
+    """Return current growth fields absent from a VALID canonical snapshot."""
+    if not authoritative:
+        return frozenset()
+    available: set[str] = set()
+    raw_claims = (snapshot or {}).get("claims") or {}
+    if isinstance(raw_claims, Mapping):
+        for claim in raw_claims.values():
+            if (
+                isinstance(claim, Mapping)
+                and claim.get("field") in CURRENT_GROWTH_CLAIM_FIELDS
+                and claim.get("decision_eligible") is True
+                and claim.get("coverage") == "FOUND"
+            ):
+                available.add(str(claim["field"]))
+    return frozenset(CURRENT_GROWTH_CLAIM_FIELDS - available)
 
 
 def _log_score_override(
@@ -127,6 +150,11 @@ class DecisionInputs:
     growth_decision_pct: float | None
     health_score_reliable: bool
     growth_score_reliable: bool
+    # Current-growth coverage is distinct from the score denominator: the
+    # latter also removes unrelated rubric criteria and cannot establish a
+    # data-vacuum exception.
+    missing_current_growth_fields: frozenset[str]
+    growth_coverage_authoritative: bool
     # True when a VALID canonical snapshot owns the scores (whether it supplied
     # a number or an authoritative None). In that state the DATA_BLOCK value is
     # never used — a snapshot None means "canonically unusable", not "fall back".
@@ -169,6 +197,10 @@ class DecisionInputs:
         # already spoken. Only a legacy / no-snapshot run uses the parsed value.
         snapshot_status = _contract_status(snapshot)
         snapshot_authoritative = snapshot_status == "VALID"
+        missing_growth_fields = _missing_current_growth_fields(
+            snapshot,
+            authoritative=snapshot_authoritative,
+        )
 
         # The reconciled dict the engine reads: the parsed metrics with the
         # snapshot-authoritative scores written in. Under a VALID snapshot this
@@ -232,6 +264,16 @@ class DecisionInputs:
             growth_score_reliable=(
                 decision_metrics.get("growth_score_consistency") != "SUSPECT"
             ),
+            missing_current_growth_fields=missing_growth_fields,
+            growth_coverage_authoritative=snapshot_authoritative,
             snapshot_authoritative=snapshot_authoritative,
             snapshot_status=snapshot_status,
+        )
+
+    @property
+    def growth_data_vacuum(self) -> bool:
+        """Whether all four current TTM/MRQ growth observations are absent."""
+        return (
+            self.growth_coverage_authoritative
+            and self.missing_current_growth_fields == CURRENT_GROWTH_CLAIM_FIELDS
         )

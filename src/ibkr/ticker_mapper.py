@@ -10,6 +10,9 @@ Wraps the existing TickerFormatter from src/ticker_utils.py with:
 from __future__ import annotations
 
 import json
+import math
+import os
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +27,7 @@ from src.ibkr.order_builder import parse_price
 from src.ibkr.ticker import (  # noqa: F401 — _CURRENCY_TO_SUFFIX re-exported for compat
     _CURRENCY_TO_SUFFIX,
     _pad_numeric_symbol_for_suffix,
+    classify_ibkr_symbol,
 )
 from src.ticker_utils import TickerFormatter
 
@@ -39,6 +43,8 @@ TickerResolutionSource = Literal[
     "operator_override",
     "currency_fallback",
     "yfinance_search",
+    "conid_cache",
+    "non_analyzable",
     "unresolved",
 ]
 
@@ -83,16 +89,30 @@ def _load_cache() -> dict:
 
 
 def _save_cache(cache: dict) -> None:
-    """Save conid cache to disk."""
+    """Save conid cache atomically so interruption cannot truncate the map."""
     CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temp_name: str | None = None
     try:
-        with open(CACHE_FILE, "w") as f:
-            json.dump(cache, f, indent=2)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{CACHE_FILE.name}.", suffix=".tmp", dir=str(CACHE_FILE.parent)
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(cache, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, CACHE_FILE)
+        temp_name = None
     except OSError as e:
         logger.warning(
             "conid_cache_save_failed",
             **summarize_exception(e, operation="conid_cache_save_failed"),
         )
+    finally:
+        if temp_name is not None:
+            try:
+                Path(temp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 # Venues that should be excluded from yfinance.Search fallback results
@@ -131,6 +151,14 @@ def resolve_ibkr_ticker(
     are useful for research lookup, but remain inferred because same-symbol,
     same-currency listings can exist on multiple venues.
     """
+    classification = classify_ibkr_symbol(symbol)
+    if classification.remedy != "use":
+        return TickerResolution(
+            yf_ticker="",
+            source="non_analyzable",
+            exchange_verified=False,
+        )
+    symbol = classification.symbol
     exchange_code = exchange.upper() if exchange else ""
     currency_code = currency.upper() if currency else ""
     suffix = IBKR_TO_YFINANCE.get(exchange_code)
@@ -385,9 +413,11 @@ def resolve_conid(yf_ticker: str, client: Any | None = None) -> int | None:
 
         # Find matching exchange
         conid = None
+        exact_exchange = False
         for candidate in candidates:
             if candidate.get("exchange") == exchange:
                 conid = candidate.get("conid")
+                exact_exchange = True
                 break
 
         # Fallback: first candidate
@@ -397,14 +427,16 @@ def resolve_conid(yf_ticker: str, client: Any | None = None) -> int | None:
         if conid is None:
             raise IBKRTickerResolutionError(yf_ticker)
 
-        # Cache it (write-through: update memory cache and flush to disk)
-        cache[cache_key] = {
-            "conid": conid,
-            "symbol": symbol,
-            "exchange": exchange,
-            "ts": time.time(),
-        }
-        _flush_cache()
+        # Inferred first-candidate matches are useful for future research lookup
+        # but never gain order authority merely by being cached.
+        cache_conid_mapping(
+            yf_ticker,
+            int(conid),
+            symbol,
+            exchange,
+            source="symbol_lookup",
+            confidence="verified" if exact_exchange else "inferred",
+        )
 
         logger.debug("conid_resolved", ticker=yf_ticker, conid=conid, exchange=exchange)
         return conid if isinstance(conid, int) else None
@@ -420,6 +452,11 @@ def resolve_conid(yf_ticker: str, client: Any | None = None) -> int | None:
         raise IBKRTickerResolutionError(yf_ticker, str(e)) from e
 
 
+def _cache_confidence_rank(confidence: object) -> int:
+    """Order cached observations consistently for lookup and replacement."""
+    return {"verified": 2, "inferred": 0}.get(str(confidence).strip().lower(), 1)
+
+
 def yf_ticker_from_conid(conid: int) -> str | None:
     """Reverse-lookup: find yf_ticker for a known conid from the local cache.
 
@@ -429,24 +466,75 @@ def yf_ticker_from_conid(conid: int) -> str | None:
     Returns yf_ticker string, or None if not found.
     """
     cache = _get_cache()
+    matches: list[tuple[int, float, str]] = []
     for key, entry in cache.items():
         if (
             not key.startswith("ibkr:")
             and isinstance(entry, dict)
             and entry.get("conid") == conid
         ):
-            return key if isinstance(key, str) else None
-    return None
+            if not isinstance(key, str) or not key:
+                continue
+            # The cache key is the value returned to research callers, so it
+            # must independently pass the broker-token admission boundary.
+            if classify_ibkr_symbol(key.split(".", 1)[0]).remedy != "use":
+                continue
+            cached_symbol = entry.get("symbol")
+            if (
+                isinstance(cached_symbol, str)
+                and classify_ibkr_symbol(cached_symbol).remedy != "use"
+            ):
+                continue
+            try:
+                timestamp = float(entry.get("ts", 0) or 0)
+            except (TypeError, ValueError):
+                timestamp = 0.0
+            if not math.isfinite(timestamp):
+                timestamp = 0.0
+            confidence_rank = _cache_confidence_rank(entry.get("confidence"))
+            matches.append((confidence_rank, timestamp, key))
+    if not matches:
+        return None
+    # Legacy files can contain more than one ticker for a conid. Until the
+    # on-disk schema is migrated, choose deterministically and prefer the most
+    # authoritative observation first, then recency, instead of JSON order.
+    # Legacy entries (no confidence) remain readable between verified and
+    # explicitly inferred mappings.
+    return max(matches)[2]
 
 
-def cache_conid_mapping(yf_ticker: str, conid: int, symbol: str, exchange: str) -> None:
+def cache_conid_mapping(
+    yf_ticker: str,
+    conid: int,
+    symbol: str,
+    exchange: str,
+    *,
+    source: str = "live",
+    confidence: str = "verified",
+) -> None:
     """Store a conid↔yf_ticker mapping so future lookups skip the API call.
 
     When storing a suffixed ticker (e.g. "WDO.TO"), any existing bare-symbol
-    entry for the same conid (e.g. "WDO") is removed.  Bare entries can arise
-    when the IBKR API returns exchange="SMART" and the currency is ambiguous;
-    the suffixed entry is always more accurate and must take precedence.
+    entry for the same conid (e.g. "WDO") is removed only when the new
+    observation has at least as much authority. A verified bare US identity
+    must survive a weaker suffix inference; lookup then selects the stronger
+    observation rather than treating every suffix as an improvement.
     """
+    classification = classify_ibkr_symbol(symbol)
+    if (
+        conid <= 0
+        or not yf_ticker.strip()
+        or classification.remedy != "use"
+        or classify_ibkr_symbol(yf_ticker.split(".", 1)[0]).remedy != "use"
+    ):
+        logger.warning(
+            "conid_cache_write_rejected",
+            conid=conid,
+            instrument_kind=classification.kind,
+            source=source,
+        )
+        return
+
     cache = _get_cache()
     # Evict stale bare-symbol entries for this conid when we have a better result
     if "." in yf_ticker:
@@ -457,6 +545,8 @@ def cache_conid_mapping(yf_ticker: str, conid: int, symbol: str, exchange: str) 
             and isinstance(v, dict)
             and v.get("conid") == conid
             and "." not in k
+            and _cache_confidence_rank(v.get("confidence"))
+            <= _cache_confidence_rank(confidence)
         ]
         for k in stale:
             del cache[k]
@@ -464,6 +554,8 @@ def cache_conid_mapping(yf_ticker: str, conid: int, symbol: str, exchange: str) 
         "conid": conid,
         "symbol": symbol,
         "exchange": exchange,
+        "source": source,
+        "confidence": confidence,
         "ts": time.time(),
     }
     _flush_cache()

@@ -17,18 +17,23 @@ Conservative by construction: only floors DO_NOT_INITIATE -> HOLD (never upgrade
 gates on the *deterministic* code subtotal (not the LLM's hand-summed total), requires no
 auto-reject/critical flag, and requires positive multi-year revenue so a genuinely
 shrinking name (e.g. KTY.WA: P/E > 18 and 3Y CAGR < 0) is never floored.
+
+Every public rewriter in this module is a projection onto a canonical form: applying
+it repeatedly must leave the text unchanged after the first application.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 import structlog
 
 from src.agents.pm_verdict_metadata import pm_verdict_metadata_from_text
 from src.charts.extractors.valuation import is_weak_buy_asymmetry
+from src.data_block_utils import fenced_block_pattern
 from src.decision_inputs import DecisionInputs
-from src.pm_decision_parser import parse_final_decision_scores
+from src.pm_decision_parser import canonicalize_pm_verdict, parse_final_decision_scores
 from src.thesis_constants import GROWTH_MIN_PCT, HEALTH_MIN_PCT
 
 logger = structlog.get_logger(__name__)
@@ -42,11 +47,11 @@ GROWTH_FAIL_MAX = 50.0
 # REJECT canonicalizes to DO_NOT_INITIATE (src.pm_decision_parser), so the gate accepts
 # a "VERDICT: REJECT" block; the rewrite must therefore match it too, or the floor
 # silently no-ops on a REJECT-worded healthy name.
-_FLOORED_FROM = r"(?:DO[ _]NOT[ _]INITIATE|REJECT)"
+_VERDICT_TOKEN = r"(?:BUY|HOLD|SELL|DO[ _]NOT[ _]INITIATE|REJECT)"
 _PM_HEADER_RE = re.compile(
-    rf"(?im)^(#+\s*PORTFOLIO MANAGER VERDICT:\s*){_FLOORED_FROM}\b.*$"
+    rf"(?im)^(#+\s*PORTFOLIO MANAGER VERDICT:\s*){_VERDICT_TOKEN}\b.*$"
 )
-_PM_BLOCK_VERDICT_RE = re.compile(rf"(?im)^(\s*VERDICT:\s*){_FLOORED_FROM}\b.*$")
+_PM_BLOCK_VERDICT_RE = re.compile(rf"(?im)^(\s*VERDICT:\s*){_VERDICT_TOKEN}\b.*$")
 # PM-owned narrative/execution decision lines. Deliberately case-sensitive:
 # Trader TRADE_BLOCK uses all-caps ACTION:, and report errors use
 # **Action Required**:. Do not loosen this to Action[^:]* or add re.IGNORECASE.
@@ -56,12 +61,9 @@ _PM_DECISION_SURFACE_RE = re.compile(
 )
 # Verdict-coupled chart-control fields that must not stay in their negative-verdict
 # state after the floor (extract_pm_block reads them before falling back to verdict).
-_SHOW_CHART_NO_RE = re.compile(r"(?im)^(\s*SHOW_VALUATION_CHART:\s*)NO\b.*$")
-_DISCOUNT_ZERO_RE = re.compile(r"(?im)^(\s*VALUATION_DISCOUNT:\s*)0(?:\.0+)?\b.*$")
-
-
-_PM_HEADER_BUY_RE = re.compile(r"(?im)^(#+\s*PORTFOLIO MANAGER VERDICT:\s*)BUY\b.*$")
-_PM_BLOCK_VERDICT_BUY_RE = re.compile(r"(?im)^(\s*VERDICT:\s*)BUY\b.*$")
+_SHOW_CHART_RE = re.compile(r"(?im)^(\s*SHOW_VALUATION_CHART:\s*)\S+.*$")
+_DISCOUNT_RE = re.compile(r"(?im)^(\s*VALUATION_DISCOUNT:\s*)\S+.*$")
+_POSITION_SIZE_PROSE_RE = re.compile(r"(?im)^(\**Recommended Position Size\**:\s*).*$")
 
 
 def _rewrite_pm_decision_surfaces(content_str: str, canonical_display: str) -> str:
@@ -70,6 +72,129 @@ def _rewrite_pm_decision_surfaces(content_str: str, canonical_display: str) -> s
         lambda match: f"{match.group('label')}: {canonical_display}",
         content_str,
     )
+
+
+def normalize_pm_block_contract(pm_output: str) -> str:
+    """Clamp position-size surfaces for a final no-initiation verdict."""
+
+    blocks = list(fenced_block_pattern("PM_BLOCK").finditer(pm_output))
+    if not blocks:
+        return pm_output
+    last = blocks[-1]
+    body = last.group(1)
+    verdict_match = re.search(r"(?im)^VERDICT:\s*([^\n]+)", body)
+    if not verdict_match:
+        return pm_output
+    verdict = canonicalize_pm_verdict(verdict_match.group(1))
+    if verdict not in {"HOLD", "DO_NOT_INITIATE", "SELL"}:
+        return pm_output
+
+    token_rewritten = False
+    size_match = re.search(r"(?im)^(POSITION_SIZE:\s*)([\d.]+)", body)
+    if size_match:
+        try:
+            emitted_size = float(size_match.group(2))
+        except ValueError:
+            emitted_size = 0.0
+        if emitted_size != 0.0:
+            rewritten_body = re.sub(
+                r"(?im)^(POSITION_SIZE:\s*)[\d.]+",
+                r"\g<1>0.0",
+                body,
+                count=1,
+            )
+            pm_output = (
+                pm_output[: last.start(1)] + rewritten_body + pm_output[last.end(1) :]
+            )
+            token_rewritten = True
+
+    canonical_prose_value = "0.0% (monitor only — no initiation)"
+    prose_lines_rewritten = sum(
+        1
+        for match in _POSITION_SIZE_PROSE_RE.finditer(pm_output)
+        if match.group(0) != f"{match.group(1)}{canonical_prose_value}"
+    )
+    pm_output = _POSITION_SIZE_PROSE_RE.sub(
+        lambda match: f"{match.group(1)}{canonical_prose_value}", pm_output
+    )
+    if token_rewritten or prose_lines_rewritten:
+        logger.warning(
+            "pm_block_position_size_rewritten",
+            verdict=verdict,
+            token_rewritten=token_rewritten,
+            prose_lines_rewritten=prose_lines_rewritten,
+        )
+    return pm_output
+
+
+def _apply_verdict_rewrite(
+    content_str: str,
+    *,
+    required_verdict: str,
+    allowed_from: frozenset[str],
+    note: str,
+    ticker: str,
+) -> tuple[str, bool, int, int]:
+    """Rewrite all code-owned PM verdict surfaces through one guarded seam."""
+
+    current = pm_verdict_metadata_from_text(content_str).verdict
+    if current not in allowed_from:
+        return content_str, False, 0, 0
+    target = canonicalize_pm_verdict(required_verdict)
+    display = "DO NOT INITIATE" if target == "DO_NOT_INITIATE" else target
+    if target not in {"BUY", "HOLD", "SELL", "DO_NOT_INITIATE"}:
+        raise ValueError(f"Unsupported canonical PM verdict: {required_verdict}")
+
+    rewritten, n_header = _PM_HEADER_RE.subn(rf"\g<1>{display}", content_str)
+    rewritten, n_block = _PM_BLOCK_VERDICT_RE.subn(rf"\g<1>{target}", rewritten)
+    if n_block == 0:
+        logger.warning(
+            "verdict_rewrite_skipped_no_pm_block_verdict",
+            ticker=ticker,
+            current_verdict=current,
+            required_verdict=target,
+        )
+        return content_str, False, n_header, 0
+
+    rewritten = _rewrite_pm_decision_surfaces(rewritten, display)
+    if target == "HOLD" and current == "DO_NOT_INITIATE":
+        rewritten = _SHOW_CHART_RE.sub(r"\g<1>YES", rewritten)
+        rewritten = _DISCOUNT_RE.sub(r"\g<1>0.8", rewritten)
+    elif target in {"DO_NOT_INITIATE", "SELL"}:
+        rewritten = _SHOW_CHART_RE.sub(r"\g<1>NO", rewritten)
+        rewritten = _DISCOUNT_RE.sub(r"\g<1>0.0", rewritten)
+    rewritten = normalize_pm_block_contract(rewritten)
+    if note not in rewritten:
+        rewritten = rewritten.rstrip() + "\n\n" + note.rstrip() + "\n"
+    return rewritten, True, n_header, n_block
+
+
+def apply_required_verdict(
+    content_str: str,
+    *,
+    required_verdict: str,
+    rule: str,
+    reason: str,
+    ticker: str = "UNKNOWN",
+) -> tuple[str, bool]:
+    """Apply a deterministic policy downgrade; never create an upgrade path."""
+
+    if canonicalize_pm_verdict(required_verdict) != "DO_NOT_INITIATE":
+        raise ValueError("Deterministic policy correction may only require DNI")
+    note = (
+        "> **DETERMINISTIC VERDICT POLICY APPLIED — PRIOR RATIONALE SUPERSEDED**\n"
+        f"> Rule {rule} requires DO NOT INITIATE because {reason}. The canonical "
+        "header, PM_BLOCK, execution, chart, and sizing fields above control the "
+        "decision; any earlier HOLD/BUY phrasing is non-operative context."
+    )
+    rewritten, changed, _, _ = _apply_verdict_rewrite(
+        content_str,
+        required_verdict="DO_NOT_INITIATE",
+        allowed_from=frozenset({"BUY", "HOLD"}),
+        note=note,
+        ticker=ticker,
+    )
+    return rewritten, changed
 
 
 def maybe_demote_buy_on_blocking_flags(
@@ -104,21 +229,22 @@ def maybe_demote_buy_on_blocking_flags(
     if not blocking:
         return content_str, False
 
-    demoted, n_header = _PM_HEADER_BUY_RE.subn(r"\1HOLD", content_str)
-    demoted, n_block = _PM_BLOCK_VERDICT_BUY_RE.subn(r"\1HOLD", demoted)
-    if n_block == 0:
-        logger.warning("buy_demotion_skipped_no_pm_block_verdict", ticker=ticker)
-        return content_str, False
-    demoted = _rewrite_pm_decision_surfaces(demoted, "HOLD")
-
     note = (
-        "\n\n> **DETERMINISTIC VERDICT DEMOTION APPLIED — BUY → HOLD**\n"
+        "> **DETERMINISTIC VERDICT DEMOTION APPLIED — BUY → HOLD**\n"
         f"> BUY-blocking flag(s) present: {', '.join(blocking)}. These mark the "
         "supporting evidence as indeterminate or unverified, so it may not back "
         "initiating a position. Resolve the flagged issue and re-run to restore "
-        "BUY eligibility.\n"
+        "BUY eligibility."
     )
-    demoted = demoted.rstrip() + note
+    demoted, changed, n_header, n_block = _apply_verdict_rewrite(
+        content_str,
+        required_verdict="HOLD",
+        allowed_from=frozenset({"BUY"}),
+        note=note,
+        ticker=ticker,
+    )
+    if not changed:
+        return content_str, False
 
     logger.info(
         "buy_demoted_on_blocking_flags",
@@ -305,6 +431,150 @@ def _has_hard_flag(red_flags: list[dict]) -> bool:
     )
 
 
+def _auto_reject_flag_types(red_flags: list[dict]) -> tuple[str, ...]:
+    """Return the canonical deterministic findings that require rejection."""
+    return tuple(
+        sorted(
+            {
+                str(flag.get("type") or "UNKNOWN")
+                for flag in red_flags
+                if str(flag.get("action") or "").upper() == "AUTO_REJECT"
+            }
+        )
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class GrowthGateAssessment:
+    """One authoritative interpretation of the PM growth hard-fail contract."""
+
+    hard_fail: bool
+    exception: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VerdictPolicyViolation:
+    """A parsed PM verdict that contradicts deterministic decision policy."""
+
+    rule: str
+    reason: str
+    required_verdict: str
+
+
+def render_growth_gate_context(decision_inputs: DecisionInputs) -> str:
+    """Render the code-owned growth decision for the PM without restating policy."""
+    assessment = assess_growth_gate(decision_inputs)
+    status = (
+        f"EXCEPTION_{assessment.exception.upper()}"
+        if assessment.exception
+        else "HARD_FAIL"
+        if assessment.hard_fail
+        else "PASS"
+    )
+    missing = ",".join(sorted(decision_inputs.missing_current_growth_fields)) or "NONE"
+    return (
+        "CODE-OWNED GROWTH GATE (binding; do not infer a different exception):\n"
+        f"- STATUS: {status}\n"
+        f"- REASON: {assessment.reason or 'NONE'}\n"
+        f"- MISSING_CURRENT_GROWTH_FIELDS: {missing}"
+    )
+
+
+def assess_growth_gate(decision_inputs: DecisionInputs) -> GrowthGateAssessment:
+    """Evaluate the growth hard fail and its two documented exceptions.
+
+    This predicate is shared by verdict validation and the deterministic
+    DO_NOT_INITIATE→HOLD floor. Missing evidence never satisfies an exception.
+    """
+
+    if not decision_inputs.growth_score_reliable:
+        return GrowthGateAssessment(
+            hard_fail=False,
+            reason="growth_score_unreliable",
+        )
+
+    metrics = decision_inputs.decision_metrics
+    growth = decision_inputs.growth_decision_pct
+    if growth is None or growth >= GROWTH_FAIL_MAX:
+        return GrowthGateAssessment(hard_fail=False)
+
+    health = decision_inputs.health_decision_pct
+    pe = metrics.get("pe_ratio")
+    cagr = metrics.get("revenue_cagr_3y")
+    if health is None or health < HEALTH_FLOOR_MIN:
+        return GrowthGateAssessment(
+            hard_fail=True,
+            reason="adjusted_health_below_exception_floor",
+        )
+    if cagr is None or cagr < 0:
+        return GrowthGateAssessment(
+            hard_fail=True,
+            reason="nonnegative_multi_year_revenue_not_established",
+        )
+    if pe is None:
+        return GrowthGateAssessment(
+            hard_fail=True,
+            reason="pe_ratio_required_for_growth_exception",
+        )
+    if pe <= 13.0:
+        return GrowthGateAssessment(
+            hard_fail=False,
+            exception="marginal_turnaround",
+        )
+
+    if pe <= PE_FLOOR_MAX and decision_inputs.growth_data_vacuum:
+        return GrowthGateAssessment(
+            hard_fail=False,
+            exception="data_vacuum",
+        )
+
+    return GrowthGateAssessment(
+        hard_fail=True,
+        reason=(
+            "data_vacuum_growth_inputs_not_established"
+            if pe <= PE_FLOOR_MAX
+            else "pe_ratio_above_growth_exception_ceiling"
+        ),
+    )
+
+
+def assess_verdict_policy(
+    content_str: str,
+    *,
+    decision_inputs: DecisionInputs,
+    red_flags: list[dict] | None = None,
+) -> VerdictPolicyViolation | None:
+    """Return a deterministic policy violation for an impermissive verdict.
+
+    The first covered rule is the growth hard fail that caused provider-dependent
+    HOLD/DNI behavior. This is intentionally housed beside the existing verdict
+    normalizers so parsing, correction, and post-processing have one authority.
+    """
+
+    verdict = pm_verdict_metadata_from_text(content_str).verdict
+    if verdict not in {"BUY", "HOLD"}:
+        return None
+    auto_reject_flags = _auto_reject_flag_types(red_flags or [])
+    if auto_reject_flags:
+        return VerdictPolicyViolation(
+            rule="pre_screening_auto_reject",
+            reason="auto_reject_flags=" + ",".join(auto_reject_flags),
+            required_verdict="DO_NOT_INITIATE",
+        )
+    if decision_inputs.decision_metrics.get("m_and_a_status") == "ACTIVE_TENDER":
+        return None
+
+    growth_gate = assess_growth_gate(decision_inputs)
+    if not growth_gate.hard_fail:
+        return None
+    return VerdictPolicyViolation(
+        rule="growth_transition_hard_fail",
+        reason=growth_gate.reason or "growth_exception_not_established",
+        required_verdict="DO_NOT_INITIATE",
+    )
+
+
 def maybe_floor_verdict_to_hold(
     content_str: str,
     *,
@@ -345,51 +615,36 @@ def maybe_floor_verdict_to_hold(
         )
         return content_str, False
 
+    growth_gate = assess_growth_gate(decision_inputs)
+    if growth_gate.hard_fail or growth_gate.exception is None:
+        return content_str, False
+
     metrics = decision_inputs.decision_metrics
     health = decision_inputs.health_decision_pct
     growth = decision_inputs.growth_decision_pct
     pe = metrics.get("pe_ratio")
     cagr = metrics.get("revenue_cagr_3y")
-
-    if health is None or health < HEALTH_FLOOR_MIN:
+    if health is None or growth is None or pe is None or cagr is None:
         return content_str, False
-    if pe is None or pe > PE_FLOOR_MAX:
-        return content_str, False
-    # The exception only applies when the growth score actually failed AND multi-year
-    # revenue is intact (positive 3Y CAGR) — i.e. the low score reflects missing data /
-    # a turnaround, not genuine shrinkage. A negative/absent CAGR is never floored.
-    # Conservative: if the growth score can't be parsed we cannot confirm the failure is
-    # data-driven, so do NOT floor (absent data must not create a mitigation).
-    if growth is None or growth >= GROWTH_FAIL_MAX:
-        return content_str, False
-    if cagr is None or cagr < 0:
-        return content_str, False
-
-    floored, n_header = _PM_HEADER_RE.subn(r"\1HOLD", content_str)
-    floored, n_block = _PM_BLOCK_VERDICT_RE.subn(r"\1HOLD", floored)
-    if n_block == 0:
-        # Could not rewrite the source-of-truth verdict line — do not half-apply.
-        logger.warning("verdict_floor_skipped_no_pm_block_verdict", ticker=ticker)
-        return content_str, False
-
-    # Normalize verdict-coupled PM_BLOCK fields so charts/reports don't keep behaving
-    # like a negative verdict (extract_pm_block reads these fields *before* the verdict).
-    # A DO_NOT_INITIATE block typically carries SHOW_VALUATION_CHART: NO and
-    # VALUATION_DISCOUNT: 0.0, which would still suppress targets under the floored HOLD.
-    floored = _SHOW_CHART_NO_RE.sub(r"\1YES", floored)
-    floored = _DISCOUNT_ZERO_RE.sub(r"\g<1>0.8", floored)
-    floored = _rewrite_pm_decision_surfaces(floored, "HOLD")
 
     note = (
-        "\n\n> **DETERMINISTIC VERDICT FLOOR APPLIED — DO NOT INITIATE → HOLD**\n"
+        "> **DETERMINISTIC VERDICT FLOOR APPLIED — DO NOT INITIATE → HOLD**\n"
         f"> The growth-score failure qualifies for the Data-Vacuum / Marginal-Turnaround "
         f"exception (Adjusted Health {health:.0f}% ≥ 65, P/E {pe:.2f} ≤ 18, "
         f"3Y revenue CAGR {cagr:.1f}% ≥ 0), and the deterministic code-computed risk "
         f"subtotal ({code_subtotal:+.2f}) is below the Zone-1 threshold ({ZONE_1_THRESHOLD}) "
         f"with no auto-reject flag. A soft-point tally may not convert a healthy, "
-        f"data-limited name into an avoid/exit.\n"
+        f"data-limited name into an avoid/exit."
     )
-    floored = floored.rstrip() + note
+    floored, changed, n_header, n_block = _apply_verdict_rewrite(
+        content_str,
+        required_verdict="HOLD",
+        allowed_from=frozenset({"DO_NOT_INITIATE"}),
+        note=note,
+        ticker=ticker,
+    )
+    if not changed:
+        return content_str, False
 
     logger.info(
         "verdict_floored_to_hold",
@@ -399,6 +654,7 @@ def maybe_floor_verdict_to_hold(
         pe_ratio=pe,
         revenue_cagr_3y=cagr,
         growth_score=growth,
+        growth_exception=growth_gate.exception,
         header_rewrites=n_header,
         block_rewrites=n_block,
     )

@@ -30,7 +30,7 @@ def test_unproven_buyback_cannot_receive_governance_credit() -> None:
 def test_proven_buyback_does_not_add_negative_buyback_constraint() -> None:
     constraint = downstream_evidence_constraints(_state("PROVEN"))
     assert "Shareholder-return execution" not in constraint
-    assert "10% of 30-day average daily turnover" in constraint
+    assert "Use the code-owned liquidity assessment" in constraint
 
 
 def test_unknown_execution_is_conservative_and_correction_survives_summary() -> None:
@@ -50,11 +50,16 @@ def test_value_trap_conflict_quarantines_raw_score_for_downstream_agents() -> No
     assert "Do not use that raw score/verdict as a hard fail" in constraint
 
 
-def test_liquidity_is_order_relative_and_unknown_notional_cannot_hard_fail() -> None:
+def test_liquidity_constraint_preserves_code_owned_status_semantics() -> None:
     constraint = downstream_evidence_constraints(_state("PROVEN"))
 
-    assert "Assess trading liquidity relative to the proposed order" in constraint
-    assert "If order notional is unknown, do not infer a hard fail" in constraint
+    assert (
+        "without reinterpreting its thresholds relative to a proposed order"
+        in constraint
+    )
+    assert "below the canonical minimum is a hard fail" in constraint
+    assert "MARGINAL passes with constrained sizing" in constraint
+    assert "INSUFFICIENT_DATA or ERROR is uncertainty" in constraint
 
 
 def test_minority_largest_holder_and_no_majority_are_not_a_conflict() -> None:

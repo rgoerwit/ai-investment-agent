@@ -117,6 +117,45 @@ class TestCompleteOutput:
         result = detect_truncation(text, agent="fundamentals_analyst")
         assert result["truncated"] is False
 
+    def test_canonical_data_block_without_end_marker_is_truncated_despite_raw_scores(
+        self,
+    ):
+        text = (
+            "### --- START DATA_BLOCK ---\n"
+            "RAW_HEALTH_SCORE: 9.5/12\n"
+            "ADJUSTED_HEALTH_SCORE: 79%\n"
+            "RAW_GROWTH_SCORE: 3/6\n"
+            "ADJUSTED_GROWTH_SCORE: 50%\n"
+            "DE_RATIO:"
+        )
+
+        result = detect_truncation(text, agent="fundamentals_analyst")
+
+        assert result["truncated"] is True
+        assert result["marker"] == "incomplete DATA_BLOCK block"
+
+    def test_legacy_data_block_requires_both_exact_score_fields(self):
+        text = "DATA_BLOCK:\nRAW_HEALTH_SCORE: 9.5/12\nGROWTH_SCORE: 60"
+
+        result = detect_truncation(text, agent="fundamentals_analyst")
+
+        assert result["truncated"] is True
+
+    def test_unfenced_forensic_block_rejects_prefixed_required_field(self):
+        text = "FORENSIC_DATA_BLOCK:\nRAW_STATUS: CLEAN\nVERDICT: RELY_ON_DATA_BLOCK"
+
+        result = detect_truncation(text, agent="global_forensic_auditor")
+
+        assert result["truncated"] is True
+
+    @pytest.mark.parametrize("zone_field", ["ZONE: LOW", "RISK_ZONE: LOW"])
+    def test_legacy_pm_block_accepts_either_exact_zone_alias(self, zone_field):
+        text = f"PM_BLOCK:\nVERDICT: BUY\n{zone_field}"
+
+        result = detect_truncation(text, agent="portfolio_manager")
+
+        assert result["truncated"] is False
+
     def test_complete_fenced_value_trap_block_not_flagged(self):
         """Fenced VALUE_TRAP_BLOCK should not be flagged as truncated."""
         text = (

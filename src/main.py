@@ -19,15 +19,21 @@ from typing import Any, cast
 
 import structlog
 from rich.console import Console
+from rich.markup import escape
 
 import src.cli as cli
 
 # Import config FIRST to set telemetry/system env vars before any library imports
 import src.output as output
 import src.persistence as persistence
+from src.agents.debate_handoffs import seed_handoff_telemetry
 from src.async_utils import run_with_hard_timeout
 from src.config import Settings, config, validate_environment_variables
-from src.error_safety import format_error_message, summarize_exception
+from src.error_safety import (
+    format_error_message,
+    redact_sensitive_text,
+    summarize_exception,
+)
 from src.eval import (
     CURRENT_CAPTURE_SCHEMA_VERSION,
     BaselineCaptureConfig,
@@ -90,6 +96,55 @@ def _safe_cli_error_message(operation: str, exc: BaseException) -> str:
         error_type=summary["error_type"],
         message_preview=summary["message_preview"],
     )
+
+
+_CONFIGURATION_ERROR_DETAIL_CHARS = 512
+_CONFIGURATION_ERROR_GUIDANCE = (
+    "Review the listed configuration issues and update the referenced settings "
+    "before retrying."
+)
+
+
+def _safe_configuration_error_message(operation: str, exc: BaseException) -> str:
+    """Render actionable configuration failures without exposing raw exceptions."""
+
+    from src.llm_runtime.bindings import BindingConfigurationError
+
+    if isinstance(exc, BindingConfigurationError):
+        details = [
+            redact_sensitive_text(error, max_chars=_CONFIGURATION_ERROR_DETAIL_CHARS)
+            for error in exc.errors
+        ]
+        visible_details = [detail for detail in details if detail]
+        message = f"Error in {operation}: BindingConfigurationError"
+        if visible_details:
+            message += "\n" + "\n".join(f"- {detail}" for detail in visible_details)
+        return message
+
+    summary = summarize_exception(
+        exc,
+        operation=operation,
+        provider="unknown",
+        preview_chars=_CONFIGURATION_ERROR_DETAIL_CHARS,
+    )
+    return format_error_message(
+        operation=operation,
+        error_type=summary["error_type"],
+        message_preview=summary["message_preview"],
+    )
+
+
+def _print_configuration_error(
+    args: argparse.Namespace, operation: str, exc: BaseException
+) -> None:
+    """Show configuration diagnostics consistently in every output mode."""
+
+    message = _safe_configuration_error_message(operation, exc)
+    if args.quiet or args.brief:
+        print(f"# Configuration Error\n\n{message}\n\n{_CONFIGURATION_ERROR_GUIDANCE}")
+        return
+    console.print(f"\n[bold red]Configuration Error:[/bold red] {escape(message)}\n")
+    console.print(f"{_CONFIGURATION_ERROR_GUIDANCE}\n")
 
 
 def suppress_all_logging():
@@ -249,6 +304,7 @@ def _build_analysis_trace_metadata(
         "quick_mode": quick_mode,
         "deep_model": runtime_config.deep_think_llm,
         "quick_model": runtime_config.quick_think_llm,
+        "debate_reasoning_handoffs": runtime_config.debate_reasoning_handoffs,
         "prompt_source": (
             "langfuse" if config.langfuse_prompt_fetch_enabled else "local"
         ),
@@ -485,6 +541,15 @@ async def _is_total_data_vacuum(ticker: str) -> bool:
     has_currency = bool(metrics.get("currency"))
     has_identity = bool(metrics.get("longName") or metrics.get("shortName"))
     return not (has_price or has_currency or has_identity)
+
+
+def _attach_runtime_evidence_records(
+    result: dict[str, Any], runtime_services: Any | None
+) -> None:
+    """Persist the active run's post-inspection tool ledger when available."""
+    evidence_recorder = getattr(runtime_services, "evidence_recorder", None)
+    if evidence_recorder is not None:
+        result["evidence_records"] = evidence_recorder.serialized_snapshot()
 
 
 async def run_analysis(
@@ -742,6 +807,11 @@ async def run_analysis(
                     bear_round1="",
                     bull_round2="",
                     bear_round2="",
+                    bull_round1_handoff={},
+                    bear_round1_handoff={},
+                    handoff_telemetry=seed_handoff_telemetry(
+                        policy_active=runtime_config.debate_reasoning_handoffs
+                    ),
                     current_round=1,
                     bull_history="",
                     bear_history="",
@@ -856,6 +926,7 @@ async def run_analysis(
                 )
 
             if isinstance(result, dict):
+                _attach_runtime_evidence_records(result, runtime_services)
                 # Stamp the provenance contract before any validity computation so
                 # this live run is held to fail-closed publication (snapshot + trace
                 # must be present and VALID). Legacy artifacts carry no stamp.
@@ -904,7 +975,6 @@ async def run_analysis(
                 operation="running analysis",
                 provider="unknown",
             ),
-            exc_info=True,
         )
         console.print(
             f"\n[bold red]{_safe_cli_error_message('running analysis', e)}[/bold red]\n"
@@ -959,14 +1029,11 @@ def _setup_runtime(
     try:
         validate_environment_variables()
     except ValueError as exc:
-        message = _safe_cli_error_message("validating environment configuration", exc)
-        if args.quiet or args.brief:
-            print(f"# Configuration Error\n\n{message}")
-        else:
-            console.print(f"\n[bold red]Configuration Error:[/bold red] {message}\n")
-            console.print(
-                "Please check your .env file and ensure all required API keys are set.\n"
-            )
+        _print_configuration_error(
+            args,
+            "validating environment configuration",
+            exc,
+        )
         raise SystemExit(1) from exc
 
     runtime_config = get_runtime_config(config)
@@ -987,11 +1054,7 @@ def _setup_runtime(
             provider_runtime=provider_runtime,
         )
     except ValueError as exc:
-        message = _safe_cli_error_message("building runtime services", exc)
-        if args.quiet or args.brief:
-            print(f"# Configuration Error\n\n{message}")
-        else:
-            console.print(f"\n[bold red]Configuration Error:[/bold red] {message}\n")
+        _print_configuration_error(args, "building runtime services", exc)
         raise SystemExit(1) from exc
 
     return provider_preflight, runtime_services
@@ -1132,7 +1195,6 @@ async def _run_retrospective_only(args: argparse.Namespace) -> int:
                 operation="running retrospective batch",
                 provider="unknown",
             ),
-            exc_info=True,
         )
         if not args.quiet and not args.brief:
             console.print(
@@ -1239,13 +1301,6 @@ async def _execute_analysis(
         tracing_metadata=tracing_metadata,
         runtime_services=scoped_runtime_services,
     )
-    if (
-        isinstance(result, dict)
-        and scoped_runtime_services.evidence_recorder is not None
-    ):
-        result["evidence_records"] = (
-            scoped_runtime_services.evidence_recorder.serialized_snapshot()
-        )
     return result
 
 
@@ -1397,7 +1452,6 @@ def _finalize_baseline_capture(
                 operation="finalizing baseline capture",
                 provider="unknown",
             ),
-            exc_info=True,
         )
         return None
 
@@ -1415,6 +1469,24 @@ def _attach_run_summary(
         article_requested=bool(args.article),
         provider_preflight=provider_preflight,
     )
+
+
+def _analysis_process_exit_code(result: dict[str, Any]) -> int:
+    """Differentiate a valid decision from a saved but technically invalid run."""
+
+    validity = result.get("analysis_validity") or {}
+    required_failures = (
+        validity.get("required_failures") if isinstance(validity, dict) else None
+    )
+    if isinstance(required_failures, dict) and required_failures:
+        return 2
+    summary = result.get("run_summary") or {}
+    summary_failures = (
+        summary.get("required_failures") if isinstance(summary, dict) else None
+    )
+    if isinstance(summary_failures, (list, tuple, set)) and summary_failures:
+        return 2
+    return 0
 
 
 def _score_analysis_trace(result: dict, trace_context: Any) -> None:
@@ -1773,7 +1845,7 @@ async def run_with_args(
             flush_traces()
 
         _log_final_summary(result, args, article_generated)
-        return 0
+        return _analysis_process_exit_code(result)
 
     except KeyboardInterrupt:
         if not (
@@ -1791,7 +1863,6 @@ async def run_with_args(
                 operation="running CLI entrypoint",
                 provider="unknown",
             ),
-            exc_info=True,
         )
         message = _safe_cli_error_message("running CLI entrypoint", exc)
         if args and (getattr(args, "quiet", False) or getattr(args, "brief", False)):

@@ -5,45 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.0.0] - 2026-09-16
+
+### Added
+
+- **Auditable analysis controls** — Canonical decision-policy records, evidence
+  promotion, tool-execution accounting, research budgets, recovery telemetry, and
+  decision-evidence reporting now make verdict changes and degraded runs traceable.
+- **Broader, safer screening** — Add official BVB Regulated Market coverage and RON
+  handling, plus resilient current feeds for ASX, JPX, Nasdaq, XETRA, and paginated
+  StockAnalysis sources.
+- **Optional balanced debate handoffs** — Full runs can pass bounded Round-1 rationale
+  capsules symmetrically to both second-round researchers and Research Manager.
+- **Portable agent guidance** — Add public, secret-safe Codex and Claude guidance,
+  focused repository skills, and automated metadata/dependency guards.
 
 ### Changed
 
-- **Cooled dependency refresh (August 2026)** — Move the LangChain, LangGraph,
-  Gemini/OpenAI/Anthropic, LangSmith/Langfuse, yfinance, scientific, optional
-  OpenTelemetry, and development-tool dependencies to deliberately reviewed
-  releases meeting the repository's 14-day routine cooldown. The mypy 2.3
-  transitive requirements `ast-serialize` and `librt` are explicitly held at
-  cooled versions, and previously unbounded integrations now have major-safe
-  ranges.
-
-- **Stronger static-analysis gate** — MyPy now checks function bodies that still lack complete signature annotations; the configured 235-file source gate remains clean without blanket ignores.
-- **Evidence provenance** — Deterministic legal and management-guidance preloads have distinct `preflight` provenance, and foreign-language normalization consumes one canonical typed evidence-record contract.
+- **Fail-closed outcome semantics** — Eligibility rejection, analysis failure, and
+  publishability are now distinct canonical states; deterministic growth, liquidity,
+  legal-coverage, and evidence rules remain authoritative across provider choices.
+- **Bounded provider-neutral execution** — Shared research loops, structural recovery,
+  timeout classification, token reserves, and cost attribution now follow code-owned
+  contracts in quick and full modes.
+- **More efficient batch runs** — The pipeline reuses recent complete same-mode
+  artifacts, excludes US-domiciled secondary listings, deduplicates issuers, and keeps
+  candidate order stable across restarts.
+- **Reviewed dependency refresh** — Update the LLM, orchestration, data, observability,
+  and development stacks while deliberately retaining MCP 1.x pending its incompatible
+  client and wire-format changes.
 
 ### Fixed
 
-- **Gemini reasoning provenance across adapter versions** — Read the configured
-  thinking level through both the legacy `thinking_level` attribute and the
-  4.3+ `reasoning_effort` field, while removing the obsolete post-construction
-  attribute assignment.
-
-- **ASX screener universe** — Replace the retired listed-companies CSV with the
-  current ASX directory feed and remove the obsolete leading-row skip.
-- **Kimi K3 cost accounting** — Replace the temporary K2.6 proxy with Kimi's
-  published K3 rates for cached input, uncached input, and output tokens.
-- **Cryptography timing attack** — Pin `cryptography==50.0.0` to remediate the
-  PKCS#7 EnvelopedData decryption finding reported as CVE-2026-69247.
-- **Legal-provider failure semantics** — An unavailable Legal Counsel no longer fabricates PFIC/CMIC uncertainty or adds issuer-risk points; it emits one zero-penalty, BUY-blocking coverage flag and leaves legal dimensions unassessed.
-- **Malformed legal JSON recovery** — Exact key boundaries prevent prefixed or suffixed decoy fields from being recovered as PFIC, VIE, or CMIC evidence.
+- **Portfolio and refresh integrity** — Quarantine unresolved broker identities,
+  preserve incomplete-inventory accounting, withhold unsafe BUY/ADD authority, and fix
+  refresh fairness, backoff, settled-rejection, closed-position, and FX edge cases.
+- **Source and artifact completeness** — Enabled exchange-source failures now stop
+  publication before replacing prior output; malformed structured responses, missing
+  required evidence, and incomplete artifacts fail visibly instead of appearing valid.
+- **Regression diagnostics** — Longitudinal comparisons now separate quick from full
+  runs and flag lost contracts, evidence, publishability, or material cost efficiency.
 
 ### Security
 
-- **h2 and pypdf security findings** — Update `h2` to 4.4.1 after its seven-day
-  security cooldown. Update `pypdf` to 6.15.0 as an owner-approved five-day
-  exception: Snyk reported excessive-iteration and excessive-memory-allocation
-  flaws, and the Auditor parses externally retrieved PDF documents. The latter
-  update is intentionally earlier than the normal cooldown because the exposed
-  parser path makes the denial-of-service risk material.
+- Pin fixed releases for `cryptography`, `h2`, `pyasn1`, `pypdf`, `starlette`, and
+  `urllib3`, including protections for the Auditor's externally sourced PDF path.
 
 ## [3.15.0] - 2026-08-18
 
@@ -542,7 +548,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - Comprehensive README.md with architecture diagrams (Mermaid)
-- CLAUDE.md developer guide for AI assistants
+- Developer guide for AI assistants
 - Honest limitations section ("Not a Get-Rich-Quick Bot")
 - Performance benchmarks and cost estimates
 - Troubleshooting guide for common issues

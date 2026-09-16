@@ -8,6 +8,7 @@ from typing import Literal
 from src.config import config
 from src.error_safety import format_error_message, summarize_exception
 from src.runtime_services import (
+    ProviderRuntime,
     RuntimeServices,
     build_provider_runtime,
     build_runtime_services_from_config,
@@ -51,11 +52,17 @@ def _save_result_sync(
     )
 
 
-def build_worker_runtime_services() -> RuntimeServices:
+def build_worker_provider_runtime() -> ProviderRuntime:
+    """Build the process-scoped provider dependencies shared by worker runs."""
+    return build_provider_runtime(explicit=True)
+
+
+def build_worker_runtime_services(provider_runtime: ProviderRuntime) -> RuntimeServices:
+    """Build one analysis run's mutable services around shared providers."""
     return build_runtime_services_from_config(
         config,
         enable_tool_audit=False,
-        provider_runtime=build_provider_runtime(explicit=True),
+        provider_runtime=provider_runtime,
     )
 
 
@@ -63,7 +70,7 @@ def run_once(
     store: RefreshJobStore,
     settings: DashboardSettings,
     *,
-    runtime_services: RuntimeServices | None = None,
+    provider_runtime: ProviderRuntime | None = None,
 ) -> bool:
     job = store.claim_next()
     if job is None:
@@ -72,7 +79,7 @@ def run_once(
         store,
         job,
         settings,
-        runtime_services=runtime_services or build_worker_runtime_services(),
+        provider_runtime=provider_runtime or build_worker_provider_runtime(),
     )
     return True
 
@@ -82,7 +89,7 @@ def _run_job(
     job: QueuedRefreshJob,
     settings: DashboardSettings,
     *,
-    runtime_services: RuntimeServices,
+    provider_runtime: ProviderRuntime,
 ) -> None:
     succeeded = 0
     failed = 0
@@ -96,7 +103,7 @@ def _run_job(
             result = _run_analysis_sync(
                 ticker,
                 job.request.quick_mode,
-                runtime_services=runtime_services,
+                runtime_services=build_worker_runtime_services(provider_runtime),
             )
             if result is None:
                 raise RuntimeError("run_analysis returned no result")
@@ -142,9 +149,9 @@ def _run_job(
 def main(poll_interval_seconds: float = 2.0) -> None:
     settings = DashboardSettings()
     store = RefreshJobStore(settings.runtime_dir / "jobs.sqlite")
-    runtime_services = build_worker_runtime_services()
+    provider_runtime = build_worker_provider_runtime()
     while True:
-        ran = run_once(store, settings, runtime_services=runtime_services)
+        ran = run_once(store, settings, provider_runtime=provider_runtime)
         if not ran:
             time.sleep(poll_interval_seconds)
 

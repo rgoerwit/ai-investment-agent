@@ -137,28 +137,38 @@ class TestArtifactFallbacks:
             system_message="legal prompt", agent_name="Legal Counsel"
         )
 
+        provider_payload = "team-id SECRET-PROVIDER-PAYLOAD"
         # The manual loop invokes llm.ainvoke directly — mock the LLM to fail.
         mock_llm = SimpleNamespace(
-            ainvoke=AsyncMock(side_effect=RuntimeError("dns failure")),
-            model_name="gemini-3-flash-preview",
+            ainvoke=AsyncMock(
+                side_effect=RuntimeError(
+                    "Error code: 403 - Your team "
+                    f"{provider_payload} has used all available credits."
+                )
+            ),
+            model_name="grok-4.6",
         )
 
         node = create_legal_counsel_node(mock_llm, [])
-        result = await node(
-            {
-                "company_of_interest": "TOTL.JK",
-                "company_name": "Total Indonesia",
-                "company_name_resolved": True,
-                "raw_fundamentals_data": "Sector: Finance\nCountry: Indonesia",
-            },
-            {},
-        )
+        with patch("src.agents.consultant_nodes.logger") as mock_logger:
+            result = await node(
+                {
+                    "company_of_interest": "TOTL.JK",
+                    "company_name": "Total Indonesia",
+                    "company_name_resolved": True,
+                    "raw_fundamentals_data": "Sector: Finance\nCountry: Indonesia",
+                },
+                {},
+            )
 
         status = result["artifact_statuses"]["legal_report"]
         risks = RedFlagDetector.extract_legal_risks(result["legal_report"])
 
         assert status["complete"] is True
         assert status["ok"] is False
+        assert status["error_kind"] == "quota_error"
+        assert status["retryable"] is False
+        assert provider_payload not in repr(result)
         assert risks["pfic_status"] is None
         assert "Legal counsel unavailable" in risks["pfic_evidence"]
         assert risks["vie_structure"] is None
@@ -174,6 +184,14 @@ class TestArtifactFallbacks:
         assert flags[0]["risk_penalty"] == 0.0
         assert flags[0]["blocks_buy"] is True
         assert "PFIC, VIE, CMIC" in flags[0]["detail"]
+        unavailable_calls = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "artifact_unavailable"
+        ]
+        assert len(unavailable_calls) == 1
+        assert unavailable_calls[0].kwargs["artifact"] == "legal_report"
+        assert "exc_info" not in unavailable_calls[0].kwargs
 
         pm_output = """# PORTFOLIO MANAGER VERDICT: BUY
 Actual Decision: BUY
@@ -258,9 +276,56 @@ VERDICT: BUY
 
         assert status["complete"] is True
         assert status["ok"] is False
-        assert status["error_kind"] == "application_error"
+        assert status["error_kind"] == "bad_request"
         assert "CONTEXT_LIMIT_EXCEEDED" in result["auditor_report"]
         assert "FORENSIC_DATA_BLOCK" in result["auditor_report"]
+
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_auditor_account_limit_is_concise_unavailable_artifact(
+        self, mock_get_prompt
+    ):
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="auditor prompt", agent_name="Forensic Auditor"
+        )
+        limit_error = RuntimeError(
+            "Error code: 403 - Your team team-id has either used all available "
+            "credits or reached its monthly spending limit."
+        )
+        mock_llm = SimpleNamespace(
+            ainvoke=AsyncMock(side_effect=limit_error), model_name="grok-4.6"
+        )
+
+        with patch("src.agents.consultant_nodes.logger") as mock_logger:
+            result = await create_auditor_node(mock_llm, [])(
+                {
+                    "company_of_interest": "LIMIT.TW",
+                    "company_name": "Limit Test",
+                    "company_name_resolved": True,
+                },
+                {},
+            )
+
+        status = result["artifact_statuses"]["auditor_report"]
+        assert status["complete"] is True
+        assert status["ok"] is False
+        assert status["error_kind"] == "quota_error"
+        assert "account credits or spending limit" in status["message"]
+        assert "team-id" not in result["auditor_report"]
+        assert "STATUS: UNAVAILABLE" in result["auditor_report"]
+        assert "FAILURE_KIND=QUOTA_ERROR" in result["auditor_report"]
+        assert not any(
+            call.args and call.args[0] == "auditor_error"
+            for call in mock_logger.error.call_args_list
+        )
+        unavailable_calls = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "artifact_unavailable"
+        ]
+        assert len(unavailable_calls) == 1
+        assert unavailable_calls[0].kwargs["artifact"] == "auditor_report"
+        assert unavailable_calls[0].kwargs["failure_kind"] == "quota_error"
 
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")
@@ -364,6 +429,48 @@ VERDICT: BUY
         assert result["auditor_report"] == "retry success"
         assert invoke_mock.await_count == 2
         mock_chat.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("src.prompts.get_prompt")
+    async def test_auditor_fallback_failure_stamps_fallback_provider(
+        self, mock_get_prompt
+    ):
+        mock_get_prompt.return_value = SimpleNamespace(
+            system_message="auditor prompt", agent_name="Forensic Auditor"
+        )
+        initial_llm = SimpleNamespace(model_name="gpt-4o")
+        fallback_llm = SimpleNamespace(model_name="grok-4.6")
+        invoke_mock = AsyncMock(
+            side_effect=[
+                RuntimeError("Unsupported value"),
+                RuntimeError("Error code: 403 - account used all available credits"),
+            ]
+        )
+
+        with (
+            patch(
+                "src.agents.runtime.invoke_with_rate_limit_handling", new=invoke_mock
+            ),
+            patch(
+                "src.agents.consultant_nodes._create_openai_responses_fallback_llm",
+                return_value=fallback_llm,
+            ),
+        ):
+            result = await create_auditor_node(initial_llm, [])(
+                {
+                    "company_of_interest": "TOTL.JK",
+                    "company_name": "Total Indonesia",
+                    "company_name_resolved": True,
+                },
+                {},
+            )
+
+        status = result["artifact_statuses"]["auditor_report"]
+        assert invoke_mock.await_count == 2
+        assert status["provider"] == "xai"
+        assert status["error_kind"] == "quota_error"
+        assert status["retryable"] is False
+        assert "STATUS: UNAVAILABLE" in result["auditor_report"]
 
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")

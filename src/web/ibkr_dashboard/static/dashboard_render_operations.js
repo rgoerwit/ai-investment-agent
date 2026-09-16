@@ -45,7 +45,7 @@ function renderRefresh() {
               : screening.candidate_count,
         },
         {
-          label: "BUYs found",
+          label: "Stage-1 BUY candidates (require full analysis)",
           value:
             screening.buy_count === null || screening.buy_count === undefined
               ? "—"

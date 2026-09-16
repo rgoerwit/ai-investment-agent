@@ -31,6 +31,18 @@ def test_parse_arguments_debug_implies_verbose(monkeypatch):
     assert args.verbose is True
 
 
+def test_parse_arguments_accepts_debate_reasoning_handoffs(monkeypatch):
+    from src.cli import parse_arguments
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", "--ticker", "6083.T", "--debate-reasoning-handoffs"],
+    )
+
+    assert parse_arguments().debate_reasoning_handoffs is True
+
+
 def test_resolve_output_paths_uses_output_sibling_images():
     from src.cli import resolve_output_paths
 
@@ -52,6 +64,66 @@ def test_validate_cli_args_rejects_quick_with_chart_flags(capsys):
 
     assert exc_info.value.code == 2
     assert "--transparent has no effect with --quick" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("overrides", "settings", "message"),
+    [
+        ({"quick": True}, Namespace(max_debate_rounds=2), "cannot be combined"),
+        ({}, Namespace(max_debate_rounds=1), "MAX_DEBATE_ROUNDS=2"),
+        (
+            {"retrospective_only": True},
+            Namespace(max_debate_rounds=2),
+            "not --retrospective-only",
+        ),
+        (
+            {"capture_baseline_cleanup": True},
+            Namespace(max_debate_rounds=2),
+            "no effect during baseline cleanup",
+        ),
+    ],
+)
+def test_debate_reasoning_handoffs_reject_inert_or_unbalanced_modes(
+    overrides, settings, message, capsys
+):
+    from src.cli import _validate_cli_args
+
+    values = {
+        "debate_reasoning_handoffs": True,
+        "quick": False,
+        "transparent": False,
+        "svg": False,
+        "retrospective_only": False,
+        "capture_baseline_cleanup": False,
+        "capture_baseline": False,
+    }
+    values.update(overrides)
+    with pytest.raises(SystemExit) as exc_info:
+        _validate_cli_args(Namespace(**values), settings=settings)
+
+    assert exc_info.value.code == 2
+    assert message in capsys.readouterr().err
+
+
+def test_debate_reasoning_handoffs_accepts_full_two_round_combinations():
+    from src.cli import _validate_cli_args
+
+    _validate_cli_args(
+        Namespace(
+            debate_reasoning_handoffs=True,
+            quick=False,
+            transparent=False,
+            svg=False,
+            retrospective_only=False,
+            capture_baseline_cleanup=False,
+            capture_baseline=False,
+            strict=True,
+            no_memory=True,
+            quiet=True,
+            brief=False,
+        ),
+        settings=Namespace(max_debate_rounds=2),
+    )
 
 
 @pytest.mark.parametrize("flag", ["quick_model", "deep_model"])

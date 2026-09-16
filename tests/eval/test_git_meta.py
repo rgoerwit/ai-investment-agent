@@ -1,6 +1,6 @@
 import subprocess
 
-from src.eval.git_meta import get_git_metadata
+from src.eval.git_meta import GIT_COMMAND_TIMEOUT_SECONDS, get_git_metadata
 
 
 class _Completed:
@@ -60,7 +60,7 @@ def test_get_git_metadata_handles_git_unavailable(monkeypatch):
     assert metadata == {
         "git_branch": None,
         "git_commit": None,
-        "dirty": False,
+        "dirty": True,
         "has_stash": False,
         "stash_count": 0,
     }
@@ -83,3 +83,36 @@ def test_get_git_metadata_records_stash_advisory(monkeypatch):
     assert metadata["dirty"] is False
     assert metadata["has_stash"] is True
     assert metadata["stash_count"] == 2
+
+
+def test_get_git_metadata_bounds_every_git_command(monkeypatch):
+    timeouts = []
+
+    def fake_run(args, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        return _Completed("")
+
+    monkeypatch.setattr("src.eval.git_meta.subprocess.run", fake_run)
+
+    get_git_metadata()
+
+    assert timeouts == [GIT_COMMAND_TIMEOUT_SECONDS] * 4
+
+
+def test_status_timeout_is_not_misreported_as_clean(monkeypatch):
+    def fake_run(args, **kwargs):
+        if args[1:3] == ["status", "--short"]:
+            raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+        responses = {
+            ("rev-parse", "--abbrev-ref", "HEAD"): "main\n",
+            ("rev-parse", "HEAD"): "abc123\n",
+            ("stash", "list"): "",
+        }
+        return _Completed(responses[tuple(args[1:])])
+
+    monkeypatch.setattr("src.eval.git_meta.subprocess.run", fake_run)
+
+    metadata = get_git_metadata()
+
+    assert metadata["git_commit"] == "abc123"
+    assert metadata["dirty"] is True

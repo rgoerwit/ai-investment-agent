@@ -174,6 +174,7 @@ def extract_metrics(
         "fcf_cagr_3y": None,
         "cycle_position": None,
         "revenue_growth_ttm": None,
+        "m_and_a_status": None,
         "sector_pe_reference_type": None,
         "sector_pe_reference_as_of": None,
         "revenue_backlog_coverage": None,
@@ -512,6 +513,14 @@ def extract_metrics(
     rev_ttm_match = re.search(r"REVENUE_GROWTH_TTM:\s*(-?\d+(?:\.\d+)?)%", data_block)
     if rev_ttm_match:
         metrics["revenue_growth_ttm"] = float(rev_ttm_match.group(1))
+
+    m_and_a_match = re.search(
+        r"M_AND_A_STATUS:\s*(ACTIVE_TENDER|RUMORED|NONE)",
+        data_block,
+        re.IGNORECASE,
+    )
+    if m_and_a_match:
+        metrics["m_and_a_status"] = m_and_a_match.group(1).upper()
 
     backlog_coverage = read_block_leading_float(data_block, "REVENUE_BACKLOG_COVERAGE")
     if backlog_coverage is not None:

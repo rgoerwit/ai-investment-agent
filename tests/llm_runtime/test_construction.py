@@ -123,6 +123,34 @@ def test_quick_mode_apac_returns_none_without_calling_factory() -> None:
     assert factory.requests == []
 
 
+def test_quick_mode_auditor_returns_none_but_full_mode_still_builds() -> None:
+    settings = _settings()
+    plan = resolve_binding_plan(settings)
+    factory = RecordingFactory()
+
+    assert (
+        build_model_for_seat(
+            SeatId.AUDITOR,
+            settings=settings,
+            plan=plan,
+            factory=factory,
+            quick_mode=True,
+        )
+        is None
+    )
+    assert factory.requests == []
+
+    model = build_required_model_for_seat(
+        SeatId.AUDITOR,
+        settings=settings,
+        plan=plan,
+        factory=factory,
+        quick_mode=False,
+    )
+    assert model is not None
+    assert [request.seat.seat_id for request in factory.requests] == [SeatId.AUDITOR]
+
+
 def test_semantic_judge_rejects_an_unpinned_cli_override() -> None:
     settings = _settings()
     plan = resolve_binding_plan(settings)
@@ -194,6 +222,71 @@ def test_reasoning_and_service_tier_overrides_reach_adapter_request() -> None:
     request = factory.requests[0]
     assert request.reasoning_value == "high"
     assert request.service_tier == "flex"
+
+
+@pytest.mark.parametrize(
+    ("configured_tier", "expected_pm_tier"),
+    [("flex", "flex"), ("standard", "standard")],
+)
+def test_quick_portfolio_manager_honors_configured_google_tier(
+    configured_tier, expected_pm_tier
+) -> None:
+    settings = _settings(
+        llm_base_provider="google",
+        llm_review_provider="openai",
+        google_service_tier=configured_tier,
+    )
+    plan = resolve_binding_plan(settings)
+    factory = RecordingFactory()
+
+    build_required_model_for_seat(
+        SeatId.PORTFOLIO_MANAGER,
+        settings=settings,
+        plan=plan,
+        factory=factory,
+        quick_mode=True,
+    )
+
+    assert factory.requests[0].service_tier == expected_pm_tier
+
+
+def test_quick_senior_fundamentals_remains_pinned_to_standard_tier() -> None:
+    settings = _settings(
+        llm_base_provider="google",
+        llm_review_provider="openai",
+        google_service_tier="flex",
+    )
+    plan = resolve_binding_plan(settings)
+    factory = RecordingFactory()
+
+    build_required_model_for_seat(
+        SeatId.SENIOR_FUNDAMENTALS,
+        settings=settings,
+        plan=plan,
+        factory=factory,
+        quick_mode=True,
+    )
+
+    assert factory.requests[0].service_tier == "standard"
+
+
+def test_readable_reasoning_request_reaches_provider_adapter() -> None:
+    settings = _settings(llm_base_provider="openai")
+    plan = resolve_binding_plan(settings)
+    factory = RecordingFactory()
+
+    build_required_model_for_seat(
+        SeatId.BULL,
+        settings=settings,
+        plan=plan,
+        factory=factory,
+        output_tokens=7_168,
+        include_reasoning_output=True,
+    )
+
+    request = factory.requests[0]
+    assert request.include_reasoning_output is True
+    assert request.output_tokens == 7_168
 
 
 def test_portfolio_macro_classifier_preserves_deep_normal_and_fast_quick_modes() -> (

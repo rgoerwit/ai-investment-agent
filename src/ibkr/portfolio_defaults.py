@@ -19,11 +19,30 @@ DEFAULT_CASH_BUFFER_PCT = 0.03
 # Max analysis age (days) before a saved verdict is treated as stale.
 DEFAULT_MAX_AGE_DAYS = 14
 
-# Price drift (%) vs analysis entry that flags a stale verdict for refresh.
+# Price drift (%) vs the analysis-time spot price that flags a stale verdict
+# for refresh. The entry price is a trade instruction, not a price anchor.
 DEFAULT_DRIFT_PCT = 15.0
 
 # Max number of stale analyses refreshed in a single reconciliation run.
 DEFAULT_REFRESH_LIMIT = 10
+
+# Refresh scheduling is weighted fair rather than strict-priority: when urgent
+# and normal-cycle work are both pending, the default 2:1 pattern guarantees
+# normal-cycle service across repeated bounded runs without making urgent work
+# wait for an entire portfolio cycle.
+DEFAULT_REFRESH_URGENT_WEIGHT = 2
+DEFAULT_REFRESH_CYCLE_WEIGHT = 1
+
+# A failed full analysis is retried on a later run, but not immediately on every
+# reconciliation invocation. The scheduler state records the exact retry time.
+DEFAULT_REFRESH_FAILURE_BACKOFF_HOURS = 24
+
+# A completed refresh can still leave a held position in DATA_QUALITY review
+# (for example, a persistent filing-evidence gap). Re-running it in the next
+# portfolio invocation cannot create new evidence, so defer another automated
+# attempt for one day. This is separate from invocation failure: a provider or
+# persistence exception still uses the failure backoff path.
+DEFAULT_REFRESH_DATA_QUALITY_BACKOFF_HOURS = 24
 
 # Concentration ceilings (% of portfolio) that trigger TRIM recommendations.
 DEFAULT_SECTOR_LIMIT_PCT = 30.0

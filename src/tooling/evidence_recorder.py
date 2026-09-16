@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -84,6 +85,17 @@ class EvidenceBinding:
     authority: EvidenceAuthority
     evidence_status: EvidenceStatus
     provider: str | None
+
+
+def evidence_record_id(record: Any) -> str:
+    """Return the canonical identifier for an object or serialized record."""
+    if isinstance(record, Mapping):
+        sequence = record.get("sequence", 0)
+        content_sha256 = record.get("content_sha256", "")
+    else:
+        sequence = getattr(record, "sequence", 0)
+        content_sha256 = getattr(record, "content_sha256", "")
+    return f"evidence:{sequence}:{str(content_sha256)[:12]}"
 
 
 def normalize_http_url(value: str) -> str | None:
@@ -201,10 +213,7 @@ def bind_fetched_evidence(
         urls=(canonical_url,),
     )
     return EvidenceBinding(
-        evidence_id=(
-            f"evidence:{getattr(record, 'sequence', 0)}:"
-            f"{str(getattr(record, 'content_sha256', ''))[:12]}"
-        ),
+        evidence_id=evidence_record_id(record),
         requested_url=(normalized if normalized in requested_urls else None),
         canonical_url=canonical_url,
         authority=authority,

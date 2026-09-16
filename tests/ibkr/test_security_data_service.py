@@ -83,6 +83,31 @@ class _WrongExchangeSingleClient(_FakeClient):
         }
 
 
+class _PlaceholderContractClient(_FakeClient):
+    def get_contract_info(self, conid: int, *, compete: bool = True):
+        return {
+            "symbol": "IBCID3600",
+            "exchange": "SEHK",
+            "primaryExch": "SEHK",
+            "currency": "HKD",
+        }
+
+
+class _PlaceholderSnapshotClient(_FakeClient):
+    def get_marketdata_snapshot(
+        self,
+        conid: int,
+        *,
+        fields: str = "",
+        compete: bool = False,
+    ):
+        snapshot = super().get_marketdata_snapshot(
+            conid, fields=fields, compete=compete
+        )
+        snapshot["55"] = "IBCID3600"
+        return snapshot
+
+
 def test_probe_returns_neutral_when_ibkr_not_configured():
     service = IbkrSecurityDataService(config=_FakeConfig(configured=False))
 
@@ -138,6 +163,32 @@ def test_probe_marks_single_wrong_exchange_candidate_as_ambiguous():
     assert probe.identity_confidence == "AMBIGUOUS"
     assert probe.error_kind == "AMBIGUOUS"
     mock_cache.assert_not_called()
+
+
+def test_probe_rejects_placeholder_contract_identity_before_cache_write():
+    service = IbkrSecurityDataService(
+        config=_FakeConfig(configured=True), client_cls=_PlaceholderContractClient
+    )
+
+    with patch("src.ibkr.security_data_service.cache_conid_mapping") as mock_cache:
+        probe = service._probe_security_sync("3600.HK")
+
+    assert probe.identity_confidence == "UNVERIFIED"
+    assert probe.error_kind == "INVALID_IDENTITY"
+    assert probe.resolved_yf_ticker == ""
+    mock_cache.assert_not_called()
+
+
+def test_probe_does_not_replace_verified_symbol_with_snapshot_placeholder():
+    service = IbkrSecurityDataService(
+        config=_FakeConfig(configured=True), client_cls=_PlaceholderSnapshotClient
+    )
+
+    probe = service._probe_security_sync("3600.HK")
+
+    assert probe.identity_confidence == "VERIFIED"
+    assert probe.resolved_symbol == "3600"
+    assert probe.resolved_yf_ticker == "3600.HK"
 
 
 def test_select_candidate_single_no_expected_exchange_is_verified():

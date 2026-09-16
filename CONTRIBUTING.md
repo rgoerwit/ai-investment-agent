@@ -30,6 +30,7 @@ cd investment-agent-public
 poetry install --with dev
 
 # Configure API keys
+poetry run pre-commit install   # required: installs the commit-time quality gates
 cp .env.example .env
 # Edit .env and add at minimum:
 #   GOOGLE_API_KEY (required - get from Google AI Studio)
@@ -254,7 +255,7 @@ def calculate_position_size(
 
 - Update README.md if you change user-facing functionality
 - Add examples to `examples/` directory
-- Update CLAUDE.md if you change architecture
+- Update `docs/CODEBASE_MEMORY.md` if you change architecture
 
 ## Community Guidelines
 

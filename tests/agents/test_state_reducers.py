@@ -297,3 +297,185 @@ class TestMergeAndCapMessages:
 
         assert tool_message in result
         assert len(result) == 2 + MESSAGE_TAIL_LIMIT
+
+    def test_parallel_tool_exchanges_are_capped_per_agent_and_never_split(self):
+        initial = HumanMessage(content="analyze AAPL")
+        calls = [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "tool", "args": {}, "id": f"call-{idx}"}],
+                name=f"agent-{idx}",
+            )
+            for idx in range(7)
+        ]
+        outputs = [
+            ToolMessage(
+                content=f"result-{idx}",
+                tool_call_id=f"call-{idx}",
+                additional_kwargs={"agent_key": f"agent-{idx}"},
+            )
+            for idx in range(7)
+        ]
+
+        result = merge_and_cap_messages([initial], [*calls, *outputs])
+
+        retained_calls = {
+            tool_call["id"]
+            for message in result
+            if isinstance(message, AIMessage)
+            for tool_call in message.tool_calls
+        }
+        retained_outputs = {
+            message.tool_call_id
+            for message in result
+            if isinstance(message, ToolMessage)
+        }
+        assert retained_calls == retained_outputs == {f"call-{idx}" for idx in range(7)}
+
+    def test_multi_tool_response_is_an_atomic_retention_unit(self):
+        initial = HumanMessage(content="analyze AAPL")
+        old_tail = [AIMessage(content=f"old-{idx}") for idx in range(20)]
+        call = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "first", "args": {}, "id": "first"},
+                {"name": "second", "args": {}, "id": "second"},
+            ],
+            name="agent",
+        )
+        outputs = [
+            ToolMessage(
+                content="one",
+                tool_call_id="first",
+                additional_kwargs={"agent_key": "agent"},
+            ),
+            ToolMessage(
+                content="two",
+                tool_call_id="second",
+                additional_kwargs={"agent_key": "agent"},
+            ),
+        ]
+
+        result = merge_and_cap_messages([initial, *old_tail], [call, *outputs])
+
+        assert call in result
+        assert all(output in result for output in outputs)
+
+    def test_pending_call_for_each_parallel_agent_survives_cap_pressure(self):
+        initial = HumanMessage(content="analyze AAPL")
+        calls = [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "tool", "args": {}, "id": f"call-{idx}"}],
+                name=f"agent-{idx}",
+            )
+            for idx in range(20)
+        ]
+
+        result = merge_and_cap_messages([initial], calls)
+
+        assert all(call in result for call in calls)
+
+    def test_same_provider_call_id_remains_isolated_by_agent_owner(self):
+        initial = HumanMessage(content="analyze AAPL")
+        first_call = AIMessage(
+            content="",
+            tool_calls=[{"name": "first", "args": {}, "id": "shared-id"}],
+            name="first-agent",
+        )
+        second_call = AIMessage(
+            content="",
+            tool_calls=[{"name": "second", "args": {}, "id": "shared-id"}],
+            name="second-agent",
+        )
+        first_output = ToolMessage(
+            content="first result",
+            tool_call_id="shared-id",
+            additional_kwargs={"agent_key": "first-agent"},
+        )
+        second_output = ToolMessage(
+            content="second result",
+            tool_call_id="shared-id",
+            additional_kwargs={"agent_key": "second-agent"},
+        )
+
+        result = merge_and_cap_messages(
+            [initial],
+            [first_call, second_call, first_output, second_output],
+        )
+
+        assert result == [
+            initial,
+            first_call,
+            second_call,
+            first_output,
+            second_output,
+        ]
+
+    def test_retention_stops_at_first_complete_unit_that_does_not_fit(self):
+        initial = HumanMessage(content="analyze AAPL")
+        oldest = AIMessage(content="old-small", name="agent")
+        call = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "tool", "args": {}, "id": f"call-{idx}"} for idx in range(11)
+            ],
+            name="agent",
+        )
+        outputs = [
+            ToolMessage(
+                content=f"result-{idx}",
+                tool_call_id=f"call-{idx}",
+                additional_kwargs={"agent_key": "agent"},
+            )
+            for idx in range(11)
+        ]
+        newest = AIMessage(content="newest", name="agent")
+
+        result = merge_and_cap_messages(
+            [initial],
+            [oldest, call, *outputs, newest],
+        )
+
+        assert newest in result
+        assert oldest not in result
+        assert call not in result
+        assert not any(output in result for output in outputs)
+
+
+class TestPartialUpdatesDoNotClobberUnownedFields:
+    """A node update omits the fields it does not own; absence is not a value.
+
+    Before the handoff work the reducer resolved a missing key through
+    `default_state`, so a partial update that omitted `count` produced
+    `y_val = 0`, which is not None and therefore won. That silently reset the
+    debate turn counter, and `run_summary.debate_rounds` is `count // 2`.
+    Parallel Bull/Bear updates carry exactly this shape, so the defect was
+    reachable — it just had no guard.
+    """
+
+    def test_count_survives_an_update_that_does_not_carry_it(self):
+        counted = {"count": 2, "current_round": 2}
+        partial = {"bull_round1": "bull argument"}
+
+        forward = merge_invest_debate_state(counted, partial)
+        reverse = merge_invest_debate_state(partial, counted)
+
+        assert forward["count"] == 2
+        assert forward["current_round"] == 2
+        assert reverse["count"] == 2
+
+    def test_role_private_dicts_survive_the_opposite_role_update(self):
+        bull = {"bull_round1_handoff": {"structured": "bull", "native": ""}}
+        bear = {"bear_round1_handoff": {"structured": "bear", "native": ""}}
+
+        merged = merge_invest_debate_state(bull, bear)
+
+        assert merged["bull_round1_handoff"]["structured"] == "bull"
+        assert merged["bear_round1_handoff"]["structured"] == "bear"
+
+    def test_an_explicitly_empty_value_still_overwrites(self):
+        """Absence and an explicit reset must stay distinguishable."""
+        merged = merge_invest_debate_state({"count": 4}, {"count": 0})
+
+        assert merged["count"] == 0

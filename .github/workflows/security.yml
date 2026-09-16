@@ -660,6 +660,10 @@ jobs:
           #   a broader mixed expression inherited from underlying libraries.
           # - frozendict: yfinance currently requires it transitively; keep this as
           #   an explicit reviewed exception rather than disabling license checks.
+          # - ibind: upstream and the exact locked 0.1.24 sdist ship Apache-2.0 only;
+          #   dependency review additionally reports the permissive
+          #   LicenseRef-scancode-unicode. The upstream LICENSE is unchanged from
+          #   0.1.23, so keep the exception scoped to this package.
           # - Several packages publish mixed/legacy SPDX fragments or scancode refs
           #   despite permissive package metadata.
           # - regex: Apache-2.0 licensed, but reports "CNRI-Python AND Apache-2.0"
@@ -672,7 +676,7 @@ jobs:
           # - langfuse: PyPI and upstream declare MIT, but dependency review reports
           #   "MIT AND Zlib". Both are permissive; scope the review exception rather
           #   than globally accepting a license expression not otherwise observed here.
-          allow-dependencies-licenses: pkg:pypi/aiohappyeyeballs, pkg:pypi/et-xmlfile, pkg:pypi/frozendict, pkg:pypi/langfuse, pkg:pypi/lxml, pkg:pypi/matplotlib, pkg:pypi/parso, pkg:pypi/protobuf, pkg:pypi/pycryptodome, pkg:pypi/python-dateutil, pkg:pypi/regex, pkg:pypi/structlog, pkg:pypi/typing-extensions, pkg:pypi/xlrd
+          allow-dependencies-licenses: pkg:pypi/aiohappyeyeballs, pkg:pypi/et-xmlfile, pkg:pypi/frozendict, pkg:pypi/ibind, pkg:pypi/langfuse, pkg:pypi/lxml, pkg:pypi/matplotlib, pkg:pypi/parso, pkg:pypi/protobuf, pkg:pypi/pycryptodome, pkg:pypi/python-dateutil, pkg:pypi/regex, pkg:pypi/structlog, pkg:pypi/typing-extensions, pkg:pypi/xlrd
           # Comment on PR with dependency changes
           comment-summary-in-pr: always
           # GitHub can lag when producing dependency graph snapshots for the PR

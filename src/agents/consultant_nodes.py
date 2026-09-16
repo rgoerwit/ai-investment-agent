@@ -15,10 +15,23 @@ from langgraph.types import RunnableConfig
 from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
 from src.data_block_utils import unfenced_label
-from src.error_safety import redact_sensitive_text, summarize_exception
+from src.error_safety import (
+    redact_sensitive_text,
+    summarize_exception,
+    summarize_failure_details,
+)
 from src.forensic_budget import AuditorBudgetLedger, AuditorBudgetPolicy
 from src.runtime_config import get_runtime_config
-from src.runtime_diagnostics import ArtifactStatus, failure_artifact, success_artifact
+from src.runtime_diagnostics import (
+    ArtifactStatus,
+    FailureDetails,
+    classify_failure,
+    failure_artifact,
+    get_base_url,
+    operator_failure_reason,
+    success_artifact,
+    unavailable_artifact,
+)
 from src.runtime_services import get_current_tool_service
 from src.service_tiers import floor_llm_hard_timeout, floor_llm_total_timeout
 from src.tooling.runtime import ToolInvocation
@@ -70,6 +83,7 @@ CONSULTANT_PARTIAL_TOOL_FAILURE_RATIO = 0.5
 # `DNI_REVIEW_CANDIDATE_MARKER`: the run summary reports the state that *actually
 # occurred* rather than recomputing a predicate that could disagree with the text.
 CONSULTANT_PARTIAL_REVIEW_MARKER = "[PARTIAL REVIEW:"
+CONSULTANT_UNAVAILABLE_MARKER = "CONSULTANT REVIEW: UNAVAILABLE"
 # Cap for the aggregator-metrics snapshot injected into the auditor's first
 # message (the loop's ToolMessage truncation cap is far larger at 63.5k).
 _AUDITOR_SNAPSHOT_MAX_CHARS = 8_000
@@ -93,6 +107,16 @@ This is a bounded screening cross-check, not a full re-analysis.
 - Focus only on decision-changing factual errors, biases, synthesis gaps, and mandate breaches.
 - If the internal analysis is sound enough for screening, say so briefly.
 """
+
+
+def _consultant_unavailable_report(details: FailureDetails) -> str:
+    return (
+        f"{CONSULTANT_UNAVAILABLE_MARKER}\n\n"
+        f"Reason: {operator_failure_reason(details)}\n"
+        "The external cross-check produced no findings; do not infer approval."
+    )
+
+
 _CONSULTANT_CONTEXT_BUDGETS = {
     "full": {
         "market": 2000,
@@ -392,7 +416,7 @@ def create_consultant_node(
         investment_plan = state.get("investment_plan", "N/A")
         foreign_language = state.get("foreign_language_report", "N/A")
         value_trap = state.get("value_trap_report", "N/A")
-        auditor = state.get("auditor_report", "N/A")
+        auditor = state.get("auditor_report") or "N/A"
         apac = state.get("apac_regional_report", "N/A")
         consultant_profile = (
             _select_quick_consultant_profile(state) if quick_mode else "full"
@@ -679,23 +703,25 @@ Provide your independent consultant review."""
                 result["consultant_quick_profile"] = consultant_profile
             return result
         except Exception as exc:
-            if isinstance(exc, TimeoutError):
-                logger.error(
-                    "consultant_node_timeout",
-                    ticker=ticker,
-                    **summarize_exception(exc, operation="consultant_node_timeout"),
-                )
-            else:
-                logger.error(
-                    "consultant_node_error",
-                    ticker=ticker,
-                    **summarize_exception(exc, operation="consultant_node_error"),
-                    exc_info=True,
-                )
-            result = failure_artifact(
-                "consultant_review",
+            provider = support.infer_provider_name(llm)
+            details = classify_failure(
                 exc,
-                provider=support.infer_provider_name(llm),
+                provider=provider,
+                model_name=support.get_model_name(llm),
+                class_name=type(llm).__name__,
+                base_url=get_base_url(llm),
+            )
+            logger.warning(
+                "artifact_unavailable",
+                ticker=ticker,
+                artifact="consultant_review",
+                artifact_status="UNAVAILABLE",
+                **summarize_failure_details(details, operation="consultant_review"),
+            )
+            result = unavailable_artifact(
+                "consultant_review",
+                details=details,
+                fallback_content=_consultant_unavailable_report(details),
             )
             result["consultant_tool_failures"] = tool_failure_count
             if quick_mode:
@@ -735,16 +761,29 @@ Provide your independent consultant review."""
                 label=f"consultant_total:{ticker}",
             )
         except TimeoutError:
+            exc = TimeoutError("Consultant node exceeded its total wall-clock budget")
+            details = classify_failure(
+                exc,
+                provider=support.infer_provider_name(llm),
+                model_name=support.get_model_name(llm),
+                class_name=type(llm).__name__,
+                base_url=get_base_url(llm),
+            )
             logger.warning(
-                "consultant_total_budget_exhausted",
+                "artifact_unavailable",
                 ticker=ticker,
+                artifact="consultant_review",
+                artifact_status="UNAVAILABLE",
                 budget_seconds=budget,
                 quick_mode=quick_mode,
+                **summarize_failure_details(
+                    details, operation="consultant_total_budget"
+                ),
             )
-            result = failure_artifact(
+            result = unavailable_artifact(
                 "consultant_review",
-                "Consultant node exceeded its total wall-clock budget",
-                provider=support.infer_provider_name(llm),
+                details=details,
+                fallback_content=_consultant_unavailable_report(details),
             )
             result["sender"] = "consultant"
             return result
@@ -959,22 +998,30 @@ then return the complete required JSON assessment. Query terms alone are not fin
                 result["sender"] = "legal_counsel"
                 return result
         except Exception as exc:
-            logger.error(
-                "legal_counsel_error",
+            provider = support.infer_provider_name(llm)
+            details = classify_failure(
+                exc,
+                provider=provider,
+                model_name=support.get_model_name(llm),
+                class_name=type(llm).__name__,
+                base_url=get_base_url(llm),
+            )
+            logger.warning(
+                "artifact_unavailable",
                 ticker=ticker,
-                **summarize_exception(exc, operation="legal_counsel_error"),
-                exc_info=True,
+                artifact="legal_report",
+                artifact_status="UNAVAILABLE",
+                **summarize_failure_details(details, operation="legal_counsel"),
             )
             fallback_report = _build_legal_fallback_report(
                 ticker=ticker,
                 country=country,
                 sector=sector,
-                reason=str(exc),
+                reason=operator_failure_reason(details),
             )
-            result = failure_artifact(
+            result = unavailable_artifact(
                 "legal_report",
-                exc,
-                provider=support.infer_provider_name(llm),
+                details=details,
                 fallback_content=fallback_report,
             )
             result["sender"] = "legal_counsel"
@@ -1065,6 +1112,27 @@ STATUS: INSUFFICIENT_DATA
 META: REPORT_DATE=UNKNOWN | PERIOD=N/A | CONFIDENCE=LOW
 REASON: {reason}
 VERDICT: Independent forensic audit incomplete within configured budget.
+"""
+
+
+def _auditor_unavailable_report(ticker: str, details: FailureDetails) -> str:
+    """Render a safe, machine-readable optional-seat failure artifact."""
+    reason = operator_failure_reason(details)
+    return f"""## FORENSIC AUDITOR REPORT
+
+**STATUS**: UNAVAILABLE
+
+**Reason**: {reason}
+
+**Recommendation**: Treat the independent forensic review for {ticker} as
+unavailable and rely on the other recorded evidence; do not infer a clean audit.
+
+---
+FORENSIC_DATA_BLOCK:
+STATUS: UNAVAILABLE
+META: FAILURE_KIND={details.kind.upper()} | CONFIDENCE=NONE
+REASON: {reason}
+VERDICT: Independent forensic audit unavailable.
 """
 
 
@@ -1419,11 +1487,13 @@ Perform a forensic audit using your tools.{snapshot_block}"""
             return result
         except Exception as exc:
             error_str = str(exc)
-            logger.error(
-                "auditor_error",
-                ticker=ticker,
-                **summarize_exception(exc, operation="auditor_error"),
-                exc_info=True,
+            provider = support.infer_provider_name(llm)
+            details = classify_failure(
+                exc,
+                provider=provider,
+                model_name=support.get_model_name(llm),
+                class_name=type(llm).__name__,
+                base_url=get_base_url(llm),
             )
 
             is_context_error = (
@@ -1437,6 +1507,15 @@ Perform a forensic audit using your tools.{snapshot_block}"""
             )
 
             if is_context_error:
+                logger.warning(
+                    "artifact_unavailable",
+                    ticker=ticker,
+                    artifact="auditor_report",
+                    artifact_status="CONTEXT_LIMIT_EXCEEDED",
+                    **summarize_failure_details(
+                        details, operation="auditor_context_limit"
+                    ),
+                )
                 forensic_label = unfenced_label("FORENSIC_DATA_BLOCK")
                 graceful_msg = f"""## FORENSIC AUDITOR REPORT
 
@@ -1454,12 +1533,10 @@ META: CONTEXT_LIMIT_EXCEEDED
 REASON: Data volume exceeded 128k token limit
 VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
 """
-                result = failure_artifact(
+                result = unavailable_artifact(
                     "auditor_report",
-                    "Auditor context limit exceeded",
-                    provider=support.infer_provider_name(llm),
+                    details=details,
                     fallback_content=graceful_msg,
-                    error_kind="application_error",
                 )
                 result["sender"] = "global_forensic_auditor"
                 result["auditor_budget"] = ledger.telemetry()
@@ -1469,7 +1546,10 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                 logger.warning(
                     "auditor_param_error_retry",
                     ticker=ticker,
-                    **summarize_exception(exc, operation="auditor_param_error_retry"),
+                    **summarize_failure_details(
+                        details,
+                        operation="auditor_param_error_retry",
+                    ),
                 )
                 try:
                     fallback_llm = _create_openai_responses_fallback_llm(llm)
@@ -1496,19 +1576,37 @@ VERDICT: Rely on DATA_BLOCK metrics for {ticker}.
                     result["auditor_budget"] = ledger.telemetry()
                     return result
                 except Exception as retry_exc:
-                    logger.error(
+                    provider = support.infer_provider_name(fallback_llm)
+                    details = classify_failure(
+                        retry_exc,
+                        provider=provider,
+                        model_name=support.get_model_name(fallback_llm),
+                        class_name=type(fallback_llm).__name__,
+                        base_url=get_base_url(fallback_llm),
+                    )
+                    logger.warning(
                         "auditor_retry_failed",
                         ticker=ticker,
-                        **summarize_exception(
-                            retry_exc, operation="auditor_retry_failed"
+                        **summarize_failure_details(
+                            details,
+                            operation="auditor_retry_failed",
                         ),
-                        exc_info=True,
                     )
 
-            result = failure_artifact(
+            logger.warning(
+                "artifact_unavailable",
+                ticker=ticker,
+                artifact="auditor_report",
+                artifact_status="UNAVAILABLE",
+                **summarize_failure_details(
+                    details,
+                    operation="auditor_unavailable",
+                ),
+            )
+            result = unavailable_artifact(
                 "auditor_report",
-                exc,
-                provider=support.infer_provider_name(llm),
+                details=details,
+                fallback_content=_auditor_unavailable_report(ticker, details),
             )
             result["sender"] = "global_forensic_auditor"
             result["auditor_budget"] = ledger.telemetry()

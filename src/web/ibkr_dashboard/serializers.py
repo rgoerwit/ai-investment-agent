@@ -199,6 +199,19 @@ def _serialize_portfolio(bundle: PortfolioRecommendationBundle) -> dict[str, Any
         "buffer_reserve_usd": buffer_reserve,
         "cash_pct": portfolio.cash_pct,
         "position_count": portfolio.position_count,
+        "unresolved_positions": [
+            {
+                "conid": position.conid,
+                "broker_token": position.broker_token,
+                "quantity": position.quantity,
+                "currency": position.currency,
+                "market_value_usd": position.market_value_usd,
+                "valuation_valid": position.valuation_valid,
+                "valuation_issue": position.valuation_issue,
+                "reason": position.reason,
+            }
+            for position in portfolio.unresolved_positions
+        ],
         "sector_weights": aggregate_sector_weights(portfolio.sector_weights),
         "exchange_weights": portfolio.exchange_weights,
     }
@@ -215,6 +228,9 @@ def _serialize_freshness(bundle: PortfolioRecommendationBundle) -> dict[str, Any
         "candidate_blocked": [
             _serialize_freshness_row(row) for row in summary.candidate_blocked
         ],
+        "refreshed_this_run": [
+            _serialize_freshness_row(row) for row in summary.refreshed_this_run
+        ],
         "fresh_count": len(summary.fresh),
         "refresh_activity": {
             "policy": bundle.refresh_activity.policy,
@@ -222,11 +238,24 @@ def _serialize_freshness(bundle: PortfolioRecommendationBundle) -> dict[str, Any
             "queued": list(bundle.refresh_activity.queued),
             "refreshed": list(bundle.refresh_activity.refreshed),
             "failed": list(bundle.refresh_activity.failed),
+            "failed_retry_after": dict(bundle.refresh_activity.failed_retry_after),
             "skipped_due_to_policy": list(
                 bundle.refresh_activity.skipped_due_to_policy
             ),
             "skipped_due_to_limit": list(bundle.refresh_activity.skipped_due_to_limit),
             "skipped_read_only": list(bundle.refresh_activity.skipped_read_only),
+            "skipped_due_to_cooldown": list(
+                bundle.refresh_activity.skipped_due_to_cooldown
+            ),
+            "skipped_due_to_failure_backoff": dict(
+                bundle.refresh_activity.skipped_due_to_failure_backoff
+            ),
+            "skipped_due_to_unrepaired": dict(
+                bundle.refresh_activity.skipped_due_to_unrepaired
+            ),
+            "unrepaired_retry_after": dict(
+                bundle.refresh_activity.unrepaired_retry_after
+            ),
         },
     }
 

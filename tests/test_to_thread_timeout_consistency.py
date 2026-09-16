@@ -63,7 +63,7 @@ OUTER_WRAPPED_ALLOWLIST: dict[str, str] = {
     "src/ibkr/portfolio_data_service.py:118": "ib_async has its own request timeout",
     "src/ibkr/portfolio_data_service.py:129": "ib_async has its own request timeout",
     "src/ibkr/portfolio_data_service.py:158": "ib_async has its own request timeout",
-    "src/ibkr/security_data_service.py:117": (
+    "src/ibkr/security_data_service.py:118": (
         "ib_async + yfinance probe; wrapped by caller-side bounds"
     ),
     # EDINET fetcher: wrapped by run_with_hard_timeout in

@@ -28,8 +28,10 @@ from src.reporting.state_access import (
     get_auditor_report,
     get_consultant_review,
     get_fundamentals_report,
+    get_pm_output,
     get_raw_fundamentals_data,
 )
+from src.runtime_diagnostics import has_unreconciled_auditor_resolution
 from src.validators.financial_rules import parse_ocf_amount
 
 logger = structlog.get_logger(__name__)
@@ -57,6 +59,23 @@ class MetricDisplaySource:
 def _run_summary(state: dict) -> dict:
     summary = state.get("run_summary")
     return summary if isinstance(summary, dict) else {}
+
+
+def auditor_review_status(state: dict) -> str:
+    """Return one rendering status, correcting legacy contradictory summaries."""
+
+    summary = _run_summary(state)
+    pm_output = get_pm_output(state)
+    if has_unreconciled_auditor_resolution(pm_output):
+        return "UNRECONCILED"
+    status = str(summary.get("auditor_review_status") or "").upper()
+    if status:
+        return status
+    if summary.get("auditor_successful"):
+        return "COMPLETED"
+    if summary.get("auditor_completed") or get_auditor_report(state):
+        return "LIMITED"
+    return "NOT_RUN"
 
 
 def _apac_status(state: dict) -> str | None:
@@ -271,13 +290,12 @@ def build_source_confidence_rows(state: dict) -> list[SourceRow]:
         rows.append(("Quarterly/TTM diagnostics", quarterly_note, "MEDIUM"))
 
     summary = _run_summary(state)
-    auditor_ran = bool(summary.get("auditor_completed")) or bool(
-        get_auditor_report(state)
-    )
-    auditor_clean = bool(summary.get("auditor_successful"))
-    if auditor_clean:
-        rows.append(("Forensic check", "Auditor (gpt-5.4-mini)", "HIGH"))
-    elif auditor_ran:
+    forensic_status = auditor_review_status(state)
+    if forensic_status == "COMPLETED":
+        rows.append(("Forensic check", "Independent Auditor seat", "HIGH"))
+    elif forensic_status == "UNRECONCILED":
+        rows.append(("Forensic check", "Auditor findings unreconciled", "LOW"))
+    elif forensic_status != "NOT_RUN":
         rows.append(("Forensic check", "Auditor ran with caveats", "MEDIUM"))
     else:
         rows.append(("Forensic check", "Not run", "—"))

@@ -327,6 +327,48 @@ def _discover_local_issuer_name(search_payload: str, ticker: str) -> str | None:
     return None
 
 
+def _entity_matched_result_urls(
+    search_payload: str,
+    ticker: str,
+    *issuer_names: str,
+) -> list[str]:
+    """Return URLs only from search-result records that identify this issuer."""
+    from src.ticker_utils import normalize_company_name
+
+    security_code = ticker.split(".", maxsplit=1)[0]
+    identifiers = tuple(dict.fromkeys((ticker, security_code)))
+    aliases: list[str] = []
+    for name in issuer_names:
+        alias = normalize_company_name(name).strip().casefold()
+        minimum_length = 2 if any(ord(character) > 127 for character in alias) else 3
+        if len(alias) >= minimum_length and alias not in aliases:
+            aliases.append(alias)
+
+    urls: list[str] = []
+    for block in RESULT_ENVELOPE_BODY_RE.findall(search_payload):
+        folded = block.casefold()
+        identifier_match = any(
+            re.search(
+                rf"(?<![\w]){re.escape(identifier.casefold())}(?![\w])",
+                folded,
+            )
+            for identifier in identifiers
+        )
+        alias_match = any(
+            alias in folded
+            if any(ord(character) > 127 for character in alias)
+            else bool(re.search(rf"(?<![\w]){re.escape(alias)}(?![\w])", folded))
+            for alias in aliases
+        )
+        if not identifier_match and not alias_match:
+            continue
+        for raw_url in URL_RE.findall(block):
+            normalized_url = raw_url.rstrip(".,;:!?)]}")
+            if normalized_url not in urls:
+                urls.append(normalized_url)
+    return urls
+
+
 async def _preload_management_guidance_evidence(
     ticker: str,
     company_name: str,
@@ -357,6 +399,7 @@ async def _preload_management_guidance_evidence(
                     "ticker": ticker,
                     "search_query": queries["results_package"],
                     "priority_terms": priority_terms,
+                    "purpose": "management_guidance",
                 },
             ),
             ("statutory_filing_api", get_official_filings, {"ticker": ticker}),
@@ -383,6 +426,7 @@ async def _preload_management_guidance_evidence(
                     "ticker": ticker,
                     "search_query": bridge_query,
                     "priority_terms": priority_terms,
+                    "purpose": "management_guidance",
                 },
             )
         ],
@@ -471,7 +515,12 @@ async def _preload_management_guidance_evidence(
         ),
         "",
     )
-    guidance_candidate_urls = list(dict.fromkeys(URL_RE.findall(bridge_payload)))[:3]
+    guidance_candidate_urls = _entity_matched_result_urls(
+        bridge_payload,
+        ticker,
+        company_name,
+        local_issuer_name or "",
+    )[:3]
     if enable_extraction and guidance_candidate_urls:
         extraction_outcomes, extraction_durations = await run_preflight_calls(
             [
@@ -494,7 +543,7 @@ async def _preload_management_guidance_evidence(
         outcomes.extend(extraction_outcomes)
         call_durations_ms.update(extraction_durations)
     else:
-        reason = "QUICK_MODE" if not enable_extraction else "NO_CANDIDATE_URLS"
+        reason = "QUICK_MODE" if not enable_extraction else "NO_ENTITY_MATCHING_URLS"
         outcomes.append(skipped_preflight_outcome("guidance_extract", reason))
 
     sections = [

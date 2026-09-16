@@ -21,6 +21,11 @@ from src.provenance_schema import (
     Scorecard,
     ScorecardCriterion,
 )
+from src.thesis_constants import (
+    FCF_YIELD_MIN_PCT,
+    NET_DEBT_EBITDA_MAX,
+    UTILITIES_FCF_YIELD_MIN_PCT,
+)
 
 _FIELD_RE = re.compile(r"(?m)^\s*(?:[-*]\s*)?([A-Z][A-Z0-9_]{2,})\s*:\s*(.*?)\s*$")
 _SCORE_CRITERION_DEPENDENCIES: dict[
@@ -57,13 +62,210 @@ _SCORE_CRITERION_DEPENDENCIES: dict[
             ("EARNINGS_GROWTH_FY",),
             ("EARNINGS_GROWTH_TTM",),
         ),
-        "ROA_ROE_IMPROVING": (("PROFITABILITY_TREND",),),
+        "ROA_ROE_IMPROVING": (
+            ("ROA_YOY_CHANGE_PERCENT",),
+            ("ROE_YOY_CHANGE_PERCENT",),
+        ),
         "GROSS_MARGIN": (("GROSS_MARGIN_PERCENT",),),
         # These remain advisory until their producers emit structured evidence.
         "GLOBAL_EXPANSION": (),
         "R_AND_D_CAPEX_BACKLOG": (),
     },
 }
+
+
+def _claim_percent_value(claim: Mapping[str, Any]) -> float | None:
+    """Parse a canonical percent claim (``30.0%`` -> ``30.0``)."""
+    if not claim.get("decision_eligible"):
+        return None
+    match = re.search(r"-?\d+(?:\.\d+)?", str(claim.get("value", "")))
+    return float(match.group()) if match else None
+
+
+def _profitability_growth_award(
+    claims: Mapping[str, Any],
+) -> tuple[str, tuple[str, ...]]:
+    """Code-own the ROA/ROE >30% YoY rubric criterion.
+
+    Either return series clearing the threshold earns the single rubric point.
+    With neither annual comparison available, the criterion is removed from the
+    adaptive denominator instead of trusting a model inference.
+    """
+    supporting_ids: list[str] = []
+    changes: list[float] = []
+    for existing_claim_id, claim in claims.items():
+        if not isinstance(claim, Mapping) or claim.get("field") not in {
+            "ROA_YOY_CHANGE_PERCENT",
+            "ROE_YOY_CHANGE_PERCENT",
+        }:
+            continue
+        value = _claim_percent_value(claim)
+        if value is not None:
+            supporting_ids.append(str(existing_claim_id))
+            changes.append(value)
+    if not changes:
+        return "N/A", ()
+    return ("1" if any(change > 30.0 for change in changes) else "0"), tuple(
+        supporting_ids
+    )
+
+
+def _eligible_fact_number(
+    claims: Mapping[str, Any], field: str
+) -> tuple[float | None, str | None]:
+    """Return one decision-eligible numeric fact without guessing among conflicts."""
+    matches: list[tuple[float, str]] = []
+    for existing_claim_id, claim in claims.items():
+        if (
+            not isinstance(claim, Mapping)
+            or claim.get("kind") != "FACT"
+            or claim.get("field") != field
+            or not claim.get("decision_eligible")
+        ):
+            continue
+        value = _text_number(str(claim.get("value", "")))
+        if value is not None:
+            matches.append((value, str(existing_claim_id)))
+    if not matches:
+        return None, None
+    first_value, first_id = matches[0]
+    if any(value != first_value for value, _ in matches[1:]):
+        return None, None
+    return first_value, first_id
+
+
+def _text_number(value: str) -> float | None:
+    """Parse the leading numeric amount from ratios and currency-formatted text."""
+    normalized = value.replace("−", "-").replace(",", "")
+    match = re.search(r"-?\d+(?:\.\d+)?", normalized)
+    if match is None:
+        return None
+    number = float(match.group())
+    prefix = normalized[: match.start()]
+    if "-" in prefix or ("(" in prefix and ")" in normalized[match.end() :]):
+        number = -abs(number)
+    return number
+
+
+def _health_objective_overrides(
+    claims: Mapping[str, Any],
+    fields: Mapping[str, str],
+    model_breakdown: Mapping[str, str],
+) -> tuple[
+    dict[str, str],
+    dict[str, tuple[str, ...]],
+    list[dict[str, str]],
+]:
+    """Code-own only sector-invariant health awards with one coherent basis.
+
+    A disagreement between the finalized DATA_BLOCK and the structured raw fact is
+    uncertainty, not permission to choose the more favorable value. Both affected
+    FCF criteria are therefore withheld from the adaptive denominator.
+    """
+    overrides: dict[str, str] = {}
+    dependencies: dict[str, tuple[str, ...]] = {}
+    conflicts: list[dict[str, str]] = []
+
+    def override(
+        criterion: str,
+        award: str,
+        supporting_ids: tuple[str, ...],
+        *,
+        reason: str = "CODE_OWNED_RUBRIC_OVERRIDE",
+    ) -> None:
+        overrides[criterion] = award
+        dependencies[criterion] = supporting_ids
+        reported = model_breakdown[criterion]
+        if award != reported:
+            conflicts.append(
+                {
+                    "field": criterion,
+                    "canonical": award,
+                    "reported": reported,
+                    "reason": reason,
+                }
+            )
+
+    direct_ratio, direct_ratio_id = _eligible_fact_number(claims, "NET_DEBT_EBITDA_RAW")
+    debt, debt_id = _eligible_fact_number(claims, "TOTAL_DEBT_RAW")
+    cash, cash_id = _eligible_fact_number(claims, "TOTAL_CASH_RAW")
+    ebitda, ebitda_id = _eligible_fact_number(claims, "EBITDA_RAW")
+    ratio = direct_ratio
+    ratio_dependencies: tuple[str, ...] = (direct_ratio_id,) if direct_ratio_id else ()
+    if ratio is None and None not in {debt, cash, ebitda} and ebitda is not None:
+        if ebitda > 0:
+            assert debt is not None and cash is not None
+            ratio = (debt - cash) / ebitda
+            ratio_dependencies = tuple(
+                dependency
+                for dependency in (debt_id, cash_id, ebitda_id)
+                if dependency is not None
+            )
+    reported_ratio = _text_number(fields.get("NET_DEBT_EBITDA", ""))
+    if reported_ratio is not None and ebitda is not None and ebitda <= 0:
+        override(
+            "NET_DEBT_EBITDA",
+            "N/A",
+            (),
+            reason="CANONICAL_METRIC_BASIS_CONFLICT",
+        )
+    elif ratio is not None and reported_ratio is not None:
+        if abs(ratio - reported_ratio) <= 0.05:
+            override(
+                "NET_DEBT_EBITDA",
+                "1" if ratio < NET_DEBT_EBITDA_MAX else "0",
+                ratio_dependencies,
+            )
+        else:
+            override(
+                "NET_DEBT_EBITDA",
+                "N/A",
+                (),
+                reason="CANONICAL_METRIC_BASIS_CONFLICT",
+            )
+
+    raw_fcf, raw_fcf_id = _eligible_fact_number(claims, "FREE_CASH_FLOW_RAW")
+    report_fcf = _text_number(fields.get("FREE_CASH_FLOW", fields.get("FCF", "")))
+    if raw_fcf is None or raw_fcf_id is None or report_fcf is None:
+        return overrides, dependencies, conflicts
+
+    raw_sign = (raw_fcf > 0) - (raw_fcf < 0)
+    report_sign = (report_fcf > 0) - (report_fcf < 0)
+    if raw_sign != report_sign:
+        for criterion in ("FCF_POSITIVE", "FCF_YIELD"):
+            override(
+                criterion,
+                "N/A",
+                (),
+                reason="CANONICAL_METRIC_BASIS_CONFLICT",
+            )
+        return overrides, dependencies, conflicts
+
+    sector = fields.get("SECTOR", "").strip().casefold()
+    if raw_fcf > 0:
+        override("FCF_POSITIVE", "1", (raw_fcf_id,))
+    elif sector == "information technology":
+        dependencies["FCF_POSITIVE"] = (raw_fcf_id,)
+        if model_breakdown["FCF_POSITIVE"] not in {"0", "0.5"}:
+            override("FCF_POSITIVE", "0", (raw_fcf_id,))
+    else:
+        override("FCF_POSITIVE", "0", (raw_fcf_id,))
+
+    market_cap, market_cap_id = _eligible_fact_number(claims, "MARKET_CAP_RAW")
+    if raw_fcf > 0 and market_cap is not None and market_cap > 0 and market_cap_id:
+        threshold = (
+            UTILITIES_FCF_YIELD_MIN_PCT if sector == "utilities" else FCF_YIELD_MIN_PCT
+        )
+        fcf_yield = raw_fcf / market_cap * 100.0
+        override(
+            "FCF_YIELD",
+            "1" if fcf_yield > threshold else "0",
+            (raw_fcf_id, market_cap_id),
+        )
+    elif raw_fcf < 0:
+        override("FCF_YIELD", "N/A", (raw_fcf_id,))
+
+    return overrides, dependencies, conflicts
 
 
 def _replace_report_section(report: str, heading: str, replacement: str) -> str:
@@ -234,6 +436,7 @@ def add_validated_derivations(
     }
     claims = dict(snapshot.get("claims", {}))
     scorecards = dict(snapshot.get("scorecards", {}))
+    derivation_conflicts: list[dict[str, str]] = []
     eligible_facts = {
         str(claim.get("field")): str(existing_claim_id)
         for existing_claim_id, claim in claims.items()
@@ -255,15 +458,16 @@ def add_validated_derivations(
         )
         if not value or breakdown is None or set(breakdown) != set(criteria):
             continue
-        numeric_awards = {
+        model_breakdown = breakdown
+        model_numeric_awards = {
             key: float(token)
-            for key, token in breakdown.items()
+            for key, token in model_breakdown.items()
             if token not in {"N/A", "REMOVED"}
         }
         score_match = re.search(r"-?\d+(?:\.\d+)?", value)
-        reported_available = sum(criteria[key] for key in numeric_awards)
+        reported_available = sum(criteria[key] for key in model_numeric_awards)
         reported_pct = (
-            sum(numeric_awards.values()) / reported_available * 100.0
+            sum(model_numeric_awards.values()) / reported_available * 100.0
             if reported_available
             else None
         )
@@ -275,8 +479,44 @@ def add_validated_derivations(
             continue
         assert reported_available > 0
 
+        breakdown = dict(model_breakdown)
+        deterministic_dependencies: dict[str, tuple[str, ...]] = {}
+        if kind == "HEALTH":
+            (
+                objective_awards,
+                objective_dependencies,
+                objective_conflicts,
+            ) = _health_objective_overrides(claims, fields, model_breakdown)
+            breakdown.update(objective_awards)
+            deterministic_dependencies.update(objective_dependencies)
+            derivation_conflicts.extend(objective_conflicts)
+        else:
+            award, dependencies = _profitability_growth_award(claims)
+            deterministic_dependencies["ROA_ROE_IMPROVING"] = dependencies
+            model_award = model_breakdown["ROA_ROE_IMPROVING"]
+            breakdown["ROA_ROE_IMPROVING"] = award
+            if award != model_award:
+                derivation_conflicts.append(
+                    {
+                        "field": "ROA_ROE_IMPROVING",
+                        "canonical": award,
+                        "reported": model_award,
+                        "reason": "CODE_OWNED_RUBRIC_OVERRIDE",
+                    }
+                )
+        numeric_awards = {
+            key: float(token)
+            for key, token in breakdown.items()
+            if token not in {"N/A", "REMOVED"}
+        }
+
         criterion_dependencies: dict[str, tuple[str, ...]] = {}
         for criterion in numeric_awards:
+            if criterion in deterministic_dependencies:
+                deterministic_resolved = deterministic_dependencies[criterion]
+                if deterministic_resolved:
+                    criterion_dependencies[criterion] = deterministic_resolved
+                continue
             resolved: tuple[str, ...] = ()
             for dependency_group in _SCORE_CRITERION_DEPENDENCIES[kind].get(
                 criterion,
@@ -320,7 +560,7 @@ def add_validated_derivations(
             if award > 0
             and _SCORE_CRITERION_DEPENDENCIES[kind].get(criterion, ()) == ()
         )
-        available = reported_available
+        available = sum(criteria[key] for key in numeric_awards)
         raw_earned = sum(numeric_awards.values())
         decision_earned = raw_earned - sum(
             numeric_awards[criterion] for criterion in advisory_only_awards
@@ -386,5 +626,6 @@ def add_validated_derivations(
         "conflicts": [
             *(snapshot.get("conflicts", []) or []),
             *(dict(conflict) for conflict in conflicts),
+            *derivation_conflicts,
         ],
     }

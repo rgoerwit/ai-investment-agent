@@ -18,12 +18,50 @@ not substitute for live API evidence. No live production-qualification evidence 
 created by the migration implementation because that requires operator credentials
 and incurs provider cost.
 
-Transport capability and application qualification are separate contracts. For
-example, current Claude profiles accurately record tool use, structured output,
-and version-specific effort controls, but Anthropic remains writer-only until its
-analytical seats pass the qualification procedure below. Binding validation checks
-both layers and reports an unqualified provider/group assignment before model
-construction.
+Transport capability, runtime application permission, and evidence qualification are
+separate contracts. For example, current Claude profiles accurately record tool use,
+structured output, and version-specific effort controls, but Anthropic remains
+writer-only until its analytical seats pass the qualification procedure below.
+Binding validation checks capability and permission and reports a disallowed
+provider/group assignment before model construction.
+
+Runtime provider/group validation is an **allowlist**, not a qualification award.
+An allowed assignment may be exercised for testing while still having only
+constructible evidence. Promotion to contract-capable or production-qualified
+requires the procedure and recorded evidence below; the runtime policy does not
+silently confer either status.
+
+Output budgets separate the application's visible-output intent from any API-side
+reasoning reserve. Saved diagnostics record both caps and classify an invalid response
+that consumes the API cap as `output_cap_exhausted`; an incomplete structured block
+below that cap remains `incomplete_structured_output`, while a complete response that
+omits a required contract field is `output_contract_violation`. Raising
+`LLM_BASE_OUTPUT_TOKENS` scales fractional seat budgets and is therefore an experiment,
+not a substitute for correct block-completion detection.
+
+Reserve class is selected once from the canonical request contract: `reasoning`,
+`critical`, and `escalation` intents use the deep reserve even when a provider resolves
+their effort to `medium`; fast/classifier/prose requests use the effort as the fallback.
+An adapter may still decide that a particular model generation does not count hidden
+reasoning against the completion cap, in which case the configured reserve is zero.
+Per-call telemetry persists visible/thinking output and the intent, API, and reserve
+caps so provider comparisons can distinguish useful output from hidden-reasoning spend.
+
+Provider retries and structural recovery are also distinct. The invocation runtime may
+repeat a transient partial response when no explicit terminal reason is available. It
+must not repeat an otherwise identical request after an explicit provider output-cap
+stop: that attempt is recorded as `output_cap_exhausted` and returned to the owning
+validator. Structural recovery happens only after a provider-success response fails
+validation and changes the request: it is text-only, uses the base provider's reasoning
+binding, inherits the originating seat's visible-output budget, and regenerates from
+already gathered evidence. Quick mode arms this bounded recovery only for Senior
+Fundamentals and Portfolio Manager. Cost rollups keep recovery usage under the
+originating analyst for human interpretation and also expose the canonical
+`analyst_retry` billing seat plus `originating_seat_id` for precise comparison.
+
+Deterministic Portfolio Manager trace reconciliation and verdict-policy enforcement do
+not use this recovery seat. Only missing, truncated, or otherwise structurally invalid
+PM output is eligible for a model-based correction.
 
 Capability facts should be checked against primary provider documentation. The
 current Claude entries use Anthropic's official [tool-use](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/overview),

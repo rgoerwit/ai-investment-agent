@@ -11,6 +11,7 @@ from scripts.cost_report import (
     aggregate,
     diff_report,
     discover_runs,
+    format_efficiency_report,
     format_report,
     load_run,
 )
@@ -27,6 +28,9 @@ def _write_run(
     by_model: dict[str, float] | None = None,
     by_tier: dict[str, float] | None = None,
     unpriced: list[str] | None = None,
+    token_usage_extra: dict | None = None,
+    research_budgets: dict | None = None,
+    run_fingerprint: dict | None = None,
 ) -> Path:
     agents = agents or {"Portfolio Manager": 0.10, "Consultant": 0.05}
     token_usage: dict = {
@@ -47,10 +51,13 @@ def _write_run(
             for k, v in (by_tier or {"flex": 0.15}).items()
         }
         token_usage["unpriced_models"] = unpriced or []
+    token_usage.update(token_usage_extra or {})
     payload = {
         "metadata": {"ticker": ticker, "analysis_date": date},
         "run_summary": {"quick_mode": False},
         "token_usage": token_usage,
+        "research_budgets": research_budgets,
+        "run_fingerprint": run_fingerprint,
     }
     path = dir_ / f"{ticker}_{date.replace(':', '').replace('-', '')}_analysis.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -127,6 +134,54 @@ class TestFallbackAndFlags:
         report = format_report(discover_runs(tmp_path), "model")
         assert "no artifacts carry this rollup" in report
 
+    def test_efficiency_report_surfaces_recovery_caps_and_research(self, tmp_path):
+        _write_run(
+            tmp_path,
+            "AAA.T",
+            token_usage_extra={
+                "recovery_usage": [{"calls": 1, "tokens": 1000, "cost_usd": 0.05}],
+                "call_attempts": [
+                    {
+                        "agent_name": "Portfolio Manager policy correction",
+                        "failure_kind": "output_cap_exhausted",
+                        "total_tokens": 12_971,
+                    }
+                ],
+            },
+            research_budgets={
+                "value_trap_detector": {
+                    "llm_calls": 4,
+                    "tool_rounds_used": 3,
+                    "forced_synthesis_used": True,
+                    "outcomes": ["TOOL_ROUND_LIMIT"],
+                }
+            },
+        )
+
+        report = format_efficiency_report(discover_runs(tmp_path))
+
+        assert "recovery: 1 call(s), $0.0500" in report
+        assert "output-cap attempts: 1, 12,971 tokens" in report
+        assert "policy=1, trace=0" in report
+        assert "value_trap_detector: llm=4, rounds=3, forced=1, limits=1" in report
+
+    @pytest.mark.parametrize("recovery_cost", (0.0, 0.05))
+    def test_efficiency_report_handles_zero_total_cost(self, tmp_path, recovery_cost):
+        _write_run(
+            tmp_path,
+            "ZERO.T",
+            agents={"Portfolio Manager": 0.0},
+            token_usage_extra={
+                "recovery_usage": [
+                    {"calls": int(recovery_cost > 0), "cost_usd": recovery_cost}
+                ]
+            },
+        )
+
+        report = format_efficiency_report(discover_runs(tmp_path))
+
+        assert f"${recovery_cost:.4f}, n/a of spend" in report
+
 
 class TestDiff:
     def test_ab_delta_math(self, tmp_path):
@@ -144,3 +199,39 @@ class TestDiff:
         assert "Δ total: $-0.1000/run" in report
         # ...and the spend moved out of the standard tier into flex.
         assert "standard" in report and "flex" in report
+
+    def test_ab_warns_when_fingerprints_are_not_controlled(self, tmp_path):
+        base_dir = tmp_path / "base"
+        candidate_dir = tmp_path / "candidate"
+        base_dir.mkdir()
+        candidate_dir.mkdir()
+        _write_run(
+            base_dir,
+            "AAA.T",
+            run_fingerprint={
+                "code_commit": "aaa",
+                "code_dirty": False,
+                "prompt_set_digest": "prompt-a",
+                "binding_digest": "google",
+                "thesis_digest": "thesis",
+            },
+        )
+        _write_run(
+            candidate_dir,
+            "AAA.T",
+            run_fingerprint={
+                "code_commit": "bbb",
+                "code_dirty": True,
+                "prompt_set_digest": "prompt-a",
+                "binding_digest": "openai",
+                "thesis_digest": "thesis",
+            },
+        )
+
+        report = diff_report(
+            discover_runs(base_dir), discover_runs(candidate_dir), "agent"
+        )
+
+        assert "not controlled — code commit differs" in report
+        assert "dirty worktree" in report
+        assert "binding" not in report.casefold()

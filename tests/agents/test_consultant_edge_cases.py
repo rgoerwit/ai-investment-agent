@@ -10,7 +10,7 @@ import copy
 import json
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from langgraph.types import RunnableConfig
@@ -296,7 +296,10 @@ class TestDataFormatEdgeCases:
         assert status["error_kind"] == "application_error"
 
     @pytest.mark.asyncio
-    async def test_quick_consultant_prompt_addendum_and_context_caps(self):
+    @pytest.mark.parametrize("auditor_report", ["Auditor", "", None])
+    async def test_quick_consultant_prompt_addendum_and_context_caps(
+        self, auditor_report
+    ):
         """Quick prompt keeps evidence channels while using smaller section caps."""
         mock_llm = Mock()
         mock_response = Mock()
@@ -339,7 +342,7 @@ class TestDataFormatEdgeCases:
                         "fundamentals_report": "Fundamentals",
                         "investment_debate_state": {"history": "Debate"},
                         "investment_plan": "Research",
-                        "auditor_report": "Auditor",
+                        "auditor_report": auditor_report,
                         "red_flags": [],
                         "pre_screening_result": "PASS",
                     }
@@ -367,7 +370,11 @@ class TestDataFormatEdgeCases:
         assert ("market", 900) in summarize_calls
         assert ("fundamentals", 2500) in summarize_calls
         assert ("research", 1400) in summarize_calls
-        assert ("auditor", 1200) in summarize_calls
+        if auditor_report:
+            assert ("auditor", 1200) in summarize_calls
+        else:
+            assert not any(section == "auditor" for section, _ in summarize_calls)
+            assert "=== INDEPENDENT FORENSIC AUDIT ===\nN/A" in prompt
         assert result["consultant_quick_profile"] == "quick_standard"
 
     def test_quick_consultant_profile_expands_for_borderline_inputs(self):
@@ -856,7 +863,9 @@ class TestErrorPropagation:
                 result = await consultant_node(state, config)
 
                 assert "consultant_review" in result
-                assert result["consultant_review"] == ""
+                assert result["consultant_review"].startswith(
+                    "CONSULTANT REVIEW: UNAVAILABLE"
+                )
                 status = result["artifact_statuses"]["consultant_review"]
                 assert status["ok"] is False
                 assert status["error_kind"] == "timeout"
@@ -912,7 +921,7 @@ class TestErrorPropagation:
         assert seen_timeouts[0] <= 0.05
         status = result["artifact_statuses"]["consultant_review"]
         assert status["error_kind"] == "timeout"
-        assert result["consultant_review"] == ""
+        assert result["consultant_review"].startswith("CONSULTANT REVIEW: UNAVAILABLE")
         status = result["artifact_statuses"]["consultant_review"]
         assert status["ok"] is False
         assert status["error_kind"] == "timeout"
@@ -955,10 +964,63 @@ class TestErrorPropagation:
                 result = await consultant_node(state, config)
 
                 assert "consultant_review" in result
-                assert result["consultant_review"] == ""
+                assert result["consultant_review"].startswith(
+                    "CONSULTANT REVIEW: UNAVAILABLE"
+                )
                 status = result["artifact_statuses"]["consultant_review"]
                 assert status["ok"] is False
                 assert status["error_kind"] == "rate_limit"
+
+    @pytest.mark.asyncio
+    async def test_consultant_account_limit_is_safe_degraded_artifact(self):
+        secret_payload = "team-id SECRET-PROVIDER-PAYLOAD"
+        limit_error = RuntimeError(
+            "Error code: 403 - Your team "
+            f"{secret_payload} has used all available credits."
+        )
+        mock_llm = SimpleNamespace(model_name="grok-4.6")
+
+        with (
+            patch(
+                "src.agents.runtime.invoke_with_rate_limit_handling",
+                new=AsyncMock(side_effect=limit_error),
+            ),
+            patch("src.prompts.get_prompt") as mock_get_prompt,
+            patch("src.agents.consultant_nodes.logger") as mock_logger,
+        ):
+            mock_get_prompt.return_value = SimpleNamespace(
+                system_message="You are a consultant.",
+                agent_name="External Consultant",
+            )
+            consultant_node = create_consultant_node(mock_llm, "consultant")
+            result = await consultant_node(
+                {
+                    "company_of_interest": "TEST",
+                    "company_name": "Test Co",
+                    "market_report": "Report",
+                    "sentiment_report": "Report",
+                    "news_report": "Report",
+                    "fundamentals_report": "Report",
+                    "investment_debate_state": {"history": "Debate"},
+                    "investment_plan": "BUY",
+                },
+                RunnableConfig(configurable={"context": Mock(trade_date="2025-12-13")}),
+            )
+
+        status = result["artifact_statuses"]["consultant_review"]
+        assert status["error_kind"] == "quota_error"
+        assert status["retryable"] is False
+        assert status["provider"] == "xai"
+        assert "account credits or spending limit" in status["message"]
+        assert secret_payload not in repr(result)
+        calls = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "artifact_unavailable"
+        ]
+        assert len(calls) == 1
+        assert calls[0].kwargs["artifact"] == "consultant_review"
+        assert "exc_info" not in calls[0].kwargs
 
 
 class TestReportGeneration:

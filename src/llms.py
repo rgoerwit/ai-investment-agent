@@ -33,6 +33,7 @@ from src.llm_budgets import (
     get_agent_output_budget,
     get_generation_budget,
 )
+from src.llm_runtime.seats import ModelIntent
 from src.runtime_config import get_runtime_config
 from src.runtime_services import get_current_provider_runtime
 from src.service_tiers import (
@@ -137,10 +138,6 @@ _OPENAI_REASONING_EFFORTS: tuple[tuple[str, frozenset[str]], ...] = (
 # (OpenAI's ``-pro`` tier).  Checked against the whole normalized model id.
 _OPENAI_NO_REASONING_MARKERS: tuple[str, ...] = ("pro",)
 
-# Efforts deep enough that the small "default" reserve cannot cover the hidden
-# reasoning; these earn the "deep" reserve instead.
-_DEEP_REASONING_EFFORTS = frozenset({"high", "xhigh", "max"})
-
 # Ordered preferences, resolved against a family's supported set.  ``low`` is
 # deliberately preferred over ``minimal`` for quick mode even where a legacy
 # model accepts both: current GPT-5.6 models do not document ``minimal``.
@@ -197,11 +194,6 @@ def _openai_reasoning_effort(
 
 def _effort_preference_for_mode(quick_mode: bool) -> tuple[str, ...]:
     return _EFFORT_PREFERENCE_QUICK if quick_mode else _EFFORT_PREFERENCE_FULL
-
-
-def _reserve_class_for_effort(effort: str | None) -> Literal["default", "deep"]:
-    """Size the completion-cap reserve to the reasoning depth requested."""
-    return "deep" if effort in _DEEP_REASONING_EFFORTS else "default"
 
 
 def _centralized_output_budget(agent_name: str) -> int:
@@ -1065,19 +1057,26 @@ def _apply_openai_generation_budget(
     *,
     model_name: str,
     effort: str | None,
+    intent: ModelIntent | None = None,
     settings: Any | None = None,
 ) -> GenerationBudget:
     """Convert an intent budget into an API cap with a reasoning reserve."""
     settings = _settings_or_default(settings)
-    budget = _resolve_generation_budget(
+    from src.llm_runtime.budgets import resolve_generation_budget
+
+    budget = resolve_generation_budget(
+        settings,
         intent_tokens=kwargs["max_completion_tokens"],
-        reserve_class=_reserve_class_for_effort(effort),
-        reserve_enabled=_reasoning_counts_against_completion_cap(
-            provider="openai",
-            model_name=model_name,
-            reasoning_effort=effort,
+        reasoning_value=(
+            effort
+            if _reasoning_counts_against_completion_cap(
+                provider="openai",
+                model_name=model_name,
+                reasoning_effort=effort,
+            )
+            else None
         ),
-        settings=settings,
+        intent=intent,
     )
     kwargs["max_completion_tokens"] = budget.api_cap_tokens
     return budget
@@ -1122,15 +1121,6 @@ class _LazyLLMProxy:
     def __repr__(self) -> str:
         status = "initialized" if self._instance is not None else "lazy"
         return f"<_LazyLLMProxy {status}>"
-
-
-def is_openai_consultant_available() -> bool:
-    """Return whether OpenAI-backed consultant/auditor nodes can be enabled."""
-    if not config.enable_consultant:
-        return False
-    if not config.get_openai_api_key():
-        return False
-    return find_spec("langchain_openai") is not None
 
 
 def get_all_llm_instances() -> dict:
@@ -1180,6 +1170,7 @@ def create_gemini_model(
     service_tier: str | None = None,
     api_key: str | None = None,
     settings: Any | None = None,
+    include_thoughts: bool = False,
 ) -> BaseChatModel:
     """
     Generic factory for Gemini models.
@@ -1260,6 +1251,8 @@ def create_gemini_model(
     if resolved_tier is not None:
         kwargs["service_tier"] = resolved_tier
         kwargs["flex_fallback_to_standard"] = settings.flex_fallback_to_standard
+    if include_thoughts:
+        kwargs["include_thoughts"] = True
 
     llm = _TieredChatGoogleGenerativeAI(**kwargs)
     _stamp_budget_metadata(
@@ -1289,6 +1282,7 @@ def create_quick_thinking_llm(
     thinking_level_bump: bool = False,
     api_key: str | None = None,
     settings: Any | None = None,
+    include_thoughts: bool = False,
 ) -> BaseChatModel:
     """
     Create a quick thinking LLM.
@@ -1340,6 +1334,7 @@ def create_quick_thinking_llm(
         service_tier=service_tier,
         api_key=api_key,
         settings=settings,
+        include_thoughts=include_thoughts,
     )
 
 
@@ -1352,6 +1347,7 @@ def create_deep_thinking_llm(
     max_output_tokens: int | None = None,
     api_key: str | None = None,
     settings: Any | None = None,
+    include_thoughts: bool = False,
 ) -> BaseChatModel:
     """
     Create a deep thinking LLM.
@@ -1383,6 +1379,7 @@ def create_deep_thinking_llm(
         reserve_class="deep",
         api_key=api_key,
         settings=settings,
+        include_thoughts=include_thoughts,
     )
 
 
@@ -1571,6 +1568,7 @@ def create_writer_openai_fallback_llm(
         service_tier_label="openai_sdk_timeout:writer_fallback",
         unthrottled_kind="writer_fallback",
         effort_preference=_EFFORT_PREFERENCE_PROSE,
+        intent=ModelIntent.PROSE,
         settings=settings,
     )
 
@@ -1633,6 +1631,7 @@ def create_consultant_llm(
     callbacks: list[BaseCallbackHandler] | None = None,
     max_completion_tokens: int | None = None,
     settings: Any | None = None,
+    model_intent: ModelIntent | None = None,
 ) -> BaseChatModel:
     """
     Create an OpenAI consultant LLM for cross-validation.
@@ -1738,6 +1737,8 @@ def create_consultant_llm(
         kwargs,
         model_name=model_name,
         effort=reasoning_effort,
+        intent=model_intent
+        or (ModelIntent.FAST if quick_mode else ModelIntent.REASONING),
         settings=settings,
     )
 
@@ -1759,6 +1760,7 @@ def create_auditor_llm(
     quick_mode: bool = False,
     model_name_override: str | None = None,
     settings: Any | None = None,
+    model_intent: ModelIntent | None = None,
 ) -> BaseChatModel | None:
     """
     Create Auditor LLM with fallback logic.
@@ -1839,6 +1841,8 @@ def create_auditor_llm(
         kwargs,
         model_name=model_name,
         effort=reasoning_effort,
+        intent=model_intent
+        or (ModelIntent.FAST if quick_mode else ModelIntent.REASONING),
         settings=settings,
     )
 
@@ -2059,7 +2063,9 @@ def _build_openai_chat(
     service_tier: str | None = None,
     unthrottled_kind: str,
     effort_preference: tuple[str, ...],
+    intent: ModelIntent | None = None,
     settings: Any | None = None,
+    include_reasoning_output: bool = False,
 ) -> BaseChatModel:
     """Shared ChatOpenAI construction for the editor and writer-fallback tiers.
 
@@ -2095,10 +2101,17 @@ def _build_openai_chat(
     reasoning_effort = _apply_openai_reasoning_effort(
         kwargs, model_name=model_name, preference=effort_preference
     )
+    if include_reasoning_output:
+        kwargs.pop("reasoning_effort", None)
+        reasoning: dict[str, Any] = {"summary": "auto"}
+        if reasoning_effort is not None:
+            reasoning["effort"] = reasoning_effort
+        kwargs["reasoning"] = reasoning
     budget = _apply_openai_generation_budget(
         kwargs,
         model_name=model_name,
         effort=reasoning_effort,
+        intent=intent,
         settings=settings,
     )
 
@@ -2159,6 +2172,7 @@ def create_editor_llm(
         service_tier_label="openai_sdk_timeout:editor",
         unthrottled_kind="editor",
         effort_preference=_EFFORT_PREFERENCE_FULL,
+        intent=ModelIntent.REASONING,
         settings=settings,
     )
 
@@ -2175,6 +2189,7 @@ def get_consultant_llm(
     max_completion_tokens: int | None = None,
     model: str | None = None,
     settings: Any | None = None,
+    model_intent: ModelIntent | None = None,
 ) -> BaseChatModel | None:
     """
     Get a consultant LLM instance for the current run.
@@ -2202,12 +2217,16 @@ def get_consultant_llm(
         return None
 
     try:
+        resolved_intent = model_intent or (
+            ModelIntent.FAST if quick_mode else ModelIntent.REASONING
+        )
         return create_consultant_llm(
             callbacks=callbacks,
             quick_mode=quick_mode,
             max_completion_tokens=max_completion_tokens,
             model=model,
             settings=settings,
+            model_intent=resolved_intent,
         )
     except Exception as e:
         logger.error(
@@ -2218,7 +2237,6 @@ def get_consultant_llm(
                 else settings.consultant_model
             ),
             quick_mode=quick_mode,
-            exc_info=True,
             **summarize_exception(e, operation="consultant_llm_init"),
         )
         return None

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import socket
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
@@ -46,7 +47,29 @@ FailureKind = Literal[
     "provider_partial_response",
     "unknown_provider_error",
 ]
-ArtifactErrorKind = FailureKind | Literal["application_error"]
+ArtifactErrorKind = (
+    FailureKind
+    | Literal[
+        "application_error",
+        "output_cap_exhausted",
+        "incomplete_structured_output",
+        "output_contract_violation",
+    ]
+)
+
+
+class RetryDisposition(StrEnum):
+    """How the invocation runtime should handle a classified failure.
+
+    ``FailureDetails.retryable`` remains the authority; the failure kind only
+    chooses the backoff family after retryability has been established. Keeping
+    that precedence here prevents callers from accidentally retrying a terminal
+    account limit merely because its kind is ``quota_error``.
+    """
+
+    NONE = "none"
+    RATE_LIMIT = "rate_limit"
+    TRANSIENT = "transient"
 
 
 @dataclass(frozen=True)
@@ -62,6 +85,40 @@ class FailureDetails:
     # This is what identifies the real vendor behind an OpenAI-compatible seat,
     # without a vendor lookup table that would need editing per new provider.
     endpoint_host: str | None = None
+
+
+def retry_disposition(details: FailureDetails) -> RetryDisposition:
+    """Return the canonical retry/backoff class for a classified failure."""
+    if not details.retryable:
+        return RetryDisposition.NONE
+    if details.kind in {"rate_limit", "quota_error"}:
+        return RetryDisposition.RATE_LIMIT
+    return RetryDisposition.TRANSIENT
+
+
+def operator_failure_reason(details: FailureDetails) -> str:
+    """Return a stable, non-sensitive explanation suitable for saved artifacts."""
+    if details.kind == "quota_error" and not details.retryable:
+        return (
+            "The configured provider's account credits or spending limit is exhausted."
+        )
+    reasons: dict[FailureKind, str] = {
+        "dns_resolution": "The configured provider hostname could not be resolved.",
+        "connect_error": "The configured provider could not be reached.",
+        "timeout": "The provider call exceeded its configured time limit.",
+        "auth_error": "The configured provider rejected authentication or access.",
+        "rate_limit": "The configured provider rate limit was exhausted.",
+        "quota_error": "The configured provider reported temporary quota exhaustion.",
+        "server_error": "The configured provider returned a server error.",
+        "model_not_found": "The configured provider model was unavailable.",
+        "bad_request": "The provider rejected the request parameters.",
+        "application_error": "The local analysis component encountered an error.",
+        "data_unavailable": "The requested source data was unavailable.",
+        "provider_safety_block": "The provider declined the request under its content policy.",
+        "provider_partial_response": "The provider returned an incomplete response.",
+        "unknown_provider_error": "The configured provider could not complete the request.",
+    }
+    return reasons[details.kind]
 
 
 _HOST_PATTERN = re.compile(r"(?:host|https?://)([A-Za-z0-9.-]+\.[A-Za-z]{2,})")
@@ -372,11 +429,24 @@ def classify_failure(
         # Expected data absence (delisted/migrated tickers), not a system fault.
         kind = "data_unavailable"
         retryable = False
-    elif isinstance(
+    elif type(root).__name__ == "ToolHistoryIntegrityError" or isinstance(
         root,
         TypeError | AttributeError | ImportError | NotImplementedError | AssertionError,
     ):
         kind = "application_error"
+        retryable = False
+    elif any(
+        marker in combined
+        for marker in (
+            "used all available credits",
+            "credit balance is too low",
+            "monthly spending limit",
+            "spending limit has been reached",
+        )
+    ):
+        # An account budget is not a transient per-request quota. Retrying it
+        # wastes calls until an operator funds the account or raises its cap.
+        kind = "quota_error"
         retryable = False
     elif "429" in statuses or any(
         marker in combined
@@ -461,7 +531,13 @@ def classify_failure(
         kind = "connect_error"
         retryable = True
     elif "400" in statuses or any(
-        marker in combined for marker in ("bad request", "invalid_request_error")
+        marker in combined
+        for marker in (
+            "bad request",
+            "invalid_request_error",
+            "context_length_exceeded",
+            "maximum context length",
+        )
     ):
         kind = "bad_request"
         retryable = False

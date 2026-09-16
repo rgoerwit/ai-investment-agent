@@ -5,6 +5,7 @@ import json
 import math
 import signal
 import sys
+import warnings
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
@@ -336,7 +337,7 @@ class TestScrapeExchanges:
 
         assert len(result) == 1
 
-    def test_empty_exchange_skipped(self):
+    def test_empty_exchange_rejected(self):
         ex = self._make_exchange("Japan", "TSE")
         config = self._make_config(ex)
 
@@ -344,12 +345,13 @@ class TestScrapeExchanges:
 
         with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
             with patch.object(find_gems, "_check_deps"):
-                with patch("find_gems.time.sleep"):
-                    result = find_gems.scrape_exchanges(config, exclude_us=True)
+                with (
+                    patch("find_gems.time.sleep"),
+                    pytest.raises(RuntimeError, match="TSE"),
+                ):
+                    find_gems.scrape_exchanges(config, exclude_us=True)
 
-        assert len(result) == 0
-
-    def test_failed_exchange_continues(self):
+    def test_failed_exchange_rejects_partial_universe(self):
         ex1 = self._make_exchange("Japan", "TSE")
         ex2 = self._make_exchange("Korea", "KRX", suffix=".KS")
         config = self._make_config(ex1, ex2)
@@ -365,11 +367,12 @@ class TestScrapeExchanges:
 
         with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
             with patch.object(find_gems, "_check_deps"):
-                with patch("find_gems.time.sleep"):
-                    result = find_gems.scrape_exchanges(config, exclude_us=True)
-
-        assert len(result) == 1
-        assert result.iloc[0]["Country"] == "Korea"
+                with (
+                    patch("find_gems.time.sleep"),
+                    pytest.raises(RuntimeError, match="TSE"),
+                ):
+                    find_gems.scrape_exchanges(config, exclude_us=True)
+        assert mock_handler.call_count == 2
 
     def test_filter_param_applied(self):
         """Config with filter: {"Type": "Equity"} should keep only matching rows."""
@@ -543,7 +546,23 @@ class TestScrapeExchanges:
         # Handler should only be called once (disabled exchange skipped)
         assert mock_handler.call_count == 1
 
-    def test_filter_empty_result_skipped(self):
+    def test_standardization_defragments_wide_excel_source(self):
+        source = pd.DataFrame({"Code": ["SAP", "DTE"]})
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", pd.errors.PerformanceWarning)
+            for index in range(120):
+                source[f"unused_{index}"] = index
+
+        exchange = self._make_exchange("Germany", "XETRA", suffix=".DE")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", pd.errors.PerformanceWarning)
+            result = find_gems._standardize_dataframe(source, exchange)
+
+        assert result["Ticker_Raw"].tolist() == ["SAP", "DTE"]
+        assert result["Country"].tolist() == ["Germany", "Germany"]
+        assert result["Exchange"].tolist() == ["XETRA", "XETRA"]
+
+    def test_filter_empty_result_rejected(self):
         """If filter removes all rows, exchange should be skipped gracefully."""
         ex = self._make_exchange("Japan", "TSE")
         ex["params"]["filter"] = {"Type": "Equity"}
@@ -560,10 +579,11 @@ class TestScrapeExchanges:
 
         with patch.dict(find_gems._HANDLERS, {"download_csv": mock_handler}):
             with patch.object(find_gems, "_check_deps"):
-                with patch("find_gems.time.sleep"):
-                    result = find_gems.scrape_exchanges(config, exclude_us=True)
-
-        assert len(result) == 0
+                with (
+                    patch("find_gems.time.sleep"),
+                    pytest.raises(RuntimeError, match="TSE"),
+                ):
+                    find_gems.scrape_exchanges(config, exclude_us=True)
 
     def test_deduplication(self):
         ex1 = self._make_exchange("Japan", "TSE1")
@@ -691,8 +711,9 @@ class TestBrazilBDRExclusion:
     )
     def test_excludes_bdr_like_suffixes(self, symbols):
         df = pd.DataFrame({"Symbol": symbols, "Company Name": ["x"] * len(symbols)})
-        result = self._scrape(df, self._make_brazil_exchange())
-        assert result.empty, result.get("YF_Ticker", pd.Series(dtype=str)).tolist()
+        assert find_gems._apply_filters(df, self._make_brazil_exchange()).empty
+        with pytest.raises(RuntimeError, match="B3"):
+            self._scrape(df, self._make_brazil_exchange())
 
     @pytest.mark.parametrize(
         "symbols",
@@ -864,6 +885,7 @@ class TestFetchAndFilter:
             "sector": "Industrials",
             "industry": "Auto Manufacturers",
             "longName": "Test Corp",
+            "country": "Japan",
             "currency": "JPY",
             "quoteType": "EQUITY",
         }
@@ -960,6 +982,52 @@ class TestFetchAndFilter:
         assert "P/E<=18 or <=24 with stronger quality" in stderr
         assert "Contextual band requires ROE>=16%/ROA>=7%" in stderr
 
+    def test_us_domiciled_foreign_listing_is_excluded_by_default(self):
+        df = self._make_tickers_df("AMZ.DE")
+        info = self._mock_info_good()
+        info.update({"longName": "Amazon.com, Inc.", "country": "United States"})
+        mock_ticker = MagicMock(info=info)
+
+        with (
+            patch("find_gems.yf.Ticker", return_value=mock_ticker),
+            patch("find_gems.time.sleep"),
+        ):
+            passing, enriched = find_gems.fetch_and_filter(df, workers=1)
+
+        assert passing.empty
+        assert len(enriched) == 1
+        assert enriched.iloc[0]["Issuer_Country"] == "United States"
+        assert enriched.iloc[0]["_reject_reason"] == "us_issuer"
+
+    def test_include_us_retains_us_domiciled_foreign_listing(self):
+        df = self._make_tickers_df("AMZ.DE")
+        info = self._mock_info_good()
+        info.update({"longName": "Amazon.com, Inc.", "country": "United States"})
+        mock_ticker = MagicMock(info=info)
+
+        with (
+            patch("find_gems.yf.Ticker", return_value=mock_ticker),
+            patch("find_gems.time.sleep"),
+        ):
+            passing, _ = find_gems.fetch_and_filter(df, include_us=True, workers=1)
+
+        assert passing["YF_Ticker"].tolist() == ["AMZ.DE"]
+
+    def test_missing_issuer_country_is_retained_and_reported(self, capsys):
+        df = self._make_tickers_df("UNKNOWN.DE")
+        info = self._mock_info_good()
+        info.pop("country")
+        mock_ticker = MagicMock(info=info)
+
+        with (
+            patch("find_gems.yf.Ticker", return_value=mock_ticker),
+            patch("find_gems.time.sleep"),
+        ):
+            passing, _ = find_gems.fetch_and_filter(df, workers=1)
+
+        assert passing["YF_Ticker"].tolist() == ["UNKNOWN.DE"]
+        assert "retained 1 with unknown domicile" in capsys.readouterr().err
+
     def test_threaded_collector_processes_all_rows(self):
         # Threaded (no-fork) enrichment must return every row's result. Results
         # complete unordered, so compare as sets.
@@ -1027,7 +1095,63 @@ class TestWriteOutputs:
         find_gems.write_outputs(df, str(out))
 
         lines = out.read_text().strip().split("\n")
-        assert lines == ["0005.HK", "2330.TW", "7203.T"]  # sorted
+        assert lines == sorted(lines, key=find_gems._candidate_order_key)
+        assert set(lines) == {"0005.HK", "2330.TW", "7203.T"}
+
+    def test_exact_duplicate_issuer_prefers_more_liquid_listing(self, tmp_path):
+        df = pd.DataFrame(
+            {
+                "YF_Ticker": ["ACME.DE", "ACME.SW", "OTHER.T"],
+                "Company_YF": ["Acme Holdings", "Acme Holdings", "Other Ltd"],
+                "Daily_Turnover_USD": [100_000.0, 900_000.0, 200_000.0],
+            }
+        )
+        out = tmp_path / "gems.txt"
+        details = tmp_path / "details.csv"
+
+        find_gems.write_outputs(df, str(out), details_path=str(details))
+
+        assert set(out.read_text().splitlines()) == {"ACME.SW", "OTHER.T"}
+        assert set(pd.read_csv(details)["YF_Ticker"]) == {"ACME.SW", "OTHER.T"}
+
+    def test_duplicate_issuer_missing_turnover_uses_lexical_ticker(self):
+        df = pd.DataFrame(
+            {
+                "YF_Ticker": ["ZZZ.DE", "AAA.SW"],
+                "Company_YF": ["Same Issuer", "Same Issuer"],
+                "Daily_Turnover_USD": [None, float("nan")],
+            }
+        )
+
+        selected, groups, discarded = find_gems._select_issuer_listings(df)
+
+        assert selected["YF_Ticker"].tolist() == ["AAA.SW"]
+        assert groups == 1
+        assert discarded == 1
+
+    def test_blank_and_similar_issuer_names_are_not_merged(self):
+        df = pd.DataFrame(
+            {
+                "YF_Ticker": ["A.DE", "B.DE", "C.DE", "D.DE"],
+                "Company_YF": [None, "", "Acme plc", "Acme PLC"],
+                "Daily_Turnover_USD": [1.0, 2.0, 3.0, 4.0],
+            }
+        )
+
+        selected, groups, discarded = find_gems._select_issuer_listings(df)
+
+        assert selected["YF_Ticker"].tolist() == ["A.DE", "B.DE", "C.DE", "D.DE"]
+        assert groups == 0
+        assert discarded == 0
+
+    def test_digest_order_is_stable_when_membership_changes(self):
+        original = ["0005.HK", "2330.TW", "7203.T", "ACME.DE"]
+        expanded = [*original, "NEW.SW"]
+
+        ordered = sorted(original, key=find_gems._candidate_order_key)
+        expanded_order = sorted(expanded, key=find_gems._candidate_order_key)
+
+        assert [ticker for ticker in expanded_order if ticker in original] == ordered
 
     def test_details_csv(self, tmp_path):
         df = pd.DataFrame(
@@ -1342,11 +1466,11 @@ class TestApplyFilters:
         result = find_gems._apply_filters(df, config)
         assert len(result) == 3
 
-    def test_missing_column_ignored(self):
+    def test_missing_column_rejected(self):
         df = pd.DataFrame({"Name": ["A", "B"]})
         config = {"params": {"filter": {"NonExistent": "X"}}}
-        result = find_gems._apply_filters(df, config)
-        assert len(result) == 2
+        with pytest.raises(ValueError, match="filter column"):
+            find_gems._apply_filters(df, config)
 
 
 # ============================================================
@@ -2016,8 +2140,8 @@ class TestExchangeScrapeIntegration:
     - Handler returning completely empty DataFrame after fetching a response (fail)
     - Zero rows surviving filters (fail — scraper or filters fundamentally broken)
 
-    Row counts, column names, and minor structural variations are NOT checked here
-    because live exchange websites change frequently and cause false failures.
+    Configured unique-ticker floors are checked after the production filters and
+    ticker normalization, so repeated pages cannot conceal a degraded source.
 
     Run with: pytest tests/scripts/test_find_gems.py::TestExchangeScrapeIntegration -v
     """
@@ -2093,6 +2217,13 @@ class TestExchangeScrapeIntegration:
                 f"{exchange['exchange_name']}: 0 rows survive after filtering "
                 "(filters may be misconfigured or source data format changed)"
             )
+            standardized = find_gems._standardize_dataframe(df, exchange)
+            tickers = standardized.apply(
+                lambda row: find_gems._generate_yf_ticker(row, exchange), axis=1
+            ).dropna()
+            assert tickers.nunique() >= int(exchange.get("min_expected_rows") or 1)
+            if exchange["yahoo_suffix"] == ".RO":
+                assert {"TLV.RO", "H2O.RO", "SNP.RO"} <= set(tickers)
 
     def test_b3_source_includes_known_midcaps(self):
         """Catches the May 2026 regression where the B3 source URL returned
@@ -2144,6 +2275,7 @@ class TestExchangeScrapeIntegration:
 # return basic financials for these blue-chip names, something is wrong
 # at the data-source layer — not in legitimate filter rejection territory.
 _EXCHANGE_CANARIES: dict[str, str] = {
+    ".RO": "TLV.RO",  # Banca Transilvania (BVB regulated market)
     ".T": "7203.T",  # Toyota (Japan TSE)
     ".HK": "0005.HK",  # HSBC (Hong Kong)
     ".TW": "2330.TW",  # TSMC (Taiwan)
@@ -2214,6 +2346,10 @@ class TestExchangeMetricCanary:
             f"marketCap/netIncomeToCommon fallback failed). Every {suffix} "
             f"listing will be silently rejected at the missing-P/E gate."
         )
+        if suffix == ".RO":
+            assert result["Currency_YF"] == "RON"
+            assert result["Market_Cap_USD"] > 50_000_000
+            assert result["Daily_Turnover_USD"] > 100_000
 
 
 # ============================================================
@@ -2271,7 +2407,7 @@ class TestHandleScrapeHtmlPagination:
         df = find_gems._handle_scrape_html(self._config(max_pages=1), session)
 
         assert len(df) == 10
-        # Should have fetched exactly page 1 (no ?p=2 call)
+        # Should have fetched exactly page 1 (no ?page=2 call)
         assert session.get.call_count == 1
 
     def test_two_pages_concatenated(self):
@@ -2281,8 +2417,8 @@ class TestHandleScrapeHtmlPagination:
         page2_syms = [f"B{i}" for i in range(500)]
         pages = {
             base: _make_html_table(page1_syms),
-            f"{base}?p=2": _make_html_table(page2_syms),
-            f"{base}?p=3": "<html><body><p>No table here</p></body></html>",
+            f"{base}?page=2": _make_html_table(page2_syms),
+            f"{base}?page=3": "<html><body><p>No table here</p></body></html>",
         }
         session = _make_mock_session(pages)
 
@@ -2292,24 +2428,24 @@ class TestHandleScrapeHtmlPagination:
         assert session.get.call_count == 3  # page 1, page 2, page 3 (stops)
 
     def test_custom_page_param_used_for_pagination(self):
-        """Some sources use ?page=N rather than the default ?p=N pagination."""
+        """An explicit parameter overrides the default ?page=N pagination."""
         base = self.BASE_CONFIG["source_url"]
         page1_syms = [f"A{i}" for i in range(500)]
         page2_syms = [f"B{i}" for i in range(300)]
         pages = {
             base: _make_html_table(page1_syms),
-            f"{base}?page=2": _make_html_table(page2_syms),
+            f"{base}?p=2": _make_html_table(page2_syms),
         }
         session = _make_mock_session(pages)
         config = self._config(max_pages=5)
-        config["params"]["page_param"] = "page"
+        config["params"]["page_param"] = "p"
 
         df = find_gems._handle_scrape_html(config, session)
 
         assert len(df) == 800
         fetched_urls = [call.args[0] for call in session.get.call_args_list]
-        assert f"{base}?page=2" in fetched_urls
-        assert f"{base}?p=2" not in fetched_urls
+        assert f"{base}?p=2" in fetched_urls
+        assert f"{base}?page=2" not in fetched_urls
 
     def test_partial_last_page_stops_early(self):
         """When page N has fewer rows than page 1, it's the last page and is still collected."""
@@ -2318,7 +2454,7 @@ class TestHandleScrapeHtmlPagination:
         page2_syms = [f"B{i}" for i in range(300)]  # partial page
         pages = {
             base: _make_html_table(page1_syms),
-            f"{base}?p=2": _make_html_table(page2_syms),
+            f"{base}?page=2": _make_html_table(page2_syms),
         }
         session = _make_mock_session(pages)
 
@@ -2328,21 +2464,20 @@ class TestHandleScrapeHtmlPagination:
         assert len(df) == 800
         assert session.get.call_count == 2
 
-    def test_http_error_on_page_2_returns_page_1(self):
-        """An HTTP error on page 2 is silently swallowed; page 1 data returned."""
+    def test_http_error_on_page_2_rejects_partial_source(self):
+        """A transport failure is not proof that pagination completed."""
         base = self.BASE_CONFIG["source_url"]
         page1_syms = [f"A{i}" for i in range(500)]
         import requests as _req
 
         pages = {
             base: _make_html_table(page1_syms),
-            f"{base}?p=2": _req.exceptions.ConnectionError("timeout"),
+            f"{base}?page=2": _req.exceptions.ConnectionError("timeout"),
         }
         session = _make_mock_session(pages)
 
-        df = find_gems._handle_scrape_html(self._config(max_pages=3), session)
-
-        assert len(df) == 500
+        with pytest.raises(_req.exceptions.ConnectionError):
+            find_gems._handle_scrape_html(self._config(max_pages=3), session)
 
     def test_no_table_on_page_1_raises(self):
         """No table on page 1 raises ValueError (not silently returns empty)."""
@@ -2360,12 +2495,12 @@ class TestHandleScrapeHtmlPagination:
         full_page = _make_html_table([f"X{i}" for i in range(500)])
         pages = {base: full_page}
         for p in range(2, 10):
-            pages[f"{base}?p={p}"] = full_page
+            pages[f"{base}?page={p}"] = full_page
         session = _make_mock_session(pages)
 
         df = find_gems._handle_scrape_html(self._config(max_pages=2), session)
 
-        assert len(df) == 1000
+        assert len(df) == 500
         assert session.get.call_count == 2  # page 1 + page 2 only
 
     def test_exchange_configs_have_paginate_key(self):
@@ -2386,6 +2521,7 @@ class TestHandleScrapeHtmlPagination:
         assert len(found) == len(targets), f"Missing configs: {targets - set(found)}"
 
         for name, ex in found.items():
+            assert ex["params"]["page_param"] == "page"
             assert ex["params"].get("paginate_max_pages", 1) > 1, (
                 f"{name} missing paginate_max_pages > 1"
             )

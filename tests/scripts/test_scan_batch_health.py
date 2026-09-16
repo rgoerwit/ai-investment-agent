@@ -28,6 +28,8 @@ def _write(results_dir: Path, ticker: str, date: str, time: str, **kw) -> Path:
         "consultant_review_status": kw.get("consultant_review_status", "COMPLETED"),
         "optional_failures": kw.get("optional_failures", []),
         "required_failures": kw.get("required_failures", []),
+        "pre_screening_result": kw.get("pre_screening_result"),
+        "screening_eligibility": kw.get("screening_eligibility"),
     }
     payload = {
         "prediction_snapshot": snapshot,
@@ -80,6 +82,25 @@ class TestDetectAnomalies:
     def test_llm_failures(self):
         rec = self._rec(run_summary={"publishable": True, "llm_failures": 2})
         assert any("llm_failures=2" in a for a in sbh.detect_anomalies(rec, None))
+
+    def test_malformed_llm_failure_telemetry_is_flagged_without_crashing(self):
+        rec = self._rec(run_summary={"publishable": True, "llm_failures": "unknown"})
+
+        assert "invalid llm_failures telemetry" in sbh.detect_anomalies(rec, None)
+
+    def test_contradictory_screening_outcome_is_flagged(self):
+        rec = self._rec(
+            run_summary={
+                "publishable": True,
+                "pre_screening_result": "REJECT",
+                "screening_eligibility": "QUALIFIES",
+            }
+        )
+
+        assert any(
+            "screening outcome mismatch: REJECT / QUALIFIES" in anomaly
+            for anomaly in sbh.detect_anomalies(rec, None)
+        )
 
     def test_consultant_error_and_unparsed(self):
         for bad in ("ERROR", "UNPARSED"):
@@ -228,6 +249,23 @@ class TestPriorVerdictSameMode:
 
 
 class TestScanEndToEnd:
+    def test_scan_flags_persisted_screening_outcome_mismatch(self, tmp_path: Path):
+        _write(
+            tmp_path,
+            "BAD.T",
+            "20260712",
+            "120000",
+            verdict="DO_NOT_INITIATE",
+            pre_screening_result="REJECT",
+            screening_eligibility="QUALIFIES",
+        )
+
+        result = sbh.scan(tmp_path, "20260712")
+
+        assert result.total == 1
+        assert result.flagged[0][0].ticker == "BAD.T"
+        assert "screening outcome mismatch: REJECT / QUALIFIES" in result.flagged[0][1]
+
     def test_scan_flags_real_error_and_full_flip_only(self, tmp_path: Path):
         # Full flip vs an explicit full prior → flagged.
         _write(tmp_path, "AAA.T", "20260302", "120000", verdict="DO_NOT_INITIATE")
@@ -270,6 +308,40 @@ class TestScanEndToEnd:
         _write(tmp_path, "OK.T", "20260712", "120000", verdict="HOLD")
         result = sbh.scan(tmp_path, "20260712")
         assert result.total == 1
+
+    def test_unrelated_history_is_not_opened(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        unrelated = _write(tmp_path, "UNRELATED.T", "20260101", "120000", verdict="BUY")
+        prior = _write(
+            tmp_path, "AAA.T", "20260302", "120000", verdict="DO_NOT_INITIATE"
+        )
+        current = _write(tmp_path, "AAA.T", "20260712", "120000", verdict="BUY")
+        original_read_text = Path.read_text
+        opened: list[Path] = []
+
+        def tracked_read_text(path: Path, *args, **kwargs):
+            opened.append(path)
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", tracked_read_text)
+
+        result = sbh.scan(tmp_path, "20260712")
+
+        assert result.total == 1
+        assert current in opened
+        assert prior in opened
+        assert unrelated not in opened
+
+    def test_malformed_newest_predecessor_is_skipped(self, tmp_path: Path):
+        _write(tmp_path, "AAA.T", "20260101", "120000", verdict="HOLD")
+        (tmp_path / "AAA.T_20260601_120000_analysis.json").write_text("{broken")
+        _write(tmp_path, "AAA.T", "20260712", "120000", verdict="BUY")
+
+        result = sbh.scan(tmp_path, "20260712")
+
+        flagged = {record.ticker: anomalies for record, anomalies in result.flagged}
+        assert any("verdict flip: HOLD → BUY" in item for item in flagged["AAA.T"])
 
 
 class TestModifiedSinceSelection:
@@ -364,6 +436,28 @@ class TestFreshOutputCheck:
 
         assert check.status == "AMBIGUOUS"
         assert check.publishable is False
+
+    def test_fresh_check_does_not_open_other_tickers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        target = _write(tmp_path, "X.T", "20260712", "120000")
+        unrelated = _write(tmp_path, "Y.T", "20260712", "120001")
+        os.utime(target, (5000, 5000))
+        os.utime(unrelated, (5001, 5001))
+        original_read_text = Path.read_text
+        opened: list[Path] = []
+
+        def tracked_read_text(path: Path, *args, **kwargs):
+            opened.append(path)
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", tracked_read_text)
+
+        check = sbh.check_fresh_ticker_output(tmp_path, "X.T", 3000)
+
+        assert check.status == "PUBLISHABLE"
+        assert target in opened
+        assert unrelated not in opened
 
 
 class TestDegradedButPublishable:

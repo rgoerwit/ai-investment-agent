@@ -125,6 +125,9 @@ class NormalizedPosition(BaseModel):
     )
     valuation_valid: bool = True
     valuation_issue: str | None = None
+    # A genuinely closed position (quantity and both value legs zero). Distinct
+    # from `quantity == 0` alone, which an inconsistent broker row can also show.
+    position_flat: bool = False
     currency: str = "USD"  # ISO code for the LOCAL currency above
     current_price_local: float = 0.0  # LOCAL currency
     acquired_date: str | None = None  # YYYY-MM-DD if lot/history data is available
@@ -154,6 +157,24 @@ class NormalizedPosition(BaseModel):
         return self.ticker.exchange
 
 
+class UnresolvedBrokerPosition(BaseModel):
+    """A real broker holding quarantined because it has no safe research identity.
+
+    This type deliberately has no ``Ticker`` field. It can be displayed and
+    included in portfolio accounting, but cannot enter reconciliation, research,
+    watchlist, dip-watch, or order construction paths.
+    """
+
+    conid: int = 0
+    broker_token: str
+    quantity: float = 0.0
+    currency: str = "USD"
+    market_value_usd: float = 0.0
+    valuation_valid: bool = True
+    valuation_issue: str | None = None
+    reason: str
+
+
 # Why a held position is being acted on. A portfolio action requires portfolio
 # evidence: a stock-level rejection may trigger refresh, review, replacement
 # analysis, or an exit — but it must not decide among those alone.
@@ -168,7 +189,8 @@ class NormalizedPosition(BaseModel):
 #   CONFIRMED_THESIS_FAILURE   – reject verdict confirmed by a prior full-mode
 #                                reject with minimum spacing (the forcing function
 #                                that prevents deadwood accumulating forever)
-#   THESIS_REASSESSMENT        – single unconfirmed reject — review + refresh
+#   THESIS_REASSESSMENT        – unconfirmed hard reject — review + refresh;
+#                                price-only soft rejects remain on cadence
 #   ENTRY_CONSTRAINT           – analyzer would not initiate at this price, but
 #                                fundamentals are intact ("not cheap enough to
 #                                buy" is not evidence to exit)
@@ -203,18 +225,45 @@ class PortfolioEvidence(BaseModel):
     Assembled by the analysis index from already-saved fields (run_summary
     markers, root red_flags) — never reparsed from prose at reconcile time.
     The three flag families are deliberately separate: buy-blocking evidence
-    means the gate arithmetic is indeterminate (a REVIEW signal), compliance
-    flags carry per-position burdens independent of dollar size (PFIC Form
-    8621), and mandatory-exit restrictions are the only flags that force a
-    sale. ``complete=False`` marks legacy artifacts that predate the
-    persisted markers — classify conservatively, never more favorably.
+    blocks an initiation (a REVIEW signal), compliance flags carry per-position
+    burdens independent of dollar size (PFIC Form 8621), and mandatory-exit
+    restrictions are the only flags that force a sale. ``complete=False`` marks
+    legacy artifacts that predate the persisted markers — classify
+    conservatively, never more favorably.
+
+    Buy-blocking flags are **not** one kind of claim, and conflating them cost
+    real money. Two cases:
+
+    * *Settled* — the gate was computed and the stock failed it
+      (``LIQUIDITY_HARD_FAIL``: a measured turnover against a fixed thesis
+      threshold, minted ``action=AUTO_REJECT``). Nothing a further analysis can
+      produce will change it.
+    * *Indeterminate* — the gate arithmetic could not be established
+      (``*_EVIDENCE_GAP``, ``*_SCORE_UNRELIABLE``, minted ``action=REVIEW``).
+      More research may genuinely close it.
+
+    Both block a buy, so ``buy_blocking_flag_types`` remains their union and
+    every disposition consumer keeps reading it. Only the refresh scheduler
+    needs the split: it must never pay for an analysis that cannot change the
+    answer. ``settled_reject_flag_types`` defaults to empty so a legacy
+    artifact — where the distinction was never recorded — is treated as
+    indeterminate, preserving visibility at the cost of at most one refresh.
     """
 
     complete: bool = False
     dni_review_candidate: bool = False  # quality-gate-passing DNI marker
     buy_blocking_flag_types: tuple[str, ...] = ()  # blocks_buy red flags
+    settled_reject_flag_types: tuple[str, ...] = ()  # blocks_buy + AUTO_REJECT
     compliance_flag_types: tuple[str, ...] = ()  # PFIC_/VIE_/CMIC_ class
     mandatory_exit_flag_types: tuple[str, ...] = ()  # reserved; empty today
+
+    @property
+    def indeterminate_flag_types(self) -> tuple[str, ...]:
+        """Buy-blocking flags a further paid analysis could plausibly resolve."""
+        settled = set(self.settled_reject_flag_types)
+        return tuple(
+            flag for flag in self.buy_blocking_flag_types if flag not in settled
+        )
 
 
 class TradeBlockData(BaseModel):
@@ -422,6 +471,7 @@ class PortfolioSummary(BaseModel):
     cash_pct: float = 0.0
     position_count: int = 0
     available_cash_usd: float = 0.0  # settled_cash minus cash_buffer
+    unresolved_positions: list[UnresolvedBrokerPosition] = Field(default_factory=list)
     # Concentration weights (% of portfolio value) — populated by reconcile()
     sector_weights: dict[str, float] = Field(default_factory=dict)
     exchange_weights: dict[str, float] = Field(default_factory=dict)
