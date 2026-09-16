@@ -5,6 +5,7 @@ import json
 import math
 import signal
 import sys
+import warnings
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
@@ -544,6 +545,22 @@ class TestScrapeExchanges:
         assert result.iloc[0]["YF_Ticker"] == "7203.T"
         # Handler should only be called once (disabled exchange skipped)
         assert mock_handler.call_count == 1
+
+    def test_standardization_defragments_wide_excel_source(self):
+        source = pd.DataFrame({"Code": ["SAP", "DTE"]})
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", pd.errors.PerformanceWarning)
+            for index in range(120):
+                source[f"unused_{index}"] = index
+
+        exchange = self._make_exchange("Germany", "XETRA", suffix=".DE")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", pd.errors.PerformanceWarning)
+            result = find_gems._standardize_dataframe(source, exchange)
+
+        assert result["Ticker_Raw"].tolist() == ["SAP", "DTE"]
+        assert result["Country"].tolist() == ["Germany", "Germany"]
+        assert result["Exchange"].tolist() == ["XETRA", "XETRA"]
 
     def test_filter_empty_result_rejected(self):
         """If filter removes all rows, exchange should be skipped gracefully."""
@@ -1449,11 +1466,11 @@ class TestApplyFilters:
         result = find_gems._apply_filters(df, config)
         assert len(result) == 3
 
-    def test_missing_column_ignored(self):
+    def test_missing_column_rejected(self):
         df = pd.DataFrame({"Name": ["A", "B"]})
         config = {"params": {"filter": {"NonExistent": "X"}}}
-        result = find_gems._apply_filters(df, config)
-        assert len(result) == 2
+        with pytest.raises(ValueError, match="filter column"):
+            find_gems._apply_filters(df, config)
 
 
 # ============================================================

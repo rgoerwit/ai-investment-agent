@@ -24,7 +24,7 @@
       "exchange_name": "NYSE/NASDAQ/AMEX",
       "enabled": true,
       "method": "download_csv",
-      "source_url": "http://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt",
+      "source_url": "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt",
       "yahoo_suffix": "",
       "min_expected_rows": 2000,
       "params": {

@@ -20,6 +20,143 @@ def bvb():
     return {**ex, "enabled": True, "min_expected_rows": 2}
 
 
+@pytest.fixture
+def nasdaq():
+    config = json.loads(Path("config/exchanges.json").read_text())
+    ex = next(ex for ex in config["exchanges"] if ex["country"] == "United States")
+    return {**ex, "min_expected_rows": 2}
+
+
+def test_nasdaq_csv_filter_and_copy_preserve_real_symbols(nasdaq, monkeypatch):
+    content = (
+        "Nasdaq Traded|Symbol|Security Name|Test Issue\n"
+        "Y|AAPL|Apple Inc.|N\n"
+        "Y|ZZZZ|Test Security|Y\n"
+        "Y|MSFT|Microsoft Corporation|N\n"
+        "File Creation Time: 0916202609:00|||\n"
+    )
+    session = MagicMock()
+    session.get.return_value = _response(content)
+    monkeypatch.setattr(find_gems, "_get_session", lambda: session)
+    monkeypatch.setattr(find_gems.time, "sleep", lambda _: None)
+    raw = find_gems._handle_download_csv(nasdaq, session)
+    filtered = find_gems._apply_filters(raw, nasdaq)
+    assert filtered.index.tolist() == [0, 2]
+    standardized = find_gems._standardize_dataframe(filtered, nasdaq)
+    assert standardized.Ticker_Raw.tolist() == ["AAPL", "MSFT"]
+    assert standardized.Company.tolist() == ["Apple Inc.", "Microsoft Corporation"]
+    assert "Symbol" in raw and "Ticker_Raw" not in raw
+    result = find_gems.scrape_exchanges(
+        {"meta": {"description": "test"}, "exchanges": [nasdaq]}, exclude_us=False
+    )
+    assert result.YF_Ticker.tolist() == ["AAPL", "MSFT"]
+    assert nasdaq["source_url"].startswith("https://")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<html><body>Request unsuccessful</body></html>",
+        "<!DOCTYPE HTML>\n<html>Access denied</html>",
+    ],
+)
+def test_csv_rejects_persistent_html_without_exposing_body(nasdaq, body, monkeypatch):
+    session = MagicMock()
+    responses = [_response(body), _response(body)]
+    for response in responses:
+        response.close = MagicMock()
+    session.get.side_effect = responses
+    sleep = MagicMock()
+    monkeypatch.setattr(find_gems.time, "sleep", sleep)
+    with pytest.raises(ValueError, match="CSV source returned HTML") as error:
+        find_gems._handle_download_csv(nasdaq, session)
+    assert body not in str(error.value)
+    assert session.get.call_count == 2
+    sleep.assert_called_once_with(0.5)
+    for response in responses:
+        response.close.assert_called_once()
+
+
+def test_csv_challenge_then_valid_recovers_with_one_retry(nasdaq, monkeypatch):
+    challenge = _response(
+        '<html><iframe src="/_Incapsula_Resource">Request unsuccessful</iframe></html>'
+    )
+    challenge.close = MagicMock()
+    valid = _response("Symbol|Security Name|Test Issue\nAAPL|Apple|N\n")
+    session = MagicMock()
+    session.get.side_effect = [challenge, valid]
+    sleep = MagicMock()
+    monkeypatch.setattr(find_gems.time, "sleep", sleep)
+    assert find_gems._handle_download_csv(nasdaq, session).Symbol.tolist() == ["AAPL"]
+    assert session.get.call_count == 2
+    challenge.close.assert_called_once()
+    sleep.assert_called_once_with(0.5)
+
+
+def test_valid_csv_needs_one_request(nasdaq, monkeypatch):
+    session = MagicMock()
+    session.get.return_value = _response(
+        "Symbol|Security Name|Test Issue\nAAPL|Apple|N\n"
+    )
+    sleep = MagicMock()
+    monkeypatch.setattr(find_gems.time, "sleep", sleep)
+    assert find_gems._handle_download_csv(nasdaq, session).Symbol.tolist() == ["AAPL"]
+    assert session.get.call_count == 1
+    sleep.assert_not_called()
+
+
+def test_csv_transport_and_challenge_share_retry_budget(nasdaq, monkeypatch):
+    challenge = _response("<html>Request unsuccessful</html>")
+    challenge.close = MagicMock()
+    session = MagicMock()
+    session.get.side_effect = [requests.Timeout(), challenge]
+    sleep = MagicMock()
+    monkeypatch.setattr(find_gems.time, "sleep", sleep)
+    with pytest.raises(ValueError, match="CSV source returned HTML"):
+        find_gems._handle_download_csv(nasdaq, session)
+    assert session.get.call_count == 2
+    sleep.assert_called_once_with(0.5)
+    challenge.close.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("content", "failure"),
+    [
+        ("Symbol|Security Name\nAAPL|Apple\nMSFT|Microsoft\n", "filter column"),
+        (
+            "Wrong Symbol|Security Name|Test Issue\nAAPL|Apple|N\nMSFT|Microsoft|N\n",
+            "ticker column",
+        ),
+    ],
+)
+def test_missing_source_columns_fail_before_ticker_generation(nasdaq, content, failure):
+    session = MagicMock()
+    session.get.return_value = _response(content)
+    raw = find_gems._handle_download_csv(nasdaq, session)
+    with pytest.raises(ValueError, match=failure):
+        find_gems._standardize_dataframe(find_gems._apply_filters(raw, nasdaq), nasdaq)
+
+
+@pytest.mark.parametrize("rows", ["", "AAPL|Apple|Y\n", "AAPL|Apple|N\n"])
+def test_empty_filtered_empty_or_partial_csv_cannot_publish(nasdaq, rows, monkeypatch):
+    session = MagicMock()
+    session.get.return_value = _response("Symbol|Security Name|Test Issue\n" + rows)
+    monkeypatch.setattr(find_gems, "_get_session", lambda: session)
+    monkeypatch.setattr(find_gems.time, "sleep", lambda _: None)
+    with pytest.raises(RuntimeError):
+        find_gems.scrape_exchanges(
+            {"meta": {"description": "test"}, "exchanges": [nasdaq]}, exclude_us=False
+        )
+
+
+def test_missing_exclusion_column_fails_closed():
+    with pytest.raises(ValueError, match="exclusion column"):
+        find_gems._apply_filters(
+            pd.DataFrame({"Symbol": ["AAPL"]}),
+            {"params": {"exclude_filter": {"ETF": "Y"}}},
+        )
+
+
 def _html(symbols=("TLV", "H2O")):
     rows = "".join(
         f'<tr><td><a href="/FinancialInstruments/Details/FinancialInstrumentsDetails.aspx?s={s}">{s}</a> RO0000000000</td>'

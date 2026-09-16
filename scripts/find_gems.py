@@ -348,8 +348,9 @@ def _standardize_dataframe(df, config):
 
     ticker_col = params.get("ticker_col")
     actual_ticker = _find_col_fuzzy(df, ticker_col)
-    if actual_ticker:
-        rename_dict[actual_ticker] = "Ticker_Raw"
+    if actual_ticker is None:
+        raise ValueError("Source missing configured ticker column")
+    rename_dict[actual_ticker] = "Ticker_Raw"
 
     name_col = params.get("name_col")
     actual_name = _find_col_fuzzy(df, name_col)
@@ -362,7 +363,9 @@ def _standardize_dataframe(df, config):
         if actual_source:
             rename_dict[actual_source] = std_col
 
-    df = df.rename(columns=rename_dict)
+    # Excel sources such as XETRA can arrive as highly fragmented frames.  A copy
+    # consolidates their internal blocks before the standardized columns are added.
+    df = df.rename(columns=rename_dict).copy()
     df["Country"] = config["country"]
     df["Exchange"] = config["exchange_name"]
 
@@ -423,7 +426,7 @@ def _handle_download_json(config, session):
 
 
 def _handle_download_csv(config, session):
-    response = _fetch_source(session, config["source_url"])
+    response = _fetch_source(session, config["source_url"], expect_csv=True)
     params = config["params"]
     skip = params.get("skip_rows", 0)
     sep = params.get("delimiter", ",")
@@ -452,12 +455,22 @@ def _handle_download_excel(config, session):
     return pd.read_excel(io.BytesIO(response.content), sheet_name=sheet, skiprows=skip)
 
 
-def _fetch_source(session, url):
-    """Retry one transient GET, including failures while reading the body."""
+def _fetch_source(session, url, *, expect_csv=False):
+    """Share one retry across transport, server and CSV HTML-response failures."""
     for attempt in range(2):
         try:
             response = session.get(url)
             response.raise_for_status()
+            if expect_csv and re.search(
+                rb"<(?:!doctype\s+html|html)\b", response.content[:1024], re.I
+            ):
+                response.close()
+                if attempt:
+                    raise ValueError(
+                        "CSV source returned HTML instead of a symbol directory"
+                    )
+                time.sleep(0.5)
+                continue
             return response
         except requests.exceptions.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else None
@@ -621,6 +634,8 @@ def _apply_filters(df, config):
     if filter_rules:
         for col, value in filter_rules.items():
             actual_col = _find_col_fuzzy(df, col)
+            if actual_col is None:
+                raise ValueError("Source missing configured filter column")
             if actual_col:
                 df = df[df[actual_col].astype(str).str.strip() == str(value)]
 
@@ -629,6 +644,8 @@ def _apply_filters(df, config):
     if exclude_rules:
         for col, values in exclude_rules.items():
             actual_col = _find_col_fuzzy(df, col)
+            if actual_col is None:
+                raise ValueError("Source missing configured exclusion column")
             if actual_col:
                 if isinstance(values, list):
                     df = df[~df[actual_col].astype(str).str.strip().isin(values)]
