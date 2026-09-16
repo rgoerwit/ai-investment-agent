@@ -5,238 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.0.0] - 2026-09-16
 
 ### Added
 
-- **Romanian equity screening** — BVB Regulated Market equities use the official
-  listing table with explicit market-segment and symbol checks. RON conversion,
-  official-document hosts, and Romanian portfolio concentration labels complete
-  the existing ticker metadata path. AeRO is excluded.
-
-- **Canonical decision-policy and evidence reporting** — Saved artifacts now retain
-  deterministic verdict interventions, scoped tool-outcome telemetry, external-
-  evidence promotion counts, and structural-recovery triggers; report memos,
-  compliance visuals, Portfolio Manager transcript labels, and decision-evidence
-  tables consume the canonical records while legacy `tool_failures` remains available
-  for comparison.
-
-- **Balanced debate reasoning handoffs** — An opt-in full-run mode gives both
-  second-round researchers and Research Manager symmetric, bounded Round-1
-  rationale adjuncts, with provider-summary fallback, automatic budgets, and
-  telemetry-only persistence.
-
-### Fixed
-
-- **Exchange-source completeness** — Tokyo uses the current JPX spreadsheet;
-  StockAnalysis pagination uses the correct query parameter. Repeated pages no
-  longer inflate unique-ticker floors, and failed enabled sources block Stage 0
-  before existing output is replaced. Transient transport failures receive one
-  bounded retry and HTML decoding respects configured or detected encoding.
-
-- **Refresh scheduler stopped paying to re-analyse settled rejections** — A held
-  position whose only buy-blocking evidence is a resolved gate failure (for example a
-  measured liquidity hard fail, minted `AUTO_REJECT`) is no longer treated as an
-  indeterminate evidence gap, so it stays visible under operator review instead of
-  re-entering the urgent refresh stream on every portfolio invocation; settled
-  evidence rejoins the ordinary fair cycle near analysis expiry. Buy-blocking
-  flags are now split at the analysis-index projection into settled rejections and
-  indeterminate gaps; `buy_blocking_flag_types` remains their union for every
-  disposition consumer.
-
-- **Broker contract identifiers no longer escape as research tickers** — Position
-  ingestion now treats `IBCID<conid>` as an identity-recovery instruction, validates
-  cache keys and confidence, quarantines unresolved holdings without constructing a
-  ticker, preserves their accounting and currency exposure, and withholds BUY/ADD
-  authority while inventory identity is incomplete.
-
-- **Unrepaired-refresh backoff now actually applies** — The backoff was keyed on the
-  buy-blocking flag composition, which varies run to run with search quality, so the
-  stored key never matched and a changed key silently deleted the entry. It is now
-  keyed on the action basis, and scheduler state holds one entry per ticker
-  (`unrepaired_refresh`, state version 3) rather than a nested per-condition map. A
-  genuinely different basis remains immediately eligible; price no longer participates
-  in scheduler identity at all.
-
-- **`blocking` refresh policy no longer starves normal-cycle work** — It passed only
-  the urgent stream to the planner, wasting every slot urgent did not fill; a portfolio
-  with one permanently urgent row and 64 due-soon rows refreshed exactly one analysis
-  per run. Urgent is still served first, and the remaining budget is filled from the
-  normal cycle.
+- **Auditable analysis controls** — Canonical decision-policy records, evidence
+  promotion, tool-execution accounting, research budgets, recovery telemetry, and
+  decision-evidence reporting now make verdict changes and degraded runs traceable.
+- **Broader, safer screening** — Add official BVB Regulated Market coverage and RON
+  handling, plus resilient current feeds for ASX, JPX, Nasdaq, XETRA, and paginated
+  StockAnalysis sources.
+- **Optional balanced debate handoffs** — Full runs can pass bounded Round-1 rationale
+  capsules symmetrically to both second-round researchers and Research Manager.
+- **Portable agent guidance** — Add public, secret-safe Codex and Claude guidance,
+  focused repository skills, and automated metadata/dependency guards.
 
 ### Changed
 
-- **Cooled dependency round (August 2026)** — Nineteen dependencies move to
-  releases at least fourteen days old, resolved as exact pins in three grouped
-  commits: the LangChain/LangGraph/LangSmith/Langfuse cluster with the OpenAI and
-  Anthropic SDKs, the Google GenAI SDK, and the development tools. `langchain`
-  itself is deliberately held at 1.3.14 — 1.3.15 and 1.3.16 require a
-  `langchain-core` newer than the cooldown allows. Each resolution was verified
-  by diffing the whole lockfile rather than the named packages, so no
-  unrequested transitive moved.
-- **Google GenAI SDK advances past its 1.x cap** — `google-genai` moves to
-  2.17.0. Version 2.0.0's only breaking changes are Interactions-only, with
-  upstream stating `GenerateContent` is unaffected; nothing in `src/` imports the
-  SDK directly, and the two behaviours this repository couples to — service-tier
-  enums and optional aiohttp — landed in 1.70.0 and 1.65.0, below the version
-  already in use. Verified by a live quick-mode analysis confirming the
-  service-tier stamp still reaches the request config.
-- **The pre-commit ruff revision tracks the development pin** — The hook gates
-  every commit, so a drift between it and `pyproject.toml` let local runs and the
-  gate disagree about formatting.
-- **Model Context Protocol stays on 1.x deliberately** — `docs/MCP.md` records
-  why: three of the five client-side changes in v2 fail silently, including an
-  HTTP client swap that degrades server-initiated messages without raising, and
-  v2 offers no capability this repository uses.
-
-### Security
-
-- **Declared floors for `urllib3` and `starlette` now track their fixed
-  releases** — Both admitted versions predating known advisories while the
-  lockfile happened to resolve above them. Dependency scanners read the
-  lockfile, so this class of gap is invisible to CI by construction. Neither
-  correction moved a locked version.
-- **Security pins carry their rationale** — The `pyasn1`, `cryptography` and
-  `pypdf` pins name the advisories they remediate. `pypdf` advances to 6.16.1 to
-  bound XForm text-extraction work under CVE-2026-84311. `pyasn1` in particular
-  looks redundant, since the resolver reaches the pinned version unaided today,
-  but three of the five CVEs against the version its parent floors at are fixed
-  only at the pinned release.
+- **Fail-closed outcome semantics** — Eligibility rejection, analysis failure, and
+  publishability are now distinct canonical states; deterministic growth, liquidity,
+  legal-coverage, and evidence rules remain authoritative across provider choices.
+- **Bounded provider-neutral execution** — Shared research loops, structural recovery,
+  timeout classification, token reserves, and cost attribution now follow code-owned
+  contracts in quick and full modes.
+- **More efficient batch runs** — The pipeline reuses recent complete same-mode
+  artifacts, excludes US-domiciled secondary listings, deduplicates issuers, and keeps
+  candidate order stable across restarts.
+- **Reviewed dependency refresh** — Update the LLM, orchestration, data, observability,
+  and development stacks while deliberately retaining MCP 1.x pending its incompatible
+  client and wire-format changes.
 
 ### Fixed
 
-- **Screening restarts no longer repay for recent analyses** — The batch pipeline
-  reuses complete same-mode reports from a configurable 60-day window, carries reused
-  quick BUY verdicts into Stage 2, rejects future-dated and failed artifacts, and
-  reports the saved workload before confirmation. Exact run-date and forced rerun
-  behavior remain available explicitly.
-- **Foreign listings no longer bypass US-issuer exclusion** — Screening now retains
-  issuer domicile from its existing enrichment payload, excludes US-domiciled
-  secondary listings by default, collapses exact duplicate issuer names to the most
-  liquid listing, and emits candidates in membership-stable digest order so an
-  interrupted run is not geographically sorted.
-
-- **Run fingerprinting cannot block artifact completion indefinitely** — Git metadata
-  probes now carry a hard subprocess timeout, and an unavailable worktree status is
-  treated as non-comparable rather than silently clean.
-- **Screen rejection no longer masks analysis failure** — The completed gate inputs
-  now derive one canonical outcome separating issuer eligibility from run status.
-  Evidence-backed rejects bypass debate and model calls through a deterministic
-  do-not-initiate decision, while missing required data and validator failures end as
-  unassessable and fail publication closed. Persistence and reports consume the same
-  outcome, and unreconciled auditor findings can no longer be labeled clean.
-- **Quick/full screens now share code-owned growth and liquidity gates** — Annual
-  statement data deterministically owns the ROA/ROE-improvement point, the data-vacuum
-  exception checks the four current TTM/MRQ growth fields rather than an unrelated
-  rubric denominator, and one typed liquidity assessment flows from the market tool
-  through state, snapshot, fast-fail routing, and the generic post-PM `AUTO_REJECT`
-  defense. Missing liquidity data remains uncertainty; measured turnover below the
-  canonical minimum remains an initiation hard fail. Parallel gate aggregation is
-  reject-dominant, while financial-validator completion is tracked separately from
-  the gate outcome so an early liquidity rejection cannot release the Portfolio
-  Manager twice. Verdict-changing policy also keeps superseded actionable prose out
-  of the canonical memo and confines it to the labeled audit appendix.
-- **Longitudinal comparisons separate mode and structural regressions** — Quick runs
-  compare with prior quick runs and full runs with prior full runs; the report now
-  flags lost contracts or publishability, missing scores, full-mode evidence loss,
-  disappearing decision-material flags, rising execution/recovery failures, and
-  material same-mode cost increases.
-
-- **Quick-mode provider comparisons no longer pay for known-useless repeats** — An
-  explicit provider output-cap stop is handed to structural validation instead of
-  repeating the same capped request. Every shared graph tool loop now uses one
-  code-owned ledger for model turns, rounds, fan-out, evidence, tool, purpose,
-  duplicate, and failure-circuit limits, with forced synthesis and persisted budget
-  telemetry. This bounds Value Trap reformulation loops as well as foreign-language
-  research.
-- **Provider swaps no longer change verdict correctness or hide recovery cost** — The
-  Portfolio Manager validates the growth hard-fail and its evidence-backed exceptions
-  against one canonical policy. Trace IDs and policy-owned verdict surfaces are
-  reconciled deterministically; model recovery remains only for structural failure.
-  Recovery
-  calls retain human-readable attribution to their originating analyst while saved
-  telemetry also identifies the canonical recovery seat and origin; run summaries
-  separately count retained tool messages and actual tool executions.
-- **Critical-seat reasoning reserves are provider-neutral** — Reasoning, critical, and
-  escalation intents receive the deep reserve regardless of whether the provider maps
-  the request to medium or high effort. Saved usage and attempt records carry visible
-  and thinking output plus intent/API/reserve caps, and `cost_report.py --efficiency`
-  surfaces cap, recovery, PM-correction, and research-loop regressions.
-- **Provider-success responses now fail truthfully and recover narrowly** — Canonical
-  structured blocks cannot be marked complete without an end marker, prefixed fields
-  no longer satisfy shorter required names, and saved failures distinguish output-cap
-  exhaustion from incomplete structure and ordinary contract violations. Structural
-  recovery is text-only and provider-neutral; quick mode pays for it only at Senior
-  Fundamentals and Portfolio Manager.
-
-- **A closed position no longer manufactures urgent analysis work** — A sold
-  holding still present in the IBKR snapshot has quantity 0, so the unit anchor
-  `quantity × price` was 0 and value classification fell back to "unclassifiable"
-  for every non-USD currency. That marked the position valuation-invalid, which
-  let it slip past the evaluator's closed-position skip and surface as an
-  *urgent* data-quality refresh for stock the operator no longer owned (7047.T
-  and HERDEZ.MX, 2026-08-19, two full-mode analyses). A closed position is now a
-  validated condition established before any FX or unit work, and short
-  positions route to review instead of being silently skipped.
-- **A refreshed ticker is no longer re-advertised as urgent** — The reconciler
-  re-reconciles after executing refreshes, so a ticker it had just analysed
-  returned to the urgent bucket complete with the command to analyse it again,
-  in the same report whose "Refreshed:" line named it. Those rows now render in
-  a command-free `Refreshed this run` state. Separately, an unconfirmed hard
-  reject waits for the day its confirmation window is actually reachable rather
-  than re-entering the urgent queue on every run for a week; convergence still
-  lands on the same day, without the intervening re-analyses.
-- **Debate handoff telemetry has one producer** — Persistence rebuilt the
-  telemetry shape independently of the graph and had already drifted on
-  `policy_version`. It now projects the graph's own record through a single
-  allowlisting function, and reports `policy_active` (what the run was
-  configured to do) separately from `barrier_reported` (whether the debate
-  barrier ran) instead of inferring both from one flag plus ambient run
-  configuration.
-- **Native reasoning summaries mark their truncation** — Every observed summary
-  reached the character cap exactly, so the next agent received an incomplete
-  text that read as complete.
-
-### Changed
-
-- **Round-1 rationale capsules are appended, not prefixed** — The canonical
-  argument is the deliverable, so a response cut off at the output cap now loses
-  only the adjunct. The parser already read either order.
-- **Cooled dependency refresh (August 2026)** — Move the LangChain, LangGraph,
-  Gemini/OpenAI/Anthropic, LangSmith/Langfuse, yfinance, scientific, optional
-  OpenTelemetry, and development-tool dependencies to deliberately reviewed
-  releases meeting the repository's 14-day routine cooldown. The mypy 2.3
-  transitive requirements `ast-serialize` and `librt` are explicitly held at
-  cooled versions, and previously unbounded integrations now have major-safe
-  ranges.
-
-- **Stronger static-analysis gate** — MyPy now checks function bodies that still lack complete signature annotations; the configured 235-file source gate remains clean without blanket ignores.
-- **Evidence provenance** — Deterministic legal and management-guidance preloads have distinct `preflight` provenance, and foreign-language normalization consumes one canonical typed evidence-record contract.
-
-### Fixed
-
-- **Gemini reasoning provenance across adapter versions** — Read the configured
-  thinking level through both the legacy `thinking_level` attribute and the
-  4.3+ `reasoning_effort` field, while removing the obsolete post-construction
-  attribute assignment.
-
-- **ASX screener universe** — Replace the retired listed-companies CSV with the
-  current ASX directory feed and remove the obsolete leading-row skip.
-- **Kimi K3 cost accounting** — Replace the temporary K2.6 proxy with Kimi's
-  published K3 rates for cached input, uncached input, and output tokens.
-- **Cryptography timing attack** — Pin `cryptography==50.0.0` to remediate the
-  PKCS#7 EnvelopedData decryption finding reported as CVE-2026-69247.
-- **Legal-provider failure semantics** — An unavailable Legal Counsel no longer fabricates PFIC/CMIC uncertainty or adds issuer-risk points; it emits one zero-penalty, BUY-blocking coverage flag and leaves legal dimensions unassessed.
-- **Malformed legal JSON recovery** — Exact key boundaries prevent prefixed or suffixed decoy fields from being recovered as PFIC, VIE, or CMIC evidence.
+- **Portfolio and refresh integrity** — Quarantine unresolved broker identities,
+  preserve incomplete-inventory accounting, withhold unsafe BUY/ADD authority, and fix
+  refresh fairness, backoff, settled-rejection, closed-position, and FX edge cases.
+- **Source and artifact completeness** — Enabled exchange-source failures now stop
+  publication before replacing prior output; malformed structured responses, missing
+  required evidence, and incomplete artifacts fail visibly instead of appearing valid.
+- **Regression diagnostics** — Longitudinal comparisons now separate quick from full
+  runs and flag lost contracts, evidence, publishability, or material cost efficiency.
 
 ### Security
 
-- **h2 and pypdf security findings** — Update `h2` to 4.4.1 after its seven-day
-  security cooldown. Update `pypdf` to 6.15.0 as an owner-approved five-day
-  exception: Snyk reported excessive-iteration and excessive-memory-allocation
-  flaws, and the Auditor parses externally retrieved PDF documents. The latter
-  update is intentionally earlier than the normal cooldown because the exposed
-  parser path makes the denial-of-service risk material.
+- Pin fixed releases for `cryptography`, `h2`, `pyasn1`, `pypdf`, `starlette`, and
+  `urllib3`, including protections for the Auditor's externally sourced PDF path.
 
 ## [3.15.0] - 2026-08-18
 

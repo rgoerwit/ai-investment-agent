@@ -408,6 +408,7 @@ Practical notes:
 
 - Stage 1 is a broad quick screen: `--quick --no-charts --brief --no-memory`, not strict mode.
 - The upstream `find_gems.py` filter starts conservative, with a modest higher-P/E band allowed when profitability, leverage, cash-flow quality, and coverage are stronger. By default it excludes both US venues and US-domiciled secondary listings, retains the more liquid listing for exact duplicate issuer names, and writes candidates in a stable mixed order; `--include-us` restores US issuers and venues.
+- Enabled exchange sources are completeness requirements: a failed or structurally degraded source aborts Stage 0 before prior screening output is replaced. BVB coverage is limited to the official Regulated Market equity table; AeRO is intentionally excluded.
 - Paid-tier cost for a full pipeline pass with all optional agents enabled is roughly **$0.12 × Stage 1 basket size + $0.22 × Stage 2 BUYs** — e.g., a ~1,000-ticker basket with a ~14% Stage-1 BUY rate lands near **$150**. Free-tier or optional-agent-off runs are substantially cheaper.
 
 Resumption is built in:
@@ -519,6 +520,7 @@ Notes:
 
 - `--read-only` is the safest way to understand the tool before you touch live broker data.
 - `--recommend` produces actionable suggestions and sizing guidance. Order execution is currently disabled, so the tool remains advisory.
+- Positions whose broker identity cannot be resolved remain in accounting and currency exposure, but are quarantined from ticker research; incomplete inventory withholds portfolio-level BUY/ADD authority until the identity gap is repaired.
 - Concentration warnings, stale-analysis flags, cash timing, macro-demoted review items, and capital-allocation `PROFIT_TAKE` candidates are part of the normal report output.
 - `PROFIT_TAKE` is reserved for positions with intact business quality, material gains versus IBKR average cost, and saved analysis evidence of idle-cash capital-allocation risk. It is always advisory (a `REVIEW`, never an automatic sell suggestion) — selling an intact winner is a capital-gains and tax-lot decision the tool surfaces for you, not one it makes. More generally, the reconciler only proposes an executable sell for a small, positively-listed set of cases (a confirmed thesis failure across two full-mode analyses, or a mandatory-exit/tender-offer flag); price moves and stale-analysis rejections alone never do.
 

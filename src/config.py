@@ -1292,7 +1292,7 @@ class Settings(BaseSettings):
         description="Environment (dev, prod, test)",
     )
     app_release: str = Field(
-        default="3.1.0",
+        default="4.0.0",
         validation_alias="APP_RELEASE",
         description="Application release/version tag for observability",
     )
