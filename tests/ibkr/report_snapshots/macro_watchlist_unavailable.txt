@@ -41,7 +41,8 @@
   Normal-cycle eligible refreshes:
     None
 
-  Operator decision points — will be re-run on normal cadence:
+  Current handling guidance — no refresh queued yet:
+    Current dispositions; normal-cycle refresh follows near expiry.
     SOFT00       no analysis
              Verdict: REJECT  (2026-03-05)
     SOFT01       no analysis

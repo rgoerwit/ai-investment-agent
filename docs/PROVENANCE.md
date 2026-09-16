@@ -1,6 +1,6 @@
 # Provenance: which layer owns which decision
 
-Last updated: 2026-08-28
+Last updated: 2026-09-15
 
 This file records how evidence moves through the pipeline and why the boundaries sit
 where they do. It explains the rationale and intended behaviour; the implementation
@@ -27,6 +27,7 @@ Which source may each deterministic consumer read?
 | Verdict floor | typed decision inputs, snapshot-backed |
 | Review-candidate tagging | the PM decision text — deliberately |
 | Portfolio flag index | the persisted red-flag ledger |
+| Broker position identity | validated symbol/exchange mapping or conid cache |
 | Report-stage flags | the persisted red-flag ledger, passthrough |
 | Publication gate | the decoded snapshot and trace contract |
 
@@ -42,6 +43,26 @@ fails publication instead of overriding the merged rejection.
 **A deterministic check may consume projected text only when that text is guaranteed
 to be a valid canonical projection.** Anything that changes a gate, a score, BUY
 eligibility, or that removes another flag must consume canonical evidence directly.
+
+## Broker identifiers are not market tickers
+
+IBKR may place an internal contract token such as `IBCID<conid>` in a field that
+normally contains a market symbol. That token is an identity-recovery instruction,
+not a ticker and never a yfinance input. The portfolio boundary classifies broker
+symbols before constructing a `Ticker`: ordinary securities are converted normally,
+corporate-action receivables are excluded as non-securities, and contract identifiers
+must recover a validated yfinance identity from the conid map or live contract metadata.
+
+If recovery fails, the holding remains in accounting and known-currency exposure as
+an unresolved identity, while research, refresh scheduling, and order construction
+receive no ticker at all. Sector and exchange concentration continue to describe the
+identified book; reports expose the missing identity coverage separately rather than
+inventing a sector or geography. Portfolio-increasing BUY and ADD recommendations are
+withheld until inventory identity is complete, while reductions on resolved holdings
+remain available. Cached conid mappings remain usable during a transient live API
+failure, but placeholder observations cannot enter that cache. Reports expose
+unresolved holdings explicitly so an identity outage cannot silently create either a
+research vacuum or a false impression that the holding disappeared.
 
 ## Decision score versus advisory score
 

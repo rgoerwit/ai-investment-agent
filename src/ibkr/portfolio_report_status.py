@@ -14,9 +14,51 @@ from src.ibkr.portfolio_report_formatting import (
     ReportBuffer,
     normalize_reason,
 )
+from src.ibkr.refresh_service import (
+    format_refresh_retry_at,
+    parse_refresh_retry_at,
+)
 
 if TYPE_CHECKING:
     from src.ibkr.refresh_service import AnalysisFreshnessRow
+
+
+_OPERATOR_DECISION_GLOSSES: dict[str, str] = {
+    "ENTRY_CONSTRAINT": "maintain position; do not add; no sell implied",
+    "THESIS_REASSESSMENT": "recheck thesis; no exit until failure is confirmed",
+    "CAPITAL_ALLOCATION": "decide whether to hold, trim, or redeploy capital",
+}
+
+
+def _operator_decision_label(row: AnalysisFreshnessRow) -> str:
+    """Return the decision basis with a concise operator-facing explanation."""
+    basis = row.action_basis or row.reason_family
+    gloss = _OPERATOR_DECISION_GLOSSES.get(basis)
+    return f"{basis} — {gloss}" if gloss else basis
+
+
+def _backoff_detail(cause: str, retry_after: str | None, *, fallback: str) -> str:
+    """Describe a deferred refresh without reading scheduler state in the renderer."""
+    retry_at = parse_refresh_retry_at(retry_after)
+    if retry_at is None:
+        return f"{cause}; {fallback}"
+    return f"{cause}; retry after {format_refresh_retry_at(retry_at)}"
+
+
+def _failed_refresh_detail(retry_after: str | None) -> str:
+    return _backoff_detail(
+        "auto-refresh failed",
+        retry_after,
+        fallback="retry on a later refresh-enabled run",
+    )
+
+
+def _unrepaired_detail(retry_after: str | None) -> str:
+    return _backoff_detail(
+        "a completed refresh left this review unchanged",
+        retry_after,
+        fallback="automatic retry on a later run",
+    )
 
 
 def _append_account_header(lines: list[str], context: PortfolioReportContext) -> None:
@@ -107,6 +149,35 @@ def _append_account_header(lines: list[str], context: PortfolioReportContext) ->
             )
         )
     lines.append("")
+    if portfolio.unresolved_positions:
+        lines.extend(
+            (
+                "⚠ BROKER IDENTITY REVIEW — no research or order queued",
+                "  These holdings remain included in portfolio accounting but have no safe ticker identity.",
+            )
+        )
+        for position in portfolio.unresolved_positions:
+            value = (
+                f"${position.market_value_usd:,.0f}"
+                if position.valuation_valid
+                else "value unavailable"
+            )
+            lines.append(
+                f"  conid {position.conid or 'unknown'}  ·  "
+                f"{position.quantity:,.4g} units  ·  {position.currency}  ·  {value}"
+            )
+            detail = f"{position.reason}; broker token {position.broker_token}"
+            if position.valuation_issue:
+                detail += f"; {position.valuation_issue}"
+            lines.extend(
+                ReportBuffer.wrap_banner_value(
+                    "      ",
+                    detail,
+                    width=DETAIL_WRAP_WIDTH,
+                    max_lines=2,
+                )
+            )
+        lines.append("")
 
 
 def _append_macro_banner(
@@ -224,7 +295,8 @@ def _append_screening_freshness(
             )
             buy_count = freshness.buy_count if freshness.buy_count is not None else "—"
             lines.append(
-                f"  Candidates screened: {candidate_count}  ·  BUYs found: {buy_count}"
+                f"  Candidates screened: {candidate_count}  ·  "
+                f"Stage-1 BUY candidates: {buy_count} (require full analysis)"
             )
         lines.append("  → Consider re-running: ./scripts/run_pipeline.sh")
     lines.append("")
@@ -264,6 +336,23 @@ def _append_analysis_freshness(
         Keeping the command off the summary line matches the report's REVIEW
         layout and avoids a long ticker/expiry/command compound line.
         """
+        # A backoff replaces the command rather than joining the reason line.
+        # Sharing that line meant the notice competed with the reason for a
+        # two-line budget and was silently truncated away when it grew.
+        if row.run_ticker in activity.failed:
+            follow_up = _failed_refresh_detail(
+                activity.failed_retry_after.get(row.run_ticker)
+            )
+        elif row.run_ticker in activity.skipped_due_to_failure_backoff:
+            follow_up = _failed_refresh_detail(
+                activity.skipped_due_to_failure_backoff.get(row.run_ticker)
+            )
+        elif row.run_ticker in activity.skipped_due_to_unrepaired:
+            follow_up = _unrepaired_detail(
+                activity.skipped_due_to_unrepaired.get(row.run_ticker)
+            )
+        else:
+            follow_up = None
         prefix = f"    {row.display_ticker:<12} "
         lines.extend(
             writer.wrap_banner_value(
@@ -276,7 +365,9 @@ def _append_analysis_freshness(
         lines.extend(
             writer.wrap_banner_value(
                 f"{DETAIL_INDENT}→  ",
-                analysis_command(row.run_ticker),
+                follow_up
+                if follow_up is not None
+                else analysis_command(row.run_ticker),
                 width=DETAIL_WRAP_WIDTH + 14,
                 max_lines=2,
             )
@@ -347,7 +438,11 @@ def _append_analysis_freshness(
 
     if summary.operator_review:
         lines.extend(
-            ("", "  Operator decision points — will be re-run on normal cadence:")
+            (
+                "",
+                "  Current handling guidance — no refresh queued yet:",
+                "    Current dispositions; normal-cycle refresh follows near expiry.",
+            )
         )
         for row in summary.operator_review:
             reason = normalize_reason(
@@ -355,8 +450,18 @@ def _append_analysis_freshness(
                 .split("  [MACRO_STOP:")[0]
                 .split("  [MACRO_WATCH:")[0]
             )
-            lines.append(
-                f"    {row.display_ticker:<12} {row.action_basis or row.reason_family}"
+            status = (
+                [f"analysis {row.age_days}d old"] if row.age_days is not None else []
+            )
+            if row.expires_date:
+                status.append(f"expires {row.expires_date}")
+            lines.extend(
+                writer.wrap_banner_value(
+                    f"    {row.display_ticker:<12} ",
+                    "  ·  ".join([_operator_decision_label(row), *status]),
+                    width=DETAIL_WRAP_WIDTH + 14,
+                    max_lines=2,
+                )
             )
             lines.extend(
                 writer.wrap_banner_value(
@@ -390,10 +495,27 @@ def _append_analysis_freshness(
             "refresh-enabled run: " + ", ".join(activity.skipped_due_to_limit)
         )
     if activity.skipped_due_to_cooldown:
-        lines.append(
-            "    Deferred after failed refresh: "
-            + ", ".join(activity.skipped_due_to_cooldown)
+        if activity.skipped_due_to_failure_backoff:
+            lines.append(
+                "    Deferred after failed refresh: "
+                + ", ".join(activity.skipped_due_to_failure_backoff)
+            )
+        if activity.skipped_due_to_unrepaired:
+            lines.append(
+                "    Deferred — a completed refresh left these unchanged: "
+                + ", ".join(activity.skipped_due_to_unrepaired)
+            )
+    if activity.unrepaired_retry_after:
+        cooldown_details = ", ".join(
+            f"{ticker} after "
+            + (
+                format_refresh_retry_at(parsed)
+                if (parsed := parse_refresh_retry_at(retry_after)) is not None
+                else "a later run"
+            )
+            for ticker, retry_after in activity.unrepaired_retry_after.items()
         )
+        lines.append(f"    Unrepaired-refresh backoff: {cooldown_details}")
     if not (
         activity.refreshed
         or activity.failed
@@ -401,6 +523,7 @@ def _append_analysis_freshness(
         or activity.skipped_due_to_policy
         or activity.skipped_due_to_limit
         or activity.skipped_due_to_cooldown
+        or activity.unrepaired_retry_after
     ):
         lines.append("    No refresh actions were needed.")
     lines.extend(("", f"  User action: {user_action}", ""))

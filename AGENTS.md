@@ -69,7 +69,8 @@ For the live analyzer path, inspect in this order when relevant:
 
 ## Implementation approach
 
-- Prefer a small change in the module that already owns the concept.
+- Fix root causes at the owning seam; prefer a small centralized change over
+  caller-specific exceptions or whack-a-mole patches.
 - Do not add duplicate helpers, data structures, compatibility facades, convenience
   re-exports, or parallel abstractions when an established seam exists.
 - Use direct imports. Package roots such as `src/__init__.py`, `src/tooling/__init__.py`,

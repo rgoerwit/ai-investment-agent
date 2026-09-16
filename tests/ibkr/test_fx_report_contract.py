@@ -148,7 +148,7 @@ def test_raw_broker_usd_values_flow_through_to_formatted_implied_split():
                 "currency": "JPY",
             }
         ]
-    )[0]
+    ).resolved[0]
 
     report = format_report(
         [_item(position)],
@@ -177,7 +177,7 @@ def test_raw_local_values_do_not_create_formatted_historical_fx_claim():
                 "currency": "JPY",
             }
         ]
-    )[0]
+    ).resolved[0]
 
     report = format_report(
         [_item(position)],

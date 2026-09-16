@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.ibkr.ticker import Ticker
+from src.ibkr.ticker import Ticker, classify_ibkr_symbol
 
 # ── TestTickerFromIbkr ────────────────────────────────────────────────────────
 
@@ -11,6 +11,40 @@ class TestTickerFromIbkr:
     """Tests for Ticker.from_ibkr() — IBKR raw fields → Ticker."""
 
     # Known exchange codes (static IBKR_TO_YFINANCE map wins)
+
+    def test_corporate_action_receivable_is_not_a_ticker(self):
+        classification = classify_ibkr_symbol(" 2753.rec ")
+
+        assert classification.kind == "corporate_action_receivable"
+        assert classification.underlying_symbol == "2753"
+        assert classification.remedy == "drop"
+        with pytest.raises(ValueError, match="not analyzable securities"):
+            Ticker.from_ibkr("2753.REC", "TWSE", "TWD")
+
+    def test_hyphenated_corporate_action_receivable_is_not_a_ticker(self):
+        classification = classify_ibkr_symbol("2753.REC-TWSE")
+
+        assert classification.kind == "corporate_action_receivable"
+        assert classification.underlying_symbol == "2753"
+        with pytest.raises(ValueError, match="not analyzable securities"):
+            Ticker.from_ibkr("2753.REC-TWSE", "", "TWD")
+
+    def test_bare_rec_symbol_remains_analyzable(self):
+        classification = classify_ibkr_symbol("REC")
+
+        assert classification.kind == "security"
+        assert classification.remedy == "use"
+        assert Ticker.from_ibkr("REC", "SMART", "USD").yf == "REC"
+
+    @pytest.mark.parametrize("symbol", ["IBCID17382285", " ibcid82633947 "])
+    def test_contract_identifier_is_not_a_ticker(self, symbol):
+        classification = classify_ibkr_symbol(symbol)
+
+        assert classification.kind == "contract_identifier"
+        assert classification.contract_id in {17382285, 82633947}
+        assert classification.remedy == "recover_from_conid"
+        with pytest.raises(ValueError, match="not analyzable securities"):
+            Ticker.from_ibkr(symbol, "SMART", "USD")
 
     def test_tsej_japan(self):
         # IBKR Client Portal reports Tokyo as "TSEJ" (not "TSE").

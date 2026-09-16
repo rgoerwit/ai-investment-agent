@@ -7,14 +7,20 @@ import pytest
 
 from src.fx_normalization import set_fx_rate_cache
 from src.ibkr.exceptions import IBKRAPIError
-from src.ibkr.models import NormalizedPosition, PortfolioSummary
+from src.ibkr.models import (
+    NormalizedPosition,
+    PortfolioSummary,
+    UnresolvedBrokerPosition,
+)
 from src.ibkr.portfolio import (
+    _resolve_conid_ticker,
     _resolve_watchlist_conid,
     build_portfolio_summary,
     normalize_positions,
     read_watchlist,
 )
 from src.ibkr.ticker import Ticker
+from src.ibkr.ticker_mapper import TickerResolution
 from tests.ibkr.reconciler_cases import _FakeFxRateCache
 
 
@@ -46,7 +52,7 @@ class TestNormalizePositions:
                 "mktPrice": 2100.0,
             }
         ]
-        positions = normalize_positions(raw)
+        positions = normalize_positions(raw).resolved
         assert len(positions) == 1
         p = positions[0]
         assert p.yf_ticker == "7203.T"
@@ -59,6 +65,120 @@ class TestNormalizePositions:
         assert p.market_value_basis == "BROKER_USD"
         assert p.unrealized_pnl_basis == "BROKER_USD"
         assert p.valuation_valid is True
+
+    def test_corporate_action_receivable_is_excluded_at_normalization_boundary(self):
+        raw = [
+            {
+                "conid": 275_300,
+                "contractDesc": "2753",
+                "listingExchange": "TWSE",
+                "position": 300,
+                "mktValue": 1_700,
+                "currency": "TWD",
+                "mktPrice": 180,
+            },
+            {
+                "conid": 275_315,
+                "contractDesc": "2753.REC",
+                "listingExchange": "TWSE",
+                "position": 15,
+                "mktValue": 85,
+                "currency": "TWD",
+                "mktPrice": 180,
+            },
+        ]
+
+        positions = normalize_positions(raw).resolved
+        summary = build_portfolio_summary(
+            {"BASE": {"netliquidationvalue": 10_000}}, positions
+        )
+
+        assert [(position.yf_ticker, position.quantity) for position in positions] == [
+            ("2753.TW", 300)
+        ]
+        assert summary.portfolio_value_usd == 10_000
+        assert summary.position_count == 1
+
+    @pytest.mark.parametrize("descriptor", ["2753.REC-TW", "2753.REC-TWSE"])
+    def test_hyphenated_corporate_action_receivable_is_excluded(self, descriptor):
+        raw = [
+            {
+                "contractDesc": descriptor,
+                "listingExchange": "TWSE",
+                "position": 15,
+                "mktValue": 85,
+                "currency": "TWD",
+            }
+        ]
+
+        result = normalize_positions(raw)
+        assert result.resolved == []
+        assert result.excluded_non_security_count == 1
+
+    def test_normal_hyphenated_security_descriptor_remains_analyzable(self):
+        raw = [
+            {
+                "contractDesc": "7203-TSEJ",
+                "listingExchange": "",
+                "position": 10,
+                "mktValue": 20_000,
+                "currency": "JPY",
+                "mktPrice": 2_000,
+            }
+        ]
+
+        positions = normalize_positions(raw).resolved
+
+        assert len(positions) == 1
+        assert positions[0].yf_ticker == "7203.T"
+
+    def test_contract_identifier_uses_cached_yfinance_identity(self):
+        raw = [
+            {
+                "conid": 17_382_285,
+                "contractDesc": "IBCID17382285",
+                "listingExchange": "SMART",
+                "position": 3,
+                "mktValue": 1_000,
+                "mktPrice": 1_000 / 3,
+                "avgCost": 1_000 / 3,
+                "currency": "KRW",
+            }
+        ]
+
+        with patch(
+            "src.ibkr.portfolio.yf_ticker_from_conid",
+            return_value="001060.KS",
+        ):
+            positions = normalize_positions(raw).resolved
+
+        assert len(positions) == 1
+        assert positions[0].yf_ticker == "001060.KS"
+        assert "IBCID" not in positions[0].yf_ticker
+
+    def test_unresolved_contract_identifier_is_excluded_before_research(self):
+        raw = [
+            {
+                "conid": 17_382_285,
+                "contractDesc": "IBCID17382285",
+                "listingExchange": "SMART",
+                "position": 3,
+                "mktValue": 1_000,
+                "mktPrice": 1_000 / 3,
+                "avgCost": 1_000 / 3,
+                "currency": "KRW",
+            }
+        ]
+
+        with patch("src.ibkr.portfolio.yf_ticker_from_conid", return_value=None):
+            result = normalize_positions(raw)
+            assert result.resolved == []
+            assert len(result.unresolved) == 1
+            unresolved = result.unresolved[0]
+            assert unresolved.conid == 17_382_285
+            assert unresolved.broker_token == "IBCID17382285"
+            assert unresolved.market_value_usd > 0
+            assert not hasattr(unresolved, "ticker")
 
     def test_hk_zero_padding(self):
         raw = [
@@ -73,7 +193,7 @@ class TestNormalizePositions:
                 "mktPrice": 59.0,
             }
         ]
-        positions = normalize_positions(raw)
+        positions = normalize_positions(raw).resolved
         assert positions[0].yf_ticker == "0005.HK"
 
     def test_korean_position_preserves_fixed_width_ibkr_symbol(self):
@@ -88,15 +208,79 @@ class TestNormalizePositions:
                 "mktPrice": 1_429_000,
             }
         ]
-        positions = normalize_positions(raw)
+        positions = normalize_positions(raw).resolved
 
         assert positions[0].ticker.ibkr == "010130"
         assert positions[0].yf_ticker == "010130.KS"
 
-    def test_empty_symbol_skipped(self):
-        raw = [{"conid": 0, "contractDesc": "", "listingExchange": ""}]
-        positions = normalize_positions(raw)
-        assert len(positions) == 0
+    def test_empty_symbol_retains_unresolved_holding(self):
+        raw = [{"contractDesc": "", "position": 1, "mktValue": 100, "currency": "USD"}]
+        result = normalize_positions(raw)
+        assert result.resolved == []
+        assert len(result.unresolved) == 1
+        assert result.unresolved[0].market_value_usd == 100
+
+    def test_contract_identifier_mismatch_is_quarantined_without_lookup(self):
+        raw = [{"conid": 42, "contractDesc": "IBCID43", "position": 1, "mktValue": 100}]
+        with patch("src.ibkr.portfolio._resolve_conid_ticker") as resolve:
+            result = normalize_positions(raw)
+        resolve.assert_not_called()
+        assert result.resolved == []
+        assert result.unresolved[0].conid == 42
+        assert "does not match" in result.unresolved[0].reason
+        assert not hasattr(result.unresolved[0], "ticker")
+
+    @pytest.mark.parametrize("symbol", ["IBCID42", "RAW"])
+    def test_recovered_conid_identity_is_not_replaced_by_search(self, symbol):
+        raw = [
+            {
+                "conid": 42,
+                "contractDesc": symbol,
+                "listingExchange": "UNMAPPED",
+                "currency": "TWD",
+            }
+        ]
+        with (
+            patch(
+                "src.ibkr.portfolio._resolve_conid_ticker",
+                return_value=TickerResolution("AAPL", "exchange_map", True),
+            ),
+            patch(
+                "src.ibkr.portfolio._yf_search_ticker", return_value="WRONG.TW"
+            ) as search,
+        ):
+            result = normalize_positions(raw, client=MagicMock())
+        search.assert_not_called()
+        assert result.resolved[0].yf_ticker == "AAPL"
+        assert result.resolved[0].ticker_identity_verified
+        assert result.resolved[0].ticker_resolution_source == "exchange_map"
+
+    @pytest.mark.parametrize("price", [100.0, True])
+    def test_resolved_and_unresolved_holdings_share_valuation_policy(self, price):
+        common = {
+            "listingExchange": "NASDAQ",
+            "currency": "USD",
+            "position": 1,
+            "mktPrice": price,
+            "mktValue": 100,
+            "avgCost": 90,
+        }
+        raw = [dict(common, contractDesc="AAPL"), dict(common, contractDesc="IBCID42")]
+        with patch(
+            "src.ibkr.portfolio._resolve_conid_ticker",
+            return_value=TickerResolution("", "unresolved", False),
+        ):
+            result = normalize_positions(raw)
+        resolved, unresolved = result.resolved[0], result.unresolved[0]
+        assert resolved.market_value_usd == unresolved.market_value_usd
+        assert resolved.valuation_valid == unresolved.valuation_valid
+        assert resolved.valuation_issue == unresolved.valuation_issue
+        assert resolved.valuation_valid is (price is not True)
+
+    def test_normalization_result_requires_explicit_collection_selection(self):
+        result = normalize_positions([])
+        with pytest.raises(TypeError):
+            iter(result)
 
     def test_multiple_positions(self):
         raw = [
@@ -115,7 +299,7 @@ class TestNormalizePositions:
                 "mktPrice": 600,
             },
         ]
-        positions = normalize_positions(raw)
+        positions = normalize_positions(raw).resolved
         assert len(positions) == 2
         tickers = {p.yf_ticker for p in positions}
         assert "7203.T" in tickers
@@ -134,7 +318,7 @@ class TestNormalizePositions:
                 "lastPrice": 156.0,
             }
         ]
-        positions = normalize_positions(raw)
+        positions = normalize_positions(raw).resolved
         assert positions[0].quantity == 25
         assert positions[0].avg_cost_local == 150.0
         assert positions[0].current_price_local == 156.0
@@ -152,7 +336,7 @@ class TestNormalizePositions:
                 "currency": "JPY",
             }
         ]
-        positions = normalize_positions(raw)
+        positions = normalize_positions(raw).resolved
         # ¥210,000 × 0.0067 = $1,407
         assert positions[0].market_value_usd == pytest.approx(1407.0, rel=0.01)
 
@@ -168,7 +352,7 @@ class TestNormalizePositions:
                 "currency": "USD",
             }
         ]
-        positions = normalize_positions(raw)
+        positions = normalize_positions(raw).resolved
         assert positions[0].market_value_usd == pytest.approx(1800.0)
 
     def test_unknown_currency_fails_closed(self):
@@ -183,7 +367,7 @@ class TestNormalizePositions:
                 "currency": "ZZZ",  # fictitious currency
             }
         ]
-        positions = normalize_positions(raw)
+        positions = normalize_positions(raw).resolved
         assert positions[0].market_value_usd == 0.0
         assert positions[0].unrealized_pnl_usd == 0.0
         assert positions[0].valuation_valid is False
@@ -218,7 +402,7 @@ class TestNormalizePositions:
             }
         ]
 
-        position = normalize_positions(raw)[0]
+        position = normalize_positions(raw).resolved[0]
 
         assert position.market_value_usd == pytest.approx(9_000.0 * fx_rate)
         assert position.unrealized_pnl_usd == pytest.approx(-1_000.0 * fx_rate)
@@ -241,7 +425,7 @@ class TestNormalizePositions:
             }
         ]
 
-        position = normalize_positions(raw)[0]
+        position = normalize_positions(raw).resolved[0]
 
         assert position.market_value_usd == pytest.approx(60.3)
         assert position.unrealized_pnl_usd == pytest.approx(-6.7)
@@ -263,7 +447,7 @@ class TestNormalizePositions:
             }
         ]
 
-        position = normalize_positions(raw)[0]
+        position = normalize_positions(raw).resolved[0]
 
         assert position.valuation_valid is False
         assert position.market_value_usd == 0.0
@@ -315,7 +499,7 @@ class TestNormalizePositions:
             "currency": "USD",
         }
 
-        positions = normalize_positions([malformed, valid])
+        positions = normalize_positions([malformed, valid]).resolved
 
         assert len(positions) == 2
         assert positions[0].valuation_valid is False
@@ -337,7 +521,7 @@ class TestNormalizePositions:
             }
         ]
 
-        position = normalize_positions(raw)[0]
+        position = normalize_positions(raw).resolved[0]
 
         assert position.valuation_valid is False
         assert position.market_value_usd == 0.0
@@ -364,7 +548,7 @@ class TestNormalizePositions:
                 "mktPrice": 8.94,  # IBKR: GBP 8.94
             }
         ]
-        positions = normalize_positions(raw)
+        positions = normalize_positions(raw).resolved
         assert positions[0].yf_ticker == "GAMA.L"
         assert positions[0].current_price_local == pytest.approx(8.94)
         assert positions[0].currency == "GBP"
@@ -382,7 +566,7 @@ class TestNormalizePositions:
                 "mktPrice": 22.02,
             }
         ]
-        positions = normalize_positions(raw)
+        positions = normalize_positions(raw).resolved
         assert positions[0].yf_ticker == "KLR.L"
         assert positions[0].currency == "GBP"
         assert positions[0].current_price_local == pytest.approx(22.02)
@@ -405,7 +589,7 @@ class TestNormalizePositions:
                 "mktPrice": 8.94,
             }
         ]
-        p = normalize_positions(raw)[0]
+        p = normalize_positions(raw).resolved[0]
         assert p.currency == "GBP"
         assert p.current_price_local == pytest.approx(8.94)
         # Pounds rate, not the pence rate the x100 rule used to force.
@@ -434,7 +618,7 @@ class TestNormalizePositions:
         ]
 
         with patch("src.ibkr.portfolio.cache_conid_mapping"):
-            positions = normalize_positions(raw, client=client)
+            positions = normalize_positions(raw, client=client).resolved
 
         assert positions[0].yf_ticker == "1264.TWO"
         client.get_contract_info.assert_called_once_with(1264, compete=False)
@@ -455,7 +639,7 @@ class TestNormalizePositions:
         ]
 
         with patch("src.ibkr.portfolio.cache_conid_mapping"):
-            positions = normalize_positions(raw, client=client)
+            positions = normalize_positions(raw, client=client).resolved
 
         assert positions[0].yf_ticker == "1264.TWO"
 
@@ -471,7 +655,7 @@ class TestNormalizePositions:
             }
         ]
 
-        positions = normalize_positions(raw)
+        positions = normalize_positions(raw).resolved
 
         assert positions[0].yf_ticker == "1264.TW"
 
@@ -490,7 +674,7 @@ class TestNormalizePositions:
             }
         ]
 
-        positions = normalize_positions(raw, client=client)
+        positions = normalize_positions(raw, client=client).resolved
 
         assert positions[0].yf_ticker == "AAPL"
         assert positions[0].ticker_identity_verified is True
@@ -518,7 +702,7 @@ class TestNormalizePositions:
                 return_value="AGS.BR",
             ),
         ):
-            positions = normalize_positions(raw, client=client)
+            positions = normalize_positions(raw, client=client).resolved
 
         assert positions[0].yf_ticker == "AGS.BR"
         assert positions[0].ticker_identity_verified is False
@@ -541,7 +725,7 @@ class TestNormalizePositions:
         ]
 
         with patch("src.ibkr.portfolio.cache_conid_mapping"):
-            positions = normalize_positions(raw, client=client)
+            positions = normalize_positions(raw, client=client).resolved
 
         assert positions[0].yf_ticker == "035420.KQ"
 
@@ -558,7 +742,7 @@ class TestNormalizePositions:
             }
         ]
 
-        positions = normalize_positions(raw, client=client)
+        positions = normalize_positions(raw, client=client).resolved
 
         assert len(positions) == 1
         assert positions[0].yf_ticker == "1264.TW"
@@ -582,13 +766,47 @@ class TestNormalizePositions:
         ]
 
         with patch("src.ibkr.portfolio.cache_conid_mapping"):
-            positions = normalize_positions(raw, client=client)
+            positions = normalize_positions(raw, client=client).resolved
 
         assert positions[0].yf_ticker == "1264.TWO"
         assert positions[0].ticker_identity_verified is True
         assert positions[0].ticker_resolution_source == "exchange_map"
         client.get_contract_info.assert_called_once_with(1264, compete=False)
         client.get_security_definition.assert_called_once_with(1264)
+
+    def test_contract_info_placeholder_falls_through_to_security_definition(self):
+        client = _contract_info_client(
+            {
+                "symbol": "IBCID17382285",
+                "primaryExch": "SMART",
+                "currency": "KRW",
+            }
+        )
+        client.get_security_definition.return_value = {
+            "ticker": "001060",
+            "listingExchange": "KRX",
+            "currency": "KRW",
+        }
+        raw = [
+            {
+                "conid": 17_382_285,
+                "contractDesc": "IBCID17382285",
+                "listingExchange": "SMART",
+                "position": 3,
+                "mktValue": 1_000,
+                "currency": "KRW",
+            }
+        ]
+
+        with (
+            patch("src.ibkr.portfolio.yf_ticker_from_conid", return_value=None),
+            patch("src.ibkr.portfolio.cache_conid_mapping"),
+        ):
+            positions = normalize_positions(raw, client=client).resolved
+
+        assert positions[0].yf_ticker == "001060.KS"
+        assert positions[0].ticker_identity_verified is True
+        client.get_security_definition.assert_called_once_with(17_382_285)
 
     def test_position_security_definition_exception_keeps_position(self, caplog):
         client = _contract_info_client({})
@@ -606,7 +824,7 @@ class TestNormalizePositions:
         ]
 
         with caplog.at_level(logging.WARNING, logger="src.ibkr.portfolio"):
-            positions = normalize_positions(raw, client=client)
+            positions = normalize_positions(raw, client=client).resolved
 
         assert positions[0].yf_ticker == "1264.TW"
         assert any(
@@ -628,7 +846,7 @@ class TestNormalizePositions:
         ]
 
         with caplog.at_level(logging.WARNING, logger="src.ibkr.portfolio"):
-            positions = normalize_positions(raw, client=client)
+            positions = normalize_positions(raw, client=client).resolved
 
         assert positions[0].yf_ticker == "1264.TW"
         assert any("conid_contract_info_failed" in r.message for r in caplog.records)
@@ -647,7 +865,7 @@ class TestNormalizePositions:
             }
         ]
 
-        positions = normalize_positions(raw, client=client)
+        positions = normalize_positions(raw, client=client).resolved
 
         assert positions[0].yf_ticker == "1264.TW"
 
@@ -666,7 +884,7 @@ class TestNormalizePositions:
             }
         ]
 
-        positions = normalize_positions(raw, client=client)
+        positions = normalize_positions(raw, client=client).resolved
 
         assert positions[0].conid == 0
         assert positions[0].yf_ticker == "1264.TW"
@@ -691,9 +909,66 @@ class TestNormalizePositions:
             patch("src.ibkr.portfolio.yf_ticker_from_conid", return_value="1264.TW"),
             patch("src.ibkr.portfolio.cache_conid_mapping"),
         ):
-            positions = normalize_positions(raw, client=client)
+            positions = normalize_positions(raw, client=client).resolved
 
         assert positions[0].yf_ticker == "1264.TWO"
+
+    def test_force_live_non_security_cannot_fall_back_to_cached_ticker(self):
+        client = _contract_info_client(
+            {"symbol": "2753.REC", "primaryExch": "TWSE", "currency": "TWD"}
+        )
+
+        with patch("src.ibkr.portfolio.yf_ticker_from_conid", return_value="2753.TW"):
+            resolution = _resolve_conid_ticker(275_315, client, force_live=True)
+
+        assert resolution.yf_ticker == ""
+        assert resolution.source == "non_analyzable"
+
+    def test_force_live_failure_falls_back_to_cached_ticker(self):
+        client = MagicMock()
+        client.get_contract_info.side_effect = IBKRAPIError("unavailable")
+
+        with patch("src.ibkr.portfolio.yf_ticker_from_conid", return_value="PEY.TO"):
+            resolution = _resolve_conid_ticker(82_633_947, client, force_live=True)
+
+        assert resolution.yf_ticker == "PEY.TO"
+        assert resolution.source == "conid_cache"
+        assert resolution.exchange_verified is False
+
+    def test_force_live_placeholder_falls_back_to_cached_ticker(self):
+        client = _contract_info_client(
+            {
+                "symbol": "IBCID82633947",
+                "primaryExch": "TSE",
+                "currency": "CAD",
+            }
+        )
+
+        with patch("src.ibkr.portfolio.yf_ticker_from_conid", return_value="PEY.TO"):
+            resolution = _resolve_conid_ticker(82_633_947, client, force_live=True)
+
+        assert resolution.yf_ticker == "PEY.TO"
+        assert resolution.source == "conid_cache"
+
+    def test_security_definition_placeholder_falls_back_to_cached_ticker(self):
+        client = _contract_info_client(
+            {
+                "symbol": "IBCID637692266",
+                "primaryExch": "TWSE",
+                "currency": "TWD",
+            }
+        )
+        client.get_security_definition.return_value = {
+            "symbol": "IBCID637692266",
+            "primaryExch": "TWSE",
+            "currency": "TWD",
+        }
+
+        with patch("src.ibkr.portfolio.yf_ticker_from_conid", return_value="6782.TW"):
+            resolution = _resolve_conid_ticker(637_692_266, client, force_live=True)
+
+        assert resolution.yf_ticker == "6782.TW"
+        assert resolution.source == "conid_cache"
 
 
 class TestBuildPortfolioSummary:
@@ -735,6 +1010,24 @@ class TestBuildPortfolioSummary:
         ]
         summary = build_portfolio_summary(ledger, positions, "U999")
         assert summary.portfolio_value_usd == 13000.0
+
+    def test_unresolved_identity_remains_in_portfolio_accounting(self):
+        unresolved = UnresolvedBrokerPosition(
+            conid=17_382_285,
+            broker_token="IBCID17382285",
+            quantity=3,
+            currency="KRW",
+            market_value_usd=750,
+            reason="canonical security identity unavailable",
+        )
+
+        summary = build_portfolio_summary(
+            {}, [], "U999", unresolved_positions=[unresolved]
+        )
+
+        assert summary.portfolio_value_usd == 750
+        assert summary.position_count == 1
+        assert summary.unresolved_positions == [unresolved]
 
     def test_zero_cash_buffer(self):
         ledger = {"BASE": {"cashbalance": 10000, "netliquidationvalue": 100000}}

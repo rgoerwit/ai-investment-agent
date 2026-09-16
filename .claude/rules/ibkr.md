@@ -32,12 +32,44 @@ the action, its basis, and whether it is executable.
 any sell that is not on the whitelist — including one loaded from a legacy cached
 bundle.
 
+## Paying for an analysis requires that one could change the answer
+
+The refresh scheduler spends real money per queued ticker, so eligibility is a
+claim about *repairability*, not about severity.
+
+- **`blocks_buy` is two different claims.** A settled gate failure (minted
+  `action=AUTO_REJECT`, e.g. `LIQUIDITY_HARD_FAIL`) cannot move during the current
+  observation period, so it must not enter the urgent stream; it rejoins the ordinary
+  fair cycle near analysis expiry. An evidence gap (`action=REVIEW`) might close with
+  more research. Read
+  `evidence.indeterminate_flag_types` for scheduling, never the
+  `buy_blocking_flag_types` union — that union is for "is a buy blocked", which
+  both kinds answer yes to.
+- **Never key scheduler state on model or search output.** Buy-blocking flag
+  *composition* varies run to run for an unchanged position, so a key built from
+  it never repeats and the backoff it guards never fires. Key on the action
+  basis — a closed enum — or on nothing.
+- **Price never enters scheduler identity.** A review-level breach raises
+  urgency; it is not evidence that new research exists to buy.
+- **`blocking` policy bounds ordering, not throughput.** Serve urgent first,
+  then fill the remaining budget from the normal cycle. Passing only the urgent
+  stream idles every slot urgent does not fill.
+
+Full history: `docs/CODEBASE_MEMORY.md`.
+
 ## Identity gates executability
 
 An order needs a verified listing mapping: a real contract id, an exact ticker match,
 and currency agreement. Matching **fails closed on missing currency** — losing an
 analysis match is safer than attaching another issuer's research. Display is
 exchange-qualified, so two listings of the same symbol never render identically.
+
+Raw broker tokens cross the market-data boundary only through the canonical identity
+resolver. An `IBCID<conid>` token is an instruction to recover identity from validated
+cache or contract metadata, never a ticker or yfinance input. If recovery fails, keep
+the holding in accounting without constructing a `Ticker`; unresolved inventory
+blocks every BUY and ADD, while reviews and reductions on resolved holdings remain
+available. Do not represent missing identity as a sector or exchange bucket.
 
 ## Money has a unit, and the unit is the currency code
 

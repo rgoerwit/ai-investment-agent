@@ -4,7 +4,23 @@ from pathlib import Path
 
 from src.web.ibkr_dashboard.job_store import RefreshJobRequest, RefreshJobStore
 from src.web.ibkr_dashboard.settings import DashboardSettings
-from src.web.ibkr_dashboard.worker import run_once
+from src.web.ibkr_dashboard.worker import (
+    build_worker_provider_runtime,
+    build_worker_runtime_services,
+    run_once,
+)
+
+
+def test_worker_runtime_services_reuse_only_provider_state():
+    provider_runtime = build_worker_provider_runtime()
+
+    first = build_worker_runtime_services(provider_runtime)
+    second = build_worker_runtime_services(provider_runtime)
+
+    assert first.providers is provider_runtime
+    assert second.providers is provider_runtime
+    assert first.evidence_recorder is not second.evidence_recorder
+    assert first.issuer_authority is not second.issuer_authority
 
 
 def test_worker_completes_job(tmp_path: Path, monkeypatch):
@@ -78,13 +94,15 @@ def test_worker_marks_partial_when_one_ticker_fails(tmp_path: Path, monkeypatch)
     )
 
 
-def test_worker_passes_explicit_runtime_services(tmp_path: Path, monkeypatch):
+def test_worker_builds_isolated_runtime_services_per_ticker(
+    tmp_path: Path, monkeypatch
+):
     store = RefreshJobStore(tmp_path / "jobs.sqlite")
     settings = DashboardSettings(runtime_dir=tmp_path / "runtime")
     store.enqueue(
         RefreshJobRequest(
             scope="ticker_list",
-            tickers=("7203.T",),
+            tickers=("7203.T", "MEGP.L"),
             results_dir="results-c",
             watchlist_name=None,
             quick_mode=True,
@@ -93,13 +111,23 @@ def test_worker_passes_explicit_runtime_services(tmp_path: Path, monkeypatch):
         )
     )
 
-    seen = {}
-    sentinel_runtime = object()
+    seen: list[object] = []
+    run_services = [object(), object()]
+    provider_runtime = object()
+    built_for: list[object] = []
+
+    def fake_build(shared_provider_runtime):
+        built_for.append(shared_provider_runtime)
+        return run_services[len(built_for) - 1]
 
     def fake_run(ticker, quick_mode, *, runtime_services):
-        seen["runtime_services"] = runtime_services
+        seen.append(runtime_services)
         return {"ticker": ticker}
 
+    monkeypatch.setattr(
+        "src.web.ibkr_dashboard.worker.build_worker_runtime_services",
+        fake_build,
+    )
     monkeypatch.setattr("src.web.ibkr_dashboard.worker._run_analysis_sync", fake_run)
     monkeypatch.setattr(
         "src.web.ibkr_dashboard.worker._save_result_sync",
@@ -108,5 +136,6 @@ def test_worker_passes_explicit_runtime_services(tmp_path: Path, monkeypatch):
         ),
     )
 
-    assert run_once(store, settings, runtime_services=sentinel_runtime) is True
-    assert seen["runtime_services"] is sentinel_runtime
+    assert run_once(store, settings, provider_runtime=provider_runtime) is True
+    assert seen == run_services
+    assert built_for == [provider_runtime, provider_runtime]

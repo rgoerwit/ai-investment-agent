@@ -24,6 +24,33 @@ async def _async_result(value):
     return value
 
 
+def test_attach_runtime_evidence_records_uses_the_supplied_run_ledger():
+    from src.main import _attach_runtime_evidence_records
+
+    recorder = SimpleNamespace(
+        serialized_snapshot=MagicMock(return_value=[{"sequence": 1}])
+    )
+    result: dict = {}
+
+    _attach_runtime_evidence_records(
+        result,
+        SimpleNamespace(evidence_recorder=recorder),
+    )
+
+    assert result["evidence_records"] == [{"sequence": 1}]
+    recorder.serialized_snapshot.assert_called_once_with()
+
+
+def test_attach_runtime_evidence_records_allows_callers_without_services():
+    from src.main import _attach_runtime_evidence_records
+
+    result = {"existing": "value"}
+
+    _attach_runtime_evidence_records(result, None)
+
+    assert result == {"existing": "value"}
+
+
 @pytest.fixture(autouse=True)
 def restore_cli_logger_levels():
     from src.main import (

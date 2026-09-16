@@ -444,6 +444,12 @@ def should_fail_closed(
     truncated: bool,
     content: str,
 ) -> bool:
+    # Senior Fundamentals consumes the separately captured structured ingress, so
+    # this does not halt the graph. It does keep a capped raw wrapper from being
+    # persisted as a valid analyst artifact.
+    if agent_key == "junior_fundamentals_analyst" and truncated:
+        return True
+
     if validation["ok"]:
         return False
 

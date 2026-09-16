@@ -11,6 +11,7 @@ from src.ibkr.client import IbkrClient
 from src.ibkr.exceptions import IBKRAPIError, IBKRAuthError, IBKRSessionConflictError
 from src.ibkr.order_builder import parse_price
 from src.ibkr.session_manager import get_ibkr_session_manager
+from src.ibkr.ticker import classify_ibkr_symbol
 from src.ibkr.ticker_mapper import (
     cache_conid_mapping,
     ibkr_symbol_to_yf,
@@ -236,6 +237,11 @@ class IbkrSecurityDataService:
                 used_brokerage_session=bool(info),
             )
 
+            if not resolved_yf_ticker:
+                probe.identity_confidence = "UNVERIFIED"
+                probe.error_kind = "INVALID_IDENTITY"
+                return probe
+
             if confidence != "VERIFIED":
                 return probe
 
@@ -259,10 +265,14 @@ class IbkrSecurityDataService:
                     snapshot.get(_FIELD_COMPANY_NAME),
                     probe.company_name,
                 )
-                probe.resolved_symbol = self._first_non_empty(
+                snapshot_symbol = self._first_non_empty(
                     snapshot.get(_FIELD_SYMBOL),
-                    probe.resolved_symbol,
                 )
+                if (
+                    snapshot_symbol
+                    and classify_ibkr_symbol(snapshot_symbol).remedy == "use"
+                ):
+                    probe.resolved_symbol = snapshot_symbol
                 probe.exchange = self._first_non_empty(
                     snapshot.get(_FIELD_EXCHANGE),
                     probe.exchange,

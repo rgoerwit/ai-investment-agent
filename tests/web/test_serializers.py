@@ -6,6 +6,7 @@ from src.ibkr.models import (
     PortfolioSummary,
     ReconciliationItem,
     TradeBlockData,
+    UnresolvedBrokerPosition,
 )
 from src.ibkr.portfolio_presentation import build_cash_summary, build_live_order_note
 from src.ibkr.recommendation_service import PortfolioRecommendationBundle
@@ -61,6 +62,40 @@ def test_serialize_dashboard_snapshot_handles_empty_lists(sample_bundle):
     assert payload["freshness"]["candidate_blocked"] == []
     assert payload["macro_alert"] is None
     assert payload["screening_freshness"]["status"] == "missing"
+
+
+def test_serialize_dashboard_snapshot_exposes_unresolved_broker_identity(sample_bundle):
+    sample_bundle.portfolio.unresolved_positions = [
+        UnresolvedBrokerPosition(
+            conid=17_382_285,
+            broker_token="IBCID17382285",
+            quantity=3,
+            currency="KRW",
+            market_value_usd=750,
+            reason="no verified market ticker",
+        )
+    ]
+
+    unresolved = serialize_dashboard_snapshot(sample_bundle)["portfolio"][
+        "unresolved_positions"
+    ][0]
+
+    assert unresolved["conid"] == 17_382_285
+    assert unresolved["broker_token"] == "IBCID17382285"
+    assert "ticker" not in unresolved
+
+
+def test_serialize_dashboard_snapshot_distinguishes_refresh_cooldowns(sample_bundle):
+    retry_after = "2026-09-12T02:40:34+00:00"
+    sample_bundle.refresh_activity.skipped_due_to_cooldown = ["2173.T"]
+    sample_bundle.refresh_activity.skipped_due_to_unrepaired = {"2173.T": retry_after}
+
+    activity = serialize_dashboard_snapshot(sample_bundle)["freshness"][
+        "refresh_activity"
+    ]
+
+    assert activity["skipped_due_to_unrepaired"] == {"2173.T": retry_after}
+    assert activity["skipped_due_to_failure_backoff"] == {}
 
 
 def test_serialize_dashboard_snapshot_includes_screening_freshness(sample_bundle):

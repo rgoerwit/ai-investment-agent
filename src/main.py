@@ -543,6 +543,15 @@ async def _is_total_data_vacuum(ticker: str) -> bool:
     return not (has_price or has_currency or has_identity)
 
 
+def _attach_runtime_evidence_records(
+    result: dict[str, Any], runtime_services: Any | None
+) -> None:
+    """Persist the active run's post-inspection tool ledger when available."""
+    evidence_recorder = getattr(runtime_services, "evidence_recorder", None)
+    if evidence_recorder is not None:
+        result["evidence_records"] = evidence_recorder.serialized_snapshot()
+
+
 async def run_analysis(
     ticker: str,
     quick_mode: bool,
@@ -917,6 +926,7 @@ async def run_analysis(
                 )
 
             if isinstance(result, dict):
+                _attach_runtime_evidence_records(result, runtime_services)
                 # Stamp the provenance contract before any validity computation so
                 # this live run is held to fail-closed publication (snapshot + trace
                 # must be present and VALID). Legacy artifacts carry no stamp.
@@ -1291,13 +1301,6 @@ async def _execute_analysis(
         tracing_metadata=tracing_metadata,
         runtime_services=scoped_runtime_services,
     )
-    if (
-        isinstance(result, dict)
-        and scoped_runtime_services.evidence_recorder is not None
-    ):
-        result["evidence_records"] = (
-            scoped_runtime_services.evidence_recorder.serialized_snapshot()
-        )
     return result
 
 

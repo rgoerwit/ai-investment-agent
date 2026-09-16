@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from src.reporting.state_access import get_effective_red_flags
-from src.tooling.evidence_recorder import normalize_http_url
+from src.tooling.evidence_recorder import evidence_record_id, normalize_http_url
 
 
 def _cell(value: object, *, limit: int = 80) -> str:
@@ -34,10 +34,7 @@ def _inspected_source(source: Mapping[str, Any], claim: Mapping[str, Any]) -> st
         return "—"
     matched = False
     for record in records:
-        sequence = _record_field(record, "sequence")
-        content_sha256 = str(_record_field(record, "content_sha256", ""))
-        record_id = f"evidence:{sequence}:{content_sha256[:12]}"
-        if record_id != evidence_id:
+        if evidence_record_id(record) != evidence_id:
             continue
         if (
             bool(_record_field(record, "blocked", False))

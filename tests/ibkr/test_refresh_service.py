@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
 import pytest
 
-from src.ibkr.models import ReconciliationItem
+from src.ibkr.models import PortfolioEvidence, ReconciliationItem
+from src.ibkr.reconciler import reconcile
 from src.ibkr.refresh_service import (
     AnalysisFreshnessRow,
     AnalysisFreshnessSummary,
@@ -14,8 +16,9 @@ from src.ibkr.refresh_service import (
     RefreshActivity,
     RefreshExecutionOptions,
     RefreshPlanOptions,
+    _UnrepairedRefresh,
 )
-from tests.ibkr.reconciler_cases import _make_analysis, _make_position
+from tests.ibkr.reconciler_cases import _make_analysis, _make_portfolio, _make_position
 
 
 def _make_review_item(
@@ -27,13 +30,18 @@ def _make_review_item(
     action_basis: str | None = None,
     held: bool = True,
 ) -> ReconciliationItem:
+    analysis = _make_analysis(ticker=ticker, age_days=age_days)
+    if action_basis == "DATA_QUALITY":
+        analysis.evidence = PortfolioEvidence(
+            buy_blocking_flag_types=("TEST_EVIDENCE_UNAVAILABLE",)
+        )
     return ReconciliationItem(
         ticker=ticker,
         action="REVIEW",
         reason=reason,
         urgency="MEDIUM",
         ibkr_position=_make_position(ticker=ticker) if held else None,
-        analysis=_make_analysis(ticker=ticker, age_days=age_days),
+        analysis=analysis,
         sell_type=sell_type,
         action_basis=action_basis,
     )
@@ -304,7 +312,12 @@ class TestPlan:
         )
         assert activity.queued == ["GTT.PA"]
 
-    def test_blocking_keeps_due_soon_behind_urgent_work(self):
+    def test_blocking_orders_due_soon_behind_urgent_work(self):
+        """Blocking policy orders the streams; it does not drop the cycle one.
+
+        The earlier contract asserted due-soon work was *excluded* whenever any
+        urgent row existed, which idled the rest of the budget every run.
+        """
         service = AnalysisRefreshService()
         due_soon_item = ReconciliationItem(
             ticker="GTT.PA",
@@ -331,7 +344,7 @@ class TestPlan:
                 max_age_days=14,
             ),
         )
-        assert activity.queued == ["7203.T"]
+        assert activity.queued == ["7203.T", "GTT.PA"]
 
     def test_blocking_falls_back_to_due_soon_when_no_urgent_work_exists(self):
         service = AnalysisRefreshService()
@@ -467,6 +480,196 @@ class TestPlan:
         )
         assert activity.queued == []
 
+    @pytest.mark.parametrize("analysis_available", [True, False])
+    def test_broker_data_quality_review_does_not_schedule_stock_analysis(
+        self, analysis_available
+    ):
+        service = AnalysisRefreshService()
+        position = _make_position(ticker="2173.T").model_copy(
+            update={
+                "valuation_valid": False,
+                "valuation_issue": "broker value units could not be verified",
+            }
+        )
+        items = reconcile(
+            [position],
+            ({"2173.T": _make_analysis(ticker="2173.T")} if analysis_available else {}),
+            _make_portfolio(),
+        )
+
+        summary = service.classify(items, max_age_days=14)
+        activity = service.plan(summary, options=_plan_options(policy="blocking"))
+
+        assert [row.run_ticker for row in summary.operator_review] == ["2173.T"]
+        assert summary.blocking_now == []
+        assert activity.queued == []
+
+    @pytest.mark.parametrize("broker_defect", ["short", "invalid_valuation"])
+    @pytest.mark.parametrize("settled", [True, False])
+    def test_broker_defect_precedes_aging_analysis_refresh(
+        self, broker_defect, settled
+    ):
+        service = AnalysisRefreshService()
+        position = _make_position(ticker="2173.T")
+        if broker_defect == "short":
+            position.quantity = -1
+        else:
+            position.valuation_valid = False
+            position.valuation_issue = "broker value units could not be verified"
+        analysis = _make_analysis(ticker="2173.T", age_days=30)
+        flag = "LIQUIDITY_HARD_FAIL" if settled else "TEST_EVIDENCE_UNAVAILABLE"
+        analysis.evidence = PortfolioEvidence(
+            buy_blocking_flag_types=(flag,),
+            settled_reject_flag_types=(flag,) if settled else (),
+        )
+        items = reconcile([position], {"2173.T": analysis}, _make_portfolio())
+        summary = service.classify(items, max_age_days=14)
+        activity = service.plan(summary, options=_plan_options(policy="blocking"))
+
+        assert items[0].action_basis == "DATA_QUALITY"
+        assert service._refresh_repairable(items[0]) is False
+        assert [row.run_ticker for row in summary.operator_review] == ["2173.T"]
+        assert summary.due_soon == []
+        assert summary.blocking_now == []
+        assert activity.queued == []
+
+    def test_fresh_settled_liquidity_reject_does_not_schedule_paid_analysis(self):
+        """The 2173.T regression: a fresh measured failure is not an evidence gap.
+
+        LIQUIDITY_HARD_FAIL is minted AUTO_REJECT from a measured turnover, so
+        no further research can change it. Treating every blocks_buy flag as
+        repairable put this position in the urgent stream on every invocation
+        and — under the blocking policy, which only consults the cycle stream
+        when urgent is empty — starved all normal-cycle refreshes behind it.
+        """
+        service = AnalysisRefreshService()
+        analysis = _make_analysis(
+            ticker="2173.T", verdict="DO_NOT_INITIATE", age_days=0
+        )
+        analysis.health_adj = 30.0
+        analysis.growth_adj = 20.0
+        analysis.evidence = PortfolioEvidence(
+            buy_blocking_flag_types=("LIQUIDITY_HARD_FAIL",),
+            settled_reject_flag_types=("LIQUIDITY_HARD_FAIL",),
+        )
+        items = reconcile(
+            [_make_position(ticker="2173.T")], {"2173.T": analysis}, _make_portfolio()
+        )
+        assert items[0].action_basis == "DATA_QUALITY"
+
+        summary = service.classify(items, max_age_days=14)
+        cycle_summary = AnalysisFreshnessSummary(
+            blocking_now=list(summary.blocking_now),
+            operator_review=list(summary.operator_review),
+            due_soon=[_freshness_row("CYCLE.A", bucket="due_soon")],
+        )
+        activity = service.plan(cycle_summary, options=_plan_options(policy="blocking"))
+
+        assert service._refresh_repairable(items[0]) is False
+        assert [row.run_ticker for row in summary.operator_review] == ["2173.T"]
+        assert summary.blocking_now == []
+        # The freed urgent stream no longer starves normal-cycle work.
+        assert activity.queued == ["CYCLE.A"]
+
+    def test_aging_settled_liquidity_reject_rejoins_normal_cycle(self):
+        service = AnalysisRefreshService()
+        analysis = _make_analysis(
+            ticker="2173.T", verdict="DO_NOT_INITIATE", age_days=8
+        )
+        analysis.health_adj = 30.0
+        analysis.growth_adj = 20.0
+        analysis.evidence = PortfolioEvidence(
+            buy_blocking_flag_types=("LIQUIDITY_HARD_FAIL",),
+            settled_reject_flag_types=("LIQUIDITY_HARD_FAIL",),
+        )
+        items = reconcile(
+            [_make_position(ticker="2173.T")],
+            {"2173.T": analysis},
+            _make_portfolio(),
+        )
+
+        summary = service.classify(items, max_age_days=14)
+        activity = service.plan(summary, options=_plan_options(policy="blocking"))
+
+        assert [row.run_ticker for row in summary.due_soon] == ["2173.T"]
+        assert summary.operator_review == []
+        assert activity.queued == ["2173.T"]
+
+    def test_settled_and_indeterminate_flags_together_remain_repairable(self):
+        """A settled flag must not mask a real gap sitting beside it."""
+        service = AnalysisRefreshService()
+        analysis = _make_analysis(
+            ticker="2173.T", verdict="DO_NOT_INITIATE", age_days=0
+        )
+        analysis.health_adj = 30.0
+        analysis.growth_adj = 20.0
+        analysis.evidence = PortfolioEvidence(
+            buy_blocking_flag_types=(
+                "LIQUIDITY_HARD_FAIL",
+                "MANAGEMENT_GUIDANCE_EVIDENCE_GAP",
+            ),
+            settled_reject_flag_types=("LIQUIDITY_HARD_FAIL",),
+        )
+        items = reconcile(
+            [_make_position(ticker="2173.T")], {"2173.T": analysis}, _make_portfolio()
+        )
+
+        summary = service.classify(items, max_age_days=14)
+        activity = service.plan(summary, options=_plan_options(policy="blocking"))
+
+        assert service._refresh_repairable(items[0]) is True
+        assert activity.queued == ["2173.T"]
+
+    def test_operator_short_position_review_does_not_schedule_stock_analysis(self):
+        service = AnalysisRefreshService()
+        position = _make_position(ticker="2173.T", quantity=-10)
+        items = reconcile(
+            [position],
+            {"2173.T": _make_analysis(ticker="2173.T")},
+            _make_portfolio(),
+        )
+
+        summary = service.classify(items, max_age_days=14)
+        activity = service.plan(summary, options=_plan_options(policy="blocking"))
+
+        assert items[0].action_basis == "DATA_QUALITY"
+        assert [row.run_ticker for row in summary.operator_review] == ["2173.T"]
+        assert activity.queued == []
+
+    def test_blocking_policy_tops_up_spare_capacity_with_cycle_work(self):
+        """Strict priority must bound ordering, not throughput.
+
+        Passing only the urgent stream wasted every slot the urgent queue did
+        not fill, so a portfolio with one permanently urgent row refreshed
+        exactly one analysis per run while 64 due-soon rows waited forever.
+        """
+        service = AnalysisRefreshService()
+        summary = AnalysisFreshnessSummary(
+            blocking_now=[_freshness_row("URGENT.A", bucket="blocking_now")],
+            due_soon=[
+                _freshness_row("CYCLE.A", bucket="due_soon"),
+                _freshness_row("CYCLE.B", bucket="due_soon"),
+            ],
+        )
+
+        activity = service.plan(summary, options=_plan_options(policy="blocking"))
+
+        assert activity.queued == ["URGENT.A", "CYCLE.A", "CYCLE.B"]
+
+    def test_blocking_policy_still_serves_urgent_first_under_a_tight_limit(self):
+        service = AnalysisRefreshService()
+        summary = AnalysisFreshnessSummary(
+            blocking_now=[_freshness_row("URGENT.A", bucket="blocking_now")],
+            due_soon=[_freshness_row("CYCLE.A", bucket="due_soon")],
+        )
+
+        activity = service.plan(
+            summary, options=_plan_options(policy="blocking", limit=1)
+        )
+
+        assert activity.queued == ["URGENT.A"]
+        assert activity.skipped_due_to_limit == ["CYCLE.A"]
+
     def test_work_conserving_when_one_stream_is_empty(self):
         service = AnalysisRefreshService()
         only_cycle = AnalysisFreshnessSummary(
@@ -513,6 +716,8 @@ class TestPlan:
         )
         assert retry.queued == ["CYCLE.A"]
         assert retry.skipped_due_to_cooldown == ["URGENT.A"]
+        assert "URGENT.A" in retry.skipped_due_to_failure_backoff
+        assert retry.skipped_due_to_unrepaired == {}
 
     @pytest.mark.asyncio
     async def test_corrupt_scheduler_state_is_rebuilt_after_the_next_attempt(
@@ -548,7 +753,12 @@ class TestPlan:
         )
 
         rebuilt = json.loads(state_path.read_text(encoding="utf-8"))
-        assert rebuilt == {"next_slot": 1, "retry_not_before": {}, "version": 1}
+        assert rebuilt == {
+            "next_slot": 1,
+            "retry_not_before": {},
+            "unrepaired_refresh": {},
+            "version": 3,
+        }
 
     def test_read_only_plan_does_not_consume_a_fair_service_slot(self, tmp_path):
         service = AnalysisRefreshService()
@@ -576,6 +786,114 @@ class TestPlan:
             summary, options=_plan_options(limit=1, scheduler_state_path=state_path)
         ).queued == ["URGENT.A"]
 
+    def test_scheduler_state_loads_v1_without_unrepaired_backoffs(self, tmp_path):
+        state_path = tmp_path / "refresh-state.json"
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "next_slot": 3,
+                    "retry_not_before": {"FAILED.A": future},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        state = AnalysisRefreshService._load_state(state_path)
+
+        assert state.next_slot == 3
+        assert state.retry_not_before == {"FAILED.A": future}
+        assert state.unrepaired_refresh == {}
+
+        AnalysisRefreshService._save_state(state_path, state)
+        migrated = json.loads(state_path.read_text(encoding="utf-8"))
+        assert migrated["version"] == 3
+        assert migrated["unrepaired_refresh"] == {}
+
+    def test_scheduler_state_rejects_unknown_version(self, tmp_path, caplog):
+        state_path = tmp_path / "refresh-state.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 99,
+                    "next_slot": 7,
+                    "retry_not_before": {},
+                    "unrepaired_refresh": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        state = AnalysisRefreshService._load_state(state_path)
+
+        assert state == type(state)()
+        assert "refresh_scheduler_state_invalid" in caplog.text
+
+    def test_scheduler_state_prunes_expired_entries_in_memory(self, tmp_path):
+        state_path = tmp_path / "refresh-state.json"
+        past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "next_slot": 2,
+                    "retry_not_before": {"OLD.A": past, "LIVE.A": future},
+                    "unrepaired_refresh": {
+                        "OLD.A": {"basis": "DATA_QUALITY", "retry_after": past},
+                        "BAD.A": {
+                            "basis": "DATA_QUALITY",
+                            "retry_after": "malformed",
+                        },
+                        "LIVE.A": {
+                            "basis": "DATA_QUALITY",
+                            "retry_after": future,
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        state = AnalysisRefreshService._load_state(state_path)
+
+        assert state.retry_not_before == {"LIVE.A": future}
+        assert state.unrepaired_refresh == {
+            "LIVE.A": _UnrepairedRefresh(basis="DATA_QUALITY", retry_after=future)
+        }
+        # Loading/planning remains read-only; the next normal scheduler write
+        # persists the pruned representation.
+        assert "OLD.A" in state_path.read_text(encoding="utf-8")
+
+    def test_scheduler_state_prunes_broker_contract_identifiers(self, tmp_path):
+        state_path = tmp_path / "refresh-state.json"
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "next_slot": 2,
+                    "retry_not_before": {
+                        "PEY.TO": future,
+                        "IBCID82633947.TO": future,
+                    },
+                    "unrepaired_refresh": {
+                        "IBCID82633947.TO": {
+                            "basis": "DATA_QUALITY",
+                            "retry_after": future,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        state = AnalysisRefreshService._load_state(state_path)
+
+        assert state.retry_not_before == {"PEY.TO": future}
+        assert state.unrepaired_refresh == {}
+
 
 class TestUserAction:
     def test_user_action_matches_read_only_message(self):
@@ -595,6 +913,28 @@ class TestUserAction:
         assert (
             action
             == "read-only mode blocked refresh — run pm --refresh-policy proactive"
+        )
+
+    def test_user_action_respects_failure_backoff(self):
+        service = AnalysisRefreshService()
+        summary = service.classify([_make_review_item("7203.T")], max_age_days=14)
+        activity = RefreshActivity(
+            policy="blocking",
+            limit=10,
+            failed=["7203.T"],
+            failed_retry_after={"7203.T": "2026-09-05T02:40:34+00:00"},
+        )
+
+        action = service.user_action(
+            summary,
+            activity,
+            show_recommendations=False,
+            command_builder=lambda *args: "pm " + " ".join(args),
+        )
+
+        assert action == (
+            "refresh failed for 7203.T — backoff active; "
+            "rerun on a later refresh-enabled run"
         )
 
 
@@ -695,6 +1035,112 @@ class TestExecute:
 
         assert updated.refreshed == []
         assert updated.failed == ["7203.T"]
+        assert "7203.T" in updated.failed_retry_after
+
+    @pytest.mark.asyncio
+    async def test_unrepaired_refresh_backs_off_and_price_alone_cannot_requeue(
+        self, tmp_path, monkeypatch
+    ):
+        """Exercise real reconcile rows through plan, execute, and replanning.
+
+        The backoff is keyed on the action basis, so a price move that leaves
+        the basis at DATA_QUALITY must not buy a second analysis: price is not
+        evidence that more research exists to find. A genuine basis change is.
+        """
+        from unittest.mock import AsyncMock
+
+        monkeypatch.setattr("src.persistence._maybe_save_rejection_record", AsyncMock())
+        monkeypatch.setattr(
+            "src.ibkr.position_evaluator._load_prior_history", lambda analysis: []
+        )
+        service = AnalysisRefreshService()
+        state_path = tmp_path / "refresh-state.json"
+        position = _make_position(ticker="2173.T", current_price=2100)
+        analysis = _make_analysis(
+            ticker="2173.T",
+            verdict="DO_NOT_INITIATE",
+            age_days=0,
+        )
+        analysis.health_adj = 30.0
+        analysis.growth_adj = 20.0
+        analysis.evidence = PortfolioEvidence(
+            buy_blocking_flag_types=("LEGAL_COUNSEL_UNAVAILABLE",)
+        )
+        initial_items = reconcile([position], {"2173.T": analysis}, _make_portfolio())
+        assert initial_items[0].action_basis == "DATA_QUALITY"
+        initial_summary = service.classify(initial_items, max_age_days=14)
+        activity = service.plan(
+            initial_summary,
+            options=_plan_options(limit=1, scheduler_state_path=state_path),
+        )
+        assert activity.queued == ["2173.T"]
+
+        async def successful_runner(**kwargs):
+            return {"ticker": "2173.T"}
+
+        updated = await service.execute(
+            activity,
+            execution=RefreshExecutionOptions(quick_mode=False),
+            run_analysis_fn=successful_runner,
+            save_results_fn=lambda *args, **kwargs: tmp_path / "saved.json",
+        )
+
+        assert updated.refreshed == ["2173.T"]
+        assert service._load_state(state_path).retry_not_before == {}
+
+        # The successfully saved analysis still carries the same evidence gap.
+        replanned_items = reconcile([position], {"2173.T": analysis}, _make_portfolio())
+        replanned_summary = service.classify(
+            replanned_items,
+            max_age_days=14,
+            already_refreshed=frozenset(updated.refreshed),
+        )
+        updated = service.record_unrepaired_refreshes(updated, replanned_summary)
+        assert "2173.T" in updated.unrepaired_retry_after
+
+        # A new invocation sees the same condition and defers it with timing.
+        next_summary = service.classify(replanned_items, max_age_days=14)
+        next_activity = service.plan(
+            next_summary,
+            options=_plan_options(limit=1, scheduler_state_path=state_path),
+        )
+        assert next_activity.queued == []
+        assert next_activity.skipped_due_to_cooldown == ["2173.T"]
+        assert "2173.T" in next_activity.skipped_due_to_unrepaired
+        assert next_activity.skipped_due_to_failure_backoff == {}
+
+        # The price later crosses the saved review level. The row is still a
+        # DATA_QUALITY review, so the paid-analysis backoff still applies: a
+        # price hovering near a threshold must not be able to re-authorize
+        # spend on an evidence gap the last run already failed to close.
+        breached_position = _make_position(ticker="2173.T", current_price=1800)
+        stop_items = reconcile(
+            [breached_position], {"2173.T": analysis}, _make_portfolio()
+        )
+        assert "broke the analysis review level" in stop_items[0].reason
+        assert stop_items[0].action_basis == "DATA_QUALITY"
+        stop_summary = service.classify(stop_items, max_age_days=14)
+        stop_activity = service.plan(
+            stop_summary,
+            options=_plan_options(limit=1, scheduler_state_path=state_path),
+        )
+        assert stop_activity.queued == []
+        assert "2173.T" in stop_activity.skipped_due_to_unrepaired
+
+        # A genuine basis change is new information and clears the backoff.
+        repaired = _make_analysis(
+            ticker="2173.T", verdict="DO_NOT_INITIATE", age_days=0
+        )
+        repaired.health_adj = 30.0
+        repaired.growth_adj = 20.0
+        repaired.evidence = PortfolioEvidence()
+        moved_items = reconcile([position], {"2173.T": repaired}, _make_portfolio())
+        assert moved_items[0].action_basis != "DATA_QUALITY"
+        moved_activity = service.plan(
+            service.classify(moved_items, max_age_days=14),
+            options=_plan_options(limit=1, scheduler_state_path=state_path),
+        )
+        assert moved_activity.skipped_due_to_unrepaired == {}
 
     @pytest.mark.asyncio
     async def test_execute_exception_does_not_strand_later_scheduled_work(

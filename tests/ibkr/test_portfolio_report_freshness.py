@@ -16,6 +16,7 @@ from scripts.portfolio_manager import (
 from src.ibkr.models import (
     AnalysisRecord,
     NormalizedPosition,
+    PortfolioEvidence,
     PortfolioSummary,
     ReconciliationItem,
     TradeBlockData,
@@ -126,7 +127,104 @@ class TestAnalysisFreshnessReporting:
         assert "Refreshed: 7203.T" in report
         assert "User action: none" in report
 
-    def test_operator_review_reason_uses_aligned_wrapped_detail_lines(self):
+    def test_failed_urgent_refresh_shows_its_retry_time(self):
+        item = ReconciliationItem(
+            ticker="7203.T",
+            action="REVIEW",
+            reason="No analysis found",
+            urgency="HIGH",
+            ibkr_position=_make_position(ticker="7203.T"),
+        )
+        report = format_report(
+            [item],
+            _make_portfolio(),
+            refresh_activity=RefreshActivity(
+                policy="blocking",
+                limit=10,
+                failed=["7203.T"],
+                failed_retry_after={"7203.T": "2026-09-05T02:40:34.512873+00:00"},
+            ),
+        )
+
+        assert "auto-refresh failed; retry after 2026-09-05 02:40:34 UTC" in report
+        assert ".512873" not in report
+        assert "Backoff active for failed refreshes: 7203.T" in report
+        assert "Retry failed refreshes" not in report
+        assert (
+            "User action: refresh failed for 7203.T — backoff active; "
+            "rerun on a later refresh-enabled run"
+        ) in report
+
+    def test_failed_refresh_with_invalid_retry_time_degrades_safely(self):
+        item = ReconciliationItem(
+            ticker="7203.T",
+            action="REVIEW",
+            reason="No analysis found",
+            urgency="HIGH",
+            ibkr_position=_make_position(ticker="7203.T"),
+        )
+
+        report = format_report(
+            [item],
+            _make_portfolio(),
+            refresh_activity=RefreshActivity(
+                policy="blocking",
+                limit=10,
+                failed=["7203.T"],
+                failed_retry_after={"7203.T": "not-a-time"},
+            ),
+        )
+
+        assert "auto-refresh failed; retry on a later refresh-enabled run" in report
+
+    def test_unrepaired_refresh_backoff_is_not_reported_as_failure(self):
+        item = ReconciliationItem(
+            ticker="2173.T",
+            action="REVIEW",
+            reason="Gate scores unreliable (LEGAL_COUNSEL_UNAVAILABLE)",
+            urgency="HIGH",
+            ibkr_position=_make_position(ticker="2173.T"),
+            analysis=_make_analysis(ticker="2173.T", age_days=0),
+            action_basis="DATA_QUALITY",
+        )
+        item.analysis.evidence = PortfolioEvidence(
+            buy_blocking_flag_types=("LEGAL_COUNSEL_UNAVAILABLE",)
+        )
+        retry_after = "2026-09-12T02:40:34.512873+00:00"
+        report = format_report(
+            [item],
+            _make_portfolio(),
+            refresh_activity=RefreshActivity(
+                policy="blocking",
+                limit=10,
+                skipped_due_to_cooldown=["2173.T"],
+                skipped_due_to_unrepaired={"2173.T": retry_after},
+            ),
+        )
+
+        assert "a completed refresh left this review unchanged" in report
+        assert "retry after 2026-09-12 02:40:34 UTC" in report
+        assert "Deferred — a completed refresh left these unchanged: 2173.T" in report
+        assert "Deferred after failed refresh: 2173.T" not in report
+        assert "prior refresh did not repair active for 2173.T" in report
+
+        payload = json.loads(
+            format_json(
+                [item],
+                _make_portfolio(),
+                refresh_activity=RefreshActivity(
+                    policy="blocking",
+                    limit=10,
+                    skipped_due_to_cooldown=["2173.T"],
+                    skipped_due_to_unrepaired={"2173.T": retry_after},
+                ),
+            )
+        )
+        refresh = payload["analysis_freshness_summary"]
+        assert refresh["skipped_due_to_unrepaired"] == {"2173.T": retry_after}
+        assert refresh["skipped_due_to_failure_backoff"] == {}
+
+    def test_current_guidance_shows_freshness_without_requesting_a_rerun(self):
         item = ReconciliationItem(
             ticker="7203.T",
             action="REVIEW",
@@ -142,13 +240,67 @@ class TestAnalysisFreshnessReporting:
 
         report = format_report([item], _make_portfolio())
         operator_section = report.split(
-            "Operator decision points — will be re-run on normal cadence:", 1
+            "Current handling guidance — no refresh queued yet:", 1
         )[1]
         operator_section = operator_section.split("Refresh activity this run:", 1)[0]
 
         assert "7203" in operator_section
         assert "Fundamentals remain intact" in operator_section
+        assert "analysis 1d old" in operator_section
+        assert "expires " in operator_section
+        assert "normal-cycle refresh follows near expiry" in operator_section
         assert max(map(len, operator_section.splitlines())) <= DETAIL_WRAP_WIDTH + 14
+
+    def test_operator_review_explains_common_decision_bases(self):
+        items = [
+            ReconciliationItem(
+                ticker="ENTRY.T",
+                action="REVIEW",
+                reason="Fundamentals intact; entry screen rejected the current price",
+                urgency="LOW",
+                ibkr_position=_make_position(ticker="ENTRY.T"),
+                analysis=_make_analysis(ticker="ENTRY.T", age_days=1),
+                action_basis="ENTRY_CONSTRAINT",
+            ),
+            ReconciliationItem(
+                ticker="THESIS.T",
+                action="REVIEW",
+                reason="Price weakness alone is not exit evidence",
+                urgency="LOW",
+                ibkr_position=_make_position(ticker="THESIS.T"),
+                analysis=_make_analysis(ticker="THESIS.T", age_days=1),
+                action_basis="THESIS_REASSESSMENT",
+            ),
+            ReconciliationItem(
+                ticker="VALUE.T",
+                action="REVIEW",
+                reason="Base-case valuation reference reached",
+                urgency="LOW",
+                ibkr_position=_make_position(ticker="VALUE.T"),
+                analysis=_make_analysis(ticker="VALUE.T", age_days=1),
+                action_basis="CAPITAL_ALLOCATION",
+            ),
+        ]
+
+        report = format_report(items, _make_portfolio())
+        operator_section = report.split(
+            "Current handling guidance — no refresh queued yet:",
+            1,
+        )[1]
+        operator_section = operator_section.split("Refresh activity this run:", 1)[0]
+
+        assert (
+            "ENTRY_CONSTRAINT — maintain position; do not add; no sell implied"
+            in operator_section
+        )
+        assert (
+            "THESIS_REASSESSMENT — recheck thesis; no exit until failure is confirmed"
+            in operator_section
+        )
+        assert (
+            "CAPITAL_ALLOCATION — decide whether to hold, trim, or redeploy capital"
+            in operator_section
+        )
 
     def test_format_json_includes_freshness_summary(self):
         payload = json.loads(
@@ -181,7 +333,10 @@ class TestAnalysisFreshnessReporting:
         )
         assert "SCREENING FRESHNESS" in report
         assert "Last completed sweep: 2026-01-05  (90 days ago)" in report
-        assert "Candidates screened: 245  ·  BUYs found: 12" in report
+        assert (
+            "Candidates screened: 245  ·  "
+            "Stage-1 BUY candidates: 12 (require full analysis)"
+        ) in report
 
     def test_format_report_omits_fresh_screening_freshness(self):
         report = format_report(
@@ -648,7 +803,7 @@ class TestRefreshedThisRunRendersWithoutACommand:
     """
 
     def _item(self, ticker: str = "7203.T"):
-        return ReconciliationItem(
+        item = ReconciliationItem(
             ticker=ticker,
             action="REVIEW",
             reason="Gate scores unreliable — re-run before acting",
@@ -658,6 +813,10 @@ class TestRefreshedThisRunRendersWithoutACommand:
             sell_type="DATA_QUALITY_REVIEW",
             action_basis="DATA_QUALITY",
         )
+        item.analysis.evidence = PortfolioEvidence(
+            buy_blocking_flag_types=("TEST_EVIDENCE_UNAVAILABLE",)
+        )
+        return item
 
     @staticmethod
     def _freshness_section(report: str) -> str:

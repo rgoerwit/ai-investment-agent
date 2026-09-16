@@ -544,6 +544,30 @@ def test_consultant_validation_does_not_fail_closed_on_short_nontruncated_output
     )
 
 
+def test_junior_fundamentals_truncation_fails_closed():
+    assert (
+        should_fail_closed(
+            "junior_fundamentals_analyst",
+            validation={"ok": True, "checks": [], "missing": []},
+            truncated=True,
+            content="=== RAW FINANCIAL DATA FOR TEST ===",
+        )
+        is True
+    )
+
+
+def test_junior_fundamentals_complete_output_remains_valid():
+    assert (
+        should_fail_closed(
+            "junior_fundamentals_analyst",
+            validation={"ok": True, "checks": [], "missing": []},
+            truncated=False,
+            content="=== RAW FINANCIAL DATA FOR TEST ===\n=== END RAW DATA ===",
+        )
+        is False
+    )
+
+
 def test_auditor_validation_rejects_status_only_stub():
     content = "STATUS: REVIEW"
 

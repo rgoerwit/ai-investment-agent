@@ -237,6 +237,10 @@ class PortfolioRecommendationService:
                 # operator has in effect already run.
                 already_refreshed=frozenset(refresh_activity.refreshed),
             )
+            refresh_activity = self._refresh_service.record_unrepaired_refreshes(
+                refresh_activity,
+                freshness_summary,
+            )
 
         return PortfolioRecommendationBundle(
             analyses=analyses,

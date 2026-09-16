@@ -37,6 +37,13 @@ DEFAULT_REFRESH_CYCLE_WEIGHT = 1
 # reconciliation invocation. The scheduler state records the exact retry time.
 DEFAULT_REFRESH_FAILURE_BACKOFF_HOURS = 24
 
+# A completed refresh can still leave a held position in DATA_QUALITY review
+# (for example, a persistent filing-evidence gap). Re-running it in the next
+# portfolio invocation cannot create new evidence, so defer another automated
+# attempt for one day. This is separate from invocation failure: a provider or
+# persistence exception still uses the failure backoff path.
+DEFAULT_REFRESH_DATA_QUALITY_BACKOFF_HOURS = 24
+
 # Concentration ceilings (% of portfolio) that trigger TRIM recommendations.
 DEFAULT_SECTOR_LIMIT_PCT = 30.0
 DEFAULT_EXCHANGE_LIMIT_PCT = 40.0

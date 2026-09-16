@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,10 +15,12 @@ from src.error_safety import summarize_exception
 from src.ibkr.models import AnalysisRecord, ReconciliationItem
 from src.ibkr.portfolio_defaults import (
     DEFAULT_REFRESH_CYCLE_WEIGHT,
+    DEFAULT_REFRESH_DATA_QUALITY_BACKOFF_HOURS,
     DEFAULT_REFRESH_FAILURE_BACKOFF_HOURS,
     DEFAULT_REFRESH_URGENT_WEIGHT,
     DEFAULT_SELL_CONFIRMATION_MIN_SPACING_DAYS,
 )
+from src.ibkr.ticker import classify_ibkr_symbol
 from src.ibkr.types import (
     AnalysisRunner,
     AnalysisSaver,
@@ -40,6 +43,27 @@ _SERVICE_PATTERN: tuple[RefreshStream, ...] = cast(
 )
 
 
+def _is_research_ticker(ticker: str) -> bool:
+    """Reject broker-only identifiers from durable scheduler state."""
+    return classify_ibkr_symbol(ticker.split(".", 1)[0]).remedy == "use"
+
+
+def parse_refresh_retry_at(raw: str | None) -> datetime | None:
+    """Parse the scheduler's ISO retry timestamp, treating a naive value as UTC."""
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def format_refresh_retry_at(retry_at: datetime) -> str:
+    """Render a retry timestamp for operators. One spelling, four call sites."""
+    return retry_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
 @dataclass(frozen=True)
 class AnalysisFreshnessRow:
     display_ticker: str
@@ -53,6 +77,13 @@ class AnalysisFreshnessRow:
     age_days: int | None
     expires_date: str | None
     days_until_due: int | None
+    # Whether a paid stock analysis could plausibly change this row. Deliberately
+    # a boolean and not an identity string: the previous design keyed scheduler
+    # state on the buy-blocking flag *composition*, which is downstream of search
+    # quality and changed on 6 of 6 consecutive runs for 2173.T, so the key never
+    # repeated and the cooldown never fired. Nothing about prose, dates, or price
+    # enters scheduler semantics.
+    refresh_repairable: bool = False
 
 
 @dataclass
@@ -78,14 +109,34 @@ class RefreshActivity:
     queued: list[str] = field(default_factory=list)
     refreshed: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
+    failed_retry_after: dict[str, str] = field(default_factory=dict)
     skipped_due_to_policy: list[str] = field(default_factory=list)
     skipped_due_to_limit: list[str] = field(default_factory=list)
     skipped_read_only: list[str] = field(default_factory=list)
     skipped_due_to_cooldown: list[str] = field(default_factory=list)
+    # Failure backoff is ticker-wide because retrying the invocation cannot
+    # succeed before its provider/persistence cooldown. The unrepaired backoff
+    # is scoped to the action basis instead: a paid run that left the same basis
+    # in place is evidence that the next one will too, but a genuinely different
+    # basis (STOP_LOSS after DATA_QUALITY) is new information and stays eligible.
+    skipped_due_to_failure_backoff: dict[str, str] = field(default_factory=dict)
+    skipped_due_to_unrepaired: dict[str, str] = field(default_factory=dict)
+    scheduled_bases: dict[str, str] = field(default_factory=dict)
+    unrepaired_retry_after: dict[str, str] = field(default_factory=dict)
     # (ticker, WRR cursor position after dispatch). Attempts, successful or
     # failed, consume a quantum so one bad urgent ticker cannot monopolize runs.
     scheduled_slots: list[tuple[str, int]] = field(default_factory=list)
     scheduler_state_path: Path | None = None
+
+    def copy(self) -> RefreshActivity:
+        """Return an independent copy, sharing no mutable container.
+
+        ``execute`` mutates its result, so it must not alias the planned
+        activity. This replaced a hand-written field-by-field copy that omitted
+        three fields and had to be extended for every new one — a silently
+        shared list is exactly the sort of bug that copy was there to prevent.
+        """
+        return deepcopy(self)
 
 
 @dataclass(frozen=True)
@@ -105,12 +156,24 @@ class RefreshExecutionOptions:
     skip_charts: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class _UnrepairedRefresh:
+    """A paid refresh that completed and left the same action basis in place."""
+
+    basis: str
+    retry_after: str
+
+
 @dataclass
 class _SchedulerState:
     """Small durable state needed for fair service across separate CLI runs."""
 
     next_slot: int = 0
     retry_not_before: dict[str, str] = field(default_factory=dict)
+    # One entry per ticker, not per condition: the question is "did the last
+    # paid analysis change this ticker's disposition", which is a fact about the
+    # position, not about which particular evidence gap happened to surface.
+    unrepaired_refresh: dict[str, _UnrepairedRefresh] = field(default_factory=dict)
 
 
 class AnalysisRefreshService:
@@ -168,6 +231,7 @@ class AnalysisRefreshService:
                 age_days=analysis.age_days if analysis else None,
                 expires_date=expires_date,
                 days_until_due=days_until_due,
+                refresh_repairable=self._refresh_repairable(item),
             )
 
             if item.ibkr_position is None:
@@ -179,7 +243,14 @@ class AnalysisRefreshService:
                     summary.fresh.append(row)
                 continue
             if analysis is None:
-                if item.sell_type == "SOFT_REJECT":
+                if item.action_basis == "DATA_QUALITY":
+                    # Broker/operator defects remain non-repairable even when
+                    # no saved stock analysis exists. The missing artifact is
+                    # incidental; a paid run cannot fix the live position row.
+                    summary.operator_review.append(
+                        replace(row, bucket="operator_review")
+                    )
+                elif item.sell_type == "SOFT_REJECT":
                     # A correlated macro event can demote a historical sell
                     # to REVIEW after its artifact is no longer available.
                     # Keep that visible to the operator, but do not let it
@@ -264,11 +335,14 @@ class AnalysisRefreshService:
             ]
             return activity
         if options.policy == "blocking":
-            # Strict priority remains work-conserving: a blocking run serves
-            # urgent work first, but must not idle a whole session when only
-            # normal-cycle work is available.
+            # Strict priority, then top up. Passing only the urgent stream left
+            # the rest of the budget unused: a portfolio with one permanently
+            # urgent row and 64 due-soon rows refreshed exactly one analysis per
+            # run and never reached normal-cycle work at all. Urgent still goes
+            # first and still takes as many slots as it needs; "blocking" bounds
+            # ordering, not throughput.
             selected, deferred = self._priority_plan(
-                urgent if urgent else cycle,
+                [*urgent, *cycle],
                 options.limit,
                 state.next_slot,
             )
@@ -278,11 +352,17 @@ class AnalysisRefreshService:
             )
         activity.queued = [row.run_ticker for row, _ in selected]
         activity.scheduled_slots = [(row.run_ticker, slot) for row, slot in selected]
+        activity.scheduled_bases = {
+            row.run_ticker: row.action_basis
+            for row, _ in selected
+            if row.refresh_repairable and row.action_basis
+        }
         activity.skipped_due_to_limit = [row.run_ticker for row in deferred]
         if options.read_only:
             activity.skipped_read_only = list(activity.queued)
             activity.queued = []
             activity.scheduled_slots = []
+            activity.scheduled_bases = {}
         return activity
 
     def user_action(
@@ -312,9 +392,24 @@ class AnalysisRefreshService:
 
         command = render_command()
         if activity.failed:
+            if activity.failed_retry_after:
+                return (
+                    f"refresh failed for {', '.join(activity.failed)} — "
+                    "backoff active; rerun on a later refresh-enabled run"
+                )
             return f"refresh failed for {', '.join(activity.failed)} — rerun {command}"
         if activity.skipped_read_only:
             return f"read-only mode blocked refresh — run {command}"
+        if activity.skipped_due_to_failure_backoff:
+            return self._cooldown_user_action(
+                "failed refresh backoff",
+                activity.skipped_due_to_failure_backoff,
+            )
+        if activity.skipped_due_to_unrepaired:
+            return self._cooldown_user_action(
+                "prior refresh did not repair",
+                activity.skipped_due_to_unrepaired,
+            )
         if activity.policy == "off":
             return f"run {command}"
         if activity.skipped_due_to_limit:
@@ -323,6 +418,18 @@ class AnalysisRefreshService:
                 f"(remaining: {', '.join(activity.skipped_due_to_limit)})"
             )
         return "none"
+
+    @staticmethod
+    def _cooldown_user_action(label: str, retry_times: dict[str, str]) -> str:
+        tickers = ", ".join(retry_times)
+        parsed = [parse_refresh_retry_at(value) for value in retry_times.values()]
+        retry_at = min((value for value in parsed if value is not None), default=None)
+        timing = (
+            retry_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+            if retry_at is not None
+            else "a later refresh-enabled run"
+        )
+        return f"{label} active for {tickers} — retry after {timing}"
 
     async def execute(
         self,
@@ -333,17 +440,7 @@ class AnalysisRefreshService:
         save_results_fn: AnalysisSaver,
         progress: ProgressCallback | None = None,
     ) -> RefreshActivity:
-        updated = replace(
-            activity,
-            queued=list(activity.queued),
-            refreshed=list(activity.refreshed),
-            failed=list(activity.failed),
-            skipped_due_to_policy=list(activity.skipped_due_to_policy),
-            skipped_due_to_limit=list(activity.skipped_due_to_limit),
-            skipped_read_only=list(activity.skipped_read_only),
-            skipped_due_to_cooldown=list(activity.skipped_due_to_cooldown),
-            scheduled_slots=list(activity.scheduled_slots),
-        )
+        updated = activity.copy()
         state = self._load_state(updated.scheduler_state_path)
         slots_by_ticker = dict(updated.scheduled_slots)
         refresh_count = len(updated.queued)
@@ -376,15 +473,82 @@ class AnalysisRefreshService:
                     **summarize_exception(exc, operation="refreshing analysis"),
                 )
                 updated.failed.append(ticker)
-                state.retry_not_before[ticker] = (
+                retry_after = (
                     datetime.now(UTC)
                     + timedelta(hours=DEFAULT_REFRESH_FAILURE_BACKOFF_HOURS)
                 ).isoformat()
+                state.retry_not_before[ticker] = retry_after
+                updated.failed_retry_after[ticker] = retry_after
             else:
                 updated.refreshed.append(ticker)
+                # Invocation recovery and persistent evidence are separate. A
+                # successful run clears only the former; the post-refresh
+                # reconciliation below decides whether the same evidence gap
+                # survived and merits a condition-specific cooldown.
                 state.retry_not_before.pop(ticker, None)
+                updated.failed_retry_after.pop(ticker, None)
             if (slot_after := slots_by_ticker.get(ticker)) is not None:
                 state.next_slot = slot_after
+            self._save_state(updated.scheduler_state_path, state)
+        return updated
+
+    def record_unrepaired_refreshes(
+        self,
+        activity: RefreshActivity,
+        summary: AnalysisFreshnessSummary,
+    ) -> RefreshActivity:
+        """Persist a backoff for each paid refresh that repaired nothing.
+
+        This intentionally runs after refreshed artifacts have been loaded and
+        reconciled: a successful invocation alone says nothing about whether it
+        changed the disposition that justified its cost.
+
+        The recorded key is the action *basis*, a closed ten-value enum, not the
+        set of buy-blocking flags. Flag composition is downstream of search
+        quality and varies run to run even when nothing about the position has
+        changed, so keying on it meant the stored key never matched and the
+        backoff never applied. A genuinely different basis is new information
+        and stays immediately eligible.
+        """
+        updated = activity.copy()
+        state = self._load_state(updated.scheduler_state_path)
+        # operator_review and fresh are absent on purpose: a ticker that landed
+        # there is no longer competing for a paid slot, so it needs no backoff.
+        replanned_rows = {
+            row.run_ticker: row
+            for row in (
+                *summary.blocking_now,
+                *summary.stale_in_queue,
+                *summary.due_soon,
+                *summary.candidate_blocked,
+                *summary.refreshed_this_run,
+            )
+        }
+        changed = False
+        for ticker in updated.refreshed:
+            scheduled_basis = updated.scheduled_bases.get(ticker)
+            current = replanned_rows.get(ticker)
+            unrepaired = (
+                scheduled_basis is not None
+                and current is not None
+                and current.refresh_repairable
+                and current.action_basis == scheduled_basis
+            )
+            if unrepaired:
+                retry_after = (
+                    datetime.now(UTC)
+                    + timedelta(hours=DEFAULT_REFRESH_DATA_QUALITY_BACKOFF_HOURS)
+                ).isoformat()
+                state.unrepaired_refresh[ticker] = _UnrepairedRefresh(
+                    basis=str(scheduled_basis), retry_after=retry_after
+                )
+                updated.unrepaired_retry_after[ticker] = retry_after
+                changed = True
+            elif state.unrepaired_refresh.pop(ticker, None) is not None:
+                # The refresh moved the position off its prior basis, so the
+                # stored backoff no longer describes anything.
+                changed = True
+        if changed:
             self._save_state(updated.scheduler_state_path, state)
         return updated
 
@@ -397,6 +561,13 @@ class AnalysisRefreshService:
         analysis = item.analysis
         assert analysis is not None
         basis = item.action_basis
+        if basis == "DATA_QUALITY" and AnalysisRefreshService._requires_broker_repair(
+            item
+        ):
+            # The attached analysis may itself be aging or incomplete, but paid
+            # research cannot repair the broker condition driving this review.
+            summary.operator_review.append(replace(row, bucket="operator_review"))
+            return
         if basis in _OPERATOR_ONLY_BASES:
             # These are decisions for the operator, not same-day evidence
             # failures. Keep them visible while fresh, then put them into the
@@ -446,11 +617,29 @@ class AnalysisRefreshService:
                 # every single run for a week (7047.T: 08-15 x2, 08-18, 08-19).
                 summary.operator_review.append(replace(row, bucket="operator_review"))
             return
+        if basis == "DATA_QUALITY" and not row.refresh_repairable:
+            # Broker defects remain operator work. A settled analytical reject
+            # is also not same-day repairable, but its measurement is not
+            # immutable: re-admit it to the ordinary fair cycle near expiry.
+            settled_reject = bool(analysis.evidence.settled_reject_flag_types)
+            target = (
+                summary.due_soon
+                if settled_reject
+                and row.days_until_due is not None
+                and row.days_until_due <= 7
+                else summary.operator_review
+            )
+            target.append(
+                replace(
+                    row,
+                    bucket=(
+                        "due_soon" if target is summary.due_soon else "operator_review"
+                    ),
+                )
+            )
+            return
         if basis in {"DATA_QUALITY", "STOP_LOSS"}:
-            # Evidence or a review-level breach is indeterminate evidence:
-            # re-run before the operator acts, even if the saved artifact is
-            # from today. The failed-run backoff below prevents an unavailable
-            # provider from monopolizing the urgent stream.
+            # Analysis evidence gaps and review-level breaches merit a refresh.
             summary.blocking_now.append(replace(row, bucket="blocking_now"))
             return
         if row.reason_family == "stale":
@@ -572,15 +761,31 @@ class AnalysisRefreshService:
         def filter_rows(rows: list[AnalysisFreshnessRow]) -> list[AnalysisFreshnessRow]:
             eligible: list[AnalysisFreshnessRow] = []
             for row in rows:
-                retry_at = AnalysisRefreshService._parse_retry_at(
+                retry_at = parse_refresh_retry_at(
                     state.retry_not_before.get(row.run_ticker)
                 )
                 if retry_at is not None and retry_at > now:
                     activity.skipped_due_to_cooldown.append(row.run_ticker)
-                else:
-                    if retry_at is not None:
-                        state.retry_not_before.pop(row.run_ticker, None)
-                    eligible.append(row)
+                    activity.skipped_due_to_failure_backoff[row.run_ticker] = (
+                        retry_at.isoformat()
+                    )
+                    continue
+                # A stored backoff suppresses only the basis it was recorded
+                # against, so a position that has since moved to a different
+                # basis is new information and competes for a slot again.
+                unrepaired = state.unrepaired_refresh.get(row.run_ticker)
+                backoff_at = (
+                    parse_refresh_retry_at(unrepaired.retry_after)
+                    if unrepaired is not None and unrepaired.basis == row.action_basis
+                    else None
+                )
+                if backoff_at is not None and backoff_at > now:
+                    activity.skipped_due_to_cooldown.append(row.run_ticker)
+                    activity.skipped_due_to_unrepaired[row.run_ticker] = (
+                        backoff_at.isoformat()
+                    )
+                    continue
+                eligible.append(row)
             return eligible
 
         return (filter_rows(urgent), filter_rows(cycle))
@@ -591,8 +796,18 @@ class AnalysisRefreshService:
             return _SchedulerState()
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("scheduler state must be an object")
+            version = raw.get("version")
+            if isinstance(version, bool) or version not in {1, 2, 3}:
+                raise ValueError(f"unsupported scheduler state version: {version!r}")
             next_slot = raw.get("next_slot", 0)
             retry_not_before = raw.get("retry_not_before", {})
+            # v2 keyed this map on buy-blocking flag composition, which proved
+            # unusable (the key effectively never repeated). Those entries
+            # describe nothing a v3 reader can act on, so they are dropped
+            # rather than migrated; at worst one ticker is refreshed once more.
+            raw_unrepaired = raw.get("unrepaired_refresh", {}) if version == 3 else {}
             if not isinstance(next_slot, int) or next_slot < 0:
                 raise ValueError("invalid next_slot")
             if not isinstance(retry_not_before, dict) or not all(
@@ -600,8 +815,38 @@ class AnalysisRefreshService:
                 for key, value in retry_not_before.items()
             ):
                 raise ValueError("invalid retry_not_before")
+            if not isinstance(raw_unrepaired, dict) or not all(
+                isinstance(key, str)
+                and isinstance(value, dict)
+                and isinstance(value.get("basis"), str)
+                and isinstance(value.get("retry_after"), str)
+                for key, value in raw_unrepaired.items()
+            ):
+                raise ValueError("invalid unrepaired_refresh")
+            now = datetime.now(UTC)
+            # State is persisted only when execution advances the scheduler.
+            # Pruning while loading keeps plan() read-only and ensures the next
+            # normal write drops expired or malformed entries.
+            retry_not_before = {
+                ticker: retry_after
+                for ticker, retry_after in retry_not_before.items()
+                if (parsed := parse_refresh_retry_at(retry_after)) is not None
+                and parsed > now
+                and _is_research_ticker(ticker)
+            }
+            unrepaired_refresh = {
+                ticker: _UnrepairedRefresh(
+                    basis=entry["basis"], retry_after=entry["retry_after"]
+                )
+                for ticker, entry in raw_unrepaired.items()
+                if (parsed := parse_refresh_retry_at(entry["retry_after"])) is not None
+                and parsed > now
+                and _is_research_ticker(ticker)
+            }
             return _SchedulerState(
-                next_slot=next_slot, retry_not_before=retry_not_before
+                next_slot=next_slot,
+                retry_not_before=retry_not_before,
+                unrepaired_refresh=unrepaired_refresh,
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             logger.warning(
@@ -627,9 +872,16 @@ class AnalysisRefreshService:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(
                     {
-                        "version": 1,
+                        "version": 3,
                         "next_slot": state.next_slot,
                         "retry_not_before": state.retry_not_before,
+                        "unrepaired_refresh": {
+                            ticker: {
+                                "basis": entry.basis,
+                                "retry_after": entry.retry_after,
+                            }
+                            for ticker, entry in state.unrepaired_refresh.items()
+                        },
                     },
                     handle,
                     indent=2,
@@ -651,16 +903,6 @@ class AnalysisRefreshService:
                     os.unlink(temp_name)
                 except OSError:
                     pass
-
-    @staticmethod
-    def _parse_retry_at(raw: str | None) -> datetime | None:
-        if not raw:
-            return None
-        try:
-            parsed = datetime.fromisoformat(raw)
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-        except ValueError:
-            return None
 
     @staticmethod
     def _analysis_expiry_details(
@@ -688,6 +930,43 @@ class AnalysisRefreshService:
         if "stale analysis" in reason_lower or item.analysis.age_days > max_age_days:
             return "stale"
         return "review required"
+
+    @staticmethod
+    def _requires_broker_repair(item: ReconciliationItem) -> bool:
+        position = item.ibkr_position
+        return position is not None and (
+            position.quantity < 0 or not position.valuation_valid
+        )
+
+    @staticmethod
+    def _refresh_repairable(item: ReconciliationItem) -> bool:
+        """Whether a paid stock analysis could plausibly change this row.
+
+        Only *indeterminate* buy-blocking evidence qualifies. A settled gate
+        failure — ``LIQUIDITY_HARD_FAIL`` measured against a fixed thesis
+        threshold — is already resolved, and re-running research cannot move
+        it; treating it as repairable re-analysed 2173.T on every invocation
+        for days while its liquidity verdict was never in doubt.
+
+        Price is deliberately absent. A review-level breach raises urgency
+        elsewhere, but it is not evidence that more research exists to buy, and
+        letting it participate here made spend a function of a price hovering
+        near a threshold.
+        """
+        if (
+            item.action_basis != "DATA_QUALITY"
+            or item.analysis is None
+            or AnalysisRefreshService._requires_broker_repair(item)
+        ):
+            return False
+        if item.analysis.evidence.indeterminate_flag_types:
+            return True
+        data_quality = item.analysis.data_quality
+        return data_quality.get("data_vacuum") is True or (
+            item.analysis.current_price is None
+            and item.analysis.health_adj == 0
+            and item.analysis.growth_adj == 0
+        )
 
 
 def refresh_scheduler_state_path(results_dir: Path) -> Path:

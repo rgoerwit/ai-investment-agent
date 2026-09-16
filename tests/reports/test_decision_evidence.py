@@ -71,6 +71,38 @@ def test_decision_evidence_does_not_trust_claim_without_matching_record() -> Non
     assert "No decision fact is backed by an inspected external document" in rendered
 
 
+def test_decision_evidence_uses_canonical_id_for_record_without_sequence() -> None:
+    url = "https://issuer.example/results"
+    state = {
+        "evidence_records": [
+            {
+                "content_sha256": "abcdef1234567890",
+                "requested_urls": [url],
+                "urls": [url],
+                "blocked": False,
+                "execution_status": "SUCCEEDED",
+                "evidence_status": "EVIDENCE_FOUND",
+            }
+        ],
+        "analysis_snapshot": {
+            "claims": {
+                "claim:external": {
+                    "field": "GUIDANCE_REVENUE",
+                    "value": "+5%",
+                    "authority": "PRIMARY",
+                    "coverage": "FOUND",
+                    "decision_eligible": True,
+                    "evidence_id": "evidence:0:abcdef123456",
+                    "source_url": url,
+                }
+            }
+        },
+        "decision_trace": {"decision_facts": ["claim:external"]},
+    }
+
+    assert "[inspected source]" in render_decision_evidence_markdown(state)
+
+
 def test_decision_evidence_rejects_failed_or_url_mismatched_record() -> None:
     claim = {
         "field": "GUIDANCE_REVENUE",

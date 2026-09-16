@@ -7,7 +7,9 @@ with yfinance ticker mapping and FX normalization.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Literal
 
 import structlog
 
@@ -15,13 +17,17 @@ from src.error_safety import summarize_exception
 from src.fx_normalization import get_fx_rate_cache
 from src.ibkr.client import IbkrClient, mask_account
 from src.ibkr.exceptions import IBKRError
-from src.ibkr.models import NormalizedPosition, PortfolioSummary
+from src.ibkr.models import (
+    NormalizedPosition,
+    PortfolioSummary,
+    UnresolvedBrokerPosition,
+)
 from src.ibkr.portfolio_defaults import DEFAULT_CASH_BUFFER_PCT
 from src.ibkr.position_values import (
     NormalizedPositionValues,
     normalize_position_values,
 )
-from src.ibkr.ticker import Ticker
+from src.ibkr.ticker import Ticker, classify_ibkr_symbol
 from src.ibkr.ticker_mapper import (
     TickerResolution,
     _yf_search_ticker,
@@ -64,259 +70,332 @@ def _position_field(raw: dict, primary: str, fallback: str) -> object:
     return value
 
 
-@dataclass
-class _PendingPosition:
-    """Position state gathered before FX rates are known.
-
-    Ticker/currency resolution (conid lookups, yfinance search) has no
-    dependency on FX rates, so it runs first for every position; FX rates
-    for the resulting currency set are then batch-resolved once (see
-    FxRateCache) instead of once per position.
-    """
-
-    ticker_obj: Ticker
-    ticker_identity_verified: bool
-    ticker_resolution_source: str
-    conid: int | None
+@dataclass(frozen=True)
+class _BrokerNumerics:
     raw_market_value: float
-    currency: str
     quantity: float
     current_price_local: float
     avg_cost_local: float
     raw_unrealized_pnl: float | None
-    malformed_fields: list[str]
+    malformed_fields: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _ResolvedPositionIdentity:
+    ticker: Ticker
+    verified: bool
+    source: str
+
+
+_PositionIdentityStatus = Literal["resolved", "unresolved", "excluded"]
+
+
+@dataclass(frozen=True)
+class _PositionIdentityOutcome:
+    status: _PositionIdentityStatus
+    conid: int | None
+    resolved: _ResolvedPositionIdentity | None = None
+    reason: str | None = None
+    instrument_kind: str | None = None
+
+
+@dataclass(frozen=True)
+class _PendingPosition:
+    """One parsed broker row awaiting only its batched FX rate."""
+
+    conid: int | None
+    broker_token: str
+    currency: str
+    numerics: _BrokerNumerics
+    identity: _ResolvedPositionIdentity | None
+    unresolved_reason: str | None = None
+
+
+@dataclass
+class PositionNormalizationResult:
+    """Resolved positions plus broker holdings quarantined without a ticker."""
+
+    resolved: list[NormalizedPosition] = field(default_factory=list)
+    unresolved: list[UnresolvedBrokerPosition] = field(default_factory=list)
+    excluded_non_security_count: int = 0
+
+
+def _resolve_position_identity(
+    symbol: str,
+    exchange: str,
+    currency: str,
+    conid: int | None,
+    client: IbkrClient | None,
+) -> _PositionIdentityOutcome:
+    """Resolve one broker identity before it can acquire a research ticker."""
+    classification = classify_ibkr_symbol(symbol.partition("-")[0])
+    if classification.remedy == "drop":
+        return _PositionIdentityOutcome(
+            "excluded", conid, instrument_kind=classification.kind
+        )
+
+    if classification.remedy == "recover_from_conid" or not symbol:
+        embedded_conid = classification.contract_id
+        # Conflicting identifiers are not grounds to choose either instrument.
+        if conid is not None and embedded_conid is not None and embedded_conid != conid:
+            logger.warning(
+                "position_contract_identifier_mismatch",
+                conid=conid,
+                embedded_conid=embedded_conid,
+            )
+            return _PositionIdentityOutcome(
+                "unresolved",
+                conid,
+                reason="broker contract identifier does not match conid",
+            )
+        conid = conid or embedded_conid
+        # A placeholder provides no competing market identity: use a safe cached
+        # conid observation before requiring an available brokerage session.
+        resolution = (
+            _resolve_conid_ticker(conid, client, context="position")
+            if conid is not None
+            else TickerResolution("", "unresolved", False)
+        )
+        if not resolution.yf_ticker:
+            return _PositionIdentityOutcome(
+                "unresolved", conid, reason="canonical security identity unavailable"
+            )
+        # The resolved market key already owns its venue. Raw broker currency
+        # must not add a different suffix to a deliberately bare US identity.
+        ticker = Ticker.from_yf(resolution.yf_ticker)
+    else:
+        ticker = Ticker.from_ibkr(classification.symbol, exchange, currency)
+        smart_non_usd = exchange.upper() in {"", "SMART"} and currency.upper() not in {
+            "",
+            "USD",
+        }
+        verified = ticker.exchange_resolved and not smart_non_usd
+        resolution = TickerResolution(
+            ticker.yf,
+            "exchange_map"
+            if verified
+            else ("currency_fallback" if ticker.has_suffix else "unresolved"),
+            verified,
+        )
+        recovered_from_conid = False
+        if (
+            conid is not None
+            and client is not None
+            and _should_resolve_position_conid(
+                ticker, raw_exchange=exchange, raw_currency=currency
+            )
+        ):
+            # Ordinary symbols can carry ambiguous venue metadata, so consult
+            # the live contract while retaining safe cache fallback.
+            contract_resolution = _resolve_conid_ticker(
+                conid, client, force_live=True, context="position"
+            )
+            if contract_resolution.source == "non_analyzable":
+                return _PositionIdentityOutcome(
+                    "unresolved",
+                    conid,
+                    reason="broker contract is not a market security",
+                )
+            if contract_resolution.yf_ticker:
+                resolution = contract_resolution
+                ticker = Ticker.from_yf(resolution.yf_ticker)
+                recovered_from_conid = True
+
+        # Search can fill an unknown raw-symbol listing, but cannot replace a
+        # recovered contract identity with a weaker guess.
+        if (
+            not recovered_from_conid
+            and not ticker.has_suffix
+            and exchange
+            and exchange.upper() not in _US_EXCHANGES
+        ):
+            searched = _yf_search_ticker(classification.symbol, exchange, currency)
+            if searched:
+                ticker = Ticker.from_yf(searched)
+                resolution = TickerResolution(searched, "yfinance_search", False)
+
+    overridden, was_overridden = apply_operator_override(ticker.yf)
+    if was_overridden:
+        ticker = Ticker.from_yf(overridden)
+        resolution = TickerResolution(overridden, "operator_override", True)
+    return _PositionIdentityOutcome(
+        "resolved",
+        conid,
+        resolved=_ResolvedPositionIdentity(
+            ticker, resolution.exchange_verified, resolution.source
+        ),
+    )
+
+
+def _parse_broker_numerics(raw: dict) -> _BrokerNumerics:
+    """Parse the same monetary inputs for resolved and quarantined holdings."""
+    market_value, market_value_valid = _parse_position_number(
+        _position_field(raw, "mktValue", "marketValue")
+    )
+    quantity, quantity_valid = _parse_position_number(
+        _position_field(raw, "position", "qty")
+    )
+    price, price_valid = _parse_position_number(
+        _position_field(raw, "mktPrice", "lastPrice")
+    )
+    cost, cost_valid = _parse_position_number(
+        _position_field(raw, "avgCost", "avgPrice")
+    )
+    raw_pnl = raw.get("unrealizedPnl")
+    pnl, pnl_valid = _parse_position_number(raw_pnl)
+    return _BrokerNumerics(
+        raw_market_value=market_value,
+        quantity=quantity,
+        current_price_local=price,
+        avg_cost_local=cost,
+        raw_unrealized_pnl=None if raw_pnl is None else pnl,
+        malformed_fields=tuple(
+            name
+            for name, valid in (
+                ("quantity", quantity_valid),
+                ("market_value", market_value_valid),
+                ("current_price", price_valid),
+                ("avg_cost", cost_valid),
+                ("unrealized_pnl", pnl_valid),
+            )
+            if not valid
+        ),
+    )
+
+
+def _value_broker_position(
+    numerics: _BrokerNumerics, currency: str, fx_rate: float | None
+) -> NormalizedPositionValues:
+    """Apply one valuation policy independently of the identity outcome."""
+    if numerics.malformed_fields:
+        return NormalizedPositionValues(
+            market_value_usd=0.0,
+            unrealized_pnl_usd=0.0,
+            fx_rate_to_usd=None,
+            market_value_basis="UNAVAILABLE",
+            unrealized_pnl_basis="UNAVAILABLE",
+            valuation_valid=False,
+            valuation_issue=(
+                "Malformed broker numeric field(s): "
+                + ", ".join(numerics.malformed_fields)
+            ),
+        )
+    return normalize_position_values(
+        quantity=numerics.quantity,
+        current_price_local=numerics.current_price_local,
+        avg_cost_local=numerics.avg_cost_local,
+        raw_market_value=numerics.raw_market_value,
+        raw_unrealized_pnl=numerics.raw_unrealized_pnl,
+        currency=currency,
+        fx_rate=fx_rate,
+    )
 
 
 def normalize_positions(
     raw_positions: list[dict],
     *,
     client: IbkrClient | None = None,
-) -> list[NormalizedPosition]:
-    """
-    Convert raw IBKR position dicts to NormalizedPosition models.
+) -> PositionNormalizationResult:
+    """Resolve broker identities and retain unresolved holdings for accounting.
 
-    Maps IBKR symbols to yfinance tickers for reconciliation against
-    evaluator analyses.
-
-    Args:
-        raw_positions: List of raw IBKR position dicts
-        client: Connected IBKR client. When available, held positions in
-            ambiguous multi-exchange markets are resolved from their conid.
-
-    Returns:
-        List of NormalizedPosition models (skips positions that can't be mapped)
+    Callers must explicitly consume the resolved and unresolved collections.
+    Identity resolution precedes a single batched FX lookup and valuation path.
     """
     pending: list[_PendingPosition] = []
-
+    result = PositionNormalizationResult()
     for raw in raw_positions:
-        # Extract raw IBKR fields
-        raw_symbol = (raw.get("contractDesc", "") or raw.get("ticker", "")).strip()
-        if "-" in raw_symbol:
-            raw_symbol = raw_symbol.split("-")[0]
-        raw_exchange = (
-            raw.get("listingExchange", "") or raw.get("exchange", "")
-        ).strip()
-        raw_currency = (raw.get("currency", "") or "").strip()
+        symbol = (raw.get("contractDesc", "") or raw.get("ticker", "")).strip()
+        exchange = (raw.get("listingExchange", "") or raw.get("exchange", "")).strip()
+        currency = (raw.get("currency", "") or "").strip()
+        outcome = _resolve_position_identity(
+            symbol, exchange, currency, _parse_conid(raw.get("conid")), client
+        )
+        if outcome.status == "excluded":
+            result.excluded_non_security_count += 1
+            logger.info(
+                "position_non_analyzable_skipped",
+                instrument_kind=outcome.instrument_kind,
+            )
+            continue
+        if outcome.status == "unresolved":
+            logger.warning("position_identity_unresolved", conid=outcome.conid)
+        identity = outcome.resolved
+        pending.append(
+            _PendingPosition(
+                conid=outcome.conid,
+                broker_token=symbol,
+                currency=currency
+                or (
+                    "GBP"
+                    if identity is not None and identity.ticker.suffix == ".L"
+                    else "USD"
+                ),
+                numerics=_parse_broker_numerics(raw),
+                identity=identity,
+                unresolved_reason=outcome.reason,
+            )
+        )
 
-        if not raw_symbol:
+    fx_rates = get_fx_rate_cache().resolve_rates_sync({p.currency for p in pending})
+    for position in pending:
+        numerics = position.numerics
+        rate_info = fx_rates.get(position.currency.strip().upper())
+        values = _value_broker_position(
+            numerics, position.currency, rate_info[0] if rate_info else None
+        )
+        if not values.valuation_valid:
             logger.warning(
-                "position_unmapped",
-                raw_symbol="(empty)",
-                exchange=raw_exchange,
+                "position_valuation_unavailable",
+                conid=position.conid,
+                currency=position.currency,
+                reason=values.valuation_issue,
+            )
+        if position.identity is None:
+            assert position.unresolved_reason is not None
+            result.unresolved.append(
+                UnresolvedBrokerPosition(
+                    conid=position.conid or 0,
+                    broker_token=position.broker_token,
+                    quantity=numerics.quantity,
+                    currency=position.currency,
+                    market_value_usd=values.market_value_usd,
+                    valuation_valid=values.valuation_valid,
+                    valuation_issue=values.valuation_issue,
+                    reason=position.unresolved_reason,
+                )
             )
             continue
 
-        # Build Ticker from IBKR fields — this is the authoritative conversion point.
-        ticker_obj = Ticker.from_ibkr(raw_symbol, raw_exchange, raw_currency)
-        smart_non_usd = raw_exchange.upper() in {
-            "",
-            "SMART",
-        } and raw_currency.upper() not in {
-            "",
-            "USD",
-        }
-        ticker_identity_verified = ticker_obj.exchange_resolved and not smart_non_usd
-        if ticker_identity_verified:
-            ticker_resolution_source = "exchange_map"
-        elif ticker_obj.has_suffix:
-            ticker_resolution_source = "currency_fallback"
-        else:
-            ticker_resolution_source = "unresolved"
-
-        conid = _parse_conid(raw.get("conid"))
-        if (
-            conid is not None
-            and client is not None
-            and _should_resolve_position_conid(
-                ticker_obj,
-                raw_exchange=raw_exchange,
-                raw_currency=raw_currency,
-            )
-        ):
-            resolution = _resolve_conid_ticker(
-                conid,
-                client,
-                force_live=True,
-                context="position",
-            )
-            if resolution.yf_ticker:
-                ticker_obj = Ticker.from_yf(
-                    resolution.yf_ticker,
-                    currency=raw_currency,
-                )
-                ticker_identity_verified = resolution.exchange_verified
-                ticker_resolution_source = resolution.source
-
-        # Network fallback: for non-US positions where the exchange code is unknown
-        # (not in IBKR_TO_YFINANCE), attempt a yfinance.Search to resolve the suffix.
-        # The network call and result caching live in ticker_mapper._yf_search_ticker.
-        if (
-            not ticker_obj.has_suffix
-            and raw_exchange
-            and raw_exchange not in _US_EXCHANGES
-        ):
-            yf_str = _yf_search_ticker(raw_symbol, raw_exchange, raw_currency)
-            if yf_str:
-                ticker_obj = Ticker.from_yf(yf_str, currency=raw_currency)
-                ticker_identity_verified = False
-                ticker_resolution_source = "yfinance_search"
-
-        # Operator-confirmed listing migrations (config/ticker_overrides.json):
-        # keep position keys aligned with the analysis side until IBKR's own
-        # exchange metadata catches up with the move.
-        overridden_yf, was_overridden = apply_operator_override(ticker_obj.yf)
-        if was_overridden:
-            ticker_obj = Ticker.from_yf(overridden_yf, currency=raw_currency)
-            ticker_identity_verified = True
-            ticker_resolution_source = "operator_override"
-
-        raw_market_value, market_value_valid = _parse_position_number(
-            _position_field(raw, "mktValue", "marketValue")
-        )
-        currency = raw_currency or ("GBP" if ticker_obj.suffix == ".L" else "USD")
-        quantity, quantity_valid = _parse_position_number(
-            _position_field(raw, "position", "qty")
-        )
-        current_price_local, current_price_valid = _parse_position_number(
-            _position_field(raw, "mktPrice", "lastPrice")
-        )
-        avg_cost_local, avg_cost_valid = _parse_position_number(
-            _position_field(raw, "avgCost", "avgPrice")
-        )
-        raw_unrealized_pnl_value = raw.get("unrealizedPnl")
-        parsed_unrealized_pnl, pnl_valid = _parse_position_number(
-            raw_unrealized_pnl_value
-        )
-        raw_unrealized_pnl = (
-            None if raw_unrealized_pnl_value is None else parsed_unrealized_pnl
-        )
-        numeric_validity = {
-            "quantity": quantity_valid,
-            "market_value": market_value_valid,
-            "current_price": current_price_valid,
-            "avg_cost": avg_cost_valid,
-            "unrealized_pnl": pnl_valid,
-        }
-        malformed_fields = [
-            field for field, is_valid in numeric_validity.items() if not is_valid
-        ]
-
-        pending.append(
-            _PendingPosition(
-                ticker_obj=ticker_obj,
-                ticker_identity_verified=ticker_identity_verified,
-                ticker_resolution_source=ticker_resolution_source,
-                conid=conid,
-                raw_market_value=raw_market_value,
-                currency=currency,
-                quantity=quantity,
-                current_price_local=current_price_local,
-                avg_cost_local=avg_cost_local,
-                raw_unrealized_pnl=raw_unrealized_pnl,
-                malformed_fields=malformed_fields,
+        identity = position.identity
+        # Preserve broker currency units. Comparisons convert both price sides
+        # by currency code; exchange suffix alone must never rescale GBP prices.
+        result.resolved.append(
+            NormalizedPosition(
+                conid=position.conid or 0,
+                ticker=identity.ticker,
+                quantity=numerics.quantity,
+                avg_cost_local=numerics.avg_cost_local,
+                market_value_usd=values.market_value_usd,
+                unrealized_pnl_usd=values.unrealized_pnl_usd,
+                fx_rate_to_usd=values.fx_rate_to_usd,
+                market_value_basis=values.market_value_basis,
+                unrealized_pnl_basis=values.unrealized_pnl_basis,
+                valuation_valid=values.valuation_valid,
+                valuation_issue=values.valuation_issue,
+                position_flat=values.position_flat,
+                currency=position.currency,
+                current_price_local=numerics.current_price_local,
+                ticker_identity_verified=identity.verified,
+                ticker_resolution_source=identity.source,
             )
         )
-
-    # Batch-resolve FX rates once per unique currency (live yfinance first,
-    # FALLBACK_RATES_TO_USD only if that fails) instead of once per position —
-    # a portfolio with e.g. 15 JPY positions previously fetched JPY 15 times.
-    unique_currencies = {p.currency for p in pending}
-    fx_rates = get_fx_rate_cache().resolve_rates_sync(unique_currencies)
-
-    positions: list[NormalizedPosition] = []
-    for p in pending:
-        ticker_obj = p.ticker_obj
-        currency = p.currency
-        current_price_local = p.current_price_local
-        avg_cost_local = p.avg_cost_local
-
-        if p.malformed_fields:
-            normalized_values = NormalizedPositionValues(
-                market_value_usd=0.0,
-                unrealized_pnl_usd=0.0,
-                fx_rate_to_usd=None,
-                market_value_basis="UNAVAILABLE",
-                unrealized_pnl_basis="UNAVAILABLE",
-                valuation_valid=False,
-                valuation_issue=(
-                    "Malformed broker numeric field(s): "
-                    + ", ".join(p.malformed_fields)
-                ),
-            )
-        else:
-            rate_info = fx_rates.get(currency.strip().upper())
-            normalized_values = normalize_position_values(
-                quantity=p.quantity,
-                current_price_local=current_price_local,
-                avg_cost_local=avg_cost_local,
-                raw_market_value=p.raw_market_value,
-                raw_unrealized_pnl=p.raw_unrealized_pnl,
-                currency=currency,
-                fx_rate=rate_info[0] if rate_info else None,
-            )
-        position_fx_rate = normalized_values.fx_rate_to_usd
-        if not normalized_values.valuation_valid:
-            logger.warning(
-                "position_valuation_unavailable",
-                ticker=ticker_obj.yf,
-                currency=currency,
-                reason=normalized_values.valuation_issue,
-            )
-
-        # No venue-conditional rescaling here. IBKR's own currency code is kept
-        # as-is, and any comparison against an analysis price converts BOTH
-        # sides by their currency codes (see reconciliation_rules._comparable_prices).
-        # The previous ".L + GBP -> x100" rule assumed the analysis always held
-        # pence; it is right only when the fetcher declined a minor-unit
-        # conversion and wrong when it succeeded, and it could not tell which
-        # had happened — the GAMA.L false valuation-reference review.
-
-        position = NormalizedPosition(
-            conid=p.conid or 0,
-            ticker=ticker_obj,
-            quantity=p.quantity,
-            avg_cost_local=avg_cost_local,
-            market_value_usd=normalized_values.market_value_usd,
-            unrealized_pnl_usd=normalized_values.unrealized_pnl_usd,
-            fx_rate_to_usd=position_fx_rate,
-            market_value_basis=normalized_values.market_value_basis,
-            unrealized_pnl_basis=normalized_values.unrealized_pnl_basis,
-            valuation_valid=normalized_values.valuation_valid,
-            valuation_issue=normalized_values.valuation_issue,
-            position_flat=normalized_values.position_flat,
-            currency=currency,
-            current_price_local=current_price_local,
-            ticker_identity_verified=p.ticker_identity_verified,
-            ticker_resolution_source=p.ticker_resolution_source,
-        )
-        positions.append(position)
-
     logger.info(
         "positions_normalized",
-        count=len(positions),
-        skipped=len(raw_positions) - len(positions),
+        count=len(result.resolved),
+        unresolved=len(result.unresolved),
+        excluded_non_security=result.excluded_non_security_count,
     )
-    return positions
+    return result
 
 
 def _parse_conid(raw_conid: object) -> int | None:
@@ -353,9 +432,11 @@ def _should_resolve_position_conid(
 
 def build_portfolio_summary(
     ledger: dict,
-    positions: list[NormalizedPosition],
+    positions: Sequence[NormalizedPosition],
     account_id: str = "",
     cash_buffer_pct: float = DEFAULT_CASH_BUFFER_PCT,
+    *,
+    unresolved_positions: Sequence[UnresolvedBrokerPosition] = (),
 ) -> PortfolioSummary:
     """
     Build portfolio summary from IBKR ledger and normalized positions.
@@ -365,6 +446,7 @@ def build_portfolio_summary(
         positions: Normalized positions
         account_id: IBKR account ID
         cash_buffer_pct: Cash buffer fraction (don't deploy into new BUYs)
+        unresolved_positions: Holdings retained for accounting without a safe ticker
 
     Returns:
         PortfolioSummary model
@@ -385,11 +467,17 @@ def build_portfolio_summary(
     else:
         cash = 0.0
         settled_cash = 0.0
-        portfolio_value = sum(p.market_value_usd for p in positions)
+        portfolio_value = sum(p.market_value_usd for p in positions) + sum(
+            p.market_value_usd for p in unresolved_positions
+        )
 
     # Fallback portfolio value from positions
     if portfolio_value <= 0:
-        portfolio_value = sum(p.market_value_usd for p in positions) + max(cash, 0)
+        portfolio_value = (
+            sum(p.market_value_usd for p in positions)
+            + sum(p.market_value_usd for p in unresolved_positions)
+            + max(cash, 0)
+        )
 
     cash_pct = (cash / portfolio_value * 100) if portfolio_value > 0 else 0.0
     # available_cash derived from settled_cash (not total cash) — only spendable funds
@@ -401,8 +489,9 @@ def build_portfolio_summary(
         cash_balance_usd=cash,
         settled_cash_usd=settled_cash,
         cash_pct=cash_pct,
-        position_count=len(positions),
+        position_count=len(positions) + len(unresolved_positions),
         available_cash_usd=available_cash,
+        unresolved_positions=list(unresolved_positions),
     )
 
 
@@ -415,10 +504,9 @@ def _resolve_conid_ticker(
 ) -> TickerResolution:
     """Resolve an IBKR conid to a yfinance ticker.
 
-    Checks the local conid cache first (instant, no API call).  On a miss,
-    calls /iserver/contract/{conid}/info via the client, maps to a yfinance
-    ticker using the same IBKR→yfinance table as live positions, and caches
-    the result so subsequent runs are instant.
+    Checks the local conid cache first. Unless ``force_live`` is set, a suffixed
+    cached identity is returned immediately. Live resolution can improve or
+    invalidate it; transient live failures retain the cached mapping.
 
     Returns the ticker plus resolution provenance. Inferred mappings remain
     usable for research lookup but cannot authorize an order.
@@ -429,27 +517,32 @@ def _resolve_conid_ticker(
     # "SMART" and the currency was ambiguous.  If a client is available, bypass
     # the cache for bare entries so ibkr_symbol_to_yf can try the yfinance
     # search fallback (which is now enabled for SMART + non-USD currency).
-    cached = None if force_live else yf_ticker_from_conid(conid)
-    if cached and ("." in cached or client is None):
+    cached = yf_ticker_from_conid(conid)
+    fast_path = None if force_live else cached
+    if fast_path and ("." in fast_path or client is None):
         logger.debug(
             "conid_cache_hit",
             context=context,
             conid=conid,
-            yf_ticker=cached,
+            yf_ticker=fast_path,
         )
-        return TickerResolution(cached, "unresolved", False)
-    if cached:
+        return TickerResolution(fast_path, "conid_cache", False)
+    if fast_path:
         logger.debug(
             "conid_bare_cache_bypass",
             context=context,
             conid=conid,
-            cached=cached,
+            cached=fast_path,
             reason="retrying to resolve exchange suffix",
         )
 
     # Slow path: ask IBKR for contract details
     if client is None:
-        return TickerResolution(cached or "", "unresolved", False)
+        return TickerResolution(
+            cached or "",
+            "conid_cache" if cached else "unresolved",
+            False,
+        )
 
     try:
         info = client.get_contract_info(conid, compete=False)
@@ -462,14 +555,21 @@ def _resolve_conid_ticker(
             conid=conid,
             **summary,
         )
-        return TickerResolution(cached or "", "unresolved", False)
+        return TickerResolution(
+            cached or "",
+            "conid_cache" if cached else "unresolved",
+            False,
+        )
 
-    if not info:
-        logger.debug("conid_no_contract_info", context=context, conid=conid)
+    symbol = (info.get("symbol", "") or info.get("ticker", "") or "").strip()
+    classification = classify_ibkr_symbol(symbol)
+    if not info or classification.kind == "contract_identifier":
+        event = "conid_no_contract_info" if not info else "conid_placeholder_symbol"
+        logger.debug(event, context=context, conid=conid)
         try:
-            info = client.get_security_definition(conid)
+            security_definition = client.get_security_definition(conid)
         except AttributeError:
-            info = {}
+            security_definition = {}
         except Exception as exc:
             summary = summarize_exception(exc, operation="conid_security_definition")
             summary.pop("message_preview", None)
@@ -479,9 +579,23 @@ def _resolve_conid_ticker(
                 conid=conid,
                 **summary,
             )
-            info = {}
-        if not info:
-            return TickerResolution(cached or "", "unresolved", False)
+            security_definition = {}
+        if security_definition:
+            info = security_definition
+        elif not info:
+            return TickerResolution(
+                cached or "",
+                "conid_cache" if cached else "unresolved",
+                False,
+            )
+        elif classification.kind == "contract_identifier":
+            # A placeholder returned from both live symbol-bearing fields is
+            # not evidence that a previously verified mapping became wrong.
+            return TickerResolution(
+                cached or "",
+                "conid_cache" if cached else "unresolved",
+                False,
+            )
 
     symbol = (info.get("symbol", "") or info.get("ticker", "") or "").strip()
     exchange = (
@@ -495,11 +609,29 @@ def _resolve_conid_ticker(
 
     if not symbol:
         logger.debug("conid_no_symbol", context=context, conid=conid)
-        return TickerResolution(cached or "", "unresolved", False)
+        return TickerResolution(
+            cached or "",
+            "conid_cache" if cached else "unresolved",
+            False,
+        )
 
     resolution = resolve_ibkr_ticker(symbol, exchange, currency)
+    if resolution.source == "non_analyzable":
+        # Placeholder metadata is an availability failure, not evidence that a
+        # validated cached security identity became false. A real non-security
+        # token such as .REC remains authoritative negative evidence.
+        if classify_ibkr_symbol(symbol).kind == "contract_identifier" and cached:
+            return TickerResolution(cached, "conid_cache", False)
+        return resolution
     if resolution.yf_ticker and resolution.exchange_verified:
-        cache_conid_mapping(resolution.yf_ticker, conid, symbol, exchange)
+        cache_conid_mapping(
+            resolution.yf_ticker,
+            conid,
+            symbol,
+            exchange,
+            source="contract_info",
+            confidence="verified",
+        )
     if resolution.yf_ticker:
         logger.debug(
             "conid_resolved",
@@ -514,7 +646,11 @@ def _resolve_conid_ticker(
         )
     if resolution.yf_ticker:
         return resolution
-    return TickerResolution(cached or "", "unresolved", False)
+    return TickerResolution(
+        cached or "",
+        "conid_cache" if cached else "unresolved",
+        False,
+    )
 
 
 def _resolve_conid_to_yf(
@@ -674,10 +810,17 @@ def read_portfolio(
         )
 
     raw_positions = client.get_positions(acct)
-    positions = normalize_positions(raw_positions, client=client)
+    normalized = normalize_positions(raw_positions, client=client)
+    positions = normalized.resolved
 
     ledger = client.get_ledger(acct)
-    summary = build_portfolio_summary(ledger, positions, acct, cash_buffer_pct)
+    summary = build_portfolio_summary(
+        ledger,
+        positions,
+        acct,
+        cash_buffer_pct,
+        unresolved_positions=normalized.unresolved,
+    )
 
     logger.info(
         "portfolio_read",

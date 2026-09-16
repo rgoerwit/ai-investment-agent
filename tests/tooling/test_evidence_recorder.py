@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from src.tooling.evidence_recorder import EvidenceRecorder, bind_fetched_evidence
+from src.tooling.evidence_recorder import (
+    EvidenceRecorder,
+    bind_fetched_evidence,
+    evidence_record_id,
+)
 from src.tooling.runtime import ToolExecutionService, ToolInvocation, ToolResult
 
 
@@ -15,6 +19,17 @@ class _SanitizingHook:
             value="sanitized https://official.example/result",
             findings=["scrubbed"],
         )
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"content_sha256": "abcdef1234567890"},
+        type("Record", (), {"content_sha256": "abcdef1234567890"})(),
+    ],
+)
+def test_evidence_record_id_defaults_missing_sequence_consistently(record) -> None:
+    assert evidence_record_id(record) == "evidence:0:abcdef123456"
 
 
 @pytest.mark.asyncio

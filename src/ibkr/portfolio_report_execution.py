@@ -351,7 +351,15 @@ def _render_action_plan(
         if activity.refreshed:
             lines.append(f"    ✓ Refreshed this run: {', '.join(activity.refreshed)}")
         if activity.failed:
-            lines.append(f"    → Retry failed refreshes: {', '.join(activity.failed)}")
+            if activity.failed_retry_after:
+                lines.append(
+                    "    → Backoff active for failed refreshes: "
+                    + ", ".join(activity.failed)
+                )
+            else:
+                lines.append(
+                    f"    → Retry failed refreshes: {', '.join(activity.failed)}"
+                )
         if activity.skipped_due_to_limit:
             lines.append(
                 "    → Remaining after limit: "

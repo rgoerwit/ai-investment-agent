@@ -396,6 +396,18 @@ def _extract_flag_types(
 
 _COMPLIANCE_FLAG_PREFIXES = ("PFIC_", "VIE_", "CMIC_", "REGULATORY_")
 
+# A settled rejection is one the detectors already resolved against a fixed
+# threshold, so a further analysis cannot change it. The distinction is already
+# recorded at every mint site and needs no separate taxonomy: gate failures are
+# minted AUTO_REJECT/CRITICAL, evidence gaps REVIEW/WARNING. Verified across
+# 400 sampled artifacts with no overlap (2026-09-11).
+_SETTLED_REJECT_ACTION = "AUTO_REJECT"
+
+
+def _is_settled_reject(flag: dict[str, Any]) -> bool:
+    """Whether a buy-blocking flag records a resolved failure, not a gap."""
+    return str(flag.get("action", "")).strip().upper() == _SETTLED_REJECT_ACTION
+
 
 def _extract_portfolio_evidence(data: dict[str, Any]) -> PortfolioEvidence:
     """Assemble decision-layer evidence from already-persisted artifact fields.
@@ -426,6 +438,9 @@ def _extract_portfolio_evidence(data: dict[str, Any]) -> PortfolioEvidence:
         complete=flags_valid and "verdict_dni_review_candidate" in run_summary,
         dni_review_candidate=bool(run_summary.get("verdict_dni_review_candidate")),
         buy_blocking_flag_types=_types(lambda f: bool(f.get("blocks_buy"))),
+        settled_reject_flag_types=_types(
+            lambda f: bool(f.get("blocks_buy")) and _is_settled_reject(f)
+        ),
         compliance_flag_types=_types(
             lambda f: str(f.get("type", "")).startswith(_COMPLIANCE_FLAG_PREFIXES)
         ),

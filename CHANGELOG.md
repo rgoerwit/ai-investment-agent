@@ -21,6 +21,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rationale adjuncts, with provider-summary fallback, automatic budgets, and
   telemetry-only persistence.
 
+### Fixed
+
+- **Refresh scheduler stopped paying to re-analyse settled rejections** — A held
+  position whose only buy-blocking evidence is a resolved gate failure (for example a
+  measured liquidity hard fail, minted `AUTO_REJECT`) is no longer treated as an
+  indeterminate evidence gap, so it stays visible under operator review instead of
+  re-entering the urgent refresh stream on every portfolio invocation; settled
+  evidence rejoins the ordinary fair cycle near analysis expiry. Buy-blocking
+  flags are now split at the analysis-index projection into settled rejections and
+  indeterminate gaps; `buy_blocking_flag_types` remains their union for every
+  disposition consumer.
+
+- **Broker contract identifiers no longer escape as research tickers** — Position
+  ingestion now treats `IBCID<conid>` as an identity-recovery instruction, validates
+  cache keys and confidence, quarantines unresolved holdings without constructing a
+  ticker, preserves their accounting and currency exposure, and withholds BUY/ADD
+  authority while inventory identity is incomplete.
+
+- **Unrepaired-refresh backoff now actually applies** — The backoff was keyed on the
+  buy-blocking flag composition, which varies run to run with search quality, so the
+  stored key never matched and a changed key silently deleted the entry. It is now
+  keyed on the action basis, and scheduler state holds one entry per ticker
+  (`unrepaired_refresh`, state version 3) rather than a nested per-condition map. A
+  genuinely different basis remains immediately eligible; price no longer participates
+  in scheduler identity at all.
+
+- **`blocking` refresh policy no longer starves normal-cycle work** — It passed only
+  the urgent stream to the planner, wasting every slot urgent did not fill; a portfolio
+  with one permanently urgent row and 64 due-soon rows refreshed exactly one analysis
+  per run. Urgent is still served first, and the remaining budget is filled from the
+  normal cycle.
+
 ### Changed
 
 - **Cooled dependency round (August 2026)** — Nineteen dependencies move to

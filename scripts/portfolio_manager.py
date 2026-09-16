@@ -1330,6 +1330,12 @@ def format_json(
             "refreshed_this_run_count": len(freshness_summary.refreshed_this_run),
             "refreshed_this_run": refresh_activity.refreshed,
             "refresh_failed": refresh_activity.failed,
+            "failed_retry_after": refresh_activity.failed_retry_after,
+            "skipped_due_to_failure_backoff": (
+                refresh_activity.skipped_due_to_failure_backoff
+            ),
+            "skipped_due_to_unrepaired": (refresh_activity.skipped_due_to_unrepaired),
+            "unrepaired_retry_after": (refresh_activity.unrepaired_retry_after),
             "refresh_policy": refresh_activity.policy,
             "manual_action_required": _refresh_service.user_action(
                 freshness_summary,
@@ -1695,18 +1701,36 @@ def main() -> None:
             prompt_for_missing_secret_fn=_prompt_for_missing_secret,
         )
 
+    refresh_provider_runtime = None
+    if not args.read_only and refresh_policy != "off":
+        from src.runtime_services import build_provider_runtime
+
+        refresh_provider_runtime = build_provider_runtime(
+            settings=analyzer_config,
+            explicit=True,
+        )
+
     async def _run_analysis_for_refresh(
         *,
         ticker: str,
         quick_mode: bool,
         skip_charts: bool,
     ) -> dict | None:
-        from src.main import run_analysis
+        from src.main import build_runtime_services_from_config, run_analysis
+
+        # A refresh is a complete analysis run, not a lightweight utility call.
+        # Keep mutable evidence/authority services isolated per ticker while the
+        # process-scoped provider runtime supplies shared clients and throttles.
+        runtime_services = build_runtime_services_from_config(
+            enable_tool_audit=args.debug,
+            provider_runtime=refresh_provider_runtime,
+        )
 
         return await run_analysis(
             ticker=ticker,
             quick_mode=quick_mode,
             skip_charts=skip_charts,
+            runtime_services=runtime_services,
         )
 
     def _save_refresh_result(result, ticker: str, *, quick_mode: bool) -> Path:

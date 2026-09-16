@@ -9,6 +9,7 @@ import pytest
 from src.ibkr.exceptions import IBKRTickerResolutionError
 from src.ibkr.ticker_mapper import (
     _yf_search_ticker,
+    cache_conid_mapping,
     ibkr_symbol_to_yf,
     parse_trade_block_price,
     resolve_conid,
@@ -50,6 +51,24 @@ class TestIbkrSymbolToYf:
         assert resolution.yf_ticker == "AGS.BR"
         assert resolution.source == "exchange_map"
         assert resolution.exchange_verified is True
+
+    def test_corporate_action_receivable_is_never_resolved_or_searched(self):
+        with patch("src.ibkr.ticker_mapper._yf_search_ticker") as search:
+            resolution = resolve_ibkr_ticker("2753.REC", "TWSE", "TWD")
+
+        assert resolution.yf_ticker == ""
+        assert resolution.source == "non_analyzable"
+        assert resolution.exchange_verified is False
+        search.assert_not_called()
+
+    def test_contract_identifier_is_never_resolved_as_a_market_symbol(self):
+        with patch("src.ibkr.ticker_mapper._yf_search_ticker") as search:
+            resolution = resolve_ibkr_ticker("IBCID17382285", "KRX", "KRW")
+
+        assert resolution.yf_ticker == ""
+        assert resolution.source == "non_analyzable"
+        assert resolution.exchange_verified is False
+        search.assert_not_called()
 
     def test_smart_non_usd_search_preserves_inferred_provenance(self):
         with patch(
@@ -328,6 +347,102 @@ class TestResolveConid:
         result = resolve_conid("7203.T", client=None)
         assert result == 123456
 
+    @patch("src.ibkr.ticker_mapper._load_cache")
+    def test_reverse_lookup_ignores_cached_bookkeeping_symbol(self, mock_cache):
+        from src.ibkr.ticker_mapper import yf_ticker_from_conid
+
+        mock_cache.return_value = {
+            "2753.REC.TW": {
+                "conid": 275_315,
+                "symbol": "2753.REC",
+                "exchange": "TWSE",
+                "ts": time.time(),
+            }
+        }
+
+        assert yf_ticker_from_conid(275_315) is None
+
+    @patch("src.ibkr.ticker_mapper._load_cache")
+    def test_reverse_lookup_rejects_poisoned_market_key(self, mock_cache):
+        from src.ibkr.ticker_mapper import yf_ticker_from_conid
+
+        mock_cache.return_value = {
+            "IBCID123.TW": {
+                "conid": 123,
+                "symbol": "6782",
+                "exchange": "TWSE",
+                "confidence": "verified",
+                "ts": time.time(),
+            }
+        }
+
+        assert yf_ticker_from_conid(123) is None
+
+    @patch("src.ibkr.ticker_mapper._load_cache")
+    def test_reverse_lookup_prefers_confidence_before_recency(self, mock_cache):
+        from src.ibkr.ticker_mapper import yf_ticker_from_conid
+
+        mock_cache.return_value = {
+            "GOOD.TW": {
+                "conid": 123,
+                "symbol": "GOOD",
+                "confidence": "verified",
+                "ts": 1,
+            },
+            "WRONG.TWO": {
+                "conid": 123,
+                "symbol": "WRONG",
+                "confidence": "inferred",
+                "ts": 2,
+            },
+        }
+
+        assert yf_ticker_from_conid(123) == "GOOD.TW"
+
+    @patch("src.ibkr.ticker_mapper._flush_cache")
+    @patch("src.ibkr.ticker_mapper._get_cache")
+    def test_cache_rejects_contract_identifier_symbol(self, mock_cache, mock_flush):
+        cache: dict = {}
+        mock_cache.return_value = cache
+
+        cache_conid_mapping("IBCID17382285.KS", 17_382_285, "IBCID17382285", "KRX")
+
+        assert cache == {}
+        mock_flush.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "old_confidence,new_confidence,expected",
+        [
+            ("verified", "inferred", "AAPL"),
+            (None, "inferred", "AAPL"),
+            ("inferred", "verified", "AAPL.TW"),
+            ("verified", "verified", "AAPL.TW"),
+        ],
+    )
+    def test_suffixed_write_preserves_stronger_bare_identity(
+        self, old_confidence, new_confidence, expected
+    ):
+        from src.ibkr.ticker_mapper import yf_ticker_from_conid
+
+        cache = {
+            "AAPL": {
+                "conid": 42,
+                "symbol": "AAPL",
+                "exchange": "NASDAQ",
+                "confidence": old_confidence,
+                "ts": 1,
+            }
+        }
+        with (
+            patch("src.ibkr.ticker_mapper._get_cache", return_value=cache),
+            patch("src.ibkr.ticker_mapper._flush_cache"),
+        ):
+            cache_conid_mapping(
+                "AAPL.TW", 42, "AAPL", "TWSE", confidence=new_confidence
+            )
+            assert yf_ticker_from_conid(42) == expected
+        assert ("AAPL" in cache) is (expected == "AAPL")
+
     @patch("src.ibkr.ticker_mapper._save_cache")
     @patch("src.ibkr.ticker_mapper._load_cache", return_value={})
     def test_api_resolution(self, mock_load, mock_save):
@@ -405,6 +520,15 @@ class TestResolveYfTickerFromPosition:
     def test_standard_position(self):
         pos = {"contractDesc": "7203", "listingExchange": "TSEJ"}
         assert resolve_yf_ticker_from_position(pos) == "7203.T"
+
+    def test_corporate_action_receivable_has_no_yfinance_ticker(self):
+        pos = {
+            "contractDesc": "2753.REC",
+            "listingExchange": "TWSE",
+            "currency": "TWD",
+        }
+
+        assert resolve_yf_ticker_from_position(pos) == ""
 
     def test_toronto_position(self):
         # IBKR Client Portal lists Toronto as "TSE" → must resolve to .TO, not .T.

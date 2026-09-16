@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-08-25
+Last updated: 2026-09-15
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
@@ -66,6 +66,14 @@ The system is no longer just “analyze one ticker.” It also supports:
 - article generation
 - portfolio-aware recommendations and reconciliation
 
+## Screening Pipeline Semantics
+
+`scripts/run_pipeline.sh` runs quick Stage 1 screening, then full Stage 2
+analysis of its BUY list; same-mode reuse keeps quick reports from satisfying
+Stage 2. The marker's `buy_count` is the Stage-1 list size, not Stage-2
+completion. Verify full-run status from stage output and full reports; quick
+BUYs are screening candidates, not investable signals.
+
 ## Fast Orientation
 
 Read in this order:
@@ -103,6 +111,8 @@ For runtime/control-plane state design, use `docs/RUNTIME_MODEL.md` as the canon
 
 `src/runtime_services.py` owns runtime-scoped service binding.
 `RuntimeServices` uses `ContextVar` scoping so CLI runs, graph execution, dashboard snapshot loads, and worker jobs can bind their own tool execution, inspection, provider runtimes, and hooks without sharing mutable globals by accident.
+Provider runtimes may live for a process, but evidence recorders and issuer-authority
+registries are analysis-run scoped; long-lived workers rebuild those services per ticker.
 
 `src/graph/` owns:
 
@@ -386,6 +396,50 @@ This path now includes:
 - order-awareness
 - recommendation/reconciliation logic
 - portfolio-health and macro-event handling
+
+### Why a rejected stock was re-analysed every run (September 2026)
+
+A held position was re-analysed on every portfolio invocation for days while its
+verdict was never in doubt, and no other position was refreshed at all. Both
+symptoms came from one conflation and one scheduling bug.
+
+`PortfolioEvidence.buy_blocking_flag_types` mixed two different claims. A
+measured gate failure (`LIQUIDITY_HARD_FAIL`, minted `action=AUTO_REJECT`) is
+settled for the current observation period — same-day research cannot move it.
+An evidence gap (`action=REVIEW`) might close. The scheduler treated any non-empty
+set as "indeterminate, so buy another analysis", making a liquidity rejection
+permanently urgent. Fresh settled failures now stay out of the urgent stream and
+rejoin the ordinary fair cycle near analysis expiry. The
+discriminator already existed at every mint site; across 400 sampled artifacts
+the `AUTO_REJECT`/`REVIEW` split was clean with no overlap, so the fix needed no
+new taxonomy — only that the index projection stop flattening the two families.
+This preserves the original anti-churn decision: evidence that cannot change today
+does not consume an urgent slot, while evidence old enough to expire is measured
+again through the same fair cycle as other aging analyses.
+
+The backoff meant to catch this never fired. It was keyed on the *sorted
+buy-blocking flag tuple*, which is downstream of search quality: across seven
+consecutive analyses of the same position the set changed on six of six
+transitions, so the stored key never matched, and the branch handling a changed
+key *deleted* the stored entry. The mechanism was self-erasing and
+anti-correlated with its purpose — flakier evidence meant more certain re-spend.
+The persisted map was empty on disk every time it was inspected. It is now keyed
+on the action basis, a closed enum, and the state file carries one entry per
+ticker rather than a nested per-condition map.
+
+Separately, `blocking` policy passed only the urgent stream to the planner, so
+every slot urgent did not fill was wasted: one permanently urgent row plus 64
+due-soon rows produced exactly one refresh per run. Strict priority is about
+ordering, not throughput.
+
+Two lessons worth keeping. Scheduler state must never be keyed on model or
+search output — measure the key's stability before trusting it. And a
+"conservative" default that keeps spending is not conservative: the safe
+direction for a paid action is to withhold it.
+
+Raw `contractDesc` values cross into research tickers through
+`src/ibkr/ticker.py::classify_ibkr_symbol`; broker bookkeeping instruments such as
+corporate-action receivables are rejected there rather than patched in callers.
 
 Ownership is now split across:
 

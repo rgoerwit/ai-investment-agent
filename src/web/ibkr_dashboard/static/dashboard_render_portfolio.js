@@ -64,11 +64,28 @@ function renderOverview() {
     overview.is_candidate_heavy
       ? `<p class="muted">This view is candidate-heavy, not portfolio-heavy. It contains ${candidateCount} off-watchlist candidate${candidateCount === 1 ? "" : "s"} and ${newBuyCount} watchlist buy${newBuyCount === 1 ? "" : "s"}.</p>`
       : "";
+  const unresolvedPositions = portfolio.unresolved_positions || [];
+  const identityReview = unresolvedPositions.length
+    ? `<section class="warning"><h3>Broker identity review</h3><p>${unresolvedPositions.length} holding${unresolvedPositions.length === 1 ? " is" : "s are"} included in portfolio accounting but excluded from research, recommendations, refreshes, and orders until a verified market ticker is recovered.</p><ul>${unresolvedPositions
+        .map(
+          (position) => {
+            const value = position.valuation_valid
+              ? fmtCurrency(position.market_value_usd)
+              : "value unavailable";
+            const valuationIssue = position.valuation_issue
+              ? `; ${escapeHtml(position.valuation_issue)}`
+              : "";
+            return `<li><code>conid ${escapeHtml(position.conid)}</code> — ${escapeHtml(position.quantity)} units, ${value} (${escapeHtml(position.reason)}${valuationIssue})</li>`;
+          },
+        )
+        .join("")}</ul></section>`
+    : "";
   return `
     ${renderCards(cards)}
     ${modeNote}
     ${portfolioRealityNote}
     ${candidateNote}
+    ${identityReview}
     <section class="summary-grid">
       ${renderInlineMetrics("Freshness At A Glance", [
         { label: "Needs review", value: freshness.blocking_now ?? 0 },

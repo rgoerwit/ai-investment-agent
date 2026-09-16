@@ -129,6 +129,23 @@ def evaluate_watchlist(
                 )
             )
         elif verdict_upper == "BUY":
+            if portfolio.unresolved_positions:
+                items.append(
+                    ReconciliationItem(
+                        ticker=Ticker.from_yf(ticker),
+                        action="REVIEW",
+                        reason=(
+                            "Watchlist BUY blocked — portfolio contains unresolved "
+                            "broker identities; resolve the incomplete inventory "
+                            "before increasing exposure"
+                        ),
+                        urgency="HIGH",
+                        analysis=analysis,
+                        action_basis="ENTRY_CONSTRAINT",
+                        is_watchlist=True,
+                    )
+                )
+                continue
             has_portfolio = portfolio.portfolio_value_usd > 0
             if has_portfolio and remaining_cash <= 0:
                 items.append(

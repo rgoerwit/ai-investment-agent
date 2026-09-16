@@ -13,6 +13,7 @@ it calls ticker.yf to get the string key.  That is the only crossing point.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from src.exchange_metadata import (
     IBKR_TO_YFINANCE,
@@ -56,6 +57,58 @@ def _build_currency_to_suffix() -> dict[str, str]:
 
 
 _CURRENCY_TO_SUFFIX: dict[str, str] = _build_currency_to_suffix()
+
+IbkrSymbolKind = Literal[
+    "security",
+    "contract_identifier",
+    "corporate_action_receivable",
+]
+IbkrSymbolRemedy = Literal["use", "drop", "recover_from_conid"]
+_CORPORATE_ACTION_RECEIVABLE_SUFFIX = ".REC"
+_CONTRACT_IDENTIFIER_PREFIX = "IBCID"
+
+
+@dataclass(frozen=True, slots=True)
+class IbkrSymbolClassification:
+    """Classify a raw IBKR symbol before treating it as a market security."""
+
+    symbol: str
+    kind: IbkrSymbolKind
+    underlying_symbol: str | None = None
+    contract_id: int | None = None
+
+    @property
+    def remedy(self) -> IbkrSymbolRemedy:
+        if self.kind == "security":
+            return "use"
+        if self.kind == "contract_identifier":
+            return "recover_from_conid"
+        return "drop"
+
+
+def classify_ibkr_symbol(symbol: str) -> IbkrSymbolClassification:
+    """Identify IBKR bookkeeping symbols that must not become research tickers."""
+    normalized = symbol.strip()
+    upper = normalized.upper()
+    contract_id = upper.removeprefix(_CONTRACT_IDENTIFIER_PREFIX)
+    if upper.startswith(_CONTRACT_IDENTIFIER_PREFIX) and contract_id.isdigit():
+        return IbkrSymbolClassification(
+            symbol=normalized,
+            kind="contract_identifier",
+            contract_id=int(contract_id),
+        )
+    suffix = _CORPORATE_ACTION_RECEIVABLE_SUFFIX
+    # Client Portal sometimes appends an exchange descriptor (for example
+    # ``2753.REC-TWSE``). Classify the symbol portion before callers strip that
+    # descriptor, otherwise the bookkeeping suffix disappears as ``2753``.
+    symbol_part = normalized.partition("-")[0]
+    if len(symbol_part) > len(suffix) and symbol_part.upper().endswith(suffix):
+        return IbkrSymbolClassification(
+            symbol=normalized,
+            kind="corporate_action_receivable",
+            underlying_symbol=symbol_part[: -len(suffix)],
+        )
+    return IbkrSymbolClassification(symbol=normalized, kind="security")
 
 
 def _suffix_for_exchange_currency(exchange: str, currency: str) -> str:
@@ -162,7 +215,12 @@ class Ticker:
                       Used as suffix fallback when exchange is unknown.
                       Normalised to upper-case.
         """
-        sym = symbol.strip()
+        classification = classify_ibkr_symbol(symbol)
+        if classification.remedy != "use":
+            raise ValueError(
+                "IBKR non-security identifiers are not analyzable securities"
+            )
+        sym = classification.symbol
         exch = exchange.strip().upper() if exchange else ""
         ccy = currency.strip().upper() if currency else ""
 
