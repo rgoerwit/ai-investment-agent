@@ -118,7 +118,14 @@ EXCHANGES_BY_SUFFIX: dict[str, ExchangeInfo] = {
     ".WA": ExchangeInfo(".WA", "Warsaw Stock Exchange", "Poland", "WSE", "PLN"),
     ".PR": ExchangeInfo(".PR", "Prague Stock Exchange", "Czech Republic", "PSE", "CZK"),
     ".BD": ExchangeInfo(".BD", "Budapest Stock Exchange", "Hungary", "BSE2", "HUF"),
-    ".RO": ExchangeInfo(".RO", "Bucharest Stock Exchange", "Romania", "BVB", "RON"),
+    ".RO": ExchangeInfo(
+        ".RO",
+        "Bucharest Stock Exchange",
+        "Romania",
+        "BVB",
+        "RON",
+        official_document_hosts=("bvb.ro",),
+    ),
     ".TWO": ExchangeInfo(
         ".TWO",
         "Taipei Exchange",

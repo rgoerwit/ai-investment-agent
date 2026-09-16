@@ -2,12 +2,46 @@
 
 import json
 import re
+import subprocess
 from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 
 _RUN_PIPELINE_PATH = Path(__file__).parent.parent.parent / "scripts" / "run_pipeline.sh"
+
+
+def test_stage_zero_failure_stops_before_candidate_consumption(tmp_path):
+    """Execute the actual Stage-0 shell branch with a failing child process."""
+    script = _RUN_PIPELINE_PATH.read_text()
+    stage = script.split("if [[ $START_STAGE -le 0 ]]; then", 1)[1]
+    stage = stage.split("    TICKER_COUNT=", 1)[0]
+    harness = (
+        """
+info() { :; }
+success() { :; }
+fail() { :; }
+exit_if_interrupted_status() { :; }
+run_tracked_child() { return 1; }
+SKIP_SCRAPE=''
+INCLUDE_US=''
+PYTHON_CMD=(python)
+TICKER_LIST=old-tickers.txt
+SCRATCH=.
+DATE=2026-09-15
+"""
+        + stage
+        + '\nprintf "ANALYZER_STARTED"\n'
+    )
+    completed = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 1
+    assert "ANALYZER_STARTED" not in completed.stdout
 
 
 # ============================================================

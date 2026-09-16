@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Romanian equity screening** — BVB Regulated Market equities use the official
+  listing table with explicit market-segment and symbol checks. RON conversion,
+  official-document hosts, and Romanian portfolio concentration labels complete
+  the existing ticker metadata path. AeRO is excluded.
+
 - **Canonical decision-policy and evidence reporting** — Saved artifacts now retain
   deterministic verdict interventions, scoped tool-outcome telemetry, external-
   evidence promotion counts, and structural-recovery triggers; report memos,
@@ -22,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   telemetry-only persistence.
 
 ### Fixed
+
+- **Exchange-source completeness** — Tokyo uses the current JPX spreadsheet;
+  StockAnalysis pagination uses the correct query parameter. Repeated pages no
+  longer inflate unique-ticker floors, and failed enabled sources block Stage 0
+  before existing output is replaced. Transient transport failures receive one
+  bounded retry and HTML decoding respects configured or detected encoding.
 
 - **Refresh scheduler stopped paying to re-analyse settled rejections** — A held
   position whose only buy-blocking evidence is a resolved gate failure (for example a

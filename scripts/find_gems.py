@@ -23,17 +23,20 @@ import logging
 import math
 import queue
 import random
+import re
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pandas as pd
 import requests
 import yfinance as yf
 
+from src.error_safety import summarize_exception
 from src.fx_normalization import normalize_minor_unit_amount
 from src.thesis_constants import LIQUIDITY_MIN_USD, PE_MAX
 from src.ticker_utils import to_yfinance
@@ -92,6 +95,7 @@ _FX_CURRENCIES = [
     "THB",
     "INR",
     "KRW",
+    "RON",
 ]
 
 SCRAPE_COLUMNS = [
@@ -312,8 +316,13 @@ def _check_deps():
     import importlib.util
 
     missing = []
-    for pkg in ("openpyxl", "xlrd", "lxml"):
-        if importlib.util.find_spec(pkg) is None:
+    for pkg, module in (
+        ("openpyxl", "openpyxl"),
+        ("xlrd", "xlrd"),
+        ("lxml", "lxml"),
+        ("beautifulsoup4", "bs4"),
+    ):
+        if importlib.util.find_spec(module) is None:
             missing.append(pkg)
     if missing:
         print(f"WARNING: Missing optional deps: {', '.join(missing)}", file=sys.stderr)
@@ -398,8 +407,7 @@ def _generate_yf_ticker(row, config):
 
 
 def _handle_download_json(config, session):
-    response = session.get(config["source_url"])
-    response.raise_for_status()
+    response = _fetch_source(session, config["source_url"])
     data = response.json()
     params = config.get("params", {})
     root = params.get("root_key")
@@ -414,8 +422,7 @@ def _handle_download_json(config, session):
 
 
 def _handle_download_csv(config, session):
-    response = session.get(config["source_url"])
-    response.raise_for_status()
+    response = _fetch_source(session, config["source_url"])
     params = config["params"]
     skip = params.get("skip_rows", 0)
     sep = params.get("delimiter", ",")
@@ -437,38 +444,57 @@ def _handle_download_csv(config, session):
 
 
 def _handle_download_excel(config, session):
-    response = session.get(config["source_url"])
-    response.raise_for_status()
+    response = _fetch_source(session, config["source_url"])
     params = config["params"]
     sheet = params.get("sheet_name", 0)
     skip = params.get("skip_rows", 0)
     return pd.read_excel(io.BytesIO(response.content), sheet_name=sheet, skiprows=skip)
 
 
+def _fetch_source(session, url):
+    """Retry one transient GET, including failures while reading the body."""
+    for attempt in range(2):
+        try:
+            response = session.get(url)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if attempt or status not in {500, 502, 503, 504}:
+                raise
+            response.close()
+            time.sleep(0.5)
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        ):
+            if attempt:
+                raise
+            time.sleep(0.5)
+
+
 def _handle_scrape_html(config, session):
     params = config["params"]
     base_url = config["source_url"]
     max_pages = params.get("paginate_max_pages", 1)
-    page_param = params.get("page_param", "p")
+    page_param = params.get("page_param", "page")
     idx = params.get("table_index", 0)
     target_col = params.get("ticker_col")
     source_encoding = params.get("source_encoding")
 
     all_frames = []
     first_page_len = None
+    seen_keys: set[str] = set()
 
     for page_num in range(1, max_pages + 1):
         url = base_url if page_num == 1 else f"{base_url}?{page_param}={page_num}"
-        try:
-            response = session.get(url)
-            response.raise_for_status()
-        except Exception:
-            if page_num == 1:
-                raise
-            break  # Stop on HTTP error for pages 2+
+        response = _fetch_source(session, url)
 
         if source_encoding:
             response.encoding = source_encoding
+        elif "charset=" not in response.headers.get("Content-Type", "").lower():
+            response.encoding = response.apparent_encoding
 
         if "<table" not in response.text.lower():
             if page_num == 1:
@@ -488,12 +514,19 @@ def _handle_scrape_html(config, session):
                     df = candidate
                     break
 
-        if df is None or df.empty:
-            if page_num == 1:
-                raise ValueError(f"Table containing '{target_col}' not found")
+        if df is None:
+            raise ValueError(f"Table containing '{target_col}' not found")
+        if df.empty:
             break
 
-        all_frames.append(df)
+        ticker_col = _find_col_fuzzy(df, target_col)
+        keys = df[ticker_col].astype("string").str.strip()
+        valid = keys.notna() & keys.ne("")
+        new_rows = valid & ~keys.isin(seen_keys) & ~keys.duplicated()
+        if not new_rows.any():
+            break
+        seen_keys.update(keys[valid])
+        all_frames.append(df.loc[new_rows])
 
         if first_page_len is None:
             first_page_len = len(df)
@@ -513,11 +546,67 @@ def _handle_scrape_html(config, session):
     )
 
 
+def _handle_bvb_shares(config, session):
+    """Read the official regulated equity table; reject an ambiguous segment."""
+    from bs4 import BeautifulSoup
+
+    response = _fetch_source(session, config["source_url"])
+    soup = BeautifulSoup(response.content, "html.parser")
+    selected = soup.select_one("#ms1")
+    if (
+        selected is None
+        or not selected.has_attr("disabled")
+        or selected.get("value") != "Piata Reglementata"
+    ):
+        raise ValueError("BVB regulated-market selection not confirmed")
+    table = soup.select_one("table#gv")
+    expected = [
+        "Simbol / ISIN",
+        "Societate",
+        "Pret (RON)",
+        "Var. (%)",
+        "Data",
+        "Categoria",
+    ]
+    if (
+        table is None
+        or [h.get_text(" ", strip=True) for h in table.select("th")] != expected
+    ):
+        raise ValueError("BVB shares table schema changed")
+    rows = []
+    for row in table.select("tr"):
+        cells = row.find_all("td", recursive=False)
+        if not cells:
+            continue
+        if len(cells) != len(expected):
+            raise ValueError("Malformed BVB share row")
+        link = cells[0].find("a", href=True)
+        symbol = link.get_text(strip=True) if link else ""
+        href = str(link["href"]) if link else ""
+        if (
+            not re.fullmatch(r"[A-Z0-9]+", symbol)
+            or parse_qs(urlsplit(href).query).get("s") != [symbol]
+            or not cells[1].get_text(strip=True)
+        ):
+            raise ValueError("Malformed BVB symbol identity")
+        rows.append(
+            {
+                "Symbol": symbol,
+                "Company": cells[1].get_text(" ", strip=True),
+                "Currency": "RON",
+            }
+        )
+    if not rows:
+        raise ValueError("Empty BVB regulated equity table")
+    return pd.DataFrame(rows)
+
+
 _HANDLERS = {
     "download_csv": _handle_download_csv,
     "download_excel": _handle_download_excel,
     "scrape_html": _handle_scrape_html,
     "download_json": _handle_download_json,
+    "bvb_shares": _handle_bvb_shares,
 }
 
 
@@ -565,6 +654,7 @@ def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
     session = _get_session()
     all_dfs = []
     degraded_exchanges: list[tuple[str, int, int]] = []
+    failed_exchanges: list[str] = []
 
     print(f"Loaded {config['meta']['description']}", file=sys.stderr)
 
@@ -585,29 +675,34 @@ def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
         handler = _HANDLERS.get(ex["method"])
         if not handler:
             print(f"Unknown method: {ex['method']}", file=sys.stderr)
+            failed_exchanges.append(ex["exchange_name"])
             continue
 
         try:
             df = handler(ex, session)
 
             if df is None or df.empty:
-                print("Empty DataFrame", file=sys.stderr)
-                continue
+                raise ValueError("Empty source")
 
             raw_cols = list(df.columns)
 
             df = _apply_filters(df, ex)
 
             if df.empty:
-                print("Empty after filtering", file=sys.stderr)
-                continue
+                raise ValueError("Empty after filtering")
 
             df = _standardize_dataframe(df, ex)
             df["YF_Ticker"] = df.apply(
                 lambda r, _ex=ex: _generate_yf_ticker(r, _ex), axis=1
             )
 
-            final_df = df[SCRAPE_COLUMNS].dropna(subset=["YF_Ticker"])
+            final_df = (
+                df[SCRAPE_COLUMNS]
+                .dropna(subset=["YF_Ticker"])
+                .drop_duplicates(subset=["YF_Ticker"])
+            )
+            if final_df.empty:
+                raise ValueError("No valid tickers")
             all_dfs.append(final_df)
 
             min_expected = int(ex.get("min_expected_rows") or 0)
@@ -630,7 +725,18 @@ def scrape_exchanges(config: dict, *, exclude_us: bool = True) -> pd.DataFrame:
             time.sleep(1.0)
 
         except Exception as e:
-            print(f"FAILED: {e}", file=sys.stderr)
+            failed_exchanges.append(ex["exchange_name"])
+            print(
+                f"FAILED: {summarize_exception(e, operation='exchange_scrape')}",
+                file=sys.stderr,
+            )
+
+    if failed_exchanges:
+        raise RuntimeError(
+            "Required exchange source(s) failed: "
+            + ", ".join(failed_exchanges)
+            + ". No screening output published; repair or disable the source."
+        )
 
     if not all_dfs:
         print("No data extracted from any exchange.", file=sys.stderr)

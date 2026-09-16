@@ -68,6 +68,14 @@ The system is no longer just “analyze one ticker.” It also supports:
 
 ## Screening Pipeline Semantics
 
+Stage 0 requires every enabled, applicable exchange source to succeed. Source
+floors count unique normalized tickers; repeated pagination pages cannot satisfy
+them. Source failure aborts before writing fresh screening output. BVB screening
+uses its official Regulated Market equity table and validates the active market
+selector; AeRO is excluded. Direct BVB HTTP availability remains an operational
+dependency, even when its browser interface is reachable. No size threshold is
+used as a substitute for exchange-segment membership.
+
 `scripts/run_pipeline.sh` runs quick Stage 1 screening, then full Stage 2
 analysis of its BUY list; same-mode reuse keeps quick reports from satisfying
 Stage 2. The marker's `buy_count` is the Stage-1 list size, not Stage-2

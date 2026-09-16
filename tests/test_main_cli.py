@@ -364,7 +364,12 @@ class TestOutputCompanyNameLookup:
             "TRUE.ST",
         ]
 
-    def test_run_analysis_prefetches_macro_context_into_trading_context(self):
+    @pytest.mark.parametrize(
+        ("ticker", "region"), [("7203.T", "JAPAN"), ("TLV.RO", "EUROPE")]
+    )
+    def test_run_analysis_prefetches_macro_context_into_trading_context(
+        self, ticker, region, tmp_path
+    ):
         from src.main import run_analysis
         from src.ticker_utils import CompanyNameResult
 
@@ -373,6 +378,7 @@ class TestOutputCompanyNameLookup:
 
         async def _capture_ainvoke(_state, *, config):
             captured_context["context"] = config["configurable"]["context"]
+            captured_context["state"] = _state
             return {}
 
         fake_graph = MagicMock()
@@ -380,7 +386,7 @@ class TestOutputCompanyNameLookup:
 
         macro_result = {
             "report": "### EQUITY REGIME\n- Summary: Risk appetite is mixed.",
-            "region": "JAPAN",
+            "region": region,
             "status": "cached",
             "generated_at": None,
             "llm_invoked": False,
@@ -397,6 +403,14 @@ class TestOutputCompanyNameLookup:
             "regime_raw": "MACRO_REGIME_BLOCK:\nRISK_APPETITE: RISK_OFF",
         }
 
+        # Consume the same newline-delimited candidate format Stage 0 publishes.
+        import pandas as pd
+
+        from scripts.find_gems import write_outputs
+
+        candidates = tmp_path / "gems.txt"
+        write_outputs(pd.DataFrame({"YF_Ticker": [ticker]}), str(candidates))
+        pipeline_ticker = candidates.read_text().strip()
         with (
             patch(
                 "src.ticker_utils.resolve_company_name",
@@ -419,7 +433,7 @@ class TestOutputCompanyNameLookup:
         ):
             result = asyncio.run(
                 run_analysis(
-                    ticker="7203.T",
+                    ticker=pipeline_ticker,
                     quick_mode=True,
                     strict_mode=False,
                     skip_charts=True,
@@ -428,11 +442,13 @@ class TestOutputCompanyNameLookup:
 
         assert result["analysis_validity"] == {"ok": True}
         assert result["macro_context_status"] == "cached"
-        assert result["macro_context_region"] == "JAPAN"
+        assert result["macro_context_region"] == region
         assert result["macro_context_injected_into_news"] is False
         context = captured_context["context"]
         assert context.macro_context_report == macro_result["report"]
-        assert context.macro_context_region == "JAPAN"
+        assert context.macro_context_region == region
+        assert context.ticker == ticker
+        assert captured_context["state"]["company_of_interest"] == ticker
         assert context.macro_context_status == "cached"
         assert context.macro_regime["risk_appetite"] == "RISK_OFF"
         assert result["macro_regime_block"]["risk_appetite"] == "RISK_OFF"
