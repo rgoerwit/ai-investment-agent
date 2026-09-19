@@ -5,6 +5,7 @@ description = "A multi-agent international equity research system using LangGrap
 authors = ["Trading System Team <team@example.com>"]
 readme = "README.md"
 packages = [{include = "src"}]
+requires-poetry = "2.4.1"
 
 [tool.poetry.dependencies]
 # Python version compatibility
@@ -142,7 +143,7 @@ ibkr-dashboard = "src.web.ibkr_dashboard.app:main"
 ibkr-dashboard-worker = "src.web.ibkr_dashboard.worker:main"
 
 [build-system]
-requires = ["poetry-core"]
+requires = ["poetry-core==2.4.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.ruff]

@@ -18,7 +18,7 @@ ARG PYTHON_VERSION=3.12
 
 FROM python:${PYTHON_VERSION}-slim AS builder
 
-ARG POETRY_VERSION=2.1.1
+ARG POETRY_VERSION=2.4.1
 
 # Install system dependencies needed for building Python packages.
 # `apt-get upgrade` patches known OS-package CVEs in the base image (the Snyk
@@ -34,7 +34,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Poetry using official installer
-RUN curl -sSL https://install.python-poetry.org | python3 - \
+RUN curl -sSL https://install.python-poetry.org | python3 - --version "${POETRY_VERSION}" \
     && ln -s /root/.local/bin/poetry /usr/local/bin/poetry
 
 WORKDIR /build
