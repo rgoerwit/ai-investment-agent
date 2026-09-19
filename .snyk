@@ -1,11 +1,12 @@
-# Snyk (https://snyk.io) policy file — accepted-risk ignores for `snyk test`
-# and the advisory pre-commit hook (scripts/snyk_check.sh).
+# Snyk (https://snyk.io) policy file — accepted-risk ignores for `snyk test`,
+# `snyk container test`, and the advisory pre-commit hook
+# (scripts/snyk_check.sh).
 #
-# These entries mirror the CI ignores in .github/workflows/security.yml
-# (pip-audit --ignore-vuln + dependency-review allow-ghsas). Keep the two in
-# sync — the CVE aliases are noted per entry.
+# The Python entries mirror CI ignores in .github/workflows/security.yml
+# (pip-audit --ignore-vuln + dependency-review allow-ghsas). The container
+# entry is consumed directly by that workflow via `--policy-path=.snyk`.
 #
-# WHY THESE ARE IGNORED (all five):
+# WHY THE CHROMADB FINDINGS ARE IGNORED (all five):
 #   Every finding is a ChromaDB *HTTP-API-server* flaw — the two Critical ones
 #   (deserialization / code injection) additionally require `trust_remote_code`,
 #   and the three High ones are RBAC / multi-tenant authorization bugs. This app
@@ -54,4 +55,12 @@ ignore:
         reason: >-
           ChromaDB server cross-tenant authorization bypass. Embedded PersistentClient
           has no tenants/auth. Unreachable. No fix exists. Mirrors CI (CVE-2026-45830).
+  # CVE-2026-85091 — false positive for Debian 13's upstream zlib 1.3.1
+  SNYK-DEBIAN13-ZLIB-19520500:
+    - '*':
+        reason: >-
+          Upstream affects zlib 1.3.1.2 through 1.3.2. Debian 13 currently ships
+          1.3.1, whose source has no vulnerable gz_vacate implementation. The
+          Dockerfile fails closed if the runtime version changes, forcing review
+          before this exact-ID VEX can mask a newly applicable package.
 patch: {}

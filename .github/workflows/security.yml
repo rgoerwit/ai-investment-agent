@@ -548,7 +548,7 @@ jobs:
           mkdir -p snyk-sarif
           # Remote ref: Snyk pulls it; --file gives base-image-upgrade advice.
           # `|| true` — non-gating (unfixable base CVEs must not fail the build).
-          snyk container test python:3.12-slim --file=Dockerfile \
+          snyk container test python:3.12-slim --file=Dockerfile --policy-path=.snyk \
             --severity-threshold=medium \
             --sarif-file-output=snyk-sarif/base.sarif || true
 
@@ -560,7 +560,7 @@ jobs:
           docker build -t investment-agent:${{ github.sha }} .
           # Scanning the BUILT image is what proves `apt-get upgrade -y` remediated
           # the fixable OS CVEs (e.g. xz-utils) that a base-tag scan still reports.
-          snyk container test investment-agent:${{ github.sha }} --file=Dockerfile \
+          snyk container test investment-agent:${{ github.sha }} --file=Dockerfile --policy-path=.snyk \
             --severity-threshold=medium \
             --sarif-file-output=snyk-sarif/image.sarif || true
 
