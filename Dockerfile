@@ -66,6 +66,12 @@ RUN apt-get update \
         libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 
+# CVE-2026-85091 affects upstream zlib 1.3.1.2 through 1.3.2. Debian 13's
+# 1.3.1 package predates the vulnerable gz_vacate implementation, although
+# Debian/Snyk currently flag every distro version. Keep the scoped .snyk VEX
+# safe by failing the build if the floating base moves to an unreviewed version.
+RUN python -c "import zlib; assert zlib.ZLIB_RUNTIME_VERSION == '1.3.1', zlib.ZLIB_RUNTIME_VERSION"
+
 # Create non-root user for security (don't run as root in production)
 RUN groupadd -r agent && useradd -r -g agent -u 1000 agent
 
