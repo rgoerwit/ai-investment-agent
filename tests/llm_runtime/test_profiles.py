@@ -4,6 +4,7 @@ from src.llm_runtime.capabilities import Capability
 from src.llm_runtime.identities import sanitize_endpoint_host
 from src.llm_runtime.profiles import (
     ModelProfile,
+    ReasoningApiMode,
     TemperaturePolicy,
     TokenParameter,
     UnsupportedModelCapability,
@@ -45,6 +46,12 @@ def test_working_mix_new_models_have_exact_reviewed_profiles() -> None:
     assert sonnet.identity.adapter_kind == "anthropic_native"
     assert sonnet.reasoning_ladder == ("low", "medium", "high", "xhigh", "max")
     assert sonnet.pricing_key == "claude-sonnet-5-5"
+
+    opus = resolve_profile("claude-opus-5-5")
+    assert opus.identity.adapter_kind == "anthropic_native"
+    assert opus.reasoning_ladder == ("low", "medium", "high", "xhigh", "max")
+    assert opus.reasoning_api_mode is ReasoningApiMode.ADAPTIVE
+    assert opus.pricing_key == "claude-opus-5-5"
 
     flash = resolve_profile("deepseek-flash")
     assert flash.identity.adapter_kind == "openai_compatible"

@@ -152,6 +152,18 @@ MODEL_PROFILES: tuple[ModelProfile, ...] = (
         temperature_policy=TemperaturePolicy.SUPPORTED,
         pricing_key="gpt-4o",
     ),
+    # Adaptive thinking is always on and cannot be disabled (400 on
+    # thinking.type="disabled"); the API default effort is medium, not high.
+    ModelProfile(
+        prefix="claude-opus-5-5",
+        identity=ModelIdentity("anthropic", "claude", "anthropic_native"),
+        capabilities=_ANTHROPIC_REASONING,
+        reasoning_ladder=("low", "medium", "high", "xhigh", "max"),
+        token_parameter=TokenParameter.MAX_TOKENS,
+        temperature_policy=TemperaturePolicy.OMIT,
+        reasoning_api_mode=ReasoningApiMode.ADAPTIVE,
+        pricing_key="claude-opus-5-5",
+    ),
     ModelProfile(
         prefix="claude-sonnet-5-5",
         identity=ModelIdentity("anthropic", "claude", "anthropic_native"),
