@@ -1818,7 +1818,15 @@ def suppress_logging():
         logging.getLogger(name).propagate = False
 
     # Suppress common noisy libraries
-    for logger_name in ["httpx", "openai", "httpcore", "langchain", "langgraph"]:
+    for logger_name in [
+        "httpx",
+        "httpx2",
+        "openai",
+        "httpcore",
+        "httpcore2",
+        "langchain",
+        "langgraph",
+    ]:
         logging.getLogger(logger_name).setLevel(logging.CRITICAL)
 
     # Suppress warnings

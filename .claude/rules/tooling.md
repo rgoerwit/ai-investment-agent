@@ -54,4 +54,14 @@ review-discarding error.
 The registry template is `config/mcp_servers.example.json`; the live registry is
 operator-local.
 
+## MCP error classification fails silently
+
+The SDK runs on `httpx2`, not `httpx`: hand it an `httpx2` client and match
+`httpx2` exception types. It folds a non-2xx POST into a stand-in JSON-RPC error
+and wraps errors in `ExceptionGroup`s, so the response hook that records the HTTP
+status and the group unwrapping are both load-bearing. Without them, 401 and 429
+lose their AUTH cooldown and backoff and nothing goes red. Run
+`tests/mcp/test_errors.py`, which drives the real SDK, after any SDK bump or edit
+to `src/mcp/errors.py` or `_open_session`.
+
 Full history: `docs/MCP.md`.

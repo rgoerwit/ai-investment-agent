@@ -1,5 +1,7 @@
 # Model Context Protocol (MCP) integration
 
+Last updated: 2026-09-30 (mcp 2.x migration).
+
 The consultant agent can cross-validate analyst claims against vendor MCP
 servers (currently the FMP MCP server). The consultant-facing MCP wrappers
 route calls through the normal `ToolExecutionService` hook chain, so audit
@@ -30,38 +32,40 @@ configured server through the full hook chain without an LLM in the loop.
   registry entry is left with `enabled: false` until they ship structured
   per-metric tools.
 
-## Why mcp stays on 1.x (audited Aug 2026)
+## mcp 2.x migration (Oct 2026)
 
-`pyproject.toml` pins `mcp = ">=1.26.0,<2.0.0"`. That cap is a researched
-decision, not routine major-safety — re-read this before "modernising" it.
+`pyproject.toml` pins `mcp = ">=2.2.0,<3.0.0"`. The repo stayed on 1.x through
+Aug 2026 because several v2 changes fail **silently** for a client like ours;
+it moved once openai 3, anthropic 1 and langsmith 0.12 had pulled in `httpx2`
+anyway, which removed most of the extra dependency cost.
 
 We are a **client only**: one server (FMP remote) over streamable HTTP, calling
-`list_tools` and `call_tool`. So most of upstream's v1→v2 migration guide (the
-`FastMCP`→`MCPServer` rename, the lowlevel `Server` handler rework, OAuth
-providers) does not apply. Five things do — and **three of them fail silently**,
-which is what decides it:
+`list_tools` and `call_tool`. The server-side parts of upstream's migration guide
+do not apply. These did, and the silent ones are why `tests/mcp/test_errors.py`
+drives the **real** SDK over an `httpx2.MockTransport` rather than mocking it:
 
-| Site | v2 change | Failure mode |
+| Site | v2 change | Failure mode if missed |
 |---|---|---|
-| `src/mcp/client.py` (`_open_session`) | `httpx.AsyncClient` passed as `http_client=` | **Silent.** Upstream: an `httpx` client "degrades in subtle ways (server-initiated messages stop arriving) instead of raising immediately" |
-| `src/mcp/errors.py` (`classify_mcp_error`) | SDK raises `httpx2` exceptions | **Silent.** We declare `httpx` ourselves so `import httpx` still succeeds; `isinstance(exc, httpx.HTTPStatusError)` simply stops matching, collapsing every transport error to generic non-retryable and disabling the 2-attempt retry, the 300 s AUTH cooldown and the 429 backoff |
-| `src/mcp/errors.py` | `McpError` → `MCPError` | **Silent.** The import sits inside `try/except ImportError`, so it yields `mcp_error_type = None` and protocol errors misclassify |
-| `src/mcp/client.py` | `streamable_http_client` yields a 2-tuple | Loud `ValueError` — we unpack `(read, write, _)` |
-| `src/mcp/normalize.py`, `client.py` | `structuredContent`/`isError`/`inputSchema`/`outputSchema` → snake_case | Loud `AttributeError` |
+| `client.py` `_open_session` | `http_client=` must be an `httpx2.AsyncClient` | **Silent.** A plain `httpx` client "degrades in subtle ways (server-initiated messages stop arriving)" |
+| `errors.py` `classify_mcp_error` | SDK raises `httpx2` exceptions | **Silent.** This repo also depends on `httpx`, so `import httpx` still works and `isinstance(exc, httpx.HTTPStatusError)` just never matches |
+| `errors.py` | `McpError` → `MCPError` | **Silent** under the old `try/except ImportError` import |
+| `errors.py` + `client.py` | A non-2xx **POST** no longer raises `HTTPStatusError`: the SDK turns it into a JSON-RPC error with a stand-in code (`-32603` "Server returned an error response") and **drops the status** | **Silent.** 401 and 429 became generic protocol errors. Fixed by an `httpx2` response hook that records the last POST error status (`HTTPErrorRecord`); 401/403/429/5xx then override the stand-in code. Other 4xx keep the server's JSON-RPC code, so a spec-correct 400 with an error body stays a protocol error |
+| `errors.py` | Errors from `initialize`/`call_tool` arrive wrapped two `ExceptionGroup`s deep (anyio task groups) | **Silent.** The group fell through to the generic non-retryable fallback. `_unwrap_exception_group` picks the first `MCPError`/`httpx2.HTTPError` leaf |
+| `client.py` | `streamable_http_client` yields a 2-tuple | Loud `ValueError` |
+| `normalize.py`, `client.py` | `structuredContent`/`isError`/`inputSchema`/`outputSchema` → snake_case attributes | Loud `AttributeError`. The camelCase names remain valid **constructor** aliases, so test fixtures that build results with them still pass and prove nothing about attribute access |
 
-v2 also adds a substantial dependency surface — `httpx2`, `mcp-types`,
-`sse-starlette>=3` (two majors), `opentelemetry-api` as a **hard** dependency,
-`pyjwt[crypto]`, `python-multipart`, `uvicorn`, `jsonschema` — and moves TLS
-verification from `certifi` to the OS trust store via `truststore`, which needs
-checking against the `python:3.12-slim` base image in `Dockerfile` before any
-migration.
+The last two rows were not in the pre-migration audit; they surfaced only when
+the end-to-end tests ran against the real SDK. Whether 1.x also wrapped errors in
+groups was not checked, so do not assume the AUTH cooldown and 429 backoff ever
+worked before this migration.
 
-Against all that, v2 offers **nothing this repo uses**.
+The `httpx2` fork also logs under its own logger names (`httpx2`, `httpcore2`);
+quieting only `httpx` leaves one INFO line per LLM or MCP request.
 
-**Revisit when** we need a v2-only feature, or upstream ends security support
-for 1.x. If you do migrate, fix the three silent sites first and add a test that
-asserts a transport error still classifies as retryable — the loud two announce
-themselves, the silent three will not.
+v2 verifies TLS against the OS trust store via `truststore` instead of `certifi`.
+The `python:*-slim` base image ships `ca-certificates`, so this should be
+transparent in Docker, but no live MCP call has been made from the container
+since the migration.
 
 ## Configuration
 

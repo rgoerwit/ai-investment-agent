@@ -461,6 +461,19 @@ jobs:
           # listed where known so the ignore matches whichever ID the source
           # (OSV/PyPI) reports. Kept in sync with the repo .snyk policy file.
           # Revisit and drop once chromadb ships a patched version.
+          #
+          # Oct-2026 batch, deferred under the 14-day release-age cooldown (the
+          # rest of the batch was bumped: urllib3 2.8.0, pyjwt 2.14.0). Each is
+          # Moderate except virtualenv's High, which is dev-only (pre-commit envs),
+          # never in the app image. REMOVE each on bump, no later than the date:
+          #   virtualenv GHSA-94p9-xgh2-xp45 (fix 21.7.12, cooled 2026-10-02)
+          #   virtualenv GHSA-9h9j-4vrj-gf7g (fix 21.7.11, cooled 2026-10-01)
+          #   pyjwt      GHSA-42vr-xj54-vc7v (fix 2.15.0,  cooled 2026-10-07)
+          #   oauthlib   GHSA-xpv3-w29h-x7cv, GHSA-hj66-6f7g-4r5v (fix 4.0.0, a
+          #              major, cooled 2026-10-12). Server-side PKCE/revocation
+          #              endpoint code; this app is only an OAuth client.
+          # No fix exists, so no date: pyjwt GHSA-gvp8-978c-rx2q (decode()
+          # options-dict reuse). jwt is reached only via mcp; src/ never imports it.
           pip-audit -r /tmp/requirements.txt \
             --format json \
             --output pip-audit-results.json \
@@ -474,6 +487,12 @@ jobs:
             --ignore-vuln CVE-2026-45832 \
             --ignore-vuln CVE-2026-45833 \
             --ignore-vuln GHSA-36p7-vc44-83pf \
+            --ignore-vuln GHSA-94p9-xgh2-xp45 \
+            --ignore-vuln GHSA-9h9j-4vrj-gf7g \
+            --ignore-vuln GHSA-42vr-xj54-vc7v \
+            --ignore-vuln GHSA-xpv3-w29h-x7cv \
+            --ignore-vuln GHSA-hj66-6f7g-4r5v \
+            --ignore-vuln GHSA-gvp8-978c-rx2q \
             || (echo "⚠️  pip-audit found vulnerabilities — see pip-audit-results.json" && exit 1)
 
       - name: Display audit summary
@@ -659,10 +678,10 @@ jobs:
           #   a broader mixed expression inherited from underlying libraries.
           # - frozendict: yfinance currently requires it transitively; keep this as
           #   an explicit reviewed exception rather than disabling license checks.
-          # - ibind: upstream and the exact locked 0.1.24 sdist ship Apache-2.0 only;
+          # - ibind: upstream and the exact locked 0.2.1 sdist ship Apache-2.0 only;
           #   dependency review additionally reports the permissive
-          #   LicenseRef-scancode-unicode. The upstream LICENSE is unchanged from
-          #   0.1.23, so keep the exception scoped to this package.
+          #   LicenseRef-scancode-unicode. The upstream LICENSE is byte-identical
+          #   from 0.1.23 through 0.2.1, so keep the exception scoped to this package.
           # - Several packages publish mixed/legacy SPDX fragments or scancode refs
           #   despite permissive package metadata.
           # - regex: Apache-2.0 licensed, but reports "CNRI-Python AND Apache-2.0"

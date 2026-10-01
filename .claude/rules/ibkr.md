@@ -98,4 +98,11 @@ server-side logout. Never connect per call: that orphans a server-side session w
 lingers until timeout, and concurrent ones compete for the single brokerage-session
 slot.
 
+## ibind is mocked everywhere but one place
+
+Every IBKR test mocks the ibind client, so an ibind rename stays green there.
+`tests/ibkr/test_ibind_contract.py` binds each call `src/ibkr/client.py` makes against the
+installed package's real signatures and fails if a new `_ibind_client.<method>`
+call has no entry. Add the entry when you add the call; run it on every ibind bump.
+
 Full history: `docs/CURRENCY.md`.

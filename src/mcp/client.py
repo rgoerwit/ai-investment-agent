@@ -6,7 +6,7 @@ import json
 from contextlib import asynccontextmanager
 from typing import Any
 
-import httpx
+import httpx2
 import structlog
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -18,6 +18,7 @@ from src.mcp.budget import BudgetTracker
 from src.mcp.catalog import ToolCatalog, ToolDescriptor
 from src.mcp.config import MCPServerSpec
 from src.mcp.errors import (
+    HTTPErrorRecord,
     MCPCallError,
     MCPErrorCategory,
     classify_mcp_error,
@@ -178,6 +179,14 @@ class MCPRuntime:
                 server_id=spec.id,
             )
 
+        http_error = HTTPErrorRecord()
+
+        async def _record_http_error(response: httpx2.Response) -> None:
+            # Only POSTs carry calls; a 405 on the optional GET stream is normal.
+            if response.status_code >= 400 and response.request.method == "POST":
+                http_error.status = response.status_code
+                http_error.retry_after = response.headers.get("retry-after")
+
         try:
             if spec.transport == "streamable_http":
                 if resolved.url is None:
@@ -186,14 +195,18 @@ class MCPRuntime:
                         category=MCPErrorCategory.CONFIG,
                         server_id=spec.id,
                     )
-                async with httpx.AsyncClient(
+                # Must be an httpx2 client: mcp 2.x degrades silently (server-sent
+                # messages stop arriving) when handed a plain httpx one. No
+                # follow_redirects: the SDK ignores it and applies its own
+                # same-origin redirect rule.
+                async with httpx2.AsyncClient(
                     headers=resolved.headers or None,
-                    follow_redirects=True,
+                    event_hooks={"response": [_record_http_error]},
                 ) as http_client:
                     async with streamable_http_client(
                         resolved.url,
                         http_client=http_client,
-                    ) as (read, write, _):
+                    ) as (read, write):
                         async with ClientSession(read, write) as session:
                             await session.initialize()
                             yield session
@@ -212,7 +225,9 @@ class MCPRuntime:
         except MCPCallError:
             raise
         except Exception as exc:
-            raise classify_mcp_error(exc, server_id=spec.id) from exc
+            raise classify_mcp_error(
+                exc, server_id=spec.id, http_error=http_error
+            ) from exc
 
     def _on_call_failure(self, err: MCPCallError) -> None:
         if err.category is MCPErrorCategory.AUTH:
@@ -301,8 +316,8 @@ class MCPRuntime:
                     server_id=spec.id,
                     name=tool.name,
                     description=tool.description or "",
-                    input_schema=tool.inputSchema,
-                    output_schema=tool.outputSchema,
+                    input_schema=tool.input_schema,
+                    output_schema=tool.output_schema,
                 )
                 for tool in tool_result.tools
             ]

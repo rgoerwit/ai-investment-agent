@@ -8,7 +8,7 @@ repos:
     # Keep in lockstep with the `ruff` pin in pyproject.toml's dev group: this
     # hook is what gates commits, so a drift between the two means local runs
     # and the gate can disagree about formatting.
-    rev: v0.16.2
+    rev: v0.16.8
     hooks:
       # Linter - auto-fixes issues where possible
       - id: ruff

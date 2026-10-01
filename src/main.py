@@ -69,14 +69,16 @@ CLI_NOISY_DEPENDENCY_LOGGERS: dict[str, int] = {
     "google_genai": logging.WARNING,
     "hpack": logging.WARNING,
     "httpcore": logging.WARNING,
+    "httpcore2": logging.WARNING,  # httpx2 fork (openai 3, anthropic 1, mcp 2)
     "httpx": logging.WARNING,
+    "httpx2": logging.WARNING,
     "langchain": logging.INFO,
     "langgraph": logging.INFO,
     "openai": logging.WARNING,
     "primp": logging.WARNING,  # ddgs HTTP client
     "urllib3": logging.WARNING,
 }
-HTTP_TRACE_LOGGERS = ("openai", "httpx", "httpcore", "hpack")
+HTTP_TRACE_LOGGERS = ("openai", "httpx", "httpcore", "httpx2", "httpcore2", "hpack")
 
 
 def _cost_suffix() -> str:
@@ -154,8 +156,10 @@ def suppress_all_logging():
         logging.getLogger(name).setLevel(logging.WARNING)
     for logger_name in [
         "httpx",
+        "httpx2",
         "openai",
         "httpcore",
+        "httpcore2",
         "langchain",
         "langgraph",
         "google",
