@@ -249,9 +249,9 @@ async def test_open_session_streamable_http_uses_http_client_for_headers(
     captured: dict[str, object] = {}
 
     class _FakeAsyncClient:
-        def __init__(self, *, headers=None, follow_redirects=True):
+        def __init__(self, *, headers=None, event_hooks=None):
             captured["headers"] = headers
-            captured["follow_redirects"] = follow_redirects
+            captured["event_hooks"] = event_hooks
 
         async def __aenter__(self):
             captured["http_client"] = self
@@ -264,7 +264,7 @@ async def test_open_session_streamable_http_uses_http_client_for_headers(
     async def fake_streamable_http_client(url, *, http_client):
         captured["url"] = url
         captured["passed_http_client"] = http_client
-        yield "read", "write", None
+        yield "read", "write"
 
     class _FakeClientSession:
         def __init__(self, read, write):
@@ -280,7 +280,7 @@ async def test_open_session_streamable_http_uses_http_client_for_headers(
         async def initialize(self):
             captured["initialized"] = True
 
-    monkeypatch.setattr("src.mcp.client.httpx.AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr("src.mcp.client.httpx2.AsyncClient", _FakeAsyncClient)
     monkeypatch.setattr(
         "src.mcp.client.streamable_http_client",
         fake_streamable_http_client,
@@ -291,7 +291,7 @@ async def test_open_session_streamable_http_uses_http_client_for_headers(
         assert isinstance(session, _FakeClientSession)
 
     assert captured["headers"] == {"Authorization": "Bearer token"}
-    assert captured["follow_redirects"] is True
+    assert len(captured["event_hooks"]["response"]) == 1
     assert captured["passed_http_client"] is captured["http_client"]
     assert captured["url"] == "https://example.test/mcp"
     assert captured["initialized"] is True

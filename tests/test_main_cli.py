@@ -1199,6 +1199,10 @@ class TestBaselineCaptureCliHelpers:
         assert logging.getLogger("openai").level >= logging.WARNING
         assert logging.getLogger("httpx").level >= logging.WARNING
         assert logging.getLogger("httpcore").level >= logging.WARNING
+        # The LLM SDKs and mcp log every request through the httpx2 fork's own
+        # loggers; quieting only "httpx" leaves one INFO line per API call.
+        assert logging.getLogger("httpx2").level >= logging.WARNING
+        assert logging.getLogger("httpcore2").level >= logging.WARNING
 
     def test_configure_cli_logging_allows_http_trace_only_in_debug(self, monkeypatch):
         from src.main import configure_cli_logging
@@ -1217,6 +1221,8 @@ class TestBaselineCaptureCliHelpers:
         assert logging.getLogger("openai").level == logging.DEBUG
         assert logging.getLogger("httpx").level == logging.DEBUG
         assert logging.getLogger("httpcore").level == logging.DEBUG
+        assert logging.getLogger("httpx2").level == logging.DEBUG
+        assert logging.getLogger("httpcore2").level == logging.DEBUG
 
 
 class TestValidateCliArgs:

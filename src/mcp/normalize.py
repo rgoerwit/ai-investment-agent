@@ -48,7 +48,7 @@ def normalize_result(
     ]
     combined_text = "\n".join(text_parts).strip()
     parsed_text_json = _parse_json_text(combined_text)
-    structured_content = result.structuredContent
+    structured_content = result.structured_content
 
     if structured_content is not None:
         payload_profile = (
@@ -68,7 +68,7 @@ def normalize_result(
     normalized: dict[str, Any] = {
         "server": server_id,
         "tool": tool_name,
-        "is_error": result.isError,
+        "is_error": result.is_error,
         "payload_profile": payload_profile,
     }
     if structured_content is not None:

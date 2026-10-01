@@ -54,38 +54,149 @@ def _parse_retry_after(value: str | None) -> int | None:
     return seconds
 
 
+@dataclass
+class HTTPErrorRecord:
+    """The last HTTP error status our MCP client saw on a POST.
+
+    mcp 2.x no longer raises ``HTTPStatusError`` for a non-2xx POST: it turns the
+    response into a JSON-RPC error with a stand-in code (``INTERNAL_ERROR``,
+    "Server returned an error response") and drops the status. Without this
+    record a 401 or 429 would classify as a generic protocol error, silently
+    disabling the AUTH cooldown and the rate-limit backoff. ``client.py``
+    fills it from an httpx2 response hook on the client it hands the SDK.
+    """
+
+    status: int | None = None
+    retry_after: str | None = None
+
+
+# Statuses that carry operational meaning beyond the JSON-RPC code the SDK
+# substitutes for them: AUTH cooldown, 429 backoff, 5xx retry.
+_STATUS_OVERRIDES_JSON_RPC = frozenset({401, 403, 429})
+
+
+def _status_overrides_json_rpc(status: int) -> bool:
+    return status in _STATUS_OVERRIDES_JSON_RPC or 500 <= status < 600
+
+
+def _classify_http_status(
+    status: int,
+    retry_after_header: str | None,
+    *,
+    server_id: str,
+    tool_name: str | None,
+) -> MCPCallError:
+    """401/403→AUTH, 429/5xx→TRANSPORT (retryable), other 4xx→PROTOCOL."""
+    retry_after = _parse_retry_after(retry_after_header)
+    if status in (401, 403):
+        return MCPCallError(
+            message=_sanitize(f"Upstream HTTP {status}"),
+            category=MCPErrorCategory.AUTH,
+            server_id=server_id,
+            tool_name=tool_name,
+            http_status=status,
+            retryable=False,
+        )
+    if status == 429:
+        return MCPCallError(
+            message=_sanitize("Upstream rate-limited"),
+            category=MCPErrorCategory.TRANSPORT,
+            server_id=server_id,
+            tool_name=tool_name,
+            http_status=status,
+            retry_after_seconds=retry_after,
+            retryable=True,
+        )
+    if 500 <= status < 600:
+        return MCPCallError(
+            message=_sanitize(f"Upstream HTTP {status}"),
+            category=MCPErrorCategory.TRANSPORT,
+            server_id=server_id,
+            tool_name=tool_name,
+            http_status=status,
+            retry_after_seconds=retry_after,
+            retryable=True,
+        )
+    return MCPCallError(
+        message=_sanitize(f"Upstream HTTP {status}"),
+        category=MCPErrorCategory.PROTOCOL,
+        server_id=server_id,
+        tool_name=tool_name,
+        http_status=status,
+        retryable=False,
+    )
+
+
+def _unwrap_exception_group(
+    exc: BaseException, preferred: type[BaseException] | Any
+) -> BaseException:
+    """Return the classifiable leaf of an anyio task-group ``ExceptionGroup``.
+
+    The SDK's transport runs in nested task groups, so an ``MCPError`` from
+    ``initialize`` / ``call_tool`` arrives two groups deep. Classifying the group
+    itself lands in the generic non-retryable fallback, which hides AUTH and
+    429. Prefer the first leaf of a known layer; otherwise a lone leaf.
+    """
+    # noqa F821 below: BaseExceptionGroup is a 3.11+ builtin and the project is
+    # 3.12, but [tool.ruff] target-version still says py310.
+    if not isinstance(exc, BaseExceptionGroup):  # noqa: F821
+        return exc
+    leaves: list[BaseException] = []
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop(0)
+        if isinstance(current, BaseExceptionGroup):  # noqa: F821
+            stack[:0] = list(current.exceptions)
+        else:
+            leaves.append(current)
+    for leaf in leaves:
+        if isinstance(leaf, preferred):
+            return leaf
+    return leaves[0] if len(leaves) == 1 else exc
+
+
 def classify_mcp_error(
     exc: BaseException,
     *,
     server_id: str,
     tool_name: str | None = None,
+    http_error: HTTPErrorRecord | None = None,
 ) -> MCPCallError:
     """Translate a transport/protocol exception into a structured MCPCallError.
 
     Recognized layers (in order):
-      * ``mcp.shared.exceptions.McpError`` — protocol-level JSON-RPC error
-      * ``httpx.HTTPStatusError`` — HTTP layer (401/403→AUTH, 429/5xx→TRANSPORT, other 4xx→PROTOCOL)
-      * ``httpx`` connection/timeout errors — TRANSPORT, retryable
+      * ``mcp.shared.exceptions.MCPError`` — protocol-level JSON-RPC error. When
+        ``http_error`` recorded a 401/403/429/5xx POST, the HTTP status wins:
+        the SDK's JSON-RPC code for it is a stand-in (see ``HTTPErrorRecord``)
+      * ``httpx2.HTTPStatusError`` — HTTP layer (401/403→AUTH, 429/5xx→TRANSPORT, other 4xx→PROTOCOL)
+      * ``httpx2`` connection/timeout errors — TRANSPORT, retryable
       * everything else — TRANSPORT, non-retryable
+
+    These are ``httpx2`` types, not ``httpx``: mcp 2.x is built on the fork, and
+    this repo also depends on ``httpx`` directly, so an ``httpx`` isinstance check
+    would import fine and silently never match.
 
     The original exception is preserved by the caller via ``raise X from exc``.
     """
+    import httpx2
+    from mcp.shared.exceptions import MCPError
 
-    # Protocol-level: MCP McpError carries a JSON-RPC code.
-    mcp_error_type: type[Any] | None
-    try:
-        from mcp.shared.exceptions import McpError as _McpError
+    exc = _unwrap_exception_group(exc, MCPError | httpx2.HTTPError)
 
-        mcp_error_type = _McpError
-    except ImportError:  # pragma: no cover - mcp dep guaranteed at runtime
-        mcp_error_type = None
-
-    if mcp_error_type is not None and isinstance(exc, mcp_error_type):
-        err_obj = getattr(exc, "error", None)
-        json_rpc_code = getattr(err_obj, "code", None) if err_obj is not None else None
-        message = (
-            getattr(err_obj, "message", None) if err_obj is not None else None
-        ) or "MCP protocol error"
+    if isinstance(exc, MCPError):
+        if (
+            http_error is not None
+            and http_error.status is not None
+            and _status_overrides_json_rpc(http_error.status)
+        ):
+            return _classify_http_status(
+                http_error.status,
+                http_error.retry_after,
+                server_id=server_id,
+                tool_name=tool_name,
+            )
+        json_rpc_code = exc.error.code
+        message = exc.error.message or "MCP protocol error"
         retryable = json_rpc_code not in _NON_RETRYABLE_JSON_RPC_CODES
         return MCPCallError(
             message=_sanitize(str(message)),
@@ -96,60 +207,21 @@ def classify_mcp_error(
             retryable=retryable,
         )
 
-    # HTTP layer: differentiate auth/rate-limit/server-error/other.
-    try:
-        import httpx
-    except ImportError:  # pragma: no cover - httpx is a transitive dep of mcp
-        httpx = None  # type: ignore[assignment]
-
-    if httpx is not None and isinstance(exc, httpx.HTTPStatusError):
-        status = exc.response.status_code
-        retry_after = _parse_retry_after(exc.response.headers.get("retry-after"))
-        if status in (401, 403):
-            return MCPCallError(
-                message=_sanitize(f"Upstream HTTP {status}"),
-                category=MCPErrorCategory.AUTH,
-                server_id=server_id,
-                tool_name=tool_name,
-                http_status=status,
-                retryable=False,
-            )
-        if status == 429:
-            return MCPCallError(
-                message=_sanitize("Upstream rate-limited"),
-                category=MCPErrorCategory.TRANSPORT,
-                server_id=server_id,
-                tool_name=tool_name,
-                http_status=status,
-                retry_after_seconds=retry_after,
-                retryable=True,
-            )
-        if 500 <= status < 600:
-            return MCPCallError(
-                message=_sanitize(f"Upstream HTTP {status}"),
-                category=MCPErrorCategory.TRANSPORT,
-                server_id=server_id,
-                tool_name=tool_name,
-                http_status=status,
-                retry_after_seconds=retry_after,
-                retryable=True,
-            )
-        return MCPCallError(
-            message=_sanitize(f"Upstream HTTP {status}"),
-            category=MCPErrorCategory.PROTOCOL,
+    if isinstance(exc, httpx2.HTTPStatusError):
+        return _classify_http_status(
+            exc.response.status_code,
+            exc.response.headers.get("retry-after"),
             server_id=server_id,
             tool_name=tool_name,
-            http_status=status,
-            retryable=False,
         )
 
-    if httpx is not None and isinstance(
+    if isinstance(
         exc,
-        httpx.ConnectError
-        | httpx.TimeoutException
-        | httpx.ReadError
-        | httpx.WriteError
-        | httpx.RemoteProtocolError,
+        httpx2.ConnectError
+        | httpx2.TimeoutException
+        | httpx2.ReadError
+        | httpx2.WriteError
+        | httpx2.RemoteProtocolError,
     ):
         return MCPCallError(
             message=_sanitize(str(exc)),

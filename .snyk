@@ -19,6 +19,10 @@
 #   an expiry would silently lapse and re-nag on every dependency-change commit
 #   with no available remediation. DROP these entries once ChromaDB ships a
 #   patched release and the lockfile is bumped past it.
+#
+# NOT MIRRORED HERE: the Oct-2026 cooldown deferrals (virtualenv, pyjwt,
+# oauthlib) are pip-audit-only ignores in security.yml, dated for removal. Their
+# SNYK-* IDs were not known at the time; the advisory hook only reports them.
 version: v1.25.0
 ignore:
   # CVE-2026-45829 — Deserialization of Untrusted Data (Critical), HTTP API + trust_remote_code

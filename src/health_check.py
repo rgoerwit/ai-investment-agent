@@ -37,6 +37,8 @@ logger = structlog.get_logger(__name__)
 # Suppress noisy library logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx2").setLevel(logging.WARNING)
+logging.getLogger("httpcore2").setLevel(logging.WARNING)
 logging.getLogger("google.ai").setLevel(logging.WARNING)
 logging.getLogger("chromadb").setLevel(logging.ERROR)
 
