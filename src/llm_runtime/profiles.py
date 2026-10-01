@@ -87,6 +87,16 @@ MODEL_PROFILES: tuple[ModelProfile, ...] = (
         pricing_key="gemini-3",
     ),
     ModelProfile(
+        prefix="gpt-6.1-sol",
+        identity=ModelIdentity("openai", "gpt", "openai_native"),
+        capabilities=_OPENAI_ANALYSIS,
+        reasoning_ladder=("low", "medium", "high", "xhigh", "max"),
+        token_parameter=TokenParameter.MAX_COMPLETION_TOKENS,
+        temperature_policy=TemperaturePolicy.OMIT,
+        service_tiers=frozenset({"standard", "flex"}),
+        pricing_key="gpt-6.1-sol",
+    ),
+    ModelProfile(
         prefix="gpt-5.6",
         identity=ModelIdentity("openai", "gpt", "openai_native"),
         capabilities=_OPENAI_ANALYSIS,
@@ -141,6 +151,16 @@ MODEL_PROFILES: tuple[ModelProfile, ...] = (
         token_parameter=TokenParameter.MAX_COMPLETION_TOKENS,
         temperature_policy=TemperaturePolicy.SUPPORTED,
         pricing_key="gpt-4o",
+    ),
+    ModelProfile(
+        prefix="claude-sonnet-5-5",
+        identity=ModelIdentity("anthropic", "claude", "anthropic_native"),
+        capabilities=_ANTHROPIC_REASONING,
+        reasoning_ladder=("low", "medium", "high", "xhigh", "max"),
+        token_parameter=TokenParameter.MAX_TOKENS,
+        temperature_policy=TemperaturePolicy.OMIT,
+        reasoning_api_mode=ReasoningApiMode.ADAPTIVE,
+        pricing_key="claude-sonnet-5-5",
     ),
     ModelProfile(
         prefix="claude-opus-4-8",
@@ -220,6 +240,17 @@ MODEL_PROFILES: tuple[ModelProfile, ...] = (
         temperature_policy=TemperaturePolicy.OMIT,
         reasoning_api_mode=ReasoningApiMode.MANUAL,
         pricing_key="claude-sonnet-4",
+    ),
+    ModelProfile(
+        prefix="deepseek-flash",
+        identity=ModelIdentity("deepseek", "deepseek", "openai_compatible"),
+        capabilities=frozenset(
+            {Capability.TEXT_GENERATION, Capability.REASONING_CONTROL}
+        ),
+        reasoning_ladder=("low", "high", "max"),
+        token_parameter=TokenParameter.MAX_COMPLETION_TOKENS,
+        temperature_policy=TemperaturePolicy.OMIT,
+        pricing_key="deepseek-flash",
     ),
     ModelProfile(
         prefix="deepseek-v4",

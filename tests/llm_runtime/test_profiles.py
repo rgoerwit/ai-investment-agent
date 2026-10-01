@@ -34,6 +34,27 @@ def test_shipped_models_resolve_to_commercial_identity() -> None:
     assert resolve_profile("claude-haiku-4-5").identity.vendor_id == "anthropic"
 
 
+def test_working_mix_new_models_have_exact_reviewed_profiles() -> None:
+    sol = resolve_profile("gpt-6.1-sol")
+    assert sol.identity.adapter_kind == "openai_native"
+    assert Capability.TOOL_CALLING in sol.capabilities
+    assert "none" not in sol.reasoning_ladder
+    assert sol.pricing_key == "gpt-6.1-sol"
+
+    sonnet = resolve_profile("claude-sonnet-5-5")
+    assert sonnet.identity.adapter_kind == "anthropic_native"
+    assert sonnet.reasoning_ladder == ("low", "medium", "high", "xhigh", "max")
+    assert sonnet.pricing_key == "claude-sonnet-5-5"
+
+    flash = resolve_profile("deepseek-flash")
+    assert flash.identity.adapter_kind == "openai_compatible"
+    assert flash.capabilities == frozenset(
+        {Capability.TEXT_GENERATION, Capability.REASONING_CONTROL}
+    )
+    assert flash.reasoning_ladder == ("low", "high", "max")
+    assert flash.pricing_key == "deepseek-flash"
+
+
 def test_unknown_future_claude_version_does_not_inherit_a_broad_old_profile() -> None:
     profile = resolve_profile("claude-opus-4-9")
     assert profile.identity.vendor_id == "unknown"

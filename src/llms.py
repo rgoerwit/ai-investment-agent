@@ -124,6 +124,7 @@ def bump_thinking_level(
 # settings only — an undocumented value that today happens to be accepted is
 # not a contract.
 _OPENAI_REASONING_EFFORTS: tuple[tuple[str, frozenset[str]], ...] = (
+    ("gpt-6.1-sol", frozenset({"low", "medium", "high", "xhigh", "max"})),
     ("gpt-5.6", frozenset({"none", "low", "medium", "high", "xhigh", "max"})),
     ("gpt-5.5", frozenset({"none", "low", "medium", "high", "xhigh"})),
     ("gpt-5.4", frozenset({"none", "low", "medium", "high", "xhigh"})),
