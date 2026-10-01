@@ -694,7 +694,10 @@ jobs:
           # - langfuse: PyPI and upstream declare MIT, but dependency review reports
           #   "MIT AND Zlib". Both are permissive; scope the review exception rather
           #   than globally accepting a license expression not otherwise observed here.
-          allow-dependencies-licenses: pkg:pypi/aiohappyeyeballs, pkg:pypi/et-xmlfile, pkg:pypi/frozendict, pkg:pypi/ibind, pkg:pypi/langfuse, pkg:pypi/lxml, pkg:pypi/matplotlib, pkg:pypi/parso, pkg:pypi/protobuf, pkg:pypi/pycryptodome, pkg:pypi/python-dateutil, pkg:pypi/regex, pkg:pypi/structlog, pkg:pypi/typing-extensions, pkg:pypi/xlrd
+          # - numpy: "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0" covers the
+          #   bundled third-party code (unchanged from 2.5.1; surfaced on the 2.5.3
+          #   bump). All permissive; scoped rather than allowing Zlib/CC0 globally.
+          allow-dependencies-licenses: pkg:pypi/aiohappyeyeballs, pkg:pypi/et-xmlfile, pkg:pypi/frozendict, pkg:pypi/ibind, pkg:pypi/langfuse, pkg:pypi/lxml, pkg:pypi/matplotlib, pkg:pypi/numpy, pkg:pypi/parso, pkg:pypi/protobuf, pkg:pypi/pycryptodome, pkg:pypi/python-dateutil, pkg:pypi/regex, pkg:pypi/structlog, pkg:pypi/typing-extensions, pkg:pypi/xlrd
           # Comment on PR with dependency changes
           comment-summary-in-pr: always
           # GitHub can lag when producing dependency graph snapshots for the PR
