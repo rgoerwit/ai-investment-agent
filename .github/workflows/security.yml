@@ -468,10 +468,17 @@ jobs:
           # never in the app image. REMOVE each on bump, no later than the date:
           #   virtualenv GHSA-94p9-xgh2-xp45 (fix 21.7.12, cooled 2026-10-02)
           #   virtualenv GHSA-9h9j-4vrj-gf7g (fix 21.7.11, cooled 2026-10-01)
+          #   virtualenv PYSEC-2026-4013 / GHSA-p58f-9548-mpm2 (activate-script
+          #              path injection; fix 21.7.13, cooled 2026-10-02)
+          #   virtualenv PYSEC-2026-4014 / GHSA-x78j-v8h9-3j2q (activate.bat
+          #              --prompt injection; fix 21.7.12, cooled 2026-10-02)
+          #   One bump to virtualenv 21.7.13 clears all four.
           #   pyjwt      GHSA-42vr-xj54-vc7v (fix 2.15.0,  cooled 2026-10-07)
           #   oauthlib   GHSA-xpv3-w29h-x7cv, GHSA-hj66-6f7g-4r5v (fix 4.0.0, a
           #              major, cooled 2026-10-12). Server-side PKCE/revocation
           #              endpoint code; this app is only an OAuth client.
+          # pip-audit matches --ignore-vuln on the ID it reports, not on aliases,
+          # so each entry below carries its PYSEC/CVE alias as well as the GHSA.
           # No fix exists, so no date: pyjwt GHSA-gvp8-978c-rx2q (decode()
           # options-dict reuse). jwt is reached only via mcp; src/ never imports it.
           pip-audit -r /tmp/requirements.txt \
@@ -489,10 +496,18 @@ jobs:
             --ignore-vuln GHSA-36p7-vc44-83pf \
             --ignore-vuln GHSA-94p9-xgh2-xp45 \
             --ignore-vuln GHSA-9h9j-4vrj-gf7g \
+            --ignore-vuln PYSEC-2026-4013 \
+            --ignore-vuln PYSEC-2026-4014 \
             --ignore-vuln GHSA-42vr-xj54-vc7v \
             --ignore-vuln GHSA-xpv3-w29h-x7cv \
             --ignore-vuln GHSA-hj66-6f7g-4r5v \
             --ignore-vuln GHSA-gvp8-978c-rx2q \
+            --ignore-vuln PYSEC-2026-4011 \
+            --ignore-vuln PYSEC-2026-4012 \
+            --ignore-vuln CVE-2026-101918 \
+            --ignore-vuln CVE-2026-103001 \
+            --ignore-vuln CVE-2026-49265 \
+            --ignore-vuln CVE-2026-49264 \
             || (echo "⚠️  pip-audit found vulnerabilities — see pip-audit-results.json" && exit 1)
 
       - name: Display audit summary
