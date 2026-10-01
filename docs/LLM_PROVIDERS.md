@@ -1,5 +1,7 @@
 # LLM Provider Qualification and Operations
 
+Last updated: 2026-10-01 (pricing-table staleness).
+
 ## Support claims
 
 Provider support has three distinct levels:
@@ -168,6 +170,19 @@ resolved binding plan: seat, group, authority stage, vendor, lineage, adapter,
 sanitized endpoint host, model, quick model, capability requirements, optional-mode
 status, and independence state/waiver. Token usage prefers the resolved identity
 and falls back to model-name inference only for legacy or external records.
+
+**The pricing table drifts from the vendor's page, and nothing goes red.** On the
+2026-10-01 re-verification, `gemini-3.6-flash` was billed at twice Google's
+published rate even though the comment above it said the promotion still applied,
+and `gemini-3.8-flash`, generally available for a month, had no row, so it would have
+been billed at the default rate. Both errors only skew the cost figures used to
+compare models, which is exactly when accuracy matters most. Each Gemini Flash
+promotion ends on a fixed date (2026-12-31 for 3.6–3.8), after which the rows
+double. Re-verify every row against its source page on any configured-model
+change, any vendor model announcement, monthly, and when a recorded promotion
+lapses. To confirm a
+model ID exists for your key, list models through the SDK; a vendor announcement is not proof (Gemini 4
+Argon was announced 2026-09-30 with no public ID).
 
 Every shipped default model must have explicit pricing. Unknown custom models are
 listed under `unpriced_models`, contribute zero to dollar totals, and emit one

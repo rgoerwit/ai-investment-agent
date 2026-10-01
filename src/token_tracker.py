@@ -18,7 +18,8 @@ from src.llm_usage import extract_token_usage_breakdown
 
 logger = structlog.get_logger(__name__)
 
-# LLM pricing per 1M tokens, standard/interactive tier (September 2026).
+# LLM pricing per 1M tokens, standard/interactive tier. Last verified against
+# every source below: 2026-10-01. Re-verify monthly and on any model change.
 # Sources: ai.google.dev/gemini-api/docs/pricing, developers.openai.com/api/docs/pricing,
 # platform.claude.com/docs/en/about-claude/pricing,
 # docs.z.ai/guides/overview/pricing, api-docs.deepseek.com/quick_start/pricing,
@@ -56,10 +57,12 @@ MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     "gpt-4o-mini": {"prompt": 0.15, "completion": 0.60},
     "gpt-4o": {"prompt": 2.50, "completion": 10.00},
     # --- Gemini 3.x (paid tier) ---
-    # Gemini 3.6/3.7 Flash promotional rates hold through 2026-12-31.
-    # Cached input is 10% of prompt at the standard tier.
+    # Gemini 3.6/3.7/3.8 Flash promotional rates hold through 2026-12-31 and
+    # double on 2027-01-01 (to $1.50 in / $7.50 out). Cached input is 10% of
+    # prompt at the standard tier.
+    "gemini-3.8-flash": {"prompt": 0.75, "completion": 3.75},
     "gemini-3.7-flash": {"prompt": 0.75, "completion": 3.75},
-    "gemini-3.6-flash": {"prompt": 1.50, "completion": 7.50},
+    "gemini-3.6-flash": {"prompt": 0.75, "completion": 3.75},
     "gemini-3.5-flash-lite": {"prompt": 0.30, "completion": 2.50},
     "gemini-3.5-flash": {"prompt": 1.50, "completion": 9.00},
     "gemini-3.1-flash-lite": {"prompt": 0.25, "completion": 1.50},

@@ -53,8 +53,10 @@ class TestCurrentModelPricing:
     @pytest.mark.parametrize(
         ("model", "expected"),
         [
-            ("gemini-3.6-flash", 1.50 + 7.50),
-            ("gemini-3.6-flash-002", 1.50 + 7.50),
+            ("gemini-3.8-flash", 0.75 + 3.75),
+            ("gemini-3.7-flash", 0.75 + 3.75),
+            ("gemini-3.6-flash", 0.75 + 3.75),
+            ("gemini-3.6-flash-002", 0.75 + 3.75),
             ("gemini-3.5-flash", 1.50 + 9.00),
             ("gemini-3.5-flash-lite", 0.30 + 2.50),
             ("gemini-3.1-flash-lite", 0.25 + 1.50),
@@ -95,6 +97,8 @@ class TestCurrentModelPricing:
         # Configured and adoption-ready models must prefix-match an explicit
         # entry, never the default fallback.
         for model in (
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
             "gemini-3.6-flash",
             "gemini-3.5-flash",
             "gemini-3.5-flash-lite",
@@ -151,7 +155,7 @@ class TestMatcherOrderIndependence:
         assert _lookup_model_pricing("moonshot/kimi-k3") is _lookup_model_pricing(
             "kimi-k3"
         )
-        assert _lookup_model_pricing("google/gemini-3.6-flash")["completion"] == 7.50
+        assert _lookup_model_pricing("google/gemini-3.6-flash")["completion"] == 3.75
 
     def test_current_matches_unchanged_by_rewrite(self):
         # Every table key resolves to itself (regression pin for the rewrite).
@@ -234,7 +238,7 @@ class TestFlexTierPricing:
     def test_gemini_36_flex_halves_published_rates(self):
         assert _usage(
             "gemini-3.6-flash", tier="flex"
-        ).estimated_cost_usd == pytest.approx((1.50 + 7.50) * FLEX_TIER_MULTIPLIER)
+        ).estimated_cost_usd == pytest.approx((0.75 + 3.75) * FLEX_TIER_MULTIPLIER)
 
     def test_fallback_to_standard_prices_full(self):
         # A flex-configured run whose call fell back reports its real tier
