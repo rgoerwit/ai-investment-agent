@@ -17,12 +17,13 @@ from src.runtime_config import get_runtime_config
 from .components import build_graph_components
 from .routing import (
     CONSULTANT_SKIP_SENTINEL,
+    FUNDAMENTALS_BARRIER,
     consultant_gate_router,
     dispatch_destinations,
     fan_out_to_analysts,
     fundamentals_sync_router,
     post_research_sync_router,
-    should_continue_analyst,
+    route_analyst_tools,
     sync_check_router,
 )
 
@@ -81,6 +82,30 @@ def _reconcile_fundamentals_evidence(state: AgentState) -> dict[str, Any]:
         evidence_records=len(records),
     )
     return {"foreign_language_report": reconciled}
+
+
+async def fundamentals_barrier_node(
+    state: AgentState, config: RunnableConfig
+) -> dict[str, Any]:
+    """Count this arrival and reconcile FLA and Legal evidence before Senior runs."""
+    from src.analysis_snapshot import build_pre_senior_snapshot
+    from src.runtime_services import get_current_evidence_records
+
+    if FUNDAMENTALS_BARRIER.already_released(state):
+        # Count only: a fresh v1 snapshot would replace the one Senior and the
+        # later syncs advanced, since analysis_snapshot is last-writer-wins.
+        return FUNDAMENTALS_BARRIER.arrival_update(state)
+    reconciled = _reconcile_fundamentals_evidence(state)
+    claim_state = {**state, **reconciled}
+    return {
+        **reconciled,
+        **FUNDAMENTALS_BARRIER.arrival_update(state),
+        "analysis_snapshot": build_pre_senior_snapshot(
+            claim_state,
+            get_current_evidence_records(),
+            version=1,
+        ),
+    }
 
 
 def create_trading_graph(
@@ -161,22 +186,6 @@ def create_trading_graph(
                 state,
                 get_current_evidence_records(),
                 version=max(2, int(prior.get("version", 1)) + 1),
-            ),
-        }
-
-    async def fundamentals_sync_node(state: AgentState, config: RunnableConfig):
-        """Reconcile sanitized FLA and Legal evidence before Senior runs."""
-        from src.analysis_snapshot import build_pre_senior_snapshot
-        from src.runtime_services import get_current_evidence_records
-
-        reconciled = _reconcile_fundamentals_evidence(state)
-        claim_state = {**state, **reconciled}
-        return {
-            **reconciled,
-            "analysis_snapshot": build_pre_senior_snapshot(
-                claim_state,
-                get_current_evidence_records(),
-                version=1,
             ),
         }
 
@@ -316,7 +325,7 @@ BEAR RESEARCHER:
     workflow.add_node("Sync Check", maybe_wrap("Sync Check", sync_check_node))
     workflow.add_node(
         "Fundamentals Sync Check",
-        maybe_wrap("Fundamentals Sync Check", fundamentals_sync_node),
+        maybe_wrap("Fundamentals Sync Check", fundamentals_barrier_node),
     )
     workflow.add_node(
         "Debate Sync R1", maybe_wrap("Debate Sync R1", debate_sync_r1_node)
@@ -341,35 +350,35 @@ BEAR RESEARCHER:
 
     workflow.add_conditional_edges(
         "Market Analyst",
-        should_continue_analyst,
+        route_analyst_tools("market_analyst"),
         {"tools": "market_tools", "continue": "Sync Check"},
     )
     workflow.add_edge("market_tools", "Market Analyst")
 
     workflow.add_conditional_edges(
         "Sentiment Analyst",
-        should_continue_analyst,
+        route_analyst_tools("sentiment_analyst"),
         {"tools": "sentiment_tools", "continue": "Sync Check"},
     )
     workflow.add_edge("sentiment_tools", "Sentiment Analyst")
 
     workflow.add_conditional_edges(
         "News Analyst",
-        should_continue_analyst,
+        route_analyst_tools("news_analyst"),
         {"tools": "news_tools", "continue": "Sync Check"},
     )
     workflow.add_edge("news_tools", "News Analyst")
 
     workflow.add_conditional_edges(
         "Junior Fundamentals Analyst",
-        should_continue_analyst,
+        route_analyst_tools("junior_fundamentals_analyst"),
         {"tools": "junior_fund_tools", "continue": "Fundamentals Sync Check"},
     )
     workflow.add_edge("junior_fund_tools", "Junior Fundamentals Analyst")
 
     workflow.add_conditional_edges(
         "Foreign Language Analyst",
-        should_continue_analyst,
+        route_analyst_tools("foreign_language_analyst"),
         {"tools": "foreign_tools", "continue": "Fundamentals Sync Check"},
     )
     workflow.add_edge("foreign_tools", "Foreign Language Analyst")
@@ -382,7 +391,7 @@ BEAR RESEARCHER:
 
     workflow.add_conditional_edges(
         "Value Trap Detector",
-        should_continue_analyst,
+        route_analyst_tools("value_trap_detector"),
         {"tools": "value_trap_tools", "continue": "Sync Check"},
     )
     workflow.add_edge("value_trap_tools", "Value Trap Detector")
@@ -390,7 +399,7 @@ BEAR RESEARCHER:
     if components.auditor_enabled:
         workflow.add_conditional_edges(
             "Auditor",
-            should_continue_analyst,
+            route_analyst_tools("global_forensic_auditor"),
             {"tools": "auditor_tools", "continue": "Sync Check"},
         )
         workflow.add_edge("auditor_tools", "Auditor")

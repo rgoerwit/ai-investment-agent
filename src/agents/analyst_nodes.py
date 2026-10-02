@@ -1676,6 +1676,7 @@ def create_analyst_node(
                 provider=support.infer_provider_name(llm),
             )
             result["messages"] = [error_message]
+            result["sender"] = agent_key
             if research_ledger is not None:
                 result["research_budgets"] = {agent_key: research_ledger.telemetry()}
             return result

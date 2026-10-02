@@ -445,6 +445,12 @@ class Settings(BaseSettings):
     llm_seat_quick_model_overrides: dict[str, str] = Field(
         default_factory=dict, validation_alias="LLM_SEAT_QUICK_MODEL_OVERRIDES"
     )
+    # Same-vendor model failover for the retry attempt after a server error or
+    # timeout, keyed by model: {"gemini-3.8-flash": "gemini-3.7-flash"}. Every
+    # seat bound to a source model inherits it; see src/llm_runtime/failover.py.
+    llm_model_failovers: dict[str, str] = Field(
+        default_factory=dict, validation_alias="LLM_MODEL_FAILOVERS"
+    )
     llm_seat_reasoning_overrides: dict[str, str] = Field(
         default_factory=dict, validation_alias="LLM_SEAT_REASONING_OVERRIDES"
     )

@@ -6,6 +6,7 @@ from enum import StrEnum
 
 from src.llm_runtime.capabilities import Capability
 from src.llm_runtime.identities import ModelIdentity
+from src.llm_runtime.seats import ModelIntent
 
 
 class TokenParameter(StrEnum):
@@ -383,3 +384,34 @@ def adjust_reasoning(profile: ModelProfile, baseline: str, steps: int = 1) -> st
         ) from exc
     target = min(max(current + steps, 0), len(profile.reasoning_ladder) - 1)
     return profile.reasoning_ladder[target]
+
+
+def reasoning_value_for_seat(
+    profile: ModelProfile,
+    intent: ModelIntent,
+    *,
+    adjust: bool,
+) -> str | None:
+    ladder = profile.reasoning_ladder
+    if not ladder:
+        return None
+    prose_preferences = (
+        ("high", "medium", "low")
+        if profile.identity.vendor_id == "anthropic"
+        else ("low", "minimal", "none")
+    )
+    reasoning_preferences = (
+        ("high", "medium", "low")
+        if profile.identity.vendor_id == "google"
+        else ("medium", "high", "low")
+    )
+    preferences = {
+        ModelIntent.FAST: ("low", "minimal", "none"),
+        ModelIntent.CLASSIFIER: ("low", "minimal", "none"),
+        ModelIntent.PROSE: prose_preferences,
+        ModelIntent.REASONING: reasoning_preferences,
+        ModelIntent.CRITICAL: ("high", "medium"),
+        ModelIntent.ESCALATION: ("max", "xhigh", "high"),
+    }[intent]
+    baseline = next((value for value in preferences if value in ladder), ladder[-1])
+    return adjust_reasoning(profile, baseline) if adjust else baseline

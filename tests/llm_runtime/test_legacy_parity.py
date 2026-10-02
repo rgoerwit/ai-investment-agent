@@ -5,12 +5,10 @@ import pytest
 from src.config import Settings
 from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.bindings import resolve_binding_plan
-from src.llm_runtime.construction import (
-    build_required_model_for_seat,
-    reasoning_value_for_seat,
-)
+from src.llm_runtime.construction import build_required_model_for_seat
 from src.llm_runtime.contracts import capture_construction_contract
 from src.llm_runtime.factory import SeatModelFactory
+from src.llm_runtime.profiles import reasoning_value_for_seat
 from src.llm_runtime.seats import SEATS, BindingGroup, SeatId
 
 

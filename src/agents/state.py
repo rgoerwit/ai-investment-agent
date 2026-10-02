@@ -51,6 +51,11 @@ def take_last(x, y):
     return y
 
 
+def add_counts(x: int | None, y: int | None) -> int:
+    """Reducer: sums counters written by successive supersteps."""
+    return (x or 0) + (y or 0)
+
+
 def _message_key(message: BaseMessage) -> tuple[str, str, str]:
     return (
         type(message).__name__,
@@ -333,6 +338,9 @@ class AgentState(TypedDict, total=False):
     red_flags: Annotated[list[dict[str, Any]], merge_flag_lists]
     pre_screening_result: Annotated[str, merge_pre_screening_results]
     financial_validation_complete: Annotated[bool, take_last]
+    # Times the Fundamentals barrier found all three inputs complete. The router
+    # releases Senior only on the first; see fundamentals_sync_router.
+    fundamentals_release_count: Annotated[int, add_counts]
     chart_paths: Annotated[dict[str, str], take_last]
     macro_context_injected_into_news: Annotated[bool, take_last]
     entity_governance_card: Annotated[dict[str, Any], take_last]

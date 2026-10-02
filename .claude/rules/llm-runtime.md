@@ -62,6 +62,14 @@ a legacy credential**. Keying on a provider key that a valid configuration does 
 set wires the node and never dispatches to it — raising nothing, with the only
 evidence a `NOT_RUN` status in the saved artifact.
 
+## Transport failures fail over by model, in one place
+
+Model failover is configured by model in `LLM_MODEL_FAILOVERS` and runs only on
+retryable `server_error`/`timeout`, from the retry loop. **Never hand-wire a
+per-node backup model for transport errors.** Any walk of a composed runnable must
+descend only real LangChain composition types: attribute probing never terminates
+on a mock.
+
 ## The pricing table goes stale silently
 
 `MODEL_PRICING_PER_1M` in `src/token_tracker.py` is hand-copied from vendor pages that

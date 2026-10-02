@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.util import find_spec
 from numbers import Real
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 from urllib.parse import urlsplit
 
 import structlog
@@ -33,6 +33,7 @@ from src.llm_budgets import (
     get_agent_output_budget,
     get_generation_budget,
 )
+from src.llm_runtime.failover import ModelFailoverMixin
 from src.llm_runtime.seats import ModelIntent
 from src.runtime_config import get_runtime_config
 from src.runtime_services import get_current_provider_runtime
@@ -633,7 +634,7 @@ def _stamp_service_tier(result: Any, tier: str) -> None:
         logger.debug("service_tier_stamp_failed", tier=tier)
 
 
-class _TieredChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
+class _TieredChatGoogleGenerativeAI(ModelFailoverMixin, ChatGoogleGenerativeAI):
     """ChatGoogleGenerativeAI with Gemini request compatibility and flex support.
 
     langchain-google-genai 4.2.6 does not expose ``service_tier`` (see
@@ -660,6 +661,7 @@ class _TieredChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
 
     service_tier: str | None = None
     flex_fallback_to_standard: bool = True
+    failover_model: str | None = None
 
     def _prepare_params(
         self,
@@ -753,6 +755,8 @@ class _TieredChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
         return None
 
     def _generate(self, *args: Any, **kwargs: Any) -> Any:
+        if (delegate := self._failover_delegate()) is not None:
+            return delegate._generate(*args, **kwargs)
         try:
             result = super()._generate(*args, **kwargs)
         except Exception as exc:
@@ -768,6 +772,8 @@ class _TieredChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
         return result
 
     async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
+        if (delegate := self._failover_delegate()) is not None:
+            return await delegate._agenerate(*args, **kwargs)
         try:
             result = await super()._agenerate(*args, **kwargs)
         except Exception as exc:
@@ -806,8 +812,12 @@ def _get_flex_fallback_chat_openai_cls() -> type[BaseChatModel]:
 
     from langchain_openai import ChatOpenAI
 
-    class _FlexFallbackChatOpenAI(ChatOpenAI):
+    class _FlexFallbackChatOpenAI(ModelFailoverMixin, ChatOpenAI):
+        _failover_model_field: ClassVar[str] = "model_name"
+        _failover_standard_tier: ClassVar[str] = "auto"
+
         flex_fallback_to_standard: bool = True
+        failover_model: str | None = None
 
         def _flex_ineligible(self) -> bool:
             """Whether this call must not request flex — capability or health.
@@ -868,6 +878,8 @@ def _get_flex_fallback_chat_openai_cls() -> type[BaseChatModel]:
             return None
 
         def _generate(self, *args: Any, **kwargs: Any) -> Any:
+            if (delegate := self._failover_delegate()) is not None:
+                return delegate._generate(*args, **kwargs)
             kwargs = self._payload_kwargs(kwargs)
             try:
                 return super()._generate(*args, **kwargs)
@@ -880,6 +892,8 @@ def _get_flex_fallback_chat_openai_cls() -> type[BaseChatModel]:
                 )
 
         async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
+            if (delegate := self._failover_delegate()) is not None:
+                return await delegate._agenerate(*args, **kwargs)
             kwargs = self._payload_kwargs(kwargs)
             try:
                 return await super()._agenerate(*args, **kwargs)

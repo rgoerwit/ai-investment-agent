@@ -14,8 +14,8 @@ from pydantic import ValidationError
 from src.config import Settings
 from src.llm_runtime.bindings import BindingConfigurationError, resolve_binding_plan
 from src.llm_runtime.budgets import resolve_generation_budget
-from src.llm_runtime.construction import build_model_for_seat, reasoning_value_for_seat
-from src.llm_runtime.profiles import resolve_profile
+from src.llm_runtime.construction import build_model_for_seat
+from src.llm_runtime.profiles import reasoning_value_for_seat, resolve_profile
 from src.llm_runtime.provider_policy import (
     _reset_cache_affinity_for_tests,
     cache_affinity_id,

@@ -1,6 +1,6 @@
 # LLM Provider Qualification and Operations
 
-Last updated: 2026-10-01 (pricing-table staleness).
+Last updated: 2026-10-01 (model failover ladder; pricing-table staleness).
 
 ## Support claims
 
@@ -255,6 +255,63 @@ booleans. A waiver reason is mandatory when enforcement is disabled. If a
 historical reason remains configured after enforcement is re-enabled, it is
 inactive, omitted from runtime telemetry, and does not make otherwise safe config
 invalid.
+
+### Model failover: the degradation ladder
+
+On 2026-10-01 the quick-mode Portfolio Manager on `gemini-3.8-flash` hit
+`504 DEADLINE_EXCEEDED` in two tickers, each time *after* the transport had already
+dropped from flex to standard. The only fallback then was a tier change on the same
+model, and the retry loop's next attempt repeated that same model. A newly released
+model being short of capacity is a property of the model, so the remedy has to change
+the model.
+
+A struggling call now goes down one ladder, each rung owned by the layer that already
+owns that concern:
+
+```
+(primary, flex) --transport--> (primary, standard) --retry loop--> (failover, standard)
+```
+
+- **What** to fail over to is the model-keyed map `LLM_MODEL_FAILOVERS`, so every seat
+  bound to the source model inherits it (PM, Senior Fundamentals, debate and risk
+  alike). The binding plan validates it at startup. A target must have a reviewed
+  profile and the same vendor, it must sit on a transport that implements
+  `ModelFailoverMixin` (`google_native`, `openai_native`), it is one hop only, and it
+  cannot map a model to itself. The failover copy keeps the source's request
+  settings, so the target must also accept the reasoning value each seat actually
+  sends, and share the source's `reasoning_api_mode`, `temperature_policy` and
+  `token_parameter`. Otherwise the failover fails at exactly the moment it is
+  needed. For example, `gpt-6.1-sol -> gpt-5.4` is rejected for a seat pinned to
+  `max`. The target appears in the binding telemetry as `failover_model`.
+- **When** is decided in `invoke_with_rate_limit_handling`. Only `server_error` and
+  `timeout` count. A 429, a bad request or a safety block says nothing about the
+  model's health. The failover attempt *replaces* a retry rather than adding one, and
+  it does not back off, because a different model is not waiting out this one's
+  outage.
+- **How**: the transport serves the attempt from a `model_copy` bound to the target
+  at the standard tier. Billing follows the response's `model_name`.
+
+**The failover never targets the model that just failed.** Several separate
+mechanisms guarantee this, and no runtime comparison is needed:
+- A self-map is rejected at startup.
+- An alias (`*-latest`) has no reviewed profile, so it cannot mask the same model
+  under another name.
+- The tier rung runs first, so a lone flex 504 recovers on the primary at standard
+  without spending the failover.
+- Once on the failover model, later retries stay there. They neither bounce back to
+  the primary nor take a second hop.
+
+Each guarantee has a test in `tests/llm_runtime/test_model_failover.py`.
+
+The structural recovery path (`SeatId.ANALYST_RETRY`, for malformed output) is
+separate and unchanged. Cross-vendor failover is out of scope, because it would
+change the independence guarantees above.
+
+**`failover_target` must walk only real `RunnableBinding`/`RunnableSequence`
+nodes.** The first version probed `bound`/`first`/`last` with `getattr`. On a mock
+every attribute access returns a new mock, so the walk never terminated. It runs on
+every LLM invocation, so it hung any test that passed a mock LLM. That hang is what
+killed the session that wrote it.
 
 ## Embedding collections
 

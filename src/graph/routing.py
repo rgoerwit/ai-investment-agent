@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage
@@ -35,28 +37,21 @@ def dispatch_destinations(*, include_auditor: bool) -> list[str]:
     return destinations
 
 
-def should_continue_analyst(
-    state: AgentState, config: RunnableConfig
-) -> Literal["tools", "continue"]:
-    """
-    Determine if analyst should call tools or continue to next node.
-    Returns "tools" if agent has pending tool calls, "continue" otherwise.
-    """
+def _route_owner_tools(state: AgentState, owner: str) -> Literal["tools", "continue"]:
     messages = state.get("messages", [])
-    sender = state.get("sender", "unknown")
     target_message: BaseMessage | None = next(
         (
             message
             for message in reversed(messages)
             if isinstance(message, AIMessage)
-            and getattr(message, "name", None) == sender
+            and getattr(message, "name", None) == owner
         ),
         None,
     )
     if target_message is None and messages:
         logger.warning(
             "analyst_routing_owner_response_missing",
-            sender=sender,
+            sender=owner,
             message_count=len(messages),
             action="end_analyst_turn",
         )
@@ -65,10 +60,42 @@ def should_continue_analyst(
     result: Literal["tools", "continue"] = "tools" if has_tool_calls else "continue"
 
     logger.debug(
-        "analyst_routing", sender=sender, has_tool_calls=has_tool_calls, result=result
+        "analyst_routing", sender=owner, has_tool_calls=has_tool_calls, result=result
     )
 
     return result
+
+
+def route_analyst_tools(owner: str):
+    """Build the tool-loop router for one analyst edge, bound to its owner.
+
+    Parallel analysts share the ``sender`` key, so it names whichever branch
+    wrote last, not the one whose edge is being evaluated. Routing by it sent a
+    failed Junior Fundamentals back into its tool node whenever another analyst
+    had calls pending; the replayed calls broke Junior's transcript, Junior
+    reached the Fundamentals barrier twice, and Senior was dispatched twice —
+    the second run overwriting a valid report with a provider 400.
+    """
+
+    def _route(
+        state: AgentState, config: RunnableConfig
+    ) -> Literal["tools", "continue"]:
+        return _route_owner_tools(state, owner)
+
+    _route.__name__ = f"route_analyst_tools[{owner}]"
+    return _route
+
+
+def should_continue_analyst(
+    state: AgentState, config: RunnableConfig
+) -> Literal["tools", "continue"]:
+    """Route by ``state['sender']``.
+
+    Only correct when a single branch is live. Graph edges must use
+    ``route_analyst_tools(owner)``; this remains for callers outside the
+    parallel analyst fan-out.
+    """
+    return _route_owner_tools(state, state.get("sender", "unknown"))
 
 
 def fan_out_to_analysts(
@@ -87,31 +114,79 @@ def fan_out_to_analysts(
     return dispatch_destinations(include_auditor=include_auditor)
 
 
+@dataclass(frozen=True, slots=True)
+class ReleaseOnceBarrier:
+    """A fan-in barrier that releases its successor at most once.
+
+    LangGraph runs a barrier node once per superstep in which any upstream
+    branch arrives, so a barrier is re-entered whenever a branch arrives late or
+    twice. The node half (``arrival_update``) adds one to a reducer-summed
+    counter each time it finds every input complete; the router half
+    (``route``) runs after that update in the same superstep and releases only
+    on the first count. Keeping both halves on one object means the node and its
+    router cannot disagree about which inputs gate the release.
+    """
+
+    name: str
+    inputs: tuple[str, ...]
+    count_field: str
+    target: str
+
+    def inputs_complete(self, state: AgentState) -> bool:
+        return all(is_artifact_complete(state, field) for field in self.inputs)
+
+    def arrival_update(self, state: AgentState) -> dict[str, int]:
+        return {self.count_field: int(self.inputs_complete(state))}
+
+    def already_released(self, state: AgentState) -> bool:
+        """Whether an earlier superstep already released the successor.
+
+        The node half reads this before its own count lands, so it sees only
+        prior arrivals. A re-arrival must not redo pre-release work: its writes
+        would land after the successor's and roll them back.
+        """
+        values: Mapping[str, Any] = state
+        return self.inputs_complete(state) and (values.get(self.count_field) or 0) >= 1
+
+    def route(self, state: AgentState) -> str:
+        if not self.inputs_complete(state):
+            logger.debug(
+                "barrier_waiting",
+                barrier=self.name,
+                complete={f: is_artifact_complete(state, f) for f in self.inputs},
+            )
+            return "__end__"
+        # Absent means the router is consulted without its node (direct calls);
+        # the graph always writes the count before routing.
+        values: Mapping[str, Any] = state
+        release_count = values.get(self.count_field) or 1
+        if release_count > 1:
+            # A re-arrival after the successor was already released. Releasing
+            # again re-runs it on a transcript ending in its own reply and
+            # overwrites its result with that failure.
+            logger.warning(
+                "barrier_redispatch_suppressed",
+                barrier=self.name,
+                release_count=release_count,
+            )
+            return "__end__"
+        logger.info("barrier_released", barrier=self.name, target=self.target)
+        return self.target
+
+
+FUNDAMENTALS_BARRIER = ReleaseOnceBarrier(
+    name="fundamentals",
+    inputs=("raw_fundamentals_data", "foreign_language_report", "legal_report"),
+    count_field="fundamentals_release_count",
+    target="Fundamentals Analyst",
+)
+
+
 def fundamentals_sync_router(
     state: AgentState, config: RunnableConfig
 ) -> Literal["Fundamentals Analyst", "__end__"]:
-    """
-    Synchronization barrier for Junior Fundamentals, Foreign Language, and Legal Counsel.
-    """
-    junior_done = is_artifact_complete(state, "raw_fundamentals_data")
-    foreign_done = is_artifact_complete(state, "foreign_language_report")
-    legal_done = is_artifact_complete(state, "legal_report")
-
-    logger.debug(
-        "fundamentals_sync_status",
-        junior_done=junior_done,
-        foreign_done=foreign_done,
-        legal_done=legal_done,
-    )
-
-    if junior_done and foreign_done and legal_done:
-        logger.info(
-            "fundamentals_sync_complete",
-            message="Junior, Foreign Language, and Legal Counsel complete - proceeding to Senior Fundamentals",
-        )
-        return "Fundamentals Analyst"
-
-    return "__end__"
+    """Release Senior Fundamentals once Junior, Foreign Language and Legal are in."""
+    return FUNDAMENTALS_BARRIER.route(state)  # type: ignore[return-value]
 
 
 def sync_check_router(
