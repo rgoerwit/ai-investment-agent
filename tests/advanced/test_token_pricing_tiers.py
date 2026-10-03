@@ -53,9 +53,12 @@ class TestCurrentModelPricing:
     @pytest.mark.parametrize(
         ("model", "expected"),
         [
-            ("gemini-3.6-flash", 1.50 + 7.50),
-            ("gemini-3.6-flash-002", 1.50 + 7.50),
+            ("gemini-3.8-flash", 0.75 + 3.75),
+            ("gemini-3.7-flash", 0.75 + 3.75),
+            ("gemini-3.6-flash", 0.75 + 3.75),
+            ("gemini-3.6-flash-002", 0.75 + 3.75),
             ("gemini-3.5-flash", 1.50 + 9.00),
+            ("gemini-3.5-flash-lite", 0.30 + 2.50),
             ("gemini-3.1-flash-lite", 0.25 + 1.50),
             ("gemini-3.1-pro-preview", 2.00 + 12.00),
             ("gemini-3-flash-preview", 0.50 + 3.00),
@@ -63,14 +66,28 @@ class TestCurrentModelPricing:
             ("gpt-5.4", 2.50 + 15.00),
             ("gpt-5.4-mini", 0.75 + 4.50),
             ("gpt-5.5", 5.00 + 30.00),
-            ("gpt-5.6-sol", 5.00 * 2.00 + 30.00 * 1.50),
-            ("gpt-5.6-terra", 2.50 * 2.00 + 15.00 * 1.50),
-            ("gpt-5.6-luna", 1.00 * 2.00 + 6.00 * 1.50),
-            ("gpt-5.6", 5.00 * 2.00 + 30.00 * 1.50),
+            ("gpt-5.6-sol", 4.00 * 2.00 + 20.00 * 1.50),
+            ("gpt-5.6-terra", 2.00 * 2.00 + 12.00 * 1.50),
+            ("gpt-5.6-luna", 0.20 * 2.00 + 1.20 * 1.50),
+            ("gpt-5.6", 4.00 * 2.00 + 20.00 * 1.50),
+            ("gpt-6-astra", 10.00 * 2.00 + 50.00 * 1.50),
+            ("gpt-6-sol", 2.00 * 2.00 + 10.00 * 1.50),
+            ("gpt-6.1-sol", 2.00 * 2.00 + 10.00 * 1.50),
+            ("gpt-6-luna", 0.10 * 2.00 + 0.50 * 1.50),
             ("claude-opus-4-6", 5.00 + 25.00),
+            ("claude-opus-5-5", 4.00 + 20.00),
+            ("claude-sonnet-5-5", 2.00 + 10.00),
+            ("claude-fable-5-1", 10.00 + 50.00),
             ("glm-5.2", 1.40 + 4.40),
-            ("deepseek-v4-pro", 0.435 + 0.87),
+            ("glm-5.3", 1.40 + 4.40),
+            ("glm-5.3-flash", 0.15 + 0.50),
+            ("glm-5.3-flashx", 0.37 + 1.25),
+            ("deepseek-v4-pro", 1.32 + 3.96),
+            ("deepseek-flash", 0.30 + 1.20),
+            ("deepseek-v4-flash", 0.30 + 1.20),
             ("kimi-k3", 3.00 + 15.00),
+            ("kimi-k2.6", 0.95 + 4.00),
+            ("kimi-k2.7-code", 0.95 + 4.00),
         ],
     )
     def test_standard_tier_cost(self, model, expected):
@@ -80,8 +97,11 @@ class TestCurrentModelPricing:
         # Configured and adoption-ready models must prefix-match an explicit
         # entry, never the default fallback.
         for model in (
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
             "gemini-3.6-flash",
             "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
             "gemini-3.1-flash-lite",
             "gemini-3.1-pro-preview",
             "gemini-3-flash-preview",
@@ -91,9 +111,16 @@ class TestCurrentModelPricing:
             "gpt-5.6-terra",
             "gpt-5.6-luna",
             "gpt-5.6",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6.1-sol",
+            "gpt-6-luna",
             "claude-opus-4-6",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
             "glm-5.2",
             "deepseek-v4-pro",
+            "deepseek-flash",
             "kimi-k3",
         ):
             assert _lookup_model_pricing(model) is not DEFAULT_PRICING_PER_1M, model
@@ -121,14 +148,14 @@ class TestMatcherOrderIndependence:
 
     def test_exact_match_preferred(self):
         # Bare "gpt-5.6" must resolve to its own entry, not a longer sibling.
-        assert _lookup_model_pricing("gpt-5.6")["prompt"] == 5.00
-        assert _lookup_model_pricing("gpt-5.6-terra")["prompt"] == 2.50
+        assert _lookup_model_pricing("gpt-5.6")["prompt"] == 4.00
+        assert _lookup_model_pricing("gpt-5.6-terra")["prompt"] == 2.00
 
     def test_vendor_prefix_is_stripped(self):
         assert _lookup_model_pricing("moonshot/kimi-k3") is _lookup_model_pricing(
             "kimi-k3"
         )
-        assert _lookup_model_pricing("google/gemini-3.6-flash")["completion"] == 7.50
+        assert _lookup_model_pricing("google/gemini-3.6-flash")["completion"] == 3.75
 
     def test_current_matches_unchanged_by_rewrite(self):
         # Every table key resolves to itself (regression pin for the rewrite).
@@ -138,9 +165,10 @@ class TestMatcherOrderIndependence:
     @pytest.mark.parametrize(
         ("model", "prompt_rate", "completion_rate"),
         [
-            ("gpt-5.6-sol", 5.00, 30.00),
-            ("gpt-5.6-terra", 2.50, 15.00),
-            ("gpt-5.6-luna", 1.00, 6.00),
+            ("gpt-5.6-sol", 4.00, 20.00),
+            ("gpt-5.6-terra", 2.00, 12.00),
+            ("gpt-5.6-luna", 0.20, 1.20),
+            ("gpt-6.1-sol", 2.00, 10.00),
         ],
     )
     def test_gpt56_long_context_surcharge_starts_above_threshold(
@@ -183,11 +211,22 @@ class TestMatcherOrderIndependence:
             cache_write=40_000,
         )
         expected = (
-            60_000 / 1_000_000 * 1.00
-            + 40_000 / 1_000_000 * 1.00 * CACHE_WRITE_PROMPT_MULTIPLIER
-            + 10_000 / 1_000_000 * 6.00
+            60_000 / 1_000_000 * 0.20
+            + 40_000 / 1_000_000 * 0.20 * CACHE_WRITE_PROMPT_MULTIPLIER
+            + 10_000 / 1_000_000 * 1.20
         )
         assert usage.estimated_cost_usd == pytest.approx(expected)
+
+    def test_new_models_use_provider_specific_cached_input_prices(self):
+        assert _usage(
+            "gpt-6.1-sol", cached=100_000, prompt=100_000, completion=0
+        ).estimated_cost_usd == pytest.approx(0.01)
+        assert _usage(
+            "deepseek-flash", cached=1_000_000, completion=0
+        ).estimated_cost_usd == pytest.approx(0.006)
+        assert _usage(
+            "deepseek-v4-pro", cached=1_000_000, completion=0
+        ).estimated_cost_usd == pytest.approx(0.044)
 
 
 class TestFlexTierPricing:
@@ -199,7 +238,7 @@ class TestFlexTierPricing:
     def test_gemini_36_flex_halves_published_rates(self):
         assert _usage(
             "gemini-3.6-flash", tier="flex"
-        ).estimated_cost_usd == pytest.approx((1.50 + 7.50) * FLEX_TIER_MULTIPLIER)
+        ).estimated_cost_usd == pytest.approx((0.75 + 3.75) * FLEX_TIER_MULTIPLIER)
 
     def test_fallback_to_standard_prices_full(self):
         # A flex-configured run whose call fell back reports its real tier

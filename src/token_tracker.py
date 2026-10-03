@@ -18,10 +18,12 @@ from src.llm_usage import extract_token_usage_breakdown
 
 logger = structlog.get_logger(__name__)
 
-# LLM pricing per 1M tokens, standard/interactive tier (August 2026).
+# LLM pricing per 1M tokens, standard/interactive tier. Last verified against
+# every source below: 2026-10-01. Re-verify monthly and on any model change.
 # Sources: ai.google.dev/gemini-api/docs/pricing, developers.openai.com/api/docs/pricing,
-# platform.claude.com/docs/en/pricing, docs.z.ai/guides/overview/pricing,
-# api-docs.deepseek.com/quick_start/pricing, kimi.com/help/kimi-api/api-pricing,
+# platform.claude.com/docs/en/about-claude/pricing,
+# docs.z.ai/guides/overview/pricing, api-docs.deepseek.com/quick_start/pricing,
+# platform.kimi.ai/docs/pricing/chat,
 # docs.x.ai/developers/pricing.
 # Matched by exact key first, then longest-prefix-wins (see
 # ``_lookup_model_pricing``) — so insertion order does NOT matter and a
@@ -29,6 +31,8 @@ logger = structlog.get_logger(__name__)
 # of where it appears. Gemini >200k-context and xAI >=200k-context rate
 # differences are not modeled (single blended rate per model; for xAI the higher
 # tier applies to every token in such a request, including output and cached).
+# DeepSeek uses peak rates as a conservative estimate; off-peak and holiday
+# discounts cannot be inferred from this static model-price table.
 # Provider-specific cached-input rates use
 # ``cached_prompt`` when present; otherwise they use CACHED_PROMPT_MULTIPLIER
 # below.
@@ -36,12 +40,16 @@ MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     # Current-generation models only — retired/deprecated models are
     # deliberately absent; if one is somehow used it hits the default-pricing
     # fallback and logs unknown_model_pricing.
-    # --- OpenAI gpt-5.x (consultant/auditor/editor; mini before parent) ---
-    "gpt-5.6-sol": {"prompt": 5.00, "completion": 30.00},
-    "gpt-5.6-terra": {"prompt": 2.50, "completion": 15.00},
-    "gpt-5.6-luna": {"prompt": 1.00, "completion": 6.00},
+    # --- OpenAI (consultant/auditor/editor; mini before parent) ---
+    "gpt-6.1-sol": {"prompt": 2.00, "cached_prompt": 0.10, "completion": 10.00},
+    "gpt-6-astra": {"prompt": 10.00, "cached_prompt": 1.00, "completion": 50.00},
+    "gpt-6-sol": {"prompt": 2.00, "cached_prompt": 0.20, "completion": 10.00},
+    "gpt-6-luna": {"prompt": 0.10, "cached_prompt": 0.01, "completion": 0.50},
+    "gpt-5.6-sol": {"prompt": 4.00, "completion": 20.00},
+    "gpt-5.6-terra": {"prompt": 2.00, "completion": 12.00},
+    "gpt-5.6-luna": {"prompt": 0.20, "completion": 1.20},
     # Official alias for Sol; keep after the more-specific family variants.
-    "gpt-5.6": {"prompt": 5.00, "completion": 30.00},
+    "gpt-5.6": {"prompt": 4.00, "completion": 20.00},
     "gpt-5.5": {"prompt": 5.00, "completion": 30.00},
     "gpt-5.4-mini": {"prompt": 0.75, "completion": 4.50},
     "gpt-5.4": {"prompt": 2.50, "completion": 15.00},
@@ -49,10 +57,13 @@ MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     "gpt-4o-mini": {"prompt": 0.15, "completion": 0.60},
     "gpt-4o": {"prompt": 2.50, "completion": 10.00},
     # --- Gemini 3.x (paid tier) ---
-    # Rates hold through 2026-12-31 and double on 2027-01-01; cached input is
-    # 10% of prompt, which CACHED_PROMPT_MULTIPLIER already supplies.
+    # Gemini 3.6/3.7/3.8 Flash promotional rates hold through 2026-12-31 and
+    # double on 2027-01-01 (to $1.50 in / $7.50 out). Cached input is 10% of
+    # prompt at the standard tier.
+    "gemini-3.8-flash": {"prompt": 0.75, "completion": 3.75},
     "gemini-3.7-flash": {"prompt": 0.75, "completion": 3.75},
-    "gemini-3.6-flash": {"prompt": 1.50, "completion": 7.50},
+    "gemini-3.6-flash": {"prompt": 0.75, "completion": 3.75},
+    "gemini-3.5-flash-lite": {"prompt": 0.30, "completion": 2.50},
     "gemini-3.5-flash": {"prompt": 1.50, "completion": 9.00},
     "gemini-3.1-flash-lite": {"prompt": 0.25, "completion": 1.50},
     # "gemini-3.1-pro" prefix also covers "-preview"
@@ -68,17 +79,29 @@ MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
     "gemini-embedding-001": {"prompt": 0.15, "completion": 0.0},
     "text-embedding-3-small": {"prompt": 0.02, "completion": 0.0},
     # --- Anthropic (article writer) ---
+    "claude-fable-5-1": {"prompt": 10.00, "completion": 50.00},
+    "claude-opus-5-5": {"prompt": 4.00, "completion": 20.00},
+    "claude-sonnet-5-5": {"prompt": 2.00, "completion": 10.00},
     "claude-opus-4": {"prompt": 5.00, "completion": 25.00},
     "claude-sonnet-4": {"prompt": 3.00, "completion": 15.00},
     "claude-haiku-4": {"prompt": 1.00, "completion": 5.00},
     # --- Z.AI (APAC regional specialist) ---
+    "glm-5.3-flashx": {"prompt": 0.37, "cached_prompt": 0.075, "completion": 1.25},
+    "glm-5.3-flash": {"prompt": 0.15, "cached_prompt": 0.03, "completion": 0.50},
+    "glm-5.3": {"prompt": 1.40, "cached_prompt": 0.26, "completion": 4.40},
     "glm-5.2": {"prompt": 1.40, "cached_prompt": 0.26, "completion": 4.40},
-    # --- DeepSeek (APAC regional specialist) ---
-    "deepseek-v4": {"prompt": 0.435, "completion": 0.87},
+    "glm-5.1": {"prompt": 1.40, "cached_prompt": 0.26, "completion": 4.40},
+    "glm-5": {"prompt": 1.00, "cached_prompt": 0.20, "completion": 3.20},
+    # --- DeepSeek (APAC regional specialist; peak rates) ---
+    "deepseek-flash": {"prompt": 0.30, "cached_prompt": 0.006, "completion": 1.20},
+    "deepseek-v4-flash": {"prompt": 0.30, "cached_prompt": 0.006, "completion": 1.20},
+    "deepseek-v4": {"prompt": 1.32, "cached_prompt": 0.044, "completion": 3.96},
     # --- Moonshot Kimi (consultant/auditor) ---
     # Official K3 API rates: $3.00 cache-miss input / $0.30 cache-hit input /
     # $15.00 output per 1M tokens.
     "kimi-k3": {"prompt": 3.00, "cached_prompt": 0.30, "completion": 15.00},
+    "kimi-k2.7-code": {"prompt": 0.95, "cached_prompt": 0.19, "completion": 4.00},
+    "kimi-k2.6": {"prompt": 0.95, "cached_prompt": 0.16, "completion": 4.00},
     # Below xAI's 200k-prompt threshold; see the tier note above.
     "grok-4.6": {"prompt": 2.00, "cached_prompt": 0.50, "completion": 6.00},
 }
@@ -100,7 +123,8 @@ FLEX_TIER_MULTIPLIER = 0.5
 # priced at this rate without the tier multiplier.
 CACHED_PROMPT_MULTIPLIER = 0.10
 
-# GPT-5.6 prices the full request at higher rates above this input threshold.
+# GPT-5.6 and GPT-6 price the full request at higher rates above this
+# input threshold.
 # Cache writes are a subset of input tokens and cost more than ordinary input.
 GPT56_LONG_CONTEXT_INPUT_THRESHOLD = 272_000
 GPT56_LONG_CONTEXT_PROMPT_MULTIPLIER = 2.0
@@ -240,7 +264,7 @@ def _context_price_multipliers(
     model_name: str, prompt_tokens: int
 ) -> tuple[float, float]:
     if (
-        model_name.startswith("gpt-5.6")
+        model_name.startswith(("gpt-5.6", "gpt-6"))
         and prompt_tokens > GPT56_LONG_CONTEXT_INPUT_THRESHOLD
     ):
         return (

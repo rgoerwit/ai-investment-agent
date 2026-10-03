@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +21,11 @@ from src.agents.output_validation import (
 from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
 from src.error_safety import summarize_exception
+from src.llm_runtime.failover import (
+    FAILOVER_FAILURE_KINDS,
+    failover_attempt,
+    failover_target,
+)
 from src.llm_usage import extract_token_usage_breakdown
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import (
@@ -513,6 +518,9 @@ async def invoke_with_rate_limit_handling(
         getattr(settings_config, "network_breaker_enabled", True)
     )
     network_breaker = get_network_breaker() if network_breaker_enabled else None
+    # Same-vendor model to spend the transient retry on, if the binding has one.
+    failover_model = failover_target(runnable)
+    failing_over = False
 
     for attempt in range(max_attempts):
         attempt_started = time.monotonic()
@@ -536,11 +544,12 @@ async def invoke_with_rate_limit_handling(
             if network_breaker is not None:
                 network_breaker.before_call()
 
-            result = await run_with_hard_timeout(
-                runnable.ainvoke(input_data),
-                timeout=effective_timeout,
-                label=f"llm:{context}:{resolved_provider}:{resolved_model}",
-            )
+            with failover_attempt() if failing_over else nullcontext():
+                result = await run_with_hard_timeout(
+                    runnable.ainvoke(input_data),
+                    timeout=effective_timeout,
+                    label=f"llm:{context}:{resolved_provider}:{resolved_model}",
+                )
             # Refusal / provider safety block: a returned response that the
             # provider blocked or refused (finish_reason SAFETY/content_filter,
             # Anthropic stop_reason=refusal, OpenAI structured .refusal, Gemini
@@ -944,11 +953,34 @@ async def invoke_with_rate_limit_handling(
                 continue
 
             transient_max_attempts = max(1, min(max_attempts, max_transient_attempts))
+            # A struggling model spends its retry on the failover model. That
+            # includes a quick-mode flex queue timeout, which is otherwise not
+            # retried because it must not re-queue at flex: the failover attempt
+            # runs at the standard tier.
+            fail_over = (
+                failover_model is not None
+                and not failing_over
+                and details.kind in FAILOVER_FAILURE_KINDS
+            )
             if (
-                retry_class is RetryDisposition.TRANSIENT
-                and not flex_latency_timeout_quick
+                (retry_class is RetryDisposition.TRANSIENT or fail_over)
+                and (not flex_latency_timeout_quick or fail_over)
                 and attempt < transient_max_attempts - 1
             ):
+                if fail_over:
+                    logger.warning(
+                        "llm_call_failover",
+                        context=context,
+                        provider=resolved_provider,
+                        source_model=resolved_model,
+                        target_model=failover_model,
+                        attempt=attempt + 1,
+                        failure_kind=details.kind,
+                    )
+                    resolved_model = failover_model
+                    failing_over = True
+                    # A different model is not waiting out this one's outage.
+                    continue
                 wait_time = 5 * (attempt + 1) + random.uniform(1, 3)
                 if deadline is not None:
                     remaining = deadline - time.monotonic()

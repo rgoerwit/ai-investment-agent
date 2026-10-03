@@ -1,6 +1,6 @@
 # The agent roster and the workflow
 
-Last updated: 2026-08-25
+Last updated: 2026-10-01 (fundamentals barrier re-dispatch)
 
 What each agent contributes, how the graph is sequenced, and the design decisions
 behind the specialist nodes. This document explains the rationale and intended
@@ -15,6 +15,27 @@ repo disagree, trust the repo.
    fundamentals barrier. The value-trap detector runs alongside.
 2. **Fundamentals barrier.** Waits for raw data, native-language sources, and legal
    risk before the senior analyst runs.
+   **The barrier releases Senior once.** Until 2026-10-01 it could release it twice.
+   Each analyst's tool-loop edge picked the message to inspect by the shared
+   `sender` key, which parallel branches overwrite, and a failed analyst did not
+   reset it. After a Junior timeout, the router read another analyst's pending tool
+   calls and sent Junior back into its tool node. That node replayed Junior's old
+   calls, Junior failed again on the duplicated transcript, and reached the barrier a
+   second time. The second Senior run sent a transcript ending in its own reply, which
+   Gemini rejects with a 400 on every version, and its failure overwrote the valid
+   report. Measured: 8 of 94 Junior failures across 5,485 saved runs ended this way,
+   all as unassessable. It was first misattributed to gemini-3.8-flash. Edges are now
+   bound to their owner (`route_analyst_tools`), and the barrier is a
+   `ReleaseOnceBarrier` that counts arrivals with all inputs complete and releases
+   only the first. Either layer alone contains the incident. A re-arrival after
+   release only adds to the count. It does not redo the evidence reconciliation
+   or the version-1 snapshot. `analysis_snapshot` is last-writer-wins, so
+   rewriting it would replace the snapshot that Senior and Sync Check have
+   since advanced.
+   `tests/graph/test_fundamentals_redispatch.py` reproduces the full pre-fix chain
+   through the production routers, reducers and barrier node over 60 deterministic
+   combinations of tool-turn counts and fan-out order. These are superstep
+   orderings, not wall-clock schedules.
 3. **Senior fundamentals.** Cross-validates cash flow against filing data, flags
    segment deterioration and ownership concentration, and produces the scored data
    block the hard gates read.

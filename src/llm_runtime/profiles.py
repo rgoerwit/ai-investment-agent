@@ -6,6 +6,7 @@ from enum import StrEnum
 
 from src.llm_runtime.capabilities import Capability
 from src.llm_runtime.identities import ModelIdentity
+from src.llm_runtime.seats import ModelIntent
 
 
 class TokenParameter(StrEnum):
@@ -87,6 +88,16 @@ MODEL_PROFILES: tuple[ModelProfile, ...] = (
         pricing_key="gemini-3",
     ),
     ModelProfile(
+        prefix="gpt-6.1-sol",
+        identity=ModelIdentity("openai", "gpt", "openai_native"),
+        capabilities=_OPENAI_ANALYSIS,
+        reasoning_ladder=("low", "medium", "high", "xhigh", "max"),
+        token_parameter=TokenParameter.MAX_COMPLETION_TOKENS,
+        temperature_policy=TemperaturePolicy.OMIT,
+        service_tiers=frozenset({"standard", "flex"}),
+        pricing_key="gpt-6.1-sol",
+    ),
+    ModelProfile(
         prefix="gpt-5.6",
         identity=ModelIdentity("openai", "gpt", "openai_native"),
         capabilities=_OPENAI_ANALYSIS,
@@ -141,6 +152,28 @@ MODEL_PROFILES: tuple[ModelProfile, ...] = (
         token_parameter=TokenParameter.MAX_COMPLETION_TOKENS,
         temperature_policy=TemperaturePolicy.SUPPORTED,
         pricing_key="gpt-4o",
+    ),
+    # Adaptive thinking is always on and cannot be disabled (400 on
+    # thinking.type="disabled"); the API default effort is medium, not high.
+    ModelProfile(
+        prefix="claude-opus-5-5",
+        identity=ModelIdentity("anthropic", "claude", "anthropic_native"),
+        capabilities=_ANTHROPIC_REASONING,
+        reasoning_ladder=("low", "medium", "high", "xhigh", "max"),
+        token_parameter=TokenParameter.MAX_TOKENS,
+        temperature_policy=TemperaturePolicy.OMIT,
+        reasoning_api_mode=ReasoningApiMode.ADAPTIVE,
+        pricing_key="claude-opus-5-5",
+    ),
+    ModelProfile(
+        prefix="claude-sonnet-5-5",
+        identity=ModelIdentity("anthropic", "claude", "anthropic_native"),
+        capabilities=_ANTHROPIC_REASONING,
+        reasoning_ladder=("low", "medium", "high", "xhigh", "max"),
+        token_parameter=TokenParameter.MAX_TOKENS,
+        temperature_policy=TemperaturePolicy.OMIT,
+        reasoning_api_mode=ReasoningApiMode.ADAPTIVE,
+        pricing_key="claude-sonnet-5-5",
     ),
     ModelProfile(
         prefix="claude-opus-4-8",
@@ -220,6 +253,17 @@ MODEL_PROFILES: tuple[ModelProfile, ...] = (
         temperature_policy=TemperaturePolicy.OMIT,
         reasoning_api_mode=ReasoningApiMode.MANUAL,
         pricing_key="claude-sonnet-4",
+    ),
+    ModelProfile(
+        prefix="deepseek-flash",
+        identity=ModelIdentity("deepseek", "deepseek", "openai_compatible"),
+        capabilities=frozenset(
+            {Capability.TEXT_GENERATION, Capability.REASONING_CONTROL}
+        ),
+        reasoning_ladder=("low", "high", "max"),
+        token_parameter=TokenParameter.MAX_COMPLETION_TOKENS,
+        temperature_policy=TemperaturePolicy.OMIT,
+        pricing_key="deepseek-flash",
     ),
     ModelProfile(
         prefix="deepseek-v4",
@@ -340,3 +384,34 @@ def adjust_reasoning(profile: ModelProfile, baseline: str, steps: int = 1) -> st
         ) from exc
     target = min(max(current + steps, 0), len(profile.reasoning_ladder) - 1)
     return profile.reasoning_ladder[target]
+
+
+def reasoning_value_for_seat(
+    profile: ModelProfile,
+    intent: ModelIntent,
+    *,
+    adjust: bool,
+) -> str | None:
+    ladder = profile.reasoning_ladder
+    if not ladder:
+        return None
+    prose_preferences = (
+        ("high", "medium", "low")
+        if profile.identity.vendor_id == "anthropic"
+        else ("low", "minimal", "none")
+    )
+    reasoning_preferences = (
+        ("high", "medium", "low")
+        if profile.identity.vendor_id == "google"
+        else ("medium", "high", "low")
+    )
+    preferences = {
+        ModelIntent.FAST: ("low", "minimal", "none"),
+        ModelIntent.CLASSIFIER: ("low", "minimal", "none"),
+        ModelIntent.PROSE: prose_preferences,
+        ModelIntent.REASONING: reasoning_preferences,
+        ModelIntent.CRITICAL: ("high", "medium"),
+        ModelIntent.ESCALATION: ("max", "xhigh", "high"),
+    }[intent]
+    baseline = next((value for value in preferences if value in ladder), ladder[-1])
+    return adjust_reasoning(profile, baseline) if adjust else baseline

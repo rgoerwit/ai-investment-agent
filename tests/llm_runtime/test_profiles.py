@@ -4,6 +4,7 @@ from src.llm_runtime.capabilities import Capability
 from src.llm_runtime.identities import sanitize_endpoint_host
 from src.llm_runtime.profiles import (
     ModelProfile,
+    ReasoningApiMode,
     TemperaturePolicy,
     TokenParameter,
     UnsupportedModelCapability,
@@ -32,6 +33,33 @@ def test_shipped_models_resolve_to_commercial_identity() -> None:
     assert Capability.STRUCTURED_OUTPUT in claude.capabilities
     assert claude.reasoning_ladder == ("low", "medium", "high", "max")
     assert resolve_profile("claude-haiku-4-5").identity.vendor_id == "anthropic"
+
+
+def test_working_mix_new_models_have_exact_reviewed_profiles() -> None:
+    sol = resolve_profile("gpt-6.1-sol")
+    assert sol.identity.adapter_kind == "openai_native"
+    assert Capability.TOOL_CALLING in sol.capabilities
+    assert "none" not in sol.reasoning_ladder
+    assert sol.pricing_key == "gpt-6.1-sol"
+
+    sonnet = resolve_profile("claude-sonnet-5-5")
+    assert sonnet.identity.adapter_kind == "anthropic_native"
+    assert sonnet.reasoning_ladder == ("low", "medium", "high", "xhigh", "max")
+    assert sonnet.pricing_key == "claude-sonnet-5-5"
+
+    opus = resolve_profile("claude-opus-5-5")
+    assert opus.identity.adapter_kind == "anthropic_native"
+    assert opus.reasoning_ladder == ("low", "medium", "high", "xhigh", "max")
+    assert opus.reasoning_api_mode is ReasoningApiMode.ADAPTIVE
+    assert opus.pricing_key == "claude-opus-5-5"
+
+    flash = resolve_profile("deepseek-flash")
+    assert flash.identity.adapter_kind == "openai_compatible"
+    assert flash.capabilities == frozenset(
+        {Capability.TEXT_GENERATION, Capability.REASONING_CONTROL}
+    )
+    assert flash.reasoning_ladder == ("low", "high", "max")
+    assert flash.pricing_key == "deepseek-flash"
 
 
 def test_unknown_future_claude_version_does_not_inherit_a_broad_old_profile() -> None:

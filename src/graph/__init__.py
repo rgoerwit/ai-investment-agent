@@ -7,6 +7,7 @@ from .components import TradingContext
 from .routing import (
     fan_out_to_analysts,
     fundamentals_sync_router,
+    route_analyst_tools,
     should_continue_analyst,
     sync_check_router,
 )
@@ -15,6 +16,7 @@ from .tool_nodes import create_agent_tool_node
 __all__ = [
     "TradingContext",
     "create_trading_graph",
+    "route_analyst_tools",
     "should_continue_analyst",
     "create_agent_tool_node",
     "fan_out_to_analysts",

@@ -7,6 +7,7 @@ from src.llm_runtime.adapters.base import ChatModelAdapter, SeatModelRequest
 from src.llm_runtime.adapters.compat import CompatibleAdapter
 from src.llm_runtime.adapters.google import GoogleAdapter
 from src.llm_runtime.adapters.openai import OpenAIAdapter
+from src.llm_runtime.failover import attach_failover
 
 
 class SeatModelFactory:
@@ -30,6 +31,7 @@ class SeatModelFactory:
         adapter = self.adapter_for(request)
         llm = adapter.build(request)
         if llm is not None:
+            attach_failover(llm, request.binding.failover_model)
             llm._llm_adapter_kind = adapter.kind  # type: ignore[attr-defined]
             llm._llm_runtime_provider = request.binding.provider  # type: ignore[attr-defined]
             llm._llm_vendor_id = request.binding.identity.vendor_id  # type: ignore[attr-defined]

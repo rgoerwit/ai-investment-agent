@@ -5,12 +5,20 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
+import structlog
+
 from src.llm_runtime.capabilities import Capability
+from src.llm_runtime.failover import FAILOVER_ADAPTER_KINDS
 from src.llm_runtime.identities import (
     ModelIdentity,
     vendor_for_endpoint_host,
 )
-from src.llm_runtime.profiles import ModelProfile, resolve_profile
+from src.llm_runtime.profiles import (
+    ModelProfile,
+    UnsupportedModelCapability,
+    reasoning_value_for_seat,
+    resolve_profile,
+)
 from src.llm_runtime.provider_policy import (
     is_provider_allowed,
     provider_credential,
@@ -25,6 +33,8 @@ from src.llm_runtime.seats import (
     SeatId,
     SeatSpec,
 )
+
+logger = structlog.get_logger(__name__)
 
 
 class BindingConfigurationError(ValueError):
@@ -44,6 +54,7 @@ class ResolvedBinding:
     endpoint_host: str | None
     profile: ModelProfile
     reasoning_value_override: str | None = None
+    failover_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -126,6 +137,8 @@ class BindingPlan:
                 "endpoint_host": binding.endpoint_host,
                 "model": binding.model,
                 "quick_model": quick.model,
+                "failover_model": binding.failover_model,
+                "quick_failover_model": quick.failover_model,
                 "normal_intent": binding.intent.value,
                 "quick_intent": quick.intent.value,
                 "reasoning_override": binding.reasoning_value_override,
@@ -473,6 +486,21 @@ def _resolve_mode_binding(
                 )
 
     intent = spec.quick_intent if quick_mode else spec.normal_intent
+    failover_model = _failovers(settings).get(model) if schema == "new" else None
+    if failover_model:
+        target = resolve_profile(failover_model)
+        missing = spec.requires - target.capabilities
+        if missing:
+            errors.append(
+                f"{mode_label}: failover model {failover_model!r} lacks "
+                f"{', '.join(sorted(missing))}"
+            )
+        errors.extend(
+            f"{mode_label}: failover model {failover_model!r} {conflict}"
+            for conflict in _failover_request_conflicts(
+                spec, intent, profile, target, reasoning_override, quick_mode=quick_mode
+            )
+        )
     return ResolvedBinding(
         spec.seat_id,
         provider,
@@ -483,7 +511,95 @@ def _resolve_mode_binding(
         endpoint_host,
         profile,
         reasoning_override,
+        failover_model,
     )
+
+
+# Request-shape facts a failover copy inherits from the source transport. A
+# mismatch would send the target a payload it rejects, at exactly the moment the
+# failover is needed.
+_INHERITED_REQUEST_FACTS = (
+    "reasoning_api_mode",
+    "temperature_policy",
+    "token_parameter",
+)
+
+
+def _failover_request_conflicts(
+    spec: SeatSpec,
+    intent: ModelIntent,
+    source: ModelProfile,
+    target: ModelProfile,
+    reasoning_override: str | None,
+    *,
+    quick_mode: bool,
+) -> list[str]:
+    """Why ``target`` cannot serve the request built for ``source``, if it cannot.
+
+    The failover copy keeps every request setting of the source transport, so the
+    target must accept the reasoning value this seat actually sends and share the
+    parameter conventions that shape the payload.
+    """
+    conflicts = [
+        f"differs in {fact} ({getattr(source, fact)} vs {getattr(target, fact)})"
+        for fact in _INHERITED_REQUEST_FACTS
+        if getattr(source, fact) != getattr(target, fact)
+    ]
+    if not spec.execution_policy.reasoning_control_enabled:
+        return conflicts
+    try:
+        value = reasoning_override or reasoning_value_for_seat(
+            source,
+            intent,
+            adjust=(
+                spec.normal_reasoning_adjustment is ReasoningAdjustment.ONE_STEP
+                and not quick_mode
+            ),
+        )
+    except UnsupportedModelCapability:
+        return conflicts  # the source binding already reports this
+    if value is not None and value not in target.reasoning_ladder:
+        supported = ", ".join(target.reasoning_ladder) or "none"
+        conflicts.append(
+            f"does not support reasoning {value!r} sent by this seat "
+            f"(supported: {supported})"
+        )
+    return conflicts
+
+
+def _failovers(settings: Any) -> Mapping[str, str]:
+    value = getattr(settings, "llm_model_failovers", None)
+    return value if isinstance(value, Mapping) else {}
+
+
+def _validate_failover_map(settings: Any, schema: str, errors: list[str]) -> None:
+    """Reject a failover the transports cannot serve, once per map entry."""
+    failovers = _failovers(settings)
+    if failovers and schema != "new":
+        errors.append("LLM_MODEL_FAILOVERS requires the provider-scoped binding schema")
+        return
+    for source, target in sorted(failovers.items()):
+        prefix = f"LLM_MODEL_FAILOVERS {source!r} -> {target!r}"
+        if source == target:
+            errors.append(f"{prefix}: a model cannot fail over to itself")
+            continue
+        if target in failovers:
+            errors.append(f"{prefix}: failover is one hop; {target!r} has its own")
+            continue
+        source_identity = resolve_profile(source).identity
+        target_identity = resolve_profile(target).identity
+        if target_identity.vendor_id == "unknown":
+            errors.append(f"{prefix}: {target!r} has no reviewed capability profile")
+        elif source_identity.vendor_id != target_identity.vendor_id:
+            errors.append(
+                f"{prefix}: failover must stay within one vendor "
+                f"({source_identity.vendor_id!r} vs {target_identity.vendor_id!r})"
+            )
+        elif target_identity.adapter_kind not in FAILOVER_ADAPTER_KINDS:
+            errors.append(
+                f"{prefix}: the {target_identity.adapter_kind!r} transport "
+                "does not support model failover"
+            )
 
 
 def resolve_binding_plan(settings: Any) -> BindingPlan:
@@ -563,6 +679,11 @@ def resolve_binding_plan(settings: Any) -> BindingPlan:
                 )
         except BindingConfigurationError as exc:
             errors.extend(exc.errors)
+
+    _validate_failover_map(settings, schema, errors)
+    bound_models = {b.model for b in (*bindings.values(), *quick_bindings.values())}
+    for source in sorted(set(_failovers(settings)) - bound_models):
+        logger.warning("llm_model_failover_unused", source_model=source)
 
     for model, affected in sorted(unknown_bindings.items()):
         errors.append(

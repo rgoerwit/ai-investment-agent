@@ -80,7 +80,14 @@ class OpenAIAdapter:
             )
             if temperature is not None:
                 kwargs["temperature"] = temperature
-            model = ChatOpenAI(**kwargs)
+            if request.binding.failover_model:
+                # Only the tiered transport can serve a failover attempt; with
+                # service_tier="auto" it behaves exactly like ChatOpenAI.
+                from src import llms
+
+                model = llms._get_flex_fallback_chat_openai_cls()(**kwargs)
+            else:
+                model = ChatOpenAI(**kwargs)
             stamp_budget_metadata(
                 model,
                 callbacks=request.callbacks,

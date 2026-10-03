@@ -11,7 +11,7 @@ from src.config import Settings, config
 from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.bindings import BindingPlan, resolve_binding_plan
 from src.llm_runtime.factory import SeatModelFactory
-from src.llm_runtime.profiles import ModelProfile, adjust_reasoning, resolve_profile
+from src.llm_runtime.profiles import reasoning_value_for_seat, resolve_profile
 from src.llm_runtime.seats import (
     SEATS,
     ModelIntent,
@@ -50,37 +50,6 @@ LegacyBuilder = Callable[[LegacySeatRequest], BaseChatModel | None]
 class WriterSeatTier:
     label: str
     build: Callable[[], BaseChatModel]
-
-
-def reasoning_value_for_seat(
-    profile: ModelProfile,
-    intent: ModelIntent,
-    *,
-    adjust: bool,
-) -> str | None:
-    ladder = profile.reasoning_ladder
-    if not ladder:
-        return None
-    prose_preferences = (
-        ("high", "medium", "low")
-        if profile.identity.vendor_id == "anthropic"
-        else ("low", "minimal", "none")
-    )
-    reasoning_preferences = (
-        ("high", "medium", "low")
-        if profile.identity.vendor_id == "google"
-        else ("medium", "high", "low")
-    )
-    preferences = {
-        ModelIntent.FAST: ("low", "minimal", "none"),
-        ModelIntent.CLASSIFIER: ("low", "minimal", "none"),
-        ModelIntent.PROSE: prose_preferences,
-        ModelIntent.REASONING: reasoning_preferences,
-        ModelIntent.CRITICAL: ("high", "medium"),
-        ModelIntent.ESCALATION: ("max", "xhigh", "high"),
-    }[intent]
-    baseline = next((value for value in preferences if value in ladder), ladder[-1])
-    return adjust_reasoning(profile, baseline) if adjust else baseline
 
 
 def build_legacy_model(

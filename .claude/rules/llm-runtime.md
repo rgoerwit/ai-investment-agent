@@ -2,6 +2,7 @@
 paths:
   - "src/llm_runtime/**"
   - "src/llms.py"
+  - "src/token_tracker.py"
 ---
 
 # Seats, bindings, and providers
@@ -60,5 +61,23 @@ A gate that decides whether a seat runs must consult the resolved binding plan, 
 a legacy credential**. Keying on a provider key that a valid configuration does not
 set wires the node and never dispatches to it — raising nothing, with the only
 evidence a `NOT_RUN` status in the saved artifact.
+
+## Transport failures fail over by model, in one place
+
+Model failover is configured by model in `LLM_MODEL_FAILOVERS` and runs only on
+retryable `server_error`/`timeout`, from the retry loop. **Never hand-wire a
+per-node backup model for transport errors.** Any walk of a composed runnable must
+descend only real LangChain composition types: attribute probing never terminates
+on a mock.
+
+## The pricing table goes stale silently
+
+`MODEL_PRICING_PER_1M` in `src/token_tracker.py` is hand-copied from vendor pages that
+change without notice, and a wrong row never fails a run: it just misreports
+`total_cost_usd`, which model-choice decisions are then made from. **Re-verify every
+row against the source URLs in its header comment** whenever a configured model
+changes, a vendor announces a model, the header's "Last verified" date is a month old,
+or a dated promotion it records lapses. Bump that date, and add new rows to the
+`TestCurrentModelPricing` parametrize list in the same change.
 
 Full history: `docs/LLM_PROVIDERS.md`.

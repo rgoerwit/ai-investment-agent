@@ -142,6 +142,64 @@ class TestAnalystNode:
         assert result["red_flags"][0]["type"] == "LIQUIDITY_HARD_FAIL"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("prepare_error", "invoke_error"),
+        [
+            (None, TimeoutError("hard timeout of 60.0s")),
+            ("integrity", None),
+        ],
+    )
+    async def test_failure_path_owns_its_routing_state(
+        self, prepare_error, invoke_error
+    ):
+        """A failed analyst must leave ``sender`` naming itself.
+
+        Otherwise ``sender`` still names whichever parallel analyst wrote last,
+        and anything reading it attributes the failure to that analyst.
+        """
+        from src.agents import create_analyst_node
+        from src.agents.message_utils import ToolHistoryIntegrityError
+        from src.runtime_diagnostics import get_artifact_status
+
+        prepare = (
+            patch(
+                "src.llm_runtime.messages.prepare_messages_for_model",
+                side_effect=ToolHistoryIntegrityError(
+                    "junior_fundamentals_analyst", duplicate_outputs=1
+                ),
+            )
+            if prepare_error
+            else patch(
+                "src.llm_runtime.messages.prepare_messages_for_model",
+                return_value=[],
+            )
+        )
+        node = create_analyst_node(
+            MagicMock(), "junior_fundamentals_analyst", [], "raw_fundamentals_data"
+        )
+        with (
+            prepare,
+            patch(
+                "src.agents.runtime.invoke_with_rate_limit_handling",
+                new=AsyncMock(side_effect=invoke_error),
+            ),
+        ):
+            result = await node(
+                {
+                    "messages": [],
+                    "company_of_interest": "TEST",
+                    "sender": "news_analyst",
+                },
+                {"configurable": {}},
+            )
+
+        assert result["sender"] == "junior_fundamentals_analyst"
+        assert [m.name for m in result["messages"]] == ["junior_fundamentals_analyst"]
+        assert not result["messages"][0].tool_calls
+        status = get_artifact_status(result, "raw_fundamentals_data")
+        assert status.complete and not status.ok
+
+    @pytest.mark.asyncio
     async def test_closed_research_budget_forces_tool_free_synthesis(self):
         from src.agents import create_analyst_node
         from src.forensic_budget import ForeignLanguageBudgetPolicy

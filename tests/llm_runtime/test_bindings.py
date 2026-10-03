@@ -39,6 +39,33 @@ def test_new_plan_resolves_group_provider_models() -> None:
     assert isinstance(plan.bindings, MappingProxyType)
 
 
+def test_working_mix_resolves_by_seat_without_cross_provider_pins() -> None:
+    plan = resolve_binding_plan(
+        _new_settings(
+            google_llm_fast_model="gemini-3.1-flash-lite",
+            google_llm_reasoning_model="gemini-3.7-flash",
+            google_llm_critical_model="gemini-3.1-pro-preview",
+            openai_llm_reasoning_model="gpt-6.1-sol",
+            anthropic_llm_prose_model="claude-sonnet-5-5",
+            deepseek_llm_reasoning_model="deepseek-flash",
+            llm_seat_model_overrides={
+                "legal_counsel": "gemini-3.7-flash",
+                "value_trap_detector": "gemini-3.7-flash",
+                "article_editor": "gpt-5.4-mini",
+            },
+        )
+    )
+    assert plan.for_seat(SeatId.MARKET).model == "gemini-3.1-flash-lite"
+    assert plan.for_seat(SeatId.BULL).model == "gemini-3.7-flash"
+    assert plan.for_seat(SeatId.SENIOR_FUNDAMENTALS).model == "gemini-3.1-pro-preview"
+    assert plan.for_seat(SeatId.PORTFOLIO_MANAGER).model == "gemini-3.1-pro-preview"
+    assert plan.for_seat(SeatId.CONSULTANT).model == "gpt-6.1-sol"
+    assert plan.for_seat(SeatId.AUDITOR).model == "gpt-6.1-sol"
+    assert plan.for_seat(SeatId.EDITOR).model == "gpt-5.4-mini"
+    assert plan.for_seat(SeatId.ARTICLE_WRITER).model == "claude-sonnet-5-5"
+    assert plan.for_seat(SeatId.APAC).model == "deepseek-flash"
+
+
 def test_legacy_defaults_translate_without_changing_provider_plane() -> None:
     plan = resolve_binding_plan(Settings(_env_file=None, google_api_key="google-key"))
     assert plan.schema == "legacy"

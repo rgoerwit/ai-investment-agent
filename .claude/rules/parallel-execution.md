@@ -6,8 +6,8 @@ paths:
 
 # Parallel agent execution
 
-Multiple agents run concurrently in this graph. Three failure classes follow, and all
-three are silent.
+Multiple agents run concurrently in this graph. Four failure classes follow, and all
+four are silent.
 
 ## 1. State reducer races
 
@@ -33,6 +33,17 @@ required:
 tagged identically. Search for the retry variable and apply the same treatment — a
 tag applied only to the first attempt is a recurring bug here, and it surfaces as an
 agent reasoning about another agent's tools only under load.
+
+## 4. Never route a branch by `sender`
+
+`sender` is one take-last key shared by every parallel branch, so it names whoever
+wrote last, not the branch being routed. Bind each conditional edge to its owner
+(`route_analyst_tools(owner)`). A barrier that fires per arrival must release its
+successor once: use `ReleaseOnceBarrier` (`src/graph/routing.py`), whose node and
+router halves share one definition. A re-arrival must skip the node's
+pre-release work (`already_released`); its writes would roll back later state. Only the Fundamentals barrier uses it so far;
+the others are unaudited.
+Misrouting a failed analyst replayed its tool calls and ran Senior Fundamentals twice.
 
 ## Adding a parallel agent
 
