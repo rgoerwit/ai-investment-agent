@@ -11,7 +11,10 @@ from urllib.parse import urlsplit
 import structlog
 from langchain_core.messages import BaseMessage
 
-from src.data_block_utils import replace_or_append_block_line
+from src.data_block_utils import (
+    extract_last_fenced_block,
+    replace_or_append_block_line,
+)
 from src.text_patterns import (
     EXCHANGE_QUALIFIED_TICKER_RE,
     RESULT_ENVELOPE_BODY_RE,
@@ -319,12 +322,84 @@ def _latest_results_record_supports(
     )
 
 
+_LATEST_RESULTS_START = "### --- START LATEST_RESULTS ---"
+_LATEST_RESULTS_END = "### --- END LATEST_RESULTS ---"
+_LATEST_RESULTS_OPENER_RE = re.compile(
+    r"^#{2,}[ \t]*(?:-{2,}[ \t]*START[ \t]+)?LATEST_RESULTS\b[ \t-]*$"
+)
+_LATEST_RESULTS_LOOSE_END_RE = re.compile(
+    r"^#{2,}[ \t]*-*[ \t]*END[ \t]+LATEST_RESULTS\b"
+)
+# The optional bullet matches _replace_or_add_field, which inserts "- FIELD: value".
+_LATEST_RESULTS_FIELD_LINE_RE = re.compile(
+    r"^(?:[-*][ \t]*)?LATEST_RESULTS_[A-Z_]+[ \t]*:"
+)
+_ANNOTATED_URL_RE = re.compile(r"^(\S+)\s+\([^()]*\)\s*$")
+# A heading or a horizontal rule ends the block; anything else is prose.
+_SECTION_BOUNDARY_RE = re.compile(r"^(?:#{2,}|-{3,}$|\*{3,}$)")
+
+
+def _reframe_latest_results_block(report: str) -> str:
+    """Restore canonical LATEST_RESULTS markers when only the markers drifted.
+
+    Oct 2026: 19 of 29 FLA contract failures were complete blocks behind a bare
+    ``### LATEST_RESULTS`` heading or an END marker missing its dashes. Only an
+    unbroken run of field lines is re-framed: prose before the next heading leaves
+    the report untouched, so no surrounding text can be absorbed into the block.
+    """
+    if extract_last_fenced_block(report, "LATEST_RESULTS") is not None:
+        return report
+    lines = report.splitlines()
+    opener = next(
+        (i for i, line in enumerate(lines) if _LATEST_RESULTS_OPENER_RE.match(line)),
+        None,
+    )
+    if opener is None:
+        return report
+    cursor, fields = opener + 1, 0
+    while cursor < len(lines) and (
+        not lines[cursor].strip() or _LATEST_RESULTS_FIELD_LINE_RE.match(lines[cursor])
+    ):
+        fields += bool(lines[cursor].strip())
+        cursor += 1
+    at_end = cursor == len(lines)
+    if not fields or not (at_end or _SECTION_BOUNDARY_RE.match(lines[cursor].strip())):
+        return report
+    closes_here = not at_end and _LATEST_RESULTS_LOOSE_END_RE.match(lines[cursor])
+    body = [line for line in lines[opener + 1 : cursor] if line.strip()]
+    tail = lines[cursor + 1 :] if closes_here else lines[cursor:]
+    rebuilt = [
+        *lines[:opener],
+        _LATEST_RESULTS_START,
+        *body,
+        _LATEST_RESULTS_END,
+        *([""] if tail else []),
+        *tail,
+    ]
+    return "\n".join(rebuilt) + ("\n" if report.endswith("\n") else "")
+
+
+def _strip_source_url_annotation(report: str) -> str:
+    """Drop a trailing ``(note)`` after the source URL when the rest is a URL."""
+    raw = _field(report, "LATEST_RESULTS_SOURCE_URL")
+    match = _ANNOTATED_URL_RE.match(raw)
+    if not match or not URL_RE.fullmatch(match.group(1)):
+        return report
+    return _replace_or_add_field(
+        report,
+        "LATEST_RESULTS_SOURCE_URL",
+        match.group(1),
+        section="START LATEST_RESULTS",
+    )
+
+
 def _normalize_latest_results(
     report: str,
     records: list[ToolEvidenceRecord],
     *,
     ticker: str,
 ) -> str:
+    report = _strip_source_url_annotation(_reframe_latest_results_block(report))
     coverage = _field(report, "LATEST_RESULTS_COVERAGE_STATUS").upper()
     asserted = any(_field(report, field) for field in LATEST_RESULTS_SOURCE_FIELDS)
     if coverage != "FOUND":

@@ -2,9 +2,11 @@
 
 from unittest.mock import patch
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from src.agents.foreign_language_evidence import (
+    _reframe_latest_results_block,
     has_foreign_language_protocol_residue,
     normalize_foreign_language_evidence,
 )
@@ -13,6 +15,8 @@ from src.agents.message_utils import (
     evidence_record_to_tool_evidence,
     make_tool_evidence_record,
 )
+from src.agents.output_validation import _has_valid_latest_results_block
+from src.data_block_utils import extract_last_fenced_block
 from src.graph.builder import _reconcile_fundamentals_evidence
 from src.tooling.evidence_recorder import EvidenceRecord
 from src.validators.entity_governance_card import build_card
@@ -660,3 +664,99 @@ def test_latest_results_rejects_mismatched_or_split_comparatives():
 
     assert "LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED" in mismatched
     assert "LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED" in split_records
+
+
+_NEXT_SECTION = (
+    "\n### FOREIGN SOURCE FINDINGS FOR TEST\n\n**CONTEXT**\n- Country: Taiwan\n"
+)
+_CANONICAL_START = "### --- START LATEST_RESULTS ---"
+_CANONICAL_END = "### --- END LATEST_RESULTS ---"
+
+
+def _drifted(report: str, *, start: str, end: str | None) -> str:
+    """Re-mark a canonical latest-results report the way models drifted (Oct 2026)."""
+    lines = [line for line in report.splitlines() if line != _CANONICAL_END]
+    lines[lines.index(_CANONICAL_START)] = start
+    return "\n".join([*lines, *([end] if end else [])]) + "\n" + _NEXT_SECTION
+
+
+def _normalized(report: str) -> str:
+    return normalize_foreign_language_evidence(report, [], ticker="TEST")
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        ("### LATEST_RESULTS", None),  # bare heading, no END marker
+        (_CANONICAL_START, "### END LATEST_RESULTS ---"),  # END missing its dashes
+        ("### LATEST_RESULTS", "---"),  # closed by a horizontal rule
+    ],
+)
+def test_drifted_latest_results_markers_are_reframed(start, end):
+    normalized = _normalized(_drifted(_latest_results_report(), start=start, end=end))
+
+    assert _has_valid_latest_results_block(normalized)
+    assert "### FOREIGN SOURCE FINDINGS FOR TEST" in normalized
+    block = extract_last_fenced_block(normalized, "LATEST_RESULTS")
+    assert "FOREIGN SOURCE FINDINGS" not in block
+
+
+def test_prose_inside_a_drifted_block_leaves_it_untouched():
+    """Only an unbroken run of field lines is re-framed; prose means ambiguity."""
+    report = _drifted(_latest_results_report(), start="### LATEST_RESULTS", end=None)
+    report = report.replace(
+        "LATEST_RESULTS_CURRENCY:",
+        "Figures below are unaudited.\nLATEST_RESULTS_CURRENCY:",
+    )
+
+    normalized = _normalized(report)
+
+    assert not _has_valid_latest_results_block(normalized)
+    assert _CANONICAL_START not in normalized
+
+
+def test_canonical_latest_results_block_is_not_reframed():
+    report = _latest_results_report() + _NEXT_SECTION
+
+    assert _reframe_latest_results_block(report) == report
+
+
+def test_annotated_source_url_is_trimmed_to_the_url():
+    report = _latest_results_report(
+        source_url="https://dart.fss.or.kr/main.do?rcpNo=2026 (Half-Year Report 2026)"
+    )
+
+    normalized = _normalized(report)
+
+    assert "LATEST_RESULTS_SOURCE_URL: https://dart.fss.or.kr/main.do?rcpNo=2026\n" in (
+        normalized
+    )
+    assert _has_valid_latest_results_block(normalized)
+
+
+@pytest.mark.parametrize(
+    ("source_url", "period_end"),
+    [
+        ("N/A", "2026-03-31"),  # FOUND without a source
+        ("N/A (not published)", "2026-03-31"),  # an annotation is not a URL
+        ("https://issuer.example/results", "UNKNOWN"),  # FOUND without a period
+    ],
+)
+def test_found_without_source_or_period_stays_invalid(source_url, period_end):
+    report = _latest_results_report(source_url=source_url).replace(
+        "LATEST_RESULTS_PERIOD_END: 2026-03-31",
+        f"LATEST_RESULTS_PERIOD_END: {period_end}",
+    )
+
+    assert not _has_valid_latest_results_block(_normalized(report))
+
+
+def test_missing_required_field_in_a_drifted_block_stays_invalid():
+    report = _drifted(_latest_results_report(), start="### LATEST_RESULTS", end=None)
+    report = "\n".join(
+        line
+        for line in report.splitlines()
+        if not line.startswith("LATEST_RESULTS_PRIOR_EARNINGS")
+    )
+
+    assert not _has_valid_latest_results_block(_normalized(report))
