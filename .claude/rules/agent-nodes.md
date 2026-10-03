@@ -46,6 +46,15 @@ the only kind of partial. Key recovery on the full partial-response classifier, 
 the cap alone. Refusals are excluded by construction, since re-asking cannot clear
 them.
 
+## Absence is not failure
+
+An unavailable *optional* source never counts as an incomplete search. Guidance
+coverage is demoted only by the required searches (`REQUIRED_GUIDANCE_SEARCHES`):
+a filings adapter that exists for no exchange reports UNAVAILABLE on every run, and
+counting it turned "issuer does not guide" into a BUY block on half of all runs —
+twice. Before adding a source to any evidence-completeness check, measure how
+often it is structurally unavailable.
+
 ## Writing state
 
 Bound every artifact write with `cap_state_value`. Deliver untrusted external content

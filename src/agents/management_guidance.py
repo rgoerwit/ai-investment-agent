@@ -61,6 +61,14 @@ INCOMPLETE_SEARCH_EVIDENCE_STATUSES = frozenset(
     {"UNAVAILABLE", "AUTH_ERROR", "INSUFFICIENT"}
 )
 
+# The searches that can establish whether an issuer guides. Only these may demote
+# NOT_DISCLOSED: the optional sources (statutory_filing_api, guidance_extract)
+# report UNAVAILABLE whenever no filings adapter covers the exchange, which in
+# Oct 2026 was every exchange. Checking them too reproduced the Aug defect by
+# another route: NOT_DISCLOSED survived 29 of 56 runs that skipped the filing
+# adapter and 0 of 449 that called it, and the gap flag blocked BUY on 55.8%.
+REQUIRED_GUIDANCE_SEARCHES = ("results_package", "earnings_bridge")
+
 GUIDANCE_PROMOTION_FIELDS: dict[str, str] = {
     "COVERAGE_STATUS": "GUIDANCE_COVERAGE_STATUS",
     "SOURCE_TYPE": "GUIDANCE_SOURCE_TYPE",
@@ -661,8 +669,11 @@ def normalize_management_guidance_output(
             "CODE_OWNED_PREFLIGHT",
         )
 
+    required_evidence = {
+        evidence_statuses.get(label) for label in REQUIRED_GUIDANCE_SEARCHES
+    }
     if coverage_status == "NOT_DISCLOSED_AFTER_TARGETED_SEARCH" and (
-        INCOMPLETE_SEARCH_EVIDENCE_STATUSES & set(evidence_statuses.values())
+        INCOMPLETE_SEARCH_EVIDENCE_STATUSES & required_evidence
     ):
         coverage_status = "UNRESOLVED_AFTER_TARGETED_SEARCH"
         block_body = replace_or_append_block_line(
@@ -846,8 +857,7 @@ def _build_unresolved_guidance_block(
     searches_completed: str,
 ) -> str:
     required_search_statuses = {
-        execution_statuses.get("results_package"),
-        execution_statuses.get("earnings_bridge"),
+        execution_statuses.get(label) for label in REQUIRED_GUIDANCE_SEARCHES
     }
     search_executed = "SUCCEEDED" in required_search_statuses
     coverage_status = (

@@ -24,6 +24,7 @@ from src.agents.analyst_nodes import (
     _should_retry_output,
 )
 from src.agents.management_guidance import (
+    REQUIRED_GUIDANCE_SEARCHES,
     _discover_local_issuer_name,
     _entity_matched_result_urls,
     _management_guidance_queries,
@@ -665,6 +666,64 @@ EVIDENCE_STATUS: NO_RESULTS
             self._NOT_DISCLOSED_BLOCK,
             "TEST.T",
             management_guidance_evidence=evidence,
+        )
+
+        assert "COVERAGE_STATUS: UNRESOLVED_AFTER_TARGETED_SEARCH" in normalized
+
+    def test_unavailable_optional_sources_do_not_demote_not_disclosed(self):
+        """The Oct 2026 shape: required searches clean, optional sources absent.
+
+        No filings adapter covered any exchange, so statutory_filing_api reported
+        UNAVAILABLE and guidance_extract was skipped on every run. Counting them
+        demoted every NOT_DISCLOSED (0 of 449 survived against 29 of 56 runs that
+        skipped the adapter) and the gap flag blocked BUY on 55.8% of runs.
+        """
+        evidence = """#### results_package
+STATUS: COMPLETED
+EXECUTION_STATUS: SUCCEEDED
+EVIDENCE_STATUS: RESULTS_FOUND
+#### earnings_bridge
+STATUS: COMPLETED
+EXECUTION_STATUS: SUCCEEDED
+EVIDENCE_STATUS: RESULTS_FOUND
+#### statutory_filing_api
+STATUS: UNAVAILABLE
+EXECUTION_STATUS: SUCCEEDED
+EVIDENCE_STATUS: UNAVAILABLE
+#### guidance_extract
+STATUS: SKIPPED
+EXECUTION_STATUS: SKIPPED
+EVIDENCE_STATUS: UNAVAILABLE
+"""
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            self._NOT_DISCLOSED_BLOCK,
+            "TEST.T",
+            management_guidance_evidence=evidence,
+        )
+
+        assert "COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH" in normalized
+
+    @pytest.mark.parametrize("required", REQUIRED_GUIDANCE_SEARCHES)
+    def test_each_required_search_still_demotes_when_incomplete(self, required):
+        sections = []
+        for label in (*REQUIRED_GUIDANCE_SEARCHES, "statutory_filing_api"):
+            status = (
+                "UNAVAILABLE"
+                if label in {required, "statutory_filing_api"}
+                else "RESULTS_FOUND"
+            )
+            sections.append(
+                f"#### {label}\nSTATUS: COMPLETED\nEXECUTION_STATUS: SUCCEEDED\n"
+                f"EVIDENCE_STATUS: {status}"
+            )
+
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            self._NOT_DISCLOSED_BLOCK,
+            "TEST.T",
+            management_guidance_evidence="\n".join(sections) + "\n",
         )
 
         assert "COVERAGE_STATUS: UNRESOLVED_AFTER_TARGETED_SEARCH" in normalized
