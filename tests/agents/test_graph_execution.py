@@ -877,7 +877,9 @@ class TestQuickModeGraphContracts:
         assert all(kwargs["allow_retry"] is True for kwargs in analyst_kwargs)
         assert all(kwargs["retry_llm"] is not None for kwargs in analyst_kwargs)
 
-    def test_quick_mode_arms_recovery_only_for_gate_critical_seats(self, monkeypatch):
+    def test_quick_mode_arms_recovery_for_evidence_and_gate_critical_seats(
+        self, monkeypatch
+    ):
         from src.config import Settings
         from src.graph.components import build_graph_components
         from src.llm_runtime.bindings import resolve_binding_plan
@@ -942,12 +944,18 @@ class TestQuickModeGraphContracts:
             for request in requests
             if request.seat.seat_id is SeatId.ANALYST_RETRY
         ]
-        assert {request.output_tokens for request in retry_requests} == {10923, 16384}
+        assert {request.output_tokens for request in retry_requests} == {
+            4096,
+            10923,
+            16384,
+        }
         by_agent = dict(analyst_calls)
         assert by_agent["fundamentals_analyst"]["allow_retry"] is True
         assert by_agent["fundamentals_analyst"]["retry_llm"] is not None
+        assert by_agent["foreign_language_analyst"]["allow_retry"] is True
+        assert by_agent["foreign_language_analyst"]["retry_llm"] is not None
         for agent_key, kwargs in analyst_calls:
-            if agent_key != "fundamentals_analyst":
+            if agent_key not in {"fundamentals_analyst", "foreign_language_analyst"}:
                 assert kwargs["allow_retry"] is False
                 assert kwargs["retry_llm"] is None
         assert len(pm_calls) == 1

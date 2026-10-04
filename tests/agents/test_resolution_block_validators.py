@@ -253,8 +253,12 @@ def test_normalize_pm_block_contract_reconciles_prose_when_token_already_zero() 
         "POSITION_SIZE: 0.0\n"
         "### --- END PM_BLOCK ---\n"
     )
-    out = normalize_pm_block_contract(pm)
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        out = normalize_pm_block_contract(pm)
     assert "Recommended Position Size**: 0.0% (monitor only — no initiation)" in out
+    assert not any(item["event"] == "pm_block_position_size_rewritten" for item in logs)
 
 
 def test_normalize_pm_block_contract_preserves_buy_prose() -> None:

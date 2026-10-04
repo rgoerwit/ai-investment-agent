@@ -12,6 +12,7 @@ from src.agents.foreign_language_evidence import (
     normalize_foreign_language_evidence,
     promote_foreign_growth_evidence,
 )
+from src.agents.management_guidance import normalize_management_guidance_output
 from src.agents.message_utils import (
     ToolEvidenceRecord,
     evidence_record_to_tool_evidence,
@@ -317,7 +318,7 @@ def test_fundamentals_barrier_reconciles_legal_evidence_idempotently():
         repeated = _reconcile_fundamentals_evidence({**state, **update})
 
     assert "DISCLOSED_UNVERIFIED" in update["foreign_language_report"]
-    assert repeated == {}
+    assert repeated == {"latest_results_reason": update["latest_results_reason"]}
 
 
 def test_fundamentals_barrier_does_not_reprocess_failed_fla_message():
@@ -335,7 +336,91 @@ def test_fundamentals_barrier_does_not_reprocess_failed_fla_message():
         },
     }
 
-    assert _reconcile_fundamentals_evidence(state) == {}
+    assert _reconcile_fundamentals_evidence(state) == {
+        "latest_results_reason": "FLA_ARTIFACT_INVALID"
+    }
+
+
+def test_fundamentals_barrier_preserves_accepted_guidance_repair():
+    preflight = "#### results_package\nSTATUS: COMPLETED\n#### earnings_bridge\nSTATUS: COMPLETED\n"
+    initial_message = "Native research summary.\n" + _latest_results_report(
+        source_url="N/A"
+    )
+    repaired_report = normalize_management_guidance_output(
+        initial_message
+        + "\n### --- START MANAGEMENT_GUIDANCE ---\n"
+        + "COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH\n"
+        + "### --- END MANAGEMENT_GUIDANCE ---\n",
+        preflight,
+    )
+    state = {
+        "company_of_interest": "TEST.T",
+        "messages": [
+            AIMessage(content=initial_message, name="foreign_language_analyst")
+        ],
+        "foreign_language_report": repaired_report,
+        "management_guidance_evidence": preflight,
+        "guidance_normalization": {
+            "initial_reason": "MISSING_BLOCK",
+            "final_action": "REPAIRED",
+        },
+        "structural_recovery_events": [
+            {
+                "originating_agent": "foreign_language_analyst",
+                "outcome": "accepted_text",
+            }
+        ],
+        "artifact_statuses": {
+            "foreign_language_report": {
+                "complete": True,
+                "ok": True,
+                "content": repaired_report,
+            }
+        },
+    }
+
+    with patch("src.runtime_services.get_current_evidence_records", return_value=[]):
+        update = _reconcile_fundamentals_evidence(state)
+
+    final_report = update.get("foreign_language_report", repaired_report)
+    assert "COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH" in final_report
+    assert "Targeted evidence did not resolve forward guidance" not in final_report
+
+
+def test_fundamentals_barrier_preserves_accepted_latest_results_repair():
+    initial_message = (
+        "Native research summary.\n"
+        "### --- START LATEST_RESULTS ---\nBROKEN\n"
+        "### --- END LATEST_RESULTS ---\n"
+    )
+    accepted_report = initial_message + "\n" + _latest_results_report()
+    state = {
+        "company_of_interest": "TEST.T",
+        "messages": [
+            AIMessage(content=initial_message, name="foreign_language_analyst")
+        ],
+        "foreign_language_report": accepted_report,
+        "structural_recovery_events": [
+            {
+                "originating_agent": "foreign_language_analyst",
+                "outcome": "accepted_text",
+            }
+        ],
+        "artifact_statuses": {
+            "foreign_language_report": {
+                "complete": True,
+                "ok": True,
+                "content": accepted_report,
+            }
+        },
+    }
+
+    with patch("src.runtime_services.get_current_evidence_records", return_value=[]):
+        update = _reconcile_fundamentals_evidence(state)
+
+    final_report = update.get("foreign_language_report", accepted_report)
+    assert final_report.count("### --- START LATEST_RESULTS ---") == 1
+    assert "LATEST_RESULTS_PERIOD_END: 2026-03-31" in final_report
 
 
 def test_related_ticker_is_removed_when_it_does_not_appear_in_supporting_evidence():
@@ -900,7 +985,7 @@ def test_final_latest_diagnostic_emits_once_after_complete_barrier():
         patch("src.runtime_services.get_current_evidence_records", return_value=[]),
         patch("src.graph.builder.logger.info") as log_info,
     ):
-        _reconcile_fundamentals_evidence(state)
+        update = _reconcile_fundamentals_evidence(state)
 
     finalized = [
         call
@@ -909,6 +994,7 @@ def test_final_latest_diagnostic_emits_once_after_complete_barrier():
     ]
     assert len(finalized) == 1
     assert finalized[0].kwargs["reason_code"] == "INVALID_CITATION"
+    assert update["latest_results_reason"] == "INVALID_CITATION"
 
 
 _NEXT_SECTION = (

@@ -118,7 +118,7 @@ def normalize_pm_block_contract(pm_output: str) -> str:
     pm_output = _POSITION_SIZE_PROSE_RE.sub(
         lambda match: f"{match.group(1)}{canonical_prose_value}", pm_output
     )
-    if token_rewritten or prose_lines_rewritten:
+    if token_rewritten:
         logger.warning(
             "pm_block_position_size_rewritten",
             verdict=verdict,

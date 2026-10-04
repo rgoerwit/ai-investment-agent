@@ -1,6 +1,6 @@
 # Prompt contracts and the drift harness
 
-Last updated: 2026-08-26
+Last updated: 2026-10-04
 
 This file records *why* the prompt-editing rules exist and what happened when they
 were absent. It explains the rationale and intended behaviour; the implementation and
@@ -52,6 +52,19 @@ the real parser. Blocks are located with `extract_last_fenced_block`, never by
 matching literal markers. Prompt text is resolved with `prompt_text(agent_key)`, the
 on-disk canonical form; `get_prompt()` is wrong here because environment overrides and
 Langfuse can replace it.
+
+The round-trip also includes focused prompt-shaped fixtures for fields that a broad
+block parser could overlook. For example, the Value Trap template's indented M&A
+fields pass through the production evidence normalizer with both present and absent
+tool citations. The test requires exactly one resulting field set and checks the
+downstream extracted status. A top-level score alone would miss duplicate or
+unreadable nested fields.
+
+L1 checks syntax and deterministic interpretation. It cannot prove that a date
+appears in an inspected filing, a citation supports its claim, or every required
+search completed. Those claims need targeted runtime fixtures with tool evidence
+and search-status records; L2 can replay captured outputs when those records are
+available. Keep that distinction when adding a new contract entry.
 
 **L2 — deterministic replay** (`make replay`). Frozen captured outputs under
 `tests/fixtures/frozen/` are pushed through the pure consumers, checking golden values

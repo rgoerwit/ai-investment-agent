@@ -17,8 +17,11 @@ from __future__ import annotations
 import re
 
 import pytest
+from langchain_core.messages import ToolMessage
 
-from src.data_block_utils import extract_last_fenced_block
+from src.agents.management_guidance import guidance_input_reason
+from src.agents.value_trap_evidence import normalize_value_trap_m_and_a_evidence
+from src.data_block_utils import extract_block_field, extract_last_fenced_block
 from src.eval.capture_contract import NODE_CAPTURE_SPECS
 from src.eval.prompt_contracts import (
     PROMPT_CONTRACTS,
@@ -28,6 +31,7 @@ from src.eval.prompt_contracts import (
 )
 from src.graph.routing import _AUDITOR_CLEAN_STATUSES
 from src.prompts import get_prompt
+from src.validators.supplemental_extractors import extract_value_trap_score
 
 # --- placeholder materialization ------------------------------------------------
 # Prompt templates write fields as `FIELD: [placeholder]`. The regex parsers can't
@@ -145,3 +149,77 @@ def test_every_prompt_key_resolves():
     keys |= {c.prompt_key for c in PROMPT_CONTRACTS}
     unresolved = sorted(k for k in keys if get_prompt(k) is None)
     assert not unresolved, f"prompt keys did not resolve: {unresolved}"
+
+
+@pytest.mark.parametrize("cited_in_tool", [True, False])
+def test_prompted_value_trap_m_and_a_fields_survive_or_downgrade(cited_in_tool: bool):
+    """Exercise the prompt's strict M&A fields through the evidence normalizer."""
+    contract = next(c for c in PROMPT_CONTRACTS if c.name == "value_trap")
+    block = _sample_for(contract)
+    url = "https://example.com/acquisition"
+    fields = {
+        "M&A_CONTEXT_EVIDENCE": "CITED",
+        "M&A_CONTEXT_SOURCE_URL": url,
+        "M&A_CONTEXT": "Acquired a distributor.",
+    }
+    for name, value in fields.items():
+        pattern = rf"(?m)^{re.escape(name)}:.*$"
+        assert len(re.findall(pattern, block)) == 1
+        block = re.sub(
+            pattern,
+            lambda match, name=name, value=value: f"{name}: {value}",
+            block,
+        )
+        assert extract_block_field(block, "VALUE_TRAP_BLOCK", name) == value
+
+    messages = (
+        [ToolMessage(content=url, tool_call_id="acquisition-source")]
+        if cited_in_tool
+        else []
+    )
+    result = normalize_value_trap_m_and_a_evidence(block, messages, ticker="TEST")
+    assert len(re.findall(r"(?m)^[ \t]*M&A_CONTEXT_EVIDENCE:", result)) == 1
+    extracted = extract_value_trap_score(result)
+    assert extracted["m_and_a_context_evidence"] == (
+        "CITED" if cited_in_tool else "UNKNOWN"
+    )
+    assert (url in result) == cited_in_tool
+
+
+@pytest.mark.parametrize("mutation", ["indent", "rename"])
+def test_value_trap_prompt_m_and_a_triplet_requires_strict_labels(mutation: str):
+    contract = next(c for c in PROMPT_CONTRACTS if c.name == "value_trap")
+    block = _sample_for(contract)
+    for field in ("M&A_CONTEXT_EVIDENCE", "M&A_CONTEXT_SOURCE_URL", "M&A_CONTEXT"):
+        assert len(re.findall(rf"(?m)^{field}:", block)) == 1
+        assert extract_block_field(block, "VALUE_TRAP_BLOCK", field) is not None
+
+    replacement = (
+        "  M&A_CONTEXT_EVIDENCE:"
+        if mutation == "indent"
+        else "M_AND_A_CONTEXT_EVIDENCE:"
+    )
+    changed = block.replace("M&A_CONTEXT_EVIDENCE:", replacement, 1)
+    assert changed != block
+    assert (
+        extract_block_field(changed, "VALUE_TRAP_BLOCK", "M&A_CONTEXT_EVIDENCE") is None
+    )
+
+
+def test_prompted_guidance_coverage_is_accepted_by_raw_block_check():
+    template = extract_last_fenced_block(
+        prompt_text("foreign_language_analyst"),
+        "MANAGEMENT_GUIDANCE",
+        include_markers=True,
+    )
+    assert template is not None
+    report = _materialize(template)
+    assert guidance_input_reason(report) == "UNCHANGED"
+
+    invalid = re.sub(
+        r"(?m)^COVERAGE_STATUS:.*$",
+        "COVERAGE_STATUS: FOUND_PROBABLY",
+        report,
+    )
+    assert invalid != report
+    assert guidance_input_reason(invalid) == "INVALID_COVERAGE"

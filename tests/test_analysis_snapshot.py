@@ -774,6 +774,85 @@ def test_senior_cannot_remint_registered_capacity_or_relabel_mrq() -> None:
     }
 
 
+def test_projection_equivalent_number_and_matching_mrq_annotation_are_not_conflicts() -> (
+    None
+):
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics(
+            {},
+            {
+                "trailingPE": 12.5,
+                "earningsGrowth_MRQ": 0.222,
+                "_earningsGrowth_MRQ_source": "calculated_from_quarterly",
+                "latest_quarter_date": "2026-06-30",
+            },
+        )
+    )
+    body = "PE_RATIO_TTM: 12.50\nEARNINGS_GROWTH_MRQ: 22.20% (as of 2026-06-30)"
+
+    reconciled, conflicts = reconcile_data_block_projection(body, snapshot)
+
+    assert not any(
+        conflict["field"] in {"PE_RATIO_TTM", "EARNINGS_GROWTH_MRQ"}
+        for conflict in conflicts
+    )
+    assert "PE_RATIO_TTM: 12.5" in reconciled
+    assert "EARNINGS_GROWTH_MRQ: 22.2%" in reconciled
+
+
+def test_projection_conflicts_on_changed_number_or_mrq_period() -> None:
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics(
+            {},
+            {
+                "trailingPE": 12.5,
+                "earningsGrowth_MRQ": 0.222,
+                "_earningsGrowth_MRQ_source": "calculated_from_quarterly",
+                "latest_quarter_date": "2026-06-30",
+            },
+        )
+    )
+    body = "PE_RATIO_TTM: 13.50\nEARNINGS_GROWTH_MRQ: 22.20% (as of 2026-03-31)"
+
+    _, conflicts = reconcile_data_block_projection(body, snapshot)
+
+    assert {conflict["field"] for conflict in conflicts} >= {
+        "PE_RATIO_TTM",
+        "EARNINGS_GROWTH_MRQ",
+    }
+
+
+def test_projection_missing_requested_field_is_filled_and_reported() -> None:
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics({}, {"trailingPE": 12.5})
+    )
+
+    reconciled, conflicts = reconcile_data_block_projection(
+        "SECTOR: Industrials", snapshot
+    )
+
+    assert "PE_RATIO_TTM: 12.5" in reconciled
+    assert any(conflict["field"] == "PE_RATIO_TTM" for conflict in conflicts)
+
+
+def test_projection_missing_unrequested_latest_growth_is_filled_without_conflict() -> (
+    None
+):
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics({"foreign_language_report": ""}, {"trailingPE": 12.5})
+    )
+
+    reconciled, conflicts = reconcile_data_block_projection(
+        "PE_RATIO_TTM: 12.5", snapshot
+    )
+
+    assert "LATEST_RESULTS_REVENUE_GROWTH_YOY: N/A" in reconciled
+    assert not any(
+        conflict["field"] == "LATEST_RESULTS_REVENUE_GROWTH_YOY"
+        for conflict in conflicts
+    )
+
+
 def test_score_derivation_requires_complete_coherent_breakdown() -> None:
     snapshot = build_pre_senior_snapshot(
         _with_structured_metrics(

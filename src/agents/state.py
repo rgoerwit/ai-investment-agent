@@ -315,6 +315,8 @@ class AgentState(TypedDict, total=False):
     news_report: Annotated[str, take_last]
     raw_fundamentals_data: Annotated[str, take_last]
     management_guidance_evidence: Annotated[str, take_last]
+    guidance_normalization: Annotated[dict[str, str], take_last]
+    latest_results_reason: Annotated[str, take_last]
     foreign_language_report: Annotated[str, take_last]
     legal_report: Annotated[str, take_last]
     fundamentals_report: Annotated[str, take_last]

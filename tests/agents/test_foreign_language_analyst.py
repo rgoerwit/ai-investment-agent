@@ -20,6 +20,7 @@ from langchain_core.messages import HumanMessage
 
 from src.agents.analyst_nodes import (
     _build_retry_invocation_messages,
+    _merge_foreign_recovery,
     _normalize_structured_output,
     _should_retry_output,
 )
@@ -29,7 +30,10 @@ from src.agents.management_guidance import (
     _entity_matched_result_urls,
     _management_guidance_queries,
     _preload_management_guidance_evidence,
+    guidance_input_reason,
+    normalize_management_guidance_output,
 )
+from src.agents.output_validation import validate_required_output
 from tests.helpers.frozen_regressions import load_frozen_regression
 
 
@@ -111,6 +115,241 @@ class TestForeignLanguageAnalystPrompt:
 
 
 class TestForeignLanguageGuidanceRetry:
+    _preflight = """#### results_package
+STATUS: COMPLETED
+#### earnings_bridge
+STATUS: COMPLETED
+"""
+    _results = """### --- START LATEST_RESULTS ---
+LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND
+LATEST_RESULTS_PERIOD: N/A
+LATEST_RESULTS_PERIOD_END: N/A
+LATEST_RESULTS_PRIOR_PERIOD: N/A
+LATEST_RESULTS_PRIOR_PERIOD_END: N/A
+LATEST_RESULTS_PERIOD_MONTHS: N/A
+LATEST_RESULTS_CURRENCY: N/A
+LATEST_RESULTS_REPORTING_UNIT: N/A
+LATEST_RESULTS_REVENUE: N/A
+LATEST_RESULTS_PRIOR_REVENUE: N/A
+LATEST_RESULTS_EARNINGS: N/A
+LATEST_RESULTS_PRIOR_EARNINGS: N/A
+LATEST_RESULTS_EARNINGS_SCOPE: N/A
+LATEST_RESULTS_SOURCE_URL: N/A
+### --- END LATEST_RESULTS ---"""
+    _guidance = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: SEARCH_FAILED
+### --- END MANAGEMENT_GUIDANCE ---"""
+
+    def test_narrow_coverage_spelling_is_canonicalized_before_validation(self):
+        from src.agents.management_guidance import guidance_coverage_is_canonicalizable
+        from src.earnings_baseline import canonical_guidance_enum
+
+        raw = self._guidance.replace(
+            "SEARCH_FAILED", "Not disclosed after targeted search"
+        )
+        normalized = normalize_management_guidance_output(raw, self._preflight)
+        assert guidance_input_reason(raw) == "INVALID_COVERAGE"
+        assert guidance_coverage_is_canonicalizable(raw)
+        assert (
+            canonical_guidance_enum(
+                "COVERAGE_STATUS", "Not disclosed after targeted search"
+            )
+            == "NOT_DISCLOSED_AFTER_TARGETED_SEARCH"
+        )
+        assert "COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH" in normalized
+        assert "Targeted evidence did not resolve forward guidance" not in normalized
+        canonical = self._guidance.replace(
+            "SEARCH_FAILED", "NOT_DISCLOSED_AFTER_TARGETED_SEARCH"
+        )
+        assert guidance_input_reason(canonical) == "UNCHANGED"
+        assert not guidance_coverage_is_canonicalizable(canonical)
+        assert (
+            canonical_guidance_enum(
+                "COVERAGE_STATUS", "NOT_DISCLOSED_AFTER_TARGETED_SEARCH"
+            )
+            == "NOT_DISCLOSED_AFTER_TARGETED_SEARCH"
+        )
+        unknown = normalize_management_guidance_output(
+            raw.replace(
+                "Not disclosed after targeted search", "Probably not disclosed"
+            ),
+            "",
+        )
+        assert "COVERAGE_STATUS: SEARCH_FAILED" in unknown
+        assert "Targeted evidence did not resolve forward guidance" in unknown
+        assert not guidance_coverage_is_canonicalizable(
+            raw.replace("Not disclosed after targeted search", "Probably not disclosed")
+        )
+
+    def test_recovery_merges_guidance_without_discarding_valid_latest_results(self):
+        original = (
+            self._results
+            + "\n"
+            + normalize_management_guidance_output(
+                "Native evidence summary without guidance block.", self._preflight
+            )
+        )
+        retry = normalize_management_guidance_output(
+            self._guidance + "\n### --- START LATEST_RESULTS ---\nBROKEN\n",
+            self._preflight,
+        )
+        merged, accepted, guidance_replaced = _merge_foreign_recovery(
+            original,
+            retry,
+            retry_raw_guidance_usable=True,
+            replace_guidance=True,
+        )
+        assert accepted
+        assert guidance_replaced
+        assert merged.count("### --- START MANAGEMENT_GUIDANCE ---") == 1
+        assert "COVERAGE_STATUS: SEARCH_FAILED" in merged
+        assert self._results in merged
+
+    def test_unusable_retry_does_not_discard_original_report(self):
+        original = self._results + "\n" + self._guidance
+        merged, accepted, guidance_replaced = _merge_foreign_recovery(
+            original,
+            "### --- START LATEST_RESULTS ---\nBROKEN\n",
+            retry_raw_guidance_usable=False,
+            replace_guidance=False,
+        )
+        assert not accepted
+        assert not guidance_replaced
+        assert merged == original
+
+    @pytest.mark.parametrize(
+        (
+            "initial_guidance",
+            "retry_content",
+            "budgeted",
+            "expected_reason",
+            "expected_action",
+            "expected_outcome",
+        ),
+        [
+            (
+                "",
+                "Still no guidance block.",
+                True,
+                "MISSING_BLOCK",
+                "FALLBACK",
+                "rejected_invalid",
+            ),
+            ("", _guidance, True, "MISSING_BLOCK", "REPAIRED", "accepted_text"),
+            ("", _guidance, False, "MISSING_BLOCK", "FALLBACK", None),
+            (
+                _guidance.replace("SEARCH_FAILED", "FOUND"),
+                _guidance,
+                True,
+                "UNCHANGED",
+                "REPAIRED",
+                "accepted_text",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_guidance_repair_precedes_final_contract_check(
+        self,
+        initial_guidance,
+        retry_content,
+        budgeted,
+        expected_reason,
+        expected_action,
+        expected_outcome,
+    ):
+        from src.agents.analyst_nodes import create_analyst_node
+        from src.forensic_budget import GraphResearchBudgetPolicy
+
+        calls = []
+        initial = "Native evidence summary.\n" + self._results + "\n" + initial_guidance
+
+        async def invoke(_runnable, payload, **_kwargs):
+            calls.append(payload)
+            return SimpleNamespace(
+                content=initial if len(calls) == 1 else retry_content,
+                tool_calls=None,
+            )
+
+        node = create_analyst_node(
+            MagicMock(),
+            "foreign_language_analyst",
+            [],
+            "foreign_language_report",
+            retry_llm=MagicMock(),
+            allow_retry=True,
+            research_budget_policy=GraphResearchBudgetPolicy(
+                tool_limits={},
+                max_tool_iterations=0,
+                max_llm_calls=2 if budgeted else 1,
+                max_tool_calls_per_turn=0,
+            ),
+        )
+        state = {
+            "messages": [],
+            "company_of_interest": "TEST.T",
+            "trade_date": "2026-08-26",
+            "management_guidance_evidence": self._preflight,
+        }
+        config = {
+            "configurable": {
+                "context": MagicMock(ticker="TEST.T", trade_date="2026-08-26")
+            }
+        }
+        with patch("src.agents.runtime.invoke_with_rate_limit_handling", new=invoke):
+            result = await node(state, config)
+
+        assert len(calls) == (2 if budgeted else 1)
+        report = result["foreign_language_report"]
+        assert "LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND" in report
+        assert report.count("### --- START LATEST_RESULTS ---") == 1
+        expected_coverage = (
+            "SEARCH_FAILED"
+            if expected_action == "REPAIRED"
+            else "UNRESOLVED_AFTER_TARGETED_SEARCH"
+        )
+        assert f"COVERAGE_STATUS: {expected_coverage}" in report
+        assert validate_required_output("foreign_language_analyst", report)["ok"]
+        assert result["guidance_normalization"] == {
+            "initial_reason": expected_reason,
+            "final_action": expected_action,
+        }
+        if expected_outcome is None:
+            assert "structural_recovery_events" not in result
+        else:
+            assert (
+                result["structural_recovery_events"][0]["outcome"] == expected_outcome
+            )
+
+    @pytest.mark.asyncio
+    async def test_no_substantive_report_does_not_claim_guidance_fallback(self):
+        from src.agents.analyst_nodes import create_analyst_node
+
+        node = create_analyst_node(
+            MagicMock(), "foreign_language_analyst", [], "foreign_language_report"
+        )
+        state = {
+            "messages": [],
+            "company_of_interest": "TEST.T",
+            "trade_date": "2026-08-26",
+            "management_guidance_evidence": self._preflight,
+        }
+        config = {
+            "configurable": {
+                "context": MagicMock(ticker="TEST.T", trade_date="2026-08-26")
+            }
+        }
+        with patch(
+            "src.agents.runtime.invoke_with_rate_limit_handling",
+            return_value=SimpleNamespace(content="No evidence.", tool_calls=None),
+        ):
+            result = await node(state, config)
+
+        assert result["guidance_normalization"] == {
+            "initial_reason": "MISSING_BLOCK",
+            "final_action": "UNRECOVERED",
+        }
+        assert result["artifact_statuses"]["foreign_language_report"]["ok"] is False
+
     def test_missing_guidance_block_triggers_retry(self):
         assert _should_retry_output(
             "Native filing review without a structured guidance block.",
@@ -130,6 +369,7 @@ class TestForeignLanguageGuidanceRetry:
         assert "MANAGEMENT_GUIDANCE" in retry_messages[-1].content
         assert "LATEST_RESULTS" in retry_messages[-1].content
         assert "SEARCHES_COMPLETED" in retry_messages[-1].content
+        assert "no tools or new searches are available" in retry_messages[-1].content
 
     def test_valid_guidance_without_latest_results_triggers_retry(self):
         content = """### --- START MANAGEMENT_GUIDANCE ---
@@ -1910,3 +2150,25 @@ class TestValueTrapVerdictExtraction:
         assert "WATCHABLE" in result
         assert "60/100" in result
         assert "N/A" in result
+
+
+def test_guidance_input_reason_classifies_first_block_without_source_text():
+    from src.agents.management_guidance import guidance_input_reason
+
+    assert guidance_input_reason("Research prose only") == "MISSING_BLOCK"
+    assert (
+        guidance_input_reason(
+            "### --- START MANAGEMENT_GUIDANCE ---\n"
+            "COVERAGE_STATUS: FOUND\n"
+            "### --- END MANAGEMENT_GUIDANCE ---"
+        )
+        == "UNCHANGED"
+    )
+    assert (
+        guidance_input_reason(
+            "### --- START MANAGEMENT_GUIDANCE ---\n"
+            "COVERAGE_STATUS: secret or malformed source prose\n"
+            "### --- END MANAGEMENT_GUIDANCE ---"
+        )
+        == "INVALID_COVERAGE"
+    )

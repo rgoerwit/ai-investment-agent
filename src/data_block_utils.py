@@ -248,6 +248,16 @@ def extract_last_fenced_block(
     return last.group(0 if include_markers else 1)
 
 
+def replace_last_fenced_block(report: str, block_name: str, replacement: str) -> str:
+    """Replace the last parseable block, or append a newly repaired block."""
+    normalized = normalize_structured_block_boundaries(report) or report
+    existing = extract_last_fenced_block(normalized, block_name, include_markers=True)
+    if existing is None:
+        return normalized.rstrip() + "\n\n" + replacement + "\n"
+    start = normalized.rfind(existing)
+    return normalized[:start] + replacement + normalized[start + len(existing) :]
+
+
 def has_parseable_fenced_block(report: str | None, block_name: str) -> bool:
     """Return True only when the named fenced block can actually be parsed."""
     return (

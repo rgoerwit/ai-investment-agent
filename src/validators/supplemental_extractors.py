@@ -8,7 +8,7 @@ from typing import Any
 
 import structlog
 
-from src.data_block_utils import extract_last_data_block
+from src.data_block_utils import extract_block_field, extract_last_data_block
 from src.validators.metric_extractor import (
     read_block_enum,
     read_block_float,
@@ -460,6 +460,12 @@ def extract_value_trap_score(value_trap_report: str) -> dict[str, Any]:
         ("M&A_CONTEXT_EVIDENCE", "m_and_a_context_evidence"),
         ("M&A_CONTEXT_SOURCE_URL", "m_and_a_context_source_url"),
         ("M&A_CONTEXT", "m_and_a_context"),
+    ):
+        value = extract_block_field(value_trap_report, "VALUE_TRAP_BLOCK", field)
+        if value and value.upper() not in ("NONE", "N/A"):
+            metrics[key] = value.upper() if field == "M&A_CONTEXT_EVIDENCE" else value
+
+    for field, key in (
         ("BUYBACK_CONTEXT", "buyback_context"),
         ("PAYOUT_TREND", "payout_trend"),
         ("CASH_POSITION", "cash_position"),

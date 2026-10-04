@@ -10,6 +10,39 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "FLA_ARTIFACT_INVALID",
+        "NO_COMPLETE_BLOCK",
+        "INVALID_CITATION",
+        "PRIMARY_VALIDATED",
+        "SECONDARY_SOURCE",
+        "UNSUPPORTED_SOURCE",
+        "NOT_FOUND",
+        "SEARCH_FAILED",
+        "INVALID_COVERAGE",
+    ],
+)
+def test_current_latest_results_barrier_reasons_survive_persistence_allowlist(
+    reason, monkeypatch
+):
+    """Current barrier outcomes are retained; new outcomes must join this table."""
+    from src.persistence import build_run_summary
+
+    tracker = MagicMock()
+    tracker.get_total_stats.return_value = {"failed_attempts": 0, "total_calls": 0}
+    monkeypatch.setattr("src.token_tracker.get_tracker", lambda: tracker)
+
+    summary = build_run_summary(
+        {"latest_results_reason": reason},
+        quick_mode=True,
+        article_requested=False,
+    )
+
+    assert summary["latest_results_reason"] == reason
+
+
 def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
     from src.persistence import build_run_summary
 
@@ -38,6 +71,11 @@ def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
             "apac_regional_report": {"complete": True, "ok": True},
         },
         "messages": [ToolMessage(content="done", tool_call_id="call_1", name="tool")],
+        "guidance_normalization": {
+            "initial_reason": "MISSING_BLOCK",
+            "final_action": "FALLBACK",
+        },
+        "latest_results_reason": "INVALID_CITATION",
     }
 
     summary = build_run_summary(
@@ -46,6 +84,18 @@ def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
         article_requested=False,
         provider_preflight={"google": {"dns": "ok"}},
     )
+
+    assert summary["guidance_normalization"] == result["guidance_normalization"]
+    assert summary["latest_results_reason"] == "INVALID_CITATION"
+
+    result["guidance_normalization"]["final_action"] = "UNRECOVERED"
+    unresolved_summary = build_run_summary(
+        result,
+        quick_mode=True,
+        article_requested=False,
+        provider_preflight={"google": {"dns": "ok"}},
+    )
+    assert unresolved_summary["guidance_normalization"]["final_action"] == "UNRECOVERED"
 
     assert summary["consultant_finished"] is True
     assert summary["consultant_review_status"] == "FAILED"

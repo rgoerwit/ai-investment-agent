@@ -592,10 +592,39 @@ async def _preload_management_guidance_evidence(
     )
 
 
+def guidance_input_reason(content: str) -> str:
+    """Classify the first model block before conservative normalization hides it."""
+    normalized = normalize_structured_block_boundaries(content) or content
+    block_body = extract_last_fenced_block(normalized, "MANAGEMENT_GUIDANCE")
+    if block_body is None:
+        return "MISSING_BLOCK"
+    coverage = extract_block_text_value(block_body, "COVERAGE_STATUS").strip().upper()
+    return "UNCHANGED" if coverage in GUIDANCE_COVERAGE_STATUSES else "INVALID_COVERAGE"
+
+
+def guidance_coverage_is_canonicalizable(content: str) -> bool:
+    """Identify readable whitespace spelling of an existing coverage status."""
+    block = extract_last_fenced_block(
+        normalize_structured_block_boundaries(content) or content,
+        "MANAGEMENT_GUIDANCE",
+    )
+    if not block:
+        return False
+    raw = extract_block_text_value(block, "COVERAGE_STATUS").strip().upper()
+    return bool(
+        raw
+        and raw not in GUIDANCE_COVERAGE_STATUSES
+        and canonical_guidance_enum("COVERAGE_STATUS", raw)
+        in GUIDANCE_COVERAGE_STATUSES
+    )
+
+
 def normalize_management_guidance_output(
     content: str,
     management_guidance_evidence: str,
     evidence_records: Sequence[Any] = (),
+    *,
+    insert_fallback: bool = True,
 ) -> str:
     """Attach code-owned provenance and enforce conservative bridge semantics."""
     normalized = normalize_structured_block_boundaries(content) or content
@@ -613,7 +642,7 @@ def normalize_management_guidance_output(
         evidence_statuses,
     )
     if not block_with_markers or block_body is None:
-        if not _has_substantive_report_content(normalized):
+        if not insert_fallback or not _has_substantive_report_content(normalized):
             return normalized
         conservative_block = _build_unresolved_guidance_block(
             execution_statuses,
@@ -621,10 +650,12 @@ def normalize_management_guidance_output(
         )
         return normalized.rstrip() + "\n\n" + conservative_block + "\n"
 
-    coverage_status = (
-        extract_block_text_value(block_body, "COVERAGE_STATUS").strip().upper()
+    coverage_status = canonical_guidance_enum(
+        "COVERAGE_STATUS", extract_block_text_value(block_body, "COVERAGE_STATUS")
     )
     if coverage_status not in GUIDANCE_COVERAGE_STATUSES:
+        if not insert_fallback:
+            return normalized
         conservative_block = _build_unresolved_guidance_block(
             execution_statuses,
             searches_completed,
@@ -654,7 +685,9 @@ def normalize_management_guidance_output(
             block_body = replace_or_append_block_line(
                 block_body,
                 field,
-                canonical_guidance_enum(field, value),
+                coverage_status
+                if field == "COVERAGE_STATUS"
+                else canonical_guidance_enum(field, value),
             )
 
     required_present = all(

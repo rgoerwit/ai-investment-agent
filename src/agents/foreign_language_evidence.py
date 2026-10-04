@@ -798,7 +798,15 @@ def _normalize_ownership(
 
     normalized_source = normalize_http_url(source_url)
     claim_records = [
-        record for record in records if _claim_in_text(record[1], holder, pct)
+        record
+        for record in records
+        if _claim_in_text(record[1], holder, pct)
+        or (
+            holder
+            and pct is None
+            and _holder_in_text(record[1], holder)
+            and "largest shareholder" in record[1].casefold()
+        )
     ]
     supporting = [
         record
@@ -863,7 +871,9 @@ def _normalize_ownership(
     )
 
     largest_value = (
-        f"{holder} ({pct:g}%)" if verified and holder and pct is not None else "UNKNOWN"
+        (f"{holder} ({pct:g}%)" if pct is not None else holder)
+        if verified and holder
+        else "UNKNOWN"
     )
     influential_entity = (
         holder

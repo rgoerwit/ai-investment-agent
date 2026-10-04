@@ -371,12 +371,13 @@ def build_graph_components(
     ]
     recovery_origins: tuple[SeatId, ...]
     if quick_mode:
-        # Quick mode pays for structural recovery only at the two required,
-        # gate-critical seats. The recovery binding uses a reasoning intent but
-        # inherits the originating seat's visible-output budget.
+        # Quick mode also repairs the Foreign Language Analyst's evidence blocks;
+        # that seat's research budget already reserves one recovery model turn.
+        # The binding inherits each originating seat's visible-output budget.
         allow_retry = plan.status_for(SeatId.ANALYST_RETRY, quick_mode=True).enabled
         recovery_origins = (
             SeatId.SENIOR_FUNDAMENTALS,
+            SeatId.FOREIGN_LANGUAGE,
             SeatId.PORTFOLIO_MANAGER,
         )
     else:

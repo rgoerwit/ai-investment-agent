@@ -644,6 +644,40 @@ def build_run_summary(
             "events": list(result.get("structural_recovery_events") or []),
             "usage": list(tracker_stats.get("recovery_usage") or []),
         },
+        "guidance_normalization": {
+            key: value
+            for key, allowed in (
+                ("initial_reason", {"UNCHANGED", "MISSING_BLOCK", "INVALID_COVERAGE"}),
+                (
+                    "final_action",
+                    {
+                        "UNCHANGED",
+                        "CANONICALIZED",
+                        "REPAIRED",
+                        "FALLBACK",
+                        "UNRECOVERED",
+                    },
+                ),
+            )
+            if (value := (result.get("guidance_normalization") or {}).get(key))
+            in allowed
+        },
+        "latest_results_reason": (
+            result.get("latest_results_reason")
+            if result.get("latest_results_reason")
+            in {
+                "FLA_ARTIFACT_INVALID",
+                "NO_COMPLETE_BLOCK",
+                "INVALID_CITATION",
+                "PRIMARY_VALIDATED",
+                "SECONDARY_SOURCE",
+                "UNSUPPORTED_SOURCE",
+                "NOT_FOUND",
+                "SEARCH_FAILED",
+                "INVALID_COVERAGE",
+            }
+            else ""
+        ),
         "llm_providers_used": providers_used,
         "llm_provider": providers_used[0]
         if len(providers_used) == 1

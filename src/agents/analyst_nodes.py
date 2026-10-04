@@ -17,12 +17,14 @@ from src.data_block_utils import (
     detect_legacy_data_block_shape,
     extract_block_text_value,
     extract_last_data_block,
+    extract_last_fenced_block,
     fenced_end,
     fenced_start,
     has_parseable_data_block,
     has_parseable_fenced_block,
     normalize_legacy_data_block_report,
     normalize_structured_block_boundaries,
+    replace_last_fenced_block,
     replace_or_append_block_line,
 )
 from src.error_safety import summarize_exception
@@ -54,11 +56,15 @@ from .fundamentals_reconciler import (
 from .management_guidance import (
     _preload_management_guidance_evidence,
     backfill_guidance_contract,
+    guidance_coverage_is_canonicalizable,
+    guidance_input_reason,
     normalize_management_guidance_output,
     promote_management_guidance,
 )
 from .output_limits import cap_state_value
 from .output_validation import (
+    _has_valid_latest_results_block,
+    _has_valid_management_guidance_block,
     classify_output_contract_failure,
     log_output_diagnostics,
     log_truncation_diagnostic,
@@ -97,11 +103,10 @@ UNRESOLVED if that block is unavailable.
 _FOREIGN_LANGUAGE_EVIDENCE_RETRY_SUFFIX = """
 CRITICAL EVIDENCE CORRECTION:
 Your first response omitted or malformed a mandatory evidence block.
-Run targeted searches of the latest results release, presentation, transcript, and
-statutory filing for management's forward guidance and material tax, subsidy,
-regulatory, accounting, or other non-operating earnings drivers. Also locate the
-newest official income statement and inspect its document before extracting current
-and year-ago comparative revenue and earnings. Then emit one parseable block for
+Use only the evidence already gathered; no tools or new searches are available.
+Correct the structured guidance and latest-results blocks using that evidence.
+If evidence is insufficient, record the applicable unresolved or search-failed
+coverage status without inventing a source or figures. Emit one parseable block for
 each of these marker pairs:
 {guidance_start}
 ...
@@ -795,6 +800,7 @@ def _normalize_structured_output(
     management_guidance_evidence: str = "",
     evidence_messages: list[BaseMessage] | None = None,
     canonical_snapshot: Mapping[str, Any] | None = None,
+    defer_guidance_fallback: bool = False,
 ) -> str:
     """Apply narrow deterministic output repairs for known model-format drift."""
     if agent_key == "foreign_language_analyst":
@@ -813,6 +819,7 @@ def _normalize_structured_output(
             content,
             management_guidance_evidence,
             evidence_records,
+            insert_fallback=not defer_guidance_fallback,
         )
         return normalize_foreign_language_evidence(
             guidance_normalized,
@@ -879,12 +886,54 @@ def _should_retry_output(content: str, agent_key: str) -> bool:
     return False
 
 
+def _merge_foreign_recovery(
+    original: str,
+    retry: str,
+    *,
+    retry_raw_guidance_usable: bool,
+    replace_guidance: bool,
+) -> tuple[str, bool, bool]:
+    """Take only repaired valid blocks, retaining independently valid original work."""
+    merged = original
+    accepted = False
+    guidance_replaced = False
+    if (
+        retry_raw_guidance_usable
+        and (replace_guidance or not _has_valid_management_guidance_block(original))
+        and _has_valid_management_guidance_block(retry)
+    ):
+        guidance = extract_last_fenced_block(
+            retry, "MANAGEMENT_GUIDANCE", include_markers=True
+        )
+        if guidance is not None:
+            merged = replace_last_fenced_block(merged, "MANAGEMENT_GUIDANCE", guidance)
+            accepted = True
+            guidance_replaced = True
+    if not _has_valid_latest_results_block(
+        original
+    ) and _has_valid_latest_results_block(retry):
+        results = extract_last_fenced_block(
+            retry, "LATEST_RESULTS", include_markers=True
+        )
+        if results is not None:
+            merged = replace_last_fenced_block(merged, "LATEST_RESULTS", results)
+            accepted = True
+    return merged, accepted, guidance_replaced
+
+
 def _build_retry_invocation_messages(
-    invocation_messages: list[Any], agent_key: str, content: str
+    invocation_messages: list[Any],
+    agent_key: str,
+    content: str,
+    *,
+    force_foreign_repair: bool = False,
 ) -> list[Any]:
     """Add the owning agent's structured-output correction for a retry."""
     if agent_key == "foreign_language_analyst":
-        if validate_required_output(agent_key, content)["ok"]:
+        if (
+            not force_foreign_repair
+            and validate_required_output(agent_key, content)["ok"]
+        ):
             return invocation_messages
         return [
             *invocation_messages,
@@ -1379,6 +1428,23 @@ def create_analyst_node(
                 new_state["research_budgets"] = {agent_key: research_ledger.telemetry()}
 
             content_str = message_utils.extract_string_content(response.content)
+            foreign_guidance_needs_repair = False
+            if agent_key == "foreign_language_analyst" and not has_tool_calls:
+                initial_reason = guidance_input_reason(content_str)
+                canonicalizable = guidance_coverage_is_canonicalizable(content_str)
+                foreign_guidance_needs_repair = (
+                    initial_reason != "UNCHANGED" and not canonicalizable
+                )
+                new_state["guidance_normalization"] = {
+                    "initial_reason": initial_reason,
+                    "final_action": (
+                        "CANONICALIZED"
+                        if canonicalizable
+                        else "FALLBACK"
+                        if foreign_guidance_needs_repair
+                        else "UNCHANGED"
+                    ),
+                }
             content_str = _normalize_structured_output(
                 agent_key,
                 content_str,
@@ -1391,6 +1457,7 @@ def create_analyst_node(
                 management_guidance_evidence=management_guidance_evidence,
                 evidence_messages=filtered_messages,
                 canonical_snapshot=state.get("analysis_snapshot"),
+                defer_guidance_fallback=foreign_guidance_needs_repair,
             )
 
             recovery_event: dict[str, Any] | None = None
@@ -1398,7 +1465,10 @@ def create_analyst_node(
             if (
                 allow_retry
                 and retry_llm is not None
-                and _should_retry_output(content_str, agent_key)
+                and (
+                    foreign_guidance_needs_repair
+                    or _should_retry_output(content_str, agent_key)
+                )
             ):
                 retry_budget_reason = (
                     research_ledger.consume_llm()
@@ -1460,7 +1530,10 @@ def create_analyst_node(
                         ),
                     )
                     retry_messages = _build_retry_invocation_messages(
-                        invocation_messages, agent_key, content_str
+                        invocation_messages,
+                        agent_key,
+                        content_str,
+                        force_foreign_repair=foreign_guidance_needs_repair,
                     )
                     # Structural recovery re-renders from evidence already gathered by
                     # the owning analyst. It deliberately exposes no tools: another tool
@@ -1505,6 +1578,16 @@ def create_analyst_node(
                         retry_content_str = message_utils.extract_string_content(
                             retry_response.content
                         )
+                        retry_raw_guidance_usable = (
+                            (
+                                guidance_input_reason(retry_content_str) == "UNCHANGED"
+                                or guidance_coverage_is_canonicalizable(
+                                    retry_content_str
+                                )
+                            )
+                            if agent_key == "foreign_language_analyst"
+                            else False
+                        )
                         retry_content_str = _normalize_structured_output(
                             agent_key,
                             retry_content_str,
@@ -1521,6 +1604,8 @@ def create_analyst_node(
                             management_guidance_evidence=management_guidance_evidence,
                             evidence_messages=filtered_messages,
                             canonical_snapshot=state.get("analysis_snapshot"),
+                            defer_guidance_fallback=agent_key
+                            == "foreign_language_analyst",
                         )
                         retry_tool_calls = getattr(retry_response, "tool_calls", None)
                         retry_has_tool_calls = (
@@ -1549,10 +1634,28 @@ def create_analyst_node(
                                 retry_improved=len(retry_content_str)
                                 > len(content_str),
                             )
-                            content_str = retry_content_str
-                            response = retry_response
-                            response_runnable = retry_llm
-                            recovery_event["outcome"] = "accepted_text"
+                            if agent_key == "foreign_language_analyst":
+                                content_str, accepted, guidance_replaced = (
+                                    _merge_foreign_recovery(
+                                        content_str,
+                                        retry_content_str,
+                                        retry_raw_guidance_usable=retry_raw_guidance_usable,
+                                        replace_guidance=foreign_guidance_needs_repair,
+                                    )
+                                )
+                                if guidance_replaced:
+                                    new_state["guidance_normalization"][
+                                        "final_action"
+                                    ] = "REPAIRED"
+                                recovery_event["outcome"] = (
+                                    "accepted_text" if accepted else "rejected_invalid"
+                                )
+                            else:
+                                content_str = retry_content_str
+                                recovery_event["outcome"] = "accepted_text"
+                            if recovery_event["outcome"] == "accepted_text":
+                                response = retry_response
+                                response_runnable = retry_llm
                     except Exception as retry_error:
                         recovery_event["outcome"] = "failed"
                         logger.error(
@@ -1568,6 +1671,27 @@ def create_analyst_node(
                         new_state["research_budgets"] = {
                             agent_key: research_ledger.telemetry()
                         }
+
+            if (
+                agent_key == "foreign_language_analyst"
+                and foreign_guidance_needs_repair
+            ):
+                # The repair sees the raw structural gap. Only after that bounded
+                # attempt do we insert code-owned unresolved guidance, before the
+                # final whole-report contract check.
+                content_str = _normalize_structured_output(
+                    agent_key,
+                    content_str,
+                    ticker,
+                    management_guidance_evidence=management_guidance_evidence,
+                    evidence_messages=filtered_messages,
+                )
+                if new_state["guidance_normalization"]["final_action"] != "REPAIRED":
+                    new_state["guidance_normalization"]["final_action"] = (
+                        "FALLBACK"
+                        if extract_last_fenced_block(content_str, "MANAGEMENT_GUIDANCE")
+                        else "UNRECOVERED"
+                    )
 
             from src.utils import detect_truncation
 

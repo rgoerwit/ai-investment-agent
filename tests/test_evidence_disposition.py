@@ -35,6 +35,7 @@ from src.earnings_baseline import (
     eps_growth_award_disposition,
     requires_eps_growth_withholding,
 )
+from src.eval.prompt_contracts import prompt_text
 from src.evidence_disposition import (
     AbsentEvidence,
     AwardDisposition,
@@ -155,6 +156,44 @@ class TestEarningsBaselineDisposition:
                     is not AwardDisposition.KEEP
                 )
                 assert requires_eps_growth_withholding(base, bridge) is expected
+
+    def test_fundamentals_prompt_matches_eps_disposition_without_exception(self):
+        prompt = prompt_text("fundamentals_analyst")
+        assert (
+            "Score EPS_GROWTH=0 when `EARNINGS_BASELINE_STATUS` is MIXED, TEMPORARILY_BOOSTED, TEMPORARILY_DEPRESSED, or REGIME_DEPENDENT"
+            in prompt
+        )
+        assert (
+            "Score EPS_GROWTH=N/A when the baseline is UNKNOWN or `GUIDANCE_BRIDGE_STATUS` is UNRESOLVED without a diagnosed distortion"
+            in prompt
+        )
+        assert (
+            "A diagnosed distortion takes precedence over an unresolved bridge"
+            in prompt
+        )
+        assert (
+            "no code-reconciled normalized growth rate is available for an exception"
+            in prompt
+        )
+        for baseline in DISTORTED_EARNINGS_BASELINE_STATUSES:
+            assert (
+                eps_growth_award_disposition(
+                    baseline_status=baseline, bridge_status="UNRESOLVED"
+                )
+                is AwardDisposition.REFUTED
+            )
+        assert (
+            eps_growth_award_disposition(
+                baseline_status="UNKNOWN", bridge_status="RECONCILED"
+            )
+            is AwardDisposition.UNRESOLVED
+        )
+        assert (
+            eps_growth_award_disposition(
+                baseline_status="DURABLE", bridge_status="RECONCILED"
+            )
+            is AwardDisposition.KEEP
+        )
 
 
 class TestWithheldCriterionIsNeutralNotFailed:

@@ -7,6 +7,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any, ClassVar
 
 import structlog
@@ -38,6 +39,41 @@ logger = structlog.get_logger(__name__)
 _FIELD_RE = re.compile(r"(?m)^\s*(?:[-*]\s*)?([A-Z][A-Z0-9_]{2,})\s*:\s*(.*?)\s*$")
 _UNKNOWN_VALUES = frozenset({"", "N/A", "NA", "NONE", "UNKNOWN", "NOT FOUND"})
 _ESTIMATE_MARKERS = ("ESTIMAT", "APPROX", "ROUGHLY", "CIRCA", "~", "≈")
+_PROJECTED_NUMBER_RE = re.compile(r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+))(%?)$")
+_PROJECTED_MRQ_RE = re.compile(
+    r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+)%)(?:\s+\(as of (\d{4}-\d{2}-\d{2})\))?$"
+)
+_PERIOD_ANNOTATED_FIELDS = frozenset({"REVENUE_GROWTH_MRQ", "EARNINGS_GROWTH_MRQ"})
+_UNREQUESTED_SENIOR_PROJECTION_FIELDS = frozenset(
+    {"LATEST_RESULTS_REVENUE_GROWTH_YOY", "LATEST_RESULTS_EARNINGS_GROWTH_YOY"}
+)
+
+
+def _same_projected_value(
+    field: str, current: str, canonical: str, *, period: object
+) -> bool:
+    """Ignore rendering differences only for registered numeric projections."""
+    if current == canonical:
+        return True
+    policy = MATERIAL_CLAIM_POLICIES[field]
+    if policy.source != "RAW_METRICS" or policy.value_format == "TEXT":
+        return False
+    if field in _PERIOD_ANNOTATED_FIELDS:
+        match = _PROJECTED_MRQ_RE.fullmatch(current)
+        if match is None:
+            return False
+        annotated_period = match.group(2)
+        if annotated_period and annotated_period != str(period or "UNKNOWN"):
+            return False
+        current = match.group(1)
+    actual = _PROJECTED_NUMBER_RE.fullmatch(current)
+    expected = _PROJECTED_NUMBER_RE.fullmatch(canonical)
+    if actual is None or expected is None or actual.group(2) != expected.group(2):
+        return False
+    try:
+        return Decimal(actual.group(1)) == Decimal(expected.group(1))
+    except InvalidOperation:
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -575,13 +611,20 @@ def reconcile_data_block_projection(
         )
         current = current_match.group(2).strip() if current_match else None
         if current != canonical:
-            conflicts.append(
-                {
-                    "field": field,
-                    "type": "SENIOR_PROJECTION_CONFLICT",
-                    "detail": f"Senior emitted {current or 'MISSING'}; canonical is {canonical}.",
-                }
+            missing_requested = (
+                current is None and field not in _UNREQUESTED_SENIOR_PROJECTION_FIELDS
             )
+            changed_meaning = current is not None and not _same_projected_value(
+                field, current, canonical, period=claim.get("period")
+            )
+            if missing_requested or changed_meaning:
+                conflicts.append(
+                    {
+                        "field": field,
+                        "type": "SENIOR_PROJECTION_CONFLICT",
+                        "detail": f"Senior emitted {current or 'MISSING'}; canonical is {canonical}.",
+                    }
+                )
             updated = replace_or_append_block_line(updated, field, canonical)
         if "period" in policy.projected_metadata and policy.period_field:
             updated = replace_or_append_block_line(

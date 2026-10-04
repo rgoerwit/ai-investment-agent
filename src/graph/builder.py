@@ -31,7 +31,7 @@ logger = structlog.get_logger(__name__)
 
 
 def _reconcile_fundamentals_evidence(state: AgentState) -> dict[str, Any]:
-    """Revalidate the original FLA response against all barrier-complete evidence."""
+    """Revalidate the accepted FLA artifact against all barrier-complete evidence."""
     from src.agents.foreign_language_evidence import (
         _field,
         normalize_foreign_language_evidence,
@@ -41,6 +41,11 @@ def _reconcile_fundamentals_evidence(state: AgentState) -> dict[str, Any]:
     from src.agents.message_utils import (
         evidence_record_to_tool_evidence,
         latest_agent_text,
+    )
+    from src.agents.output_validation import _has_valid_latest_results_block
+    from src.data_block_utils import (
+        extract_last_fenced_block,
+        replace_last_fenced_block,
     )
     from src.runtime_diagnostics import get_valid_artifact_content
     from src.runtime_services import get_current_evidence_records
@@ -56,14 +61,39 @@ def _reconcile_fundamentals_evidence(state: AgentState) -> dict[str, Any]:
                 ticker=state.get("company_of_interest", "UNKNOWN"),
                 reason_code="FLA_ARTIFACT_INVALID",
             )
-        return {}
+        return {"latest_results_reason": "FLA_ARTIFACT_INVALID"}
+    # Re-read the original for facts that can gain authority when Legal finishes.
+    # Overlay only accepted repaired blocks: otherwise a missing initial block
+    # would erase its repair, while using the whole normalized artifact would lose
+    # original ownership claims that can now be checked against Legal evidence.
     raw_report = (
-        latest_agent_text(
-            state.get("messages", []),
-            "foreign_language_analyst",
-        )
+        latest_agent_text(state.get("messages", []), "foreign_language_analyst")
         or valid_report
     )
+    guidance_action = (state.get("guidance_normalization") or {}).get("final_action")
+    recovery_accepted = any(
+        event.get("originating_agent") == "foreign_language_analyst"
+        and event.get("outcome") == "accepted_text"
+        for event in state.get("structural_recovery_events", [])
+    )
+    for block_name, needs_overlay in (
+        (
+            "MANAGEMENT_GUIDANCE",
+            guidance_action == "REPAIRED",
+        ),
+        (
+            "LATEST_RESULTS",
+            recovery_accepted and not _has_valid_latest_results_block(raw_report),
+        ),
+    ):
+        if needs_overlay:
+            accepted_block = extract_last_fenced_block(
+                valid_report, block_name, include_markers=True
+            )
+            if accepted_block is not None:
+                raw_report = replace_last_fenced_block(
+                    raw_report, block_name, accepted_block
+                )
     guidance_evidence = state.get("management_guidance_evidence", "") or ""
     source_records = [
         record
@@ -108,8 +138,10 @@ def _reconcile_fundamentals_evidence(state: AgentState) -> dict[str, Any]:
         reason_code = "SECONDARY_SOURCE"
     elif coverage == "FOUND":
         reason_code = "UNSUPPORTED_SOURCE"
+    elif coverage in {"NOT_FOUND", "SEARCH_FAILED"}:
+        reason_code = coverage
     else:
-        reason_code = coverage or "INVALID_COVERAGE"
+        reason_code = "INVALID_COVERAGE"
     if FUNDAMENTALS_BARRIER.inputs_complete(state):
         logger.info(
             "fla_latest_results_finalized",
@@ -117,13 +149,16 @@ def _reconcile_fundamentals_evidence(state: AgentState) -> dict[str, Any]:
             reason_code=reason_code,
         )
     if reconciled == state.get("foreign_language_report", ""):
-        return {}
+        return {"latest_results_reason": reason_code}
     logger.info(
         "fundamentals_evidence_reconciled",
         ticker=state.get("company_of_interest", "UNKNOWN"),
         evidence_records=len(records),
     )
-    return {"foreign_language_report": reconciled}
+    return {
+        "foreign_language_report": reconciled,
+        "latest_results_reason": reason_code,
+    }
 
 
 async def fundamentals_barrier_node(
