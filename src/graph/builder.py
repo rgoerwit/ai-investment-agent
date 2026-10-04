@@ -32,7 +32,11 @@ logger = structlog.get_logger(__name__)
 
 def _reconcile_fundamentals_evidence(state: AgentState) -> dict[str, Any]:
     """Revalidate the original FLA response against all barrier-complete evidence."""
-    from src.agents.foreign_language_evidence import normalize_foreign_language_evidence
+    from src.agents.foreign_language_evidence import (
+        _field,
+        normalize_foreign_language_evidence,
+        unique_latest_results_block,
+    )
     from src.agents.management_guidance import normalize_management_guidance_output
     from src.agents.message_utils import (
         evidence_record_to_tool_evidence,
@@ -46,6 +50,12 @@ def _reconcile_fundamentals_evidence(state: AgentState) -> dict[str, Any]:
         "foreign_language_report",
     )
     if not valid_report:
+        if FUNDAMENTALS_BARRIER.inputs_complete(state):
+            logger.info(
+                "fla_latest_results_finalized",
+                ticker=state.get("company_of_interest", "UNKNOWN"),
+                reason_code="FLA_ARTIFACT_INVALID",
+            )
         return {}
     raw_report = (
         latest_agent_text(
@@ -74,6 +84,38 @@ def _reconcile_fundamentals_evidence(state: AgentState) -> dict[str, Any]:
         supplemental_evidence=guidance_evidence,
         additional_records=records,
     )
+    final_latest = unique_latest_results_block(reconciled)
+    coverage = (
+        _field(final_latest, "LATEST_RESULTS_COVERAGE_STATUS").upper()
+        if final_latest
+        else ""
+    )
+    authority = (
+        _field(final_latest, "LATEST_RESULTS_SOURCE_AUTHORITY").upper()
+        if final_latest
+        else ""
+    )
+    source_url = (
+        _field(final_latest, "LATEST_RESULTS_SOURCE_URL") if final_latest else ""
+    )
+    if final_latest is None:
+        reason_code = "NO_COMPLETE_BLOCK"
+    elif coverage == "FOUND" and source_url.upper() in {"", "N/A"}:
+        reason_code = "INVALID_CITATION"
+    elif coverage == "FOUND" and authority == "PRIMARY":
+        reason_code = "PRIMARY_VALIDATED"
+    elif coverage == "FOUND" and authority == "SECONDARY":
+        reason_code = "SECONDARY_SOURCE"
+    elif coverage == "FOUND":
+        reason_code = "UNSUPPORTED_SOURCE"
+    else:
+        reason_code = coverage or "INVALID_COVERAGE"
+    if FUNDAMENTALS_BARRIER.inputs_complete(state):
+        logger.info(
+            "fla_latest_results_finalized",
+            ticker=state.get("company_of_interest", "UNKNOWN"),
+            reason_code=reason_code,
+        )
     if reconciled == state.get("foreign_language_report", ""):
         return {}
     logger.info(

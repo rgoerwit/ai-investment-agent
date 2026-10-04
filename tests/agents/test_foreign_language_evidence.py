@@ -1,5 +1,6 @@
 """Regression tests for deterministic FLA ownership/capacity provenance."""
 
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -16,7 +17,10 @@ from src.agents.message_utils import (
     evidence_record_to_tool_evidence,
     make_tool_evidence_record,
 )
-from src.agents.output_validation import _has_valid_latest_results_block
+from src.agents.output_validation import (
+    _has_valid_latest_results_block,
+    validate_required_output,
+)
 from src.data_block_utils import extract_last_fenced_block
 from src.graph.builder import _reconcile_fundamentals_evidence
 from src.tooling.evidence_recorder import EvidenceRecord
@@ -100,14 +104,19 @@ LATEST_RESULTS_SOURCE_URL: {source_url}
 
 def _latest_results_evidence(source_url: str) -> str:
     return f"""DOCUMENT_METADATA: {{"source_url": "{source_url}"}}
-Three months ended March 31, 2026
-Three months ended March 31, 2025
+Results comparison
+ Three months ended March 31, 2026
+ Three months ended March 31, 2025
 2026-03-31
 2025-03-31
-Currency: New dollars
+ Currency: New dollars
 Reporting unit: thousands
-Revenue 1,500 1,000
-Net income attributable to owners of parent 405 200
+Revenue
+1,500
+1,000
+Net income attributable to owners of parent
+405
+200
 """
 
 
@@ -600,6 +609,133 @@ def test_latest_results_accepts_post_inspection_ledger_record():
     assert "LATEST_RESULTS_EARNINGS_GROWTH_YOY: 102.5%" in normalized
 
 
+@pytest.mark.parametrize(
+    ("ticker", "fields", "source", "excerpt", "revenue_growth", "earnings_growth"),
+    [
+        (
+            "IPN.PA",
+            {
+                "PERIOD": "H1 2026",
+                "PRIOR_PERIOD": "H1 2025",
+                "PERIOD_END": "2026-06-30",
+                "PRIOR_PERIOD_END": "2025-06-30",
+                "PERIOD_MONTHS": "6",
+                "CURRENCY": "EUR",
+                "REPORTING_UNIT": "€m",
+                "REVENUE": "2190.2",
+                "PRIOR_REVENUE": "1819.8",
+                "EARNINGS": "402.6",
+                "PRIOR_EARNINGS": "335.5",
+                "EARNINGS_SCOPE": "IFRS Consolidated Net Profit",
+            },
+            "https://www.ipsen.com/press-release/ipsen-delivers-excellent-h1-2026-results-and-upgrades-its-full-year-guidance-3335743",
+            """Extract of consolidated results
+H1 2026
+H1 2025
+% change
+€m
+€m
+Actual
+CER
+Total Sales
+2 190.2
+1 819.8
+20.4 %
+23.5 %
+Core Operating Income
+844.9
+655.8
+28.8 %
+IFRS Consolidated Net Profit
+402.6
+335.5
+20.0 %
+The six-month periods ended 30 June 2026 and 30 June 2025.""",
+            "20.4%",
+            "20.0%",
+        ),
+        (
+            "5478.TWO",
+            {
+                "PERIOD": "115年Q2",
+                "PRIOR_PERIOD": "114年Q2",
+                "PERIOD_END": "2026-06-30",
+                "PRIOR_PERIOD_END": "2025-06-30",
+                "PERIOD_MONTHS": "3",
+                "CURRENCY": "新台幣",
+                "REPORTING_UNIT": "仟元",
+                "REVENUE": "1680297",
+                "PRIOR_REVENUE": "1556424",
+                "EARNINGS": "345215",
+                "PRIOR_EARNINGS": "401316",
+                "EARNINGS_SCOPE": "稅後淨利(歸屬本公司業主)",
+            },
+            "https://www.soft-world.com/News/NewsDetail?Sn=20394",
+            """智冠科技（5478）115年上半年簡易合併損益比較表
+單位：新台幣仟元
+合併營收
+115年Q2
+115年Q1
+QoQ
+114年Q2
+YoY
+營業收入
+1,680,297
+1,935,421
+-13%
+1,556,424
+7%
+稅後淨利(歸屬本公司業主)
+345,215
+358,473
+-3%
+401,316
+-13%""",
+            "8.0%",
+            "-14.0%",
+        ),
+    ],
+)
+def test_latest_results_inspected_comparative_table(
+    ticker, fields, source, excerpt, revenue_growth, earnings_growth
+):
+    report = _latest_results_report(source_url=source)
+    for field, value in fields.items():
+        report = report.replace(
+            f"LATEST_RESULTS_{field}: " + _field_for_test(report, field),
+            f"LATEST_RESULTS_{field}: {value}",
+        )
+    evidence = f'DOCUMENT_METADATA: {{"source_url": "{source}"}}\n{excerpt}'
+    normalized = normalize_foreign_language_evidence(
+        report,
+        [],
+        ticker=ticker,
+        additional_records=[
+            replace(
+                _record(evidence, name="get_official_document", urls={source}),
+                authority="PRIMARY_ISSUER",
+            )
+        ],
+    )
+    if ticker == "5478.TWO":
+        # The retained Q2/Q1/prior-Q2 table is real, but this issuer release
+        # omits explicit quarter-end dates, so the claimed dates cannot promote.
+        assert "LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED" in normalized
+        assert "LATEST_RESULTS_REVENUE_GROWTH_YOY: N/A" in normalized
+        return
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY" in normalized
+    assert f"LATEST_RESULTS_REVENUE_GROWTH_YOY: {revenue_growth}" in normalized
+    assert f"LATEST_RESULTS_EARNINGS_GROWTH_YOY: {earnings_growth}" in normalized
+
+
+def _field_for_test(report: str, field: str) -> str:
+    return next(
+        line.partition(": ")[2]
+        for line in report.splitlines()
+        if line.startswith(f"LATEST_RESULTS_{field}: ")
+    )
+
+
 def test_ledger_conversion_preserves_failure_status_and_normalizes_urls():
     record = EvidenceRecord(
         sequence=1,
@@ -665,6 +801,114 @@ def test_latest_results_rejects_mismatched_or_split_comparatives():
 
     assert "LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED" in mismatched
     assert "LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED" in split_records
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda text: text.replace("1,500\n1,000", "1,000\n1,500"),
+        lambda text: text.replace("Revenue\n", "Other income\n"),
+        lambda text: text.replace("March 31, 2025", "March 31, 2024"),
+        lambda text: text.replace(
+            "Reporting unit: thousands", "Reporting unit: millions"
+        ),
+        lambda text: text.replace(
+            "Net income attributable to owners of parent",
+            "Operating profit",
+        ),
+        lambda text: text.replace("Three months ended March 31, 2025\n", ""),
+    ],
+)
+def test_latest_results_rejects_table_mutations(mutation):
+    source = "https://www.twse.com.tw/results"
+    normalized = normalize_foreign_language_evidence(
+        _latest_results_report(source_url=source),
+        [
+            _tool(
+                mutation(_latest_results_evidence(source)), name="get_official_document"
+            )
+        ],
+        ticker="TEST",
+    )
+
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED" in normalized
+    assert "LATEST_RESULTS_REVENUE_GROWTH_YOY: N/A" in normalized
+
+
+def test_latest_results_rejects_wrong_asserted_end_date():
+    source = "https://www.twse.com.tw/results"
+    report = _latest_results_report(source_url=source).replace(
+        "LATEST_RESULTS_PERIOD_END: 2026-03-31",
+        "LATEST_RESULTS_PERIOD_END: 2026-04-01",
+    )
+
+    normalized = normalize_foreign_language_evidence(
+        report,
+        [_tool(_latest_results_evidence(source), name="get_official_document")],
+        ticker="TEST",
+    )
+
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED" in normalized
+    assert "LATEST_RESULTS_REVENUE_GROWTH_YOY: N/A" in normalized
+
+
+def test_invalid_latest_citation_keeps_valid_guidance_artifact():
+    guidance = """### --- START MANAGEMENT_GUIDANCE ---
+COVERAGE_STATUS: FOUND
+SOURCE_DATE: 2026-07-14
+SOURCE_URL: https://issuer.example/guidance
+SEARCHES_COMPLETED: results_package=SUCCEEDED/RESULTS_FOUND; earnings_bridge=SUCCEEDED/RESULTS_FOUND
+SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT
+OPERATING_VS_NET_DIRECTION: UNKNOWN
+MATERIAL_NONOPERATING_DRIVER: UNKNOWN
+DRIVER_TYPE: UNKNOWN
+DRIVER_PERSISTENCE: N/A
+EARNINGS_BASELINE_STATUS: MIXED
+GUIDANCE_BRIDGE_STATUS: NOT_APPLICABLE
+### --- END MANAGEMENT_GUIDANCE ---
+"""
+    report = guidance + _latest_results_report(source_url="N/A")
+
+    normalized = normalize_foreign_language_evidence(report, [], ticker="9168.T")
+
+    assert "COVERAGE_STATUS: FOUND" in normalized
+    assert "LATEST_RESULTS_COVERAGE_STATUS: FOUND" in normalized
+    assert "LATEST_RESULTS_REVENUE: N/A" in normalized
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED" in normalized
+    assert validate_required_output("foreign_language_analyst", normalized)["ok"]
+    promoted, _ = promote_foreign_growth_evidence("", normalized)
+    assert "LATEST_RESULTS_REVENUE:" not in promoted
+    assert "LATEST_RESULTS_REVENUE_GROWTH_YOY:" not in promoted
+
+
+def test_final_latest_diagnostic_emits_once_after_complete_barrier():
+    report = _latest_results_report(source_url="N/A")
+    state = {
+        "company_of_interest": "9168.T",
+        "foreign_language_report": report,
+        "messages": [AIMessage(content=report, name="foreign_language_analyst")],
+        "artifact_statuses": {
+            field: {"complete": True, "ok": True, "content": report}
+            for field in (
+                "foreign_language_report",
+                "raw_fundamentals_data",
+                "legal_report",
+            )
+        },
+    }
+    with (
+        patch("src.runtime_services.get_current_evidence_records", return_value=[]),
+        patch("src.graph.builder.logger.info") as log_info,
+    ):
+        _reconcile_fundamentals_evidence(state)
+
+    finalized = [
+        call
+        for call in log_info.call_args_list
+        if call.args == ("fla_latest_results_finalized",)
+    ]
+    assert len(finalized) == 1
+    assert finalized[0].kwargs["reason_code"] == "INVALID_CITATION"
 
 
 _NEXT_SECTION = (
@@ -785,13 +1029,21 @@ def test_repeated_or_duplicate_latest_results_blocks_are_rejected():
         ("https://issuer.example/results", "UNKNOWN"),  # FOUND without a period
     ],
 )
-def test_found_without_source_or_period_stays_invalid(source_url, period_end):
+def test_found_without_source_or_period_cannot_promote_growth(source_url, period_end):
     report = _latest_results_report(source_url=source_url).replace(
         "LATEST_RESULTS_PERIOD_END: 2026-03-31",
         f"LATEST_RESULTS_PERIOD_END: {period_end}",
     )
 
-    assert not _has_valid_latest_results_block(_normalized(report))
+    assert not _has_valid_latest_results_block(report)
+    normalized = _normalized(report)
+    assert "LATEST_RESULTS_REVENUE_GROWTH_YOY: N/A" in normalized
+    if period_end == "UNKNOWN":
+        assert not _has_valid_latest_results_block(normalized)
+    else:
+        assert _has_valid_latest_results_block(normalized)
+        assert "LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED" in normalized
+        assert "LATEST_RESULTS_REVENUE: N/A" in normalized
 
 
 def test_missing_required_field_in_a_drifted_block_stays_invalid():

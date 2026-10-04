@@ -421,6 +421,47 @@ def test_not_floored_with_auto_reject_flag():
     assert floored is False
 
 
+@pytest.mark.parametrize(
+    "flag",
+    [
+        {"type": "VALUE_TRAP_VERDICT", "risk_penalty": 1.0},
+        {"type": "FUTURE_MATERIAL_RISK", "risk_penalty": 1.0},
+    ],
+)
+def test_material_risk_is_not_erased_by_net_subtotal(flag):
+    out, floored = maybe_floor_verdict_to_hold(
+        _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+        decision_inputs=_inputs(APR_BLOCK, current_growth_fields=frozenset()),
+        red_flags=[flag, {"type": "QUALITY_BONUS", "risk_penalty": -0.5}],
+        code_subtotal=1.5,
+        pre_screening_result="PASS",
+        ticker="TEST",
+    )
+
+    assert floored is False
+    assert "VERDICT: DO_NOT_INITIATE" in out
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        {"type": "MANAGEMENT_GUIDANCE_EVIDENCE_GAP", "blocks_buy": True},
+        {"type": "REGULATORY_UNCERTAINTY", "risk_penalty": 0.5},
+    ],
+)
+def test_nonmaterial_caveat_does_not_prevent_hold_floor(flag):
+    out, floored = maybe_floor_verdict_to_hold(
+        _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+        decision_inputs=_inputs(APR_BLOCK, current_growth_fields=frozenset()),
+        red_flags=[flag],
+        code_subtotal=1.0,
+        pre_screening_result="PASS",
+    )
+
+    assert floored is True
+    assert "VERDICT: HOLD" in out
+
+
 def test_not_floored_when_prescreen_reject():
     _, floored = maybe_floor_verdict_to_hold(
         _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit
 
@@ -110,7 +110,9 @@ _LATEST_RESULTS_NUMERIC_FIELDS = (
     "LATEST_RESULTS_EARNINGS",
     "LATEST_RESULTS_PRIOR_EARNINGS",
 )
-_NUMBER_TOKEN_RE = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?(?![\w.])")
+_TABLE_NUMBER_RE = re.compile(r"-?\d{1,3}(?:[ ,]\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?")
+_TABLE_CHANGE_RE = re.compile(r"(?:%\s*change|qoq|yoy)", re.IGNORECASE)
+_REVENUE_ROW_LABELS = {"revenue", "total sales", "operating revenue", "營業收入"}
 _URL_RE = URL_RE
 _REQUIRED_BLOCK_START_RE = re.compile(
     r"(?im)^###\s+---\s+START\s+(?:MANAGEMENT_GUIDANCE|LATEST_RESULTS)\s+---\s*$"
@@ -306,14 +308,6 @@ def _exact_decimal(value: str) -> Decimal | None:
         return None
 
 
-def _evidence_has_decimal(content: str, expected: Decimal) -> bool:
-    return any(
-        parsed == expected
-        for token in _NUMBER_TOKEN_RE.findall(content)
-        if (parsed := _exact_decimal(token)) is not None
-    )
-
-
 def _valid_comparative_period(
     current_period_end: str,
     prior_period_end: str,
@@ -334,26 +328,150 @@ def _latest_results_record_supports(
     values: dict[str, str],
     decimals: dict[str, Decimal],
 ) -> bool:
-    content = record[1]
-    normalized_content = _normalized_text(content)
-    required_text = (
-        "LATEST_RESULTS_PERIOD",
-        "LATEST_RESULTS_PERIOD_END",
-        "LATEST_RESULTS_PRIOR_PERIOD",
-        "LATEST_RESULTS_PRIOR_PERIOD_END",
-        "LATEST_RESULTS_CURRENCY",
-        "LATEST_RESULTS_REPORTING_UNIT",
-        "LATEST_RESULTS_EARNINGS_SCOPE",
-    )
-    if any(
-        _normalized_text(values[field]) not in normalized_content
-        for field in required_text
+    """Bind both metric pairs to labelled rows under one retained period header."""
+    lines = [line.strip() for line in record.content.splitlines() if line.strip()]
+    current = _normalized_text(values["LATEST_RESULTS_PERIOD"])
+    prior = _normalized_text(values["LATEST_RESULTS_PRIOR_PERIOD"])
+    scope = _normalized_text(values["LATEST_RESULTS_EARNINGS_SCOPE"])
+    months = int(values["LATEST_RESULTS_PERIOD_MONTHS"])
+    if not all(
+        _header_period_matches(values[label], values[end], months)
+        and _source_has_period_end(record.content, values[end])
+        for label, end in (
+            ("LATEST_RESULTS_PERIOD", "LATEST_RESULTS_PERIOD_END"),
+            ("LATEST_RESULTS_PRIOR_PERIOD", "LATEST_RESULTS_PRIOR_PERIOD_END"),
+        )
     ):
         return False
-    return all(
-        _evidence_has_decimal(content, decimals[field])
-        for field in _LATEST_RESULTS_NUMERIC_FIELDS
+    for start, line in enumerate(lines):
+        if _normalized_text(line) != current:
+            continue
+        header = lines[start : start + 16]
+        prior_positions = [
+            index
+            for index, item in enumerate(header)
+            if _normalized_text(item) == prior
+        ]
+        if len(prior_positions) != 1:
+            continue
+        row_start = next(
+            (
+                index
+                for index in range(start + 1, min(start + 32, len(lines)))
+                if _normalized_text(lines[index]) in _REVENUE_ROW_LABELS
+            ),
+            None,
+        )
+        if row_start is None or row_start <= start + prior_positions[0]:
+            continue
+        heading = lines[max(0, start - 5) : row_start]
+        heading_text = _normalized_text(" ".join(heading))
+        unit = _normalized_text(values["LATEST_RESULTS_REPORTING_UNIT"])
+        currency = _normalized_text(values["LATEST_RESULTS_CURRENCY"])
+        if unit not in heading_text or not (
+            currency in heading_text or (currency == "eur" and "€" in heading_text)
+        ):
+            continue
+        columns = [
+            item
+            for item in lines[start:row_start]
+            if _normalized_text(item) in {current, prior}
+            or _TABLE_CHANGE_RE.fullmatch(item)
+            or re.fullmatch(r"\d{3}年[QH][1-4]|[QH][1-4]\s+\d{4}", item, re.I)
+        ]
+        if len(columns) < 2 or columns[0] != line:
+            continue
+        prior_column = next(
+            (i for i, item in enumerate(columns) if _normalized_text(item) == prior),
+            None,
+        )
+        if prior_column is None:
+            continue
+        earnings_row = next(
+            (
+                index
+                for index in range(row_start + 1, min(row_start + 45, len(lines)))
+                if _normalized_text(lines[index]) == scope
+            ),
+            None,
+        )
+        if earnings_row is None:
+            continue
+        revenue_cells = _table_row_cells(lines, row_start, len(columns))
+        earnings_cells = _table_row_cells(lines, earnings_row, len(columns))
+        if revenue_cells is None or earnings_cells is None:
+            continue
+        if (
+            revenue_cells[0] == decimals["LATEST_RESULTS_REVENUE"]
+            and revenue_cells[prior_column] == decimals["LATEST_RESULTS_PRIOR_REVENUE"]
+            and earnings_cells[0] == decimals["LATEST_RESULTS_EARNINGS"]
+            and earnings_cells[prior_column]
+            == decimals["LATEST_RESULTS_PRIOR_EARNINGS"]
+        ):
+            return True
+    return False
+
+
+def _source_has_period_end(content: str, period_end: str) -> bool:
+    """Require both asserted end dates in the same inspected document."""
+    try:
+        end = date.fromisoformat(period_end)
+    except ValueError:
+        return False
+    month_name = end.strftime("%B")
+    variants = (
+        end.isoformat(),
+        f"{end.year}/{end.month:02d}/{end.day:02d}",
+        f"{end.day} {month_name} {end.year}",
+        f"{month_name} {end.day}, {end.year}",
+        f"{end.year}年{end.month}月{end.day}日",
     )
+    return any(variant.casefold() in content.casefold() for variant in variants)
+
+
+def _header_period_matches(label: str, period_end: str, months: int) -> bool:
+    """Only accept period labels whose calendar end can be checked exactly."""
+    match = re.fullmatch(r"H([12]) (20\d{2})", label, re.I)
+    if match:
+        half, year = map(int, match.groups())
+        day = 30 if half == 1 else 31
+        return months == 6 and period_end == f"{year}-{half * 6:02d}-{day}"
+    match = re.fullmatch(r"(\d{3})年Q([1-4])", label)
+    if match:
+        roc_year, quarter = map(int, match.groups())
+        month = quarter * 3
+        day = 30 if month in {6, 9} else 31
+        return months == 3 and period_end == f"{roc_year + 1911}-{month:02d}-{day}"
+    match = re.fullmatch(
+        r"(Three|Six|Twelve) months ended ([A-Za-z]+ \d{1,2}, 20\d{2})",
+        label,
+        re.I,
+    )
+    if match:
+        expected_months = {"three": 3, "six": 6, "twelve": 12}[match.group(1).lower()]
+        try:
+            parsed_end = datetime.strptime(match.group(2), "%B %d, %Y").date()
+        except ValueError:
+            return False
+        return months == expected_months and period_end == parsed_end.isoformat()
+    return False
+
+
+def _table_row_cells(
+    lines: list[str], row_start: int, count: int
+) -> list[Decimal | None] | None:
+    cells: list[Decimal | None] = []
+    for line in lines[row_start + 1 : row_start + count + 1]:
+        if line == "-" or "%" in line:
+            cells.append(None)
+            continue
+        if not _TABLE_NUMBER_RE.fullmatch(line):
+            return None
+        try:
+            cells.append(Decimal(line.replace(",", "").replace(" ", "")))
+        except InvalidOperation:
+            return None
+    return cells if len(cells) == count else None
 
 
 _LATEST_RESULTS_START = "### --- START LATEST_RESULTS ---"
@@ -430,8 +548,6 @@ def _strip_source_url_annotation(report: str) -> str:
 def _normalize_latest_results(
     report: str,
     records: list[ToolEvidenceRecord],
-    *,
-    ticker: str,
 ) -> str:
     report = _strip_source_url_annotation(_reframe_latest_results_block(report))
     block = unique_latest_results_block(report)
@@ -448,6 +564,23 @@ def _normalize_latest_results(
 
     values = {field: _field(block, field) for field in LATEST_RESULTS_SOURCE_FIELDS}
     source_url = normalize_http_url(values["LATEST_RESULTS_SOURCE_URL"])
+    if source_url is None:
+        # A citation-free candidate cannot supply growth, but it must not erase
+        # an independently valid MANAGEMENT_GUIDANCE block in the same report.
+        normalized = _replace_latest_results_field(
+            report, "LATEST_RESULTS_SOURCE_URL", "N/A"
+        )
+        for field in _LATEST_RESULTS_NUMERIC_FIELDS:
+            normalized = _replace_latest_results_field(normalized, field, "N/A")
+        normalized = _replace_latest_results_field(
+            normalized, "LATEST_RESULTS_SOURCE_AUTHORITY", "UNSUPPORTED"
+        )
+        for field in (
+            "LATEST_RESULTS_REVENUE_GROWTH_YOY",
+            "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
+        ):
+            normalized = _replace_latest_results_field(normalized, field, "N/A")
+        return normalized
     decimals = {
         field: parsed
         for field in _LATEST_RESULTS_NUMERIC_FIELDS
@@ -507,12 +640,6 @@ def _normalize_latest_results(
             "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
             "N/A",
         )
-        if authority == "UNSUPPORTED":
-            logger.warning(
-                "fla_latest_results_evidence_rejected",
-                ticker=ticker,
-                source_url_present=source_url is not None,
-            )
         return normalized
 
     revenue_prior = decimals["LATEST_RESULTS_PRIOR_REVENUE"]
@@ -1003,7 +1130,7 @@ def normalize_foreign_language_evidence(
         ticker=ticker,
         supplemental_evidence=supplemental_evidence,
     )
-    return _normalize_latest_results(normalized, records, ticker=ticker)
+    return _normalize_latest_results(normalized, records)
 
 
 FOREIGN_GROWTH_PROMOTION_FIELDS: dict[str, str] = {

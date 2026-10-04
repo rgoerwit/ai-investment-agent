@@ -37,6 +37,7 @@ _FORENSIC_VERDICT_PATTERN = re.compile(
 def _has_valid_latest_results_block(content: str) -> bool:
     """Require the complete latest-results contract, including explicit N/A fields."""
     from src.agents.foreign_language_evidence import (
+        _LATEST_RESULTS_NUMERIC_FIELDS,
         LATEST_RESULTS_SOURCE_FIELDS,
         unique_latest_results_block,
     )
@@ -76,16 +77,30 @@ def _has_valid_latest_results_block(content: str) -> bool:
         block,
         "LATEST_RESULTS_SOURCE_URL",
     )
-    if not (
+    valid_period = (
         period
         and period.upper() not in {"N/A", "NA", "NONE", "UNKNOWN"}
         and period_end
         and re.fullmatch(r"\d{4}-\d{2}-\d{2}", period_end)
-        and source_url
-        and URL_RE.fullmatch(source_url)
-    ):
+    )
+    if not valid_period:
         return False
-    return True
+    if source_url and URL_RE.fullmatch(source_url):
+        return True
+    # A normalized unsourced candidate can coexist with independently valid
+    # guidance, provided no latest-results numeric claim survives.
+    authority = extract_block_field_from_text_raw(
+        block, "LATEST_RESULTS_SOURCE_AUTHORITY"
+    )
+    numeric_fields = (
+        *_LATEST_RESULTS_NUMERIC_FIELDS,
+        "LATEST_RESULTS_REVENUE_GROWTH_YOY",
+        "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
+    )
+    return authority == "UNSUPPORTED" and all(
+        extract_block_field_from_text_raw(block, field) == "N/A"
+        for field in numeric_fields
+    )
 
 
 def _has_valid_management_guidance_block(content: str) -> bool:

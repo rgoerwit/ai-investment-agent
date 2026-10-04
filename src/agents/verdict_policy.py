@@ -15,8 +15,9 @@ healthy, data-limited name into DO_NOT_INITIATE.
 
 Conservative by construction: only floors DO_NOT_INITIATE -> HOLD (never upgrades to BUY),
 gates on the *deterministic* code subtotal (not the LLM's hand-summed total), requires no
-auto-reject/critical flag, and requires positive multi-year revenue so a genuinely
-shrinking name (e.g. KTY.WA: P/E > 18 and 3Y CAGR < 0) is never floored.
+auto-reject/critical or individually material flag, and requires positive multi-year
+revenue so a genuinely shrinking name (e.g. KTY.WA: P/E > 18 and 3Y CAGR < 0)
+is never floored.
 
 Every public rewriter in this module is a projection onto a canonical form: applying
 it repeatedly must leave the text unchanged after the first application.
@@ -348,16 +349,21 @@ _REVIEW_DISQUALIFYING_FLAGS = frozenset({"VALUE_TRAP_HIGH_RISK", "VALUE_TRAP_VER
 _REVIEW_DISQUALIFYING_PENALTY = 1.0
 
 
-def _disqualifies_review_candidate(flag: dict) -> bool:
+def _has_material_individual_risk(flag: dict) -> bool:
+    """A single material penalty must not disappear into a net risk subtotal."""
     ftype = str(flag.get("type", ""))
-    if ftype in _REVIEW_DISQUALIFYING_FLAGS or ftype.startswith(
-        _REVIEW_DISQUALIFYING_PREFIXES
-    ):
+    if ftype in _REVIEW_DISQUALIFYING_FLAGS:
         return True
     penalty = flag.get("risk_penalty")
     if isinstance(penalty, bool):
         return False
     return isinstance(penalty, int | float) and penalty >= _REVIEW_DISQUALIFYING_PENALTY
+
+
+def _disqualifies_review_candidate(flag: dict) -> bool:
+    return str(flag.get("type", "")).startswith(
+        _REVIEW_DISQUALIFYING_PREFIXES
+    ) or _has_material_individual_risk(flag)
 
 
 def maybe_tag_dni_review_candidate(
@@ -603,6 +609,10 @@ def maybe_floor_verdict_to_hold(
         return content_str, False
     if _has_hard_flag(red_flags):
         return content_str, False
+    # A positive bonus can pull the net subtotal below Zone 1 without resolving
+    # a material individual risk. Review tagging shares this individual check.
+    if any(_has_material_individual_risk(flag) for flag in red_flags):
+        return content_str, False
     if code_subtotal is None or code_subtotal >= ZONE_1_THRESHOLD:
         return content_str, False
     if not (
@@ -633,7 +643,7 @@ def maybe_floor_verdict_to_hold(
         f"exception (Adjusted Health {health:.0f}% ≥ 65, P/E {pe:.2f} ≤ 18, "
         f"3Y revenue CAGR {cagr:.1f}% ≥ 0), and the deterministic code-computed risk "
         f"subtotal ({code_subtotal:+.2f}) is below the Zone-1 threshold ({ZONE_1_THRESHOLD}) "
-        f"with no auto-reject flag. A soft-point tally may not convert a healthy, "
+        f"without a material disqualifying flag. A soft-point tally may not convert a healthy, "
         f"data-limited name into an avoid/exit."
     )
     floored, changed, n_header, n_block = _apply_verdict_rewrite(
