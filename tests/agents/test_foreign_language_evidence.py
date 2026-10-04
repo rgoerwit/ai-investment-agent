@@ -9,6 +9,7 @@ from src.agents.foreign_language_evidence import (
     _reframe_latest_results_block,
     has_foreign_language_protocol_residue,
     normalize_foreign_language_evidence,
+    promote_foreign_growth_evidence,
 )
 from src.agents.message_utils import (
     ToolEvidenceRecord,
@@ -732,6 +733,48 @@ def test_annotated_source_url_is_trimmed_to_the_url():
         normalized
     )
     assert _has_valid_latest_results_block(normalized)
+
+
+def test_latest_results_ignores_stray_fields_outside_the_only_block():
+    source = "https://www.twse.com.tw/results"
+    report = (
+        "LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND\n"
+        "LATEST_RESULTS_SOURCE_URL: https://wrong.example (note)\n"
+        + _latest_results_report(source_url=source)
+    )
+    normalized = normalize_foreign_language_evidence(
+        report,
+        [],
+        ticker="TEST",
+        additional_records=[
+            _record(
+                _latest_results_evidence(source),
+                name="get_official_document",
+                urls={source},
+            )
+        ],
+    )
+
+    assert _has_valid_latest_results_block(normalized)
+    block = extract_last_fenced_block(normalized, "LATEST_RESULTS")
+    assert block is not None
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY" in block
+    promoted, _ = promote_foreign_growth_evidence("", normalized)
+    assert "LATEST_RESULTS_COVERAGE_STATUS: FOUND" in promoted
+
+
+def test_repeated_or_duplicate_latest_results_blocks_are_rejected():
+    report = _latest_results_report()
+    duplicate_field = report.replace(
+        "LATEST_RESULTS_COVERAGE_STATUS: FOUND",
+        "LATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND\n"
+        "LATEST_RESULTS_COVERAGE_STATUS: FOUND",
+    )
+    for ambiguous in (report + report, duplicate_field):
+        normalized = _normalized(ambiguous)
+        assert not _has_valid_latest_results_block(normalized)
+        promoted, _ = promote_foreign_growth_evidence("", normalized)
+        assert "LATEST_RESULTS_COVERAGE_STATUS" not in promoted
 
 
 @pytest.mark.parametrize(

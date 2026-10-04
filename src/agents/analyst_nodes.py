@@ -1424,14 +1424,7 @@ def create_analyst_node(
                         truncated=initial_truncation["truncated"],
                         validation=initial_validation,
                     )
-                    reasoning_setting = next(
-                        (
-                            str(value)
-                            for attr in ("reasoning_effort", "thinking_level")
-                            if isinstance((value := getattr(llm, attr, None)), str)
-                        ),
-                        None,
-                    )
+                    reasoning_setting = support.reasoning_setting_for(llm)
                     recovery_event = {
                         "schema_version": 1,
                         "originating_agent": agent_key,
@@ -1439,6 +1432,9 @@ def create_analyst_node(
                         "original_model": support.get_model_name(llm),
                         "recovery_model": support.get_model_name(retry_llm),
                         "reasoning_setting": reasoning_setting,
+                        "recovery_reasoning_setting": support.reasoning_setting_for(
+                            retry_llm
+                        ),
                         "original_output_chars": len(content_str),
                         "outcome": "attempted",
                     }

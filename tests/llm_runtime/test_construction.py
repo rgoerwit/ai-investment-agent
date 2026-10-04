@@ -5,6 +5,9 @@ import pytest
 from src.config import Settings
 from src.llm_runtime.bindings import resolve_binding_plan
 from src.llm_runtime.construction import (
+    LegacyGraphFactories,
+    LegacySeatRequest,
+    build_legacy_model,
     build_model_for_seat,
     build_required_model_for_seat,
     writer_seat_fallback_chain,
@@ -268,6 +271,104 @@ def test_quick_senior_fundamentals_remains_pinned_to_standard_tier() -> None:
     )
 
     assert factory.requests[0].service_tier == "standard"
+
+
+@pytest.mark.parametrize(
+    ("quick_mode", "expected_tier"), [(True, "standard"), (False, "flex")]
+)
+def test_junior_fundamentals_leaves_flex_only_in_quick_mode(
+    quick_mode, expected_tier
+) -> None:
+    settings = _settings(
+        llm_base_provider="google",
+        llm_review_provider="openai",
+        google_service_tier="flex",
+    )
+    plan = resolve_binding_plan(settings)
+    factory = RecordingFactory()
+
+    build_required_model_for_seat(
+        SeatId.JUNIOR_FUNDAMENTALS,
+        settings=settings,
+        plan=plan,
+        factory=factory,
+        quick_mode=quick_mode,
+    )
+
+    assert factory.requests[0].service_tier == expected_tier
+
+
+@pytest.mark.parametrize(
+    "quick_mode,expected_tier", [(True, "standard"), (False, None)]
+)
+def test_legacy_junior_uses_standard_only_in_quick_mode(
+    quick_mode, expected_tier
+) -> None:
+    settings = Settings(_env_file=None, google_api_key="g", gemini_service_tier="flex")
+    plan = resolve_binding_plan(settings)
+    assert plan.schema == "legacy"
+    factory = MagicMock(return_value=MagicMock())
+    factories = LegacyGraphFactories(
+        quick=factory,
+        deep=factory,
+        apex=MagicMock(),
+        consultant=MagicMock(),
+        auditor=MagicMock(),
+        apac=MagicMock(),
+    )
+    request = LegacySeatRequest(
+        seat_id=SeatId.JUNIOR_FUNDAMENTALS,
+        settings=settings,
+        quick_mode=quick_mode,
+        callbacks=(),
+        output_tokens=None,
+        model_override=None,
+        resolved_model=plan.for_seat(
+            SeatId.JUNIOR_FUNDAMENTALS, quick_mode=quick_mode
+        ).model,
+    )
+
+    build_legacy_model(request, graph_factories=factories)
+
+    assert factory.call_args.kwargs.get("service_tier") == expected_tier
+
+
+@pytest.mark.parametrize(
+    ("seat_id", "factory_name", "expected_tier"),
+    [
+        (SeatId.SENIOR_FUNDAMENTALS, "apex", "standard"),
+        (SeatId.ANALYST_RETRY, "deep", "standard"),
+        (SeatId.PORTFOLIO_MANAGER, "apex", None),
+    ],
+)
+def test_legacy_quick_tier_follows_seat_policy(
+    seat_id, factory_name, expected_tier
+) -> None:
+    settings = Settings(_env_file=None, google_api_key="g", gemini_service_tier="flex")
+    plan = resolve_binding_plan(settings)
+    assert plan.schema == "legacy"
+    factories = LegacyGraphFactories(
+        quick=MagicMock(),
+        deep=MagicMock(),
+        apex=MagicMock(),
+        consultant=MagicMock(),
+        auditor=MagicMock(),
+        apac=MagicMock(),
+    )
+    request = LegacySeatRequest(
+        seat_id=seat_id,
+        settings=settings,
+        quick_mode=True,
+        callbacks=(),
+        output_tokens=None,
+        model_override=None,
+        resolved_model=plan.for_seat(seat_id, quick_mode=True).model,
+    )
+
+    build_legacy_model(request, graph_factories=factories)
+
+    factory = getattr(factories, factory_name)
+    assert factory.call_args.kwargs["service_tier"] == expected_tier
 
 
 def test_readable_reasoning_request_reaches_provider_adapter() -> None:

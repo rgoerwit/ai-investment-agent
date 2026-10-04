@@ -79,6 +79,11 @@ def test_quick_mode_service_tier_policy_only_unpins_the_portfolio_manager() -> N
         SEATS[SeatId.SENIOR_FUNDAMENTALS].execution_policy.standard_tier_in_quick_mode
         is True
     )
+    # Junior's p90 latency exceeds the quick flex-attempt window (seats.py).
+    assert (
+        SEATS[SeatId.JUNIOR_FUNDAMENTALS].execution_policy.standard_tier_in_quick_mode
+        is True
+    )
     assert (
         SEATS[SeatId.PORTFOLIO_MANAGER].execution_policy.standard_tier_in_quick_mode
         is False

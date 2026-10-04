@@ -89,6 +89,7 @@ class TestApexFactoryUnset:
         with patch.object(llms_mod, "create_quick_thinking_llm") as quick:
             llms_mod.create_apex_llm("senior_fundamentals", quick_mode=True)
         quick.assert_called_once()
+        assert quick.call_args.kwargs["service_tier"] == "standard"
 
 
 class TestApexFactorySet:
@@ -152,9 +153,7 @@ class TestApexFactorySet:
         assert kwargs["thinking_level"] == "high"
         assert kwargs["temperature"] == 0.1
 
-    def test_quick_mode_pins_standard_tier(self, monkeypatch):
-        # Gate-critical seat must not queue on best-effort flex under the tight
-        # --quick budget: create_gemini_model gets service_tier="standard".
+    def test_quick_senior_pins_standard_tier(self, monkeypatch):
         _set_cfg(
             monkeypatch,
             apex_model="gemini-3.1-pro-preview",
@@ -162,7 +161,25 @@ class TestApexFactorySet:
             apex_thinking_level="high",
         )
         with patch.object(llms_mod, "create_gemini_model") as gemini:
+            llms_mod.create_apex_llm("senior_fundamentals", quick_mode=True)
+        assert gemini.call_args.kwargs["service_tier"] == "standard"
+
+    def test_quick_pm_explicit_apex_leaves_tier_to_config(self, monkeypatch):
+        _set_cfg(
+            monkeypatch,
+            apex_model="gemini-3.1-pro-preview",
+            apex_quick_model="gemini-3.5-flash",
+            gemini_service_tier="flex",
+        )
+        with patch.object(llms_mod, "create_gemini_model") as gemini:
             llms_mod.create_apex_llm("portfolio_manager", quick_mode=True)
+        assert gemini.call_args.kwargs["service_tier"] is None
+
+    def test_deep_factory_passes_explicit_tier_to_gemini(self):
+        with patch.object(llms_mod, "create_gemini_model") as gemini:
+            llms_mod.create_deep_thinking_llm(
+                model="gemini-3.5-flash", service_tier="standard"
+            )
         assert gemini.call_args.kwargs["service_tier"] == "standard"
 
     def test_full_mode_leaves_tier_to_config(self, monkeypatch):

@@ -62,8 +62,15 @@ def build_legacy_model(
     from src import llms
 
     seat_id = request.seat_id
+    policy = SEATS[seat_id].execution_policy
     settings = request.settings
     quick_mode = request.quick_mode
+    pinned_tier = (
+        "standard"
+        if policy.standard_tier_only
+        or (quick_mode and policy.standard_tier_in_quick_mode)
+        else None
+    )
     callbacks = list(request.callbacks)
     output_tokens = request.output_tokens
     model_override = request.model_override
@@ -187,6 +194,7 @@ def build_legacy_model(
             quick_mode=quick_mode,
             callbacks=callbacks,
             max_output_tokens=output_tokens,
+            service_tier=pinned_tier,
             settings=settings,
         )
     if seat_id is SeatId.ANALYST_RETRY:
@@ -194,9 +202,9 @@ def build_legacy_model(
             model=request.resolved_model,
             callbacks=callbacks,
             max_output_tokens=output_tokens,
+            service_tier=pinned_tier,
             settings=settings,
         )
-    policy = SEATS[seat_id].execution_policy
     spec = SEATS[seat_id]
     if quick_mode or spec.normal_intent in {ModelIntent.FAST, ModelIntent.CLASSIFIER}:
         return quick_factory(
@@ -214,7 +222,7 @@ def build_legacy_model(
             max_retries=policy.sdk_max_retries,
             callbacks=callbacks,
             max_output_tokens=output_tokens,
-            service_tier=("standard" if policy.standard_tier_only else None),
+            service_tier=pinned_tier,
             thinking_level_bump=(seat_id is SeatId.VALUE_TRAP and not quick_mode),
             api_key=settings.get_google_api_key(),
             settings=settings,
@@ -230,6 +238,7 @@ def build_legacy_model(
         max_retries=policy.sdk_max_retries,
         callbacks=callbacks,
         max_output_tokens=output_tokens,
+        service_tier=pinned_tier,
         api_key=settings.get_google_api_key(),
         settings=settings,
         **reasoning_output_kwargs,

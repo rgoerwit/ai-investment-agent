@@ -23,6 +23,9 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -79,6 +82,73 @@ class _FlexHealth:
 
 
 _flex_health: dict[str, _FlexHealth] = {}
+
+
+@dataclass
+class TierAttempt:
+    """Last transport tier reached inside one outer LLM attempt."""
+
+    tier: str | None = None
+    latency_fallback: bool = False
+
+
+_tier_attempt: ContextVar[TierAttempt | None] = ContextVar(
+    "llm_tier_attempt", default=None
+)
+
+
+@contextmanager
+def track_tier_attempt(initial_tier: str | None) -> Iterator[TierAttempt]:
+    attempt = TierAttempt(initial_tier)
+    token = _tier_attempt.set(attempt)
+    try:
+        yield attempt
+    finally:
+        _tier_attempt.reset(token)
+
+
+def mark_tier_attempt(tier: str | None) -> None:
+    """Called immediately before a transport request, including fallback."""
+    attempt = _tier_attempt.get()
+    if attempt is not None:
+        attempt.tier = tier
+
+
+def mark_flex_latency_fallback() -> None:
+    """Remember that flex queue time preceded the standard request."""
+    attempt = _tier_attempt.get()
+    if attempt is not None:
+        attempt.latency_fallback = True
+
+
+def runnable_attempt_tier(runnable: Any, provider: str | None) -> str | None:
+    """Initial tier for a composed model, before transport fallback may change it."""
+    from langchain_core.runnables import RunnableBinding, RunnableSequence
+
+    stack = [runnable]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, RunnableBinding):
+            stack.append(node.bound)
+            continue
+        if isinstance(node, RunnableSequence):
+            stack.extend(node.steps)
+            continue
+        tier = getattr(node, "service_tier", None)
+        if not isinstance(tier, str):
+            continue
+        model = getattr(node, "model_name", None) or getattr(node, "model", None)
+        if tier == "flex" and (
+            flex_degraded(provider)
+            or (isinstance(model, str) and is_flex_unsupported(model))
+        ):
+            return None
+        return tier
+    return None
 
 
 def _cfg(cfg: Any = None) -> Any:

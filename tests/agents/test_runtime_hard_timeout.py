@@ -538,6 +538,131 @@ class TestQuickModeFlexLatencyGuard:
     flex-fallback x timeout matrix rows 6-8."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "start_tier", ["standard", "degraded", "capacity_fallback"]
+    )
+    async def test_standard_attempt_timeout_is_counted_and_retried(
+        self, monkeypatch, start_tier
+    ):
+        from unittest.mock import MagicMock
+
+        from src.agents.circuit_breaker import (
+            get_circuit_breaker,
+            reset_circuit_breaker_for_tests,
+        )
+        from src.runtime_config import RuntimeConfig, use_runtime_config
+        from src.service_tiers import mark_tier_attempt
+
+        reset_circuit_breaker_for_tests()
+        monkeypatch.setattr(settings_config, "gemini_service_tier", "flex")
+        if start_tier == "degraded":
+            monkeypatch.setattr(
+                "src.service_tiers.flex_degraded", lambda provider: True
+            )
+        rc = RuntimeConfig.from_config(settings_config).with_overrides(
+            quick_mode_active=True
+        )
+
+        async def timeout(*_a, **_kw):
+            if start_tier == "capacity_fallback":
+                mark_tier_attempt("standard")
+            raise TimeoutError("request timed out")
+
+        runnable = AsyncMock()
+        runnable.service_tier = "standard" if start_tier == "standard" else "flex"
+        runnable.ainvoke = AsyncMock(side_effect=timeout)
+        breaker = get_circuit_breaker()
+        record_spy = MagicMock(wraps=breaker.record_outcome)
+        monkeypatch.setattr(breaker, "record_outcome", record_spy)
+
+        with (
+            patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock),
+            use_runtime_config(rc),
+            pytest.raises(TimeoutError),
+        ):
+            await invoke_with_rate_limit_handling(
+                runnable,
+                {"input": "x"},
+                max_attempts=2,
+                max_transient_attempts=2,
+                context="QuickStandardTimeout",
+                provider="google",
+                model_name="gemini-3.5-flash",
+            )
+
+        assert runnable.ainvoke.call_count == 2
+        assert any(call.kwargs.get("ok") is False for call in record_spy.call_args_list)
+        from src.token_tracker import get_tracker
+
+        recorded = [
+            row
+            for row in get_tracker().call_attempts
+            if row.agent_name == "QuickStandardTimeout"
+        ]
+        assert recorded and all(row.service_tier != "flex" for row in recorded)
+        reset_circuit_breaker_for_tests()
+
+    @pytest.mark.asyncio
+    async def test_latency_fallback_timeout_does_not_requeue_or_trip_breaker(
+        self, monkeypatch
+    ):
+        from unittest.mock import MagicMock
+
+        from src.agents.circuit_breaker import (
+            get_circuit_breaker,
+            reset_circuit_breaker_for_tests,
+        )
+        from src.runtime_config import RuntimeConfig, use_runtime_config
+        from src.service_tiers import mark_flex_latency_fallback, mark_tier_attempt
+        from src.token_tracker import get_tracker
+
+        reset_circuit_breaker_for_tests()
+        monkeypatch.setattr(settings_config, "gemini_service_tier", "flex")
+        rc = RuntimeConfig.from_config(settings_config).with_overrides(
+            quick_mode_active=True
+        )
+
+        async def timeout_after_fallback(*_a, **_kw):
+            mark_flex_latency_fallback()
+            mark_tier_attempt("standard")
+            raise TimeoutError("standard leg exceeded remaining outer budget")
+
+        runnable = AsyncMock()
+        runnable.service_tier = "flex"
+        runnable.ainvoke = AsyncMock(side_effect=timeout_after_fallback)
+        breaker = get_circuit_breaker()
+        record_spy = MagicMock(wraps=breaker.record_outcome)
+        monkeypatch.setattr(breaker, "record_outcome", record_spy)
+
+        with (
+            patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock),
+            use_runtime_config(rc),
+            pytest.raises(TimeoutError),
+        ):
+            await invoke_with_rate_limit_handling(
+                runnable,
+                {"input": "x"},
+                max_attempts=2,
+                max_transient_attempts=2,
+                context="QuickLatencyFallbackTimeout",
+                provider="google",
+                model_name="gemini-3.5-flash",
+            )
+
+        assert runnable.ainvoke.call_count == 1
+        assert not any(
+            call.kwargs.get("ok") is False for call in record_spy.call_args_list
+        )
+        attempts = [
+            row
+            for row in get_tracker().call_attempts
+            if row.agent_name == "QuickLatencyFallbackTimeout"
+        ]
+        assert len(attempts) == 1
+        assert attempts[0].service_tier == "standard"
+        reset_circuit_breaker_for_tests()
+
+    @pytest.mark.asyncio
     async def test_quick_flex_timeout_is_non_retryable_and_not_breaker_counted(
         self, monkeypatch
     ):
@@ -561,6 +686,7 @@ class TestQuickModeFlexLatencyGuard:
 
         runnable = AsyncMock()
         runnable.ainvoke = AsyncMock(side_effect=always_hangs)
+        runnable.service_tier = "flex"
 
         breaker = get_circuit_breaker()
         record_spy = MagicMock(wraps=breaker.record_outcome)

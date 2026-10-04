@@ -49,6 +49,15 @@ def get_model_name(runnable: Any) -> str | None:
     return _get_model_name(runnable)
 
 
+def reasoning_setting_for(runnable: Any) -> str | None:
+    """Return the configured reasoning level used in recovery telemetry."""
+    for attr in ("reasoning_effort", "thinking_level"):
+        value = getattr(runnable, attr, None)
+        if isinstance(value, str):
+            return value
+    return None
+
+
 def get_context_from_config(config: Mapping[str, Any]) -> Any | None:
     """Extract TradingContext from RunnableConfig.configurable dict."""
     try:

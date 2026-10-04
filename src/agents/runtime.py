@@ -37,7 +37,11 @@ from src.runtime_diagnostics import (
     get_runtime_provider,
     retry_disposition,
 )
-from src.service_tiers import floor_llm_hard_timeout, provider_flex_active
+from src.service_tiers import (
+    floor_llm_hard_timeout,
+    runnable_attempt_tier,
+    track_tier_attempt,
+)
 from src.token_tracker import canonical_display_name
 
 logger = structlog.get_logger(__name__)
@@ -524,6 +528,13 @@ async def invoke_with_rate_limit_handling(
 
     for attempt in range(max_attempts):
         attempt_started = time.monotonic()
+        initial_tier = (
+            "standard"
+            if failing_over
+            else runnable_attempt_tier(runnable, resolved_provider)
+        )
+        attempted_tier = initial_tier
+        latency_fallback = False
         try:
             effective_timeout = hard_timeout
             if deadline is not None:
@@ -544,12 +555,17 @@ async def invoke_with_rate_limit_handling(
             if network_breaker is not None:
                 network_breaker.before_call()
 
-            with failover_attempt() if failing_over else nullcontext():
-                result = await run_with_hard_timeout(
-                    runnable.ainvoke(input_data),
-                    timeout=effective_timeout,
-                    label=f"llm:{context}:{resolved_provider}:{resolved_model}",
-                )
+            with track_tier_attempt(initial_tier) as tier_attempt:
+                try:
+                    with failover_attempt() if failing_over else nullcontext():
+                        result = await run_with_hard_timeout(
+                            runnable.ainvoke(input_data),
+                            timeout=effective_timeout,
+                            label=f"llm:{context}:{resolved_provider}:{resolved_model}",
+                        )
+                finally:
+                    attempted_tier = tier_attempt.tier
+                    latency_fallback = tier_attempt.latency_fallback
             # Refusal / provider safety block: a returned response that the
             # provider blocked or refused (finish_reason SAFETY/content_filter,
             # Anthropic stop_reason=refusal, OpenAI structured .refusal, Gemini
@@ -741,6 +757,7 @@ async def invoke_with_rate_limit_handling(
                     configured_reasoning_reserve_tokens=attempt_budget[
                         "configured_reasoning_reserve_tokens"
                     ],
+                    service_tier=attempted_tier,
                 )
             if not quiet_mode:
                 logger.info(
@@ -826,17 +843,15 @@ async def invoke_with_rate_limit_handling(
                 base_url=get_base_url(runnable),
             )
             elapsed_seconds = time.monotonic() - attempt_started
-            # Quick-mode flex latency timeout: a queued flex call the transport
-            # could not fall back to standard (fallback disabled, or the flex
-            # client timeout raced the outer hard cap). It is a queue event, not
-            # a provider fault — so it must NOT re-queue at flex (non-retryable)
-            # and must be excluded from the circuit breakers, which would
-            # otherwise trip and fast-fail sibling agents on transient queueing.
+            # A flex queue can exhaust the outer cap either before fallback or
+            # while its standard re-issue uses the remaining time. Neither is
+            # evidence of a provider fault, and retrying would re-queue at flex.
+            # Capacity and capability fallbacks do not imply queue exhaustion.
             # See the mitigation plan's flex-fallback x timeout matrix (rows 6-8).
             flex_latency_timeout_quick = (
                 details.kind == "timeout"
                 and runtime_config.quick_mode_active
-                and provider_flex_active(resolved_provider, settings_config)
+                and (attempted_tier == "flex" or latency_fallback)
             )
             # A provider safety block / content refusal is content-specific, not
             # evidence the provider or model is unhealthy — exclude it from the
@@ -904,6 +919,7 @@ async def invoke_with_rate_limit_handling(
                     failure_kind=details.kind,
                     failure_origin=failure_origin,
                     retryable=details.retryable,
+                    service_tier=attempted_tier,
                 )
 
             retry_class = retry_disposition(details)

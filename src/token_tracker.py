@@ -433,6 +433,7 @@ class LLMCallAttempt:
     intent_output_cap_tokens: int | None = None
     api_output_cap_tokens: int | None = None
     configured_reasoning_reserve_tokens: int | None = None
+    service_tier: str | None = None
     failure_kind: str | None = None
     failure_origin: str | None = None
     retryable: bool | None = None
@@ -566,6 +567,7 @@ class TokenTracker:
         intent_output_cap_tokens: int | None = None,
         api_output_cap_tokens: int | None = None,
         configured_reasoning_reserve_tokens: int | None = None,
+        service_tier: str | None = None,
         failure_kind: str | None = None,
         failure_origin: str | None = None,
         retryable: bool | None = None,
@@ -598,6 +600,7 @@ class TokenTracker:
             intent_output_cap_tokens=intent_output_cap_tokens,
             api_output_cap_tokens=api_output_cap_tokens,
             configured_reasoning_reserve_tokens=configured_reasoning_reserve_tokens,
+            service_tier=service_tier,
             failure_kind=failure_kind,
             failure_origin=failure_origin,
             retryable=retryable,

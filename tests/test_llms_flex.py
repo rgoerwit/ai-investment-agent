@@ -18,6 +18,7 @@ from src.service_tiers import (
     _reset_flex_capability_cache_for_tests,
     _reset_floor_log_cache_for_tests,
     is_flex_unsupported,
+    track_tier_attempt,
 )
 
 
@@ -125,13 +126,18 @@ class TestGeminiFlexFallback:
                 raise ValueError("503 UNAVAILABLE: no flex capacity")
             return _chat_result()
 
-        with patch.object(ChatGoogleGenerativeAI, "_agenerate", fake_agenerate):
+        with (
+            patch.object(ChatGoogleGenerativeAI, "_agenerate", fake_agenerate),
+            track_tier_attempt("flex") as attempt,
+        ):
             result = await llm._agenerate([HumanMessage(content="hi")])
 
         assert len(calls) == 2
         assert calls[1]["service_tier"] == "standard"
         # Fallback call is priced at standard rates by the tracker
         assert result.llm_output["service_tier"] == "standard"
+        assert attempt.tier == "standard"
+        assert attempt.latency_fallback is False
         # Capacity errors are NOT cached — next call still tries flex
         assert not is_flex_unsupported("gemini-3.5-flash")
 
@@ -444,6 +450,7 @@ class TestGeminiFlexLatencyFallback:
 
         with (
             patch.object(ChatGoogleGenerativeAI, "_agenerate", fake_agenerate),
+            track_tier_attempt("flex") as attempt,
             pytest.raises(TimeoutError),
         ):
             await llm._agenerate([HumanMessage(content="hi")])
@@ -451,6 +458,8 @@ class TestGeminiFlexLatencyFallback:
         # Exactly two SDK calls: the flex attempt + one standard re-issue.
         assert len(calls) == 2
         assert calls[1]["service_tier"] == "standard"
+        assert attempt.tier == "standard"
+        assert attempt.latency_fallback is True
 
     def test_flex_retry_tier_none_for_standard_attempt(self):
         llm = _tiered_llm()
@@ -481,11 +490,16 @@ class TestOpenAIFlexLatencyFallback:
                 raise TimeoutError("flex attempt exceeded client timeout")
             return _chat_result()
 
-        with patch.object(ChatOpenAI, "_agenerate", fake_agenerate):
+        with (
+            patch.object(ChatOpenAI, "_agenerate", fake_agenerate),
+            track_tier_attempt("flex") as attempt,
+        ):
             await llm._agenerate([HumanMessage(content="hi")])
 
         assert len(calls) == 2
         assert calls[1]["service_tier"] == "auto"
+        assert attempt.tier == "auto"
+        assert attempt.latency_fallback is True
         assert not is_flex_unsupported("gpt-5.4")
 
     @pytest.mark.asyncio

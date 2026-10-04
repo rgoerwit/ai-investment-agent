@@ -13,6 +13,8 @@ from langchain_core.messages import BaseMessage
 
 from src.data_block_utils import (
     extract_last_fenced_block,
+    fenced_block_pattern,
+    fenced_marker_fragment,
     replace_or_append_block_line,
 )
 from src.text_patterns import (
@@ -125,6 +127,38 @@ def _field(report: str, label: str) -> str:
         report,
     )
     return match.group(1).strip() if match else ""
+
+
+def unique_latest_results_block(report: str) -> str | None:
+    """Return the sole complete block only when its field names are unambiguous."""
+    openers = re.findall(
+        rf"(?m)^{fenced_marker_fragment('LATEST_RESULTS', 'START')}[ \t]*$",
+        report,
+    )
+    if len(openers) != 1:
+        return None
+    matches = list(fenced_block_pattern("LATEST_RESULTS").finditer(report))
+    if len(matches) != 1:
+        return None
+    block = matches[0].group(1)
+    fields = re.findall(
+        r"(?im)^[ \t]*(?:[-*][ \t]*)?(LATEST_RESULTS_[A-Z_]+)[ \t]*:",
+        block,
+    )
+    if len(fields) != len({field.upper() for field in fields}):
+        return None
+    return block
+
+
+def _replace_latest_results_field(report: str, label: str, value: str) -> str:
+    match = next(fenced_block_pattern("LATEST_RESULTS").finditer(report))
+    body = match.group(1)
+    pattern = re.compile(rf"(?im)^([ \t]*(?:[-*][ \t]*)?){re.escape(label)}[ \t]*:.*$")
+    if pattern.search(body):
+        updated = pattern.sub(lambda item: f"{item.group(1)}{label}: {value}", body)
+    else:
+        updated = body.rstrip() + f"\n{label}: {value}\n"
+    return report[: match.start(1)] + updated + report[match.end(1) :]
 
 
 def has_foreign_language_protocol_residue(report: str) -> bool:
@@ -381,15 +415,15 @@ def _reframe_latest_results_block(report: str) -> str:
 
 def _strip_source_url_annotation(report: str) -> str:
     """Drop a trailing ``(note)`` after the source URL when the rest is a URL."""
-    raw = _field(report, "LATEST_RESULTS_SOURCE_URL")
+    block = unique_latest_results_block(report)
+    if block is None:
+        return report
+    raw = _field(block, "LATEST_RESULTS_SOURCE_URL")
     match = _ANNOTATED_URL_RE.match(raw)
     if not match or not URL_RE.fullmatch(match.group(1)):
         return report
-    return _replace_or_add_field(
-        report,
-        "LATEST_RESULTS_SOURCE_URL",
-        match.group(1),
-        section="START LATEST_RESULTS",
+    return _replace_latest_results_field(
+        report, "LATEST_RESULTS_SOURCE_URL", match.group(1)
     )
 
 
@@ -400,19 +434,19 @@ def _normalize_latest_results(
     ticker: str,
 ) -> str:
     report = _strip_source_url_annotation(_reframe_latest_results_block(report))
-    coverage = _field(report, "LATEST_RESULTS_COVERAGE_STATUS").upper()
-    asserted = any(_field(report, field) for field in LATEST_RESULTS_SOURCE_FIELDS)
+    block = unique_latest_results_block(report)
+    if block is None:
+        return report
+    coverage = _field(block, "LATEST_RESULTS_COVERAGE_STATUS").upper()
+    asserted = any(_field(block, field) for field in LATEST_RESULTS_SOURCE_FIELDS)
     if coverage != "FOUND":
         if not asserted:
             return report
-        return _replace_or_add_field(
-            report,
-            "LATEST_RESULTS_SOURCE_AUTHORITY",
-            "UNKNOWN",
-            section="START LATEST_RESULTS",
+        return _replace_latest_results_field(
+            report, "LATEST_RESULTS_SOURCE_AUTHORITY", "UNKNOWN"
         )
 
-    values = {field: _field(report, field) for field in LATEST_RESULTS_SOURCE_FIELDS}
+    values = {field: _field(block, field) for field in LATEST_RESULTS_SOURCE_FIELDS}
     source_url = normalize_http_url(values["LATEST_RESULTS_SOURCE_URL"])
     decimals = {
         field: parsed
@@ -459,24 +493,19 @@ def _normalize_latest_results(
         "PRIMARY" if primary else "SECONDARY" if supporting_records else "UNSUPPORTED"
     )
 
-    normalized = _replace_or_add_field(
-        report,
-        "LATEST_RESULTS_SOURCE_AUTHORITY",
-        authority,
-        section="START LATEST_RESULTS",
+    normalized = _replace_latest_results_field(
+        report, "LATEST_RESULTS_SOURCE_AUTHORITY", authority
     )
     if not primary:
-        normalized = _replace_or_add_field(
+        normalized = _replace_latest_results_field(
             normalized,
             "LATEST_RESULTS_REVENUE_GROWTH_YOY",
             "N/A",
-            section="START LATEST_RESULTS",
         )
-        normalized = _replace_or_add_field(
+        normalized = _replace_latest_results_field(
             normalized,
             "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
             "N/A",
-            section="START LATEST_RESULTS",
         )
         if authority == "UNSUPPORTED":
             logger.warning(
@@ -498,17 +527,15 @@ def _normalize_latest_results(
         if earnings_prior > 0
         else None
     )
-    normalized = _replace_or_add_field(
+    normalized = _replace_latest_results_field(
         normalized,
         "LATEST_RESULTS_REVENUE_GROWTH_YOY",
         f"{revenue_growth * 100:.1f}%" if revenue_growth is not None else "N/A",
-        section="START LATEST_RESULTS",
     )
-    return _replace_or_add_field(
+    return _replace_latest_results_field(
         normalized,
         "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
         f"{earnings_growth * 100:.1f}%" if earnings_growth is not None else "N/A",
-        section="START LATEST_RESULTS",
     )
 
 
@@ -1033,15 +1060,19 @@ def promote_foreign_growth_evidence(body: str, foreign_data: str) -> tuple[str, 
             "UNKNOWN",
         )
         promoted = True
+    latest_block = unique_latest_results_block(foreign_data)
     for field in LATEST_RESULTS_CONTEXT_PROMOTION_FIELDS:
-        value = _field(foreign_data, field)
+        value = _field(latest_block, field) if latest_block is not None else ""
         if not value:
             continue
         updated = replace_or_append_block_line(updated, field, value)
         promoted = True
-    if _field(foreign_data, "LATEST_RESULTS_SOURCE_AUTHORITY").upper() == "PRIMARY":
+    if (
+        latest_block is not None
+        and _field(latest_block, "LATEST_RESULTS_SOURCE_AUTHORITY").upper() == "PRIMARY"
+    ):
         for field in LATEST_RESULTS_NUMERIC_PROMOTION_FIELDS:
-            value = _field(foreign_data, field)
+            value = _field(latest_block, field)
             if not value:
                 continue
             updated = replace_or_append_block_line(updated, field, value)

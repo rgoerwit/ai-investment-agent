@@ -197,6 +197,12 @@ SEATS: dict[SeatId, SeatSpec] = {
         state_field="raw_fundamentals_data",
         requires=_TOOLS,
         retry=ModelIntent.REASONING,
+        # Not gate-critical, but its own generation time does not fit a flex
+        # attempt: under --quick a flex attempt gets 0.4 x 60s = 24s, while Oct
+        # 2026 successful calls ran p90 26.5s / p95 42s. A long healthy call was
+        # cut at 24s, re-issued at standard with 36s left, and killed at the 60s
+        # cap -- 64 of 71 Junior failures, rising to 18% of runs on busy days.
+        execution_policy=SeatExecutionPolicy(standard_tier_in_quick_mode=True),
     ),
     SeatId.SENIOR_FUNDAMENTALS: _seat(
         SeatId.SENIOR_FUNDAMENTALS,

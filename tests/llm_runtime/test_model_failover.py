@@ -483,11 +483,10 @@ class TestRetryLoop:
     async def test_quick_flex_queue_timeout_fails_over_instead_of_giving_up(self):
         """A quick flex queue timeout is never re-queued at flex, but a standard-tier
         failover attempt is not a re-queue."""
-        # Both tiers time out, as the outer hard timeout would leave it.
-        transport = _Transport({PRIMARY: [TimeoutError("flex queue")] * 2})
+        # With transport fallback disabled, the failed tier remains flex.
+        transport = _Transport({PRIMARY: [TimeoutError("flex queue")]})
         with (
             transport.patch(),
-            patch("src.agents.runtime.provider_flex_active", return_value=True),
             patch(
                 "src.agents.runtime.get_runtime_config",
                 return_value=type(
@@ -504,5 +503,8 @@ class TestRetryLoop:
                 "src.agents.runtime.quick_mode_hard_timeout_seconds", return_value=60.0
             ),
         ):
-            _, attempts, _ = await _invoke(_gemini(), "PM quick flex timeout")
+            _, attempts, _ = await _invoke(
+                _gemini(flex_fallback_to_standard=False), "PM quick flex timeout"
+            )
         assert [model for model, _, _ in attempts] == [PRIMARY, FAILOVER]
+        assert transport.calls == [(PRIMARY, "flex"), (FAILOVER, "standard")]

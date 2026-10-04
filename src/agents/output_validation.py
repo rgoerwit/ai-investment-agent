@@ -36,9 +36,12 @@ _FORENSIC_VERDICT_PATTERN = re.compile(
 
 def _has_valid_latest_results_block(content: str) -> bool:
     """Require the complete latest-results contract, including explicit N/A fields."""
-    from src.agents.foreign_language_evidence import LATEST_RESULTS_SOURCE_FIELDS
+    from src.agents.foreign_language_evidence import (
+        LATEST_RESULTS_SOURCE_FIELDS,
+        unique_latest_results_block,
+    )
 
-    block = extract_last_fenced_block(content, "LATEST_RESULTS")
+    block = unique_latest_results_block(content)
     if not block:
         return False
 

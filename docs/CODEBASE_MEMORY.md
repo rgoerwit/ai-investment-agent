@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-09-15
+Last updated: 2026-10-03
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
@@ -46,6 +46,60 @@ keys, so `RAW_HEALTH_SCORE` cannot satisfy `HEALTH_SCORE`. Invalid responses are
 classified as cap exhaustion, incomplete structure, or ordinary contract violation.
 Structural recovery is text-only and bounded: full mode applies it to eligible analyst
 outputs, while quick mode limits it to Senior Fundamentals and Portfolio Manager.
+
+## Comparing Analysis Quality Across Runs (October 2026)
+
+**Pair by the latest quick-mode artifact per ticker per month.** Taking the latest
+artifact of any mode and dropping non-quick ones silently removes every ticker that
+went on to a full-mode stage-2 run, which is every quick BUY: a July/October
+comparison done that way reported 0 July BUYs where there were 34.
+
+**Adjacent months barely overlap.** The pipeline reuses a quick report for 60 days,
+so September and October share 5 tickers, all re-runs of failures. Compare against a
+month outside the reuse window (July for October: 427 pairs).
+
+Findings from that comparison, attributed through the data layer rather than verdicts:
+
+- **Guidance-gap recurrence (code).** `MANAGEMENT_GUIDANCE_EVIDENCE_GAP`
+  (`blocks_buy`) fired on 52–62% of quick runs from August to October. Both required
+  guidance searches had succeeded in every case; the demotion counted the optional
+  filings adapter, which reports UNAVAILABLE on every exchange, so
+  `NOT_DISCLOSED_AFTER_TARGETED_SEARCH` survived 0 of 449 runs that called it
+  against 29 of 56 that did not. Fixed by `REQUIRED_GUIDANCE_SEARCHES`. It was
+  present in 20 of the 31 July BUYs that were no longer BUY in October.
+- **LATEST_RESULTS contract failures (reader, plus model formatting).** 29 of 512
+  runs: complete blocks behind a bare heading, an END marker missing its dashes,
+  or a URL with a trailing note. The FLA normaliser now re-frames an unbroken run of
+  field lines; replaying the 29 saved outputs recovered 23 and changed none of the
+  486 valid ones. The remaining 6 are genuinely incomplete. A separate replay of
+  523 October 2–4 saved FLA reports found 501 valid latest-results blocks; the
+  current normalizer repaired 17 of 22 invalid blocks without source records,
+  leaving five invalid. Across 526 quick artifacts in that window, FLA call
+  attempts recorded 687 successes, two timeouts,
+  one provider safety block, and no output-cap failures; this sample does not
+  support a general FLA token-exhaustion diagnosis.
+- **Junior Fundamentals timeouts (configuration).** 2% in July, 13–18% on busy
+  October days. Under `--quick` a flex attempt gets 0.4 x 60s = 24s, below
+  Junior's own p90 of 26.5s, so long healthy calls were cut, re-issued at standard,
+  and killed at the 60s cap. Junior is now standard-tier in quick mode.
+- **Senior Fundamentals output-cap failures (model).** `gemini-3.8-flash` hit the
+  cap on 8 of 523 quick Senior calls, `gemini-3.7-flash` on 0 of 522: thinking used
+  15.6k–18.3k of 19,115 tokens against an 8,192 reserve. The structural retry
+  raises reasoning effort, so it failed the same way; that is unfixed.
+
+A two-arm trial produced 19 quick runs per arm across 17 tickers. Two pairs had
+different prompt digests, leaving 17 prompt-matched runs per arm across 15 tickers
+(including three repeats of 8174.T). With the code changes, Junior failed on none
+of the 38 runs. In the prompt-matched subset, moving Senior from 3.8 to 3.7 coincided
+with one recorded Senior output-cap failure on 3.8 and none on 3.7. Mean cost
+fell from $0.135 to $0.103. Both arms used 3.8 for Portfolio Manager and the separately
+bound structural-recovery seat; the saved binding does not record recovery effort.
+All artifacts mark the code tree dirty, so matching commit and prompt digests do
+not establish that non-prompt code was identical between arms.
+Five prompt-matched ticker pairs had different recorded verdicts, including 2117.T,
+where the 3.8 arm lacked a verdict after a cap failure. Some other flips involve
+borderline growth scores or contested legal risk. The three-run 8174.T probe was
+stable in both arms; the remaining single runs cannot rank model judgment.
 
 ## What This Repo Is
 

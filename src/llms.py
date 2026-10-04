@@ -34,7 +34,7 @@ from src.llm_budgets import (
     get_generation_budget,
 )
 from src.llm_runtime.failover import ModelFailoverMixin
-from src.llm_runtime.seats import ModelIntent
+from src.llm_runtime.seats import SEATS, ModelIntent, SeatId
 from src.runtime_config import get_runtime_config
 from src.runtime_services import get_current_provider_runtime
 from src.service_tiers import (
@@ -43,7 +43,9 @@ from src.service_tiers import (
     gemini_flex_active,
     is_flex_unsupported,
     is_flex_unsupported_error,
+    mark_flex_latency_fallback,
     mark_flex_unsupported,
+    mark_tier_attempt,
     normalize_model_name,
     note_flex_fallback,
     openai_flex_active,
@@ -751,18 +753,21 @@ class _TieredChatGoogleGenerativeAI(ModelFailoverMixin, ChatGoogleGenerativeAI):
                 **summarize_exception(exc, operation="gemini_flex_latency"),
             )
             note_flex_fallback("google", reason="latency", model=self.model)
+            mark_flex_latency_fallback()
             return "standard"
         return None
 
     def _generate(self, *args: Any, **kwargs: Any) -> Any:
         if (delegate := self._failover_delegate()) is not None:
             return delegate._generate(*args, **kwargs)
+        mark_tier_attempt(self._effective_tier(kwargs))
         try:
             result = super()._generate(*args, **kwargs)
         except Exception as exc:
             retry_tier = self._flex_retry_tier(exc, kwargs)
             if retry_tier is None:
                 raise
+            mark_tier_attempt(retry_tier)
             result = super()._generate(*args, **{**kwargs, "service_tier": retry_tier})
             _stamp_service_tier(result, retry_tier)
             return result
@@ -774,12 +779,14 @@ class _TieredChatGoogleGenerativeAI(ModelFailoverMixin, ChatGoogleGenerativeAI):
     async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
         if (delegate := self._failover_delegate()) is not None:
             return await delegate._agenerate(*args, **kwargs)
+        mark_tier_attempt(self._effective_tier(kwargs))
         try:
             result = await super()._agenerate(*args, **kwargs)
         except Exception as exc:
             retry_tier = self._flex_retry_tier(exc, kwargs)
             if retry_tier is None:
                 raise
+            mark_tier_attempt(retry_tier)
             result = await super()._agenerate(
                 *args, **{**kwargs, "service_tier": retry_tier}
             )
@@ -874,6 +881,7 @@ def _get_flex_fallback_chat_openai_cls() -> type[BaseChatModel]:
                     **summarize_exception(exc, operation="openai_flex_latency"),
                 )
                 note_flex_fallback("openai", reason="latency", model=self.model_name)
+                mark_flex_latency_fallback()
                 return "auto"
             return None
 
@@ -881,12 +889,14 @@ def _get_flex_fallback_chat_openai_cls() -> type[BaseChatModel]:
             if (delegate := self._failover_delegate()) is not None:
                 return delegate._generate(*args, **kwargs)
             kwargs = self._payload_kwargs(kwargs)
+            mark_tier_attempt(self._effective_tier(kwargs))
             try:
                 return super()._generate(*args, **kwargs)
             except Exception as exc:
                 retry_tier = self._flex_retry_tier(exc, kwargs)
                 if retry_tier is None:
                     raise
+                mark_tier_attempt(retry_tier)
                 return super()._generate(
                     *args, **{**kwargs, "service_tier": retry_tier}
                 )
@@ -895,12 +905,14 @@ def _get_flex_fallback_chat_openai_cls() -> type[BaseChatModel]:
             if (delegate := self._failover_delegate()) is not None:
                 return await delegate._agenerate(*args, **kwargs)
             kwargs = self._payload_kwargs(kwargs)
+            mark_tier_attempt(self._effective_tier(kwargs))
             try:
                 return await super()._agenerate(*args, **kwargs)
             except Exception as exc:
                 retry_tier = self._flex_retry_tier(exc, kwargs)
                 if retry_tier is None:
                     raise
+                mark_tier_attempt(retry_tier)
                 return await super()._agenerate(
                     *args, **{**kwargs, "service_tier": retry_tier}
                 )
@@ -1363,6 +1375,7 @@ def create_deep_thinking_llm(
     api_key: str | None = None,
     settings: Any | None = None,
     include_thoughts: bool = False,
+    service_tier: str | None = None,
 ) -> BaseChatModel:
     """
     Create a deep thinking LLM.
@@ -1392,6 +1405,7 @@ def create_deep_thinking_llm(
         thinking_level=thinking_level,
         max_output_tokens=max_output_tokens,
         reserve_class="deep",
+        service_tier=service_tier,
         api_key=api_key,
         settings=settings,
         include_thoughts=include_thoughts,
@@ -1407,6 +1421,7 @@ def create_apex_llm(
     quick_mode: bool,
     callbacks: list[BaseCallbackHandler] | None = None,
     max_output_tokens: int | None = None,
+    service_tier: str | None = None,
     settings: Any | None = None,
 ) -> BaseChatModel:
     """
@@ -1427,6 +1442,14 @@ def create_apex_llm(
     settings = _settings_or_default(settings)
     if seat not in APEX_SEATS:
         raise ValueError(f"unknown apex seat: {seat!r} (expected one of {APEX_SEATS})")
+    seat_id = (
+        SeatId.SENIOR_FUNDAMENTALS
+        if seat == "senior_fundamentals"
+        else SeatId.PORTFOLIO_MANAGER
+    )
+    policy = SEATS[seat_id].execution_policy
+    if policy.standard_tier_only or (quick_mode and policy.standard_tier_in_quick_mode):
+        service_tier = "standard"
 
     if not settings.apex_model:
         delegated_kwargs: dict[str, Any] = {
@@ -1435,6 +1458,8 @@ def create_apex_llm(
         }
         if explicit_settings:
             delegated_kwargs["settings"] = settings
+        if service_tier is not None:
+            delegated_kwargs["service_tier"] = service_tier
         if seat == "portfolio_manager" and not quick_mode:
             return create_deep_thinking_llm(**delegated_kwargs)
         return create_quick_thinking_llm(**delegated_kwargs)
@@ -1448,6 +1473,8 @@ def create_apex_llm(
             }
             if explicit_settings:
                 delegated_kwargs["settings"] = settings
+            if service_tier is not None:
+                delegated_kwargs["service_tier"] = service_tier
             return create_quick_thinking_llm(**delegated_kwargs)
         model_name = settings.apex_quick_model
 
@@ -1471,12 +1498,7 @@ def create_apex_llm(
         thinking_level=thinking_level,
         max_output_tokens=max_output_tokens,
         reserve_class="deep",
-        # Gate-critical seat on the critical path under the tight --quick
-        # budget: pin to standard so best-effort flex 503/504 queueing can't
-        # burn the per-call budget (and lose the DATA_BLOCK / PM_BLOCK) before
-        # any fallback. Full mode keeps config-driven flex (the flex floors +
-        # the _is_flex_latency_timeout fallback give it room to recover).
-        service_tier="standard" if quick_mode else None,
+        service_tier=service_tier,
         api_key=settings.get_google_api_key(),
         settings=settings,
     )

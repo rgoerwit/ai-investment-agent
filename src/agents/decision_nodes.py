@@ -1472,14 +1472,7 @@ RISK TEAM DEBATE:
                     truncated=trunc_info["truncated"],
                     validation=validation,
                 )
-                reasoning_setting = next(
-                    (
-                        str(value)
-                        for attr in ("reasoning_effort", "thinking_level")
-                        if isinstance((value := getattr(llm, attr, None)), str)
-                    ),
-                    None,
-                )
+                reasoning_setting = support.reasoning_setting_for(llm)
                 recovery_event: dict[str, Any] = {
                     "schema_version": 1,
                     "originating_agent": "portfolio_manager",
@@ -1487,6 +1480,9 @@ RISK TEAM DEBATE:
                     "original_model": support.get_model_name(llm),
                     "recovery_model": support.get_model_name(recovery_llm),
                     "reasoning_setting": reasoning_setting,
+                    "recovery_reasoning_setting": support.reasoning_setting_for(
+                        recovery_llm
+                    ),
                     "original_output_chars": len(content_str),
                     "outcome": "attempted",
                 }

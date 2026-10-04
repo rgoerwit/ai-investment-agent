@@ -70,6 +70,12 @@ per-node backup model for transport errors.** Any walk of a composed runnable mu
 descend only real LangChain composition types: attribute probing never terminates
 on a mock.
 
+Attempt telemetry must use the transport tier actually reached, including an in-call
+flex-to-standard retry or model failover. A quick-mode timeout after a flex latency
+fallback is still queue-affected even if the final request used standard; capacity
+and capability fallbacks do not establish that cause. Keep seat-specific tier policy
+in `SeatExecutionPolicy` so legacy and bound construction agree.
+
 ## The pricing table goes stale silently
 
 `MODEL_PRICING_PER_1M` in `src/token_tracker.py` is hand-copied from vendor pages that

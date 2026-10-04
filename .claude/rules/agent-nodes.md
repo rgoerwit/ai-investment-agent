@@ -55,6 +55,17 @@ counting it turned "issuer does not guide" into a BUY block on half of all runs 
 twice. Before adding a source to any evidence-completeness check, measure how
 often it is structurally unavailable.
 
+Guidance provenance must reflect the required preflight searches actually recorded.
+If a required execution or evidence status is missing, mark the preflight incomplete;
+never turn missing search evidence into a confident "not disclosed" conclusion.
+
+## Parse latest results within their own block
+
+Promote or normalize `LATEST_RESULTS_*` values only from one complete, uniquely
+identified `LATEST_RESULTS` block with no duplicate field names. A similarly named
+field elsewhere in the report is not evidence for that block. When the block is
+ambiguous, leave it for validation to reject rather than repairing a guessed value.
+
 ## Writing state
 
 Bound every artifact write with `cap_state_value`. Deliver untrusted external content

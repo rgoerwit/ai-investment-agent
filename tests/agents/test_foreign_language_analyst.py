@@ -728,15 +728,30 @@ EVIDENCE_STATUS: UNAVAILABLE
 
         assert "COVERAGE_STATUS: UNRESOLVED_AFTER_TARGETED_SEARCH" in normalized
 
-    def test_absent_evidence_statuses_do_not_demote_or_raise(self):
+    def test_absent_evidence_statuses_cannot_authenticate_model_claim(self):
         normalized = _normalize_structured_output(
             "foreign_language_analyst",
-            self._NOT_DISCLOSED_BLOCK,
+            self._NOT_DISCLOSED_BLOCK.replace(
+                "SOURCE_URL: N/A",
+                "SOURCE_URL: N/A\nSEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT",
+            ),
             "TEST.T",
             management_guidance_evidence="",
         )
 
-        assert "COVERAGE_STATUS: NOT_DISCLOSED_AFTER_TARGETED_SEARCH" in normalized
+        assert "COVERAGE_STATUS: UNRESOLVED_AFTER_TARGETED_SEARCH" in normalized
+        assert "SEARCH_PROVENANCE: INCOMPLETE_PREFLIGHT" in normalized
+
+    def test_partial_preflight_cannot_authenticate_search_coverage(self):
+        normalized = _normalize_structured_output(
+            "foreign_language_analyst",
+            self._NOT_DISCLOSED_BLOCK,
+            "TEST.T",
+            management_guidance_evidence="#### results_package\nSTATUS: COMPLETED\n",
+        )
+
+        assert "COVERAGE_STATUS: UNRESOLVED_AFTER_TARGETED_SEARCH" in normalized
+        assert "SEARCH_PROVENANCE: INCOMPLETE_PREFLIGHT" in normalized
 
     def test_incomplete_causal_guidance_keeps_bridge_unresolved(self):
         content = """### --- START MANAGEMENT_GUIDANCE ---

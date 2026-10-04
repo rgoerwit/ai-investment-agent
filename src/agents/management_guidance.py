@@ -613,7 +613,7 @@ def normalize_management_guidance_output(
         evidence_statuses,
     )
     if not block_with_markers or block_body is None:
-        if not _has_substantive_report_content(normalized) or not execution_statuses:
+        if not _has_substantive_report_content(normalized):
             return normalized
         conservative_block = _build_unresolved_guidance_block(
             execution_statuses,
@@ -657,23 +657,24 @@ def normalize_management_guidance_output(
                 canonical_guidance_enum(field, value),
             )
 
-    if execution_statuses:
-        block_body = replace_or_append_block_line(
-            block_body,
-            "SEARCHES_COMPLETED",
-            searches_completed,
-        )
-        block_body = replace_or_append_block_line(
-            block_body,
-            "SEARCH_PROVENANCE",
-            "CODE_OWNED_PREFLIGHT",
-        )
+    required_present = all(
+        label in execution_statuses and label in evidence_statuses
+        for label in REQUIRED_GUIDANCE_SEARCHES
+    )
+    block_body = replace_or_append_block_line(
+        block_body, "SEARCHES_COMPLETED", searches_completed
+    )
+    block_body = replace_or_append_block_line(
+        block_body,
+        "SEARCH_PROVENANCE",
+        "CODE_OWNED_PREFLIGHT" if required_present else "INCOMPLETE_PREFLIGHT",
+    )
 
     required_evidence = {
         evidence_statuses.get(label) for label in REQUIRED_GUIDANCE_SEARCHES
     }
     if coverage_status == "NOT_DISCLOSED_AFTER_TARGETED_SEARCH" and (
-        INCOMPLETE_SEARCH_EVIDENCE_STATUSES & required_evidence
+        not required_present or INCOMPLETE_SEARCH_EVIDENCE_STATUSES & required_evidence
     ):
         coverage_status = "UNRESOLVED_AFTER_TARGETED_SEARCH"
         block_body = replace_or_append_block_line(
@@ -871,7 +872,14 @@ def _build_unresolved_guidance_block(
             "SOURCE_DATE: N/A",
             "SOURCE_URL: N/A",
             f"SEARCHES_COMPLETED: {searches_completed}",
-            "SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT",
+            "SEARCH_PROVENANCE: "
+            + (
+                "CODE_OWNED_PREFLIGHT"
+                if all(
+                    label in execution_statuses for label in REQUIRED_GUIDANCE_SEARCHES
+                )
+                else "INCOMPLETE_PREFLIGHT"
+            ),
             "GUIDANCE_PERIOD: N/A",
             "REVENUE_GUIDANCE: N/A",
             "OPERATING_PROFIT_GUIDANCE: N/A",
