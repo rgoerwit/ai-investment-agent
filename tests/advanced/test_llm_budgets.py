@@ -17,16 +17,16 @@ def test_foreign_language_analyst_budget_matches_news_analyst_tier():
     # FLA's prompt now spans 5-6 structured evidence blocks (segment breakdown,
     # ownership, filing cash flow, management guidance, capital structure,
     # R&D/capex backlog) — same scope tier as News Analyst/Trader/Consultant,
-    # not the simpler single-block Legal Counsel/Value Trap Detector agents.
+    # Legal Counsel needs less visible output; Value Trap also needs room for reasoning.
     assert get_agent_output_budget("Foreign Language Analyst", 32768) == 4096
     assert get_agent_output_budget(
         "Foreign Language Analyst", 32768
     ) == get_agent_output_budget("News Analyst", 32768)
 
 
-def test_simple_single_block_agents_unaffected_by_fla_bump():
+def test_legal_and_value_trap_budgets_match_their_output_needs():
     assert AGENT_OUTPUT_BUDGET_FRACTIONS["Legal Counsel"] == Fraction(1, 16)
-    assert AGENT_OUTPUT_BUDGET_FRACTIONS["Value Trap Detector"] == Fraction(1, 16)
+    assert AGENT_OUTPUT_BUDGET_FRACTIONS["Value Trap Detector"] == Fraction(1, 8)
 
 
 def test_agent_budgets_scale_when_base_cap_doubles():
@@ -65,3 +65,16 @@ def test_generation_budget_deep_reserve():
     assert budget.intent_tokens == 2048
     assert budget.reserve_tokens == 8192
     assert budget.api_cap_tokens == 10240
+
+
+def test_value_trap_budget_leaves_visible_room_after_observed_reasoning():
+    budget = get_generation_budget(
+        intent_tokens=get_agent_output_budget("Value Trap Detector", 32768),
+        reserve_class="default",
+        reserve_enabled=True,
+        default_reserve_tokens=2048,
+        deep_reserve_tokens=8192,
+    )
+    assert budget.api_cap_tokens == 6144
+    # The failed Stage-2 call spent 3929 tokens reasoning; the old cap left 167.
+    assert budget.api_cap_tokens - 3929 >= 2048

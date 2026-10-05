@@ -1,5 +1,8 @@
 """Focused metric-extraction coverage for the red-flag validator."""
 
+import pytest
+
+from src.monetary import parse_monetary_amount
 from tests.validators.red_flag_validator_cases import (
     TestDataBlockMarkerVariants,
     TestDebtToEquityNormalization,
@@ -18,6 +21,7 @@ from src.validators.metric_extractor import (
     extract_debt_to_equity,
     extract_interest_coverage,
     extract_metrics,
+    extract_operating_cash_flow,
 )
 from src.validators.supplemental_flags import detect_return_quality_fragility_flags
 
@@ -191,3 +195,107 @@ class TestSignedDecisionMetrics:
 
     def test_negative_debt_to_equity_is_signed(self):
         assert extract_debt_to_equity("D/E: -0.30") == -30.0
+
+
+@pytest.mark.parametrize(
+    "amount,expected",
+    [
+        ("8176419328 KRW", 8176419328),
+        ("1,234 BRL", 1234),
+        ("-1,234 MYR", -1234),
+        ("+1.25B KRW", 1.25e9),
+        ("2.5m BRL", 2.5e6),
+        ("3K MYR", 3000),
+    ],
+)
+def test_currency_suffix_is_not_a_magnitude(amount, expected):
+    metrics = extract_metrics(
+        _block(f"OPERATING_CASH_FLOW: {amount}", f"FREE_CASH_FLOW: {amount}")
+        + f"\n**Net Income**: {amount}"
+    )
+    assert metrics["ocf"] == expected
+    assert metrics["fcf"] == expected
+    assert metrics["net_income"] == expected
+
+
+def test_korean_cash_conversion_is_not_inflated_by_currency_suffix():
+    metrics = extract_metrics(
+        _block("OPERATING_CASH_FLOW: 8176419328 KRW") + "\n**Net Income**: 7.00B KRW"
+    )
+    assert metrics["ocf"] / metrics["net_income"] == pytest.approx(1.168059904)
+
+
+@pytest.mark.parametrize(
+    "amount,expected",
+    [
+        ("100K KRW", 100000),
+        ("100 KRW", 100),
+        ("-100K KRW", -100000),
+        ("100 million MYR", 100e6),
+        ("100bn BRL", 100e9),
+        ("1.25T TWD", 1.25e12),
+        ("+1,234 CAD", 1234),
+        ("100KXYZ", None),
+        ("100MMXYZ", None),
+    ],
+)
+def test_shared_monetary_tokens_preserve_sign_scale_and_currency_boundary(
+    amount, expected
+):
+    assert parse_monetary_amount(amount) == expected
+    assert extract_operating_cash_flow("Operating Cash Flow: " + amount) == expected
+
+
+def test_shared_money_parser_rejects_nonfinite_amount():
+    assert parse_monetary_amount("9" * 400 + "B") is None
+
+
+@pytest.mark.parametrize(
+    "amount", ["USD-100K", "KRW-100K", "--100K", "100..5M", "1,2,3M", "123,45"]
+)
+def test_shared_money_parser_rejects_ambiguous_or_malformed_tokens(amount):
+    assert parse_monetary_amount(amount) is None
+
+
+def test_shared_money_parser_preserves_indian_grouping():
+    assert parse_monetary_amount("1,23,456.78 INR") == 123456.78
+
+
+@pytest.mark.parametrize(
+    "amount",
+    [
+        "€1.2 Mrd.",
+        "CHF1’234 Mio",
+        "R$4.1 bi",
+        "100 億",
+        "100 万",
+        "USD 1,5",
+        "CHF1’234",
+    ],
+)
+def test_unsupported_monetary_units_fail_closed(amount):
+    assert parse_monetary_amount(amount) is None
+    assert extract_operating_cash_flow(f"OPERATING_CASH_FLOW: {amount}") is None
+
+
+def test_magnitude_followed_by_prose_remains_supported():
+    assert parse_monetary_amount("1.2B compared with 1.1B") == 1.2e9
+
+
+@pytest.mark.parametrize(
+    "amount",
+    [
+        "€1,234 Mio.",
+        "EUR 2,500 Mrd",
+        "Operating cash flow: 4,800 Mio. EUR",
+        "1,200 crore",
+        "3,000 employees",
+    ],
+)
+def test_grouped_unsupported_amount_cannot_backtrack_to_numeric_prefix(amount):
+    from src.validators.metric_extractor import extract_free_cash_flow
+
+    assert parse_monetary_amount(amount) is None
+    assert extract_operating_cash_flow(f"Operating Cash Flow: {amount}") is None
+    assert extract_free_cash_flow(f"Free Cash Flow: {amount}") is None
+    assert extract_metrics(_block(f"OPERATING_CASH_FLOW: {amount}"))["ocf"] is None

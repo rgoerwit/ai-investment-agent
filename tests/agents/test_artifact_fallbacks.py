@@ -75,7 +75,7 @@ class TestArtifactFallbacks:
         ]
         final_response = SimpleNamespace(
             content=(
-                '{"pfic_status":"UNCERTAIN",'
+                '{"cmic_status":"N/A","other_regulatory_risks":[],"pfic_status":"UNCERTAIN",'
                 '"pfic_evidence":"Third-pass disclosure search failed; '
                 'earlier evidence retained.","vie_structure":"N/A"}'
             ),
@@ -216,7 +216,7 @@ VERDICT: BUY
             system_message="legal prompt", agent_name="Legal Counsel"
         )
         response = SimpleNamespace(
-            content='{"pfic_status":"CLEAN","vie_structure":"N/A"}',
+            content='{"pfic_status":"CLEAN","vie_structure":"N/A","cmic_status":"N/A","other_regulatory_risks":[]}',
             tool_calls=None,
         )
         mock_llm = SimpleNamespace(
@@ -567,3 +567,191 @@ VERDICT: BUY
         ]
         assert invalid_calls
         assert invalid_calls[-1].kwargs["output_preview"] == "nonsense output"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "recovered,ok",
+    [
+        (
+            '{"pfic_status":"UNCERTAIN","vie_structure":"N/A","cmic_status":"N/A","other_regulatory_risks":[]}',
+            True,
+        ),
+        ('{"pfic_status":"CLEAN"}', False),
+        ("not JSON", False),
+        (RuntimeError("recovery unavailable"), False),
+    ],
+)
+@pytest.mark.parametrize(
+    "original", ["truncated JSON", '{"coverage_status":"FOUND","exposure_type":"NONE"}']
+)
+async def test_legal_structural_recovery_is_bounded_and_fails_closed(
+    recovered, ok, original
+):
+    primary = SimpleNamespace(model_name="primary")
+    recovery = SimpleNamespace(model_name="recovery")
+    responses = [SimpleNamespace(content=original, tool_calls=[])]
+    responses.append(
+        recovered
+        if isinstance(recovered, Exception)
+        else SimpleNamespace(content=recovered, tool_calls=[])
+    )
+    invoke = AsyncMock(side_effect=responses)
+    with (
+        patch(
+            "src.prompts.get_prompt",
+            return_value=SimpleNamespace(
+                system_message="legal prompt", agent_name="Legal Counsel"
+            ),
+        ),
+        patch(
+            "src.agents.consultant_nodes.preload_capital_structure_evidence",
+            new=AsyncMock(return_value="retained evidence"),
+        ),
+        patch("src.agents.consultant_nodes._invoke_agent_loop_llm", new=invoke),
+    ):
+        result = await create_legal_counsel_node(primary, [], retry_llm=recovery)(
+            {
+                "company_of_interest": "TEST.T",
+                "company_name": "Test Company",
+                "company_name_resolved": True,
+                "raw_fundamentals_data": "Country: Japan",
+            },
+            {},
+        )
+    assert invoke.await_count == 2
+    assert invoke.await_args_list[1].args[0] is recovery
+    assert "retained evidence" in str(invoke.await_args_list[1].args[1])
+    assert result["artifact_statuses"]["legal_report"]["ok"] is ok
+    (event,) = result["structural_recovery_events"]
+    assert event["originating_agent"] == "legal_counsel"
+    assert event["final_output_valid"] is ok
+    assert event["outcome"] == ("accepted_text" if ok else "failed")
+    if not ok:
+        risks = RedFlagDetector.extract_legal_risks(result["legal_report"])
+        assert risks["pfic_status"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "original,recovery,ok",
+    [
+        ("VALID", None, True),
+        ("bad JSON", "VALID", True),
+        ("bad JSON", "bad JSON", False),
+        ("bad JSON", RuntimeError("recovery unavailable"), False),
+        ('{"pfic_status":"PROBABLE"}', "VALID", False),
+        ('{"pfic_status":"UNCERTAIN"}', "VALID", False),
+        ('{"pfic_status":"PROBABLE"}', "PROBABLE", True),
+        ('{"other_regulatory_risks":[{"severity":null}]}', "VALID", True),
+    ],
+)
+async def test_legal_recovery_buy_authority_scenarios(original, recovery, ok):
+    def response(value):
+        if isinstance(value, Exception):
+            return value
+        if value in {"VALID", "PROBABLE"}:
+            value = json.dumps(
+                {
+                    "pfic_status": "PROBABLE" if value == "PROBABLE" else "CLEAN",
+                    "vie_structure": "NO",
+                    "cmic_status": "CLEAR",
+                    "pfic_evidence": None,
+                    "other_regulatory_risks": [],
+                }
+            )
+        return SimpleNamespace(content=value, tool_calls=[])
+
+    invoke = AsyncMock(
+        side_effect=[response(original)]
+        + ([response(recovery)] if recovery is not None else [])
+    )
+    with (
+        patch(
+            "src.prompts.get_prompt",
+            return_value=SimpleNamespace(
+                system_message="legal prompt", agent_name="Legal Counsel"
+            ),
+        ),
+        patch(
+            "src.agents.consultant_nodes.preload_capital_structure_evidence",
+            new=AsyncMock(return_value="retained evidence"),
+        ),
+        patch("src.agents.consultant_nodes._invoke_agent_loop_llm", new=invoke),
+    ):
+        result = await create_legal_counsel_node(
+            SimpleNamespace(model_name="primary"),
+            [],
+            retry_llm=SimpleNamespace(model_name="recovery"),
+        )(
+            {
+                "company_of_interest": "TEST.T",
+                "company_name": "Test",
+                "raw_fundamentals_data": "Country: Japan",
+            },
+            {},
+        )
+    assert invoke.await_count == (1 if recovery is None else 2)
+    assert result["artifact_statuses"]["legal_report"]["ok"] is ok
+    flags = RedFlagDetector.detect_legal_flags(
+        RedFlagDetector.extract_legal_risks(result["legal_report"]),
+        "TEST.T",
+        artifact_status=get_artifact_status(result, "legal_report"),
+    )
+    assert any(flag["type"] == "LEGAL_COUNSEL_UNAVAILABLE" for flag in flags) is (
+        not ok
+    )
+    if not ok:
+        assert all(flag["risk_penalty"] == 0 for flag in flags)
+    for verdict in ("BUY", "HOLD", "DO_NOT_INITIATE"):
+        text = f"# PORTFOLIO MANAGER VERDICT: {verdict}\nActual Decision: {verdict}\n<PM_BLOCK>\nVERDICT: {verdict}\n</PM_BLOCK>"
+        rewritten, changed = maybe_demote_buy_on_blocking_flags(
+            text, red_flags=flags, ticker="TEST.T"
+        )
+        assert changed is (not ok and verdict == "BUY")
+        expected = "HOLD" if changed else verdict
+        assert f"VERDICT: {expected}" in rewritten
+
+
+@pytest.mark.asyncio
+async def test_legal_application_value_error_is_not_contract_failure():
+    output = json.dumps(
+        {
+            "pfic_status": "CLEAN",
+            "vie_structure": "NO",
+            "cmic_status": "CLEAR",
+            "other_regulatory_risks": [],
+        }
+    )
+    with (
+        patch(
+            "src.prompts.get_prompt",
+            return_value=SimpleNamespace(
+                system_message="legal", agent_name="Legal Counsel"
+            ),
+        ),
+        patch(
+            "src.agents.consultant_nodes.preload_capital_structure_evidence",
+            new=AsyncMock(return_value="evidence"),
+        ),
+        patch(
+            "src.agents.consultant_nodes._invoke_agent_loop_llm",
+            new=AsyncMock(return_value=SimpleNamespace(content=output, tool_calls=[])),
+        ),
+        patch(
+            "src.agents.consultant_nodes.success_artifact",
+            side_effect=ValueError("application failure"),
+        ),
+    ):
+        result = await create_legal_counsel_node(
+            SimpleNamespace(model_name="primary"), []
+        )(
+            {
+                "company_of_interest": "TEST.T",
+                "raw_fundamentals_data": "Country: Japan",
+            },
+            {},
+        )
+    status = result["artifact_statuses"]["legal_report"]
+    assert status["ok"] is False
+    assert status["error_kind"] != "output_contract_violation"

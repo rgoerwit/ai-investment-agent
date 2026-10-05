@@ -18,6 +18,7 @@ from src.data_block_utils import (
     unfenced_label,
 )
 from src.macro_regime import parse_macro_regime
+from src.monetary import MONETARY_AMOUNT_PATTERN, parse_monetary_amount
 from src.runtime_diagnostics import get_model_name as _get_model_name
 from src.runtime_diagnostics import get_runtime_provider
 
@@ -56,6 +57,23 @@ def reasoning_setting_for(runnable: Any) -> str | None:
         if isinstance(value, str):
             return value
     return None
+
+
+def structural_recovery_event(
+    agent: str, failure_kind: str, llm: Any, retry_llm: Any, content: str
+) -> dict[str, Any]:
+    """Start the versioned recovery ledger; callers set its terminal outcome."""
+    return {
+        "schema_version": 1,
+        "originating_agent": agent,
+        "failure_kind": failure_kind,
+        "original_model": get_model_name(llm),
+        "recovery_model": get_model_name(retry_llm),
+        "reasoning_setting": reasoning_setting_for(llm),
+        "recovery_reasoning_setting": reasoning_setting_for(retry_llm),
+        "original_output_chars": len(content),
+        "outcome": "attempted",
+    }
 
 
 def get_context_from_config(config: Mapping[str, Any]) -> Any | None:
@@ -349,23 +367,12 @@ def compute_data_conflicts(raw_data: str, foreign_data: str) -> str:
 
     if foreign_data:
         ocf_match = re.search(
-            r"Operating Cash Flow\s*\(?Filing\)?[:\s]*([¥$€£₩]?[\d,.]+)\s*(B|M|T|billion|million|trillion)?",
+            rf"Operating Cash Flow[\t ]*\(?Filing\)?[:\t ]*{MONETARY_AMOUNT_PATTERN}",
             foreign_data,
             re.IGNORECASE,
         )
         if ocf_match:
-            try:
-                val_str = ocf_match.group(1).replace(",", "").lstrip("¥$€£₩")
-                filing_ocf = float(val_str)
-                suffix = (ocf_match.group(2) or "").upper()
-                if suffix in ("B", "BILLION"):
-                    filing_ocf *= 1e9
-                elif suffix in ("M", "MILLION"):
-                    filing_ocf *= 1e6
-                elif suffix in ("T", "TRILLION"):
-                    filing_ocf *= 1e12
-            except (ValueError, OverflowError):
-                filing_ocf = None
+            filing_ocf = parse_monetary_amount(ocf_match.group(0))
 
         period_match = re.search(
             r"Period[:\s]*(FY\d{4}|H[12]\s*\d{4}|Q[1-4]\s*\d{4}|\d{4})",

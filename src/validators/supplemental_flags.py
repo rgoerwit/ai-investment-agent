@@ -1253,8 +1253,9 @@ def detect_consultant_flags(
                 "type": "CONSULTANT_MAJOR_CONCERNS",
                 "severity": "HIGH",
                 "detail": "Consultant raised MAJOR CONCERNS — PM must address each",
-                "action": "RISK_PENALTY",
-                "risk_penalty": 1.5,
+                "action": "REVIEW",
+                "risk_penalty": 0.0,
+                "blocks_buy": True,
                 "rationale": "External consultant found material issues with the analysis. These could be factual errors, severe biases, or fundamentally flawed synthesis. PM decision should reflect these concerns.",
             }
         )
@@ -1265,8 +1266,8 @@ def detect_consultant_flags(
                 "type": "CONSULTANT_CONDITIONAL",
                 "severity": "WARNING",
                 "detail": "Consultant gave CONDITIONAL APPROVAL — conditions must be met",
-                "action": "RISK_PENALTY",
-                "risk_penalty": 0.5,
+                "action": "REVIEW",
+                "risk_penalty": 0.0,
                 "rationale": "External consultant approved with conditions. PM should verify conditions are addressed in the final decision rationale.",
             }
         )
@@ -1299,15 +1300,14 @@ def detect_consultant_flags(
         logger.debug("consultant_flag_transient_strength", ticker=ticker)
 
     if discrepancies:
-        disc_penalty = min(len(discrepancies) * 0.5, 1.5)
         disc_details = "; ".join(d.strip() for d in discrepancies[:3])
         flags.append(
             {
                 "type": "CONSULTANT_DATA_DISCREPANCY",
                 "severity": "WARNING",
                 "detail": f"{len(discrepancies)} spot-check discrepancies: {disc_details}",
-                "action": "RISK_PENALTY",
-                "risk_penalty": disc_penalty,
+                "action": "REVIEW",
+                "risk_penalty": 0.0,
                 "rationale": "Consultant's independent spot-checks found discrepancies between DATA_BLOCK values and direct API queries. This suggests potential data quality issues that should be investigated.",
             }
         )
@@ -1315,7 +1315,6 @@ def detect_consultant_flags(
             "consultant_flag_discrepancies",
             ticker=ticker,
             count=len(discrepancies),
-            penalty=disc_penalty,
         )
 
     return flags

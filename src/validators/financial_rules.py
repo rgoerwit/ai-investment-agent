@@ -12,6 +12,7 @@ import structlog
 from src.data_block_utils import extract_data_block_field
 from src.earnings_baseline import is_material_baseline_distortion
 from src.guidance_vocabulary import all_transient_tax_terms
+from src.monetary import MONETARY_AMOUNT_RE, parse_monetary_amount
 from src.text_patterns import SENTENCE_SPLIT_RE
 from src.thesis_constants import (
     PE_MAX,
@@ -167,20 +168,6 @@ def contains_transient_strength_marker(report: str | None) -> bool:
     )
 
 
-_OCF_MAGNITUDE: dict[str, float] = {
-    "T": 1e12,
-    "TRILLION": 1e12,
-    "B": 1e9,
-    "BN": 1e9,
-    "BILLION": 1e9,
-    "M": 1e6,
-    "MN": 1e6,
-    "MM": 1e6,
-    "MILLION": 1e6,
-    "K": 1e3,
-}
-
-
 def sector_leverage_thresholds(
     sector: Sector,
     *,
@@ -194,10 +181,6 @@ def sector_leverage_thresholds(
     return (300, 2.5, 150) if strict_mode else (500, 2.0, 100)
 
 
-_OCF_NUM_MAG_RE = re.compile(
-    r"(\d[\d,]*\.?\d*)\s*(trillion|billion|million|bn|mm|mn|[tbmk])\b",
-    re.IGNORECASE,
-)
 _OCF_LINE_RE = re.compile(
     r"(?im)^[^\n]*\b(?:operating cash flow|cash flow from operations|"
     r"net cash from operating activities|cfo)\b[^\n]*$"
@@ -297,19 +280,16 @@ def parse_ocf_amount(text: str | None) -> float | None:
     """
     if not text:
         return None
-    match = _OCF_NUM_MAG_RE.search(text)
-    if match:
-        try:
-            value = float(match.group(1).replace(",", ""))
-        except ValueError:
-            return None
-        return value * _OCF_MAGNITUDE.get(match.group(2).upper(), 1.0)
-    bare = re.search(r"(\d[\d,]{6,})", text)  # bare large number, e.g. 920000000
-    if bare:
-        try:
-            return float(bare.group(1).replace(",", ""))
-        except ValueError:
-            return None
+    matches = list(MONETARY_AMOUNT_RE.finditer(text))
+    # Preserve preference for an explicit magnitude over unlabeled numbers;
+    # a year or footnote preceding the amount must not hide it.
+    for match in matches:
+        if match.group(3):
+            return parse_monetary_amount(match.group(0))
+    for match in matches:
+        if len(match.group(2).split(".", 1)[0]) >= 7:
+            # Small bare numbers may be years or footnotes, not money.
+            return parse_monetary_amount(match.group(0))
     return None
 
 
@@ -1024,18 +1004,18 @@ def detect_red_flags(
     ):
         ocf_ni_ratio = ocf / ni_for_ocf
         if ocf_ni_ratio > 3.0:
-            penalty, label = (
-                (1.5, "likely data error or period mismatch")
+            label = (
+                "likely data error or period mismatch"
                 if ocf_ni_ratio > 5.0
-                else (1.0, "unusual, verify data source")
+                else "unusual, verify data source"
             )
             red_flags.append(
                 {
                     "type": "SUSPICIOUS_OCF_NI_RATIO",
                     "severity": "WARNING",
                     "detail": f"OCF {ocf_ni_ratio:.1f}x net income — {label}",
-                    "action": "RISK_PENALTY",
-                    "risk_penalty": penalty,
+                    "action": "REVIEW",
+                    "risk_penalty": 0.0,
                     "rationale": f"Operating cash flow exceeding net income by >{ocf_ni_ratio:.0f}x is unusual and may indicate a data source error, wrong currency, or period mismatch. Cross-validate with an independent source.",
                 }
             )

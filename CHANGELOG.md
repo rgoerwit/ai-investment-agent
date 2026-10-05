@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Treat generic consultant conditions, numerical discrepancies, and suspicious
+  OCF/NI ratios as zero-weight review findings rather than issuer-risk penalties.
+- Block BUY when the Consultant reports MAJOR_CONCERNS: unresolved material
+  analysis flaws withhold initiation authority without adding issuer-risk points.
+  Growth exceptions retain their existing authority.
+
+### Fixed
+
+- Remove legal-response fragments from parser-fallback logging.
+- Parse currency suffixes separately from monetary magnitudes, preventing KRW,
+  BRL, and MYR amounts from creating false cash-conversion warnings. Share monetary
+  token recognition across metric extraction, OCF corroboration, filing conflicts,
+  capital-exposure scaling, and web-extracted market capitalization; preserve signed
+  K/M/B/T and spelled magnitudes. Reject unsupported units and ambiguous grouping,
+  including grouped-number backtracking to a smaller numeric prefix.
+- Bind capital claims to exact source URLs and scaled same-currency amounts; retain
+  unresolved absence coverage ahead of accounting qualifiers. Include inspected,
+  successful Legal Counsel follow-up evidence in normalization. Align the legal
+  prompt with unresolved no-findings coverage until absence is code-verifiable.
+- Preserve both debate sides and canonical versus advisory score explanations in
+  consultant context. Keep missing evidence distinct from issuer risk in review
+  and portfolio-manager prompts.
+- Recover invalid full-mode legal JSON once through the existing text-only recovery
+  seat, retain cost attribution, validate regulatory-risk entry shapes, and fail
+  closed when recovery is unsuccessful or changes retained legal assessments.
+- Leave more output room for Value Trap reasoning, retrieve unfetched approved
+  guidance documents when extraction is unavailable, and report evidence coverage
+  gaps separately from publication status in the batch health digest.
+
 ## [4.0.0] - 2026-09-16
 
 ### Added

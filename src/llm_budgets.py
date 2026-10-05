@@ -12,7 +12,9 @@ AGENT_OUTPUT_BUDGET_FRACTIONS: dict[str, Fraction] = {
     "News Analyst": Fraction(1, 8),
     "Foreign Language Analyst": Fraction(1, 8),
     "Legal Counsel": Fraction(1, 16),
-    "Value Trap Detector": Fraction(1, 16),
+    # Its reasoning shares the output pool; the former 2k visible + 2k
+    # reserve left only a few hundred visible tokens on observed full calls.
+    "Value Trap Detector": Fraction(1, 8),
     "Valuation Calculator": Fraction(1, 32),
     "Global Forensic Auditor": Fraction(1, 4),
     "APAC Regional Specialist": Fraction(1, 4),

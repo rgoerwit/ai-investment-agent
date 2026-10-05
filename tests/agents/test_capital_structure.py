@@ -353,3 +353,134 @@ def test_final_pm_block_is_inserted_once_before_pm_contract():
     assert updated == repeated
     assert updated.count("CAPITAL STRUCTURE QUALIFICATION (DETERMINISTIC)") == 1
     assert updated.index("CAPITAL STRUCTURE QUALIFICATION") < updated.index("PM_BLOCK")
+
+
+def test_capital_exposure_uses_shared_magnitude_while_requiring_currency_and_positive_amount():
+    from src.agents.capital_structure import _parse_exposure_amount
+
+    assert _parse_exposure_amount("KRW 100K") == (100000, "KRW")
+    assert _parse_exposure_amount("BRL 1.25 million") == (1250000, "BRL")
+    assert _parse_exposure_amount("KRW -100K") is None
+    assert _parse_exposure_amount("100K KRW") is None
+    assert _parse_exposure_amount("KRW 100KXYZ") is None
+
+
+def test_capital_amount_does_not_bypass_grouping_validation():
+    from src.agents.capital_structure import _parse_exposure_amount
+
+    assert _parse_exposure_amount("USD 1,5") is None
+    assert _parse_exposure_amount("USD 1,234.50") == (1234.5, "USD")
+
+
+@pytest.mark.parametrize(
+    "changes,supported",
+    [
+        ({}, True),
+        ({"blocked": True}, False),
+        ({"execution_status": "FAILED"}, False),
+        ({"evidence_status": "AUTH_ERROR"}, False),
+        ({"source": "preflight"}, False),
+        ({"agent_key": "consultant"}, False),
+    ],
+)
+def test_capital_followup_uses_only_inspected_successful_legal_evidence(
+    changes, supported
+):
+    from src.agents.capital_structure import capital_structure_evidence_context
+    from src.tooling.evidence_recorder import EvidenceRecord
+
+    content = _supporting_evidence("USD 2.0 billion of uncommenced lease commitments.")
+    fields = {
+        "sequence": 1,
+        "agent_key": "legal_counsel",
+        "tool_name": "get_official_document",
+        "source": "legal_counsel",
+        "content": content,
+        "content_sha256": "digest",
+        "requested_urls": (),
+        "urls": ("https://example.com/filing",),
+        "blocked": False,
+        "findings": (),
+        "execution_status": "SUCCEEDED",
+        "evidence_status": "EVIDENCE_FOUND",
+    }
+    fields.update(changes)
+    evidence = capital_structure_evidence_context(
+        "#### preflight\nSTATUS: FAILED", [EvidenceRecord(**fields)]
+    )
+    normalized, _ = normalize_legal_output(_legal_payload(_capital()), evidence)
+    capital = json.loads(normalized)["capital_structure"]
+    assert (capital["classification"] == "QUALIFY_RATIOS") is supported
+
+
+@pytest.mark.parametrize(
+    "source_amount,supported",
+    [
+        ("USD 2 million", False),
+        ("USD 2 billion", True),
+        ("2 billion USD", True),
+        ("EUR 2 billion", False),
+        ("USD 1,5 billion", False),
+    ],
+)
+def test_capital_support_binds_currency_and_magnitude(source_amount, supported):
+    normalized, _ = normalize_legal_output(
+        _legal_payload(
+            _capital(exposure_type="GUARANTEE_BACKSTOP", parent_recourse="FULL")
+        ),
+        _supporting_evidence(f"Parent guarantee: {source_amount}."),
+    )
+    assert (
+        json.loads(normalized)["capital_structure"]["classification"] == "BLOCK_BUY"
+    ) is supported
+
+
+def test_capital_source_url_prefix_cannot_bind_another_document():
+    normalized, _ = normalize_legal_output(
+        _legal_payload(_capital(source_url="https://example.com/fil")),
+        _supporting_evidence("USD 2.0 billion of uncommenced lease commitments."),
+    )
+    assert (
+        json.loads(normalized)["capital_structure"]["coverage_status"] == "UNRESOLVED"
+    )
+
+
+@pytest.mark.parametrize("coverage", ["FOUND", "NOT_FOUND"])
+@pytest.mark.parametrize("materiality", ["MATERIAL", "IMMATERIAL"])
+def test_model_absence_cannot_bypass_code_owned_coverage(coverage, materiality):
+    normalized, _ = normalize_legal_output(
+        _legal_payload(
+            _capital(
+                coverage_status=coverage,
+                exposure_type="NONE",
+                source_url="N/A",
+                materiality=materiality,
+            )
+        ),
+        "#### search\nEVIDENCE_STATUS: NO_RESULTS",
+    )
+    capital = json.loads(normalized)["capital_structure"]
+    assert capital["coverage_status"] == "UNRESOLVED"
+    assert capital["classification"] == "UNRESOLVED"
+
+
+@pytest.mark.parametrize("coverage", ["UNRESOLVED", "SEARCH_FAILED", "FOUND"])
+@pytest.mark.parametrize("exposure_type", ["NONE", "UNKNOWN"])
+@pytest.mark.parametrize(
+    "qualifier", [{"materiality": "IMMATERIAL"}, {"balance_sheet_status": "RECOGNIZED"}]
+)
+def test_unsupported_coverage_cannot_be_cleared_by_accounting_qualifiers(
+    coverage, exposure_type, qualifier
+):
+    normalized, _ = normalize_legal_output(
+        _legal_payload(
+            _capital(
+                coverage_status=coverage,
+                exposure_type=exposure_type,
+                source_url="N/A",
+                **qualifier,
+            )
+        ),
+        "EXECUTION_STATUS: SUCCEEDED",
+    )
+    assert json.loads(normalized)["capital_structure"]["classification"] == "UNRESOLVED"

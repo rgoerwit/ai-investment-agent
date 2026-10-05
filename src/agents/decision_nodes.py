@@ -63,6 +63,7 @@ from src.runtime_diagnostics import (
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .analysis_integrity_prompt import ANALYSIS_INTEGRITY_BLOCK
 from .evidence_constraints import downstream_evidence_constraints
 from .fundamentals_reconciler import stamp_trade_block_price_currency
 from .governance_prompt import governance_block, governance_card
@@ -1330,7 +1331,7 @@ POSITION PLANNER PROPOSAL:
 
 RISK TEAM DEBATE:
 {risk if risk else "N/A"}"""
-        pm_system_msg = agent_prompt.system_message
+        pm_system_msg = agent_prompt.system_message + ANALYSIS_INTEGRITY_BLOCK
         if strict_mode:
             pm_system_msg += _STRICT_PM_ADDENDUM
 
@@ -1472,20 +1473,9 @@ RISK TEAM DEBATE:
                     truncated=trunc_info["truncated"],
                     validation=validation,
                 )
-                reasoning_setting = support.reasoning_setting_for(llm)
-                recovery_event: dict[str, Any] = {
-                    "schema_version": 1,
-                    "originating_agent": "portfolio_manager",
-                    "failure_kind": failure_kind,
-                    "original_model": support.get_model_name(llm),
-                    "recovery_model": support.get_model_name(recovery_llm),
-                    "reasoning_setting": reasoning_setting,
-                    "recovery_reasoning_setting": support.reasoning_setting_for(
-                        recovery_llm
-                    ),
-                    "original_output_chars": len(content_str),
-                    "outcome": "attempted",
-                }
+                recovery_event: dict[str, Any] = support.structural_recovery_event(
+                    "portfolio_manager", failure_kind, llm, recovery_llm, content_str
+                )
                 structural_recovery_events.append(recovery_event)
                 logger.warning(
                     "portfolio_manager_structural_recovery",

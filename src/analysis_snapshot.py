@@ -29,6 +29,7 @@ from src.data_block_utils import (
 )
 from src.provenance_schema import (
     SchemaDecodeError,
+    Scorecard,
     require_schema_compatible,
 )
 from src.tooling.evidence_recorder import bind_fetched_evidence
@@ -851,6 +852,26 @@ def render_analysis_snapshot(snapshot: Mapping[str, Any] | None) -> str:
             "override upstream evidence and are not decision-eligible."
         ),
     ]
+    raw_scorecards = snapshot.get("scorecards")
+    scorecards = raw_scorecards if isinstance(raw_scorecards, Mapping) else {}
+    rendered_scorecards = False
+    for kind, raw_scorecard in scorecards.items():
+        scorecard = Scorecard.decode_or_none(raw_scorecard)
+        if scorecard is not None:
+            rendered_scorecards = True
+            lines.append(
+                f"{kind} SCORE: decision={scorecard.percentage:.1f}%; "
+                f"advisory={scorecard.advisory_percentage:.1f}%; "
+                f"available={scorecard.available:g}; "
+                f"decision_eligible={scorecard.decision_eligible}; excluded_advisory_credits="
+                + (",".join(scorecard.advisory_only_awards) or "NONE")
+            )
+    if rendered_scorecards:
+        lines.append(
+            "SCORING RULE: Excluded advisory credits explain differences from raw "
+            "rubric arithmetic; do not restore them without canonical lineage. "
+            "Missing evidence is unknown, not a verified pass or an issuer risk."
+        )
     claims = snapshot.get("claims", {})
     material_fields = set(MATERIAL_CLAIM_POLICIES)
     selected = [

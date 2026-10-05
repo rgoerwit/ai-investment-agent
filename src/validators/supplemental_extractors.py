@@ -344,14 +344,14 @@ def extract_legal_risks(legal_report: str) -> dict[str, Any]:
         )
         return risks
     except json.JSONDecodeError as exc:
-        from src.error_safety import redact_sensitive_text
-
         # Operator-visible: the Legal Counsel prompt promises JSON output, so a
         # parse failure means format drift — the regex fallback may miss fields.
         logger.warning(
             "legal_report_json_parse_failed_using_regex_fallback",
-            reason=str(exc.msg)[:120],
-            report_prefix=redact_sensitive_text(json_str, max_chars=80),
+            failure_kind="invalid_json",
+            error_type=type(exc).__name__,
+            line=exc.lineno,
+            column=exc.colno,
         )
 
     pfic_match = re.search(

@@ -2357,21 +2357,21 @@ class TestOCFNIRatioCheck:
         return base
 
     def test_ocf_4x_ni_triggers_warning(self):
-        """OCF 4x NI → triggers +1.0 WARNING."""
+        """OCF 4x NI → triggers zero-weight REVIEW."""
         metrics = self._make_metrics(ocf=4_000, net_income=1_000)
         flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
         ocf_flags = [f for f in flags if f["type"] == "SUSPICIOUS_OCF_NI_RATIO"]
         assert len(ocf_flags) == 1
-        assert ocf_flags[0]["risk_penalty"] == 1.0
+        assert ocf_flags[0]["risk_penalty"] == 0.0
         assert result == "PASS"
 
     def test_ocf_6x_ni_triggers_higher_warning(self):
-        """OCF 6x NI → triggers +1.5 WARNING."""
+        """OCF 6x NI → triggers zero-weight REVIEW."""
         metrics = self._make_metrics(ocf=6_000, net_income=1_000)
         flags, result = RedFlagDetector.detect_red_flags(metrics, "TEST.T")
         ocf_flags = [f for f in flags if f["type"] == "SUSPICIOUS_OCF_NI_RATIO"]
         assert len(ocf_flags) == 1
-        assert ocf_flags[0]["risk_penalty"] == 1.5
+        assert ocf_flags[0]["risk_penalty"] == 0.0
         assert result == "PASS"
 
     def test_ocf_2x_ni_no_flag(self):
@@ -2560,7 +2560,7 @@ class TestConsultantConditionEnforcement:
         assert len(flags) == 0
 
     def test_conditional_approval_flag(self):
-        """CONDITIONAL APPROVAL → +0.5 risk."""
+        """CONDITIONAL APPROVAL → review without issuer-risk points."""
         review = """
 ### CONSULTANT REVIEW: CONDITIONAL APPROVAL
 
@@ -2576,10 +2576,10 @@ Conditions:
         assert len(flags) >= 1
         cond_flags = [f for f in flags if f["type"] == "CONSULTANT_CONDITIONAL"]
         assert len(cond_flags) == 1
-        assert cond_flags[0]["risk_penalty"] == 0.5
+        assert cond_flags[0]["risk_penalty"] == 0.0
 
     def test_major_concerns_flag(self):
-        """MAJOR CONCERNS → +1.5 risk."""
+        """MAJOR CONCERNS → review and withhold BUY authority."""
         review = """
 ### CONSULTANT REVIEW: MAJOR CONCERNS
 
@@ -2592,10 +2592,11 @@ The analysis has fundamental issues.
         flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
         concern_flags = [f for f in flags if f["type"] == "CONSULTANT_MAJOR_CONCERNS"]
         assert len(concern_flags) == 1
-        assert concern_flags[0]["risk_penalty"] == 1.5
+        assert concern_flags[0]["risk_penalty"] == 0.0
+        assert concern_flags[0]["blocks_buy"] is True
 
     def test_major_concerns_with_discrepancies(self):
-        """MAJOR CONCERNS + 2 discrepancies → +1.5 + 1.0 = +2.5 risk."""
+        """MAJOR CONCERNS and data discrepancies do not establish issuer risk."""
         review = """
 ### CONSULTANT REVIEW: MAJOR CONCERNS
 
@@ -2609,7 +2610,7 @@ SPOT_CHECK freeCashflow: DATA_BLOCK=13.39B, yfinance_direct=5.2B → DISCREPANCY
         assert len(conditions["spot_check_discrepancies"]) == 2
         flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
         total_penalty = sum(f.get("risk_penalty", 0) for f in flags)
-        assert total_penalty == 2.5  # 1.5 (major) + 1.0 (2 * 0.5 discrepancies)
+        assert total_penalty == 0.0
 
     def test_mandate_breach_flag(self):
         """MANDATE BREACH → +2.0 risk."""
@@ -2710,7 +2711,7 @@ HARD STOP: RESTRICTED — NS-CMIC listed entity.
         flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
         assert len(flags) == 0
 
-    def test_discrepancy_penalty_capped(self):
+    def test_discrepancies_are_zero_weight_review(self):
         """4 discrepancies → penalty capped at 1.5 (not 2.0)."""
         review = """
 SPOT_CHECK a: X → DISCREPANCY
@@ -2725,7 +2726,8 @@ APPROVED
         flags = RedFlagDetector.detect_consultant_flags(conditions, "TEST.T")
         disc_flags = [f for f in flags if f["type"] == "CONSULTANT_DATA_DISCREPANCY"]
         assert len(disc_flags) == 1
-        assert disc_flags[0]["risk_penalty"] == 1.5  # Capped
+        assert disc_flags[0]["risk_penalty"] == 0.0
+        assert disc_flags[0]["action"] == "REVIEW"
 
 
 class TestSegmentOwnershipOCFFields:

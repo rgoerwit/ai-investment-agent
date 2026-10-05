@@ -12,6 +12,7 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.types import RunnableConfig
 
+from src.analysis_snapshot import render_analysis_snapshot
 from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
 from src.data_block_utils import unfenced_label
@@ -39,7 +40,9 @@ from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .analysis_integrity_prompt import ANALYSIS_INTEGRITY_BLOCK
 from .capital_structure import (
+    capital_structure_evidence_context,
     normalize_legal_output,
     preload_capital_structure_evidence,
 )
@@ -54,6 +57,7 @@ from .forensic_repair import (
 )
 from .governance_prompt import governance_block, governance_card
 from .output_validation import (
+    legal_recovery_preserves_assessments,
     log_output_diagnostics,
     log_truncation_diagnostic,
     should_fail_closed,
@@ -388,10 +392,34 @@ def create_consultant_node(
             context.trade_date if context else datetime.now().strftime("%Y-%m-%d")
         )
 
+        consultant_profile = (
+            _select_quick_consultant_profile(state) if quick_mode else "full"
+        )
         debate_state = state.get("investment_debate_state")
         debate_history = "N/A"
         if debate_state and isinstance(debate_state, dict):
-            debate_history = debate_state.get("history", "N/A")
+            budget = _consultant_context_budget(
+                "debate",
+                profile=consultant_profile,
+            )
+            if debate_state.get("bull_history") or debate_state.get("bear_history"):
+                # Allocate to each side before truncation; the combined history
+                # starts with Bull and can otherwise exclude Bear completely.
+                header_chars = len("BULL RESEARCHER:\n\n\nBEAR RESEARCHER:\n")
+                per_side = max(1, (budget - header_chars) // 2)
+                debate_history = "\n\n".join(
+                    f"{side.upper()} RESEARCHER:\n"
+                    + support.summarize_for_pm(
+                        str(debate_state.get(f"{side}_history") or "NOT AVAILABLE"),
+                        "research",
+                        per_side,
+                    )
+                    for side in ("bull", "bear")
+                )
+            else:
+                debate_history = support.summarize_for_pm(
+                    str(debate_state.get("history", "N/A")), "debate", budget
+                )
         elif debate_state is None:
             logger.error(
                 "consultant_received_none_debate_state",
@@ -418,9 +446,6 @@ def create_consultant_node(
         value_trap = state.get("value_trap_report", "N/A")
         auditor = state.get("auditor_report") or "N/A"
         apac = state.get("apac_regional_report", "N/A")
-        consultant_profile = (
-            _select_quick_consultant_profile(state) if quick_mode else "full"
-        )
         evidence_index = (
             _build_decision_critical_evidence_index(state) if quick_mode else ""
         )
@@ -436,6 +461,7 @@ def create_consultant_node(
 
         all_context = f"""
 {evidence_index}\
+{render_analysis_snapshot(state.get("analysis_snapshot"))}
 === ANALYST REPORTS (SOURCE DATA) ===
 
 MARKET ANALYST REPORT:
@@ -452,7 +478,7 @@ FUNDAMENTALS ANALYST REPORT:
 {attribution_table}{conflict_table}
 === BULL/BEAR DEBATE HISTORY ===
 
-{support.summarize_for_pm(debate_history, "debate", _consultant_context_budget("debate", profile=consultant_profile)) if debate_history != "N/A" else "N/A"}
+{debate_history}
 
 === RESEARCH MANAGER SYNTHESIS ===
 
@@ -493,7 +519,7 @@ FUNDAMENTALS ANALYST REPORT:
                     "Cite the primary source you trust and identify the source you reject."
                 )
 
-        prompt = f"""{agent_prompt.system_message}
+        prompt = f"""{agent_prompt.system_message}{ANALYSIS_INTEGRITY_BLOCK}
 
 ANALYSIS DATE: {support._format_date_with_fy_hint(current_date)}
 TICKER: {ticker}
@@ -791,7 +817,7 @@ Provide your independent consultant review."""
     return consultant_node
 
 
-def create_legal_counsel_node(llm, tools: list) -> Callable:
+def create_legal_counsel_node(llm, tools: list, *, retry_llm: Any = None) -> Callable:
     """
     Create Legal Counsel node for PFIC or VIE detection.
     """
@@ -952,51 +978,125 @@ then return the complete required JSON assessment. Query terms alone are not fin
                     getattr(final_response, "content", "")
                 )
 
+            from src.runtime_services import get_current_evidence_records
+
+            capital_structure_evidence = capital_structure_evidence_context(
+                capital_structure_evidence,
+                get_current_evidence_records(agent_key="legal_counsel"),
+            )
             normalized_response, capital_contract_present = normalize_legal_output(
                 response_str,
                 capital_structure_evidence,
             )
-            try:
-                if normalized_response is None:
-                    raise json.JSONDecodeError("No JSON object found", response_str, 0)
-                parsed = json.loads(normalized_response)
-                logger.debug(
-                    "legal_counsel_complete",
-                    ticker=ticker,
-                    pfic_status=parsed.get("pfic_status"),
-                    vie_structure=parsed.get("vie_structure"),
-                    capital_structure_classification=(
-                        parsed.get("capital_structure") or {}
-                    ).get("classification"),
-                    capital_structure_contract_present=capital_contract_present,
+            recovery_events: list[dict[str, Any]] = []
+            valid = (
+                normalized_response is not None
+                and validate_required_output("legal_counsel", normalized_response)["ok"]
+            )
+            if not valid and retry_llm is not None:
+                original_legal_output = normalized_response or ""
+                event = support.structural_recovery_event(
+                    "legal_counsel",
+                    "output_contract_violation",
+                    llm,
+                    retry_llm,
+                    response_str,
                 )
-                result = success_artifact(
-                    "legal_report",
-                    normalized_response,
-                    provider=support.infer_provider_name(llm),
-                )
-                result["sender"] = "legal_counsel"
-                return result
-            except json.JSONDecodeError:
+                recovery_events.append(event)
+                try:
+                    repair_response = await _invoke_agent_loop_llm(
+                        retry_llm,
+                        [
+                            *messages,
+                            HumanMessage(
+                                content=(
+                                    "The output contract failed. Using only the retained "
+                                    "evidence, return the complete required legal JSON. "
+                                    "Preserve uncertainty and source limitations; do not "
+                                    "invent findings or request tools.\n"
+                                    + format_untrusted_block(
+                                        response_str, "INVALID LEGAL OUTPUT"
+                                    )
+                                )
+                            ),
+                        ],
+                        context="Legal Counsel Structural Recovery",
+                        canonical_agent="Legal Counsel",
+                    )
+                    normalized_response, capital_contract_present = (
+                        normalize_legal_output(
+                            message_utils.extract_string_content(
+                                getattr(repair_response, "content", "")
+                            ),
+                            capital_structure_evidence,
+                        )
+                    )
+                    valid = (
+                        normalized_response is not None
+                        and validate_required_output(
+                            "legal_counsel", normalized_response
+                        )["ok"]
+                        and legal_recovery_preserves_assessments(
+                            original_legal_output, normalized_response
+                        )
+                    )
+                    event.update(
+                        outcome="accepted_text" if valid else "failed",
+                        final_output_valid=valid,
+                    )
+                except Exception as repair_exc:
+                    event.update(outcome="failed", final_output_valid=False)
+                    logger.warning(
+                        "legal_counsel_recovery_failed",
+                        ticker=ticker,
+                        **summarize_exception(
+                            repair_exc, operation="legal_counsel_recovery"
+                        ),
+                    )
+            if not valid or normalized_response is None:
                 logger.warning(
-                    "legal_counsel_invalid_json",
+                    "legal_counsel_invalid_output",
                     ticker=ticker,
-                    response_preview=redact_sensitive_text(response_str, max_chars=200),
+                    failure_kind="output_contract_violation",
                 )
                 fallback_report = _build_legal_fallback_report(
                     ticker=ticker,
                     country=country,
                     sector=sector,
-                    reason="Invalid JSON response from legal counsel",
+                    reason="Invalid legal output contract",
                 )
                 result = failure_artifact(
                     "legal_report",
-                    "Invalid JSON response from legal counsel",
+                    "Invalid legal output contract",
+                    error_kind="output_contract_violation",
                     provider=support.infer_provider_name(llm),
                     fallback_content=fallback_report,
                 )
                 result["sender"] = "legal_counsel"
+                if recovery_events:
+                    result["structural_recovery_events"] = recovery_events
                 return result
+
+            parsed = json.loads(normalized_response)
+            logger.debug(
+                "legal_counsel_complete",
+                ticker=ticker,
+                pfic_status=parsed.get("pfic_status"),
+                vie_structure=parsed.get("vie_structure"),
+                capital_structure_classification=(
+                    parsed.get("capital_structure") or {}
+                ).get("classification"),
+                capital_structure_contract_present=capital_contract_present,
+            )
+            result = success_artifact(
+                "legal_report",
+                normalized_response,
+                provider=support.infer_provider_name(llm),
+            )
+            result["sender"] = "legal_counsel"
+            if recovery_events:
+                result["structural_recovery_events"] = recovery_events
+            return result
         except Exception as exc:
             provider = support.infer_provider_name(llm)
             details = classify_failure(

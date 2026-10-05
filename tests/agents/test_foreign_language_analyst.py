@@ -2172,3 +2172,50 @@ def test_guidance_input_reason_classifies_first_block_without_source_text():
         )
         == "INVALID_COVERAGE"
     )
+
+
+@pytest.mark.asyncio
+async def test_guidance_auth_failure_falls_back_to_unfetched_approved_documents():
+    from src.tooling.runtime import ToolResult
+
+    calls = []
+    urls = [f"https://www.hochiki.co.jp/ir/results{i}.pdf" for i in range(3)]
+
+    class Service:
+        async def execute(self, call, runner):
+            calls.append(call)
+            if call.name == "extract_guidance_sources":
+                return ToolResult(
+                    value="STATUS: AUTH_ERROR\nREASON: GUIDANCE_EXTRACTION_AUTH_ERROR"
+                )
+            if call.name == "get_official_document":
+                return ToolResult(
+                    value="STATUS: EVIDENCE_FOUND\nissuer document content"
+                )
+            if call.name == "get_official_filings":
+                return ToolResult(value="STATUS: UNAVAILABLE")
+            return ToolResult(
+                value="".join(
+                    f"<result><title>Hochiki 6745 results</title><url>{url}</url></result>"
+                    for url in urls
+                )
+                + "<result><title>Other issuer</title><url>https://unapproved.example/results</url></result>"
+            )
+
+    with (
+        patch("src.runtime_services.get_current_tool_service", return_value=Service()),
+        patch(
+            "src.tools.official_documents.is_official_document_url",
+            side_effect=lambda url: url in urls,
+        ),
+    ):
+        evidence = await _preload_management_guidance_evidence(
+            "6745.T", "Hochiki Corporation"
+        )
+    documents = [
+        call.args["url"] for call in calls if call.name == "get_official_document"
+    ]
+    assert documents == urls
+    assert "guidance_document_fallback_1" in evidence
+    assert "GUIDANCE_EXTRACTION_AUTH_ERROR" in evidence
+    assert "issuer document content" in evidence

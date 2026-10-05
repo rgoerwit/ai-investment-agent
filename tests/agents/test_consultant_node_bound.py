@@ -253,3 +253,34 @@ class TestTheHappyPathIsUnchanged:
         status = result.get("artifact_statuses", {}).get("consultant_review")
         assert status is not None
         assert status.get("ok") is True
+
+
+@pytest.mark.asyncio
+async def test_consultant_retains_both_sides_of_long_debate():
+    state = _state()
+    state["investment_debate_state"] = {
+        "history": "Bull Analyst: " + "optimism " * 3000 + "Bear Analyst: BEAR_CASE",
+        "bull_history": "BULL_CASE " + "optimism " * 3000,
+        "bear_history": "BEAR_CASE " + "risk " * 3000,
+    }
+    inputs = []
+    response = Mock(
+        content="FINAL CONSULTANT VERDICT\nMANDATE_BREACH: NONE\nHARD_STOP: NONE\n"
+        + "x" * 400,
+        tool_calls=[],
+        response_metadata={"finish_reason": "stop"},
+    )
+
+    async def invoke(*args, **kwargs):
+        inputs.append(str(args[1]))
+        return response
+
+    with (
+        _prompt_patch(),
+        patch("src.agents.runtime.invoke_with_rate_limit_handling", new=invoke),
+    ):
+        await create_consultant_node(Mock(), "consultant")(state, _config())
+    assert inputs
+    assert "BULL_CASE" in inputs[0]
+    assert "BEAR_CASE" in inputs[0]
+    assert len(inputs[0]) < 20000

@@ -1367,3 +1367,31 @@ def test_fully_rooted_health_score_has_transitive_lineage() -> None:
         component["derived_from"]
         for component in derived["scorecards"]["HEALTH"]["criteria"].values()
     )
+
+
+def test_render_distinguishes_canonical_and_advisory_scores():
+    rendered = render_analysis_snapshot(
+        {
+            "contract_status": "VALID",
+            "claims": {},
+            "scorecards": {
+                "growth": {
+                    "percentage": 20,
+                    "advisory_percentage": 40,
+                    "available": 5,
+                    "decision_eligible": True,
+                    "advisory_only_awards": ["GLOBAL_EXPANSION"],
+                }
+            },
+        }
+    )
+    assert "growth SCORE: decision=20.0%; advisory=40.0%; available=5" in rendered
+    assert "excluded_advisory_credits=GLOBAL_EXPANSION" in rendered
+    assert "Missing evidence is unknown" in rendered
+    assert "SCORE:" not in render_analysis_snapshot(
+        {
+            "contract_status": "VALID",
+            "claims": {},
+            "scorecards": [],
+        }
+    )

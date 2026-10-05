@@ -11,24 +11,9 @@ from src.data_block_utils import (
     extract_block_number_from_text,
     extract_last_data_block,
 )
+from src.monetary import MONETARY_AMOUNT_PATTERN, parse_monetary_amount
 
 logger = structlog.get_logger(__name__)
-
-
-def parse_currency_value(sign: str, value_str: str, multiplier: str | None) -> float:
-    """Parse a sign + numeric string + B/M/K multiplier into a float."""
-    value = float(value_str.replace(",", ""))
-    if sign == "-":
-        value = -value
-    if multiplier:
-        normalized = multiplier.upper()
-        if normalized == "B":
-            value *= 1_000_000_000
-        elif normalized == "M":
-            value *= 1_000_000
-        elif normalized == "K":
-            value *= 1_000
-    return value
 
 
 def parse_ratio_or_percent(raw_value: str) -> float | None:
@@ -381,14 +366,12 @@ def extract_metrics(
             metrics[metric_name] = value
 
     ocf_match = re.search(
-        r"OPERATING_CASH_FLOW:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        rf"OPERATING_CASH_FLOW:\s*{MONETARY_AMOUNT_PATTERN}",
         data_block,
         re.IGNORECASE,
     )
     if ocf_match:
-        metrics["ocf"] = parse_currency_value(
-            ocf_match.group(1), ocf_match.group(2), ocf_match.group(3)
-        )
+        metrics["ocf"] = parse_monetary_amount(ocf_match.group(0))
 
     ocf_source_match = re.search(
         r"OPERATING_CASH_FLOW_SOURCE:\s*(JUNIOR|FILING|N/A)",
@@ -702,49 +685,44 @@ def extract_free_cash_flow(report: str) -> float | None:
     """Extract free cash flow with support for signs and B/M/K multipliers."""
     patterns = [
         # Canonical DATA_BLOCK field (fundamentals prompt v9.31)
-        r"(?:^|\n)\s*FREE_CASH_FLOW:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"\*\*Free Cash Flow\*\*:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"(?:^|\n)\s*Free Cash Flow:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"(?:^|\n)\s*FCF:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"(?:Free Cash Flow|FCF):\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"Positive FCF:\s*[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        rf"(?:^|\n)\s*FREE_CASH_FLOW:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"\*\*Free Cash Flow\*\*:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"(?:^|\n)\s*Free Cash Flow:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"(?:^|\n)\s*FCF:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"(?:Free Cash Flow|FCF):\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"Positive FCF:\s*{MONETARY_AMOUNT_PATTERN}",
     ]
     for pattern in patterns:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
         if match:
-            groups = match.groups()
-            if len(groups) == 2:
-                return parse_currency_value("", groups[0], groups[1])
-            return parse_currency_value(groups[0], groups[1], groups[2])
+            return parse_monetary_amount(match.group(0))
     return None
 
 
 def extract_net_income(report: str) -> float | None:
     """Extract net income with support for signs and B/M/K multipliers."""
     patterns = [
-        r"\*\*Net Income\*\*:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"(?:^|\n)\s*Net Income:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"Net Income:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        rf"\*\*Net Income\*\*:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"(?:^|\n)\s*Net Income:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"Net Income:\s*{MONETARY_AMOUNT_PATTERN}",
     ]
     for pattern in patterns:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
         if match:
-            groups = match.groups()
-            return parse_currency_value(groups[0], groups[1], groups[2])
+            return parse_monetary_amount(match.group(0))
     return None
 
 
 def extract_operating_cash_flow(report: str) -> float | None:
     """Extract operating cash flow with support for signs and B/M/K multipliers."""
     patterns = [
-        r"\*\*Operating Cash Flow\*\*:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"(?:^|\n)\s*Operating Cash Flow:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"(?:^|\n)\s*OCF:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"(?:Operating Cash Flow|OCF):\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        rf"\*\*Operating Cash Flow\*\*:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"(?:^|\n)\s*Operating Cash Flow:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"(?:^|\n)\s*OCF:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"(?:Operating Cash Flow|OCF):\s*{MONETARY_AMOUNT_PATTERN}",
     ]
     for pattern in patterns:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
         if match:
-            groups = match.groups()
-            return parse_currency_value(groups[0], groups[1], groups[2])
+            return parse_monetary_amount(match.group(0))
     return None

@@ -457,6 +457,7 @@ async def _preload_management_guidance_evidence(
         )
         if is_official_document_url(url.rstrip(".,;:!?)]}"))
     ][:2]
+    child_urls: list[str] = []
     if enable_extraction and official_candidate_urls:
         labels = ("latest_results_document", "latest_results_document_backup")
         official_outcomes, official_durations = await run_preflight_calls(
@@ -550,6 +551,42 @@ async def _preload_management_guidance_evidence(
         )
         outcomes.extend(extraction_outcomes)
         call_durations_ms.update(extraction_durations)
+        # An extraction-provider outage must not prevent bounded retrieval of
+        # newly discovered approved issuer documents. Keep the failed outcome,
+        # and use the same inspected tool-execution chain for the fallback.
+        if any(
+            outcome.evidence_status in INCOMPLETE_SEARCH_EVIDENCE_STATUSES
+            for outcome in extraction_outcomes
+        ):
+            already_requested = {*official_candidate_urls, *child_urls}
+            fallback_urls = [
+                url
+                for url in guidance_candidate_urls
+                if url not in already_requested and is_official_document_url(url)
+            ][:2]
+            if fallback_urls:
+                fallback_outcomes, fallback_durations = await run_preflight_calls(
+                    [
+                        (
+                            f"guidance_document_fallback_{index + 1}",
+                            get_official_document,
+                            {
+                                "url": url,
+                                "keywords": ",".join(priority_terms[:12]),
+                                "ticker": ticker,
+                                "company_name": company_name,
+                            },
+                        )
+                        for index, url in enumerate(fallback_urls)
+                    ],
+                    agent_key="foreign_language_analyst",
+                    source="preflight",
+                    ticker=ticker,
+                    failure_event="management_guidance_preflight_call_failed",
+                    logger=logger,
+                )
+                outcomes.extend(fallback_outcomes)
+                call_durations_ms.update(fallback_durations)
     else:
         reason = "QUICK_MODE" if not enable_extraction else "NO_ENTITY_MATCHING_URLS"
         outcomes.append(skipped_preflight_outcome("guidance_extract", reason))

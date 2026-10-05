@@ -399,6 +399,7 @@ def build_graph_components(
             SeatId.SENIOR_FUNDAMENTALS,
             SeatId.FOREIGN_LANGUAGE,
             SeatId.VALUE_TRAP,
+            SeatId.LEGAL_COUNSEL,
             SeatId.PORTFOLIO_MANAGER,
         )
     if allow_retry:
@@ -624,7 +625,11 @@ def build_graph_components(
     )
 
     legal_llm = seat_model(SeatId.LEGAL_COUNSEL)
-    legal_counsel = create_legal_counsel_node(legal_llm, toolkit.get_legal_tools())
+    legal_counsel = create_legal_counsel_node(
+        legal_llm,
+        toolkit.get_legal_tools(),
+        retry_llm=retry_llms.get(SeatId.LEGAL_COUNSEL),
+    )
 
     value_trap_llm = seat_model(SeatId.VALUE_TRAP)
     value_trap_detector = create_analyst_node(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from numbers import Real
 from typing import Any
@@ -26,8 +27,19 @@ from src.earnings_baseline import (
 from src.llm_usage import extract_token_usage_breakdown
 from src.runtime_diagnostics.failure_classification import ArtifactErrorKind
 from src.text_patterns import URL_RE
+from src.validators.supplemental_extractors import (
+    CMIC_STATUS_TOKENS,
+    PFIC_STATUS_TOKENS,
+    VIE_STRUCTURE_TOKENS,
+)
 
 logger = structlog.get_logger(__name__)
+
+_LEGAL_STATUS_FIELDS = (
+    ("pfic_status", PFIC_STATUS_TOKENS),
+    ("vie_structure", VIE_STRUCTURE_TOKENS),
+    ("cmic_status", CMIC_STATUS_TOKENS),
+)
 
 _FORENSIC_VERDICT_PATTERN = re.compile(
     r"(?im)^\s*(?:\*\*)?\s*verdict\s*(?:\*\*)?\s*:\s*\S+"
@@ -347,11 +359,88 @@ def _has_forensic_verdict(content: str) -> bool:
     return bool(_FORENSIC_VERDICT_PATTERN.search(content))
 
 
+def _valid_regulatory_risk(risk: Any) -> bool:
+    return (
+        isinstance(risk, dict)
+        and all(
+            isinstance(risk.get(field), str) and risk[field].strip()
+            for field in ("risk_type", "description", "severity")
+        )
+        and risk["severity"].upper() in {"HIGH", "MEDIUM", "LOW"}
+    )
+
+
+def legal_recovery_preserves_assessments(original: str, recovered: str) -> bool:
+    """Structural repair may fill gaps, but may not re-adjudicate valid findings."""
+
+    try:
+        before, after = json.loads(original), json.loads(recovered)
+    except (ValueError, TypeError):
+        return True  # Malformed original JSON has no trustworthy field boundaries.
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    for field, allowed in _LEGAL_STATUS_FIELDS:
+        value = before.get(field)
+        if isinstance(value, str) and value in allowed and after.get(field) != value:
+            return False
+    capital = before.get("capital_structure")
+    if (
+        isinstance(capital, dict)
+        and capital.get("coverage_status") == "FOUND"
+        and capital.get("classification") in {"BLOCK_BUY", "QUALIFY_RATIOS"}
+        and after.get("capital_structure") != capital
+    ):
+        # Amount, recourse and materiality can alter downstream sizing even when
+        # classification is unchanged. Structural repair is not re-adjudication.
+        return False
+    risks = before.get("other_regulatory_risks")
+    recovered_risks = after.get("other_regulatory_risks")
+    if isinstance(risks, list):
+        for risk in risks:
+            if _valid_regulatory_risk(risk) and (
+                not isinstance(recovered_risks, list) or risk not in recovered_risks
+            ):
+                return False
+    return True
+
+
 def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
     checks: list[tuple[str, bool]] = []
     issues: dict[str, str] = {}
 
-    if agent_key == "foreign_language_analyst":
+    if agent_key == "legal_counsel":
+        try:
+            payload = json.loads(content)
+        except (ValueError, TypeError):
+            payload = None
+        valid_object = isinstance(payload, dict)
+        checks.append(("json_object", valid_object))
+        if valid_object:
+            for field, allowed in _LEGAL_STATUS_FIELDS:
+                checks.append(
+                    (
+                        field,
+                        isinstance(payload.get(field), str)
+                        and payload[field] in allowed,
+                    )
+                )
+            checks.append(
+                (
+                    "regulatory_risks",
+                    isinstance(payload.get("other_regulatory_risks"), list)
+                    and all(
+                        _valid_regulatory_risk(risk)
+                        for risk in payload["other_regulatory_risks"]
+                    ),
+                )
+            )
+            checks.append(
+                (
+                    "capital_structure",
+                    isinstance(payload.get("capital_structure"), dict),
+                )
+            )
+    elif agent_key == "foreign_language_analyst":
         from src.agents.foreign_language_evidence import (
             has_foreign_language_protocol_residue,
         )
