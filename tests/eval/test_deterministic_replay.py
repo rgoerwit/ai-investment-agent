@@ -92,6 +92,10 @@ def test_data_block_metrics_golden():
     assert metrics["pb_ratio"] == 8.71
     assert metrics["sector"] == "technology"
     assert metrics["adjusted_health_score"] == 75.0
+    assert metrics["adjusted_growth_score"] == 100.0
+    assert metrics["ocf"] == 2_274.98 * 1_000_000_000
+    assert metrics["fcf"] == 992.38 * 1_000_000_000
+    assert metrics["net_income"] == 1_717.05 * 1_000_000_000
 
 
 def test_data_block_red_flags_golden():

@@ -376,6 +376,7 @@ def build_graph_components(
         # The binding inherits each originating seat's visible-output budget.
         allow_retry = plan.status_for(SeatId.ANALYST_RETRY, quick_mode=True).enabled
         recovery_origins = (
+            SeatId.JUNIOR_FUNDAMENTALS,
             SeatId.SENIOR_FUNDAMENTALS,
             SeatId.FOREIGN_LANGUAGE,
             SeatId.PORTFOLIO_MANAGER,

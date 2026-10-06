@@ -879,9 +879,11 @@ def _should_retry_output(content: str, agent_key: str) -> bool:
     if support._is_output_insufficient(content, agent_key):
         return True
 
-    if agent_key == "fundamentals_analyst":
-        return not validate_required_output(agent_key, content)["ok"]
-    if agent_key == "foreign_language_analyst":
+    if agent_key in {
+        "fundamentals_analyst",
+        "foreign_language_analyst",
+        "junior_fundamentals_analyst",
+    }:
         return not validate_required_output(agent_key, content)["ok"]
     return False
 
@@ -929,6 +931,20 @@ def _build_retry_invocation_messages(
     force_foreign_repair: bool = False,
 ) -> list[Any]:
     """Add the owning agent's structured-output correction for a retry."""
+    if agent_key == "junior_fundamentals_analyst":
+        return [
+            *invocation_messages,
+            HumanMessage(
+                content=(
+                    "OUTPUT CONTRACT CORRECTION: Return the required RAW FINANCIAL DATA "
+                    "wrapper first, with TOOL 1: get_financial_metrics and TOOL 2: "
+                    "get_fundamental_analysis sections and the exact === END RAW DATA === "
+                    "terminator. Use only retained tool evidence; preserve raw JSON and "
+                    "document unavailable results. Keep prose minimal. Do not invent data "
+                    "or call tools."
+                )
+            ),
+        ]
     if agent_key == "foreign_language_analyst":
         if (
             not force_foreign_repair

@@ -53,14 +53,12 @@ class TestFinancialPatternExtractor:
             assert result.get("forwardPE") == expected, f"Failed to match: '{text}'"
 
     def test_market_cap_patterns(self, extractor):
-        """Test Market Cap extraction with suffixes and commas."""
+        """Test Market Cap extraction with magnitudes and unambiguous grouping."""
         scenarios = [
             ("Market Cap: 1.5T", 1.5 * 1e12),
             ("Market Cap 200.5B", 200.5 * 1e9),
             ("Market Cap: 500M", 500 * 1e6),
             ("Market Cap: 1,234.56B", 1234.56 * 1e9),  # Standard comma separator
-            # International (comma as decimal)
-            ("Market Cap: 200,5B", 200.5 * 1e9),
         ]
 
         for text, expected in scenarios:
@@ -71,6 +69,12 @@ class TestFinancialPatternExtractor:
             assert abs(val - expected) < 1000, (
                 f"Value mismatch for '{text}': got {val}, expected {expected}"
             )
+
+    @pytest.mark.parametrize(
+        "text", ["Market Cap: 200,5B", "Market Cap: 200,5B; prior CAD 200M"]
+    )
+    def test_market_cap_rejects_ambiguous_decimal_comma(self, extractor, text):
+        assert extractor.extract_from_text(text).get("marketCap") is None
 
     def test_analyst_coverage_patterns(self, extractor):
         """Test Analyst Coverage count extraction with varied phrasing."""

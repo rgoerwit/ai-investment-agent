@@ -47,7 +47,10 @@ from src.error_safety import summarize_exception
 # to live on src.agents.pm_verdict_metadata, which created a charts circular
 # import: pm_block -> pm_verdict_metadata -> agents/__init__ -> decision_nodes).
 from src.pm_claim_audit import (
+    active_decision_gate_ids,
     audit_pm_claims,
+    eligible_decision_claims,
+    normalize_decision_trace_citations,
     reconcile_final_decision_trace,
     render_decision_trace_instruction,
     validate_decision_trace,
@@ -1412,6 +1415,9 @@ RISK TEAM DEBATE:
                 auditor=state.get("auditor_report") or None,
                 red_flags=red_flags,
             )
+            content_str = normalize_decision_trace_citations(
+                content_str, state.get("analysis_snapshot"), red_flags
+            )
             response_runnable = llm
             correction_used = False
 
@@ -1427,44 +1433,33 @@ RISK TEAM DEBATE:
                 trunc_info=trunc_info,
             )
 
-            validation = validate_required_output("portfolio_manager", content_str)
-            trace_sections = {"decision_facts", "decision_gates"}
+            validation = validate_required_output(
+                "portfolio_manager",
+                content_str,
+                snapshot=state.get("analysis_snapshot"),
+                red_flags=red_flags,
+            )
+            trace_sections = {"decision_facts", "decision_gates", "decision_trace"}
+            needs_correction = should_fail_closed(
+                "portfolio_manager",
+                validation=validation,
+                truncated=trunc_info["truncated"],
+                content=content_str,
+            )
+            repair_possible = bool(
+                eligible_decision_claims(state.get("analysis_snapshot"))
+                or active_decision_gate_ids(red_flags)
+            )
             if (
-                validation["missing"]
-                and set(validation["missing"]).issubset(trace_sections)
-                and not trunc_info["truncated"]
-            ):
-                correction_prompt = (
-                    "Your prior response omitted required decision-trace "
-                    "fields. Return the complete corrected response, including exactly "
-                    "one complete PM_BLOCK with DECISION_FACTS and DECISION_GATES. "
-                    "Do not return a patch and do not call tools."
-                )
-                (
-                    response,
-                    content_str,
-                    response_runnable,
-                ) = await invoke_structure_correction(
-                    correction_prompt,
-                    context_suffix="structure correction",
-                )
-                correction_used = True
-                trunc_info = detect_truncation(
-                    content_str,
-                    agent="portfolio_manager",
-                )
-                validation = validate_required_output(
-                    "portfolio_manager",
-                    content_str,
-                )
-            if (
-                recovery_llm is not None
-                and not correction_used
-                and should_fail_closed(
-                    "portfolio_manager",
-                    validation=validation,
-                    truncated=trunc_info["truncated"],
-                    content=content_str,
+                needs_correction
+                and repair_possible
+                and (
+                    recovery_llm is not None
+                    or (
+                        validation["missing"]
+                        and set(validation["missing"]).issubset(trace_sections)
+                        and not trunc_info["truncated"]
+                    )
                 )
             ):
                 failure_kind = classify_output_contract_failure(
@@ -1473,8 +1468,12 @@ RISK TEAM DEBATE:
                     truncated=trunc_info["truncated"],
                     validation=validation,
                 )
-                recovery_event: dict[str, Any] = support.structural_recovery_event(
-                    "portfolio_manager", failure_kind, llm, recovery_llm, content_str
+                recovery_event = support.structural_recovery_event(
+                    "portfolio_manager",
+                    failure_kind,
+                    llm,
+                    recovery_llm or llm,
+                    content_str,
                 )
                 structural_recovery_events.append(recovery_event)
                 logger.warning(
@@ -1484,27 +1483,42 @@ RISK TEAM DEBATE:
                     missing_sections=validation["missing"],
                 )
                 (
-                    response,
-                    content_str,
-                    response_runnable,
+                    corrected_response,
+                    corrected_content,
+                    correction_runnable,
                 ) = await invoke_structure_correction(
-                    "STRUCTURAL RECOVERY: Return one concise, complete response. "
-                    "Emit PM_BLOCK before supporting prose, include every required "
-                    "field, and close the block with its exact END marker. Do not "
-                    "return a patch and do not call tools.",
-                    context_suffix="structural recovery",
+                    "OUTPUT CONTRACT CORRECTION: Return one concise, complete response. "
+                    "Emit PM_BLOCK first and close its exact END marker. Cite at least "
+                    "one eligible canonical fact or active gate from the supplied decision "
+                    "trace instruction; both fields cannot be NONE. Every cited ID must "
+                    "be valid, and include all active gates. Do not invent evidence, "
+                    "return a patch, or call tools.",
+                    context_suffix="output contract correction",
                 )
-                recovery_event["outcome"] = "accepted_text"
                 correction_used = True
-                trunc_info = detect_truncation(
-                    content_str,
-                    agent="portfolio_manager",
-                )
+                if getattr(corrected_response, "tool_calls", None):
+                    recovery_event["outcome"] = "rejected_tool_calls"
+                else:
+                    response, content_str, response_runnable = (
+                        corrected_response,
+                        corrected_content,
+                        correction_runnable,
+                    )
+                    content_str = normalize_decision_trace_citations(
+                        content_str, state.get("analysis_snapshot"), red_flags
+                    )
+                trunc_info = detect_truncation(content_str, agent="portfolio_manager")
                 validation = validate_required_output(
                     "portfolio_manager",
                     content_str,
+                    snapshot=state.get("analysis_snapshot"),
+                    red_flags=red_flags,
                 )
-            decision_trace: dict[str, Any] | None = None
+            decision_trace = validate_decision_trace(
+                content_str,
+                state.get("analysis_snapshot"),
+                red_flags,
+            )
             final_output_invalid = should_fail_closed(
                 "portfolio_manager",
                 validation=validation,
@@ -1512,9 +1526,12 @@ RISK TEAM DEBATE:
                 content=content_str,
             )
             if structural_recovery_events:
-                structural_recovery_events[-1][
-                    "final_output_valid"
-                ] = not final_output_invalid
+                event = structural_recovery_events[-1]
+                event["final_output_valid"] = not final_output_invalid
+                if event.get("outcome") != "rejected_tool_calls":
+                    event["outcome"] = (
+                        "failed" if final_output_invalid else "accepted_text"
+                    )
             if not final_output_invalid:
                 content_str, decision_trace = reconcile_final_decision_trace(
                     content_str,
@@ -1569,6 +1586,7 @@ RISK TEAM DEBATE:
                         validation=validation,
                     ),
                 )
+                result["decision_trace"] = decision_trace
                 if structural_recovery_events:
                     result["structural_recovery_events"] = structural_recovery_events
                 return result
@@ -1750,6 +1768,21 @@ RISK TEAM DEBATE:
                 state.get("analysis_snapshot"),
                 red_flags,
             )
+            if decision_trace["status"] != "VALID":
+                if structural_recovery_events:
+                    structural_recovery_events[-1]["outcome"] = "failed"
+                    structural_recovery_events[-1]["final_output_valid"] = False
+                result = failure_artifact(
+                    "final_trade_decision",
+                    "Portfolio Manager decision trace invalid",
+                    provider=support.infer_provider_name(llm),
+                    fallback_content=content_str,
+                    error_kind="output_contract_violation",
+                )
+                result["decision_trace"] = decision_trace
+                if structural_recovery_events:
+                    result["structural_recovery_events"] = structural_recovery_events
+                return result
             _log_risk_tally_reconciliation(content_str, code_risk_subtotal, ticker)
             _log_pm_discipline_checks(
                 content_str, red_flags, valuation_reliability, ticker

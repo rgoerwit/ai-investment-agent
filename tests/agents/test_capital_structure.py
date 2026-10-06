@@ -361,7 +361,7 @@ def test_capital_exposure_uses_shared_magnitude_while_requiring_currency_and_pos
     assert _parse_exposure_amount("KRW 100K") == (100000, "KRW")
     assert _parse_exposure_amount("BRL 1.25 million") == (1250000, "BRL")
     assert _parse_exposure_amount("KRW -100K") is None
-    assert _parse_exposure_amount("100K KRW") is None
+    assert _parse_exposure_amount("100K KRW") == (100000, "KRW")
     assert _parse_exposure_amount("KRW 100KXYZ") is None
 
 

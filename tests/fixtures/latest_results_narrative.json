@@ -1,0 +1,16 @@
+{
+  "ticker": "071970.KS",
+  "capture_date": "2026-10-03",
+  "case": "explicit_half_year_secondary_narrative",
+  "expect_authority": "SECONDARY",
+  "report": "### --- START LATEST_RESULTS ---\n- LATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n- LATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\n- LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: H1 2026\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: H1 2025\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 6\nLATEST_RESULTS_CURRENCY: KRW\nLATEST_RESULTS_REPORTING_UNIT: Billion\nLATEST_RESULTS_REVENUE: 261.6\nLATEST_RESULTS_PRIOR_REVENUE: 402.4\nLATEST_RESULTS_EARNINGS: 60.0\nLATEST_RESULTS_PRIOR_EARNINGS: 165.1\nLATEST_RESULTS_EARNINGS_SCOPE: Net Income\nLATEST_RESULTS_SOURCE_URL: https://quartr.com/events/hd-hyundai-marine-engine-co-ltd-071970-q2-2026_FVY3q2Nx\n### --- END LATEST_RESULTS ---",
+  "execution_status": "SUCCEEDED",
+  "evidence": {
+    "tool_name": "search_foreign_sources",
+    "evidence_status": "RESULTS_FOUND",
+    "content": "<result relevance=\"0.78\" provider=\"tavily\">\n<title>HD Hyundai Marine Engine (071970) Q2 2026 Summary | Quartr</title>\n<url>https://quartr.com/events/hd-hyundai-marine-engine-co-ltd-071970-q2-2026_FVY3q2Nx</url>\n<summary>Consolidated revenue for H1 2026 was KRW 261.6 billion, down from KRW 402.4 billion in H1 2025.\n Operating income for H1 2026 was KRW 63.8 billion, compared to KRW 75.9 billion in H1 2025.\n Net income for H1 2026 was KRW 60.0 billion, down from KRW 165.1 billion in H1 2025.\n Basic EPS for H1 2026 was KRW 1,769, compared to KRW 4,867 in H1 2025.\n Cash and cash equivalents at June 2026 were KRW 340.3 billion, up from KRW 94.3 billion at December 2025.\n\n### Outlook and guidance [...] Q1 2025\n\n  Revenue up 35% YoY to KRW 83B, net income KRW 13.9B, strong order backlog and cash flow.\n Logotype for HD Hyundai Marine Engine\n\n  071970\n\n  Q2 2025\n\n  Revenue up 24% YoY, net income KRW 30.4B, major ownership change, strong cash position.\n Logotype for HD Hyundai Marine Engine\n\n  071970\n\n  Q3 2025\n\n  Revenue up 28% YoY, net income KRW 53B, major ownership change, and strong cash flow.\n Logotype for HD Hyundai Marine Engine\n\n  071970\n\n  Q1 2026 [...] The company underwent a major change in ownership, with HD Korea Shipbuilding & Offshore Engineering acquiring a 35.05% stake and becoming the largest shareholder as of July 2024.\n The company changed its name to HD Hyundai Marine Engine Co., Ltd. and completed the sale of a major plant, improving its financial structure.\n The main business is marine engines, with 77.7% of sales from ship engines and 22.3% from engine parts and services.\n\n### Financial highlights</summary>\n</result>",
+    "urls": [
+      "https://quartr.com/events/hd-hyundai-marine-engine-co-ltd-071970-q2-2026_FVY3q2Nx"
+    ]
+  }
+}

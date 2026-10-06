@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Recognize supported currency-code and compound-symbol prefixes, signed and
+  accounting amounts through the shared monetary grammar. Preserve minor currency
+  denominations in FX resolution, caches, OCF comparisons, and reconciliation;
+  share stable currency spellings with chart formatting. Extract market-cap values
+  after parenthesized date qualifiers. Accept explicit ISO currency amounts in
+  either order for capital exposure, and stop free-text scanners at invalid
+  monetary candidates instead of substituting later comparative amounts.
+- Give Junior Fundamentals one bounded text-only contract recovery in quick mode.
+  Share the Portfolio Manager's structural and semantic correction allowance;
+  require eligible decision facts or active gates and retain publication failure
+  when the final policy trace is invalid.
+- Bind observed comparative issuer statements to exact metric rows, period columns,
+  currency, reporting scale, and earnings scope. Preserve rejection across adjacent
+  tables and ambiguous layouts; persist finite normalization and withheld-field
+  reasons in the retained report.
 - Remove legal-response fragments from parser-fallback logging.
 - Parse currency suffixes separately from monetary magnitudes, preventing KRW,
   BRL, and MYR amounts from creating false cash-conversion warnings. Share monetary

@@ -14,7 +14,7 @@ from typing import Literal
 import structlog
 
 from src.error_safety import summarize_exception
-from src.fx_normalization import get_fx_rate_cache
+from src.fx_normalization import canonical_currency_code, get_fx_rate_cache
 from src.ibkr.client import IbkrClient, mask_account
 from src.ibkr.exceptions import IBKRError
 from src.ibkr.models import (
@@ -339,7 +339,7 @@ def normalize_positions(
     fx_rates = get_fx_rate_cache().resolve_rates_sync({p.currency for p in pending})
     for position in pending:
         numerics = position.numerics
-        rate_info = fx_rates.get(position.currency.strip().upper())
+        rate_info = fx_rates.get(canonical_currency_code(position.currency) or "")
         values = _value_broker_position(
             numerics, position.currency, rate_info[0] if rate_info else None
         )

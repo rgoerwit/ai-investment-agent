@@ -2219,3 +2219,59 @@ async def test_guidance_auth_failure_falls_back_to_unfetched_approved_documents(
     assert "guidance_document_fallback_1" in evidence
     assert "GUIDANCE_EXTRACTION_AUTH_ERROR" in evidence
     assert "issuer document content" in evidence
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode", ["failed_documents", "blocked_documents", "duplicate_urls", "quick_skip"]
+)
+async def test_guidance_fallback_remains_bounded_and_retains_failure(mode):
+    from src.tooling.runtime import ToolResult
+
+    calls = []
+    url = "https://www.hochiki.co.jp/ir/results.pdf"
+
+    class Service:
+        async def execute(self, call, runner):
+            calls.append(call)
+            if call.name == "extract_guidance_sources":
+                return ToolResult(
+                    value="STATUS: AUTH_ERROR\nREASON: GUIDANCE_EXTRACTION_AUTH_ERROR"
+                )
+            if call.name == "get_official_document":
+                if mode == "blocked_documents":
+                    return ToolResult(value="STATUS: UNAVAILABLE", blocked=True)
+                return ToolResult(value="STATUS: FETCH_FAILED")
+            if call.name == "get_official_filings":
+                return ToolResult(value="STATUS: UNAVAILABLE")
+            return ToolResult(
+                value=(
+                    f"<result><title>Hochiki 6745 results</title><url>{url}</url></result>"
+                    * 2
+                    + "<result><title>Hochiki 6745 results</title><url>https://unapproved.example/results.pdf</url></result>"
+                )
+            )
+
+    with (
+        patch("src.runtime_services.get_current_tool_service", return_value=Service()),
+        patch(
+            "src.tools.official_documents.is_official_document_url",
+            side_effect=lambda candidate: candidate == url,
+        ),
+    ):
+        evidence = await _preload_management_guidance_evidence(
+            "6745.T", "Hochiki Corporation", enable_extraction=mode != "quick_skip"
+        )
+    documents = [
+        call.args["url"] for call in calls if call.name == "get_official_document"
+    ]
+    assert len(documents) == len(set(documents))
+    assert set(documents) <= {url}
+    if mode == "quick_skip":
+        assert not documents
+        assert not any(call.name == "extract_guidance_sources" for call in calls)
+        assert "QUICK_MODE" in evidence
+    else:
+        assert documents == [url]
+        assert "GUIDANCE_EXTRACTION_AUTH_ERROR" in evidence
+        assert "issuer document content" not in evidence

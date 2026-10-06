@@ -1198,7 +1198,7 @@ Conditions:
             "VERDICT: HOLD\n"
             "RISK_TALLY: 0.5\n"
             "ZONE: MODERATE\n"
-            "DECISION_FACTS: NONE\n"
+            "DECISION_FACTS: claim:pe\n"
             "DECISION_GATES: NONE\n"
             "### --- END PM_BLOCK ---\n"
         )
@@ -1243,6 +1243,20 @@ Conditions:
                     },
                     "company_of_interest": "TEST.T",
                     "red_flags": [],
+                    "analysis_snapshot": {
+                        "contract_status": "VALID",
+                        "claims": {
+                            "claim:pe": {
+                                "id": "claim:pe",
+                                "field": "PE_RATIO_TTM",
+                                "value": "10",
+                                "authority": "AGGREGATOR",
+                                "coverage": "FOUND",
+                                "decision_eligible": True,
+                                "decision_role": "SUPPORT",
+                            }
+                        },
+                    },
                     "pre_screening_result": "PASS",
                     "artifact_statuses": {
                         "consultant_review": {

@@ -38,3 +38,20 @@ def test_market_cap_shared_monetary_contract(amount, expected):
 def test_nonmonetary_locale_ratio_contract_is_preserved():
     result = FinancialPatternExtractor().extract_from_text("P/E Ratio (TTM): 12,5")
     assert result["trailingPE"] == 12.5
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Market Cap (2025): $1.2B", 1.2e9),
+        ("Market Cap (as of 2026-06-30): CAD 2.14B", 2.14e9),
+        ("Revenue 50M; Market Cap (estimated): R$3.62B; debt 20M", 3.62e9),
+        ("Market Cap (2025): 1.2B USD", 1.2e9),
+        ("Market Cap (2025): unavailable; revenue $1.2B", None),
+        ("Market Cap (2025): €1.2 Mrd.; prior $1.1B", None),
+        ("Market Cap (2025): AUD 1,5M; prior CAD 2M", None),
+    ],
+)
+def test_market_cap_reads_value_after_parenthesized_qualifier(text, expected):
+    actual = FinancialPatternExtractor().extract_from_text(text).get("marketCap")
+    assert actual == (pytest.approx(expected) if expected is not None else None)

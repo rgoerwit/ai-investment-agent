@@ -1901,3 +1901,17 @@ PE_RATIO_TTM: 99
             "TEST",
             canonical_snapshot=snapshot,
         )
+
+
+def test_growth_score_remains_distinct_from_reconciled_earnings_growth():
+    from src.agents.fundamentals_reconciler import reconcile_high_risk_fields
+    from src.data_block_utils import extract_block_text_value
+    from src.validators.metric_extractor import extract_metrics
+
+    body = "RAW_GROWTH_SCORE: 6/6\nADJUSTED_GROWTH_SCORE: 100% (based on 6 available points)\nEARNINGS_GROWTH_FY: 100%"
+    reconciled = reconcile_high_risk_fields(body, {"earningsGrowth": 0.35})
+    assert extract_block_text_value(reconciled, "EARNINGS_GROWTH_FY") == "35.0%"
+    metrics = extract_metrics(
+        f"### --- START DATA_BLOCK ---\n{reconciled}\n### --- END DATA_BLOCK ---"
+    )
+    assert metrics["adjusted_growth_score"] == 100

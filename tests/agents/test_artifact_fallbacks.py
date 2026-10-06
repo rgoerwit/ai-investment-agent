@@ -580,6 +580,7 @@ VERDICT: BUY
         ('{"pfic_status":"CLEAN"}', False),
         ("not JSON", False),
         (RuntimeError("recovery unavailable"), False),
+        (TimeoutError("bounded recovery timeout"), False),
     ],
 )
 @pytest.mark.parametrize(
@@ -644,20 +645,40 @@ async def test_legal_structural_recovery_is_bounded_and_fails_closed(
         ('{"pfic_status":"UNCERTAIN"}', "VALID", False),
         ('{"pfic_status":"PROBABLE"}', "PROBABLE", True),
         ('{"other_regulatory_risks":[{"severity":null}]}', "VALID", True),
+        (
+            '{"other_regulatory_risks":[{"risk_type":"REGULATORY","description":"Retained adverse finding","severity":"HIGH"}]}',
+            "VALID",
+            False,
+        ),
+        (
+            '{"other_regulatory_risks":[{"risk_type":"REGULATORY","description":"Retained adverse finding","severity":"HIGH"}]}',
+            "VALID_ADVERSE",
+            True,
+        ),
     ],
 )
 async def test_legal_recovery_buy_authority_scenarios(original, recovery, ok):
     def response(value):
         if isinstance(value, Exception):
             return value
-        if value in {"VALID", "PROBABLE"}:
+        if value in {"VALID", "PROBABLE", "VALID_ADVERSE"}:
             value = json.dumps(
                 {
                     "pfic_status": "PROBABLE" if value == "PROBABLE" else "CLEAN",
                     "vie_structure": "NO",
                     "cmic_status": "CLEAR",
                     "pfic_evidence": None,
-                    "other_regulatory_risks": [],
+                    "other_regulatory_risks": (
+                        [
+                            {
+                                "risk_type": "REGULATORY",
+                                "description": "Retained adverse finding",
+                                "severity": "HIGH",
+                            }
+                        ]
+                        if value == "VALID_ADVERSE"
+                        else []
+                    ),
                 }
             )
         return SimpleNamespace(content=value, tool_calls=[])

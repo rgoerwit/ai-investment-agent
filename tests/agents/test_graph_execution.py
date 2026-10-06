@@ -950,12 +950,18 @@ class TestQuickModeGraphContracts:
             16384,
         }
         by_agent = dict(analyst_calls)
+        assert by_agent["junior_fundamentals_analyst"]["allow_retry"] is True
+        assert by_agent["junior_fundamentals_analyst"]["retry_llm"] is not None
         assert by_agent["fundamentals_analyst"]["allow_retry"] is True
         assert by_agent["fundamentals_analyst"]["retry_llm"] is not None
         assert by_agent["foreign_language_analyst"]["allow_retry"] is True
         assert by_agent["foreign_language_analyst"]["retry_llm"] is not None
         for agent_key, kwargs in analyst_calls:
-            if agent_key not in {"fundamentals_analyst", "foreign_language_analyst"}:
+            if agent_key not in {
+                "fundamentals_analyst",
+                "foreign_language_analyst",
+                "junior_fundamentals_analyst",
+            }:
                 assert kwargs["allow_retry"] is False
                 assert kwargs["retry_llm"] is None
         assert len(pm_calls) == 1

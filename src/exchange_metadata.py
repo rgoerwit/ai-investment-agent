@@ -3,10 +3,61 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Literal, get_args
 
 IBKRNumericSymbolMode = Literal["same_as_yahoo", "strip_leading_zeroes"]
 _VALID_IBKR_MODES: frozenset[str] = frozenset(get_args(IBKRNumericSymbolMode))
+
+# Stable display spellings and lexical identities; exchange quotes and FX scaling
+# remain owned by their runtime layers. Ambiguous symbols carry no global identity.
+CURRENCY_DISPLAY_FORMATS = MappingProxyType(
+    {
+        "USD": ("$", "prefix", False),
+        "HKD": ("HK$", "prefix", False),
+        "JPY": ("¥", "prefix", False),
+        "TWD": ("NT$", "prefix", False),
+        "KRW": ("₩", "prefix", False),
+        "CNY": ("CN¥", "prefix", False),
+        "AUD": ("A$", "prefix", False),
+        "SGD": ("S$", "prefix", False),
+        "THB": ("฿", "prefix", False),
+        "IDR": ("Rp", "prefix", True),
+        "MYR": ("RM", "prefix", True),
+        "INR": ("₹", "prefix", False),
+        "GBP": ("£", "prefix", False),
+        "EUR": ("€", "prefix", False),
+        "CHF": ("CHF", "prefix", True),
+        "SEK": ("kr", "suffix", True),
+        "DKK": ("kr", "suffix", True),
+        "NOK": ("kr", "suffix", True),
+        "ISK": ("kr", "suffix", True),
+        "PLN": ("zł", "suffix", True),
+        "CZK": ("Kč", "suffix", True),
+        "HUF": ("Ft", "suffix", True),
+        "RON": ("lei", "suffix", True),
+        "CAD": ("C$", "prefix", False),
+        "BRL": ("R$", "prefix", True),
+        "MXN": ("MX$", "prefix", False),
+        "ILS": ("₪", "prefix", False),
+        "ZAR": ("R", "prefix", True),
+    }
+)
+CURRENCY_CODE_ALIASES = MappingProxyType({"RMB": "CNY"})
+# Monetary prose supports observed prefix symbols. Display-only suffix symbols
+# (including ambiguous kr) are presentation metadata, not global currency identity.
+CURRENCY_SYMBOL_TO_CODE = MappingProxyType(
+    {
+        **{
+            symbol: code
+            for code, (symbol, placement, _) in CURRENCY_DISPLAY_FORMATS.items()
+            if placement == "prefix" and symbol not in {"$", "¥", "R", "CHF"}
+        },
+        "AU$": "AUD",
+        "CAD$": "CAD",
+        "NZ$": "NZD",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)

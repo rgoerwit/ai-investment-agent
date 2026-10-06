@@ -1,0 +1,17 @@
+{
+  "ticker": "009540.KS",
+  "capture_date": "2026-10-05",
+  "incomplete_output": "=== RAW FINANCIAL DATA FOR 009540.KS ===\n\n### TOOL 1: get_financial_metrics\n{\n  \"industry\": \"Aerospace & Defense\",\n  \"sector\": \"Industrials\",\n  \"marketCap\": 23052970622976,\n  \"operatingCashflow\": 5534067458048,\n  \"financialCurrency\": \"KRW\"\n}\n### TOOL 2: get_fundamental_analysis\n=== SUPPLEMENTAL ADR SEARCH ===\n",
+  "metrics_payload": {
+    "industry": "Aerospace & Defense",
+    "sector": "Industrials",
+    "marketCap": 23052970622976,
+    "operatingCashflow": 5534067458048,
+    "financialCurrency": "KRW"
+  },
+  "qualitative_excerpt": "=== SUPPLEMENTAL ADR SEARCH ===",
+  "research_budget": {
+    "llm_calls": 1
+  },
+  "sanitization": "Unrelated financial fields and search prose omitted; original missing END wrapper retained."
+}

@@ -57,7 +57,8 @@ class FinancialPatternExtractor:
             ],
             "marketCap": [
                 re.compile(
-                    rf"(?:Market Cap|Valuation)[^\n\d+-]*{MONETARY_AMOUNT_PATTERN}",
+                    rf"(?:Market Cap|Valuation)[\t ]*(?:\([^\n)]*\)[\t ]*)?"
+                    rf"(?:[:=][\t ]*|(?:of|is|around)[\t ]+)?(?P<amount>{MONETARY_AMOUNT_PATTERN})",
                     re.IGNORECASE,
                 )
             ],
@@ -125,7 +126,7 @@ class FinancialPatternExtractor:
                 if match:
                     try:
                         if field == "marketCap":
-                            parsed_amount = parse_monetary_amount(match.group(0))
+                            parsed_amount = parse_monetary_amount(match.group("amount"))
                             if parsed_amount is None or parsed_amount <= 0:
                                 continue
                             val = parsed_amount

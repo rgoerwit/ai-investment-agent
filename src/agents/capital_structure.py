@@ -12,7 +12,13 @@ from typing import Any
 import structlog
 
 from src.data_block_utils import replace_or_append_block_line
-from src.monetary import MONETARY_AMOUNT_PATTERN, parse_monetary_amount
+from src.fx_normalization import canonical_currency_code
+from src.monetary import (
+    MONETARY_AMOUNT_RE,
+    iter_monetary_tokens,
+    monetary_currency_codes,
+    parse_monetary_amount,
+)
 from src.text_patterns import RESULT_ENVELOPE_RE
 from src.tooling.evidence_recorder import EvidenceRecord, normalize_http_url
 
@@ -379,16 +385,14 @@ def _as_finite_float(value: Any, *, allow_zero: bool = False) -> float | None:
 
 def _parse_exposure_amount(raw_amount: Any) -> tuple[float, str] | None:
     """Parse an ISO-currency amount while preserving magnitude conservatively."""
-    text = str(raw_amount or "").strip().upper()
-    match = re.fullmatch(
-        rf"(?P<currency>[A-Z]{{3}})\s+{MONETARY_AMOUNT_PATTERN}", text, re.IGNORECASE
-    )
-    if match is None:
+    text = str(raw_amount or "").strip()
+    match = MONETARY_AMOUNT_RE.fullmatch(text)
+    if match is None or not (match.group("currency") or match.group("currency_suffix")):
         return None
     value = parse_monetary_amount(text)
     if value is None or value <= 0:
         return None
-    return value, match.group("currency")
+    return value, monetary_currency_codes(match)[0]
 
 
 def _source_context(evidence: str, source_url: str) -> str:
@@ -420,14 +424,13 @@ def _amount_supported(context: str, amount: str) -> bool:
         return False
     value, currency = expected
     # Bind magnitude and currency to the same token, not independent substrings.
-    for pattern in (
-        rf"\b{currency}[\t ]+{MONETARY_AMOUNT_PATTERN}",
-        rf"{MONETARY_AMOUNT_PATTERN}[\t ]+{currency}\b",
-    ):
-        for match in re.finditer(pattern, context, re.IGNORECASE):
-            actual = parse_monetary_amount(match.group(0))
-            if actual is not None and math.isclose(actual, value, rel_tol=1e-9):
-                return True
+    for match in iter_monetary_tokens(context):
+        currencies = monetary_currency_codes(match)
+        if not any(currencies) or any(code and code != currency for code in currencies):
+            continue
+        actual = parse_monetary_amount(match.group(0))
+        if actual is not None and math.isclose(actual, value, rel_tol=1e-9):
+            return True
     return False
 
 
@@ -482,9 +485,9 @@ def assess_capital_structure_scale(
         return {"status": "UNRESOLVED", "reason": "AMOUNT_OR_BASIS_UNUSABLE"}
 
     exposure, exposure_currency = parsed_exposure
-    financial_currency = str(
-        raw_metrics.get("financialCurrency") or raw_metrics.get("currency") or ""
-    ).upper()
+    financial_currency = canonical_currency_code(
+        str(raw_metrics.get("financialCurrency") or raw_metrics.get("currency") or "")
+    )
     if not financial_currency or financial_currency != exposure_currency:
         return {"status": "UNRESOLVED", "reason": "CURRENCY_MISMATCH"}
 

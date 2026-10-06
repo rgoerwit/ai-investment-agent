@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping, Sequence
 from numbers import Real
 from typing import Any
 
@@ -404,7 +405,13 @@ def legal_recovery_preserves_assessments(original: str, recovered: str) -> bool:
     return True
 
 
-def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
+def validate_required_output(
+    agent_key: str,
+    content: str,
+    *,
+    snapshot: Mapping[str, Any] | None = None,
+    red_flags: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     checks: list[tuple[str, bool]] = []
     issues: dict[str, str] = {}
 
@@ -440,6 +447,25 @@ def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
                     isinstance(payload.get("capital_structure"), dict),
                 )
             )
+    elif agent_key == "junior_fundamentals_analyst":
+        checks.extend(
+            [
+                (
+                    "raw_data_wrapper",
+                    bool(
+                        re.search(
+                            r"(?s)=== RAW FINANCIAL DATA FOR [^\n]+ ===.+=== END RAW DATA ===",
+                            content,
+                        )
+                    ),
+                ),
+                ("metrics_tool_output", "### TOOL 1: get_financial_metrics" in content),
+                (
+                    "fundamental_tool_output",
+                    "### TOOL 2: get_fundamental_analysis" in content,
+                ),
+            ]
+        )
     elif agent_key == "foreign_language_analyst":
         from src.agents.foreign_language_evidence import (
             has_foreign_language_protocol_residue,
@@ -472,6 +498,8 @@ def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
         if guidance_issue is not None:
             issues["promoted_management_guidance"] = guidance_issue
     elif agent_key == "portfolio_manager":
+        from src.pm_claim_audit import trace_has_citations, validate_decision_trace
+
         pm_block = extract_last_fenced_block(content, "PM_BLOCK")
         checks.extend(
             [
@@ -500,6 +528,14 @@ def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
                 ),
             ]
         )
+        if red_flags is not None:
+            trace_valid = (
+                validate_decision_trace(content, snapshot, red_flags)["status"]
+                == "VALID"
+            )
+        else:
+            trace_valid = trace_has_citations(content)
+        checks.append(("decision_trace", trace_valid))
     elif agent_key == "research_manager":
         checks.extend(
             [
@@ -564,6 +600,7 @@ def should_fail_closed(
         "portfolio_manager",
         "fundamentals_analyst",
         "foreign_language_analyst",
+        "junior_fundamentals_analyst",
     }:
         return True
 

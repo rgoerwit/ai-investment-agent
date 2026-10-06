@@ -520,6 +520,7 @@ def test_save_results_to_file_preserves_macro_context_metadata(tmp_path, monkeyp
     monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
 
     result = {
+        "foreign_language_report": "LATEST_RESULTS_NORMALIZATION_REASON: COMPARATIVE_ROWS_UNBOUND\nLATEST_RESULTS_WITHHELD_FIELDS: REVENUE_GROWTH_YOY,EARNINGS_GROWTH_YOY",
         "market_report": "ok",
         "sentiment_report": "ok",
         "news_report": "ok",
@@ -599,6 +600,14 @@ def test_save_results_to_file_preserves_macro_context_metadata(tmp_path, monkeyp
     assert payload["macro_regime_raw"].startswith("MACRO_REGIME_BLOCK:")
     assert payload["reports"]["apac_regional_report"].startswith(
         "### APAC REGIONAL AUDIT"
+    )
+    assert (
+        "LATEST_RESULTS_NORMALIZATION_REASON: COMPARATIVE_ROWS_UNBOUND"
+        in payload["source_artifacts"]["foreign_language_report"]
+    )
+    assert (
+        "LATEST_RESULTS_WITHHELD_FIELDS: REVENUE_GROWTH_YOY,EARNINGS_GROWTH_YOY"
+        in payload["source_artifacts"]["foreign_language_report"]
     )
     assert payload["evidence_records"] == result["evidence_records"]
 

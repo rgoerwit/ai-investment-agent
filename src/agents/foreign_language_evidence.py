@@ -17,6 +17,13 @@ from src.data_block_utils import (
     fenced_marker_fragment,
     replace_or_append_block_line,
 )
+from src.exchange_metadata import (
+    CURRENCY_CODE_ALIASES,
+    CURRENCY_DISPLAY_FORMATS,
+    CURRENCY_SYMBOL_TO_CODE,
+)
+from src.fx_normalization import canonical_currency_code
+from src.monetary import has_valid_monetary_grouping
 from src.text_patterns import (
     EXCHANGE_QUALIFIED_TICKER_RE,
     RESULT_ENVELOPE_BODY_RE,
@@ -295,12 +302,14 @@ def _is_primary_evidence(record: ToolEvidenceRecord) -> bool:
 
 
 def _normalized_text(value: str) -> str:
-    return " ".join(value.casefold().split())
+    return " ".join(value.casefold().replace("’", "'").split())
 
 
 def _exact_decimal(value: str) -> Decimal | None:
     candidate = value.strip()
-    if not re.fullmatch(r"-?\d[\d,]*(?:\.\d+)?", candidate):
+    if not re.fullmatch(
+        r"-?\d[\d,]*(?:\.\d+)?", candidate
+    ) or not has_valid_monetary_grouping(candidate):
         return None
     try:
         return Decimal(candidate.replace(",", ""))
@@ -323,25 +332,129 @@ def _valid_comparative_period(
     return 1 <= months <= 12 and 320 <= delta_days <= 410
 
 
+_REPORTING_SCALE_PATTERN = (
+    r"'000|\b(?:thousands?|millions?|billions?|trillions?|[kmbt])\b"
+)
+_TABLE_CURRENCY_PATTERN = "|".join(
+    re.escape(token.casefold())
+    for token in sorted(
+        {
+            *CURRENCY_DISPLAY_FORMATS,
+            *CURRENCY_CODE_ALIASES,
+            *CURRENCY_SYMBOL_TO_CODE,
+            "$",
+            "¥",
+        },
+        key=len,
+        reverse=True,
+    )
+)
+
+
+def _statement_boundary(line: str) -> bool:
+    normalized = _normalized_text(line)
+    return bool(
+        line.startswith("[PDF PAGE")
+        or re.fullmatch(
+            r"(?:\([^()]*\)\s*)?(?:Notes?\s+)?20\d{2}\s+20\d{2}", line, re.I
+        )
+        or re.search(
+            r"(?:months|year) ended|截至|20\d{2}年第[1-4]季|\d{3}年Q[1-4]"
+            r"|(?<!\w)[QH][1-4]\s+20\d{2}\b|(?<!\w)[1-4]T\d{2}(?!\w)",
+            line,
+            re.I,
+        )
+        or (
+            re.search(_REPORTING_SCALE_PATTERN, normalized)
+            and re.search(
+                rf"(?<!\w)(?:{_TABLE_CURRENCY_PATTERN})(?=$|\W|[kmbt]\b)", normalized
+            )
+        )
+    )
+
+
+def _heading_currency_forms(values: dict[str, str]) -> tuple[str, ...]:
+    raw = values["LATEST_RESULTS_CURRENCY"]
+    currency = CURRENCY_SYMBOL_TO_CODE.get(raw, canonical_currency_code(raw) or "")
+    aliases = tuple(
+        alias for alias, code in CURRENCY_CODE_ALIASES.items() if code == currency
+    )
+    symbols = tuple(
+        symbol for symbol, code in CURRENCY_SYMBOL_TO_CODE.items() if code == currency
+    )
+    source_names = {
+        "USD": ("United States dollars", "US$"),
+        "EUR": ("€",),
+        "CNY": ("Renminbi",),
+    }.get(currency, ())
+    return (raw, currency, *aliases, *symbols, *source_names)
+
+
+def _heading_has_currency_and_unit(heading: str, values: dict[str, str]) -> bool:
+    """Require explicit currency and reporting scale tokens in the table heading."""
+    heading = _normalized_text(heading)
+    unit = _normalized_text(values["LATEST_RESULTS_REPORTING_UNIT"])
+    if re.search(_REPORTING_SCALE_PATTERN, unit) is None:
+        return False
+    if re.search(rf"(?<!\w){re.escape(unit)}(?!\w)", heading) is None:
+        return False
+    forms = _heading_currency_forms(values)
+    return any(
+        re.search(
+            rf"(?<!\w){re.escape(_normalized_text(form))}(?=$|\W|[kmbt]\b)",
+            heading,
+        )
+        for form in forms
+    )
+
+
+def _compatible_unit_only_header(line: str, values: dict[str, str]) -> bool:
+    """Only a unit declaration may continue an existing comparative table."""
+    unit = re.escape(_normalized_text(values["LATEST_RESULTS_REPORTING_UNIT"]))
+    # The owning table heading already binds currency. Ambiguous display symbols
+    # can repeat the declared unit here without independently proving identity.
+    currency = canonical_currency_code(values["LATEST_RESULTS_CURRENCY"]) or ""
+    display = CURRENCY_DISPLAY_FORMATS.get(currency)
+    forms = (*_heading_currency_forms(values), *((display[0],) if display else ()))
+    currency_tokens = "|".join(re.escape(_normalized_text(form)) for form in forms)
+    return (
+        re.fullmatch(
+            rf"\(?\s*(?:notes?\s+)?(?:(?:(?:{currency_tokens})\s*)?{unit}\s*)+\)?",
+            _normalized_text(line),
+        )
+        is not None
+    )
+
+
 def _latest_results_record_supports(
     record: ToolEvidenceRecord,
     values: dict[str, str],
     decimals: dict[str, Decimal],
 ) -> bool:
     """Bind both metric pairs to labelled rows under one retained period header."""
+    if record.evidence_status not in {"EVIDENCE_FOUND", "RESULTS_FOUND"}:
+        return False
     lines = [line.strip() for line in record.content.splitlines() if line.strip()]
     current = _normalized_text(values["LATEST_RESULTS_PERIOD"])
     prior = _normalized_text(values["LATEST_RESULTS_PRIOR_PERIOD"])
     scope = _normalized_text(values["LATEST_RESULTS_EARNINGS_SCOPE"])
     months = int(values["LATEST_RESULTS_PERIOD_MONTHS"])
-    if not all(
+    label_statuses = [
         _header_period_matches(values[label], values[end], months)
-        and _source_has_period_end(record.content, values[end])
         for label, end in (
             ("LATEST_RESULTS_PERIOD", "LATEST_RESULTS_PERIOD_END"),
             ("LATEST_RESULTS_PRIOR_PERIOD", "LATEST_RESULTS_PRIOR_PERIOD_END"),
         )
-    ):
+    ]
+    if False in label_statuses:
+        return False
+    if _two_column_statement_supports(lines, values, decimals):
+        return True
+    if _comparative_narrative_supports(lines, values, decimals):
+        return True
+    # Unknown claim wording can use only the independent presentation readers.
+    # The exact-label reader below needs labels that themselves prove the period.
+    if not all(label_statuses):
         return False
     for start, line in enumerate(lines):
         if _normalized_text(line) != current:
@@ -354,23 +467,20 @@ def _latest_results_record_supports(
         ]
         if len(prior_positions) != 1:
             continue
-        row_start = next(
-            (
-                index
-                for index in range(start + 1, min(start + 32, len(lines)))
-                if _normalized_text(lines[index]) in _REVENUE_ROW_LABELS
-            ),
-            None,
-        )
+        row_start = None
+        for index in range(start + 1, min(start + 32, len(lines))):
+            normalized = _normalized_text(lines[index])
+            if normalized in _REVENUE_ROW_LABELS:
+                row_start = index
+                break
+            if normalized not in {current, prior} and _statement_boundary(lines[index]):
+                if not _compatible_unit_only_header(lines[index], values):
+                    break
         if row_start is None or row_start <= start + prior_positions[0]:
             continue
         heading = lines[max(0, start - 5) : row_start]
         heading_text = _normalized_text(" ".join(heading))
-        unit = _normalized_text(values["LATEST_RESULTS_REPORTING_UNIT"])
-        currency = _normalized_text(values["LATEST_RESULTS_CURRENCY"])
-        if unit not in heading_text or not (
-            currency in heading_text or (currency == "eur" and "€" in heading_text)
-        ):
+        if not _heading_has_currency_and_unit(heading_text, values):
             continue
         columns = [
             item
@@ -387,14 +497,13 @@ def _latest_results_record_supports(
         )
         if prior_column is None:
             continue
-        earnings_row = next(
-            (
-                index
-                for index in range(row_start + 1, min(row_start + 45, len(lines)))
-                if _normalized_text(lines[index]) == scope
-            ),
-            None,
-        )
+        earnings_row = None
+        for index in range(row_start + 1, min(row_start + 45, len(lines))):
+            if _statement_boundary(lines[index]):
+                break
+            if _normalized_text(lines[index]) == scope:
+                earnings_row = index
+                break
         if earnings_row is None:
             continue
         revenue_cells = _table_row_cells(lines, row_start, len(columns))
@@ -426,11 +535,58 @@ def _source_has_period_end(content: str, period_end: str) -> bool:
         f"{month_name} {end.day}, {end.year}",
         f"{end.year}年{end.month}月{end.day}日",
     )
-    return any(variant.casefold() in content.casefold() for variant in variants)
+    if any(
+        _normalized_text(variant) in _normalized_text(content) for variant in variants
+    ):
+        return True
+    # Explicit calendar half-years bind the same end date without inventing a
+    # fiscal calendar. The row readers must still bind each claimed metric.
+    if re.search(r"\bfiscal\b|\bFY\s*20\d{2}\b", content, re.I):
+        return False
+    return any(
+        _header_period_matches(match.group(0), period_end, 6)
+        for match in re.finditer(
+            r"(?<!\w)(?:H[12]\s+20\d{2}|(?:First|Second) half(?: of)? 20\d{2})(?!\w)",
+            content,
+            re.I,
+        )
+    )
 
 
-def _header_period_matches(label: str, period_end: str, months: int) -> bool:
-    """Only accept period labels whose calendar end can be checked exactly."""
+def _header_period_matches(label: str, period_end: str, months: int) -> bool | None:
+    """Return match, contradiction, or None for wording without calendar proof."""
+    label = " ".join(label.split())
+    for token in re.finditer(r"(?<!\w)([QH])(\d+)(?!\w)", label, re.I):
+        allowed = {"1", "2", "3", "4"} if token.group(1).upper() == "Q" else {"1", "2"}
+        if token.group(2) not in allowed:
+            return False
+    half_match = re.fullmatch(r"(First|Second) half(?: of)? (20\d{2})", label, re.I)
+    korean_half = re.fullmatch(
+        r"(20\d{2})년 (상반기|하반기) \(H([12]) (20\d{2})\)", label, re.I
+    )
+    if half_match:
+        half = 1 if half_match.group(1).casefold() == "first" else 2
+        label = f"H{half} {half_match.group(2)}"
+    elif korean_half:
+        year, name, half_number, repeated_year = korean_half.groups()
+        if year != repeated_year or half_number != ("1" if name == "상반기" else "2"):
+            return False
+        label = f"H{half_number} {year}"
+    quarter_match = re.fullmatch(r"Q([1-4]) (20\d{2})", label, re.I)
+    chinese_match = re.fullmatch(r"(20\d{2})年第([1-4])季", label)
+    short_match = re.fullmatch(r"([1-4])T(\d{2})", label, re.I)
+    if quarter_match or chinese_match or short_match:
+        if quarter_match:
+            quarter, year = map(int, quarter_match.groups())
+        elif chinese_match:
+            year, quarter = map(int, chinese_match.groups())
+        else:
+            assert short_match is not None
+            quarter, short_year = map(int, short_match.groups())
+            year = 2000 + short_year
+        month = quarter * 3
+        day = 30 if month in {6, 9} else 31
+        return months == 3 and period_end == f"{year}-{month:02d}-{day}"
     match = re.fullmatch(r"H([12]) (20\d{2})", label, re.I)
     if match:
         half, year = map(int, match.groups())
@@ -443,17 +599,244 @@ def _header_period_matches(label: str, period_end: str, months: int) -> bool:
         day = 30 if month in {6, 9} else 31
         return months == 3 and period_end == f"{roc_year + 1911}-{month:02d}-{day}"
     match = re.fullmatch(
-        r"(Three|Six|Twelve) months ended ([A-Za-z]+ \d{1,2}, 20\d{2})",
+        r"(?:For the )?(Three|Six|Twelve) months ended ([A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})",
         label,
         re.I,
     )
     if match:
         expected_months = {"three": 3, "six": 6, "twelve": 12}[match.group(1).lower()]
         try:
-            parsed_end = datetime.strptime(match.group(2), "%B %d, %Y").date()
+            date_format = "%d %B %Y" if match.group(2)[0].isdigit() else "%B %d, %Y"
+            parsed_end = datetime.strptime(match.group(2), date_format).date()
         except ValueError:
             return False
         return months == expected_months and period_end == parsed_end.isoformat()
+    match = re.fullmatch(
+        r"(?:For the )?year ended ([A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})",
+        label,
+        re.I,
+    )
+    if match:
+        try:
+            date_format = "%d %B %Y" if match.group(1)[0].isdigit() else "%B %d, %Y"
+            parsed_end = datetime.strptime(match.group(1), date_format).date()
+        except ValueError:
+            return False
+        return months == 12 and period_end == parsed_end.isoformat()
+    match = re.fullmatch(
+        r"截至(20\d{2})年(\d{1,2})月(\d{1,2})日止(三|六|十二)個月", label
+    )
+    if match:
+        try:
+            parsed_end = date(*map(int, match.groups()[:3]))
+        except ValueError:
+            return False
+        return (
+            months == {"三": 3, "六": 6, "十二": 12}[match.group(4)]
+            and period_end == parsed_end.isoformat()
+        )
+    # Recognizable statements embedded in unfamiliar wording still constrain the
+    # claim. FY alone supplies no calendar proof; independently bound source
+    # headers must establish its dates and duration.
+    for match in re.finditer(
+        r"(?<!\w)(?:(?:Q[1-4]|H[12])\s+20\d{2}|[1-4]T\d{2}|20\d{2}年第[1-4]季"
+        r"|\d{3}年Q[1-4]|(?:First|Second) half(?: of)? 20\d{2}"
+        r"|(?:Three|Six|Twelve) months ended (?:[A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})"
+        r"|(?:For the )?year ended (?:[A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})"
+        r"|截至20\d{2}年\d{1,2}月\d{1,2}日止(?:三|六|十二)個月)(?!\w)",
+        label,
+        re.I,
+    ):
+        if _header_period_matches(match.group(), period_end, months) is False:
+            return False
+    for match in re.finditer(r"(?<!\d)20\d{2}-\d{2}-\d{2}(?!\d)", label):
+        if match.group() != period_end:
+            return False
+    return None
+
+
+def _comparative_narrative_supports(
+    lines: list[str], values: dict[str, str], decimals: dict[str, Decimal]
+) -> bool:
+    """Bind the observed explicit comparative sentences within one source result.
+
+    Each metric must name both calendar periods, currencies and scales on its
+    own line. Duplicate metric statements are ambiguous, even if one matches.
+    """
+    if any(re.search(r"\bfiscal\b|\bFY\s*20\d{2}\b", line, re.I) for line in lines):
+        return False
+    currency_forms = "|".join(
+        re.escape(form) for form in _heading_currency_forms(values)
+    )
+    unit = re.escape(values["LATEST_RESULTS_REPORTING_UNIT"])
+    number = r"-?\d[\d,]*(?:\.\d+)?"
+    period = r"H[12] 20\d{2}"
+    scope = _normalized_text(values["LATEST_RESULTS_EARNINGS_SCOPE"])
+    patterns = {
+        "REVENUE": r"(?:Consolidated )?revenue",
+        "EARNINGS": re.escape(scope),
+    }
+    for metric, label in patterns.items():
+        pattern = re.compile(
+            rf"(?:<summary>)?{label} for (?P<current_period>{period}) was "
+            rf"(?:{currency_forms}) (?P<current>{number}) {unit}, "
+            rf"(?:down from|compared to) (?:{currency_forms}) (?P<prior>{number}) {unit} "
+            rf"in (?P<prior_period>{period})\.(?:</summary>)?",
+            re.I,
+        )
+        candidates = []
+        for line in lines:
+            heading = re.match(
+                rf"(?:<summary>)?{label} for (?P<period>{period})\b", line, re.I
+            )
+            if heading and _header_period_matches(
+                heading.group("period"),
+                values["LATEST_RESULTS_PERIOD_END"],
+                int(values["LATEST_RESULTS_PERIOD_MONTHS"]),
+            ):
+                candidates.append(line)
+        if len(candidates) != 1 or (match := pattern.fullmatch(candidates[0])) is None:
+            return False
+        if not all(
+            _header_period_matches(
+                match.group(group),
+                values[field],
+                int(values["LATEST_RESULTS_PERIOD_MONTHS"]),
+            )
+            for group, field in (
+                ("current_period", "LATEST_RESULTS_PERIOD_END"),
+                ("prior_period", "LATEST_RESULTS_PRIOR_PERIOD_END"),
+            )
+        ):
+            return False
+        if (
+            _exact_decimal(match.group("current"))
+            != decimals[f"LATEST_RESULTS_{metric}"]
+            or _exact_decimal(match.group("prior"))
+            != decimals[f"LATEST_RESULTS_PRIOR_{metric}"]
+        ):
+            return False
+    return True
+
+
+def _two_column_statement_supports(
+    lines: list[str], values: dict[str, str], decimals: dict[str, Decimal]
+) -> bool:
+    """Bind observed inline issuer statements to exactly two ordered period columns."""
+    current_end = values["LATEST_RESULTS_PERIOD_END"]
+    prior_end = values["LATEST_RESULTS_PRIOR_PERIOD_END"]
+    current_year, prior_year = current_end[:4], prior_end[:4]
+    months = int(values["LATEST_RESULTS_PERIOD_MONTHS"])
+    scope = _normalized_text(values["LATEST_RESULTS_EARNINGS_SCOPE"])
+    number = r"-?\d[\d,]*(?:\.\d+)?"
+    # Cell symbols are display only after the heading binds currency and scale.
+    forms = _heading_currency_forms(values)
+    display_symbols = (*forms, *(("$",) if any("$" in form for form in forms) else ()))
+    symbols = "|".join(re.escape(form) for form in display_symbols)
+    currency_declaration = re.compile(rf"\(Expressed in (?:{symbols})\)", re.I)
+    cell_prefix = rf"(?:(?:{symbols})\s*)?"
+    row_pattern = re.compile(
+        rf"(?P<label>[^\d]+?)\s+(?:(?P<note>\d+(?:\s*&\s*\d+)?|\d+\([a-z]\))\s+)?"
+        rf"{cell_prefix}(?P<current>{number})\s+{cell_prefix}(?P<prior>{number})\s*$",
+        re.I,
+    )
+    for start, line in enumerate(lines):
+        column_header = re.fullmatch(
+            rf"(?P<unit>\([^()]*\)\s*)?(?:Notes?\s+)?{current_year}\s+{prior_year}",
+            line,
+            re.I,
+        )
+        if column_header is None or start == 0:
+            continue
+        unit_header = column_header.group("unit")
+        if unit_header and not _heading_has_currency_and_unit(unit_header, values):
+            continue
+        # PDF line wrapping and a parenthesized presentation-currency declaration
+        # may separate the period from its columns. Keep the search bounded and
+        # require the complete candidate header to prove both periods.
+        headers = [
+            " ".join(
+                item
+                for item in lines[max(0, start - count) : start]
+                if not currency_declaration.fullmatch(_normalized_text(item))
+            )
+            for count in range(1, 4)
+        ]
+        if not any(
+            _header_period_matches(
+                header if current_year in header else f"{header} {current_year}",
+                current_end,
+                months,
+            )
+            is True
+            and _header_period_matches(
+                re.sub(
+                    rf"\b{current_year}\b",
+                    prior_year,
+                    header if current_year in header else f"{header} {current_year}",
+                ),
+                prior_end,
+                months,
+            )
+            is True
+            for header in headers
+        ):
+            continue
+        heading = _normalized_text(" ".join(lines[max(0, start - 3) : start + 3]))
+        if not _heading_has_currency_and_unit(heading, values):
+            continue
+        note_declared = re.search(r"\bnotes?\b", heading) is not None
+        revenue_pair = None
+        earnings_pair = None
+        ambiguous = False
+        rows_started = False
+        for row_index in range(start + 1, min(start + 45, len(lines))):
+            row = lines[row_index]
+            if _statement_boundary(row):
+                if not rows_started and _compatible_unit_only_header(row, values):
+                    continue
+                break
+            match = row_pattern.fullmatch(row)
+            if match is None:
+                continue
+            rows_started = True
+            if match.group("note") is not None and not note_declared:
+                ambiguous = True
+                break
+            label = _normalized_text(match.group("label")).rstrip(":")
+            pair = (
+                _exact_decimal(match.group("current")),
+                _exact_decimal(match.group("prior")),
+            )
+            if label in _REVENUE_ROW_LABELS:
+                if revenue_pair is not None:
+                    ambiguous = True
+                    break  # Multiple headline rows are ambiguous.
+                revenue_pair = pair
+            scoped_label = _normalized_text(
+                lines[row_index - 1].rstrip(":") + " " + match.group("label")
+            )
+            if label == scope or scoped_label.removeprefix(
+                "profit "
+            ) == scope.removeprefix("profit "):
+                if earnings_pair is not None:
+                    ambiguous = True
+                    break
+                earnings_pair = pair
+        if (
+            not ambiguous
+            and revenue_pair
+            == (
+                decimals["LATEST_RESULTS_REVENUE"],
+                decimals["LATEST_RESULTS_PRIOR_REVENUE"],
+            )
+            and earnings_pair
+            == (
+                decimals["LATEST_RESULTS_EARNINGS"],
+                decimals["LATEST_RESULTS_PRIOR_EARNINGS"],
+            )
+        ):
+            return True
     return False
 
 
@@ -580,7 +963,20 @@ def _normalize_latest_results(
             "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
         ):
             normalized = _replace_latest_results_field(normalized, field, "N/A")
-        return normalized
+        normalized = _replace_latest_results_field(
+            normalized, "LATEST_RESULTS_NORMALIZATION_REASON", "SOURCE_URL_INVALID"
+        )
+        return _replace_latest_results_field(
+            normalized,
+            "LATEST_RESULTS_WITHHELD_FIELDS",
+            ", ".join(
+                (
+                    *_LATEST_RESULTS_NUMERIC_FIELDS,
+                    "LATEST_RESULTS_REVENUE_GROWTH_YOY",
+                    "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
+                )
+            ),
+        )
     decimals = {
         field: parsed
         for field in _LATEST_RESULTS_NUMERIC_FIELDS
@@ -625,9 +1021,56 @@ def _normalize_latest_results(
     authority = (
         "PRIMARY" if primary else "SECONDARY" if supporting_records else "UNSUPPORTED"
     )
+    if primary:
+        reason = "SUPPORTED_PRIMARY"
+    elif supporting_records:
+        reason = "SUPPORTED_SECONDARY"
+    elif not structurally_valid:
+        reason = "INVALID_COMPARATIVE_CLAIM"
+    elif not candidate_records:
+        reason = "SOURCE_NOT_RETAINED"
+    elif any(
+        _header_period_matches(
+            values[label], values[end], int(values["LATEST_RESULTS_PERIOD_MONTHS"])
+        )
+        is False
+        for label, end in (
+            ("LATEST_RESULTS_PERIOD", "LATEST_RESULTS_PERIOD_END"),
+            ("LATEST_RESULTS_PRIOR_PERIOD", "LATEST_RESULTS_PRIOR_PERIOD_END"),
+        )
+    ):
+        reason = "PERIOD_LABEL_MISMATCH"
+    elif not any(
+        all(
+            _source_has_period_end(record.content, values[field])
+            for field in (
+                "LATEST_RESULTS_PERIOD_END",
+                "LATEST_RESULTS_PRIOR_PERIOD_END",
+            )
+        )
+        for record in candidate_records
+    ):
+        reason = "PERIOD_END_NOT_RETAINED"
+    elif not any(
+        _heading_has_currency_and_unit(record.content, values)
+        for record in candidate_records
+    ):
+        reason = "CURRENCY_OR_UNIT_UNBOUND"
+    else:
+        reason = "COMPARATIVE_ROWS_UNBOUND"
 
     normalized = _replace_latest_results_field(
         report, "LATEST_RESULTS_SOURCE_AUTHORITY", authority
+    )
+    normalized = _replace_latest_results_field(
+        normalized, "LATEST_RESULTS_NORMALIZATION_REASON", reason
+    )
+    normalized = _replace_latest_results_field(
+        normalized,
+        "LATEST_RESULTS_WITHHELD_FIELDS",
+        "NONE"
+        if primary
+        else "LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY",
     )
     if not primary:
         normalized = _replace_latest_results_field(

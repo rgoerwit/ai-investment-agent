@@ -11,8 +11,13 @@ import structlog
 
 from src.data_block_utils import extract_data_block_field
 from src.earnings_baseline import is_material_baseline_distortion
+from src.fx_normalization import canonical_currency_code
 from src.guidance_vocabulary import all_transient_tax_terms
-from src.monetary import MONETARY_AMOUNT_RE, parse_monetary_amount
+from src.monetary import (
+    extract_monetary_currency,
+    iter_monetary_tokens,
+    parse_monetary_amount,
+)
 from src.text_patterns import SENTENCE_SPLIT_RE
 from src.thesis_constants import (
     PE_MAX,
@@ -189,10 +194,6 @@ _OCF_META_FIELD_RE = re.compile(
     r"(?i)\b(REPORT_DATE|PERIOD_END|PERIOD_START|PERIOD|CURRENCY|SCOPE|"
     r"AUDITOR_SIGNATURE_DATE|AUDIT_STATUS)\s*[:=]\s*([^|\n]+)"
 )
-_OCF_CURRENCY_RE = re.compile(
-    r"(?i)(?:\b(?:currency\s*[:=]\s*)?(USD|SGD|PLN|JPY|KRW|CNY|HKD|"
-    r"EUR|GBP|AUD|CAD|TWD|INR)\b|S\$)"
-)
 
 
 @dataclass(frozen=True)
@@ -242,10 +243,7 @@ def _normalize_ocf_period(value: str | None) -> str | None:
 
 
 def _extract_ocf_currency(text: str | None) -> str | None:
-    match = _OCF_CURRENCY_RE.search(text or "")
-    if not match:
-        return None
-    return "SGD" if match.group(0).upper() == "S$" else match.group(1).upper()
+    return extract_monetary_currency(text)
 
 
 def extract_datablock_ocf_observation(
@@ -280,14 +278,14 @@ def parse_ocf_amount(text: str | None) -> float | None:
     """
     if not text:
         return None
-    matches = list(MONETARY_AMOUNT_RE.finditer(text))
+    matches = list(iter_monetary_tokens(text))
     # Preserve preference for an explicit magnitude over unlabeled numbers;
     # a year or footnote preceding the amount must not hide it.
     for match in matches:
-        if match.group(3):
+        if match.group("magnitude"):
             return parse_monetary_amount(match.group(0))
     for match in matches:
-        if len(match.group(2).split(".", 1)[0]) >= 7:
+        if len(match.group("number").split(".", 1)[0]) >= 7:
             # Small bare numbers may be years or footnotes, not money.
             return parse_monetary_amount(match.group(0))
     return None
@@ -371,7 +369,8 @@ def _ocf_comparison_blocker(
     if (
         headline.currency
         and forensic.currency
-        and headline.currency.upper() != forensic.currency.upper()
+        and canonical_currency_code(headline.currency)
+        != canonical_currency_code(forensic.currency)
     ):
         return f"CURRENCY_MISMATCH ({headline.currency} vs {forensic.currency})"
     if not headline.currency or not forensic.currency:

@@ -9,7 +9,8 @@ Tests cover:
 5. Integration with financial data formats (yfinance/FMP schemas)
 """
 
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -24,6 +25,23 @@ from src.fx_normalization import (
     normalize_minor_unit_currency,
     normalize_to_usd,
 )
+
+
+@pytest.fixture(autouse=True)
+def _offline_fx_default(request, monkeypatch):
+    """Non-integration scenarios exercise fallback without live market I/O."""
+    if request.node.get_closest_marker("integration"):
+        return
+    monkeypatch.setattr(
+        "yfinance.Ticker",
+        lambda *args, **kwargs: SimpleNamespace(
+            fast_info=SimpleNamespace(last_price=None), info={}
+        ),
+    )
+    monkeypatch.setattr(
+        "src.yfinance_runtime.configure_yfinance_defaults", lambda: None
+    )
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TIER 1: FX Rate Fetching Tests
@@ -685,6 +703,22 @@ class TestFXNormalizationPerformance:
 
 
 class TestFxRateCacheKeying:
+    @pytest.mark.asyncio
+    async def test_minor_denominations_keep_distinct_cache_keys(self):
+        from src.fx_normalization import FxRateCache
+
+        cache = FxRateCache()
+        with patch(
+            "src.fx_normalization.get_fx_rate_yfinance",
+            new=AsyncMock(return_value=None),
+        ):
+            rates = await cache.get_rates(["GBp", "GBP", "GBX", "gbx"])
+        assert set(rates) == {"GBp", "GBP", "GBX"}
+        assert rates["GBp"][0] == pytest.approx(rates["GBP"][0] / 100)
+        assert rates["GBX"] == rates["GBp"]
+        assert cache.peek_cached_rate("GBp") == rates["GBp"]
+        assert cache.peek_cached_rate("GBP") == rates["GBP"]
+
     """The cache is keyed by (from_currency, to_currency), not from_currency
     alone — every current production caller only ever resolves to USD, but
     the public API accepts an arbitrary to_currency, and a from-currency-only
@@ -768,3 +802,90 @@ class TestFxRateCacheKeying:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize(
+    "source,target,expected",
+    [
+        ("GBp", "USD", 1.347 / 100),
+        ("USD", "GBp", 100 / 1.347),
+        ("GBX", "GBP", 0.01),
+        ("GBP", "GBX", 100),
+        ("GBp", "GBX", 1),
+        ("GBp", "GBp", 1),
+        ("gbx", "usd", 1.347 / 100),
+    ],
+)
+@pytest.mark.asyncio
+async def test_minor_currency_resolution_scales_both_legs_once(
+    source, target, expected
+):
+    assert get_fx_rate_fallback(source, target) == pytest.approx(expected)
+    with patch(
+        "src.fx_normalization.get_fx_rate_yfinance", new=AsyncMock(return_value=None)
+    ):
+        rate, _ = await get_fx_rate(source, target)
+    assert rate == pytest.approx(expected)
+
+
+@pytest.mark.asyncio
+async def test_live_minor_currency_resolution_queries_major_pair():
+    with patch(
+        "src.fx_normalization.run_blocking_call", new=AsyncMock(return_value=1.25)
+    ) as fetch:
+        assert await get_fx_rate_yfinance("GBp", "USD") == pytest.approx(0.0125)
+        assert fetch.call_args.args[0].label == "fx_rate:GBPUSD=X"
+        assert await get_fx_rate_yfinance("USD", "GBX") == pytest.approx(125)
+        assert fetch.call_args.args[0].label == "fx_rate:USDGBP=X"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rate_limited", [False, True])
+async def test_fx_error_summary_preserves_fallback_without_raw_prose(rate_limited):
+    from src.yfinance_runtime import YFRateLimitError
+
+    error = (
+        YFRateLimitError()
+        if rate_limited
+        else RuntimeError(
+            "secret response body https://private.example/path?token=secret"
+        )
+    )
+    with (
+        patch(
+            "src.fx_normalization.run_blocking_call", new=AsyncMock(side_effect=error)
+        ),
+        patch("src.fx_normalization.logger") as log,
+    ):
+        rate, source = await get_fx_rate("GBp", "USD")
+    assert rate == pytest.approx(0.01347)
+    assert source == "fallback"
+    fields = [
+        call.kwargs for call in log.debug.call_args_list if "error_type" in call.kwargs
+    ]
+    assert len(fields) == 1
+    assert fields[0]["operation"] == "fx_rate_yfinance"
+    assert "secret response body" not in str(log.mock_calls)
+    assert "https://private.example/path" not in str(log.mock_calls)
+    assert "token=secret" not in str(log.mock_calls)
+    assert log.warning.call_args.kwargs["to_currency"] == "USD"
+
+
+@pytest.mark.asyncio
+async def test_same_major_denomination_conversion_has_identity_attribution():
+    with patch("src.fx_normalization.get_fx_rate_yfinance", new=AsyncMock()) as live:
+        assert await get_fx_rate("GBp", "GBP") == (0.01, "identity")
+        assert await get_fx_rate("GBP", "GBX") == (100, "identity")
+    live.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("RMB", "CNY"), ("cny", "CNY"), ("GBp", "GBp"), ("GBP", "GBP"), ("gbx", "GBX")],
+)
+def test_shared_currency_canonicalization_preserves_alias_and_denomination(
+    raw, expected
+):
+    from src.fx_normalization import canonical_currency_code
+
+    assert canonical_currency_code(raw) == expected
