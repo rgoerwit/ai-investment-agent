@@ -79,7 +79,10 @@ def _check(case):
         key = f"LATEST_RESULTS_{metric}_GROWTH_YOY"
         assert field(normalized, key) == (expected or "N/A"), case["justification"]
         assert field(senior, key) == (expected or ""), case["justification"]
-    return field(normalized, "LATEST_RESULTS_NORMALIZATION_REASON")
+    reason = field(normalized, "LATEST_RESULTS_NORMALIZATION_REASON")
+    if "expected_reason" in case:
+        assert reason == case["expected_reason"], case["justification"]
+    return reason
 
 
 @pytest.mark.parametrize("case", _CORPUS, ids=lambda case: case["case"])
@@ -96,8 +99,8 @@ def test_manifest_retains_source_justifications_and_frozen_holdout():
     }
     assert all(case["justification"] for case in _CORPUS)
     assert Counter(case["kind"] for case in _CORPUS) == {
-        "captured_excerpt": 22,
-        "adversarial_mutation": 50,
+        "captured_excerpt": 34,
+        "adversarial_mutation": 65,
     }
 
 
@@ -113,11 +116,7 @@ def test_offline_replay_matches_each_adjudicated_case_and_reports_errors_separat
                 {
                     "source_artifacts": {"foreign_language_report": base["report"]},
                     "evidence_records": [
-                        {
-                            **item,
-                            "execution_status": "SUCCEEDED",
-                            "blocked": False,
-                        }
+                        {"execution_status": "SUCCEEDED", "blocked": False, **item}
                         for item in base["evidence_records"]
                     ],
                 }
@@ -188,6 +187,7 @@ def test_metric_pairs_cannot_be_assembled_across_evidence_records():
         "captured_TECK.A.TO",
         "explicit_half_year_secondary_narrative",
         "wrong_unit",
+        "captured_GFT.DE",
     ],
 )
 def test_normalized_growth_reaches_canonical_consumers_only_with_primary_authority(
@@ -208,7 +208,10 @@ def test_normalized_growth_reaches_canonical_consumers_only_with_primary_authori
             + senior
             + "\n### --- END DATA_BLOCK ---"
         },
-        [SimpleNamespace(**item, blocked=False) for item in base["evidence_records"]],
+        [
+            SimpleNamespace(**{"blocked": False, **item})
+            for item in base["evidence_records"]
+        ],
         degraded=False,
     )
     claims = {claim["field"]: claim for claim in snapshot["claims"].values()}
@@ -400,3 +403,580 @@ def test_primary_url_in_same_record_cannot_promote_secondary_cited_url():
     )
     assert field(normalized, "LATEST_RESULTS_SOURCE_AUTHORITY") == "SECONDARY"
     assert field(normalized, "LATEST_RESULTS_EARNINGS_GROWTH_YOY") == "N/A"
+
+
+@pytest.mark.parametrize(
+    "label,end,months,expected",
+    [
+        ("Half Year ended June 30, 2026 (H1 2026)", "2026-06-30", 6, True),
+        ("Half-year ended 30 June 2026", "2026-06-30", 6, True),
+        ("Half-year ended 30 Jun 2026", "2026-06-30", 6, True),
+        ("Three Months Ended Jun 30, 2026", "2026-06-30", 3, True),
+        ("Year ended 31 Dec 2025", "2025-12-31", 12, True),
+        ("Half Year ended June 30, 2026 (H2 2026)", "2026-06-30", 6, False),
+        ("Half-year ended 30 June 2026", "2026-06-30", 12, False),
+        ("Six months ended 30 June 2026", "2026-06-30", 3, False),
+        ("Three Months Ended Feb 30, 2026", "2026-02-28", 3, False),
+        ("Q2 FY2026", "2026-06-30", 3, None),
+        ("2027年3月期 第1四半期", "2026-06-30", 3, True),
+        ("２０２７年３月期 第１四半期", "2026-06-30", 3, True),
+        ("2027年3月期 第1四半期", "2027-03-31", 3, False),
+        ("2027年3月期 第1四半期", "2026-06-30", 6, False),
+        ("2027年3月期 第2四半期", "2026-09-30", 3, None),
+        ("3月期 第1四半期", "2026-06-30", 3, None),
+    ],
+)
+def test_period_calendar_proof_and_contradictions(label, end, months, expected):
+    assert evidence_module._header_period_matches(label, end, months) is expected
+
+
+@pytest.mark.parametrize(
+    "source", ["Jun 30, 2026", "30 Jun 2026", "２０２７年３月期 第１四半期"]
+)
+def test_retained_abbreviated_dates_and_fiscal_q1_supply_calendar_proof(source):
+    assert evidence_module._source_has_period_end(source, "2026-06-30")
+    assert not evidence_module._source_has_period_end(source, "2025-06-30")
+
+
+@pytest.mark.parametrize(
+    "currency,unit,source",
+    [
+        ("EUR", "thousands", "€’000"),
+        ("EUR", "€'000", "EUR thousands"),
+        ("JPY", "millions", "百万円"),
+        ("JPY", "百万円", "JPY millions"),
+        ("USD", "thousands", "KUSD"),
+        ("USD", "KUSD", "USD thousands"),
+        ("IDR", "Million Rupiah", "millions of Rupiah"),
+    ],
+)
+def test_reporting_unit_equivalence_stays_currency_and_scale_bound(
+    currency, unit, source
+):
+    from src.monetary import reporting_unit_scale
+
+    values = {
+        "LATEST_RESULTS_CURRENCY": currency,
+        "LATEST_RESULTS_REPORTING_UNIT": unit,
+    }
+    assert evidence_module._heading_has_currency_and_unit(source, values)
+    assert evidence_module._compatible_unit_only_header(source, values)
+    assert evidence_module._statement_boundary(source)
+    assert reporting_unit_scale(unit) == reporting_unit_scale(source)
+    for unrelated in (source + " H1 2026", source + "\nNet income 100 90"):
+        assert not evidence_module._compatible_unit_only_header(unrelated, values)
+    assert not evidence_module._heading_has_currency_and_unit(
+        source + " CHF billions", values
+    )
+
+
+@pytest.mark.parametrize("wording", ["Half-year ended", "Half Year ended"])
+def test_complete_half_year_source_header_reaches_primary_without_annual_submatch(
+    wording,
+):
+    base = _materialize(
+        next(c for c in _CORPUS if c["case"] == "simple_interim_statement")
+    )
+    report = base["report"].replace("Six months ended", wording)
+    item = base["evidence"]
+    content = item["content"].replace("Six months ended", wording)
+    normalized = normalize_foreign_language_evidence(
+        report,
+        [],
+        ticker=base["ticker"],
+        additional_records=[make_tool_evidence_record(**{**item, "content": content})],
+    )
+    assert field(normalized, "LATEST_RESULTS_SOURCE_AUTHORITY") == "PRIMARY"
+    assert field(normalized, "LATEST_RESULTS_REVENUE_GROWTH_YOY") == "18.0%"
+
+
+def test_model_fiscal_labels_cannot_prove_unrelated_source_table():
+    base = _materialize(_CORPUS[0])
+    report = (
+        base["report"]
+        .replace("For the year ended 31 December 2025", "2026年9月期 第1四半期")
+        .replace("For the year ended 31 December 2024", "2025年9月期 第1四半期")
+        .replace("LATEST_RESULTS_PERIOD_MONTHS: 12", "LATEST_RESULTS_PERIOD_MONTHS: 3")
+    )
+    content = base["evidence"]["content"].replace(
+        "For the year ended 31 December 2025", "Unknown reporting period"
+    )
+    content += "\n2026年9月期 第1四半期\nUnrelated source label"
+    normalized = normalize_foreign_language_evidence(
+        report,
+        [],
+        ticker=base["ticker"],
+        additional_records=[
+            make_tool_evidence_record(**{**base["evidence"], "content": content})
+        ],
+    )
+    assert field(normalized, "LATEST_RESULTS_SOURCE_AUTHORITY") == "UNSUPPORTED"
+
+
+def test_gft_net_income_growth_and_advisory_awards_do_not_lift_decision_score():
+    from src.agents.verdict_policy import assess_growth_gate
+    from src.analysis_snapshot import add_validated_derivations
+    from src.decision_inputs import DecisionInputs
+
+    base = _materialize(next(c for c in _CORPUS if c["case"] == "captured_GFT.DE"))
+    normalized = normalize_foreign_language_evidence(
+        base["report"],
+        [],
+        ticker=base["ticker"],
+        additional_records=[_record(r) for r in base["evidence_records"]],
+    )
+    senior, _ = promote_foreign_growth_evidence(base["senior_excerpt"], normalized)
+    # Reconstruct the pre-projection arithmetic from the retained 2/5 awards.
+    # These other consumer facts reproduce saved aggregator snapshot values;
+    # they do not claim to be part of the issuer excerpt.
+    senior = senior.replace(
+        "ADJUSTED_GROWTH_SCORE: 0.0%", "ADJUSTED_GROWTH_SCORE: 40.0%"
+    )
+    senior += "\nGROSS_MARGIN_PERCENT: 15.0%\nROA_YOY_CHANGE_PERCENT: -27.8%\nROE_YOY_CHANGE_PERCENT: -27.0%"
+    report = "### --- START DATA_BLOCK ---\n" + senior + "\n### --- END DATA_BLOCK ---"
+    snapshot = build_analysis_snapshot(
+        {"fundamentals_report": report},
+        [SimpleNamespace(**r) for r in base["evidence_records"]],
+        degraded=False,
+    )
+    snapshot = add_validated_derivations(snapshot, report)
+    card = snapshot["scorecards"]["GROWTH"]
+    claims = {c["field"]: (cid, c) for cid, c in snapshot["claims"].items()}
+    assert card["criteria"]["REVENUE_GROWTH"]["award"] == "0"
+    assert card["criteria"]["REVENUE_GROWTH"]["derived_from"] == [
+        claims["LATEST_RESULTS_REVENUE_GROWTH_YOY"][0]
+    ]
+    assert claims["LATEST_RESULTS_REVENUE_GROWTH_YOY"][1]["value"] == "4.8%"
+    assert claims["LATEST_RESULTS_EARNINGS_GROWTH_YOY"][1]["value"] == "26.7%"
+    assert card["criteria"]["EPS_GROWTH"] == {
+        "award": "N/A",
+        "max_points": 1.0,
+        "derived_from": [],
+    }
+    assert card["advisory_only_awards"] == ["GLOBAL_EXPANSION", "R_AND_D_CAPEX_BACKLOG"]
+    assert card["percentage"] == 0.0
+    assert card["advisory_percentage"] == 40.0
+    inputs = DecisionInputs.from_metrics_and_snapshot(
+        {
+            "adjusted_growth_score": 40.0,
+            "adjusted_health_score": 45.5,
+            "pe_ratio": 18.74,
+            "revenue_cagr_3y": 6.8,
+        },
+        "Information Technology",
+        snapshot,
+    )
+    assert inputs.growth_decision_pct == 0.0
+    # Supply the captured health result to isolate the growth gate from unrelated
+    # health-score lineage; its independently low value excludes an exception.
+    from dataclasses import replace
+
+    gate = assess_growth_gate(
+        replace(inputs, health_decision_pct=45.5, health_score_reliable=True)
+    )
+    assert gate.hard_fail
+    assert gate.exception is None
+
+
+@pytest.mark.parametrize("prior", ["0", "-13.5"])
+def test_primary_loss_or_zero_baseline_never_creates_earnings_growth(prior):
+    import hashlib
+
+    base = _materialize(next(c for c in _CORPUS if c["case"] == "captured_GFT.DE"))
+    report = base["report"].replace(
+        "LATEST_RESULTS_PRIOR_EARNINGS: 13.5", f"LATEST_RESULTS_PRIOR_EARNINGS: {prior}"
+    )
+    item = base["evidence_records"][0]
+    content = item["content"].replace(
+        "Net income\n17.1\n13.5", f"Net income\n17.1\n{prior}"
+    )
+    item = {
+        **item,
+        "content": content,
+        "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
+    }
+    normalized = normalize_foreign_language_evidence(
+        report, [], ticker=base["ticker"], additional_records=[_record(item)]
+    )
+    assert field(normalized, "LATEST_RESULTS_SOURCE_AUTHORITY") == "PRIMARY"
+    assert field(normalized, "LATEST_RESULTS_EARNINGS_GROWTH_YOY") == "N/A"
+    senior, _ = promote_foreign_growth_evidence(
+        "GROWTH_SCORE_BREAKDOWN: EPS_GROWTH=N/A", normalized
+    )
+    assert field(senior, "GROWTH_SCORE_BREAKDOWN") == "EPS_GROWTH=N/A"
+
+
+@pytest.mark.parametrize(
+    "currency,source,expected",
+    [
+        ("GBP", "GBP millions", True),
+        ("GBp", "GBp millions", True),
+        ("GBP", "GBp millions", False),
+        ("GBp", "GBP millions", False),
+        ("GBX", "GBX millions", True),
+    ],
+)
+def test_reporting_units_preserve_minor_currency_identity(currency, source, expected):
+    values = {
+        "LATEST_RESULTS_CURRENCY": currency,
+        "LATEST_RESULTS_REPORTING_UNIT": "millions",
+    }
+    assert evidence_module._heading_has_currency_and_unit(source, values) is expected
+
+
+@pytest.mark.parametrize(
+    "token", ["EUR'000000", "EUR'000x", "USDmillionth", "wrongprefixKUSD"]
+)
+def test_unsupported_reporting_declarations_do_not_match_valid_prefix(token):
+    from src.monetary import reporting_unit_declarations
+
+    assert reporting_unit_declarations(token) == ()
+
+
+@pytest.mark.parametrize("unit", ["USD thousands", "KUSD", "百万円"])
+@pytest.mark.parametrize("heading", ["EUR thousands", "EUR\nReporting unit: thousands"])
+def test_reporting_unit_currency_cannot_contradict_currency_field(unit, heading):
+    values = {"LATEST_RESULTS_CURRENCY": "EUR", "LATEST_RESULTS_REPORTING_UNIT": unit}
+    assert not evidence_module._heading_has_currency_and_unit(heading, values)
+
+
+@pytest.mark.parametrize(
+    "claim_unit,source_unit,authority",
+    [("Billions", "billion", "SECONDARY"), ("million", "billion", "UNSUPPORTED")],
+)
+def test_narrative_unit_aliases_preserve_exact_currency_scale_and_clause(
+    claim_unit, source_unit, authority
+):
+    base = _materialize(
+        next(
+            c for c in _CORPUS if c["case"] == "explicit_half_year_secondary_narrative"
+        )
+    )
+    report = base["report"].replace(
+        "LATEST_RESULTS_REPORTING_UNIT: Billion",
+        f"LATEST_RESULTS_REPORTING_UNIT: {claim_unit}",
+    )
+    item = {
+        **base["evidence"],
+        "content": base["evidence"]["content"].replace("billion", source_unit),
+    }
+    normalized = normalize_foreign_language_evidence(
+        report, [], ticker=base["ticker"], additional_records=[_record(item)]
+    )
+    assert field(normalized, "LATEST_RESULTS_SOURCE_AUTHORITY") == authority
+    assert field(normalized, "LATEST_RESULTS_EARNINGS_GROWTH_YOY") == "N/A"
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "2027年3月期 第1四半期",
+        "２０２７年３月期 第１四半期",
+        "2027年3月期 第1四半期 (2026-07-04)",
+        "2027年3月期 第1四半期 (53-week calendar)",
+    ],
+)
+def test_retained_fiscal_q1_binding_and_conflicting_calendar_headers(header):
+    import hashlib
+
+    base = _materialize(next(c for c in _CORPUS if c["case"] == "captured_GFT.DE"))
+    report = (
+        base["report"]
+        .replace("H1 2026", "2027年3月期 第1四半期")
+        .replace("H1 2025", "2026年3月期 第1四半期")
+        .replace("LATEST_RESULTS_PERIOD_MONTHS: 6", "LATEST_RESULTS_PERIOD_MONTHS: 3")
+    )
+    item = {
+        **base["evidence"],
+        "content": base["evidence"]["content"]
+        .replace("H1 2026", header)
+        .replace("H1 2025", "2026年3月期 第1四半期"),
+    }
+    item["content_sha256"] = hashlib.sha256(item["content"].encode()).hexdigest()
+    normalized = normalize_foreign_language_evidence(
+        report, [], ticker=base["ticker"], additional_records=[_record(item)]
+    )
+    expected = "UNSUPPORTED" if "(" in header else "PRIMARY"
+    assert field(normalized, "LATEST_RESULTS_SOURCE_AUTHORITY") == expected
+
+
+@pytest.mark.parametrize("currency", ["CNY", "CHF", "EUR"])
+def test_implicit_jpy_scale_cannot_be_cast_to_foreign_currency(currency):
+    values = {
+        "LATEST_RESULTS_CURRENCY": currency,
+        "LATEST_RESULTS_REPORTING_UNIT": "millions",
+    }
+    source = f"{currency} 百万円"
+    assert not evidence_module._heading_has_currency_and_unit(source, values)
+    assert not evidence_module._compatible_unit_only_header(source, values)
+    assert evidence_module._statement_boundary(source)
+
+
+@pytest.mark.parametrize(
+    "source_unit,authority", [("million", "PRIMARY"), ("百万円", "UNSUPPORTED")]
+)
+def test_primary_narrative_implicit_unit_currency_cannot_contradict_explicit_prefix(
+    source_unit, authority
+):
+    base = _materialize(
+        next(
+            c for c in _CORPUS if c["case"] == "explicit_half_year_secondary_narrative"
+        )
+    )
+    report = (
+        base["report"]
+        .replace("LATEST_RESULTS_CURRENCY: KRW", "LATEST_RESULTS_CURRENCY: CNY")
+        .replace(
+            "LATEST_RESULTS_REPORTING_UNIT: Billion",
+            "LATEST_RESULTS_REPORTING_UNIT: million",
+        )
+    )
+    item = {
+        **base["evidence"],
+        "tool_name": "get_official_document",
+        "evidence_status": "EVIDENCE_FOUND",
+        "content": base["evidence"]["content"]
+        .replace("KRW", "CNY")
+        .replace("billion", source_unit),
+        "authority_by_url": [(base["evidence"]["urls"][0], "PRIMARY_ISSUER")],
+    }
+    normalized = normalize_foreign_language_evidence(
+        report, [], ticker=base["ticker"], additional_records=[_record(item)]
+    )
+    assert field(normalized, "LATEST_RESULTS_SOURCE_AUTHORITY") == authority
+    if authority == "UNSUPPORTED":
+        assert field(normalized, "LATEST_RESULTS_EARNINGS_GROWTH_YOY") == "N/A"
+
+
+@pytest.mark.parametrize(
+    "token,currency,scale",
+    [
+        ("百万円", "JPY", 1e6),
+        ("千円", "JPY", 1e3),
+        ("億円", "JPY", 1e8),
+        ("人民幣千元", "CNY", 1e3),
+        ("백만원", "KRW", 1e6),
+    ],
+)
+def test_currency_bound_reporting_units_agree_across_consumers(token, currency, scale):
+    from src.monetary import reporting_unit_declarations, reporting_unit_scale
+
+    values = {
+        "LATEST_RESULTS_CURRENCY": currency,
+        "LATEST_RESULTS_REPORTING_UNIT": token,
+    }
+    assert reporting_unit_scale(token) == scale
+    assert reporting_unit_declarations(token) == ((currency, scale),)
+    assert evidence_module._heading_has_currency_and_unit(token, values)
+    assert evidence_module._compatible_unit_only_header(token, values)
+    assert evidence_module._statement_boundary(token)
+    for other in {"CHF", "CNY", "JPY", "KRW"} - {currency}:
+        assert not evidence_module._heading_has_currency_and_unit(
+            f"{other} {token}", values
+        )
+        assert not evidence_module._compatible_unit_only_header(
+            f"{other} {token}", values
+        )
+
+
+@pytest.mark.parametrize("currency", ["CNY", "TWD"])
+def test_plain_chinese_thousands_needs_source_currency_context(currency):
+    from src.monetary import reporting_unit_declarations, reporting_unit_scale
+
+    values = {
+        "LATEST_RESULTS_CURRENCY": currency,
+        "LATEST_RESULTS_REPORTING_UNIT": "千元",
+    }
+    assert reporting_unit_scale("千元") == 1e3
+    assert reporting_unit_declarations("千元") == ()
+    assert not evidence_module._heading_has_currency_and_unit("千元", values)
+    assert evidence_module._heading_has_currency_and_unit(f"{currency} 千元", values)
+    assert evidence_module._statement_boundary("千元")
+    assert not evidence_module._heading_has_currency_and_unit("JPY 千元", values)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Don't",
+        "don't",
+        "T cells",
+        "M investors",
+        "a K note",
+        "B's",
+        "2026 T",
+        "USD Don't",
+    ],
+)
+def test_stray_scale_letters_never_bind_reporting_metadata(text):
+    from src.monetary import reporting_unit_declarations, reporting_unit_scale
+
+    assert reporting_unit_scale(text) is None
+    assert reporting_unit_declarations(text) == ()
+
+
+@pytest.mark.parametrize(
+    "unit,scale", [("K", 1e3), ("M", 1e6), ("B", 1e9), ("T", 1e12)]
+)
+def test_complete_structured_scale_letters_remain_valid(unit, scale):
+    from src.monetary import reporting_unit_scale
+
+    assert reporting_unit_scale(unit) == scale
+    values = {"LATEST_RESULTS_CURRENCY": "EUR", "LATEST_RESULTS_REPORTING_UNIT": unit}
+    assert evidence_module._heading_has_currency_and_unit(f"EUR {unit}", values)
+
+
+@pytest.mark.parametrize(
+    "currency,source_currency", [("€", "€"), ("€", "EUR"), ("EUR", "€")]
+)
+def test_symbol_currency_reaches_primary_narrative_through_public_normalizer(
+    currency, source_currency
+):
+    import hashlib
+
+    base = _materialize(
+        next(
+            c for c in _CORPUS if c["case"] == "explicit_half_year_secondary_narrative"
+        )
+    )
+    report = base["report"].replace(
+        "LATEST_RESULTS_CURRENCY: KRW", f"LATEST_RESULTS_CURRENCY: {currency}"
+    )
+    item = {
+        **base["evidence"],
+        "tool_name": "get_official_document",
+        "evidence_status": "EVIDENCE_FOUND",
+        "execution_status": "SUCCEEDED",
+        "content": base["evidence"]["content"].replace("KRW", source_currency),
+        "authority_by_url": [(base["evidence"]["urls"][0], "PRIMARY_ISSUER")],
+    }
+    item["content_sha256"] = hashlib.sha256(item["content"].encode()).hexdigest()
+    normalized = normalize_foreign_language_evidence(
+        report, [], ticker=base["ticker"], additional_records=[_record(item)]
+    )
+    assert field(normalized, "LATEST_RESULTS_SOURCE_AUTHORITY") == "PRIMARY"
+    assert (
+        field(normalized, "LATEST_RESULTS_NORMALIZATION_REASON") == "SUPPORTED_PRIMARY"
+    )
+
+
+@pytest.mark.parametrize(
+    "label,end,months,expected",
+    [
+        ("2027年3月期 第1四半期連結累計期間", "2026-06-30", 3, True),
+        ("2027年3月期 第2四半期連結累計期間", "2026-09-30", 6, None),
+        ("2027年3月期 第2四半期", "2026-09-30", 3, None),
+        ("2027年13月期 第1四半期", "2026-06-30", 3, False),
+        ("Three months ended 30 Jun 2026", "2026-06-30", 3, True),
+        ("Year ended Jun 30, 2026 and 2025", "2025-06-30", 12, True),
+        ("Six months ended Jun 31, 2026", "2026-06-30", 6, False),
+    ],
+)
+def test_consolidated_fiscal_and_date_parser_preserves_calendar_limits(
+    label, end, months, expected
+):
+    assert evidence_module._header_period_matches(label, end, months) is expected
+
+
+@pytest.mark.parametrize(
+    "symbol,currency", evidence_module.CURRENCY_SYMBOL_TO_CODE.items()
+)
+@pytest.mark.parametrize("reader", ["table", "narrative"])
+@pytest.mark.parametrize("claim_symbol", [True, False])
+def test_registered_currency_symbols_match_iso_claims_through_both_readers(
+    symbol, currency, reader, claim_symbol
+):
+    import hashlib
+
+    case_name = (
+        "captured_GFT.DE"
+        if reader == "table"
+        else "explicit_half_year_secondary_narrative"
+    )
+    original_currency = "EUR" if reader == "table" else "KRW"
+    base = _materialize(next(c for c in _CORPUS if c["case"] == case_name))
+    report = base["report"].replace(
+        f"LATEST_RESULTS_CURRENCY: {original_currency}",
+        f"LATEST_RESULTS_CURRENCY: {symbol if claim_symbol else currency}",
+    )
+    # Keep unit-field identity consistent when the table fixture embeds EUR there.
+    report = report.replace(
+        "LATEST_RESULTS_REPORTING_UNIT: EUR million",
+        f"LATEST_RESULTS_REPORTING_UNIT: {currency} million",
+    )
+    item = {
+        **base["evidence"],
+        "tool_name": "get_official_document",
+        "execution_status": "SUCCEEDED",
+        "evidence_status": "EVIDENCE_FOUND",
+        "content": base["evidence"]["content"].replace(original_currency, symbol),
+        "authority_by_url": [(base["evidence"]["urls"][0], "PRIMARY_ISSUER")],
+    }
+    item["content_sha256"] = hashlib.sha256(item["content"].encode()).hexdigest()
+    normalized = normalize_foreign_language_evidence(
+        report, [], ticker=base["ticker"], additional_records=[_record(item)]
+    )
+    assert field(normalized, "LATEST_RESULTS_SOURCE_AUTHORITY") == "PRIMARY"
+    assert (
+        field(normalized, "LATEST_RESULTS_NORMALIZATION_REASON") == "SUPPORTED_PRIMARY"
+    )
+
+
+@pytest.mark.parametrize("currency", ["GBP", "GBp", "GBX"])
+@pytest.mark.parametrize("declared", ["GBP", "GBp", "GBX"])
+def test_claim_reporting_declarations_preserve_minor_identity_before_casefold(
+    currency, declared
+):
+    values = {
+        "LATEST_RESULTS_CURRENCY": currency,
+        "LATEST_RESULTS_REPORTING_UNIT": f"{currency} millions",
+    }
+    expected = currency == declared
+    assert (
+        evidence_module._heading_has_currency_and_unit(f"{declared} millions", values)
+        is expected
+    )
+    assert (
+        evidence_module._compatible_unit_only_header(f"{declared} millions", values)
+        is expected
+    )
+    assert evidence_module._statement_boundary(f"{declared} millions")
+
+
+@pytest.mark.parametrize("currency", ["GBP", "GBp", "GBX"])
+@pytest.mark.parametrize("source_currency", ["GBP", "GBp", "GBX"])
+def test_narrative_explicit_currency_retains_minor_unit_contradictions(
+    currency, source_currency
+):
+    import hashlib
+
+    base = _materialize(
+        next(
+            c for c in _CORPUS if c["case"] == "explicit_half_year_secondary_narrative"
+        )
+    )
+    report = (
+        base["report"]
+        .replace("LATEST_RESULTS_CURRENCY: KRW", f"LATEST_RESULTS_CURRENCY: {currency}")
+        .replace(
+            "LATEST_RESULTS_REPORTING_UNIT: Billion",
+            f"LATEST_RESULTS_REPORTING_UNIT: {currency} billion",
+        )
+    )
+    item = {
+        **base["evidence"],
+        "tool_name": "get_official_document",
+        "execution_status": "SUCCEEDED",
+        "evidence_status": "EVIDENCE_FOUND",
+        "content": base["evidence"]["content"].replace("KRW", source_currency),
+        "authority_by_url": [(base["evidence"]["urls"][0], "PRIMARY_ISSUER")],
+    }
+    item["content_sha256"] = hashlib.sha256(item["content"].encode()).hexdigest()
+    normalized = normalize_foreign_language_evidence(
+        report, [], ticker=base["ticker"], additional_records=[_record(item)]
+    )
+    assert field(normalized, "LATEST_RESULTS_SOURCE_AUTHORITY") == (
+        "PRIMARY" if currency == source_currency else "UNSUPPORTED"
+    )
+    if currency != source_currency:
+        assert field(normalized, "LATEST_RESULTS_EARNINGS_GROWTH_YOY") == "N/A"

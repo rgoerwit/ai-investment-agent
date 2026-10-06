@@ -7,12 +7,12 @@ from pathlib import Path
 import pytest
 
 from src.agents.foreign_language_evidence import (
-    _exact_decimal,
     _header_period_matches,
     normalize_foreign_language_evidence,
     promote_foreign_growth_evidence,
 )
 from src.agents.message_utils import make_tool_evidence_record
+from src.monetary import exact_decimal
 
 _CASES = json.loads(
     (Path(__file__).parents[1] / "fixtures/latest_results_statements.json").read_text()
@@ -59,9 +59,7 @@ def test_malformed_comma_cells_cannot_become_different_nominal_amounts(
 def test_evidence_decimal_grouping_matches_money_contract_without_float_loss(
     value, expected
 ):
-    assert _exact_decimal(value) == (
-        Decimal(expected) if expected is not None else None
-    )
+    assert exact_decimal(value) == (Decimal(expected) if expected is not None else None)
 
 
 @pytest.mark.parametrize("case", _CASES, ids=lambda row: row["case"])

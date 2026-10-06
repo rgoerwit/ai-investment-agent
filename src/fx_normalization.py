@@ -22,7 +22,7 @@ import structlog
 
 from src.blocking_io import FX_RATE_POLICY, run_blocking_call
 from src.error_safety import summarize_exception
-from src.exchange_metadata import CURRENCY_CODE_ALIASES
+from src.exchange_metadata import CURRENCY_CODE_ALIASES, CURRENCY_SYMBOL_TO_CODE
 
 logger = structlog.get_logger(__name__)
 
@@ -185,13 +185,16 @@ def canonical_currency_code(currency: str | None) -> str | None:
     ``"GBp".upper()`` is ``"GBP"`` — a different currency scaled 100x. A plain
     ``.upper()`` at a resolution boundary is therefore how a pence quote
     silently becomes a pounds quote (the GAMA.L false-review bug, Aug 2026).
-    Registered minor-unit aliases keep their canonical spelling; everything else
-    is upper-cased as before, so ``"usd"`` still normalizes to ``"USD"``.
+    Registered minor-unit aliases keep their canonical spelling; unambiguous
+    symbols resolve to ISO codes. Other inputs are upper-cased as before, so
+    ``"usd"`` still normalizes to ``"USD"``.
 
-    Matching is deliberately **case-sensitive**: ``"GBp"`` and ``"GBP"`` differ
-    only in case, so a case-insensitive lookup would map pounds onto pence. An
-    exact alias hit is preserved; anything else upper-cases, which still lands
-    ``"gbx"`` on the ``"GBX"`` alias and leaves ``"gbp"`` as ordinary pounds.
+    Minor-unit alias matching is deliberately **case-sensitive**: ``"GBp"`` and
+    ``"GBP"`` differ only in case, so a case-insensitive alias lookup would map
+    pounds onto pence. Exact minor-unit alias hits are preserved; registered
+    symbols match case-insensitively. Remaining inputs upper-case before the
+    code-alias lookup, which still lands ``"gbx"`` on the ``"GBX"`` alias and
+    leaves ``"gbp"`` as ordinary pounds.
     """
     if not currency:
         return None
@@ -200,6 +203,16 @@ def canonical_currency_code(currency: str | None) -> str | None:
         return None
     if stripped in MINOR_UNIT_CURRENCY_ALIASES:
         return stripped
+    symbol = next(
+        (
+            code
+            for token, code in CURRENCY_SYMBOL_TO_CODE.items()
+            if token.casefold() == stripped.casefold()
+        ),
+        None,
+    )
+    if symbol:
+        return symbol
     return CURRENCY_CODE_ALIASES.get(stripped.upper(), stripped.upper())
 
 

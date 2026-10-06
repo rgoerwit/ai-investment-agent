@@ -2,7 +2,7 @@
 
 Reads a `scratch/<TICKER>-LOG-<DATE>_<mode>.txt` file produced by
 `pipeline_signals.sh::run_tracked_child` and returns a structured dict
-with counts of network / timeout / breaker events plus elapsed seconds.
+with counts of network / timeout / breaker / tier events plus elapsed seconds.
 
 This is the common backend for:
 - `scripts/extract_run_health.py` (per-run badge string)
@@ -33,6 +33,8 @@ class LogStats:
     network_breaker_opened: int = 0
     llm_circuit_opened: int = 0
     pending_task_dumps: int = 0
+    flex_fallbacks: int = 0
+    flex_degradation_episodes: int = 0
     pipeline_child_timeout: bool = False
     exit_status: int | None = None
     elapsed_seconds: float | None = None
@@ -42,8 +44,11 @@ class LogStats:
 
     @property
     def is_clean(self) -> bool:
-        """A run is 'clean' if nothing notable happened. Used by callers
-        to decide whether to emit anything at all."""
+        """Whether the log contains no tracked events or child failure.
+
+        This raw-event predicate does not apply the badge/summary thresholds;
+        a successful transient fallback can be non-clean without a warning.
+        """
         return (
             self.dns_failures == 0
             and self.connect_errors == 0
@@ -51,6 +56,8 @@ class LogStats:
             and self.network_breaker_opened == 0
             and self.llm_circuit_opened == 0
             and self.pending_task_dumps == 0
+            and self.flex_fallbacks == 0
+            and self.flex_degradation_episodes == 0
             and not self.pipeline_child_timeout
             and (self.exit_status is None or self.exit_status == 0)
         )
@@ -63,6 +70,8 @@ _RE_HARD_TIMEOUT = re.compile(r"event='hard_timeout_exceeded'")
 _RE_NETWORK_BREAKER_OPEN = re.compile(r"event='network_breaker_opened'")
 _RE_LLM_CIRCUIT_OPEN = re.compile(r"event='llm_circuit_opened'")
 _RE_PENDING_DUMP = re.compile(r"event='pending_tasks_dump'")
+_RE_FLEX_FALLBACK = re.compile(r"event='flex_fallback_to_standard'")
+_RE_FLEX_DEGRADED = re.compile(r"event='flex_provider_degraded'")
 _RE_CHILD_TIMEOUT = re.compile(r"\[pipeline_child_timeout\]")
 _RE_CHILD_EXIT = re.compile(
     r"\[pipeline_child_exit\] status=(?P<status>-?\d+) elapsed=(?P<elapsed>\d+)s"
@@ -73,6 +82,7 @@ def parse_log(path: Path | str) -> LogStats:
     """Parse one pipeline ticker log file. Returns LogStats; never raises."""
     p = Path(path)
     dns = connect = timeouts = nbo = lco = pdumps = 0
+    flex_fallbacks = flex_episodes = 0
     child_timeout = False
     exit_status: int | None = None
     elapsed: float | None = None
@@ -93,6 +103,10 @@ def parse_log(path: Path | str) -> LogStats:
                     lco += 1
                 if _RE_PENDING_DUMP.search(line):
                     pdumps += 1
+                if _RE_FLEX_FALLBACK.search(line):
+                    flex_fallbacks += 1
+                if _RE_FLEX_DEGRADED.search(line):
+                    flex_episodes += 1
                 if _RE_CHILD_TIMEOUT.search(line):
                     child_timeout = True
                 m = _RE_CHILD_EXIT.search(line)
@@ -114,6 +128,8 @@ def parse_log(path: Path | str) -> LogStats:
         network_breaker_opened=nbo,
         llm_circuit_opened=lco,
         pending_task_dumps=pdumps,
+        flex_fallbacks=flex_fallbacks,
+        flex_degradation_episodes=flex_episodes,
         pipeline_child_timeout=child_timeout,
         exit_status=exit_status,
         elapsed_seconds=elapsed,

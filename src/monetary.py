@@ -5,10 +5,13 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Iterator
+from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
 
 from src.exchange_metadata import (
     CURRENCY_CODE_ALIASES,
     CURRENCY_DISPLAY_FORMATS,
+    CURRENCY_REPORTING_NAMES,
     CURRENCY_SYMBOL_TO_CODE,
     SUFFIX_TO_CURRENCY_CODE,
 )
@@ -68,6 +71,112 @@ _MONETARY_MAGNITUDES = {
     "K": 1e3,
     "THOUSAND": 1e3,
 }
+
+# Reporting declarations are metadata, deliberately separate from amount grammar.
+_CURRENCY_BOUND_REPORTING_UNITS = MappingProxyType(
+    {
+        "百万円": ("JPY", 1e6),
+        "千円": ("JPY", 1e3),
+        "億円": ("JPY", 1e8),
+        "人民幣千元": ("CNY", 1e3),
+        "백만원": ("KRW", 1e6),
+        # Used by multiple currencies; only an explicit source currency binds it.
+        "千元": (None, 1e3),
+    }
+)
+_BOUND_REPORTING_PATTERN = "|".join(
+    sorted(_CURRENCY_BOUND_REPORTING_UNITS, key=len, reverse=True)
+)
+REPORTING_SCALE_PATTERN = (
+    r"['’]000(?!\w)|(?<![\w'’])(?:thousands?|millions?|billions?|trillions?|[kmbt])(?!\w)"
+    rf"|{_BOUND_REPORTING_PATTERN}"
+)
+_REPORTING_CURRENCIES = {
+    **{
+        code.casefold(): canonical_currency_code(code) or code
+        for code in _CURRENCY_CODES - {"GBp"}
+    },
+    **{alias.casefold(): code for alias, code in CURRENCY_CODE_ALIASES.items()},
+    **_SYMBOL_CURRENCIES,
+    **CURRENCY_REPORTING_NAMES,
+}
+_REPORTING_CURRENCY_PATTERN = "|".join(
+    re.escape(token) for token in sorted(_REPORTING_CURRENCIES, key=len, reverse=True)
+)
+_REPORTING_DECLARATION_RE = re.compile(
+    rf"(?<!\w)(?:(?P<currency>{_REPORTING_CURRENCY_PATTERN})\s*\(?\s*"
+    rf"(?P<scale>{REPORTING_SCALE_PATTERN})"
+    rf"|(?P<scale_first>{REPORTING_SCALE_PATTERN})\s+(?:of\s+)?"
+    rf"(?P<currency_last>{_REPORTING_CURRENCY_PATTERN})(?!\w)"
+    rf"|(?P<compact>[KMBT])(?P<code>{_CURRENCY_PATTERN})(?!\w))"
+    rf"|(?P<bound>{_BOUND_REPORTING_PATTERN})",
+    re.I,
+)
+
+
+def _reporting_scale(token: str) -> float:
+    if token in _CURRENCY_BOUND_REPORTING_UNITS:
+        return _CURRENCY_BOUND_REPORTING_UNITS[token][1]
+    return (
+        1e3
+        if token in {"'000", "’000"}
+        else _MONETARY_MAGNITUDES[token.upper().rstrip("S")]
+    )
+
+
+def reporting_unit_scale(text: str) -> float | None:
+    """Read a whole declared unit field or explicit currency-bound declarations."""
+    token = text.strip()
+    match = re.fullmatch(
+        rf"(?:[$¥]\s*)?(?P<scale>{REPORTING_SCALE_PATTERN})", token, re.I
+    )
+    if match:
+        return _reporting_scale(match.group("scale"))
+    scales = {scale for _, scale in reporting_unit_declarations(text)}
+    return next(iter(scales)) if len(scales) == 1 else None
+
+
+def reporting_unit_declarations(text: str) -> tuple[tuple[str, float], ...]:
+    """Read explicit currency/scale pairs, retaining contradictory identities."""
+    declarations = []
+    for match in _REPORTING_DECLARATION_RE.finditer(text):
+        token = (
+            match.group("bound")
+            or match.group("scale")
+            or match.group("scale_first")
+            or match.group("compact")
+        )
+        scale = _reporting_scale(token)
+        bound_currency = _CURRENCY_BOUND_REPORTING_UNITS.get(token, (None, scale))[0]
+        if bound_currency:
+            declarations.append((bound_currency, scale))
+        raw_currency = (
+            match.group("currency")
+            or match.group("currency_last")
+            or match.group("code")
+        )
+        if raw_currency:
+            currency = (
+                raw_currency
+                if raw_currency in MINOR_UNIT_CURRENCY_ALIASES
+                else _REPORTING_CURRENCIES.get(raw_currency.casefold())
+            )
+            if currency:
+                declarations.append((currency, scale))
+    return tuple(declarations)
+
+
+def exact_decimal(value: str) -> Decimal | None:
+    """Parse a complete numeric field without scaling or currency conversion."""
+    candidate = value.strip()
+    if not re.fullmatch(
+        r"-?\d[\d,]*(?:\.\d+)?", candidate
+    ) or not has_valid_monetary_grouping(candidate):
+        return None
+    try:
+        return Decimal(candidate.replace(",", ""))
+    except InvalidOperation:
+        return None
 
 
 def parse_currency_value(sign: str, value_str: str, multiplier: str | None) -> float:

@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Recognize complete half-year labels, abbreviated English dates, retained Japanese
+  fiscal Q1 context, and equivalent currency-bound reporting-unit declarations while
+  preserving comparative table and earnings-scope checks. Keep monetary amount
+  grammar separate from reporting units.
+- Freeze additional source-adjudicated latest-results regressions and distinguish
+  incomplete claims, retained unbound evidence, citation authority, and attempted
+  acquisition in offline replay. Report flex fallbacks and degradation episodes in
+  batch summaries without changing routing or pricing.
+
 - Reject failed evidence and failed result envelopes before ownership/capacity
   normalization; bind envelope authority to its declared source and apply the same
   checks to preflight fallback while preserving valid neighboring results.

@@ -1,6 +1,6 @@
 # Prompt contracts and the drift harness
 
-Last updated: 2026-10-04
+Last updated: 2026-10-06
 
 This file records *why* the prompt-editing rules exist and what happened when they
 were absent. It explains the rationale and intended behaviour; the implementation and
@@ -111,3 +111,29 @@ suppresses the conservative fallback — converting absent evidence into apparen
 positive evidence. Every required field needs a guaranteed code-owned producer; the
 prompt may be told to copy a derived field, but only with its legal tokens spelled
 out, so that naming the field cannot swap one silent failure for another.
+
+## Measuring validator changes
+
+Quote before/after acceptance and rejection on the same frozen, individually
+adjudicated corpus, including negative cases. Keep captured evidence separate from
+format reconstructions; a recovered reconstruction does not establish a production
+coverage gain. Report false acceptance, false rejection, authority mismatches, and
+remaining uncertainty rather than treating a higher acceptance rate as success.
+
+The latest-results corpus has 99 cases: the earlier reader revision changed PRIMARY
+13/99 to 19/99, SECONDARY stayed 4/99, and withheld changed 82/99 to 76/99. Its six
+recoveries are format reconstructions. The subsequent currency and parser correction
+keeps those authority counts: 19 PRIMARY, 4 SECONDARY, 76 withheld, with zero false
+acceptances, false rejections, or authority mismatches against the frozen expectations.
+The 34 captured cases remain 7 PRIMARY, 2 SECONDARY, 25 withheld. One captured JPY
+case now recognizes its explicit 億円 reporting declaration and reports comparative
+rows unbound instead of currency/unit unbound; its authority and growth stay withheld.
+New symbol, reporting-unit, and malformed-record cases are controlled regressions,
+separate from the captured production sample.
+
+The production replay is unchanged: its 77 artifacts retain one supported
+latest-results claim and 21 fetched-but-unbound claims; this correction establishes
+no production acceptance gain.
+Acquisition replay diagnoses retained records, not distinct network calls, and
+normalization of a citation does not grant authority. Missing authority, incomplete
+claims, failed acquisition, and fetched but unbound sources remain separate outcomes.

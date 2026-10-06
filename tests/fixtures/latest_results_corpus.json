@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "selection": "Five prior captured regression controls, fourteen new public captured cases stratified by original withholding reason, language and statement layout, and forty-one declared adversarial mutations. New captured holdouts assigned before subsequent reader edits. Adjudication includes exact claim scope and numbers; readable nearby different metrics do not authorize a claim. Three additional October 5 public source excerpts and nine adversarial mutations exercise declared percentage columns, prior-first ordering, human currency names, and retained issuer provenance.",
+  "selection": "Five prior captured regression controls, fourteen new public captured cases stratified by original withholding reason, language and statement layout, and forty-one declared adversarial mutations. New captured holdouts assigned before subsequent reader edits. Adjudication includes exact claim scope and numbers; readable nearby different metrics do not authorize a claim. Three additional October 5 public source excerpts and nine adversarial mutations exercise declared percentage columns, prior-first ordering, human currency names, and retained issuer provenance. October 6 adds twelve verbatim trimmed retained excerpts, nine GFT mutations and six explicitly declared formatting reconstructions. Original capture digests are retained separately from the accurately recomputed excerpt digests. Expected authority and consumer behavior are source-adjudicated; reconstructed formatting cases are not counted as production recoveries.",
   "cases": [
     {
       "case": "simple_annual_statement",
@@ -1291,6 +1291,525 @@
       "expected_authority": "UNSUPPORTED",
       "expected_growth": null,
       "justification": "An additional period before the claimed columns makes the table ambiguous even when currency and both claimed periods occur later in the header."
+    },
+    {
+      "case": "captured_GFT.DE",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "4.8%",
+        "26.7%"
+      ],
+      "expected_reason": "SUPPORTED_PRIMARY",
+      "justification": "Exact ordered H1 2026/H1 2025 EUR million table binds Revenue 462.6/441.5 and Net income 17.1/13.5; primary issuer recorder authority permits 4.8%/26.7% growth. Net income is not per-share EPS."
+    },
+    {
+      "case": "captured_BSLN.SW",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_BSLN.SW",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "The issuer table and narrative retain 119.0/104.0 revenue and 27.9/15.8 net profit. Claimed 104.4 and 28.0 are wrong, irrespective of nearby correct numbers."
+    },
+    {
+      "case": "captured_BIJ.DE",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_BIJ.DE",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "PERIOD_END_NOT_RETAINED",
+      "justification": "Cited search excerpt names sales and generic net income, but no prior-period calendar proof or owner-attributable earnings scope. Half-year wording itself must not be misread as an annual contradiction."
+    },
+    {
+      "case": "captured_EMMN.SW",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_EMMN.SW",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "PERIOD_END_NOT_RETAINED",
+      "justification": "Cited search retains earnings 100.9/97.2 without comparative revenue, currency/scale and period columns. A half-year source title does not supply a complete table."
+    },
+    {
+      "case": "captured_TXG.TO",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_TXG.TO",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "PERIOD_END_NOT_RETAINED",
+      "justification": "Retained issuer table has five quarterly and cumulative columns. Abbreviated Jun in the model label is valid but cannot supply missing prior-date/table binding."
+    },
+    {
+      "case": "captured_8056.T",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_8056.T",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "PERIOD_END_NOT_RETAINED",
+      "justification": "Verbatim Japanese PDF excerpt retains prior-first three-month date ranges and 百万円. Existing readers cannot bind split labels and owners scope; canonical unit recognition alone cannot reconstruct that table."
+    },
+    {
+      "case": "captured_SL.MI",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_SL.MI",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "PERIOD_END_NOT_RETAINED",
+      "justification": "Verbatim €’000 issuer table contains two percentage columns and two change columns; source header lacks full year-end dates, and flattened cells are not an ordered two-cell table."
+    },
+    {
+      "case": "captured_STAA.JK",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_STAA.JK",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "The issuer declares millions of Rupiah; bilingual dot-grouped columns and ownership profit in the equity statement do not bind all four claimed income statement cells."
+    },
+    {
+      "case": "captured_SIP.BR",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_SIP.BR",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "KUSD explicitly means USD thousands, but retained pages show revenue geographical breakdown, cash flow and equity, without the claimed income statement comparison."
+    },
+    {
+      "case": "captured_2130.T",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_2130.T",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "PERIOD_END_NOT_RETAINED",
+      "justification": "Retained fiscal Q1 labels are valid calendar context only where present. No complete source comparative current/prior table binds both claim metrics under existing readers."
+    },
+    {
+      "case": "captured_5989.T",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_5989.T",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "INVALID_COMPARATIVE_CLAIM",
+      "justification": "Claimed comparative figures are incomplete; fiscal context cannot repair missing figures."
+    },
+    {
+      "case": "captured_8473.T",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_8473.T",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "Retained year/month Q1 fiscal label supplies calendar context and the source 億円 declaration binds JPY hundred-millions, but comparative table binding remains incomplete; authority and growth stay withheld."
+    },
+    {
+      "case": "gft_wrong_revenue",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_PRIOR_REVENUE: 441.5",
+          "LATEST_RESULTS_PRIOR_REVENUE: 441.6"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "Exact source cells never authorize a nearby number."
+    },
+    {
+      "case": "gft_wrong_scope",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_EARNINGS_SCOPE: Net income",
+          "LATEST_RESULTS_EARNINGS_SCOPE: Earnings per share"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "Net income cannot be used as per-share earnings."
+    },
+    {
+      "case": "gft_wrong_scale",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_REPORTING_UNIT: EUR million",
+          "LATEST_RESULTS_REPORTING_UNIT: thousands"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "CURRENCY_OR_UNIT_UNBOUND",
+      "justification": "Million table declarations cannot bind thousands."
+    },
+    {
+      "case": "gft_wrong_period",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_PERIOD_END: 2026-06-30",
+          "LATEST_RESULTS_PERIOD_END: 2026-09-30"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "INVALID_COMPARATIVE_CLAIM",
+      "justification": "H1 must endJune 30, notSeptember 30."
+    },
+    {
+      "case": "gft_failed",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {
+        "execution_status": "FAILED"
+      },
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "SOURCE_NOT_RETAINED",
+      "justification": "Failed execution never authorizes retained content."
+    },
+    {
+      "case": "gft_blocked",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {
+        "blocked": true
+      },
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "SOURCE_NOT_RETAINED",
+      "justification": "Blocked evidence never authorizes retained content."
+    },
+    {
+      "case": "gft_stale_digest",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "Revenue\n462.6",
+          "Revenue\n462.7"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "Edited source digest and wrong cell withhold primary authority."
+    },
+    {
+      "case": "gft_authority_removed",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {
+        "authority_by_url": []
+      },
+      "expected_authority": "SECONDARY",
+      "expected_growth": null,
+      "expected_reason": "SUPPORTED_SECONDARY",
+      "justification": "Source support survives but issuer authority requires retained recorder attribution."
+    },
+    {
+      "case": "gft_truncated_row",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "Net income\n17.1\n13.5",
+          "Net income\n17.1"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "A missing comparative cell cannot be restored from model text."
+    },
+    {
+      "case": "half_year_source_header",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_interim_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "Six months ended",
+          "Half Year ended"
+        ]
+      ],
+      "content_replacements": [
+        [
+          "Six months ended",
+          "Half Year ended"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "18.0%",
+        "33.3%"
+      ],
+      "expected_reason": "SUPPORTED_PRIMARY",
+      "justification": "Declared formatting reconstruction: A complete Half Year ended 30June header supplies six-month duration; embedded year-ended wording is not an annual contradiction."
+    },
+    {
+      "case": "half_year_hyphen_header",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_interim_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "Six months ended",
+          "Half-year ended"
+        ]
+      ],
+      "content_replacements": [
+        [
+          "Six months ended",
+          "Half-year ended"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "18.0%",
+        "33.3%"
+      ],
+      "expected_reason": "SUPPORTED_PRIMARY",
+      "justification": "Declared formatting reconstruction: Hyphenated half-year header with actual dates retains six-month comparative meaning."
+    },
+    {
+      "case": "eur_thousands_alias",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_interim_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_CURRENCY: USD",
+          "LATEST_RESULTS_CURRENCY: EUR"
+        ],
+        [
+          "LATEST_RESULTS_REPORTING_UNIT: $'000",
+          "LATEST_RESULTS_REPORTING_UNIT: thousands"
+        ]
+      ],
+      "content_replacements": [
+        [
+          "United States dollars",
+          "EUR"
+        ],
+        [
+          "$’000",
+          "€’000"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "18.0%",
+        "33.3%"
+      ],
+      "expected_reason": "SUPPORTED_PRIMARY",
+      "justification": "Declared formatting reconstruction: EUR and €’000 declare the same currency/thousand scale, with both source dates and exact metric cells retained."
+    },
+    {
+      "case": "usd_compact_reporting_unit",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_interim_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_REPORTING_UNIT: $'000",
+          "LATEST_RESULTS_REPORTING_UNIT: thousands"
+        ]
+      ],
+      "content_replacements": [
+        [
+          "$’000",
+          "KUSD"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "18.0%",
+        "33.3%"
+      ],
+      "expected_reason": "SUPPORTED_PRIMARY",
+      "justification": "Declared formatting reconstruction: KUSD is a reporting declaration of USD thousands, not a widening of amount grammar."
+    },
+    {
+      "case": "idr_reporting_unit_plural",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_interim_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_CURRENCY: USD",
+          "LATEST_RESULTS_CURRENCY: IDR"
+        ],
+        [
+          "LATEST_RESULTS_REPORTING_UNIT: $'000",
+          "LATEST_RESULTS_REPORTING_UNIT: Million Rupiah"
+        ]
+      ],
+      "content_replacements": [
+        [
+          "United States dollars",
+          "Rupiah"
+        ],
+        [
+          "$’000",
+          "millions of Rupiah"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "18.0%",
+        "33.3%"
+      ],
+      "expected_reason": "SUPPORTED_PRIMARY",
+      "justification": "Declared formatting reconstruction: Million Rupiah and millions of Rupiah bind the same IDR million table; source metric pairs and period columns are preserved."
+    },
+    {
+      "case": "jpy_reporting_unit",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_interim_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_CURRENCY: USD",
+          "LATEST_RESULTS_CURRENCY: JPY"
+        ],
+        [
+          "LATEST_RESULTS_REPORTING_UNIT: $'000",
+          "LATEST_RESULTS_REPORTING_UNIT: 百万円"
+        ]
+      ],
+      "content_replacements": [
+        [
+          "United States dollars",
+          "JPY"
+        ],
+        [
+          "$’000",
+          "百万円"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "18.0%",
+        "33.3%"
+      ],
+      "expected_reason": "SUPPORTED_PRIMARY",
+      "justification": "Declared formatting reconstruction: 百万円 explicitly declares JPY millions in a reconstructed formatting scenario with retained comparative table semantics."
     }
   ]
 }

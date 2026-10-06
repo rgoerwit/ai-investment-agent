@@ -37,6 +37,11 @@ _ERROR_ENVELOPE_RE = re.compile(
 )
 _AUTH_ERROR_RE = re.compile(r"(?is)\b(?:401|403|unauthorized|forbidden)\b")
 
+# Tools that retain an attempted document acquisition, including failed/blocked calls.
+DOCUMENT_ACQUISITION_TOOLS = frozenset(
+    {"get_official_document", "extract_guidance_sources", "get_official_filings"}
+)
+
 ExecutionStatus = Literal["SUCCEEDED", "FAILED", "BLOCKED", "SKIPPED"]
 EvidenceStatus = Literal[
     "EVIDENCE_FOUND",

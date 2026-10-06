@@ -388,7 +388,10 @@ async def fetch_unresolved_latest_results(
     """Fetch one approved citation only for a complete, withheld results claim."""
     from src.agents.foreign_language_evidence import unique_latest_results_block
     from src.runtime_services import get_current_evidence_records
-    from src.tooling.evidence_recorder import normalize_http_url
+    from src.tooling.evidence_recorder import (
+        DOCUMENT_ACQUISITION_TOOLS,
+        normalize_http_url,
+    )
     from src.tools.official_documents import (
         get_official_document,
         is_official_document_url,
@@ -414,8 +417,7 @@ async def fetch_unresolved_latest_results(
     # another request with different keywords or a different tool-call signature.
     if any(
         source_url in (*record.requested_urls, *record.urls)
-        and record.tool_name
-        in {"get_official_document", "extract_guidance_sources", "get_official_filings"}
+        and record.tool_name in DOCUMENT_ACQUISITION_TOOLS
         for record in get_current_evidence_records(agent_key="foreign_language_analyst")
     ):
         return ""

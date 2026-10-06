@@ -46,6 +46,17 @@ CURRENCY_DISPLAY_FORMATS = MappingProxyType(
 CURRENCY_CODE_ALIASES = MappingProxyType(
     {"RMB": "CNY", "NEW TAIWAN DOLLAR": "TWD", "NEW TAIWAN DOLLARS": "TWD"}
 )
+# Observed names in source reporting declarations; not monetary amount aliases.
+CURRENCY_REPORTING_NAMES = MappingProxyType(
+    {
+        "rupiah": "IDR",
+        "united states dollars": "USD",
+        # US$ is recognized in reporting declarations; the monetary amount
+        # grammar's scope is deliberately unchanged.
+        "us$": "USD",
+        "renminbi": "CNY",
+    }
+)
 # Monetary prose supports observed prefix symbols. Display-only suffix symbols
 # (including ambiguous kr) are presentation metadata, not global currency identity.
 CURRENCY_SYMBOL_TO_CODE = MappingProxyType(

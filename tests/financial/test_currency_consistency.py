@@ -11,6 +11,7 @@ import pytest
 
 from src.agents.capital_structure import _amount_supported, _parse_exposure_amount
 from src.data.pattern_extraction import FinancialPatternExtractor
+from src.exchange_metadata import CURRENCY_SYMBOL_TO_CODE
 from src.fx_normalization import (
     FxRateCache,
     canonical_currency_code,
@@ -351,3 +352,66 @@ def test_symbol_source_supports_iso_exposure_without_cross_currency_matching():
     assert _amount_supported("Guarantee: NZ$100K", "NZD 100K")
     assert not _amount_supported("Guarantee: A$100K", "NZD 100K")
     assert extract_monetary_currency("Currency: NZ$") == "NZD"
+
+
+@pytest.mark.parametrize(
+    "symbol,currency",
+    [
+        ("€", "EUR"),
+        ("£", "GBP"),
+        ("HK$", "HKD"),
+        ("NT$", "TWD"),
+        ("₩", "KRW"),
+        ("CN¥", "CNY"),
+        ("Rp", "IDR"),
+        ("NZ$", "NZD"),
+    ],
+)
+def test_unambiguous_currency_symbols_share_identity_and_fx(symbol, currency):
+    assert canonical_currency_code(symbol) == currency
+    assert get_fx_rate_fallback(symbol, "USD") == get_fx_rate_fallback(currency, "USD")
+    assert get_fx_rate_fallback(symbol, currency) == 1.0
+
+
+@pytest.mark.parametrize("symbol", ["$", "¥", "R", "kr"])
+def test_ambiguous_currency_symbols_never_gain_global_identity(symbol):
+    assert canonical_currency_code(symbol) == symbol.upper()
+    assert get_fx_rate_fallback(symbol, "USD") is None
+
+
+@pytest.mark.parametrize(
+    "amount,expected",
+    [
+        ("100K KRW", 100_000),
+        ("100 KRW", 100),
+        ("100 Mio EUR", None),
+        ("100 Mrd EUR", None),
+    ],
+)
+def test_reporting_metadata_does_not_expand_amount_grammar(amount, expected):
+    assert parse_monetary_amount(amount) == expected
+
+
+@pytest.mark.parametrize("symbol,currency", CURRENCY_SYMBOL_TO_CODE.items())
+@pytest.mark.parametrize("spelling", ["original", "lower", "padded"])
+def test_every_registered_symbol_identity_and_conversion(symbol, currency, spelling):
+    raw = (
+        symbol.lower()
+        if spelling == "lower"
+        else f"  {symbol}  "
+        if spelling == "padded"
+        else symbol
+    )
+    assert canonical_currency_code(raw) == currency
+    assert get_fx_rate_fallback(raw, "USD") == get_fx_rate_fallback(currency, "USD")
+
+
+@pytest.mark.parametrize(
+    "currency,major,scale",
+    [("GBp", "GBP", 0.01), ("GBX", "GBP", 0.01), ("GBP", "GBP", 1)],
+)
+def test_symbol_canonicalization_preserves_minor_unit_conversion(
+    currency, major, scale
+):
+    assert canonical_currency_code(currency) == currency
+    assert get_fx_rate_fallback(currency, major) == scale

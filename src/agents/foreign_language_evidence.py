@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import calendar
 import re
+import unicodedata
 from collections.abc import Sequence
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -20,10 +22,16 @@ from src.data_block_utils import (
 from src.exchange_metadata import (
     CURRENCY_CODE_ALIASES,
     CURRENCY_DISPLAY_FORMATS,
+    CURRENCY_REPORTING_NAMES,
     CURRENCY_SYMBOL_TO_CODE,
 )
 from src.fx_normalization import canonical_currency_code
-from src.monetary import has_valid_monetary_grouping
+from src.monetary import (
+    REPORTING_SCALE_PATTERN,
+    exact_decimal,
+    reporting_unit_declarations,
+    reporting_unit_scale,
+)
 from src.text_patterns import (
     EXCHANGE_QUALIFIED_TICKER_RE,
     RESULT_ENVELOPE_RE,
@@ -377,19 +385,9 @@ def _is_primary_evidence(
 
 
 def _normalized_text(value: str) -> str:
-    return " ".join(value.casefold().replace("’", "'").split())
-
-
-def _exact_decimal(value: str) -> Decimal | None:
-    candidate = value.strip()
-    if not re.fullmatch(
-        r"-?\d[\d,]*(?:\.\d+)?", candidate
-    ) or not has_valid_monetary_grouping(candidate):
-        return None
-    try:
-        return Decimal(candidate.replace(",", ""))
-    except InvalidOperation:
-        return None
+    return " ".join(
+        unicodedata.normalize("NFKC", value).casefold().replace("’", "'").split()
+    )
 
 
 def _valid_comparative_period(
@@ -407,9 +405,32 @@ def _valid_comparative_period(
     return 1 <= months <= 12 and 320 <= delta_days <= 410
 
 
-_REPORTING_SCALE_PATTERN = (
-    r"'000|\b(?:thousands?|millions?|billions?|trillions?|[kmbt])\b"
+_FISCAL_QUARTER_RE = re.compile(
+    r"(?P<year>20\d{2})年\s*(?P<month>\d{1,2})月期\s*第(?P<quarter>[1-4])四半期"
+    r"(?:連結累計期間)?"
 )
+
+
+def _parse_source_date(value: str) -> date | None:
+    format_string = "%d %B %Y" if value[0].isdigit() else "%B %d, %Y"
+    for source_format in (format_string, format_string.replace("%B", "%b")):
+        try:
+            return datetime.strptime(value, source_format).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _reporting_unit_compatible(
+    unit: str, currency: str | None, scale: float | None
+) -> bool:
+    return (
+        scale is not None
+        and reporting_unit_scale(unit) == scale
+        and all(code == currency for code, _ in reporting_unit_declarations(unit))
+    )
+
+
 _TABLE_CURRENCY_PATTERN = "|".join(
     re.escape(token.casefold())
     for token in sorted(
@@ -440,36 +461,45 @@ def _statement_boundary(line: str) -> bool:
             re.I,
         )
         or (
-            re.search(_REPORTING_SCALE_PATTERN, normalized)
+            re.search(REPORTING_SCALE_PATTERN, normalized)
             and re.search(
                 rf"(?<!\w)(?:{_TABLE_CURRENCY_PATTERN})(?=$|\W|[kmbt]\b)", normalized
             )
         )
+        or reporting_unit_declarations(line)
+        or reporting_unit_scale(normalized) is not None
+        or _FISCAL_QUARTER_RE.search(normalized)
     )
 
 
 def _heading_currency_forms(values: dict[str, str]) -> tuple[str, ...]:
     raw = values["LATEST_RESULTS_CURRENCY"]
-    currency = CURRENCY_SYMBOL_TO_CODE.get(raw, canonical_currency_code(raw) or "")
+    currency = canonical_currency_code(raw) or ""
     aliases = tuple(
         alias for alias, code in CURRENCY_CODE_ALIASES.items() if code == currency
     )
     symbols = tuple(
         symbol for symbol, code in CURRENCY_SYMBOL_TO_CODE.items() if code == currency
     )
-    source_names = {
-        "USD": ("United States dollars", "US$"),
-        "EUR": ("€",),
-        "CNY": ("Renminbi",),
-    }.get(currency, ())
+    source_names = tuple(
+        name for name, code in CURRENCY_REPORTING_NAMES.items() if code == currency
+    )
     return (raw, currency, *aliases, *symbols, *source_names)
 
 
 def _heading_has_currency_and_unit(heading: str, values: dict[str, str]) -> bool:
     """Require explicit currency and reporting scale tokens in the table heading."""
+    declarations = reporting_unit_declarations(unicodedata.normalize("NFKC", heading))
     heading = _normalized_text(heading)
-    unit = _normalized_text(values["LATEST_RESULTS_REPORTING_UNIT"])
-    if re.search(_REPORTING_SCALE_PATTERN, unit) is None:
+    raw_unit = unicodedata.normalize("NFKC", values["LATEST_RESULTS_REPORTING_UNIT"])
+    unit = _normalized_text(raw_unit)
+    scale = reporting_unit_scale(raw_unit)
+    currency = canonical_currency_code(values["LATEST_RESULTS_CURRENCY"])
+    if not _reporting_unit_compatible(raw_unit, currency, scale):
+        return False
+    if declarations and currency:
+        return scale is not None and set(declarations) == {(currency, scale)}
+    if re.search(REPORTING_SCALE_PATTERN, unit) is None:
         return False
     if re.search(rf"(?<!\w){re.escape(unit)}(?!\w)", heading) is None:
         return False
@@ -492,6 +522,22 @@ def _compatible_unit_only_header(line: str, values: dict[str, str]) -> bool:
     display = CURRENCY_DISPLAY_FORMATS.get(currency)
     forms = (*_heading_currency_forms(values), *((display[0],) if display else ()))
     currency_tokens = "|".join(re.escape(_normalized_text(form)) for form in forms)
+    declarations = reporting_unit_declarations(line)
+    if declarations:
+        if not _heading_has_currency_and_unit(line, values):
+            return False
+        # Equivalent spellings may repeat a declaration, never a new period/row.
+        scale = REPORTING_SCALE_PATTERN
+        return (
+            re.fullmatch(
+                rf"\(?\s*(?:notes?\s+|(?:expressed\s+)?in\s+|単位[:：]\s*)?"
+                rf"(?:(?:(?:{currency_tokens})\s*(?:{scale})|"
+                rf"(?:{scale})\s+(?:of\s+)?(?:{currency_tokens})|"
+                rf"[kmbt](?:{currency_tokens})|(?:{scale}))\s*)+\)?",
+                _normalized_text(line),
+            )
+            is not None
+        )
     return (
         re.fullmatch(
             rf"\(?\s*(?:notes?\s+)?(?:(?:(?:{currency_tokens})\s*)?{unit}\s*)+\)?",
@@ -597,21 +643,35 @@ def _latest_results_record_supports(
 
 
 def _source_has_period_end(content: str, period_end: str) -> bool:
-    """Require both asserted end dates in the same inspected document."""
+    """Check a date to choose a rejection reason after authority readers fail.
+
+    This diagnostic cannot grant source authority or acceptance.
+    """
     try:
         end = date.fromisoformat(period_end)
     except ValueError:
         return False
+    content = unicodedata.normalize("NFKC", content)
     month_name = end.strftime("%B")
     variants = (
         end.isoformat(),
         f"{end.year}/{end.month:02d}/{end.day:02d}",
         f"{end.day} {month_name} {end.year}",
         f"{month_name} {end.day}, {end.year}",
+        f"{end.day} {end.strftime('%b')} {end.year}",
+        f"{end.strftime('%b')} {end.day}, {end.year}",
         f"{end.year}年{end.month}月{end.day}日",
     )
     if any(
         _normalized_text(variant) in _normalized_text(content) for variant in variants
+    ):
+        return True
+    # A retained year/month fiscal label proves Q1's calendar end. Later fiscal
+    # quarters need explicit duration/date evidence; do not infer a YTD basis.
+    if any(
+        _header_period_matches(match.group(), period_end, 3) is True
+        for match in _FISCAL_QUARTER_RE.finditer(content)
+        if match.group("quarter") == "1"
     ):
         return True
     # Explicit calendar half-years bind the same end date without inventing a
@@ -630,7 +690,24 @@ def _source_has_period_end(content: str, period_end: str) -> bool:
 
 def _header_period_matches(label: str, period_end: str, months: int) -> bool | None:
     """Return match, contradiction, or None for wording without calendar proof."""
-    label = " ".join(label.split())
+    label = " ".join(unicodedata.normalize("NFKC", label).split())
+    fiscal = _FISCAL_QUARTER_RE.fullmatch(label)
+    if fiscal and fiscal.group("quarter") == "1":
+        fiscal_year, fiscal_month = (
+            int(fiscal.group("year")),
+            int(fiscal.group("month")),
+        )
+        if not 1 <= fiscal_month <= 12:
+            return False
+        fiscal_month -= 9
+        if fiscal_month <= 0:
+            fiscal_year -= 1
+            fiscal_month += 12
+        day = calendar.monthrange(fiscal_year, fiscal_month)[1]
+        return (
+            months == 3
+            and period_end == date(fiscal_year, fiscal_month, day).isoformat()
+        )
     for token in re.finditer(r"(?<!\w)([QH])(\d+)(?!\w)", label, re.I):
         allowed = {"1", "2", "3", "4"} if token.group(1).upper() == "Q" else {"1", "2"}
         if token.group(2) not in allowed:
@@ -674,28 +751,37 @@ def _header_period_matches(label: str, period_end: str, months: int) -> bool | N
         day = 30 if month in {6, 9} else 31
         return months == 3 and period_end == f"{roc_year + 1911}-{month:02d}-{day}"
     match = re.fullmatch(
-        r"(?:For the )?(Three|Six|Twelve) months ended ([A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})",
+        r"(?:For the )?(Three months|Six months|Twelve months|Half[- ]year) ended ([A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})(?: \(H[12] 20\d{2}\))?",
         label,
         re.I,
     )
     if match:
-        expected_months = {"three": 3, "six": 6, "twelve": 12}[match.group(1).lower()]
-        try:
-            date_format = "%d %B %Y" if match.group(2)[0].isdigit() else "%B %d, %Y"
-            parsed_end = datetime.strptime(match.group(2), date_format).date()
-        except ValueError:
+        expected_months = {
+            "three months": 3,
+            "six months": 6,
+            "twelve months": 12,
+            "half-year": 6,
+            "half year": 6,
+        }[match.group(1).lower()]
+        parsed_end = _parse_source_date(match.group(2))
+        if parsed_end is None:
             return False
-        return months == expected_months and period_end == parsed_end.isoformat()
+        return (
+            months == expected_months
+            and period_end == parsed_end.isoformat()
+            and all(
+                _header_period_matches(token.group(), period_end, months) is not False
+                for token in re.finditer(r"H[12] 20\d{2}", label, re.I)
+            )
+        )
     match = re.fullmatch(
         r"(?:For the )?years? ended ([A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})(?: and (20\d{2}))?",
         label,
         re.I,
     )
     if match:
-        try:
-            date_format = "%d %B %Y" if match.group(1)[0].isdigit() else "%B %d, %Y"
-            parsed_end = datetime.strptime(match.group(1), date_format).date()
-        except ValueError:
+        parsed_end = _parse_source_date(match.group(1))
+        if parsed_end is None:
             return False
         ends = {parsed_end.isoformat()}
         if match.group(2):
@@ -723,7 +809,8 @@ def _header_period_matches(label: str, period_end: str, months: int) -> bool | N
         r"(?<!\w)(?:(?:Q[1-4]|H[12])\s+20\d{2}|[1-4]T\d{2}|20\d{2}年第[1-4]季"
         r"|\d{3}年Q[1-4]|(?:First|Second) half(?: of)? 20\d{2}"
         r"|(?:Three|Six|Twelve) months ended (?:[A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})"
-        r"|(?:For the )?year ended (?:[A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})"
+        r"|Half[- ]year ended (?:[A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})(?: \(H[12] 20\d{2}\))?"
+        r"|(?<!half-)(?<!half )(?:For the )?year ended (?:[A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})"
         r"|截至20\d{2}年\d{1,2}月\d{1,2}日止(?:三|六|十二)個月)(?!\w)",
         label,
         re.I,
@@ -749,7 +836,13 @@ def _comparative_narrative_supports(
     currency_forms = "|".join(
         re.escape(form) for form in _heading_currency_forms(values)
     )
-    unit = re.escape(values["LATEST_RESULTS_REPORTING_UNIT"])
+    unit = REPORTING_SCALE_PATTERN
+    scale = reporting_unit_scale(values["LATEST_RESULTS_REPORTING_UNIT"])
+    currency = canonical_currency_code(values["LATEST_RESULTS_CURRENCY"])
+    if not _reporting_unit_compatible(
+        values["LATEST_RESULTS_REPORTING_UNIT"], currency, scale
+    ):
+        return False
     number = r"-?\d[\d,]*(?:\.\d+)?"
     period = r"H[12] 20\d{2}"
     scope = _normalized_text(values["LATEST_RESULTS_EARNINGS_SCOPE"])
@@ -760,8 +853,8 @@ def _comparative_narrative_supports(
     for metric, label in patterns.items():
         pattern = re.compile(
             rf"(?:<summary>)?{label} for (?P<current_period>{period}) was "
-            rf"(?:{currency_forms}) (?P<current>{number}) {unit}, "
-            rf"(?:down from|compared to) (?:{currency_forms}) (?P<prior>{number}) {unit} "
+            rf"(?P<current_currency>{currency_forms}) (?P<current>{number}) (?P<current_unit>{unit}), "
+            rf"(?:down from|compared to) (?P<prior_currency>{currency_forms}) (?P<prior>{number}) (?P<prior_unit>{unit}) "
             rf"in (?P<prior_period>{period})\.(?:</summary>)?",
             re.I,
         )
@@ -778,6 +871,15 @@ def _comparative_narrative_supports(
                 candidates.append(line)
         if len(candidates) != 1 or (match := pattern.fullmatch(candidates[0])) is None:
             return False
+        if any(
+            not _reporting_unit_compatible(
+                f"{match.group(key + '_currency')} {match.group(key + '_unit')}",
+                currency,
+                scale,
+            )
+            for key in ("current", "prior")
+        ):
+            return False
         if not all(
             _header_period_matches(
                 match.group(group),
@@ -791,9 +893,9 @@ def _comparative_narrative_supports(
         ):
             return False
         if (
-            _exact_decimal(match.group("current"))
+            exact_decimal(match.group("current"))
             != decimals[f"LATEST_RESULTS_{metric}"]
-            or _exact_decimal(match.group("prior"))
+            or exact_decimal(match.group("prior"))
             != decimals[f"LATEST_RESULTS_PRIOR_{metric}"]
         ):
             return False
@@ -947,7 +1049,7 @@ def _two_column_statement_supports(
                 break
             label = _normalized_text(match.group("label")).rstrip(":")
             cells = tuple(
-                _exact_decimal(match.group(key)) for key in ("first", "second")
+                exact_decimal(match.group(key)) for key in ("first", "second")
             )
             pair = (cells[current_column], cells[1 - current_column])
             if label in _REVENUE_ROW_LABELS:
@@ -1122,7 +1224,7 @@ def _normalize_latest_results(
     decimals = {
         field: parsed
         for field in _LATEST_RESULTS_NUMERIC_FIELDS
-        if (parsed := _exact_decimal(values[field])) is not None
+        if (parsed := exact_decimal(values[field])) is not None
     }
     required_text_values = (
         values["LATEST_RESULTS_PERIOD"],
