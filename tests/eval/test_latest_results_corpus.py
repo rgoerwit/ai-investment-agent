@@ -17,11 +17,22 @@ from src.agents.foreign_language_evidence import (
     normalize_foreign_language_evidence,
     promote_foreign_growth_evidence,
 )
-from src.agents.message_utils import make_tool_evidence_record
+from src.agents.message_utils import (
+    evidence_record_to_tool_evidence,
+    make_tool_evidence_record,
+)
 from src.analysis_snapshot import build_analysis_snapshot
 
 _FIXTURES = Path(__file__).parents[1] / "fixtures"
 _CORPUS = json.loads((_FIXTURES / "latest_results_corpus.json").read_text())["cases"]
+
+
+def _record(item):
+    return (
+        evidence_record_to_tool_evidence(item)
+        if "content_sha256" in item
+        else make_tool_evidence_record(**item)
+    )
 
 
 def _materialize(case):
@@ -53,7 +64,7 @@ def _check(case):
         [],
         ticker=base["ticker"],
         additional_records=[
-            make_tool_evidence_record(**item)
+            _record(item)
             for item in base["evidence_records"]
             if item.get("evidence_status")
         ],
@@ -85,8 +96,8 @@ def test_manifest_retains_source_justifications_and_frozen_holdout():
     }
     assert all(case["justification"] for case in _CORPUS)
     assert Counter(case["kind"] for case in _CORPUS) == {
-        "captured_excerpt": 19,
-        "adversarial_mutation": 41,
+        "captured_excerpt": 22,
+        "adversarial_mutation": 50,
     }
 
 
@@ -188,9 +199,7 @@ def test_normalized_growth_reaches_canonical_consumers_only_with_primary_authori
         base["report"],
         [],
         ticker=base["ticker"],
-        additional_records=[
-            make_tool_evidence_record(**item) for item in base["evidence_records"]
-        ],
+        additional_records=[_record(item) for item in base["evidence_records"]],
     )
     senior, _ = promote_foreign_growth_evidence("GROWTH_SCORE: 7", normalized)
     snapshot = build_analysis_snapshot(
@@ -375,3 +384,19 @@ def test_malformed_calendar_tokens_fail_closed_without_recursion(label):
         field(normalized, "LATEST_RESULTS_NORMALIZATION_REASON")
         == "PERIOD_LABEL_MISMATCH"
     )
+
+
+def test_primary_url_in_same_record_cannot_promote_secondary_cited_url():
+    base = _materialize(_CORPUS[0])
+    primary = base["evidence"]["urls"][0]
+    secondary = "https://secondary.example/results"
+    record = make_tool_evidence_record(
+        **{**base["evidence"], "urls": [primary, secondary]}
+    )
+    assert record.authority == "PRIMARY_REGISTRY"
+    report = base["report"].replace(primary, secondary)
+    normalized = normalize_foreign_language_evidence(
+        report, [], ticker=base["ticker"], additional_records=[record]
+    )
+    assert field(normalized, "LATEST_RESULTS_SOURCE_AUTHORITY") == "SECONDARY"
+    assert field(normalized, "LATEST_RESULTS_EARNINGS_GROWTH_YOY") == "N/A"

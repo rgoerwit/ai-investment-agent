@@ -43,7 +43,9 @@ CURRENCY_DISPLAY_FORMATS = MappingProxyType(
         "ZAR": ("R", "prefix", True),
     }
 )
-CURRENCY_CODE_ALIASES = MappingProxyType({"RMB": "CNY"})
+CURRENCY_CODE_ALIASES = MappingProxyType(
+    {"RMB": "CNY", "NEW TAIWAN DOLLAR": "TWD", "NEW TAIWAN DOLLARS": "TWD"}
+)
 # Monetary prose supports observed prefix symbols. Display-only suffix symbols
 # (including ambiguous kr) are presentation metadata, not global currency identity.
 CURRENCY_SYMBOL_TO_CODE = MappingProxyType(

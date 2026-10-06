@@ -1,0 +1,74 @@
+[
+  {
+    "case": "captured_BOSN.SW",
+    "ticker": "BOSN.SW",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: H1 2026\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: H1 2025\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 6\nLATEST_RESULTS_CURRENCY: CHF\nLATEST_RESULTS_REPORTING_UNIT: in CHF million\nLATEST_RESULTS_REVENUE: 575.7\nLATEST_RESULTS_PRIOR_REVENUE: 546.7\nLATEST_RESULTS_EARNINGS: 54.7\nLATEST_RESULTS_PRIOR_EARNINGS: 38.7\nLATEST_RESULTS_EARNINGS_SCOPE: Net income\nLATEST_RESULTS_SOURCE_URL: https://ir.bossard.com/media/document/8368cddd-b473-4c33-93a3-51d9bfc61187/assets/Bossard_Group_Semi-Annual_2026_Presentation.pdf\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: COMPARATIVE_ROWS_UNBOUND\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "evidence_records": [
+      {
+        "tool_name": "get_official_document",
+        "content": "[PDF PAGE 7]\nIncome statement as of June 30\nFINANCIAL PERFORMANCE\nin CHF million H1 2025 H1 2026 +/-\nNet sales 546.7 575.7 5.3 %\nGross profit 177.4 198.3 11.7 %\nin % 32.5 % 34.4 %\nSelling & administrative expenses  -123.4 -126.8 2.7 %\nOther operating income 1.5 1.4 -6.7 %\nEBIT 55.5 72.9 31.3 %\nin % 10.2 % 12.7 %\nResult from associated companies -0.4 -0.2\nFinancial result -5.6 -2.4\nIncome before taxes 49.5 70.3 42.0 %\nIncome taxes -10.8 -15.6\nNet income 38.7 54.7 41.3 %\nin % 7.1 % 9.5 %\n− Higher gross profit margin due to\ntar\ngeted measures in purchasing,\npr\nice adjustments and customer\nproduct mix\n− S&A costs increased moderately\ndue to:\n− higher FTEs\n− salary increases\n− and higher license fees due\nto m\nore system users after\nthe rollout of the new ERP\nsystem\n− Financial result\n− Improvement of financial result\ndue \nto lower interest expenses\nand positive currency impact\nin CHF million\n",
+        "urls": [
+          "https://ir.bossard.com/media/document/8368cddd-b473-4c33-93a3-51d9bfc61187/assets/Bossard_Group_Semi-Annual_2026_Presentation.pdf"
+        ],
+        "evidence_status": "EVIDENCE_FOUND",
+        "content_sha256": "eeed55adbe882a989b3cf6c61876ee6aff2fe72dbbdc892c980c7b836727267b",
+        "authority_by_url": [
+          [
+            "https://ir.bossard.com/media/document/8368cddd-b473-4c33-93a3-51d9bfc61187/assets/Bossard_Group_Semi-Annual_2026_Presentation.pdf",
+            "PRIMARY_ISSUER"
+          ]
+        ],
+        "execution_status": "SUCCEEDED",
+        "blocked": false
+      }
+    ]
+  },
+  {
+    "case": "captured_TCW.TO",
+    "ticker": "TCW.TO",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: Three months ended June 30, 2026\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: Three months ended June 30, 2025\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 3\nLATEST_RESULTS_CURRENCY: CAD\nLATEST_RESULTS_REPORTING_UNIT: millions\nLATEST_RESULTS_REVENUE: 214.6\nLATEST_RESULTS_PRIOR_REVENUE: 213.8\nLATEST_RESULTS_EARNINGS: -2.3\nLATEST_RESULTS_PRIOR_EARNINGS: 19.5\nLATEST_RESULTS_EARNINGS_SCOPE: (Loss) / profit for the period\nLATEST_RESULTS_SOURCE_URL: https://tricanwellservice.com/app/uploads/2026/07/Press-Release-Q2-2026-Results.pdf\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: COMPARATIVE_ROWS_UNBOUND\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "evidence_records": [
+      {
+        "tool_name": "get_official_document",
+        "content": "Three\tmonths\tended Six\tmonths\tended\n(Unaudited)\nJune\t30,\t\n2026\nJune\t30,\t\n2025\nMarch\t31,\t\n2026\nJune\t30,\t\n2026\nJune\t30,\t\n2025\nRevenue \t 214.6\t \t 213.8\t \t 330.3\t \t 544.9\t \t 472.9\t\nGross\tprofit \t 13.5\t \t 39.9\t \t 65.4\t \t 78.9\t \t 93.6\t\nAdjusted\tEBITDAS1 \t 25.2\t \t 47.3\t \t 77.7\t \t 102.9\t \t 109.6\t\nAdjusted\tEBITDA1 \t 22.6\t \t 44.9\t \t 70.1\t \t 92.8\t \t 106.2\t\nFree\tcash\tflow1 \t 13.0\t \t 24.4\t \t 49.6\t \t 62.5\t \t 67.4\t\nPer\tshare\t–\tbasic1 \t 0.06\t \t 0.13\t \t 0.24\t \t 0.30\t \t 0.36\t\nPer\tshare\t–\tdiluted1 \t 0.06\t \t 0.13\t \t 0.23\t \t 0.30\t \t 0.36\t\nCash\tflow\tfrom\toperations \t 84.8\t \t 115.8\t \t 92.2\t \t 177.1\t \t 111.2\t\n(Loss)\t/\tprofit\tfor\tthe\tperiod \t (2.3)\t \t 19.5\t \t 30.3\t \t 27.9\t \t 51.4\t\nPer\tshare\t–\tbasic \t (0.01)\t \t 0.11\t \t 0.14\t \t 0.13\t \t 0.28\t\nPer\tshare\t–\tdiluted \t (0.01)\t \t 0.11\t \t 0.14\t \t 0.13\t \t 0.27\t\nDividends\tpaid \t 11.5\t \t 9.0\t \t 11.6\t \t 23.1\t \t 18.3\t\nPer\tshare \t 0.055\t \t 0.050\t \t 0.055\t \t 0.110\t \t 0.100\t\nShares\toutstanding,\tend\tof\tperiod \t 209,334\t \t 178,497\t \t 210,199\t \t 209,334\t \t 178,497\t\nWeighted\taverage\tshares\toutstanding\t–\tbasic \t 209,924\t \t 181,951\t \t 210,541\t \t 210,231\t \t 185,041\t\nWeighted\taverage\tshares\toutstanding\t–\tdiluted \t 210,979\t \t 184,524\t \t 212,197\t \t 211,587\t \t 187,700\t\n1\tRefer\tto\tthe\tNon-GAAP\tdisclosure\tsection\tof\tthis\tnews\trelease\tfor\tfurther\tdetails.\n($\tmillions) As\tat\tJune\t30,\t2026 As\tat\tDecember\t31,\t2025\nCash\tand\tcash\tequivalents \t 15.4\t \t 12.5\t\nCurrent\tassets\t–\tother \t 205.9\t \t 308.2\t\nCurrent\tportion\tof\tlease\tliabilities \t 8.2\t \t 6.1\t\nCurrent\tliabilities\t–\tother \t 116.7\t \t 122.8\t\nLease\tliabilities\t–\tnon-current\tportion \t 14.0\t \t 17.8\t\nTotal\tnon-current\tfinancial\tliabilities \t —\t \t 92.4\t\nTotal\tassets \t 897.7\t \t 1,013.7\t\nThree\tmonths\tended\n(Unaudited)\nJune\t30,\t\n2025\nSeptember\t\n30,\t2025\nDecember\t\n31,\t2025\nMarch\t31,\t\n2026\nJune\t30,\t\n2026\nWTI\t–\tAverage\tprice\t(US$/bbl) \t $63.68\t \t $64.97\t \t $59.14\t \t $72.67\t \t $92.99\t\nAECO-C\t–\tSpot\taverage\tprice\t(C$/mcf) \t $1.66\t \t $0.57\t \t $2.14\t \t $1.89\t \t $1.51\t\nWCS\t–\tAverage\tprice\t(C$/bbl) \t $73.58\t \t $72.29\t \t $65.17\t \t $78.41\t \t $100.89\t\nAverage\texchange\trate\t(US$/C$) \t $0.72\t \t $0.73\t \t $0.72\t \t $0.73\t \t $0.72\t\nCanadian\taverage\tdrilling\trig\tcount \t 139\t \t 184\t \t 196\t \t 225\t \t 160\t\nSource:\tBloomberg,\tBank\tof\tCanada,\tand\tRig\tLocator\n\n[PDF PAGE 4]\nHIGHLIGHTS\nCapital\texpenditures1\tand\ttechnology\tmodernization\t\nCapital\texpenditures 1\tfor\tthe\t three\tand\tsix\tmonths\tended \tJune\t30,\t2026 \ttotaled\t $20.8\tmillion\tand\t $39.3\tmillion,\t\nrespectively\t ($16.2\t million\t and\t $28.7\t million\t for\t the\t three\t and\t six\t months\t ended \t June\t 30,\t 2025 ).\t \t Capital\t\nexpenditures¹\tduring\tthe\tperiod\tprimarily\trelated\tto\tmaintenance\tcapital\tto\tsupport\tthe\treliability\tand\tefficiency\tof\t\nthe\tCompany's\tequipment\tfleet,\tas\twell\tas\tgrowth\tcapital\tassociated\twith\tthe\tconstruction\tof\tCanada's\tfirst\t100%\t\nnatural\t gas\t fueled,\t continuous,\t heavy-duty\t hydraulic\t fracturing\t fleet\t and\t the\t purchase\t of\t electric\t ancillary\t\nfracturing\tequipment.\t\nThe\t Company\t has\t approved\t a\t capital\t budget\t for\t 2026\t of\t $122\t million,\t underscoring\t Trican's\t commitment\t to\t\ndisciplined\t investment\t and\t long-term\t growth.\t \t The\t approved\t capital\t budget\t reflects\t the\t Company’s\t continued\t\nfocus\t on\t maintenance\t capital\t to\t ensure\t reliability\t and\t efficiency\t across\t its\t operations,\t while\t allocating\t targeted\t\ngrowth\tcapital\tto\tadvance\tmodernization\tinitiatives\tand\tposition\tthe\tCompany\tfor\tfuture\topportunities.\t\tGrowth\t\nc a p i t a l \t i n c l u d e s \t C a n a d a ’ s \t f i r s t \t 1 0 0 % \t n a t u r a l \t g a s \t f u e l e d , \t c o n t i n u o u s , \t h e a v y - d u t y \t h y d r a u l i c \t f r a c t u r i n g \t f l e e t , \t w h i c h \t i s \t\nexpected\tto\tbe\tfield\tready\tin\tthe\tfourth\tquarter\tof\t2026.\nThe\t Company\t is\t undertaking\t a\t significant\t technology\t modernization\t initiative\t starting\t with\t our\t base\t financial\t\nsystem\tand\timplementing\tan\tintegrated\tenterprise\tresource\tplanning\t(\"ERP\")\tplatform.\t\tTrican\tanticipates\tongoing\t\ntechnology\t enhancements\t including\t advanced\t data\t analytics\t to\t enhance\t operational\t efficiency,\t reliability\t and\t\ncompetitiveness\tover\tthe\tyears.\t\tThe\tinvestment\tfor\t2026\tis\tanticipated\tto\tbe\t$13\tmillion\twhich\twill\tbe\tpresented\t\nas\tgeneral\tand\tadministrative\t(\"G&A\")\texpense\tin\taccordance\twith\tIFRS.\nThe\tCompany\twill\tfund\tthese\texpenditures\twith\tavailable\tcash\tresources,\tfree\tcash\tflow 1\tand\tour\trevolving\tcredit\t\nfacility.\t\t\t\nHydraulic\tfracturing\tfleet\nW e \t c o n t i n u e \t t o \t a d v a n c e \t t h e \t m o d e r n i z a t i o n \t o f \t o u r \t f r a c t u r i n g \t f l e e t \t t h r o u g h \t t a r g e t e d \t i n v e s t m e n t s \t i n \t l o w e r - e m i s s i o n \t\na n d \t n e x t - g e n e r a t i o n \t t e c h n o l o g i e s , \t i n c l u d i n g \t t h e \t a d d i t i o n \t o f \t a \t 1 0 0 % \t n a t u r a l \t g a s \t f u e l e d , \t c o n t i n u o u s , \t h e a v y - d u t y \t\nhydraulic\tfracturing\tfleet.\t\tThis\tapproach\tbuilds\ton\tour\tmodernization\tstrategy\tover\trecent\tyears,\tincluding\tprior\t\ninvestments\tin\tupgrading\texisting\tequipment\twith\tTier\t4\tDynamic\tGas\tBlending\t(“ Tier\t4\tDGB ”)\tengine\ttechnology\t\nalongside\tthe\tconstruction\tof\tnew\tfully\telectric\tancillary\tequipment.\t\tThe\tcombination\tof\tTier\t4\tDGB\tengines\tand\t\nfully\telectric\tancillary\tequipment\tcan\tdisplace\tup\tto\t90%\tof\tthe\tdiesel\tused\tin\ta\tconventional\tfracturing\toperation\t\nwith\tnatural\tgas\tresulting\tin\tlower\toverall\tfuel\tcosts\tand\treduced\temissions.\t\tOur\tongoing\tfleet\tmodernization\talso\t\nincludes\tthe\tdeployment\tof\tindustry\tleading\tcontinuous\theavy\tduty\tpumps\tand\tidle\treduction\ttechnol\n",
+        "urls": [
+          "https://tricanwellservice.com/app/uploads/2026/07/Press-Release-Q2-2026-Results.pdf"
+        ],
+        "evidence_status": "EVIDENCE_FOUND",
+        "content_sha256": "788531f36ae094573dabca0120fc0039ff595c86411c817830d116f72c47c441",
+        "authority_by_url": [
+          [
+            "https://tricanwellservice.com/app/uploads/2026/07/Press-Release-Q2-2026-Results.pdf",
+            "PRIMARY_ISSUER"
+          ]
+        ],
+        "execution_status": "SUCCEEDED",
+        "blocked": false
+      }
+    ]
+  },
+  {
+    "case": "captured_1590.TW",
+    "ticker": "1590.TW",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: FOR THE YEARS ENDED DECEMBER 31, 2025\nLATEST_RESULTS_PERIOD_END: 2025-12-31\nLATEST_RESULTS_PRIOR_PERIOD: FOR THE YEARS ENDED DECEMBER 31, 2024\nLATEST_RESULTS_PRIOR_PERIOD_END: 2024-12-31\nLATEST_RESULTS_PERIOD_MONTHS: 12\nLATEST_RESULTS_CURRENCY: New Taiwan Dollars\nLATEST_RESULTS_REPORTING_UNIT: In Thousands of New Taiwan Dollars\nLATEST_RESULTS_REVENUE: 34329945\nLATEST_RESULTS_PRIOR_REVENUE: 30660133\nLATEST_RESULTS_EARNINGS: 8399832\nLATEST_RESULTS_PRIOR_EARNINGS: 7623278\nLATEST_RESULTS_EARNINGS_SCOPE: NET PROFIT FOR THE YEAR\nLATEST_RESULTS_SOURCE_URL: https://as-jp.airtac.com/upload/2026050711311083110.PDF\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: COMPARATIVE_ROWS_UNBOUND\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "evidence_records": [
+      {
+        "tool_name": "get_official_document",
+        "content": "CONSOLIDATED STATEMENTS OF COMPREHENSIVE INCOME \nFOR THE YEARS ENDED DECEMBER 31, 2025 AND 2024 \n(In Thousands of New Taiwan Dollars, Except Earnings Per Share) \n  2025  2024 \n  Amount  %  Amount  % \n         \nOPERATING REVENUE         \nSales (Notes 4, 20 and 33)    $ 34,329,945     100    $ 30,660,133     100 \n                     \nOPERATING COSTS         \nCost of goods sold (Notes 9 and 21)     18,547,909     54     16,346,436     54 \n                     \nGROSS PROFIT     15,782,036     46     14,313,697     46 \n                     \nOPERATING EXPENSES (Note 21)         \nSelling and marketing expenses     3,152,639     9     3,046,151     10 \nGeneral and administrative expenses     1,217,327     4     1,174,931     4 \nResearch and development expenses     1,110,514     3     1,040,124     3 \nExpected credit loss recognized (gain reversed)     13,859     -     26,977     - \n                     \nTotal operating expenses     5,494,339     16     5,288,183     17 \n                     \nPROFIT FROM OPERATIONS     10,287,697     30     9,025,514     29 \n                     \nNON-OPERATING INCOME AND EXPENSES \n(Notes 4 and 21)         \nOther income     120,365     -     162,362     - \nOther gains and losses     292,982     1     572,580     2 \nFinance costs     (55,693)     -     (126,754)     - \n                     \nTotal non-operating income and expenses     357,654     1     608,188     2 \n                     \nPROFIT BEFORE INCOME TAX FROM \nCONTINUING OPERATIONS     10,645,351     31     9,633,702     31 \n                     \nINCOME TAX EXPENSE (Notes 4 and 22)     2,245,519     7     2,010,424     6 \n                     \nNET PROFIT FOR THE YEAR     8,399,832     24     7,623,278     25 \n                     \nOTHER COMPREHENSIVE INCOME         \nItems that will not be reclassified subsequently to \nprofit or loss:         \nExchange differences arising on translation to the \npresentation currency     310,769     1     1,557,934     5 \nItems that may be reclassified subsequently to profit \nor loss:         \nExchange differences on translating foreign \noperations     (21,547)     -     (283,513)     (1) \n \n \n \n(Continued)\n",
+        "urls": [
+          "https://as-jp.airtac.com/upload/2026050711311083110.PDF"
+        ],
+        "evidence_status": "EVIDENCE_FOUND",
+        "content_sha256": "4bae6c8726a8beae2b074fa2161bae3a201873985d2e3efaf4d7e8b83754b1b3",
+        "authority_by_url": [
+          [
+            "https://as-jp.airtac.com/upload/2026050711311083110.PDF",
+            "PRIMARY_ISSUER"
+          ]
+        ],
+        "execution_status": "SUCCEEDED",
+        "blocked": false
+      }
+    ]
+  }
+]

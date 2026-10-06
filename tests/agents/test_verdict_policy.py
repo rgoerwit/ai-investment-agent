@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 
 import pytest
 
@@ -20,6 +21,7 @@ from src.agents.verdict_policy import (
 )
 from src.charts.extractors.pm_block import extract_pm_block
 from src.decision_inputs import DecisionInputs
+from src.liquidity_assessment import LiquidityAssessment
 from src.validators.metric_extractor import extract_metrics
 
 
@@ -53,11 +55,18 @@ def _inputs(
                 },
             },
         }
-    return DecisionInputs.from_metrics_and_snapshot(
+    inputs = DecisionInputs.from_metrics_and_snapshot(
         metrics,
         None,
         snapshot,
         ticker="TEST",
+    )
+
+    # These unit profiles isolate growth policy with known independent gates.
+    return replace(
+        inputs,
+        english_analyst_count=4,
+        liquidity=LiquidityAssessment("PASS", average_daily_turnover_usd=500_000),
     )
 
 
@@ -1131,3 +1140,211 @@ def test_verdict_policy_owns_no_private_score_regex():
     source = inspect.getsource(vp)
     assert "ADJUSTED_GROWTH_SCORE" not in source
     assert "ADJUSTED_HEALTH_SCORE" not in source
+
+
+@pytest.mark.parametrize(
+    "count,should_floor", [(14, True), (15, False), (16, False), (None, False)]
+)
+def test_coverage_boundary_cannot_be_overridden_by_growth_exception(
+    count, should_floor
+):
+    inputs = replace(
+        _inputs(APR_BLOCK, current_growth_fields=frozenset()),
+        english_analyst_count=count,
+    )
+    output = _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE")
+    result, floored = maybe_floor_verdict_to_hold(
+        output,
+        decision_inputs=inputs,
+        red_flags=[],
+        code_subtotal=1.0,
+        pre_screening_result="PASS",
+    )
+    assert floored is should_floor
+    if not should_floor:
+        assert result == output
+    violation = assess_verdict_policy(
+        _pm_output("HOLD", "HOLD"), decision_inputs=inputs
+    )
+    assert (violation is not None) is (count is not None and count >= 15)
+
+
+@pytest.mark.parametrize(
+    "us_revenue,should_floor", [(None, True), (35.0, True), (35.01, False)]
+)
+def test_disclosed_us_revenue_gate_respects_existing_policy(us_revenue, should_floor):
+    inputs = replace(
+        _inputs(APR_BLOCK, current_growth_fields=frozenset()), us_revenue_pct=us_revenue
+    )
+    _, floored = maybe_floor_verdict_to_hold(
+        _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+        decision_inputs=inputs,
+        red_flags=[],
+        code_subtotal=1.0,
+        pre_screening_result="PASS",
+    )
+    assert floored is should_floor
+
+
+@pytest.mark.parametrize(
+    "liquidity",
+    [
+        None,
+        LiquidityAssessment("ERROR"),
+        LiquidityAssessment(
+            "FAIL_INSUFFICIENT_LIQUIDITY", average_daily_turnover_usd=10_000
+        ),
+    ],
+)
+def test_unresolved_or_failed_liquidity_withholds_floor(liquidity):
+    inputs = replace(
+        _inputs(APR_BLOCK, current_growth_fields=frozenset()), liquidity=liquidity
+    )
+    _, floored = maybe_floor_verdict_to_hold(
+        _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+        decision_inputs=inputs,
+        red_flags=[],
+        code_subtotal=1.0,
+        pre_screening_result="PASS",
+    )
+    assert floored is False
+
+
+def test_unknown_and_unreliable_growth_are_indeterminate_in_context():
+    for inputs in [
+        replace(_inputs(APR_BLOCK), growth_decision_pct=None),
+        replace(_inputs(APR_BLOCK), growth_score_reliable=False),
+    ]:
+        assert "STATUS: INDETERMINATE" in render_growth_gate_context(inputs)
+
+
+@pytest.mark.parametrize("gate", ["coverage", "liquidity", "us_revenue"])
+def test_active_tender_preserves_verified_independent_rejections(gate):
+    inputs = _inputs(APR_BLOCK, current_growth_fields=frozenset())
+    inputs.decision_metrics["m_and_a_status"] = "ACTIVE_TENDER"
+    if gate == "coverage":
+        inputs = replace(inputs, english_analyst_count=15)
+    elif gate == "liquidity":
+        inputs = replace(
+            inputs,
+            liquidity=LiquidityAssessment(
+                "FAIL_INSUFFICIENT_LIQUIDITY", average_daily_turnover_usd=99_999
+            ),
+        )
+    else:
+        inputs = replace(inputs, us_revenue_pct=35.01)
+    violation = assess_verdict_policy(
+        _pm_output("HOLD", "HOLD"), decision_inputs=inputs
+    )
+    assert violation is not None
+    assert (
+        violation.rule
+        == {
+            "coverage": "analyst_coverage",
+            "liquidity": "liquidity",
+            "us_revenue": "us_revenue",
+        }[gate]
+    )
+
+
+def test_active_tender_retains_existing_growth_exemption_without_proven_independent_fail():
+    inputs = replace(_inputs(KTY_BLOCK), english_analyst_count=None)
+    inputs.decision_metrics["m_and_a_status"] = "ACTIVE_TENDER"
+    assert (
+        assess_verdict_policy(_pm_output("HOLD", "HOLD"), decision_inputs=inputs)
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "ticker,health,growth,pe,cagr,opinions",
+    [
+        ("HNR1.DE", 80.0, 0.0, 11.27, 2.6, 16),
+        ("BOL.ST", 81.8, 20.0, 11.81, 2.7, 15),
+    ],
+)
+def test_oct5_real_aggregator_coverage_cases_withhold_growth_floor(
+    ticker, health, growth, pe, cagr, opinions
+):
+    # Trimmed decisive fields from the public Oct-5 retained fundamentals artifacts.
+    from src.agents.verdict_policy import assess_growth_gate
+
+    fundamentals = _data_block(health, pe, growth, cagr).replace(
+        "### --- END DATA_BLOCK ---",
+        f"ANALYST_COVERAGE_ENGLISH: {opinions}\n### --- END DATA_BLOCK ---",
+    )
+    inputs = DecisionInputs.from_metrics(extract_metrics(fundamentals))
+    inputs = replace(
+        inputs,
+        liquidity=LiquidityAssessment("PASS", average_daily_turnover_usd=500_000),
+    )
+    assert assess_growth_gate(inputs).exception == "marginal_turnaround"
+    assert inputs.english_analyst_count is None
+    original = _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE")
+    output, floored = maybe_floor_verdict_to_hold(
+        original,
+        decision_inputs=inputs,
+        red_flags=[],
+        code_subtotal=0.0,
+        pre_screening_result="PASS",
+        ticker=ticker,
+    )
+    assert not floored
+    assert output == original
+
+
+def test_unreliable_health_cannot_advertise_a_growth_exception():
+    from src.agents.verdict_policy import assess_growth_gate
+
+    inputs = replace(_inputs(_data_block(75, 12, 40, 16)), health_score_reliable=False)
+    gate = assess_growth_gate(inputs)
+    assert not gate.hard_fail
+    assert gate.exception is None
+    assert "STATUS: INDETERMINATE" in render_growth_gate_context(inputs)
+
+
+def test_floor_regression_detects_an_independent_gate_bypass(monkeypatch):
+    import src.agents.verdict_policy as policy
+
+    inputs = replace(
+        _inputs(APR_BLOCK, current_growth_fields=frozenset()), english_analyst_count=15
+    )
+    args = {
+        "decision_inputs": inputs,
+        "red_flags": [],
+        "code_subtotal": 0.0,
+        "pre_screening_result": "PASS",
+    }
+    output = _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE")
+    assert not policy.maybe_floor_verdict_to_hold(output, **args)[1]
+    monkeypatch.setattr(policy, "assess_initiation_gates", lambda inputs: ())
+    assert policy.maybe_floor_verdict_to_hold(output, **args)[1]
+
+
+@pytest.mark.parametrize(
+    "health,status,violation",
+    [
+        (None, "INDETERMINATE", False),
+        (64.0, "HARD_FAIL", True),
+        (65.0, "EXCEPTION_MARGINAL_TURNAROUND", False),
+    ],
+)
+def test_missing_health_does_not_imply_verified_low_health(health, status, violation):
+    from src.agents.verdict_policy import assess_growth_gate
+
+    inputs = replace(_inputs(_data_block(75, 12, 40, 16)), health_decision_pct=health)
+    assessment = assess_growth_gate(inputs)
+    assert assessment.status == status
+    assert (
+        assess_verdict_policy(_pm_output("HOLD", "HOLD"), decision_inputs=inputs)
+        is not None
+    ) is violation
+    if health is None:
+        assert assessment.exception is None
+        assert not maybe_floor_verdict_to_hold(
+            _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+            decision_inputs=inputs,
+            red_flags=[],
+            code_subtotal=0.0,
+            pre_screening_result="PASS",
+        )[1]

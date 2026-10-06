@@ -720,8 +720,8 @@ class _TieredChatGoogleGenerativeAI(ModelFailoverMixin, ChatGoogleGenerativeAI):
         if isinstance(requested_tier, str):
             return requested_tier
         if self.service_tier == "flex" and self._flex_ineligible():
-            return None
-        return self.service_tier
+            return "standard"
+        return self.service_tier or "standard"
 
     def _flex_retry_tier(
         self, exc: BaseException, kwargs: dict[str, Any]

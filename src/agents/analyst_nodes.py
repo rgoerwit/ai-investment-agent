@@ -1698,6 +1698,35 @@ def create_analyst_node(
                         else "UNRECOVERED"
                     )
 
+            if (
+                agent_key == "foreign_language_analyst"
+                and get_runtime_config(settings_config).quick_mode_active
+                and research_ledger is not None
+            ):
+                from src.agents.management_guidance import (
+                    fetch_unresolved_latest_results,
+                )
+
+                fetched = await fetch_unresolved_latest_results(
+                    content_str,
+                    ticker=ticker,
+                    company_name=company_name,
+                    budget=research_ledger,
+                )
+                if fetched:
+                    management_guidance_evidence += fetched
+                    new_state["management_guidance_evidence"] = (
+                        management_guidance_evidence
+                    )
+                    content_str = _normalize_structured_output(
+                        agent_key,
+                        content_str,
+                        ticker,
+                        management_guidance_evidence=management_guidance_evidence,
+                        evidence_messages=filtered_messages,
+                    )
+                new_state["research_budgets"] = {agent_key: research_ledger.telemetry()}
+
             from src.utils import detect_truncation
 
             trunc_info = detect_truncation(content_str, agent=agent_key)

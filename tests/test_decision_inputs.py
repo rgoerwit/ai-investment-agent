@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.decision_inputs import DecisionInputs
 
 
@@ -217,3 +219,88 @@ class TestNonValidSnapshotFailsClosed:
             )
             assert inputs.snapshot_status is None
             assert inputs.health_score_reliable is True
+
+
+@pytest.mark.parametrize(
+    "authority,eligible,exactness,lineage,expected",
+    [
+        ("PRIMARY", True, "EXACT", "evidence:1:abc", 14),
+        ("AGGREGATOR", True, "EXACT", "evidence:1:abc", None),
+        ("PRIMARY", False, "EXACT", "evidence:1:abc", None),
+        ("PRIMARY", True, "ESTIMATED", "evidence:1:abc", None),
+        ("PRIMARY", True, "EXACT", "state:legacy:coverage", None),
+    ],
+)
+def test_coverage_requires_exact_primary_fetched_fact(
+    authority, eligible, exactness, lineage, expected
+):
+    snapshot = _snapshot(75, 40)
+    snapshot["claims"] = {
+        "coverage": {
+            "field": "ANALYST_COVERAGE_ENGLISH",
+            "value": "14",
+            "authority": authority,
+            "coverage": "FOUND",
+            "decision_eligible": eligible,
+            "exactness": exactness,
+            "source_url": "https://issuer.example/coverage",
+            "evidence_id": lineage,
+        }
+    }
+    inputs = DecisionInputs.from_metrics_and_snapshot(
+        {"analyst_coverage": 14}, None, snapshot
+    )
+    assert inputs.english_analyst_count == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["-1", "14.5", "14 local analysts", "True", "NaN", "14 (estimated)", "9" * 5000],
+)
+def test_malformed_or_wrong_scope_coverage_is_unknown(value):
+    snapshot = _snapshot(75, 40)
+    snapshot["claims"] = {
+        "coverage": {
+            "field": "ANALYST_COVERAGE_ENGLISH",
+            "value": value,
+            "authority": "PRIMARY",
+            "coverage": "FOUND",
+            "decision_eligible": True,
+            "exactness": "EXACT",
+            "source_url": "https://issuer.example/coverage",
+            "evidence_id": "evidence:1:abc",
+        }
+    }
+    assert (
+        DecisionInputs.from_metrics_and_snapshot(
+            {}, None, snapshot
+        ).english_analyst_count
+        is None
+    )
+
+
+def test_conflicting_coverage_facts_and_legacy_counts_are_unknown():
+    snapshot = _snapshot(75, 40)
+    claim = {
+        "field": "ANALYST_COVERAGE_ENGLISH",
+        "value": "14",
+        "authority": "PRIMARY",
+        "coverage": "FOUND",
+        "decision_eligible": True,
+        "exactness": "EXACT",
+        "source_url": "https://issuer.example/coverage",
+        "evidence_id": "evidence:1:abc",
+    }
+    snapshot["claims"] = {"one": claim, "two": dict(claim, value="16")}
+    assert (
+        DecisionInputs.from_metrics_and_snapshot(
+            {}, None, snapshot
+        ).english_analyst_count
+        is None
+    )
+    assert (
+        DecisionInputs.from_metrics(
+            {"analyst_coverage": 14, "numberOfAnalystOpinions": 4}
+        ).english_analyst_count
+        is None
+    )

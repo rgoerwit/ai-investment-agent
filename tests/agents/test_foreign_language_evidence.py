@@ -799,6 +799,7 @@ def test_latest_results_inspected_comparative_table(
             replace(
                 _record(evidence, name="get_official_document", urls={source}),
                 authority="PRIMARY_ISSUER",
+                authority_by_url=((source, "PRIMARY_ISSUER"),),
             )
         ],
     )
@@ -1141,3 +1142,420 @@ def test_missing_required_field_in_a_drifted_block_stays_invalid():
     )
 
     assert not _has_valid_latest_results_block(_normalized(report))
+
+
+@pytest.mark.parametrize("primary", [False, True])
+def test_control_corroboration_binds_primary_authority_to_ownership_citation(primary):
+    official = "https://www.twse.com.tw/ownership"
+    secondary = "https://secondary.example/ownership"
+    cited = official if primary else secondary
+    record = make_tool_evidence_record(
+        tool_name="get_official_document",
+        content="STATUS: EVIDENCE_FOUND\nBenQ Materials Corp. owns 14.82% of shares; this entity is a consolidated subsidiary. 2026-03-28",
+        urls=(official, secondary),
+    )
+    normalized = normalize_foreign_language_evidence(
+        _report(source_url=cited), [], ticker="TEST", additional_records=[record]
+    )
+    assert "Ownership Evidence Status: VERIFIED_URL" in normalized
+    assert f"Control Status: {'CONTROLLED' if primary else 'UNKNOWN'}" in normalized
+
+
+@pytest.mark.parametrize("primary", [False, True])
+def test_capacity_authority_binds_to_explicit_citation(primary):
+    official = "https://www.twse.com.tw/capacity"
+    secondary = "https://secondary.example/capacity"
+    cited = official if primary else secondary
+    report = f"CAPACITY_UTILIZATION: 85%\nCAPACITY_UTILIZATION_SOURCE_URL: {cited}\nCAPACITY_UTILIZATION_AS_OF: 2026-03-28\n"
+    record = make_tool_evidence_record(
+        tool_name="get_official_document",
+        content="STATUS: EVIDENCE_FOUND\nCapacity utilization was 85% on 2026-03-28.",
+        urls=(official, secondary),
+    )
+    normalized = normalize_foreign_language_evidence(
+        report, [], ticker="TEST", additional_records=[record]
+    )
+    status = "PRIMARY" if primary else "SECONDARY"
+    assert f"CAPACITY_EVIDENCE_STATUS: {status}" in normalized
+
+
+def test_source_envelope_split_does_not_inherit_another_sources_primary_authority():
+    from src.agents.foreign_language_evidence import _split_search_result_records
+
+    official = "https://www.twse.com.tw/results"
+    secondary = "https://secondary.example/results"
+    record = make_tool_evidence_record(
+        tool_name="extract_guidance_sources",
+        content=f"STATUS: EVIDENCE_FOUND\n<result><url>{official}</url><content>Issuer filing</content></result><result><url>{secondary}</url><content>Secondary article</content></result>",
+        urls=(official, secondary),
+    )
+    assert record.authority == "PRIMARY_REGISTRY"
+    split = _split_search_result_records([record])
+    assert [row.authority for row in split] == ["PRIMARY_REGISTRY", "SECONDARY"]
+    assert dict(split[1].authority_by_url) == {secondary: "SECONDARY"}
+
+
+@pytest.mark.parametrize(
+    ("execution", "status", "usable", "primary"),
+    [
+        ("SUCCEEDED", "EVIDENCE_FOUND", True, True),
+        ("SUCCEEDED", "RESULTS_FOUND", True, False),
+        ("FAILED", "EVIDENCE_FOUND", False, False),
+        ("BLOCKED", "EVIDENCE_FOUND", False, False),
+        ("SKIPPED", "EVIDENCE_FOUND", False, False),
+        ("SUCCEEDED", "UNAVAILABLE", False, False),
+        ("SUCCEEDED", "AUTH_ERROR", False, False),
+        ("SUCCEEDED", "INSUFFICIENT", False, False),
+        ("SUCCEEDED", "NO_RESULTS", False, False),
+        ("SUCCEEDED", "COVERAGE_COMPLETE_NO_MATCH", False, False),
+    ],
+)
+@pytest.mark.parametrize("pct", ["14.82", "60"])
+def test_saved_evidence_status_controls_ownership_capacity_and_downstream_consumers(
+    execution, status, usable, primary, pct
+):
+    """Retained claim text in a failed response must never become economic evidence."""
+    import hashlib
+    import json
+
+    source = "https://www.twse.com.tw/combined"
+    content = (
+        "STATUS: EVIDENCE_FOUND\n"
+        f"BenQ Materials Corp. owns {pct}% of shares; this entity is a consolidated subsidiary. "
+        "Capacity utilization was 85% in 2026-Q1. 2026-03-28"
+    )
+    saved = json.loads(
+        json.dumps(
+            {
+                "tool_name": "get_official_document",
+                "content": content,
+                "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
+                "urls": [source],
+                "authority_by_url": [[source, "PRIMARY_REGISTRY"]],
+                "execution_status": execution,
+                "evidence_status": status,
+                "blocked": execution == "BLOCKED",
+            }
+        )
+    )
+    record = evidence_record_to_tool_evidence(saved)
+    normalized = normalize_foreign_language_evidence(
+        _report(
+            holder=f"BenQ Materials Corp. ({pct}%)",
+            controller=f"BenQ Materials Corp. ({pct}%)",
+            source_url=source,
+            capacity="85%",
+            capacity_url=source,
+        ),
+        [],
+        ticker="TEST",
+        additional_records=[record],
+    )
+    controlled = usable and (primary or pct == "60")
+    expected_control = "CONTROLLED" if controlled else "UNKNOWN"
+    assert f"Control Status: {expected_control}" in normalized
+    assert (
+        f"Largest Shareholder: BenQ Materials Corp. ({pct}%)"
+        if usable
+        else "Largest Shareholder: UNKNOWN"
+    ) in normalized
+    capacity_status = "PRIMARY" if primary else "SECONDARY" if usable else "UNSUPPORTED"
+    assert f"CAPACITY_EVIDENCE_STATUS: {capacity_status}" in normalized
+    senior, _ = promote_foreign_growth_evidence("GROWTH_SCORE: 7", normalized)
+    assert f"CAPACITY_EVIDENCE_STATUS: {capacity_status}" in senior
+    assert f"CAPACITY_UTILIZATION: {'85%' if usable else 'N/A'}" in senior
+    assert "GROWTH_SCORE: 7" in senior
+    card = build_card(
+        ticker="TEST",
+        company_name="Test",
+        merged_data={},
+        senior_metrics={},
+        fla_report=normalized,
+    )
+    assert card.control_status == expected_control
+    assert (card.controlling_shareholder is not None) is controlled
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_search_envelopes_bind_claims_to_their_own_sources_through_normalization(
+    reverse,
+):
+    """A primary hit with no claim cannot promote a different secondary hit."""
+    official = "https://www.twse.com.tw/irrelevant"
+    secondary = "https://secondary.example/combined"
+    blocks = [
+        f"<result><url>{official}</url><content>Unrelated issuer filing.</content></result>",
+        f"<result><url>{secondary}</url><content>BenQ Materials Corp. owns 14.82% of shares; this entity is a consolidated subsidiary. Capacity utilization was 85% in 2026-Q1. 2026-03-28</content></result>",
+    ]
+    record = make_tool_evidence_record(
+        tool_name="extract_guidance_sources",
+        content="STATUS: EVIDENCE_FOUND\n"
+        + "".join(reversed(blocks) if reverse else blocks),
+        urls=(official, secondary),
+    )
+    normalized = normalize_foreign_language_evidence(
+        _report(source_url=secondary, capacity="85%", capacity_url=secondary),
+        [],
+        ticker="TEST",
+        additional_records=[record],
+    )
+    assert "Ownership Evidence Status: VERIFIED_URL" in normalized
+    assert "Control Status: UNKNOWN" in normalized
+    assert "CAPACITY_EVIDENCE_STATUS: SECONDARY" in normalized
+
+
+def test_unrelated_control_record_cannot_supply_a_cited_sources_control_basis():
+    cited = "https://www.twse.com.tw/ownership"
+    records = [
+        _record(
+            "STATUS: EVIDENCE_FOUND\nBenQ Materials Corp. owns 14.82% of shares.",
+            name="get_official_document",
+            urls=(cited,),
+        ),
+        _record(
+            "STATUS: EVIDENCE_FOUND\nBenQ Materials Corp. owns 14.82% of shares; this entity is a consolidated subsidiary.",
+            name="get_official_document",
+            urls=("https://secondary.example/ownership",),
+        ),
+    ]
+    normalized = normalize_foreign_language_evidence(
+        _report(source_url=cited),
+        [],
+        ticker="TEST",
+        additional_records=records,
+    )
+    assert "Ownership Evidence Status: VERIFIED_URL" in normalized
+    assert "Control Status: UNKNOWN" in normalized
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "error",
+    [
+        '{"error": "unauthorized"}',
+        '{"error": "provider_failure"}',
+        "STATUS: UNAVAILABLE",
+        "STATUS: AUTH_ERROR",
+        "STATUS: NO_RESULTS",
+        "STATUS: COVERAGE_COMPLETE_NO_MATCH",
+    ],
+)
+def test_partial_provider_error_cannot_become_primary_but_valid_secondary_hit_survives(
+    reverse, error
+):
+    official = "https://www.twse.com.tw/failed"
+    secondary = "https://secondary.example/combined"
+    claim = "BenQ Materials Corp. owns 14.82% of shares; this entity is a consolidated subsidiary. Capacity utilization was 85% in 2026-Q1. 2026-03-28"
+    blocks = [
+        f"<result><url>{official}</url><content>\n{error}\n{claim}</content></result>",
+        f"<result><url>{secondary}</url><content>{claim}</content></result>",
+    ]
+    record = make_tool_evidence_record(
+        tool_name="extract_guidance_sources",
+        content="STATUS: EVIDENCE_FOUND\n"
+        + "".join(reversed(blocks) if reverse else blocks),
+        urls=(official, secondary),
+    )
+    for cited, usable in ((official, False), (secondary, True)):
+        normalized = normalize_foreign_language_evidence(
+            _report(source_url=cited, capacity="85%", capacity_url=cited),
+            [],
+            ticker="TEST",
+            additional_records=[record],
+        )
+        assert "Control Status: UNKNOWN" in normalized
+        assert (
+            f"CAPACITY_EVIDENCE_STATUS: {'SECONDARY' if usable else 'UNSUPPORTED'}"
+            in normalized
+        )
+        assert f"CAPACITY_UTILIZATION: {'85%' if usable else 'N/A'}" in normalized
+
+
+@pytest.mark.asyncio
+async def test_live_and_serialized_issuer_authority_reaches_governance_and_growth_after_teardown():
+    import json
+
+    from src.runtime_services import RuntimeServices, use_runtime_services
+    from src.tooling.evidence_recorder import EvidenceRecorder
+    from src.tooling.inspection_service import INSPECTION_SERVICE
+    from src.tooling.runtime import ToolExecutionService, ToolInvocation, ToolResult
+
+    source = "https://issuer.example/combined"
+    content = f'STATUS: EVIDENCE_FOUND\nDOCUMENT_METADATA: {{"source_url": "{source}"}}\nBenQ Materials Corp. owns 14.82% of shares; this entity is a consolidated subsidiary. Capacity utilization was 85% in 2026-Q1. 2026-03-28'
+    recorder = EvidenceRecorder()
+    services = RuntimeServices(
+        ToolExecutionService([recorder]),
+        INSPECTION_SERVICE,
+        evidence_recorder=recorder,
+    )
+    with use_runtime_services(services):
+        services.issuer_authority.register_url(
+            source, provenance="structured_company_profile"
+        )
+        await recorder.after(
+            ToolInvocation("get_official_document", {"url": source}, "preflight"),
+            ToolResult(content),
+        )
+        live = evidence_record_to_tool_evidence(recorder.snapshot()[0])
+        saved = json.loads(json.dumps(recorder.serialized_snapshot()[0]))
+    for record, primary in (
+        (live, True),
+        (evidence_record_to_tool_evidence(saved), True),
+        (evidence_record_to_tool_evidence({**saved, "content_sha256": "stale"}), False),
+    ):
+        normalized = normalize_foreign_language_evidence(
+            _report(source_url=source, capacity="85%", capacity_url=source),
+            [],
+            ticker="TEST",
+            additional_records=[record],
+        )
+        card = build_card(
+            ticker="TEST",
+            company_name="Test",
+            merged_data={},
+            senior_metrics={},
+            fla_report=normalized,
+        )
+        assert card.control_status == ("CONTROLLED" if primary else "UNKNOWN")
+        senior, _ = promote_foreign_growth_evidence("GROWTH_SCORE: 7", normalized)
+        assert (
+            f"CAPACITY_EVIDENCE_STATUS: {'PRIMARY' if primary else 'SECONDARY'}"
+            in senior
+        )
+        assert "CAPACITY_UTILIZATION: 85%" in senior
+
+
+@pytest.mark.parametrize(
+    "outer,inner",
+    [("EVIDENCE_FOUND", "RESULTS_FOUND"), ("RESULTS_FOUND", "EVIDENCE_FOUND")],
+)
+def test_result_envelope_cannot_promote_evidence_above_either_declared_status(
+    outer, inner
+):
+    source = "https://www.twse.com.tw/combined"
+    record = make_tool_evidence_record(
+        tool_name="extract_guidance_sources",
+        content=f"STATUS: {outer}\n<result><url>{source}</url><content>\nSTATUS: {inner}\nBenQ Materials Corp. owns 14.82% of shares; this entity is a consolidated subsidiary. Capacity utilization was 85% in 2026-Q1. 2026-03-28</content></result>",
+        urls=(source,),
+    )
+    normalized = normalize_foreign_language_evidence(
+        _report(source_url=source, capacity="85%", capacity_url=source),
+        [],
+        ticker="TEST",
+        additional_records=[record],
+    )
+    assert "Ownership Evidence Status: VERIFIED_URL" in normalized
+    assert "Control Status: UNKNOWN" in normalized
+    assert "CAPACITY_EVIDENCE_STATUS: SECONDARY" in normalized
+
+
+@pytest.mark.parametrize("primary", [False, True])
+def test_source_link_in_result_body_cannot_replace_the_result_source(primary):
+    official = "https://www.twse.com.tw/reference"
+    secondary = "https://secondary.example/ownership"
+    source = official if primary else secondary
+    record = make_tool_evidence_record(
+        tool_name="extract_guidance_sources",
+        content=f"STATUS: EVIDENCE_FOUND\n<result><url>{source}</url><content>BenQ Materials Corp. owns 14.82% of shares; this entity is a consolidated subsidiary. Reference: {official}</content></result>",
+        urls=(source, official),
+    )
+    normalized = normalize_foreign_language_evidence(
+        _report(source_url="N/A"),
+        [],
+        ticker="TEST",
+        additional_records=[record],
+    )
+    assert f"Control Status: {'CONTROLLED' if primary else 'UNKNOWN'}" in normalized
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["EVIDENCE_FOUND", "RESULTS_FOUND", "UNAVAILABLE", "AUTH_ERROR", "NO_RESULTS"],
+)
+def test_preflight_capacity_fallback_obeys_error_status(status):
+    source = "https://www.twse.com.tw/capacity"
+    supplemental = f"STATUS: {status}\n<result><url>{source}</url><content>Capacity utilization was 85% in 2026-Q1.</content></result>"
+    normalized = normalize_foreign_language_evidence(
+        _report(capacity="85%", capacity_url=source),
+        [],
+        ticker="TEST",
+        supplemental_evidence=supplemental,
+    )
+    usable = status in {"EVIDENCE_FOUND", "RESULTS_FOUND"}
+    assert f"CAPACITY_UTILIZATION: {'85%' if usable else 'N/A'}" in normalized
+    assert (
+        f"CAPACITY_EVIDENCE_STATUS: {'SECONDARY' if usable else 'UNSUPPORTED'}"
+        in normalized
+    )
+
+
+@pytest.mark.parametrize("distinct", [False, True])
+@pytest.mark.parametrize("status", ["EVIDENCE_FOUND", "RESULTS_FOUND", "AUTH_ERROR"])
+def test_secondary_control_corroboration_requires_two_usable_independent_domains(
+    distinct, status
+):
+    source = "https://secondary.example/ownership"
+    other = "https://other.example/ownership" if distinct else source
+    claim = "BenQ Materials Corp. owns 14.82% of shares; this entity is a consolidated subsidiary."
+    records = [
+        _record(
+            "STATUS: RESULTS_FOUND\n" + claim,
+            name="extract_guidance_sources",
+            urls=(source,),
+        ),
+        _record(
+            f"STATUS: {status}\n" + claim,
+            name="extract_guidance_sources",
+            urls=(other,),
+        ),
+    ]
+    normalized = normalize_foreign_language_evidence(
+        _report(source_url=source),
+        [],
+        ticker="TEST",
+        additional_records=records,
+    )
+    controlled = distinct and status != "AUTH_ERROR"
+    assert f"Control Status: {'CONTROLLED' if controlled else 'UNKNOWN'}" in normalized
+
+
+@pytest.mark.parametrize("padding", [0, 20_001])
+def test_capacity_preflight_bounds_each_source_after_splitting_combined_results(
+    padding,
+):
+    source = "https://secondary.example/capacity"
+    supplemental = (
+        "STATUS: RESULTS_FOUND\n"
+        + "<result><url>https://other.example/irrelevant</url><content>"
+        + "x" * padding
+        + "</content></result>"
+        + f"<result><url>{source}</url><content>Capacity utilization was 85% in 2026-Q1.</content></result>"
+    )
+    normalized = normalize_foreign_language_evidence(
+        _report(capacity="85%", capacity_url=source),
+        [],
+        ticker="TEST",
+        supplemental_evidence=supplemental,
+    )
+    assert "CAPACITY_UTILIZATION: 85%" in normalized
+    assert "CAPACITY_EVIDENCE_STATUS: SECONDARY" in normalized
+
+
+@pytest.mark.parametrize(
+    "supplemental",
+    [
+        "",
+        "<result><content>Capacity utilization was 85%.</content></result>",
+        "<result><url>javascript:alert(1)</url><content>Capacity utilization was 85%.</content></result>",
+        "<result><url>https://secondary.example/capacity</url><content>Capacity utilization was 85%.",
+    ],
+)
+def test_capacity_preflight_missing_or_malformed_source_cannot_promote(supplemental):
+    normalized = normalize_foreign_language_evidence(
+        _report(capacity="85%", capacity_url="https://secondary.example/capacity"),
+        [],
+        ticker="TEST",
+        supplemental_evidence=supplemental,
+    )
+    assert "CAPACITY_UTILIZATION: N/A" in normalized
+    assert "CAPACITY_EVIDENCE_STATUS: UNSUPPORTED" in normalized

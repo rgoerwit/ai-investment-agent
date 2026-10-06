@@ -21,7 +21,10 @@ _CURRENCY_CODES = (
     | CURRENCY_DISPLAY_FORMATS.keys()
     | MINOR_UNIT_CURRENCY_ALIASES.keys()
 )
-_CURRENCY_PATTERN = "|".join(sorted(_CURRENCY_CODES | CURRENCY_CODE_ALIASES.keys()))
+_CURRENCY_PATTERN = "|".join(
+    re.escape(code).replace(r"\ ", r"[\t ]+")
+    for code in sorted(_CURRENCY_CODES | CURRENCY_CODE_ALIASES.keys())
+)
 _SYMBOL_PATTERN = (
     "|".join(
         re.escape(symbol)

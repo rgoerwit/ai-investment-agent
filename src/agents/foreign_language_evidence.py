@@ -26,13 +26,14 @@ from src.fx_normalization import canonical_currency_code
 from src.monetary import has_valid_monetary_grouping
 from src.text_patterns import (
     EXCHANGE_QUALIFIED_TICKER_RE,
-    RESULT_ENVELOPE_BODY_RE,
     RESULT_ENVELOPE_RE,
     URL_RE,
 )
+from src.tooling.evidence_recorder import classify_evidence_value
 
 from .message_utils import (
     ToolEvidenceRecord,
+    make_tool_evidence_record,
     normalize_http_url,
     tool_evidence_records,
 )
@@ -95,7 +96,6 @@ _FACILITY_STATUS_TERMS = {
     "AT_CAPACITY": ("at capacity", "full capacity"),
     "NONE": ("no expansion", "no buildout", "no facility expansion"),
 }
-_PREFLIGHT_RESULT_RE = RESULT_ENVELOPE_BODY_RE
 LATEST_RESULTS_SOURCE_FIELDS = (
     "LATEST_RESULTS_PERIOD",
     "LATEST_RESULTS_PERIOD_END",
@@ -119,7 +119,14 @@ _LATEST_RESULTS_NUMERIC_FIELDS = (
 )
 _TABLE_NUMBER_RE = re.compile(r"-?\d{1,3}(?:[ ,]\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?")
 _TABLE_CHANGE_RE = re.compile(r"(?:%\s*change|qoq|yoy)", re.IGNORECASE)
-_REVENUE_ROW_LABELS = {"revenue", "total sales", "operating revenue", "營業收入"}
+_REVENUE_ROW_LABELS = {
+    "revenue",
+    "net sales",
+    "sales",
+    "total sales",
+    "operating revenue",
+    "營業收入",
+}
 _URL_RE = URL_RE
 _REQUIRED_BLOCK_START_RE = re.compile(
     r"(?im)^###\s+---\s+START\s+(?:MANAGEMENT_GUIDANCE|LATEST_RESULTS)\s+---\s*$"
@@ -213,25 +220,42 @@ def _split_search_result_records(
     """Make source matching operate on one search result, not an entire result page."""
     split_records: list[ToolEvidenceRecord] = []
     for record in records:
+        if record.evidence_status not in {"EVIDENCE_FOUND", "RESULTS_FOUND"}:
+            continue
         tool_name, content, urls = record
         blocks = RESULT_ENVELOPE_RE.findall(content)
         if not blocks:
             split_records.append(record)
             continue
         for block in blocks:
+            block_status = classify_evidence_value(tool_name or "", block)[1]
+            if block_status not in {
+                "EVIDENCE_FOUND",
+                "RESULTS_FOUND",
+            }:
+                continue
             block_urls = {
                 normalized
-                for match in _URL_RE.finditer(block)
-                if (normalized := normalize_http_url(match.group(0)))
+                for raw_url in re.findall(r"(?is)<url>\s*(.*?)\s*</url>", block)
+                if (normalized := normalize_http_url(raw_url))
             }
             if block_urls:
                 split_records.append(
-                    ToolEvidenceRecord(
+                    make_tool_evidence_record(
                         tool_name=tool_name,
                         content=block,
                         urls=block_urls,
-                        evidence_status=record.evidence_status,
-                        authority=record.authority,
+                        evidence_status=(
+                            block_status
+                            if record.evidence_status == "EVIDENCE_FOUND"
+                            and _field(block, "STATUS")
+                            else record.evidence_status
+                        ),
+                        authority_by_url=tuple(
+                            pair
+                            for pair in record.authority_by_url
+                            if pair[0] in block_urls
+                        ),
                     )
                 )
     return split_records
@@ -270,18 +294,53 @@ def _holder_parts(value: str) -> tuple[str, float | None]:
 
 
 def _claim_in_text(text: str, holder: str, pct: float | None) -> bool:
-    folded = " ".join(text.casefold().split())
-    holder_tokens = [
-        token
-        for token in re.findall(r"\w+", holder.casefold())
-        if len(token) > 1 and token not in _CORPORATE_SUFFIXES
-    ]
-    if not holder_tokens or not all(token in folded for token in holder_tokens):
-        return False
     if pct is None:
         return False
-    pct_token = f"{pct:g}"
-    return bool(re.search(rf"(?<!\d){re.escape(pct_token)}(?:0+)?\s*%?", folded))
+    token = f"{pct:g}"
+    zero_suffix = r"0*" if "." in token else r"(?:\.0+)?"
+    percentage = re.compile(rf"(?<![\d.]){re.escape(token)}{zero_suffix}\s*%")
+    text = re.sub(r"<[^>]+>", "\n", text)
+    # Bind shareholder table values within one row, retaining the declared header.
+    table_header = False
+    for line in text.splitlines():
+        if line.strip().startswith("|"):
+            if re.search(r"shareholder|holder|股東|股东", line, re.I):
+                table_header = True
+            if (
+                table_header
+                and _holder_in_text(line, holder)
+                and percentage.search(line)
+            ):
+                return True
+        else:
+            table_header = False
+    # Corporate abbreviations do not end a sentence. Separate competing holders
+    # at clause boundaries rather than pairing a percentage elsewhere in the record.
+    prose = re.sub(
+        r"\b(?:corp|co|inc|ltd)\.", lambda m: m.group()[:-1], text, flags=re.I
+    )
+    for clause in re.split(
+        r"\n+|[;。!?]|(?<=\.)\s+|,?\s+(?:while|whereas|and)\s+", prose
+    ):
+        if (
+            _holder_in_text(clause, holder)
+            and percentage.search(clause)
+            and re.search(
+                r"\b(?:owns?|holds?|shareholders?|ownership)\b|持股", clause, re.I
+            )
+            and (
+                not re.search(
+                    r"\b(?:acquisition|acquired|bought|purchased)\b", clause, re.I
+                )
+                or re.search(
+                    r"\b(?:company(?:['’]s)?\s+shares?|share\s+capital|voting\s+rights)\b",
+                    clause,
+                    re.I,
+                )
+            )
+        ):
+            return True
+    return False
 
 
 def _holder_in_text(text: str, holder: str) -> bool:
@@ -294,8 +353,24 @@ def _holder_in_text(text: str, holder: str) -> bool:
     return bool(holder_tokens) and all(token in folded for token in holder_tokens)
 
 
-def _is_primary_evidence(record: ToolEvidenceRecord) -> bool:
-    return record.evidence_status == "EVIDENCE_FOUND" and record.authority in {
+def _is_primary_evidence(
+    record: ToolEvidenceRecord, source_url: str | None = None
+) -> bool:
+    from src.tooling.evidence_recorder import resolve_evidence_authority
+
+    if source_url is not None and source_url not in record.urls:
+        return False
+    authority = (
+        record.authority
+        if source_url is None
+        else resolve_evidence_authority(
+            tool_name=record.tool_name or "",
+            evidence_status=record.evidence_status,
+            urls=(source_url,),
+            authority_by_url=record.authority_by_url,
+        )
+    )
+    return record.evidence_status == "EVIDENCE_FOUND" and authority in {
         "PRIMARY_REGISTRY",
         "PRIMARY_ISSUER",
     }
@@ -612,7 +687,7 @@ def _header_period_matches(label: str, period_end: str, months: int) -> bool | N
             return False
         return months == expected_months and period_end == parsed_end.isoformat()
     match = re.fullmatch(
-        r"(?:For the )?year ended ([A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})",
+        r"(?:For the )?years? ended ([A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})(?: and (20\d{2}))?",
         label,
         re.I,
     )
@@ -622,7 +697,13 @@ def _header_period_matches(label: str, period_end: str, months: int) -> bool | N
             parsed_end = datetime.strptime(match.group(1), date_format).date()
         except ValueError:
             return False
-        return months == 12 and period_end == parsed_end.isoformat()
+        ends = {parsed_end.isoformat()}
+        if match.group(2):
+            try:
+                ends.add(parsed_end.replace(year=int(match.group(2))).isoformat())
+            except ValueError:
+                return False
+        return months == 12 and period_end in ends
     match = re.fullmatch(
         r"截至(20\d{2})年(\d{1,2})月(\d{1,2})日止(三|六|十二)個月", label
     )
@@ -722,7 +803,7 @@ def _comparative_narrative_supports(
 def _two_column_statement_supports(
     lines: list[str], values: dict[str, str], decimals: dict[str, Decimal]
 ) -> bool:
-    """Bind observed inline issuer statements to exactly two ordered period columns."""
+    """Bind two explicit period columns, excluding declared notes/percentages."""
     current_end = values["LATEST_RESULTS_PERIOD_END"]
     prior_end = values["LATEST_RESULTS_PRIOR_PERIOD_END"]
     current_year, prior_year = current_end[:4], prior_end[:4]
@@ -735,21 +816,25 @@ def _two_column_statement_supports(
     symbols = "|".join(re.escape(form) for form in display_symbols)
     currency_declaration = re.compile(rf"\(Expressed in (?:{symbols})\)", re.I)
     cell_prefix = rf"(?:(?:{symbols})\s*)?"
-    row_pattern = re.compile(
-        rf"(?P<label>[^\d]+?)\s+(?:(?P<note>\d+(?:\s*&\s*\d+)?|\d+\([a-z]\))\s+)?"
-        rf"{cell_prefix}(?P<current>{number})\s+{cell_prefix}(?P<prior>{number})\s*$",
-        re.I,
-    )
     for start, line in enumerate(lines):
         column_header = re.fullmatch(
-            rf"(?P<unit>\([^()]*\)\s*)?(?:Notes?\s+)?{current_year}\s+{prior_year}",
+            r"(?P<unit>.*?)\s*(?P<first>[QH][1-4]\s+20\d{2})\s+"
+            r"(?P<second>[QH][1-4]\s+20\d{2})(?:\s+(?P<change>\+/-|Change\s*%|YoY\s*%))?",
+            line,
+            re.I,
+        ) or re.fullmatch(
+            r"(?P<unit>\([^()]*\)\s*)?(?:Notes?\s+)?"
+            r"(?P<first>20\d{2})\s+(?P<second>20\d{2})",
             line,
             re.I,
         )
         if column_header is None or start == 0:
             continue
         unit_header = column_header.group("unit")
-        if unit_header and not _heading_has_currency_and_unit(unit_header, values):
+        if unit_header and (
+            not _heading_has_currency_and_unit(unit_header, values)
+            or re.search(r"(?<!\w)[QH][1-4]\b|\b20\d{2}\b", unit_header, re.I)
+        ):
             continue
         # PDF line wrapping and a parenthesized presentation-currency declaration
         # may separate the period from its columns. Keep the search bounded and
@@ -759,33 +844,88 @@ def _two_column_statement_supports(
                 item
                 for item in lines[max(0, start - count) : start]
                 if not currency_declaration.fullmatch(_normalized_text(item))
+                and not (
+                    item.startswith("(")
+                    and item.endswith(")")
+                    and _heading_has_currency_and_unit(item, values)
+                )
             )
             for count in range(1, 4)
         ]
-        if not any(
-            _header_period_matches(
-                header if current_year in header else f"{header} {current_year}",
-                current_end,
-                months,
-            )
-            is True
-            and _header_period_matches(
-                re.sub(
-                    rf"\b{current_year}\b",
-                    prior_year,
-                    header if current_year in header else f"{header} {current_year}",
-                ),
-                prior_end,
-                months,
-            )
-            is True
-            for header in headers
+        explicit_periods = " " in column_header.group("first")
+        ordered_periods = (column_header.group("first"), column_header.group("second"))
+        current_column = next(
+            (
+                index
+                for index, label in enumerate(ordered_periods)
+                if current_year in label
+            ),
+            None,
+        )
+        if (
+            current_column is None
+            or prior_year not in ordered_periods[1 - current_column]
         ):
             continue
-        heading = _normalized_text(" ".join(lines[max(0, start - 3) : start + 3]))
+        if explicit_periods:
+            supported_periods = all(
+                _header_period_matches(label, end, months) is True
+                for label, end in (
+                    (ordered_periods[current_column], current_end),
+                    (ordered_periods[1 - current_column], prior_end),
+                )
+            )
+        else:
+            supported_periods = any(
+                _header_period_matches(
+                    header if current_year in header else f"{header} {current_year}",
+                    current_end,
+                    months,
+                )
+                is True
+                and _header_period_matches(
+                    re.sub(
+                        rf"\b{current_year}\b",
+                        prior_year,
+                        header
+                        if current_year in header
+                        else f"{header} {current_year}",
+                    ),
+                    prior_end,
+                    months,
+                )
+                is True
+                for header in headers
+            )
+        if not supported_periods:
+            continue
+        heading = _normalized_text(
+            " ".join(
+                lines[max(0, start - 3) : start + 1] + lines[start + 1 : start + 3]
+            )
+        )
         if not _heading_has_currency_and_unit(heading, values):
             continue
         note_declared = re.search(r"\bnotes?\b", heading) is not None
+        percentages = bool(
+            start + 1 < len(lines)
+            and re.fullmatch(r"Amount\s+%\s+Amount\s+%", lines[start + 1], re.I)
+        )
+        percent_cell = rf"(?:{number}|-)\s*%?"
+        between = rf"\s+{percent_cell}" if percentages else ""
+        trailing = (
+            rf"\s+{percent_cell}"
+            if percentages
+            else rf"(?:\s+{number}\s*%)?"
+            if column_header.groupdict().get("change")
+            else ""
+        )
+        row_pattern = re.compile(
+            rf"(?P<label>[^\d]+?)\s+(?:(?P<note>\d+(?:\s*&\s*\d+)?|\d+\([a-z]\))\s+)?"
+            rf"{cell_prefix}(?P<first>{number}){between}\s+"
+            rf"{cell_prefix}(?P<second>{number}){trailing}\s*$",
+            re.I,
+        )
         revenue_pair = None
         earnings_pair = None
         ambiguous = False
@@ -796,7 +936,9 @@ def _two_column_statement_supports(
                 if not rows_started and _compatible_unit_only_header(row, values):
                     continue
                 break
-            match = row_pattern.fullmatch(row)
+            match = row_pattern.fullmatch(
+                re.sub(r"\s+\(Notes?\s+\d[\d, &and]*\)", "", row, flags=re.I)
+            )
             if match is None:
                 continue
             rows_started = True
@@ -804,10 +946,10 @@ def _two_column_statement_supports(
                 ambiguous = True
                 break
             label = _normalized_text(match.group("label")).rstrip(":")
-            pair = (
-                _exact_decimal(match.group("current")),
-                _exact_decimal(match.group("prior")),
+            cells = tuple(
+                _exact_decimal(match.group(key)) for key in ("first", "second")
             )
+            pair = (cells[current_column], cells[1 - current_column])
             if label in _REVENUE_ROW_LABELS:
                 if revenue_pair is not None:
                     ambiguous = True
@@ -1017,7 +1159,9 @@ def _normalize_latest_results(
         if structurally_valid
         else []
     )
-    primary = any(_is_primary_evidence(record) for record in supporting_records)
+    primary = any(
+        _is_primary_evidence(record, source_url) for record in supporting_records
+    )
     authority = (
         "PRIMARY" if primary else "SECONDARY" if supporting_records else "UNSUPPORTED"
     )
@@ -1114,27 +1258,29 @@ def _preflight_capacity_records(
     pct_token: str,
 ) -> list[ToolEvidenceRecord]:
     """Recover exact capacity claims from code-owned preflight search results."""
-    records: list[ToolEvidenceRecord] = []
     pct_pattern = re.compile(rf"(?<!\d){re.escape(pct_token)}(?:0+)?\s*%")
-    for block in _PREFLIGHT_RESULT_RE.findall(supplemental_evidence or ""):
-        if "capacity" not in block.casefold() or not pct_pattern.search(block):
-            continue
-        urls = {
-            normalized
-            for raw_url in re.findall(r"(?is)<url>\s*(.*?)\s*</url>", block)
-            if (normalized := normalize_http_url(raw_url))
-        }
-        if urls:
-            records.append(
-                ToolEvidenceRecord(
-                    tool_name="management_guidance_preflight",
-                    content=block,
-                    urls=urls,
-                    evidence_status="RESULTS_FOUND",
-                    authority="SECONDARY",
-                )
-            )
-    return records
+    text = supplemental_evidence or ""
+    if classify_evidence_value("management_guidance_preflight", text)[1] not in {
+        "EVIDENCE_FOUND",
+        "RESULTS_FOUND",
+    }:
+        return []
+    # Search preflight can corroborate capacity, but is never a fetched filing.
+    # Split the combined preflight before bounding each individual source record.
+    record = ToolEvidenceRecord(
+        tool_name="management_guidance_preflight",
+        content=text,
+        urls=set(),
+        evidence_status="RESULTS_FOUND",
+        authority="SECONDARY",
+    )
+    return [
+        item
+        for item in _split_search_result_records([record])
+        if item.urls
+        and "capacity" in item.content.casefold()
+        and pct_pattern.search(item.content)
+    ]
 
 
 def _normalized_relationship(relationship: str) -> str:
@@ -1165,6 +1311,7 @@ def _validated_control_status(
     basis: str,
     pct: float | None,
     supporting_records: list[ToolEvidenceRecord],
+    source_url: str | None = None,
 ) -> tuple[str, str]:
     non_control_rule = _NON_CONTROL_RELATIONSHIPS.get(
         _normalized_relationship(relationship)
@@ -1197,7 +1344,7 @@ def _validated_control_status(
         if any(term in record[1].casefold() for term in control_terms)
     ]
     official_support = any(
-        _is_primary_evidence(record) for record in corroborating_records
+        _is_primary_evidence(record, source_url) for record in corroborating_records
     )
     if official_support or _has_independent_corroboration(corroborating_records):
         return "CONTROLLED", normalized_basis
@@ -1308,6 +1455,7 @@ def _normalize_ownership(
             basis=basis,
             pct=pct,
             supporting_records=(claim_records if verified else relationship_supporting),
+            source_url=normalized_source,
         )
         if verified or evidence_status == "DISCLOSED_UNVERIFIED"
         else ("UNKNOWN", "UNKNOWN")
@@ -1478,7 +1626,10 @@ def _normalize_capacity(
     evidence_status = (
         "PRIMARY"
         if supported
-        and any(_is_primary_evidence(record) for record in matching_records)
+        and any(
+            _is_primary_evidence(record, normalized_source)
+            for record in matching_records
+        )
         else "SECONDARY"
         if supported
         else "UNSUPPORTED"

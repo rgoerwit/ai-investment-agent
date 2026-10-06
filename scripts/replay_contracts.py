@@ -17,7 +17,7 @@ from src.agents.foreign_language_evidence import (
     normalize_foreign_language_evidence,
     unique_latest_results_block,
 )
-from src.agents.message_utils import make_tool_evidence_record
+from src.agents.message_utils import evidence_record_to_tool_evidence
 from src.data_block_utils import extract_block_field_from_text_raw
 from src.pm_claim_audit import (
     normalize_decision_trace_citations,
@@ -57,12 +57,7 @@ def replay_contracts(paths: Iterable[Path]) -> dict[str, dict[str, int]]:
                 )
                 if coverage == "FOUND":
                     records = [
-                        make_tool_evidence_record(
-                            tool_name=r["tool_name"],
-                            content=r["content"],
-                            urls=r.get("urls", []),
-                            evidence_status=r.get("evidence_status"),
-                        )
+                        evidence_record_to_tool_evidence(r)
                         for r in evidence
                         if isinstance(r, dict)
                         and r.get("execution_status") == "SUCCEEDED"

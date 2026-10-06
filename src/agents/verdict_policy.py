@@ -35,7 +35,12 @@ from src.charts.extractors.valuation import is_weak_buy_asymmetry
 from src.data_block_utils import fenced_block_pattern
 from src.decision_inputs import DecisionInputs
 from src.pm_decision_parser import canonicalize_pm_verdict, parse_final_decision_scores
-from src.thesis_constants import GROWTH_MIN_PCT, HEALTH_MIN_PCT
+from src.thesis_constants import (
+    ANALYST_COVERAGE_MAX,
+    GROWTH_MIN_PCT,
+    HEALTH_MIN_PCT,
+    US_REVENUE_MAX_PCT,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -458,6 +463,21 @@ class GrowthGateAssessment:
     exception: str | None = None
     reason: str | None = None
 
+    @property
+    def status(self) -> str:
+        if self.exception:
+            return f"EXCEPTION_{self.exception.upper()}"
+        if self.hard_fail:
+            return "HARD_FAIL"
+        if self.reason in {
+            "growth_score_unreliable",
+            "growth_score_unavailable",
+            "health_score_unreliable_for_growth_exception",
+            "health_score_unavailable_for_growth_exception",
+        }:
+            return "INDETERMINATE"
+        return "PASS"
+
 
 @dataclass(frozen=True, slots=True)
 class VerdictPolicyViolation:
@@ -468,20 +488,75 @@ class VerdictPolicyViolation:
     required_verdict: str
 
 
+@dataclass(frozen=True, slots=True)
+class InitiationGateAssessment:
+    """A measured independent initiation gate; uncertainty cannot authorize a floor."""
+
+    rule: str
+    status: str
+    reason: str
+
+
+def assess_initiation_gates(
+    inputs: DecisionInputs,
+) -> tuple[InitiationGateAssessment, ...]:
+    count = inputs.english_analyst_count
+    us_revenue = inputs.us_revenue_pct
+    liquidity = inputs.liquidity
+    return (
+        InitiationGateAssessment(
+            "analyst_coverage",
+            "INDETERMINATE"
+            if count is None
+            else "FAIL"
+            if count >= ANALYST_COVERAGE_MAX
+            else "PASS",
+            "verified_english_coverage_unavailable"
+            if count is None
+            else f"verified_english_analyst_count={count}",
+        ),
+        InitiationGateAssessment(
+            "us_revenue",
+            "INDETERMINATE"
+            if us_revenue is None
+            else "FAIL"
+            if us_revenue > US_REVENUE_MAX_PCT
+            else "PASS",
+            "verified_us_revenue_unavailable"
+            if us_revenue is None
+            else f"verified_us_revenue_pct={us_revenue:g}",
+        ),
+        InitiationGateAssessment(
+            "liquidity",
+            "INDETERMINATE"
+            if liquidity is None or liquidity.status in {"INSUFFICIENT_DATA", "ERROR"}
+            else "FAIL"
+            if liquidity.hard_fail
+            else "PASS",
+            "measured_liquidity_unavailable"
+            if liquidity is None
+            else liquidity.reason or liquidity.status,
+        ),
+    )
+
+
+def render_initiation_gate_context(inputs: DecisionInputs) -> str:
+    return (
+        "CODE-OWNED INITIATION GATES (independent of growth exceptions):\n"
+        + "\n".join(
+            f"- {gate.rule}: {gate.status}; {gate.reason}"
+            for gate in assess_initiation_gates(inputs)
+        )
+    )
+
+
 def render_growth_gate_context(decision_inputs: DecisionInputs) -> str:
     """Render the code-owned growth decision for the PM without restating policy."""
     assessment = assess_growth_gate(decision_inputs)
-    status = (
-        f"EXCEPTION_{assessment.exception.upper()}"
-        if assessment.exception
-        else "HARD_FAIL"
-        if assessment.hard_fail
-        else "PASS"
-    )
     missing = ",".join(sorted(decision_inputs.missing_current_growth_fields)) or "NONE"
     return (
         "CODE-OWNED GROWTH GATE (binding; do not infer a different exception):\n"
-        f"- STATUS: {status}\n"
+        f"- STATUS: {assessment.status}\n"
         f"- REASON: {assessment.reason or 'NONE'}\n"
         f"- MISSING_CURRENT_GROWTH_FIELDS: {missing}"
     )
@@ -502,13 +577,24 @@ def assess_growth_gate(decision_inputs: DecisionInputs) -> GrowthGateAssessment:
 
     metrics = decision_inputs.decision_metrics
     growth = decision_inputs.growth_decision_pct
-    if growth is None or growth >= GROWTH_FAIL_MAX:
+    if growth is None:
+        return GrowthGateAssessment(hard_fail=False, reason="growth_score_unavailable")
+    if growth >= GROWTH_FAIL_MAX:
         return GrowthGateAssessment(hard_fail=False)
+
+    if not decision_inputs.health_score_reliable:
+        return GrowthGateAssessment(
+            hard_fail=False, reason="health_score_unreliable_for_growth_exception"
+        )
 
     health = decision_inputs.health_decision_pct
     pe = metrics.get("pe_ratio")
     cagr = metrics.get("revenue_cagr_3y")
-    if health is None or health < HEALTH_FLOOR_MIN:
+    if health is None:
+        return GrowthGateAssessment(
+            hard_fail=False, reason="health_score_unavailable_for_growth_exception"
+        )
+    if health < HEALTH_FLOOR_MIN:
         return GrowthGateAssessment(
             hard_fail=True,
             reason="adjusted_health_below_exception_floor",
@@ -568,6 +654,9 @@ def assess_verdict_policy(
             reason="auto_reject_flags=" + ",".join(auto_reject_flags),
             required_verdict="DO_NOT_INITIATE",
         )
+    for gate in assess_initiation_gates(decision_inputs):
+        if gate.status == "FAIL":
+            return VerdictPolicyViolation(gate.rule, gate.reason, "DO_NOT_INITIATE")
     if decision_inputs.decision_metrics.get("m_and_a_status") == "ACTIVE_TENDER":
         return None
 
@@ -625,6 +714,11 @@ def maybe_floor_verdict_to_hold(
         )
         return content_str, False
 
+    if any(
+        gate.status == "FAIL" or (gate.rule != "us_revenue" and gate.status != "PASS")
+        for gate in assess_initiation_gates(decision_inputs)
+    ):
+        return content_str, False
     growth_gate = assess_growth_gate(decision_inputs)
     if growth_gate.hard_fail or growth_gate.exception is None:
         return content_str, False

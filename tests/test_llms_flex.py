@@ -554,7 +554,7 @@ class TestFlexHealthGatesTheTransports:
 
         self._degrade("google")
 
-        assert model._effective_tier({}) is None
+        assert model._effective_tier({}) == "standard"
         assert model._flex_ineligible() is True
 
     def test_openai_falls_back_to_auto_once_degraded(self):
@@ -577,7 +577,7 @@ class TestFlexHealthGatesTheTransports:
 
         self._degrade("google")
 
-        assert gemini._effective_tier({}) is None
+        assert gemini._effective_tier({}) == "standard"
         assert openai._effective_tier({}) == "flex"
 
     def test_capability_downgrade_still_wins_and_stays_permanent(self):
@@ -591,7 +591,7 @@ class TestFlexHealthGatesTheTransports:
 
         assert model._flex_ineligible() is True
         # No cool-off can restore a model the vendor rejects.
-        assert model._effective_tier({}) is None
+        assert model._effective_tier({}) == "standard"
 
     def test_latency_fallback_records_the_failure(self):
         from src.service_tiers import flex_degradation_snapshot
@@ -622,7 +622,7 @@ class TestFlexHealthGatesTheTransports:
         )
         self._degrade("google")
 
-        assert model._effective_tier({}) is None
+        assert model._effective_tier({}) == "standard"
 
 
 def test_per_call_tier_resolvers_consult_both_caches():
@@ -673,3 +673,19 @@ def test_per_call_tier_resolvers_consult_both_caches():
         f"construction-time site -- add it to _CONSTRUCTION_TIME_SITES with the "
         f"reason."
     )
+
+
+@pytest.mark.parametrize("async_call", [False, True])
+@pytest.mark.asyncio
+async def test_unset_google_transport_reports_standard_without_request_injection(
+    async_call,
+):
+    llm = _tiered_llm(service_tier=None)
+    request = llm._prepare_request([HumanMessage(content="hi")])
+    assert request["config"].service_tier is None
+    method = "_agenerate" if async_call else "_generate"
+    with patch.object(ChatGoogleGenerativeAI, method, return_value=_chat_result()):
+        with track_tier_attempt(None) as attempt:
+            result = await llm._agenerate([]) if async_call else llm._generate([])
+    assert attempt.tier == "standard"
+    assert result.generations[0].message.response_metadata["service_tier"] == "standard"

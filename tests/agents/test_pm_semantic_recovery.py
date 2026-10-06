@@ -262,3 +262,129 @@ def test_cleanup_uses_the_shared_normalized_block_boundary_contract(boundary):
         assert validate_decision_trace(clean, _SNAPSHOT, [])["status"] == "VALID"
         if boundary == "duplicate":
             assert clean.startswith(_EMPTY)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "coverage,initial,final",
+    [
+        (None, "DO_NOT_INITIATE", "DO_NOT_INITIATE"),
+        (14, "DO_NOT_INITIATE", "HOLD"),
+        (15, "HOLD", "DO_NOT_INITIATE"),
+        (16, "DO_NOT_INITIATE", "DO_NOT_INITIATE"),
+    ],
+)
+async def test_independent_gate_context_floor_and_saved_verdict_agree(
+    coverage, initial, final
+):
+    from src.liquidity_assessment import LiquidityAssessment
+
+    snapshot = deepcopy(_SNAPSHOT)
+    snapshot["scorecards"] = {
+        "HEALTH": {"percentage": 75, "decision_eligible": True},
+        "GROWTH": {"percentage": 40, "decision_eligible": True},
+    }
+    if coverage is not None:
+        snapshot["claims"]["claim:coverage"] = {
+            "id": "claim:coverage",
+            "field": "ANALYST_COVERAGE_ENGLISH",
+            "value": str(coverage),
+            "authority": "PRIMARY",
+            "exactness": "EXACT",
+            "coverage": "FOUND",
+            "decision_eligible": True,
+            "decision_role": "GATE_INPUT",
+            "source_url": "https://issuer.example/coverage",
+            "evidence_id": "evidence:1:abc",
+        }
+    initial_text = (
+        _EMPTY.replace("DECISION_FACTS: NONE", "DECISION_FACTS: claim:pe")
+        .replace("DO NOT INITIATE", initial.replace("_", " "))
+        .replace("DO_NOT_INITIATE", initial)
+    )
+    invoke = AsyncMock(return_value=SimpleNamespace(content=initial_text))
+    state = {
+        "company_of_interest": "TEST",
+        "pre_screening_result": "PASS",
+        "red_flags": [],
+        "analysis_snapshot": snapshot,
+        "fundamentals_report": _FUNDAMENTALS.replace(
+            "PE_RATIO_TTM: 12.0", "PE_RATIO_TTM: 12.0\nREVENUE_CAGR_3Y: 16%"
+        ),
+        "liquidity_assessment": LiquidityAssessment(
+            "PASS", average_daily_turnover_usd=500_000
+        ).to_dict(),
+    }
+    with (
+        patch(
+            "src.prompts.get_prompt",
+            return_value=SimpleNamespace(
+                system_message="PM", agent_name="Portfolio Manager"
+            ),
+        ),
+        patch(
+            "src.agents.decision_nodes.agent_runtime.invoke_with_rate_limit_handling",
+            invoke,
+        ),
+    ):
+        result = await create_portfolio_manager_node(
+            SimpleNamespace(model_name="initial"), None
+        )(state, {})
+    assert result["artifact_statuses"]["final_trade_decision"]["ok"]
+    assert result["decision_policy"]["final_verdict"] == final
+    assert result["decision_policy"]["original_verdict"] == initial
+    assert f"VERDICT: {final}" in result["final_trade_decision"]
+    gate = result["decision_policy"]["initiation_gates"][0]
+    status = (
+        "INDETERMINATE" if coverage is None else "PASS" if coverage < 15 else "FAIL"
+    )
+    assert gate["status"] == status
+    prompt = invoke.call_args.args[1][0].content
+    assert f"analyst_coverage: {status}" in prompt
+    assert "us_revenue: INDETERMINATE" in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["unavailable", "unreliable"])
+async def test_indeterminate_growth_status_agrees_in_prompt_and_saved_policy(case):
+    snapshot = deepcopy(_SNAPSHOT)
+    metrics = {"adjusted_health_score": 75, "pe_ratio": 12, "revenue_cagr_3y": 16}
+    if case == "unreliable":
+        snapshot["scorecards"] = {
+            "HEALTH": {"percentage": 75, "decision_eligible": True},
+            "GROWTH": {"percentage": 40, "decision_eligible": True},
+        }
+        metrics["growth_score_consistency"] = "SUSPECT"
+    initial = _EMPTY.replace("DECISION_FACTS: NONE", "DECISION_FACTS: claim:pe")
+    invoke = AsyncMock(return_value=SimpleNamespace(content=initial))
+    with (
+        patch(
+            "src.prompts.get_prompt",
+            return_value=SimpleNamespace(
+                system_message="PM", agent_name="Portfolio Manager"
+            ),
+        ),
+        patch(
+            "src.agents.decision_nodes.agent_runtime.invoke_with_rate_limit_handling",
+            invoke,
+        ),
+        patch(
+            "src.validators.red_flag_detector.RedFlagDetector.extract_metrics",
+            return_value=metrics,
+        ),
+    ):
+        result = await create_portfolio_manager_node(
+            SimpleNamespace(model_name="initial"), None
+        )(
+            {
+                "company_of_interest": "TEST",
+                "pre_screening_result": "PASS",
+                "red_flags": [],
+                "analysis_snapshot": snapshot,
+                "fundamentals_report": _FUNDAMENTALS,
+            },
+            {},
+        )
+    assert result["decision_policy"]["growth_gate"]["status"] == "INDETERMINATE"
+    assert result["decision_policy"]["growth_gate"]["exception"] is None
+    assert "STATUS: INDETERMINATE" in invoke.call_args.args[1][0].content

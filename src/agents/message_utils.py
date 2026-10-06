@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+import hashlib
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from langchain_core.messages import (
@@ -153,6 +154,7 @@ class ToolEvidenceRecord:
     urls: set[str]
     evidence_status: EvidenceStatus
     authority: EvidenceAuthority
+    authority_by_url: tuple[tuple[str, EvidenceAuthority], ...] = ()
 
     def __iter__(self):
         yield self.tool_name
@@ -172,6 +174,7 @@ def make_tool_evidence_record(
     content: str,
     urls: Iterable[str],
     evidence_status: EvidenceStatus | None = None,
+    authority_by_url: Iterable[tuple[str, EvidenceAuthority]] = (),
 ) -> ToolEvidenceRecord:
     """Build the canonical agent-facing view of inspected tool evidence."""
     normalized_urls = {
@@ -184,6 +187,19 @@ def make_tool_evidence_record(
         content,
     )
     status = evidence_status or classified_status
+    recorded_authorities = tuple(authority_by_url)
+    bindings = tuple(
+        (
+            url,
+            resolve_evidence_authority(
+                tool_name=tool_name or "",
+                evidence_status=status,
+                urls=(url,),
+                authority_by_url=recorded_authorities,
+            ),
+        )
+        for url in sorted(normalized_urls)
+    )
     return ToolEvidenceRecord(
         tool_name=tool_name,
         content=bounded,
@@ -193,17 +209,59 @@ def make_tool_evidence_record(
             tool_name=tool_name or "",
             evidence_status=status,
             urls=tuple(sorted(normalized_urls)),
+            authority_by_url=bindings,
         ),
+        authority_by_url=bindings,
     )
 
 
-def evidence_record_to_tool_evidence(record: EvidenceRecord) -> ToolEvidenceRecord:
-    """Convert one run-scoped ledger record without weakening its status."""
+def evidence_record_to_tool_evidence(
+    record: EvidenceRecord | Mapping[str, Any],
+) -> ToolEvidenceRecord:
+    """Convert live or saved code-owned ledger evidence with the same provenance.
+
+    Saved provenance is tied to the retained content digest. This detects stale
+    edits, not malicious rewriting of the entire local analysis artifact.
+    """
+    fields = record if isinstance(record, Mapping) else record.to_dict()
+    content = str(fields.get("content", ""))
+    bindings = fields.get("authority_by_url", ())
+    provenance = (
+        tuple(
+            (item[0], item[1])
+            for item in bindings
+            if isinstance(item, list | tuple)
+            and len(item) == 2
+            and all(isinstance(value, str) for value in item)
+            and item[1]
+            in {"PRIMARY_REGISTRY", "PRIMARY_ISSUER", "SECONDARY", "UNSUPPORTED"}
+        )
+        if isinstance(bindings, list | tuple)
+        and hashlib.sha256(content.encode("utf-8")).hexdigest()
+        == fields.get("content_sha256")
+        else ()
+    )
+    status = fields.get("evidence_status")
+    if status not in {
+        "EVIDENCE_FOUND",
+        "RESULTS_FOUND",
+        "COVERAGE_COMPLETE_NO_MATCH",
+        "NO_RESULTS",
+        "UNAVAILABLE",
+        "AUTH_ERROR",
+        "INSUFFICIENT",
+    }:
+        status = "UNAVAILABLE"
+    if (
+        fields.get("blocked") or fields.get("execution_status") != "SUCCEEDED"
+    ) and status in {None, "EVIDENCE_FOUND", "RESULTS_FOUND"}:
+        status = "UNAVAILABLE"
     return make_tool_evidence_record(
-        tool_name=record.tool_name,
-        content=record.content,
-        urls=record.urls,
-        evidence_status=record.evidence_status,
+        tool_name=fields.get("tool_name"),
+        content=content,
+        urls=fields.get("urls", ()),
+        evidence_status=cast(EvidenceStatus, status),
+        authority_by_url=provenance,
     )
 
 

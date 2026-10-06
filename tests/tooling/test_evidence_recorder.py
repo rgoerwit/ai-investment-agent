@@ -227,3 +227,93 @@ async def test_requested_url_binds_to_validated_final_document_url() -> None:
     assert binding.requested_url == requested
     assert binding.canonical_url == final
     assert binding.authority == "PRIMARY_REGISTRY"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("length", [19_999, 20_000, 20_001])
+async def test_recorder_records_actual_truncation_without_changing_returned_value(
+    length,
+):
+    recorder = EvidenceRecorder()
+    original = "x" * length
+    result = ToolResult(value=original)
+    assert (
+        await recorder.after(ToolInvocation("web_search", {}, "preflight"), result)
+        is result
+    )
+    record = recorder.snapshot()[0]
+    assert record.original_content_chars == length
+    assert record.retained_content_chars == min(length, 20_000)
+    assert record.content_truncated is (length > 20_000)
+    assert record.content.startswith(original[:20_000])
+    assert record.to_dict()["content_truncated"] is record.content_truncated
+
+
+@pytest.mark.asyncio
+async def test_live_and_saved_issuer_authority_survive_registry_teardown_and_ignore_model_labels():
+    import json
+
+    from src.agents.message_utils import (
+        evidence_record_to_tool_evidence,
+        make_tool_evidence_record,
+    )
+    from src.runtime_services import RuntimeServices, use_runtime_services
+    from src.tooling.inspection_service import INSPECTION_SERVICE
+
+    url = "https://issuer.example/results.pdf"
+    content = f'STATUS: EVIDENCE_FOUND\nDOCUMENT_METADATA: {{"source_url": "{url}", "authority": "PRIMARY_REGISTRY"}}\nResults'
+    recorder = EvidenceRecorder()
+    services = RuntimeServices(
+        ToolExecutionService([recorder]), INSPECTION_SERVICE, evidence_recorder=recorder
+    )
+    with use_runtime_services(services):
+        services.issuer_authority.register_url(
+            url, provenance="structured_company_profile"
+        )
+        await recorder.after(
+            ToolInvocation("get_official_document", {"url": url}, "preflight"),
+            ToolResult(content),
+        )
+        live = evidence_record_to_tool_evidence(recorder.snapshot()[0])
+    saved = json.loads(json.dumps(recorder.serialized_snapshot()[0]))
+    assert (
+        live.authority
+        == evidence_record_to_tool_evidence(saved).authority
+        == "PRIMARY_ISSUER"
+    )
+    assert bind_fetched_evidence(recorder.snapshot(), url).authority == "PRIMARY_ISSUER"
+    assert (
+        make_tool_evidence_record(
+            tool_name="get_official_document", content=content, urls=[url]
+        ).authority
+        == "SECONDARY"
+    )
+    for mutation in (
+        {"authority_by_url": []},
+        {"content_sha256": "forged"},
+        {"authority_by_url": [[url, "invalid"]]},
+    ):
+        assert (
+            evidence_record_to_tool_evidence({**saved, **mutation}).authority
+            == "SECONDARY"
+        )
+
+
+@pytest.mark.parametrize("execution", ["FAILED", "BLOCKED", None])
+@pytest.mark.parametrize("status", ["EVIDENCE_FOUND", "RESULTS_FOUND", None, "UNKNOWN"])
+def test_saved_failed_or_unknown_status_cannot_be_reclassified_from_content(
+    execution, status
+):
+    from src.agents.message_utils import evidence_record_to_tool_evidence
+
+    record = evidence_record_to_tool_evidence(
+        {
+            "tool_name": "get_official_document",
+            "content": "STATUS: EVIDENCE_FOUND\nOfficial results",
+            "urls": ["https://www.twse.com.tw/results"],
+            "execution_status": execution,
+            "evidence_status": status,
+        }
+    )
+    assert record.evidence_status == "UNAVAILABLE"
+    assert record.authority == "UNSUPPORTED"

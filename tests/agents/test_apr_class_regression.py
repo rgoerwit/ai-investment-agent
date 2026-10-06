@@ -7,16 +7,25 @@ retained, while the later explicit growth-exception contract remains authoritati
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from src.agents.support import format_red_flag_section
 from src.agents.verdict_policy import maybe_floor_verdict_to_hold
 from src.decision_inputs import DecisionInputs
+from src.liquidity_assessment import LiquidityAssessment
 from src.validators.red_flag_detector import RedFlagDetector
 
 
 def _floor_inputs(data_block: str) -> DecisionInputs:
     """Typed decision inputs for the floor (no snapshot: the legacy path)."""
-    return DecisionInputs.from_metrics_and_snapshot(
+    inputs = DecisionInputs.from_metrics_and_snapshot(
         RedFlagDetector.extract_metrics(data_block), None, None, ticker="TEST"
+    )
+
+    return replace(
+        inputs,
+        english_analyst_count=4,
+        liquidity=LiquidityAssessment("PASS", average_daily_turnover_usd=500_000),
     )
 
 

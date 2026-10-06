@@ -17,6 +17,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject failed evidence and failed result envelopes before ownership/capacity
+  normalization; bind envelope authority to its declared source and apply the same
+  checks to preflight fallback while preserving valid neighboring results.
+- Bind ownership percentages to a shareholder row or ownership clause instead of
+  unrelated amounts elsewhere in the cited record; preserve unknown control.
+- Bind prior-first comparative statements and declared percentage columns without
+  relaxing period, currency, scale, or earnings-scope checks. Preserve recorder-owned
+  source authority during offline replay and record explicit evidence truncation.
+- Give complete, unsupported quick-mode latest-results claims one budgeted fetch of
+  their approved citation, with no repeat of an already attempted source.
+- Preserve verified independent initiation failures across growth exceptions, and
+  withhold deterministic HOLD upgrades when English-language coverage or measured
+  liquidity is unresolved. Render and save the same gate assessments, distinguish
+  indeterminate growth inputs, and label risk-zone defaults before initiation gates.
+  Missing health withholds growth-exception authority without implying verified
+  low health.
+- Record effective standard Google service-tier attribution without changing the
+  deliberate standard transport policy or flex fallback pricing.
+
 - Recognize supported currency-code and compound-symbol prefixes, signed and
   accounting amounts through the shared monetary grammar. Preserve minor currency
   denominations in FX resolution, caches, OCF comparisons, and reconciliation;

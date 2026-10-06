@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "selection": "Five prior captured regression controls, fourteen new public captured cases stratified by original withholding reason, language and statement layout, and forty-one declared adversarial mutations. New captured holdouts assigned before subsequent reader edits. Adjudication includes exact claim scope and numbers; readable nearby different metrics do not authorize a claim.",
+  "selection": "Five prior captured regression controls, fourteen new public captured cases stratified by original withholding reason, language and statement layout, and forty-one declared adversarial mutations. New captured holdouts assigned before subsequent reader edits. Adjudication includes exact claim scope and numbers; readable nearby different metrics do not authorize a claim. Three additional October 5 public source excerpts and nine adversarial mutations exercise declared percentage columns, prior-first ordering, human currency names, and retained issuer provenance.",
   "cases": [
     {
       "case": "simple_annual_statement",
@@ -1072,6 +1072,225 @@
       "expected_growth": null,
       "adjudication": "percentage_reconstructed_comparative",
       "justification": "The retained secondary summary gives HK$58.93 billion revenue and HK$12.87 billion shareholder profit, plus YoY percentages. It does not give the asserted exact prior amounts 55.96/6.76."
+    },
+    {
+      "case": "captured_BOSN.SW",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_BOSN.SW",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "5.3%",
+        "41.3%"
+      ],
+      "justification": "Inspected issuer presentation declares in CHF million H1 2025 H1 2026 +/-. Prior-first net sales 546.7/575.7 and net income 38.7/54.7 bind both exact half-year periods. Final column is expressly a percentage. Recorder provenance preserves PRIMARY_ISSUER across offline replay."
+    },
+    {
+      "case": "captured_1590.TW",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_1590.TW",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "12.0%",
+        "10.2%"
+      ],
+      "justification": "Inspected issuer consolidated annual income statement names December 31, 2025 and 2024 in thousands of New Taiwan Dollars and declares Amount/% pairs. Sales 34,329,945/30,660,133 and NET PROFIT FOR THE YEAR 8,399,832/7,623,278 bind total net profit, distinct from later owner-attributable earnings."
+    },
+    {
+      "case": "captured_TCW.TO",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_TCW.TO",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Retained issuer headline table interleaves three quarter columns and two half-year columns; the exact comprehensive-profit statement is in thousands while the claim uses rounded millions. Do not infer column grouping or silently rescale a rounded claim."
+    },
+    {
+      "case": "bossard_swapped_periods",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_BOSN.SW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "H1 2025 H1 2026 +/-",
+          "H1 2026 H1 2025 +/-"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Changing the explicit period order without moving amounts reverses the claimed comparison; all four numbers still appear."
+    },
+    {
+      "case": "bossard_missing_percent_header",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_BOSN.SW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "H1 2025 H1 2026 +/-",
+          "H1 2025 H1 2026"
+        ],
+        [
+          "5.3 %",
+          "5.3"
+        ],
+        [
+          "41.3 %",
+          "41.3"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "An undeclared third numeric column cannot be discarded as a percentage."
+    },
+    {
+      "case": "bossard_wrong_period_duration",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_BOSN.SW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_PERIOD_MONTHS: 6",
+          "LATEST_RESULTS_PERIOD_MONTHS: 3"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Half-year columns cannot prove a quarterly comparison."
+    },
+    {
+      "case": "bossard_foreign_table_before_income",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_BOSN.SW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "Net income 38.7 54.7 41.3 %",
+          "H1 2024 H1 2025\nin EUR million\nNet income 38.7 54.7 41.3 %"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "A new half-year header and currency declaration separates net income from the sales statement."
+    },
+    {
+      "case": "airtac_missing_percent_declaration",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_1590.TW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "  Amount  %  Amount  %",
+          "  Amount  Amount"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Interleaved percentages require an explicit Amount/% column declaration."
+    },
+    {
+      "case": "airtac_wrong_earnings_scope",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_1590.TW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_EARNINGS_SCOPE: NET PROFIT FOR THE YEAR",
+          "LATEST_RESULTS_EARNINGS_SCOPE: NET PROFIT ATTRIBUTABLE TO OWNERS"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Total net profit cannot prove owner-attributable earnings even if both annual dates and amounts are present."
+    },
+    {
+      "case": "airtac_claims_percentage_as_revenue",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_1590.TW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_REVENUE: 34329945",
+          "LATEST_RESULTS_REVENUE: 100"
+        ],
+        [
+          "LATEST_RESULTS_PRIOR_REVENUE: 30660133",
+          "LATEST_RESULTS_PRIOR_REVENUE: 100"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The Amount/% header identifies 100 as percentages, never revenue."
+    },
+    {
+      "case": "airtac_wrong_currency",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_1590.TW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_CURRENCY: New Taiwan Dollars",
+          "LATEST_RESULTS_CURRENCY: USD"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "New Taiwan Dollars cannot support a USD claim despite dollar display symbols."
+    },
+    {
+      "case": "bossard_undeclared_additional_period",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_BOSN.SW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "in CHF million H1 2025 H1 2026 +/-",
+          "in CHF million Q2 2026 H1 2025 H1 2026 +/-"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "An additional period before the claimed columns makes the table ambiguous even when currency and both claimed periods occur later in the header."
     }
   ]
 }

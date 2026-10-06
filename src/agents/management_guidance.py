@@ -27,6 +27,7 @@ from src.earnings_baseline import (
     canonical_guidance_enum,
     guidance_contract_value_is_uninterpretable,
 )
+from src.forensic_budget import ResearchBudgetLedger
 from src.guidance_vocabulary import guidance_locale_policy
 from src.text_patterns import RESULT_ENVELOPE_BODY_RE, URL_RE
 
@@ -375,6 +376,70 @@ def _entity_matched_result_urls(
             if normalized_url not in urls:
                 urls.append(normalized_url)
     return urls
+
+
+async def fetch_unresolved_latest_results(
+    report: str,
+    *,
+    ticker: str,
+    company_name: str,
+    budget: ResearchBudgetLedger,
+) -> str:
+    """Fetch one approved citation only for a complete, withheld results claim."""
+    from src.agents.foreign_language_evidence import unique_latest_results_block
+    from src.runtime_services import get_current_evidence_records
+    from src.tooling.evidence_recorder import normalize_http_url
+    from src.tools.official_documents import (
+        get_official_document,
+        is_official_document_url,
+    )
+
+    block = unique_latest_results_block(report)
+    if block is None or extract_block_text_value(
+        block, "LATEST_RESULTS_NORMALIZATION_REASON"
+    ) not in {
+        "SOURCE_NOT_RETAINED",
+        "PERIOD_END_NOT_RETAINED",
+        "CURRENCY_OR_UNIT_UNBOUND",
+        "COMPARATIVE_ROWS_UNBOUND",
+        "SUPPORTED_SECONDARY",
+    }:
+        return ""
+    source_url = normalize_http_url(
+        extract_block_text_value(block, "LATEST_RESULTS_SOURCE_URL") or ""
+    )
+    if not source_url or not is_official_document_url(source_url):
+        return ""
+    # A successful, blocked, or failed fetch is already an attempted source. Avoid
+    # another request with different keywords or a different tool-call signature.
+    if any(
+        source_url in (*record.requested_urls, *record.urls)
+        and record.tool_name
+        in {"get_official_document", "extract_guidance_sources", "get_official_filings"}
+        for record in get_current_evidence_records(agent_key="foreign_language_analyst")
+    ):
+        return ""
+    outcomes, _ = await run_preflight_calls(
+        [
+            (
+                "latest_results_targeted_document",
+                get_official_document,
+                {
+                    "url": source_url,
+                    "keywords": "revenue,net sales,net income,profit",
+                    "ticker": ticker,
+                    "company_name": company_name,
+                },
+            )
+        ],
+        agent_key="foreign_language_analyst",
+        source="preflight",
+        ticker=ticker,
+        failure_event="latest_results_targeted_fetch_failed",
+        logger=logger,
+        budget=budget,
+    )
+    return "\n#### latest_results_targeted_document\n" + outcomes[0].render()
 
 
 async def _preload_management_guidance_evidence(

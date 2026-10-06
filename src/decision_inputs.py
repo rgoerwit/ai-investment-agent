@@ -19,6 +19,7 @@ behavioural risk on its own.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -26,6 +27,7 @@ from typing import Any
 import structlog
 
 from src.claim_policy import CURRENT_GROWTH_CLAIM_FIELDS
+from src.liquidity_assessment import LiquidityAssessment
 from src.provenance_schema import Scorecard
 
 logger = structlog.get_logger(__name__)
@@ -98,6 +100,39 @@ def _missing_current_growth_fields(
     return frozenset(CURRENT_GROWTH_CLAIM_FIELDS - available)
 
 
+def _verified_gate_number(
+    snapshot: Mapping[str, Any] | None, field: str, *, integer: bool = False
+) -> float | None:
+    """Read an exact, source-bound primary fact; legacy/aggregator counts are unknown."""
+    claims = (snapshot or {}).get("claims") or {}
+    if not isinstance(claims, Mapping):
+        return None
+    values = set()
+    for claim in claims.values():
+        if not isinstance(claim, Mapping) or claim.get("field") != field:
+            continue
+        if (
+            claim.get("decision_eligible") is not True
+            or claim.get("coverage") != "FOUND"
+            or claim.get("authority") != "PRIMARY"
+            or claim.get("exactness") != "EXACT"
+            or not claim.get("source_url")
+            or not str(claim.get("evidence_id") or "").startswith("evidence:")
+        ):
+            return None
+        value = str(claim.get("value", "")).strip()
+        if not re.fullmatch(r"\d+" if integer else r"\d+(?:\.\d+)?%?", value):
+            return None
+        try:
+            number = int(value) if integer else float(value.rstrip("%"))
+        except (ValueError, OverflowError):
+            return None
+        if not integer and number > 100:
+            return None
+        values.add(number)
+    return next(iter(values)) if len(values) == 1 else None
+
+
 def _log_score_override(
     kind: str, snapshot_score: float | None, parsed: float | None, ticker: str | None
 ) -> None:
@@ -164,6 +199,10 @@ class DecisionInputs:
     snapshot_authoritative: bool
     # Decoded contract status: None (no snapshot) | VALID | INVALID | DECODE_FAILED.
     snapshot_status: str | None = None
+    # Aggregator opinion counts and analyst prose cannot establish these gates.
+    english_analyst_count: int | None = None
+    us_revenue_pct: float | None = None
+    liquidity: LiquidityAssessment | None = None
 
     @classmethod
     def from_metrics(
@@ -185,6 +224,7 @@ class DecisionInputs:
         snapshot: Mapping[str, Any] | None,
         *,
         ticker: str | None = None,
+        liquidity: Any = None,
     ) -> DecisionInputs:
         parsed_health = metrics.get("adjusted_health_score")
         parsed_growth = metrics.get("adjusted_growth_score")
@@ -246,6 +286,11 @@ class DecisionInputs:
                 ),
             )
 
+        verified_coverage = (
+            _verified_gate_number(snapshot, "ANALYST_COVERAGE_ENGLISH", integer=True)
+            if snapshot_authoritative
+            else None
+        )
         sector_value = getattr(sector, "value", sector)
         return cls(
             decision_metrics=decision_metrics,
@@ -268,6 +313,13 @@ class DecisionInputs:
             growth_coverage_authoritative=snapshot_authoritative,
             snapshot_authoritative=snapshot_authoritative,
             snapshot_status=snapshot_status,
+            english_analyst_count=int(verified_coverage)
+            if verified_coverage is not None
+            else None,
+            us_revenue_pct=_verified_gate_number(snapshot, "US_REVENUE_PERCENT")
+            if snapshot_authoritative
+            else None,
+            liquidity=LiquidityAssessment.from_dict(liquidity),
         )
 
     @property

@@ -70,6 +70,11 @@ class EvidenceRecord:
     execution_status: ExecutionStatus
     evidence_status: EvidenceStatus
     reason: str | None = None
+    original_content_chars: int | None = None
+    retained_content_chars: int | None = None
+    content_truncated: bool = False
+    # Resolved by the recorder after inspection, never from document metadata.
+    authority_by_url: tuple[tuple[str, EvidenceAuthority], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -150,6 +155,7 @@ def resolve_evidence_authority(
     tool_name: str,
     evidence_status: EvidenceStatus,
     urls: tuple[str, ...],
+    authority_by_url: tuple[tuple[str, EvidenceAuthority], ...] = (),
 ) -> EvidenceAuthority:
     """Resolve evidence authority once from source kind and validated URLs."""
     if evidence_status != "EVIDENCE_FOUND":
@@ -163,7 +169,10 @@ def resolve_evidence_authority(
 
     from src.tools.official_documents import resolve_source_authority
 
-    authorities = tuple(resolve_source_authority(url) for url in urls)
+    recorded = dict(authority_by_url)
+    authorities = tuple(
+        recorded.get(url) or resolve_source_authority(url) for url in urls
+    )
     if "PRIMARY_REGISTRY" in authorities:
         return "PRIMARY_REGISTRY"
     if "PRIMARY_ISSUER" in authorities:
@@ -211,6 +220,7 @@ def bind_fetched_evidence(
         tool_name=str(getattr(record, "tool_name", "")),
         evidence_status="EVIDENCE_FOUND",
         urls=(canonical_url,),
+        authority_by_url=tuple(getattr(record, "authority_by_url", ()) or ()),
     )
     return EvidenceBinding(
         evidence_id=evidence_record_id(record),
@@ -222,7 +232,7 @@ def bind_fetched_evidence(
     )
 
 
-def _bounded_text(value: Any) -> str:
+def _value_text(value: Any) -> str:
     if isinstance(value, str):
         text = value
     elif isinstance(value, dict | list | tuple):
@@ -236,6 +246,11 @@ def _bounded_text(value: Any) -> str:
         text = str(value)
     else:
         text = f"<{type(value).__name__}>"
+    return text
+
+
+def _bounded_text(value: Any) -> str:
+    text = _value_text(value)
     if len(text) <= _MAX_CONTENT_CHARS:
         return text
     return text[:_MAX_CONTENT_CHARS] + "\n...[evidence ledger truncated]"
@@ -352,10 +367,10 @@ class EvidenceRecorder:
         return call
 
     async def after(self, call: ToolInvocation, result: ToolResult) -> ToolResult:
-        content = _bounded_text(result.value)
-        execution_status, evidence_status, reason, _ = classify_evidence_value(
+        original = _value_text(result.value)
+        execution_status, evidence_status, reason, content = classify_evidence_value(
             call.name,
-            content,
+            original,
             blocked=result.blocked,
         )
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -395,6 +410,22 @@ class EvidenceRecorder:
                 execution_status=execution_status,
                 evidence_status=evidence_status,
                 reason=reason,
+                original_content_chars=len(original),
+                retained_content_chars=min(len(original), _MAX_CONTENT_CHARS),
+                content_truncated=len(original) > _MAX_CONTENT_CHARS,
+                authority_by_url=tuple(
+                    (
+                        url,
+                        resolve_evidence_authority(
+                            tool_name=call.name,
+                            evidence_status=evidence_status,
+                            urls=(url,),
+                        ),
+                    )
+                    for url in urls
+                )
+                if not result.blocked
+                else (),
             )
         )
         self._content_chars += len(content)

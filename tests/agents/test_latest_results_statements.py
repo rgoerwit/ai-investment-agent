@@ -422,3 +422,63 @@ def test_inline_reader_stops_foreign_period_even_before_first_row(header):
         additional_records=[make_tool_evidence_record(**evidence)],
     )
     assert "LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED" in normalized
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["New Taiwan Dollar", "NEW TAIWAN DOLLARS", "  new  taiwan  dollars  ", "TWD"],
+)
+def test_official_currency_name_reuses_canonical_twd_identity(name):
+    from src.fx_normalization import (
+        canonical_currency_code,
+        normalize_minor_unit_currency,
+    )
+    from src.monetary import (
+        MONETARY_AMOUNT_RE,
+        monetary_currency_codes,
+        parse_monetary_amount,
+    )
+
+    assert canonical_currency_code(name) == "TWD"
+    assert normalize_minor_unit_currency(canonical_currency_code(name)) == ("TWD", 1.0)
+    amount = f"{name} 100 million"
+    assert parse_monetary_amount(amount) == 100_000_000
+    assert monetary_currency_codes(MONETARY_AMOUNT_RE.search(amount)) == ("TWD",)
+
+
+@pytest.mark.parametrize(
+    "name", ["Taiwanese Dollars", "New Taiwan Dollar assets", "USDollar"]
+)
+def test_currency_name_does_not_create_substring_aliases(name):
+    from src.fx_normalization import canonical_currency_code
+
+    assert canonical_currency_code(name) != "TWD"
+
+
+@pytest.mark.parametrize(
+    "header,end",
+    [
+        ("For the years ended February 29, 2024 and 2023", "2024-02-29"),
+        ("For the years ended February 29, 2024 and 0000", "2024-02-29"),
+        ("For the years ended February 30, 2024 and 2023", "2024-02-29"),
+    ],
+)
+def test_malformed_or_nonexistent_comparative_annual_dates_fail_closed(header, end):
+    assert not _header_period_matches(header, end, 12)
+
+
+@pytest.mark.parametrize(
+    "amount,expected",
+    [
+        ("-New  Taiwan\tDollars 100 million", -100_000_000),
+        ("New Taiwan Dollars 100K", 100_000),
+        ("New Taiwan Dollars 1,5 million", None),
+        ("New Taiwan Dollars 100 million USD", None),
+    ],
+)
+def test_official_currency_alias_preserves_sign_scale_grouping_and_conflicts(
+    amount, expected
+):
+    from src.monetary import parse_monetary_amount
+
+    assert parse_monetary_amount(amount) == expected

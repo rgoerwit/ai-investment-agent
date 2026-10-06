@@ -146,9 +146,9 @@ def runnable_attempt_tier(runnable: Any, provider: str | None) -> str | None:
             flex_degraded(provider)
             or (isinstance(model, str) and is_flex_unsupported(model))
         ):
-            return None
+            return "standard" if provider == "google" else None
         return tier
-    return None
+    return "standard" if provider == "google" else None
 
 
 def _cfg(cfg: Any = None) -> Any:

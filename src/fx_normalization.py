@@ -195,7 +195,7 @@ def canonical_currency_code(currency: str | None) -> str | None:
     """
     if not currency:
         return None
-    stripped = currency.strip()
+    stripped = " ".join(currency.split())
     if not stripped:
         return None
     if stripped in MINOR_UNIT_CURRENCY_ALIASES:

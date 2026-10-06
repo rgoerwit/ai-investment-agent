@@ -24,6 +24,7 @@ from src.agents.pm_verdict_metadata import (
 from src.agents.verdict_policy import (
     apply_required_verdict,
     assess_growth_gate,
+    assess_initiation_gates,
     assess_verdict_policy,
     maybe_demote_buy_on_blocking_flags,
     maybe_floor_verdict_to_hold,
@@ -32,6 +33,7 @@ from src.agents.verdict_policy import (
     maybe_tag_dni_review_candidate,
     normalize_pm_block_contract,
     render_growth_gate_context,
+    render_initiation_gate_context,
 )
 from src.data_block_utils import (
     build_fenced_block,
@@ -1307,9 +1309,15 @@ NEUTRAL ANALYST (Balanced):
             RedFlagDetector.detect_sector(fundamentals) if fundamentals else None,
             state.get("analysis_snapshot"),
             ticker=ticker,
+            liquidity=state.get("liquidity_assessment"),
         )
         growth_gate = assess_growth_gate(floor_inputs)
-        growth_gate_section = "\n\n" + render_growth_gate_context(floor_inputs)
+        growth_gate_section = (
+            "\n\n"
+            + render_growth_gate_context(floor_inputs)
+            + "\n\n"
+            + render_initiation_gate_context(floor_inputs)
+        )
 
         all_context = f"""MARKET ANALYST REPORT:
 {support.summarize_for_pm(market, "market", 2500) if market else "N/A"}
@@ -1832,10 +1840,15 @@ RISK TEAM DEBATE:
                 "adjustments": policy_adjustments,
                 "qualifications": policy_qualifications,
                 "growth_gate": {
+                    "status": growth_gate.status,
                     "hard_fail": growth_gate.hard_fail,
                     "exception": growth_gate.exception,
                     "reason": growth_gate.reason,
                 },
+                "initiation_gates": [
+                    {"rule": gate.rule, "status": gate.status, "reason": gate.reason}
+                    for gate in assess_initiation_gates(floor_inputs)
+                ],
                 "buy_blockers": buy_blockers,
             }
             if structural_recovery_events:
