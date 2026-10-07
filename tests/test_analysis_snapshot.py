@@ -1395,3 +1395,172 @@ def test_render_distinguishes_canonical_and_advisory_scores():
             "scorecards": [],
         }
     )
+
+
+def test_eps_lineage_rejects_company_profit_even_when_latest_results_is_primary():
+    """The historical latest-results-only path cannot substantiate a positive EPS award."""
+    from src.agents.verdict_policy import assess_growth_gate
+    from src.decision_inputs import DecisionInputs
+    from src.validators.metric_extractor import extract_metrics
+
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics({}, {"revenueGrowth": 0.2})
+    )
+    snapshot["claims"]["claim:profit"] = {
+        "id": "claim:profit",
+        "field": "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
+        "value": "80%",
+        "kind": "FACT",
+        "decision_eligible": True,
+        "authority": "PRIMARY",
+        "coverage": "FOUND",
+    }
+    snapshot["claims"]["claim:revenue"] = {
+        **snapshot["claims"]["claim:profit"],
+        "id": "claim:revenue",
+        "field": "LATEST_RESULTS_REVENUE_GROWTH_YOY",
+    }
+    for eps_award in ("1", "0", "N/A"):
+        report = _fundamentals(
+            f"GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH={eps_award}; "
+            "ROA_ROE_IMPROVING=N/A; GROSS_MARGIN=N/A; GLOBAL_EXPANSION=N/A; R_AND_D_CAPEX_BACKLOG=N/A",
+            f"ADJUSTED_GROWTH_SCORE: {100 if eps_award != '0' else 50}%",
+        )
+        derived = add_validated_derivations(snapshot, report)
+        card = derived["scorecards"]["GROWTH"]
+        assert card["criteria"]["EPS_GROWTH"]["derived_from"] == []
+        assert card["criteria"]["REVENUE_GROWTH"]["derived_from"] == ["claim:revenue"]
+        assert card["lineage_gaps"] == (["EPS_GROWTH"] if eps_award == "1" else [])
+        assert card["available"] == (1 if eps_award == "N/A" else 2)
+        projected = project_analysis_report(report, derived)
+        inputs = DecisionInputs.from_metrics_and_snapshot(
+            extract_metrics(projected), None, derived
+        )
+        assert (inputs.growth_decision_pct is None) is (eps_award == "1")
+        if eps_award == "1":
+            assert assess_growth_gate(inputs).status == "INDETERMINATE"
+
+
+def test_eps_lineage_uses_remaining_eligible_nonconflicting_per_share_basis():
+    from copy import deepcopy
+
+    report = _fundamentals(
+        "GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=N/A; EPS_GROWTH=1; "
+        "ROA_ROE_IMPROVING=N/A; GROSS_MARGIN=N/A; GLOBAL_EXPANSION=N/A; R_AND_D_CAPEX_BACKLOG=N/A",
+        "ADJUSTED_GROWTH_SCORE: 100%",
+    )
+    for source, expected in (
+        ("calculated_from_statement_diluted_eps", "EARNINGS_GROWTH_FY"),
+        ("calculated_from_statement_basic_eps", "EARNINGS_GROWTH_FY"),
+        ("calculated_from_statement_net_income_proxy", None),
+        ("UNKNOWN", "EARNINGS_GROWTH_FY"),
+    ):
+        snapshot = build_pre_senior_snapshot(
+            _with_structured_metrics(
+                {},
+                {
+                    "earningsGrowth": 0.3,
+                    "_earningsGrowth_source": source,
+                    "earningsGrowth_MRQ": 0.4,
+                    "_earningsGrowth_MRQ_source": "calculated_from_quarterly",
+                    "earningsGrowth_TTM": 0.5,
+                    "_earningsGrowth_TTM_source": "calculated_from_quarterly",
+                },
+            )
+        )
+        claims = snapshot["claims"]
+        derived = add_validated_derivations(snapshot, report)
+        card = derived["scorecards"]["GROWTH"]
+        deps = card["criteria"]["EPS_GROWTH"]["derived_from"]
+        assert [claims[key]["field"] for key in deps] == (
+            [expected] if expected else []
+        )
+        assert card["lineage_gaps"] == ([] if expected else ["EPS_GROWTH"])
+        # Earnings facts remain eligible for legitimate consumers.
+        assert all(
+            c["decision_eligible"]
+            for c in claims.values()
+            if c["field"].startswith("EARNINGS_GROWTH") and c["coverage"] == "FOUND"
+        )
+        if expected:
+            conflicted = deepcopy(snapshot)
+            fy_key = next(key for key, c in claims.items() if c["field"] == expected)
+            conflicted["claims"]["conflicting-fy"] = {
+                **claims[fy_key],
+                "id": "conflicting-fy",
+                "value": "99%",
+            }
+            assert add_validated_derivations(conflicted, report)["scorecards"][
+                "GROWTH"
+            ]["lineage_gaps"] == ["EPS_GROWTH"]
+            # An ineligible FY fact falls through to an eligible TTM observation.
+            conflicted = deepcopy(snapshot)
+            conflicted["claims"][fy_key]["decision_eligible"] = False
+            ttm = next(
+                c
+                for c in conflicted["claims"].values()
+                if c["field"] == "EARNINGS_GROWTH_TTM"
+            )
+            ttm["source_provider"] = "legacy-provider"
+            deps = add_validated_derivations(conflicted, report)["scorecards"][
+                "GROWTH"
+            ]["criteria"]["EPS_GROWTH"]["derived_from"]
+            assert [conflicted["claims"][key]["field"] for key in deps] == [
+                "EARNINGS_GROWTH_TTM"
+            ]
+
+
+def test_captured_0667_zero_eps_award_uses_fy_basis_without_changing_denominator():
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics(
+            {},
+            {
+                "revenueGrowth": 0.4,
+                "earningsGrowth": 0.114,
+                "grossMargins": 0.4,
+                "_earningsGrowth_source": "calculated_from_statement_diluted_eps",
+            },
+        )
+    )
+    snapshot["claims"]["claim:profit"] = {
+        "id": "claim:profit",
+        "field": "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
+        "value": "13.0%",
+        "kind": "FACT",
+        "decision_eligible": True,
+        "authority": "PRIMARY",
+        "coverage": "FOUND",
+    }
+    report = _fundamentals(
+        "GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=1; EPS_GROWTH=0; ROA_ROE_IMPROVING=N/A; GROSS_MARGIN=1; GLOBAL_EXPANSION=0; R_AND_D_CAPEX_BACKLOG=0",
+        "ADJUSTED_GROWTH_SCORE: 40%",
+    )
+    derived = add_validated_derivations(snapshot, report)
+    card = derived["scorecards"]["GROWTH"]
+    assert card["available"] == 5 and card["percentage"] == 40
+    assert not card["lineage_gaps"]
+    projected = project_analysis_report(report, derived)
+    assert "EPS_GROWTH: 0/1 — EARNINGS_GROWTH_FY=11.4%" in projected
+    assert "EPS_GROWTH: 0/1 — LATEST_RESULTS_EARNINGS_GROWTH_YOY" not in projected
+
+
+def test_known_net_income_growth_alone_never_supports_eps_rubric():
+    for raw, field in (
+        ("earningsGrowth_MRQ", "EARNINGS_GROWTH_MRQ"),
+        ("earningsGrowth_TTM", "EARNINGS_GROWTH_TTM"),
+    ):
+        snapshot = build_pre_senior_snapshot(
+            _with_structured_metrics(
+                {}, {raw: 0.3, f"_{raw}_source": "calculated_from_quarterly"}
+            )
+        )
+        report = _fundamentals(
+            "GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=N/A; EPS_GROWTH=1; ROA_ROE_IMPROVING=N/A; GROSS_MARGIN=N/A; GLOBAL_EXPANSION=N/A; R_AND_D_CAPEX_BACKLOG=N/A",
+            "ADJUSTED_GROWTH_SCORE: 100%",
+        )
+        derived = add_validated_derivations(snapshot, report)
+        assert derived["scorecards"]["GROWTH"]["lineage_gaps"] == ["EPS_GROWTH"]
+        assert any(
+            c["field"] == field and c["decision_eligible"]
+            for c in derived["claims"].values()
+        )

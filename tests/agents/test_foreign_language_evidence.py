@@ -1559,3 +1559,953 @@ def test_capacity_preflight_missing_or_malformed_source_cannot_promote(supplemen
     )
     assert "CAPACITY_UTILIZATION: N/A" in normalized
     assert "CAPACITY_EVIDENCE_STATUS: UNSUPPORTED" in normalized
+
+
+@pytest.mark.parametrize("percentage", [50.01, 69.72])
+@pytest.mark.parametrize(
+    "unrelated",
+    [
+        "independent non-executive directors oversee the board",
+        "獨立非執行董事 oversee the board",
+        "independent auditors review the accounts",
+        "minority shareholders have no control",
+    ],
+)
+def test_verified_majority_precedes_unrelated_independence(percentage, unrelated):
+    source = "https://issuer.example/ownership"
+    content = f"Lu Ruibo owns {percentage}% of Company shares, while {unrelated}."
+    normalized = normalize_foreign_language_evidence(
+        _report(
+            holder=f"Lu Ruibo ({percentage}%)",
+            controller="NONE",
+            status="NOT_CONTROLLED",
+            relationship="independent",
+            source_url=source,
+        ),
+        [],
+        ticker="1286.HK",
+        additional_records=[_record(content, urls=(source,))],
+    )
+    assert "Control Status: CONTROLLED" in normalized
+    assert "Control Basis: MAJORITY_VOTING_RIGHTS" in normalized
+    assert f"Controlling Shareholder: Lu Ruibo ({percentage:g}%)" in normalized
+    assert "Relationship: UNKNOWN" in normalized
+    card = build_card(
+        ticker="1286.HK",
+        company_name="TEST",
+        merged_data={},
+        senior_metrics={},
+        fla_report=normalized,
+    )
+    assert card.control_status == "CONTROLLED"
+
+
+@pytest.mark.parametrize(
+    "holder", ["Lu Ruibo", "Foo and Bar Holdings", "BenQ Materials Corp."]
+)
+@pytest.mark.parametrize(
+    "contrary",
+    [
+        "but has no control of the Company",
+        ", and his voting rights are capped at 30%",
+        "and uses the equity method for its investment",
+        ", independent directors oversee the board, but is not a controlling shareholder",
+    ],
+)
+def test_majority_conflicts_require_actual_holder_bound_source(holder, contrary):
+    source = "https://issuer.example/ownership"
+    normalized = normalize_foreign_language_evidence(
+        _report(
+            holder=f"{holder} (69.72%)",
+            controller="NONE",
+            relationship="independent",
+            source_url=source,
+        ),
+        [],
+        ticker="TEST",
+        additional_records=[
+            _record(
+                f"{holder} owns 69.72% of Company shares {contrary}.", urls=(source,)
+            )
+        ],
+    )
+    assert "Control Status: UNKNOWN" in normalized
+    assert "Control Basis: CONFLICTING_CONTROL_EVIDENCE" in normalized
+
+
+@pytest.mark.parametrize(
+    "pct,content,relationship,expected,basis",
+    [
+        (
+            30,
+            "Lu Ruibo owns 30% of Company shares and is independent of the Company.",
+            "independent",
+            "NOT_CONTROLLED",
+            "NONE",
+        ),
+        (
+            25,
+            "Lu Ruibo owns 25% of Company shares with significant influence under the equity method.",
+            "equity method",
+            "NOT_CONTROLLED",
+            "SIGNIFICANT_INFLUENCE_ONLY",
+        ),
+        (
+            20,
+            "Lu Ruibo owns 20% of Company shares. The Company has an independent business.",
+            "independent",
+            "UNKNOWN",
+            "UNKNOWN",
+        ),
+        (
+            20,
+            "Lu Ruibo owns 20% of Company shares; independent third parties advise the Company.",
+            "independent",
+            "UNKNOWN",
+            "UNKNOWN",
+        ),
+        (
+            50,
+            "Lu Ruibo owns 50% of Company shares.",
+            "independent",
+            "UNKNOWN",
+            "UNKNOWN",
+        ),
+        (
+            69.72,
+            "Lu Ruibo owns 69.72% of Company shares.",
+            "equity method",
+            "CONTROLLED",
+            "MAJORITY_VOTING_RIGHTS",
+        ),
+    ],
+)
+def test_control_relationship_boundaries(pct, content, relationship, expected, basis):
+    source = "https://issuer.example/ownership"
+    normalized = normalize_foreign_language_evidence(
+        _report(
+            holder=f"Lu Ruibo ({pct}%)",
+            controller="NONE",
+            relationship=relationship,
+            source_url=source,
+        ),
+        [],
+        ticker="TEST",
+        additional_records=[_record(content, urls=(source,))],
+    )
+    assert f"Control Status: {expected}" in normalized
+    assert f"Control Basis: {basis}" in normalized
+
+
+@pytest.mark.parametrize(
+    "case", ["failed", "blocked", "wrong_url", "wrong_holder", "unverified"]
+)
+def test_unverified_majority_cannot_authorize_control(case):
+    source = "https://issuer.example/ownership"
+    content = (
+        "Lu Ruibo owns 69.72% of Company shares and is independent of the Company."
+    )
+    record = _record(content, urls=(source,))
+    if case in {"failed", "blocked"}:
+        record = replace(record, evidence_status="UNAVAILABLE")
+    elif case == "wrong_url":
+        record = _record(content, urls=("https://other.example/ownership",))
+    elif case == "wrong_holder":
+        record = _record(content.replace("Lu Ruibo", "Other Person"), urls=(source,))
+    else:
+        record = _record("Lu Ruibo is independent of the Company.", urls=(source,))
+    normalized = normalize_foreign_language_evidence(
+        _report(
+            holder="Lu Ruibo (69.72%)",
+            controller="NONE",
+            relationship="independent",
+            source_url=source,
+        ),
+        [],
+        ticker="TEST",
+        additional_records=[record],
+    )
+    assert "Control Status: CONTROLLED" not in normalized
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "and minority shareholders have no control",
+        "while minority shareholders have no control",
+        "and independent non-executive directors oversee the board",
+    ],
+)
+def test_other_subject_cannot_create_majority_conflict(tail):
+    source = "https://issuer.example/ownership"
+    normalized = normalize_foreign_language_evidence(
+        _report(
+            holder="Lu Ruibo (69.72%)",
+            controller="NONE",
+            relationship="independent",
+            source_url=source,
+        ),
+        [],
+        ticker="TEST",
+        additional_records=[
+            _record(f"Lu Ruibo owns 69.72% of Company shares, {tail}.", urls=(source,))
+        ],
+    )
+    assert "Control Status: CONTROLLED" in normalized
+    assert "Control Basis: MAJORITY_VOTING_RIGHTS" in normalized
+
+
+@pytest.mark.parametrize(
+    "rights", ["non-voting shares", "shares with no voting rights"]
+)
+def test_majority_percentage_with_explicit_nonvoting_rights_is_conflicting(rights):
+    source = "https://issuer.example/ownership"
+    normalized = normalize_foreign_language_evidence(
+        _report(
+            holder="Lu Ruibo (69.72%)",
+            controller="NONE",
+            relationship="independent",
+            source_url=source,
+        ),
+        [],
+        ticker="TEST",
+        additional_records=[
+            _record(f"Lu Ruibo owns 69.72% of the Company's {rights}.", urls=(source,))
+        ],
+    )
+    assert "Control Status: UNKNOWN" in normalized
+    assert "Control Basis: CONFLICTING_CONTROL_EVIDENCE" in normalized
+
+
+@pytest.mark.parametrize("failed,blocked", [(True, False), (False, True)])
+def test_failed_or_blocked_raw_ownership_record_cannot_verify_majority(failed, blocked):
+    import hashlib
+
+    source = "https://issuer.example/ownership"
+    content = "Lu Ruibo owns 69.72% of Company shares."
+    record = evidence_record_to_tool_evidence(
+        {
+            "tool_name": "get_official_document",
+            "content": content,
+            "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
+            "urls": [source],
+            "authority_by_url": [[source, "PRIMARY_ISSUER"]],
+            "evidence_status": "EVIDENCE_FOUND",
+            "execution_status": "FAILED" if failed else "SUCCEEDED",
+            "blocked": blocked,
+        }
+    )
+    normalized = normalize_foreign_language_evidence(
+        _report(holder="Lu Ruibo (69.72%)", controller="NONE", source_url=source),
+        [],
+        ticker="TEST",
+        additional_records=[record],
+    )
+    assert "Control Status: UNKNOWN" in normalized
+    assert "Ownership Evidence Status: REJECTED" in normalized
+
+
+@pytest.mark.parametrize("holder", ["", "UNKNOWN", "N/A"])
+def test_absent_holder_never_scans_or_binds_relationship_sentences(holder):
+    from src.agents.foreign_language_evidence import _holder_sentences
+
+    with patch(
+        "src.agents.foreign_language_evidence.re.finditer",
+        side_effect=AssertionError("unknown holder must stop before scanning"),
+    ):
+        assert (
+            _holder_sentences(
+                "Independent directors oversee the Company. " * 1000, holder
+            )
+            == []
+        )
+
+
+def test_captured_teck_class_votes_do_not_authorize_issuer_control():
+    frozen = load_frozen_regression("teck_share_class_ownership.json")
+    normalized = normalize_foreign_language_evidence(
+        _report(
+            holder=frozen["holder"],
+            controller="UNKNOWN",
+            status="UNKNOWN",
+            basis="UNKNOWN",
+            relationship="independent",
+            source_url=frozen["source_url"],
+        ),
+        [],
+        ticker=frozen["ticker"],
+        additional_records=[_record(frozen["content"], urls=(frozen["source_url"],))],
+    )
+    assert "Ownership Evidence Status: VERIFIED_URL" in normalized
+    assert "Control Status: UNKNOWN" in normalized
+    assert "Control Basis: UNKNOWN" in normalized
+    assert "Controlling Shareholder: UNKNOWN" in normalized
+    assert (
+        build_card(
+            ticker=frozen["ticker"],
+            company_name="Teck",
+            merged_data={},
+            senior_metrics={},
+            fla_report=normalized,
+        ).control_status
+        == "UNKNOWN"
+    )
+
+
+@pytest.mark.parametrize(
+    "content,expected,basis",
+    [
+        ("Holder owns 60% of Class A.", "UNKNOWN", "UNKNOWN"),
+        ("Holder owns 60% of Class II.", "UNKNOWN", "UNKNOWN"),
+        ("Holder owns 60% of Class 1.", "UNKNOWN", "UNKNOWN"),
+        (
+            "Holder owns 60% of Company shares in a world-class business facing a class action.",
+            "CONTROLLED",
+            "MAJORITY_VOTING_RIGHTS",
+        ),
+        (
+            "Holder owns 60% of Class A shares.",
+            "UNKNOWN",
+            "UNKNOWN",
+        ),
+        (
+            "| Shareholder | Class A Votes (%) | Aggregate Votes (%) |\n"
+            "| --- | --- | --- |\n| Holder | 60% | 34% |",
+            "UNKNOWN",
+            "UNKNOWN",
+        ),
+        (
+            "Holder owns 60% of Class A shares and holds 60% of total voting rights.",
+            "CONTROLLED",
+            "MAJORITY_VOTING_RIGHTS",
+        ),
+        (
+            "Holder owns 60% of Class A shares. Holder holds 60% of total voting rights.",
+            "CONTROLLED",
+            "MAJORITY_VOTING_RIGHTS",
+        ),
+        (
+            "Holder owns 60% of Class A shares. Other Holder holds 60% of total voting rights.",
+            "UNKNOWN",
+            "UNKNOWN",
+        ),
+        (
+            "Holder owns 60% of Company shares. Other Fund owns Class A shares.",
+            "CONTROLLED",
+            "MAJORITY_VOTING_RIGHTS",
+        ),
+        (
+            "| Shareholder | Class A Votes (%) |\n| Other Fund | 80% |\n\n"
+            "Holder owns 60% of Company shares.",
+            "CONTROLLED",
+            "MAJORITY_VOTING_RIGHTS",
+        ),
+        (
+            "Holder owns 60% of Class A shares and has contractual control of Company.",
+            "CONTROLLED",
+            "CONTRACTUAL_RIGHTS",
+        ),
+        (
+            "Holder owns 60% of Class A shares. Other Fund has contractual control of Company.",
+            "UNKNOWN",
+            "UNKNOWN",
+        ),
+    ],
+)
+def test_majority_share_class_scope_is_bound_to_ownership_context(
+    content, expected, basis
+):
+    source = "https://issuer.example/ownership"
+    normalized = normalize_foreign_language_evidence(
+        _report(
+            holder="Holder (60%)",
+            controller="Holder (60%)",
+            basis="CONTRACTUAL_RIGHTS",
+            source_url=source,
+        ),
+        [_tool(content + f"\n{source}", name="get_official_filings")],
+        ticker="TEST",
+    )
+    assert f"Control Status: {expected}" in normalized
+    assert f"Control Basis: {basis}" in normalized
+
+
+@pytest.mark.parametrize(
+    "holder,statement",
+    [
+        (
+            "Lu Ruibo",
+            "Mr. Lu Ruibo and his associates are interested in {pct}% of the issued shares.",
+        ),
+        ("Lu Ruibo", "Lu Ruibo and her associates hold {pct}% of issued shares."),
+        ("Holder", "Holder and its associates own {pct}% of issued shares."),
+        ("Holder", "Holder and their associates own {pct}% of issued shares."),
+        (
+            "Holder",
+            "Holder together with its associates holds {pct}% of issued shares.",
+        ),
+        (
+            "Holder",
+            "Holder, together with its associates, holds {pct}% of issued shares.",
+        ),
+        ("Capital Associates", "Capital Associates owns {pct}% of issued shares."),
+        (
+            "Lu Ruibo",
+            "Lu Ruibo holds {pct}%. Lu Ruibo is not an associate of any director.",
+        ),
+        ("Lu Ruibo", "Lu Ruibo holds {pct}%. Lu Ruibo does not use the equity method."),
+        (
+            "Lu Ruibo",
+            "Lu Ruibo holds {pct}%. Lu Ruibo does not have significant influence.",
+        ),
+        (
+            "Lu Ruibo",
+            "Lu Ruibo holds {pct}%. Lu Ruibo is not accounted for as an associate.",
+        ),
+        (
+            "Lu Ruibo",
+            "Lu Ruibo holds {pct}%. Lu Ruibo discusses significant influence in the annual report.",
+        ),
+        ("Lu Ruibo", "Lu Ruibo holds {pct}%, while Other Fund uses the equity method."),
+    ],
+)
+@pytest.mark.parametrize("pct", [25, 69.72])
+@pytest.mark.parametrize(
+    "relationship", ["associate", "equity method", "significant influence"]
+)
+def test_coholders_names_and_negated_accounting_do_not_establish_non_control(
+    holder, statement, pct, relationship
+):
+    source = "https://issuer.example/ownership"
+    normalized = normalize_foreign_language_evidence(
+        _report(
+            holder=f"{holder} ({pct}%)", relationship=relationship, source_url=source
+        ),
+        [],
+        ticker="1286.HK",
+        additional_records=[_record(statement.format(pct=pct), urls=(source,))],
+    )
+    expected = "CONTROLLED" if pct > 50 else "UNKNOWN"
+    assert f"Control Status: {expected}" in normalized
+    assert "CONFLICTING_CONTROL_EVIDENCE" not in normalized
+    card = build_card(
+        ticker="1286.HK",
+        company_name="TEST",
+        merged_data={},
+        senior_metrics={},
+        fla_report=normalized,
+    )
+    assert card.control_status == expected
+
+
+@pytest.mark.parametrize("pct", [25, 69.72])
+@pytest.mark.parametrize(
+    "accounting",
+    [
+        "uses the equity method for its investment",
+        "has significant influence only",
+        "is accounted for as an associate",
+        "is classified as an associate",
+        "is an associate of the Company",
+    ],
+)
+def test_explicit_accounting_relationship_remains_authoritative(pct, accounting):
+    source = "https://issuer.example/ownership"
+    normalized = normalize_foreign_language_evidence(
+        _report(holder=f"Holder ({pct}%)", relationship="associate", source_url=source),
+        [],
+        ticker="TEST",
+        additional_records=[
+            _record(f"Holder owns {pct}% and {accounting}.", urls=(source,))
+        ],
+    )
+    assert (
+        f"Control Status: {'UNKNOWN' if pct > 50 else 'NOT_CONTROLLED'}" in normalized
+    )
+    assert (
+        f"Control Basis: {'CONFLICTING_CONTROL_EVIDENCE' if pct > 50 else 'SIGNIFICANT_INFLUENCE_ONLY'}"
+        in normalized
+    )
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "and its associates",
+        "is not an associate",
+        "does not use the equity method",
+        "has significant influence only",
+    ],
+)
+@pytest.mark.parametrize("failed,blocked", [(True, False), (False, True)])
+def test_relationship_words_cannot_revive_failed_or_blocked_evidence(
+    phrase, failed, blocked
+):
+    source = "https://issuer.example/ownership"
+    record = evidence_record_to_tool_evidence(
+        {
+            "tool_name": "get_official_document",
+            "content": f"Holder owns 69.72% and {phrase}.",
+            "urls": [source],
+            "execution_status": "FAILED" if failed else "SUCCEEDED",
+            "blocked": blocked,
+            "evidence_status": "EVIDENCE_FOUND",
+        }
+    )
+    normalized = normalize_foreign_language_evidence(
+        _report(holder="Holder (69.72%)", relationship="associate", source_url=source),
+        [],
+        ticker="TEST",
+        additional_records=[record],
+    )
+    assert "Control Status: UNKNOWN" in normalized
+    assert "Ownership Evidence Status: REJECTED" in normalized
+
+
+@pytest.mark.parametrize("pct", [None, 25, 69.72])
+@pytest.mark.parametrize(
+    "assertion,supported",
+    [
+        ("Holder uses the equity method for its investment.", True),
+        ("Holder uses the equity method for its stake, as at 31 May 2026.", True),
+        ("Holder uses the equity method for its stake, as at 31 may 2026.", True),
+        ("Holder uses the equity method for its stake, as at May 31, 2026.", True),
+        ("Holder uses the equity method for its stake, as at MAY 31, 2026.", True),
+        ("As at 31 May 2026, Holder uses the equity method for its stake.", True),
+        ("As at 31  May 2026, Holder uses the equity method for its stake.", True),
+        ("As at 31\tMay\t2026, Holder uses the equity method for its stake.", True),
+        ("Holder uses the equity method for its stake, as at 31  May 2026.", True),
+        ("Holder uses the equity method for its stake, as at May\t31,\t2026.", True),
+        ("Holder uses the equity method for its stake, as at 31 Feb 2026.", True),
+        ("Holder has significant influence over the company, which may change.", True),
+        (
+            "Holder has significant influence over the company, but it might change.",
+            True,
+        ),
+        (
+            "Holder has significant influence over the company, which may be unverified.",
+            False,
+        ),
+        (
+            "Holder has significant influence over the company, but it may be untrue.",
+            False,
+        ),
+        (
+            "Holder has significant influence over the company, only if its options vest.",
+            False,
+        ),
+        ("Holder may have significant influence over the company.", False),
+        ("Holder MAY have significant influence over the company.", False),
+        ("May Holder use the equity method for its investment?", False),
+        ("Holder applies the equity-method for its investment.", True),
+        ("Holder is accounted for as an associate.", True),
+        ("Holder is treated as an associate.", True),
+        ("Holder is an associate of the Company.", True),
+        ("Holder has significant influence only.", True),
+        ("Holder exercises significant influence over the group.", True),
+        ("Holder is the entity with significant influence over the issuer.", True),
+        ("Holder does not use the equity method.", False),
+        ("Holder never uses the equity method.", False),
+        ("Holder is not accounted for as an associate.", False),
+        ("Holder has no significant influence over the group.", False),
+        ("Holder does not have significant influence over the group.", False),
+        ("Holder may use the equity method.", False),
+        ("Holder uses the equity method if the transaction closes.", False),
+        (
+            "Holder uses the equity method for its investment, but this is unverified.",
+            False,
+        ),
+        (
+            "Holder has significant influence only, according to an unverified claim.",
+            False,
+        ),
+        ("Holder uses the equity method subject to shareholder approval.", False),
+        ("Holder uses the equity method, but the relationship is uncertain.", False),
+        (
+            "Holder uses the equity method, but Other Fund may change its investment plans.",
+            True,
+        ),
+        (
+            "Holder uses the equity method, and its associates may change their investment plans.",
+            True,
+        ),
+        (
+            "Holder has significant influence only, but unrelated financial projections are unverified.",
+            True,
+        ),
+        ("Holder has significant influence only if its options vest.", False),
+        ("Holder might be classified as an associate.", False),
+        ("Holder could have significant influence over the group.", False),
+        ("If Holder uses the equity method, accounting will change.", False),
+        (
+            "Whether Holder has significant influence over the group remains unclear.",
+            False,
+        ),
+        ('The report quotes "Holder uses the equity method" as a hypothetical.', False),
+        (
+            "The report quotes 'Holder is treated as an associate' as a hypothetical.",
+            False,
+        ),
+        ("Holder is an associate of a director.", False),
+        ("Holder has significant influence in the industry.", False),
+        ("Holder discusses the equity method and significant influence.", False),
+        (
+            "Holder and its associates are unrelated to the accounting assessment.",
+            False,
+        ),
+        ("Holder is independent. Other Fund uses the equity method.", False),
+        (
+            "Holder is independent, while Other Fund has significant influence over the group.",
+            False,
+        ),
+        (
+            "Holder owns shares and its associate Other Fund uses the equity method.",
+            False,
+        ),
+        ("Holder says Other Fund uses the equity method.", False),
+        ("Holder 未採用權益法。", False),
+        ("Holder 財務成本 採用權益法認列之關聯企業及合資損益之份額 489,717", False),
+        ("Holder 为联营公司。", False),
+        (
+            "Holder 持分法による投資利益が増加し、その他の営業収益も大きく増えました。",
+            False,
+        ),
+        ("Holder uses the equity method. 獨立非執行董事 oversee the board.", True),
+        ("獨立非執行董事 oversee the board. Holder uses the equity method.", True),
+        (
+            "Holder does not use the equity method, but Holder has significant influence only.",
+            True,
+        ),
+    ],
+)
+def test_accounting_assertion_semantics_across_stake_and_relationship_only(
+    pct, assertion, supported
+):
+    source = "https://issuer.example/ownership"
+    content = (f"Holder owns {pct}%. " if pct is not None else "") + assertion
+    normalized = normalize_foreign_language_evidence(
+        _report(
+            holder="Holder (25%)" if pct is None else f"Holder ({pct}%)",
+            relationship="equity method",
+            source_url=source,
+        ),
+        [],
+        ticker="TEST",
+        additional_records=[_record(content, urls=(source,))],
+    )
+    expected = (
+        "UNKNOWN"
+        if supported and pct is not None and pct > 50
+        else "NOT_CONTROLLED"
+        if supported
+        else "CONTROLLED"
+        if pct is not None and pct > 50
+        else "UNKNOWN"
+    )
+    assert f"Control Status: {expected}" in normalized
+    if pct is None:
+        assert (
+            f"Ownership Evidence Status: {'DISCLOSED_UNVERIFIED' if supported else 'REJECTED'}"
+            in normalized
+        )
+        assert "Largest Shareholder: UNKNOWN" in normalized
+    card = build_card(
+        ticker="TEST",
+        company_name="TEST",
+        merged_data={},
+        senior_metrics={},
+        fla_report=normalized,
+    )
+    assert card.control_status == expected
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Holder is interested in an acquisition worth 69.72% of revenue.",
+        "Holder may be interested in 69.72% of the issued shares.",
+        "Holder is interested in 69.72% of the issued shares if its options vest.",
+        "Holder is interested in 69.72% of the issued shares subject to shareholder approval.",
+        "Holder is interested in 69.72% of the issued shares, according to an unverified claim.",
+        "Holder is interested in 69.72% of the issued shares, but this is unverified.",
+        "It is uncertain whether Holder is interested in 69.72% of the issued shares.",
+        'The report quotes "Holder is interested in 69.72% of the issued shares".',
+        "Holder is not interested in 69.72% of the issued shares.",
+        "Holder were formerly interested in 69.72% of the issued shares.",
+        "Holder is interested in 69.72% of another investor's portfolio.",
+        "Holder is interested in Company shares. Revenue grew 69.72%.",
+    ],
+)
+def test_interest_without_bound_issued_share_percentage_cannot_verify_stake(content):
+    source = "https://issuer.example/ownership"
+    normalized = normalize_foreign_language_evidence(
+        _report(holder="Holder (69.72%)", source_url=source),
+        [],
+        ticker="TEST",
+        additional_records=[_record(content, urls=(source,))],
+    )
+    assert "Ownership Evidence Status: REJECTED" in normalized
+    assert "Control Status: UNKNOWN" in normalized
+    assert (
+        build_card(
+            ticker="TEST",
+            company_name="TEST",
+            merged_data={},
+            senior_metrics={},
+            fla_report=normalized,
+        ).control_status
+        == "UNKNOWN"
+    )
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "",
+        " as at 31 May 2026",
+        " as at 31 may 2026",
+        " as at May 31, 2026",
+        " as at MAY 31, 2026",
+        " as at 31  May 2026",
+        " as at May\t31,\t2026",
+        ", which may change",
+        ", but Other Fund may change its investment plans",
+        ", and its associates may change their investment plans",
+    ],
+)
+def test_current_interest_assertion_preserves_normal_and_independent_clauses(suffix):
+    source = "https://issuer.example/ownership"
+    normalized = normalize_foreign_language_evidence(
+        _report(holder="Holder (69.72%)", source_url=source),
+        [],
+        ticker="TEST",
+        additional_records=[
+            _record(
+                f"Holder is interested in 69.72% of the issued shares{suffix}.",
+                urls=(source,),
+            )
+        ],
+    )
+    assert "Ownership Evidence Status: VERIFIED_URL" in normalized
+    assert "Control Status: CONTROLLED" in normalized
+    assert (
+        build_card(
+            ticker="TEST",
+            company_name="TEST",
+            merged_data={},
+            senior_metrics={},
+            fla_report=normalized,
+        ).control_status
+        == "CONTROLLED"
+    )
+
+
+def test_restored_bare_associate_defect_is_killed_by_captured_regression(monkeypatch):
+    import src.agents.foreign_language_evidence as evidence
+
+    monkeypatch.setattr(
+        evidence,
+        "_supports_non_control_relationship",
+        lambda sentence, holder, relationship: any(
+            term in sentence.casefold()
+            for term in (
+                "equity method",
+                "equity-method",
+                "significant influence",
+                "associate",
+            )
+        ),
+    )
+    with pytest.raises(AssertionError):
+        test_coholders_names_and_negated_accounting_do_not_establish_non_control(
+            "Lu Ruibo",
+            "Mr. Lu Ruibo and his associates are interested in {pct}% of the issued shares.",
+            69.72,
+            "associate",
+        )
+    test_explicit_accounting_relationship_remains_authoritative(
+        25, "uses the equity method for its investment"
+    )
+
+
+def test_restored_class_majority_defect_is_killed_by_teck_regression(monkeypatch):
+    import src.agents.foreign_language_evidence as evidence
+
+    monkeypatch.setattr(
+        evidence, "_majority_is_class_scoped", lambda records, holder, pct: False
+    )
+    with pytest.raises(AssertionError):
+        test_captured_teck_class_votes_do_not_authorize_issuer_control()
+
+
+@pytest.mark.parametrize(
+    "holder",
+    [
+        "Acme Co. Limited",
+        "Acme Corp. Holdings",
+        "Acme Inc. Group",
+        "Acme Ltd. Holdings",
+        "Acme Limited",
+        "May Holdings",
+        "MAY Holdings Co. Limited",
+    ],
+)
+@pytest.mark.parametrize(
+    "assertion,supported",
+    [
+        ("{holder} uses the equity method for its investment.", True),
+        ("{holder} is accounted for as an associate.", True),
+        ("{holder} has significant influence only.", True),
+        ("{holder} does not use the equity method.", False),
+        ("{holder} may use the equity method.", False),
+        ("{holder} uses the equity method, but this is unverified.", False),
+        ("{holder} and its associates are independent investors.", False),
+        (
+            "{holder} does not use the equity method, but {holder} has significant influence only.",
+            True,
+        ),
+        ("Other{holder} uses the equity method for its investment.", False),
+    ],
+)
+@pytest.mark.parametrize("pct", [None, 25, 69.72])
+def test_corporate_abbreviation_normalization_preserves_exact_accounting_actor(
+    holder, assertion, supported, pct
+):
+    source = "https://issuer.example/ownership"
+    content = (
+        f"{holder} holds {pct}%. " if pct is not None else ""
+    ) + assertion.format(holder=holder)
+    normalized = normalize_foreign_language_evidence(
+        _report(
+            holder=f"{holder} ({25 if pct is None else pct}%)",
+            relationship="equity method",
+            source_url=source,
+        ),
+        [],
+        ticker="TEST",
+        additional_records=[_record(content, urls=(source,))],
+    )
+    expected = (
+        "UNKNOWN"
+        if supported and pct is not None and pct > 50
+        else "NOT_CONTROLLED"
+        if supported
+        else "CONTROLLED"
+        if pct is not None and pct > 50
+        else "UNKNOWN"
+    )
+    assert f"Control Status: {expected}" in normalized
+    assert (
+        build_card(
+            ticker="TEST",
+            company_name="TEST",
+            merged_data={},
+            senior_metrics={},
+            fla_report=normalized,
+        ).control_status
+        == expected
+    )
+    if pct is None:
+        assert (
+            f"Ownership Evidence Status: {'DISCLOSED_UNVERIFIED' if supported else 'REJECTED'}"
+            in normalized
+        )
+
+
+@pytest.mark.parametrize(
+    "holder",
+    [
+        "Acme Co. Limited",
+        "Acme Corp. Holdings",
+        "Acme Inc. Group",
+        "Acme Ltd. Holdings",
+    ],
+)
+@pytest.mark.parametrize(
+    "tail,controlled",
+    [
+        ("is interested in 69.72% of the issued shares", True),
+        ("and its associates are interested in 69.72% of the issued shares", True),
+        ("is interested in 69.72% of the issued shares if its options vest", False),
+        (
+            "is interested in 69.72% of the issued shares subject to shareholder approval",
+            False,
+        ),
+        ("is not interested in 69.72% of the issued shares", False),
+    ],
+)
+def test_corporate_abbreviations_bind_interest_and_certainty(holder, tail, controlled):
+    source = "https://issuer.example/ownership"
+    normalized = normalize_foreign_language_evidence(
+        _report(holder=f"{holder} (69.72%)", source_url=source),
+        [],
+        ticker="TEST",
+        additional_records=[_record(f"{holder} {tail}.", urls=(source,))],
+    )
+    expected = "CONTROLLED" if controlled else "UNKNOWN"
+    assert f"Control Status: {expected}" in normalized
+    assert (
+        build_card(
+            ticker="TEST",
+            company_name="TEST",
+            merged_data={},
+            senior_metrics={},
+            fla_report=normalized,
+        ).control_status
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "holder",
+    [
+        "Acme Co. Limited",
+        "Acme Corp. Holdings",
+        "Acme Inc. Group",
+        "Acme Ltd. Holdings",
+    ],
+)
+@pytest.mark.parametrize(
+    "votes,controlled", [(None, False), ("60", True), ("34", False)]
+)
+def test_corporate_abbreviations_bind_class_scope_and_total_issuer_votes(
+    holder, votes, controlled
+):
+    source = "https://issuer.example/ownership"
+    content = f"{holder} holds 60% of Class A shares."
+    if votes is not None:
+        content += f" {holder} holds {votes}% of total voting rights."
+    normalized = normalize_foreign_language_evidence(
+        _report(holder=f"{holder} (60%)", basis="UNKNOWN", source_url=source),
+        [],
+        ticker="TEST",
+        additional_records=[_record(content, urls=(source,))],
+    )
+    expected = "CONTROLLED" if controlled else "UNKNOWN"
+    assert f"Control Status: {expected}" in normalized
+    assert (
+        build_card(
+            ticker="TEST",
+            company_name="TEST",
+            merged_data={},
+            senior_metrics={},
+            fla_report=normalized,
+        ).control_status
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "holder", ["Holder", "Acme Co. Limited", "Acme Corp. Holdings"]
+)
+def test_exact_actor_boundary_rejects_embedded_holder_name(holder):
+    from src.agents.foreign_language_evidence import (
+        _holder_sentences,
+        _supports_non_control_relationship,
+    )
+
+    sentence = f"Other{holder} uses the equity method for its investment."
+    assert not any(
+        _supports_non_control_relationship(clause, holder, "EQUITY METHOD")
+        for clause in _holder_sentences(sentence, holder)
+    )

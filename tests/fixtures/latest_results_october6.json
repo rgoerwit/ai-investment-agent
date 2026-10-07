@@ -655,5 +655,39 @@
         "content_sha256": "8dab76b936410b38393ee46963b166912f7255e3f6550f01fbc49a23389afe75"
       }
     ]
+  },
+  {
+    "case": "1112_HK_captured_flattened_results",
+    "ticker": "1112.HK",
+    "source_artifact": "1112.HK_20261006_191047_analysis.json",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: Six months ended 30 June 2026\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: Six months ended 30 June 2025\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 6\nLATEST_RESULTS_CURRENCY: RMB\nLATEST_RESULTS_REPORTING_UNIT: million\nLATEST_RESULTS_REVENUE: 8695.9\nLATEST_RESULTS_PRIOR_REVENUE: 7019.2\nLATEST_RESULTS_EARNINGS: 610.6\nLATEST_RESULTS_PRIOR_EARNINGS: 71.0\nLATEST_RESULTS_EARNINGS_SCOPE: Net profit (Profit for the period)\nLATEST_RESULTS_SOURCE_URL: https://www.hh.global/news/h-and-h-group-interim-results-2026-revenue-up-23-7\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: COMPARATIVE_ROWS_UNBOUND\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---",
+    "evidence_records": [
+      {
+        "tool_name": "get_official_document",
+        "urls": [
+          "https://www.hh.global/news/h-and-h-group-interim-results-2026-revenue-up-23-7"
+        ],
+        "requested_urls": [
+          "https://www.hh.global/news/h-and-h-group-interim-results-2026-revenue-up-23-7"
+        ],
+        "evidence_status": "EVIDENCE_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://www.hh.global/news/h-and-h-group-interim-results-2026-revenue-up-23-7",
+            "PRIMARY_ISSUER"
+          ]
+        ],
+        "content": "STATUS: EVIDENCE_FOUND\nDOCUMENT_METADATA: {\"source_url\": \"https://www.hh.global/news/h-and-h-group-interim-results-2026-revenue-up-23-7\"}\nFINANCIAL RESULTS\nSix months ended 30 June\nSix months ended 30 June\n2026\n2025\nChange\nRMB million\nRMB million\n(Unaudited)\n(Unaudited)\nRevenue\n8,695.9\n7,019.2\n+23.9%\nEBITDA*\n1,583.3\n1,033.1\n+53.3%\nAdjusted EBITDA*\n1,891.9\n1,100.7\n+71.9%\nAdjusted EBITDA margin\n21.8%\n15.7%\n+6.1pts\nNet profit\n610.6\n71.0\n+760.0%\nAdjusted Net profit**\n919.2\n363.0\n+153.2%\nAdjusted net profit margin\n10.6%\n5.2%\n+5.4pts\n*EBITDA refers to earnings before interest, income tax expense, depreciation and amortization. Adjusted EBITDA = EBITDA + Non-cash losses of RMB308.6 million for the six months ended 30 June 2026 (six months ended 30 June 2025: losses of RMB57.6 million) + Non-recurring losses of nil for the six months ended 30 June 2026 (six months ended 30 June 2025: losses of RMB10.0 million).[^14]\n**Adjusted net profit = Net profit + EBITDA adjustment items of losses of RMB308.6 million for the six months ended 30 June 2026 (six months ended 30 June 2025: losses of RMB67.6 million) + Other non-cash losses of nil for the six months ended 30 June 2026 (six months ended 30 June 2025: losses of RMB224.4 million).[^15]\n",
+        "content_sha256": "4c739613d4ae2e13496021ee9d636e987b2e4c4b91d1998cf84945924323ae62"
+      }
+    ],
+    "expected_authority": "PRIMARY",
+    "expected_growth": [
+      "23.9%",
+      "760.0%"
+    ],
+    "justification": "Issuer-owned hh.global results release; two six-month June columns, ordered 2026/2025; RMB million in both columns; revenue8695.9/7019.2 and unadjusted total net profit610.6/71.0; the claim parenthetical denotes profit for the period rather than attributable or adjusted scope. Change column excluded."
   }
 ]

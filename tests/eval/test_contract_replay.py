@@ -88,6 +88,8 @@ def test_empty_replay_is_explicit_and_stable():
             "latest_results_acquisition",
             "latest_results_claims",
             "pm_trace",
+            "ownership",
+            "eps_lineage",
         )
     }
 
@@ -276,6 +278,27 @@ def test_registry_authority_without_acquisition_is_approved_not_unavailable():
     )
 
 
+def test_ownership_replay_uses_basis_owner_and_keeps_unknown_labels_finite(monkeypatch):
+    from collections import Counter
+
+    from scripts.replay_contracts import _replay_ownership
+    from src.agents.foreign_language_evidence import _CONTROL_BASIS_TERMS
+
+    monkeypatch.setitem(_CONTROL_BASIS_TERMS, "REVIEWED_BASIS", ("reviewed basis",))
+    counts = Counter()
+    _replay_ownership(
+        "Control Status: unexpected private prose\nControl Basis: unexpected private prose\nOwnership Evidence Status: unexpected private prose",
+        "Control Status: CONTROLLED\nControl Basis: REVIEWED_BASIS\nOwnership Evidence Status: VERIFIED_URL",
+        counts,
+    )
+    assert counts["after_basis:REVIEWED_BASIS"] == 1
+    assert all(
+        counts[f"before_{category}:OTHER"] == 1
+        for category in ("control", "basis", "evidence")
+    )
+    assert all("private prose" not in key for key in counts)
+
+
 @pytest.mark.parametrize("bad_status", [[], {}, None])
 @pytest.mark.parametrize("field_name", ["urls", "requested_urls"])
 def test_matching_malformed_status_keeps_valid_artifact_and_never_counts_fetch(
@@ -304,3 +327,272 @@ def test_matching_malformed_status_keeps_valid_artifact_and_never_counts_fetch(
         ]
         == "attempted_failed_or_blocked"
     )
+
+
+@pytest.mark.parametrize("pct", [25, 69.72])
+@pytest.mark.parametrize(
+    "statement,supported",
+    [
+        ("Holder and its associates hold {pct}% of issued shares.", False),
+        ("Holder owns {pct}%. Holder is not an associate of a director.", False),
+        ("Holder owns {pct}% and uses the equity method.", True),
+        ("Holder owns {pct}%. Holder may use the equity method.", False),
+        (
+            'Holder owns {pct}%. The report quotes "Holder uses the equity method".',
+            False,
+        ),
+    ],
+)
+@pytest.mark.parametrize("coverage", ["ABSENT", "NOT_FOUND"])
+def test_ownership_replays_without_found_results_and_uses_shared_semantics(
+    tmp_path, pct, statement, supported, coverage
+):
+    from tests.agents.test_foreign_language_evidence import _report
+
+    source = "https://issuer.example/ownership"
+    foreign = _report(
+        holder=f"Holder ({pct}%)",
+        relationship="equity method",
+        status="UNKNOWN",
+        basis="UNKNOWN",
+        source_url=source,
+    )
+    if coverage == "NOT_FOUND":
+        foreign += "\n### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: NOT_FOUND\n### --- END LATEST_RESULTS ---"
+    path = tmp_path / "ownership_analysis.json"
+    path.write_text(
+        json.dumps(
+            {
+                "source_artifacts": {"foreign_language_report": foreign},
+                "evidence_records": [
+                    {
+                        "tool_name": "get_official_document",
+                        "content": statement.format(pct=pct),
+                        "urls": [source],
+                        "execution_status": "SUCCEEDED",
+                        "blocked": False,
+                        "evidence_status": "EVIDENCE_FOUND",
+                    }
+                ],
+            }
+        )
+    )
+    original = path.read_bytes()
+    result = replay_contracts([path])
+    expected = (
+        "UNKNOWN"
+        if supported and pct > 50
+        else "NOT_CONTROLLED"
+        if supported
+        else "CONTROLLED"
+        if pct > 50
+        else "UNKNOWN"
+    )
+    assert result["ownership"][f"after_control:{expected}"] == 1
+    assert result["ownership"]["replayed"] == 1
+    assert result["latest_results"] == {}
+    assert result["eps_lineage"] == {"missing_snapshot": 1}
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "status,blocked", [("FAILED", False), ("SUCCEEDED", True), (None, False)]
+)
+def test_ownership_replay_never_uses_failed_or_blocked_records(
+    tmp_path, status, blocked
+):
+    from tests.agents.test_foreign_language_evidence import _report
+
+    source = "https://issuer.example/ownership"
+    path = tmp_path / "ownership_analysis.json"
+    path.write_text(
+        json.dumps(
+            {
+                "source_artifacts": {
+                    "foreign_language_report": _report(
+                        holder="Holder (69.72%)", source_url=source
+                    )
+                },
+                "evidence_records": [
+                    {
+                        "tool_name": "get_official_document",
+                        "content": "Holder holds 69.72% of issued shares.",
+                        "urls": [source],
+                        "execution_status": status,
+                        "blocked": blocked,
+                        "evidence_status": "EVIDENCE_FOUND",
+                    }
+                ],
+            }
+        )
+    )
+    result = replay_contracts([path])
+    assert result["ownership"]["after_control:UNKNOWN"] == 1
+    assert result["ownership"]["after_evidence:REJECTED"] == 1
+
+
+def _eps_artifact(tmp_path, source, award="1"):
+    from src.analysis_snapshot import build_pre_senior_snapshot
+    from src.score_lineage import add_validated_derivations
+    from tests.test_analysis_snapshot import _fundamentals, _with_structured_metrics
+
+    snapshot = build_pre_senior_snapshot(
+        _with_structured_metrics(
+            {}, {"earningsGrowth": 0.3, "_earningsGrowth_source": source}
+        )
+    )
+    report = _fundamentals(
+        f"GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=N/A; EPS_GROWTH={award}; ROA_ROE_IMPROVING=N/A; GROSS_MARGIN=N/A; GLOBAL_EXPANSION=N/A; R_AND_D_CAPEX_BACKLOG=N/A",
+        f"ADJUSTED_GROWTH_SCORE: {'100' if award == '1' else '0'}%",
+    )
+    # Simulate a retained legacy positive scorecard that used company-profit support.
+    before = add_validated_derivations(snapshot, report)
+    card = before["scorecards"]["GROWTH"]
+    if source in {
+        "calculated_from_quarterly",
+        "calculated_from_statement_net_income_proxy",
+    }:
+        card["decision_eligible"] = True
+        card["lineage_gaps"] = []
+        card["criteria"]["EPS_GROWTH"]["derived_from"] = [
+            key
+            for key, value in before["claims"].items()
+            if value.get("field") == "EARNINGS_GROWTH_FY"
+        ]
+    path = tmp_path / "eps_analysis.json"
+    path.write_text(
+        json.dumps(
+            {"reports": {"fundamentals_report": report}, "analysis_snapshot": before}
+        )
+    )
+    return path
+
+
+@pytest.mark.parametrize(
+    "source,lost",
+    [
+        ("calculated_from_quarterly", True),
+        ("calculated_from_statement_net_income_proxy", True),
+        ("calculated_from_statement_diluted_eps", False),
+        ("calculated_from_statement_basic_eps", False),
+        ("legacy-provider", False),
+    ],
+)
+def test_eps_replay_measures_dependencies_and_eligibility_without_risk(
+    tmp_path, source, lost
+):
+    path = _eps_artifact(tmp_path, source)
+    original = path.read_bytes()
+    result = replay_contracts([path])
+    assert result["eps_lineage"]["replayed"] == 1
+    assert result["eps_lineage"].get("eps_dependencies_changed", 0) == int(lost)
+    assert result["eps_lineage"].get("growth_eligibility_lost", 0) == int(lost)
+    assert result["eps_lineage"].get("unsupported_positive_eps_after", 0) == int(lost)
+    assert result["eps_lineage"]["before_growth:eligible"] == 1
+    assert (
+        result["eps_lineage"][f"after_growth:{'ineligible' if lost else 'eligible'}"]
+        == 1
+    )
+    assert path.read_bytes() == original
+    assert set(result) == {
+        "artifacts",
+        "ocf",
+        "latest_results",
+        "latest_results_acquisition",
+        "latest_results_claims",
+        "pm_trace",
+        "ownership",
+        "eps_lineage",
+    }
+
+
+@pytest.mark.parametrize(
+    "snapshot,expected",
+    [
+        (None, "missing_snapshot"),
+        ({}, "unavailable_contract_or_report"),
+        ([], "malformed_snapshot"),
+        ("legacy", "malformed_snapshot"),
+        ({"contract_status": "VALID", "claims": []}, "malformed_snapshot"),
+        (
+            {"contract_status": "VALID", "scorecards": {"GROWTH": []}},
+            "malformed_snapshot",
+        ),
+        (
+            {
+                "contract_status": "VALID",
+                "scorecards": {
+                    "GROWTH": {
+                        "criteria": {
+                            "EPS_GROWTH": {
+                                "award": "PRIVATE CONTENT",
+                                "derived_from": [],
+                            }
+                        }
+                    }
+                },
+            },
+            "malformed_snapshot",
+        ),
+        (
+            {
+                "contract_status": "VALID",
+                "scorecards": {
+                    "GROWTH": {
+                        "criteria": {
+                            "EPS_GROWTH": {"award": "1", "derived_from": "claim:x"}
+                        }
+                    }
+                },
+            },
+            "malformed_snapshot",
+        ),
+    ],
+)
+def test_legacy_missing_and_malformed_snapshots_do_not_become_contract_defects_or_emit_content(
+    tmp_path, snapshot, expected, capsys
+):
+    path = _artifact(tmp_path)
+    data = json.loads(path.read_text())
+    data["analysis_snapshot"] = snapshot
+    path.write_text(json.dumps(data))
+    result = replay_contracts([path])
+    assert result["artifacts"] == {"processed": 1, "seen": 1}
+    assert result["eps_lineage"] == {expected: 1}
+    assert result["latest_results"] == {"SUPPORTED_SECONDARY": 1}
+    assert capsys.readouterr().out == ""
+
+
+def test_ownership_replay_counts_relationship_only_changes_separately(tmp_path):
+    from tests.agents.test_foreign_language_evidence import _report
+
+    source = "https://issuer.example/ownership"
+    path = tmp_path / "ownership_analysis.json"
+    path.write_text(
+        json.dumps(
+            {
+                "source_artifacts": {
+                    "foreign_language_report": _report(
+                        holder="Holder (25%)",
+                        controller="NONE",
+                        status="NOT_CONTROLLED",
+                        basis="SIGNIFICANT_INFLUENCE_ONLY",
+                        relationship="equity method",
+                        source_url=source,
+                    )
+                },
+                "evidence_records": [
+                    {
+                        "tool_name": "get_official_document",
+                        "content": "Holder uses the equity method.",
+                        "urls": [source],
+                        "execution_status": "SUCCEEDED",
+                        "evidence_status": "EVIDENCE_FOUND",
+                    }
+                ],
+            }
+        )
+    )
+    counts = replay_contracts([path])["ownership"]
+    assert counts["relationship_or_evidence_only_changed"] == 1
+    assert "substantive_control_changed" not in counts

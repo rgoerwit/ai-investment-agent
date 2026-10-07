@@ -1,6 +1,6 @@
 # Provenance: which layer owns which decision
 
-Last updated: 2026-09-15
+Last updated: 2026-10-06
 
 This file records how evidence moves through the pipeline and why the boundaries sit
 where they do. It explains the rationale and intended behaviour; the implementation
@@ -186,6 +186,40 @@ The growth data-vacuum exception is a field-coverage rule, not score arithmetic.
 available only when a valid snapshot shows all four current growth observations absent:
 revenue and earnings at both TTM and MRQ horizons. Missing expansion, margin, or other
 rubric criteria cannot manufacture the exception.
+
+The marginal-turnaround and data-vacuum growth exceptions permit at most HOLD.
+They clear the growth rejection without establishing initiation growth; independent
+hard fails still require DO_NOT_INITIATE. An active tender retains its event-driven
+override. This ceiling addresses the observed 9795.T screening case, where a zero
+canonical growth score passed through the marginal-turnaround exception and the risk
+zone default still produced BUY. The PM context declares the ceiling, and the shared
+verdict rewriter reconciles the header, execution fields, decision trace, and saved
+verdict if the model returns BUY.
+
+EPS rubric lineage excludes latest-results company profit growth and known net-income
+or proxy sources. Those earnings facts remain available to their legitimate consumers;
+true statement diluted/basic EPS and existing aggregator bases remain available.
+A positive EPS award without eligible per-share support makes the score indeterminate.
+
+Verified majority ownership precedes unrelated independence descriptions. Contrary
+control evidence must concern the same holder; co-holder associates and director
+affiliations are distinct from positive equity-method or significant-influence
+assertions. Negated, conditional, quoted, or unsupported-language relationship text
+establishes no accounting fact. A majority within one share class leaves issuer
+control unresolved unless the same holder has an explicit matching total-votes
+percentage or separately corroborated control rights.
+
+Flattened comparative statements bind both period columns, each currency and scale,
+and any declared change column before metric rows can support latest-results claims.
+Duplicate rows, ambiguous columns, conflicting periods, and differing earnings scopes
+withhold support. The explicit total-period-profit scope equivalence does not extend
+to owner-attributable or adjusted profit.
+
+Junior recovery and final validity share one predicate. A copied metrics-tool cap
+marker can be repaired from its valid inspected structured ingress without a model
+call; other incomplete outputs retain the one budgeted text-only retry. The metrics
+section is still relayed by the model during normal synthesis. Rendering that section
+directly from ingress is a separate future simplification.
 
 Liquidity follows the same authority pattern. The market tool emits a typed assessment
 using the thresholds in `src/thesis_constants.py`; the market node carries it through

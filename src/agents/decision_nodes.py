@@ -26,6 +26,7 @@ from src.agents.verdict_policy import (
     assess_growth_gate,
     assess_initiation_gates,
     assess_verdict_policy,
+    maybe_cap_exception_growth_buy_to_hold,
     maybe_demote_buy_on_blocking_flags,
     maybe_floor_verdict_to_hold,
     maybe_qualify_buy_in_quick_mode,
@@ -1711,6 +1712,21 @@ RISK TEAM DEBATE:
                         "rule": "growth_transition_exception",
                         "reason": growth_gate.exception or "documented_exception",
                         "from": "DO_NOT_INITIATE",
+                        "to": "HOLD",
+                    }
+                )
+            content_str, growth_capped = maybe_cap_exception_growth_buy_to_hold(
+                content_str,
+                decision_inputs=floor_inputs,
+                ticker=ticker,
+            )
+            if growth_capped:
+                policy_adjustments.append(
+                    {
+                        "kind": "growth_exception_ceiling",
+                        "rule": "growth_transition_exception",
+                        "reason": growth_gate.exception or "documented_exception",
+                        "from": "BUY",
                         "to": "HOLD",
                     }
                 )

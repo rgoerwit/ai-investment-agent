@@ -59,23 +59,46 @@ _CONTROL_BASIS_TERMS = {
     "VOTING_AGREEMENT": ("voting agreement", "voting rights agreement"),
 }
 _NON_CONTROL_RELATIONSHIPS = {
-    "EQUITY METHOD": (
-        "SIGNIFICANT_INFLUENCE_ONLY",
-        ("equity method", "equity-method", "significant influence", "associate"),
-    ),
-    "SIGNIFICANT INFLUENCE": (
-        "SIGNIFICANT_INFLUENCE_ONLY",
-        ("significant influence", "equity method", "equity-method", "associate"),
-    ),
-    "ASSOCIATE": (
-        "SIGNIFICANT_INFLUENCE_ONLY",
-        ("associate", "significant influence", "equity method", "equity-method"),
-    ),
-    "INDEPENDENT": (
-        "NONE",
-        ("independent", "not controlled", "no control"),
-    ),
+    "EQUITY METHOD": "SIGNIFICANT_INFLUENCE_ONLY",
+    "SIGNIFICANT INFLUENCE": "SIGNIFICANT_INFLUENCE_ONLY",
+    "ASSOCIATE": "SIGNIFICANT_INFLUENCE_ONLY",
+    "INDEPENDENT": "NONE",
 }
+_ACCOUNTING_RELATIONSHIP_RE = re.compile(
+    r"\b(?:uses?|using|applies?|under)\s+(?:the\s+)?equity[- ]method\b|"
+    r"\b(?:accounted\s+for|classified|treated)\s+as\s+(?:an?\s+)?associate\b|"
+    r"\b(?:is|remains)\s+an?\s+associate\s+of\s+(?:the\s+)?(?:company|group|issuer)\b|"
+    r"\b(?:has|have|having|exercises?|with)\s+significant\s+influence"
+    r"(?=\s*(?:only\b|over\s+(?:the\s+)?(?:company|group|issuer|investee)\b|under\s+(?:the\s+)?equity|[.;,。!?]|$))",
+    re.I,
+)
+_ASSERTION_QUALIFIERS = (
+    r"if|unless|subject\s+to|unverified|uncertain|"
+    r"unconfirmed|alleged|allegedly|reportedly|hypothetical"
+)
+_ASSERTION_MODAL_RE = re.compile(r"\b(?:may|might|could|would)\b", re.I)
+_UNASSERTED_ASSERTION_RE = re.compile(
+    rf"\b(?:not|no|never|without|whether|claims?|discusses|denies|{_ASSERTION_QUALIFIERS})\b",
+    re.I,
+)
+_ASSERTION_QUALIFIER_RE = re.compile(
+    rf"\b(?:{_ASSERTION_QUALIFIERS}|(?:may|might|could|would)\s+(?:not\s+)?(?:be|have\s+been))\b",
+    re.I,
+)
+# Role descriptions are not shareholder independence evidence. Remove only the
+# unrelated phrase, retaining any actual control assertion in the same sentence.
+_UNRELATED_INDEPENDENT_RE = re.compile(
+    r"\bindependent\s+(?:non[- ]executive\s+)?directors?\b|"
+    r"\bindependent\s+(?:auditors?|board\s+committee|financial\s+advis[eo]rs?|business)\b",
+    re.I,
+)
+_EXPLICIT_NON_CONTROL_RE = re.compile(
+    r"\b(?:does not control|no control|not controlled|not a controlling shareholder|non[- ]voting shares|no voting rights)\b|"
+    r"\bvoting rights\b[^.;。!?\n]*\b(?:waived|capped|restricted)\b",
+    re.I,
+)
+
+
 _CORPORATE_SUFFIXES = {
     "ag",
     "co",
@@ -322,19 +345,33 @@ def _claim_in_text(text: str, holder: str, pct: float | None) -> bool:
                 return True
         else:
             table_header = False
-    # Corporate abbreviations do not end a sentence. Separate competing holders
-    # at clause boundaries rather than pairing a percentage elsewhere in the record.
-    prose = re.sub(
-        r"\b(?:corp|co|inc|ltd)\.", lambda m: m.group()[:-1], text, flags=re.I
-    )
-    for clause in re.split(
-        r"\n+|[;。!?]|(?<=\.)\s+|,?\s+(?:while|whereas|and)\s+", prose
-    ):
+    normalized_holder = _normalize_corporate_abbreviations(holder)
+    for clause in _holder_sentences(text, holder):
+        interest = re.match(
+            rf"^\s*{re.escape(normalized_holder.rstrip('.'))}"
+            r"(?:,?\s+(?:and|together with)\s+(?:his|her|its|their)\s+associates,?)?"
+            rf"\s+(?:is|are) interested in\s+{re.escape(token)}{zero_suffix}\s*%\s+of\s+(?:the\s+)?issued\s+shares\b",
+            clause,
+            re.I,
+        )
         if (
             _holder_in_text(clause, holder)
             and percentage.search(clause)
-            and re.search(
-                r"\b(?:owns?|holds?|shareholders?|ownership)\b|持股", clause, re.I
+            and (
+                (
+                    interest is None
+                    and re.search(
+                        r"\b(?:owns?|holds?|shareholders?|ownership)\b|持股",
+                        clause,
+                        re.I,
+                    )
+                )
+                or (
+                    interest is not None
+                    and _assertion_is_unqualified(
+                        clause, interest.start(), interest.end()
+                    )
+                )
             )
             and (
                 not re.search(
@@ -408,6 +445,11 @@ def _valid_comparative_period(
 _FISCAL_QUARTER_RE = re.compile(
     r"(?P<year>20\d{2})年\s*(?P<month>\d{1,2})月期\s*第(?P<quarter>[1-4])四半期"
     r"(?:連結累計期間)?"
+)
+
+
+_SOURCE_DATE_PATTERN = (
+    r"[A-Za-z]+[ \t]+\d{1,2},[ \t]+20\d{2}|\d{1,2}[ \t]+[A-Za-z]+[ \t]+20\d{2}"
 )
 
 
@@ -751,7 +793,7 @@ def _header_period_matches(label: str, period_end: str, months: int) -> bool | N
         day = 30 if month in {6, 9} else 31
         return months == 3 and period_end == f"{roc_year + 1911}-{month:02d}-{day}"
     match = re.fullmatch(
-        r"(?:For the )?(Three months|Six months|Twelve months|Half[- ]year) ended ([A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})(?: \(H[12] 20\d{2}\))?",
+        rf"(?:For the )?(Three months|Six months|Twelve months|Half[- ]year) ended ({_SOURCE_DATE_PATTERN})(?: \(H[12] 20\d{{2}}\))?",
         label,
         re.I,
     )
@@ -775,7 +817,7 @@ def _header_period_matches(label: str, period_end: str, months: int) -> bool | N
             )
         )
     match = re.fullmatch(
-        r"(?:For the )?years? ended ([A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})(?: and (20\d{2}))?",
+        rf"(?:For the )?years? ended ({_SOURCE_DATE_PATTERN})(?: and (20\d{{2}}))?",
         label,
         re.I,
     )
@@ -902,6 +944,104 @@ def _comparative_narrative_supports(
     return True
 
 
+# Total period profit is equivalent here; owner-attributable and adjusted scopes
+# remain distinct. Additions require separate accounting-scope review.
+_EQUIVALENT_EARNINGS_SCOPES = {"net profit (profit for the period)": "net profit"}
+
+
+def _flattened_statement_supports(
+    lines: list[str], start: int, values: dict[str, str], decimals: dict[str, Decimal]
+) -> bool:
+    """Bind flattened rows to two period/unit columns and any declared change."""
+    current_end = values["LATEST_RESULTS_PERIOD_END"]
+    prior_end = values["LATEST_RESULTS_PRIOR_PERIOD_END"]
+    current_year, prior_year = current_end[:4], prior_end[:4]
+    months = int(values["LATEST_RESULTS_PERIOD_MONTHS"])
+    scope = _normalized_text(values["LATEST_RESULTS_EARNINGS_SCOPE"])
+    number = r"-?\d[\d,]*(?:\.\d+)?"
+    years = lines[start : start + 2]
+    if len(years) != 2 or set(years) != {current_year, prior_year}:
+        return False
+    labels = [lines[start - 1]]
+    if start > 1 and _statement_boundary(lines[start - 2]):
+        labels.append(lines[start - 2])
+    if not all(
+        _header_period_matches(f"{label} {year}", end, months) is True
+        for label in labels
+        for year, end in ((current_year, current_end), (prior_year, prior_end))
+    ):
+        return False
+    row_start = start + 2
+    has_change = row_start < len(lines) and bool(
+        re.fullmatch(
+            r"Change(?:\s*%)?|%\s*Change|YoY(?:\s*%)?|\+/-",
+            lines[row_start],
+            re.I,
+        )
+    )
+    row_start += int(has_change)
+    units = []
+    while row_start < min(start + 12, len(lines)):
+        header_line = lines[row_start]
+        if _compatible_unit_only_header(header_line, values):
+            units.append(header_line)
+        elif not re.fullmatch(r"\((?:Unaudited|Audited)\)", header_line, re.I):
+            break
+        row_start += 1
+    if len(units) != 2 or not all(
+        _heading_has_currency_and_unit(unit, values) for unit in units
+    ):
+        return False
+    flat_current_column = years.index(current_year)
+    pairs: dict[str, tuple[Decimal | None, Decimal | None]] = {}
+    ambiguous = False
+    index = row_start
+    # This narrow parenthetical is the unadjusted total-period-profit
+    # label. Owner-attributable and adjusted qualifiers stay distinct.
+    flattened_scope = _EQUIVALENT_EARNINGS_SCOPES.get(scope, scope)
+    while index < min(row_start + 75, len(lines)):
+        row = lines[index]
+        if _statement_boundary(row) or row.startswith(("*", "-ENDS-")):
+            break
+        label = _normalized_text(row).rstrip("*† ")
+        flat_cells = _table_row_cells(lines, index, 2)
+        if flat_cells is None or (
+            has_change
+            and (
+                index + 3 >= len(lines)
+                or not re.fullmatch(rf"[+-]?{number}(?:%|pts)", lines[index + 3], re.I)
+            )
+        ):
+            ambiguous = True
+            break
+        metric = (
+            "REVENUE"
+            if label in _REVENUE_ROW_LABELS
+            else "EARNINGS"
+            if label == flattened_scope
+            else None
+        )
+        if metric:
+            if metric in pairs:
+                ambiguous = True
+                break
+            pairs[metric] = (
+                flat_cells[flat_current_column],
+                flat_cells[1 - flat_current_column],
+            )
+        index += 3 + int(has_change)
+    if not ambiguous and all(
+        pairs.get(metric)
+        == (
+            decimals[f"LATEST_RESULTS_{metric}"],
+            decimals[f"LATEST_RESULTS_PRIOR_{metric}"],
+        )
+        for metric in ("REVENUE", "EARNINGS")
+    ):
+        return True
+    return False
+
+
 def _two_column_statement_supports(
     lines: list[str], values: dict[str, str], decimals: dict[str, Decimal]
 ) -> bool:
@@ -919,6 +1059,12 @@ def _two_column_statement_supports(
     currency_declaration = re.compile(rf"\(Expressed in (?:{symbols})\)", re.I)
     cell_prefix = rf"(?:(?:{symbols})\s*)?"
     for start, line in enumerate(lines):
+        # HTML extraction can retain one cell per line, including a declared
+        # change column. Bind years and every unit before reading any metric.
+        if re.fullmatch(r"20\d{2}", line) and start > 0:
+            if _flattened_statement_supports(lines, start, values, decimals):
+                return True
+            continue
         column_header = re.fullmatch(
             r"(?P<unit>.*?)\s*(?P<first>[QH][1-4]\s+20\d{2})\s+"
             r"(?P<second>[QH][1-4]\s+20\d{2})(?:\s+(?P<change>\+/-|Change\s*%|YoY\s*%))?",
@@ -1406,31 +1552,216 @@ def _has_independent_corroboration(
     return len(domains) >= 2
 
 
+def _normalize_corporate_abbreviations(text: str) -> str:
+    """Preserve the same name spelling in prose and exact holder assertions."""
+    return re.sub(
+        r"\b(?:corp|co|inc|ltd)\.", lambda m: m.group()[:-1], text, flags=re.I
+    )
+
+
+def _holder_sentences(content: str, holder: str) -> list[str]:
+    """Bind relationship evidence without splitting percentages or company names."""
+    if holder.strip().upper() in _UNKNOWN:
+        return []
+    prose = _normalize_corporate_abbreviations(content)
+    normalized_holder = _normalize_corporate_abbreviations(holder)
+    holder_spans = [
+        match.span() for match in re.finditer(re.escape(normalized_holder), prose, re.I)
+    ]
+    clauses = []
+    cursor = 0
+    for separator in re.finditer(
+        r"\n+|[;。!?]|(?<=\.)\s+|,?\s+(?:while|whereas|and(?!\s+(?:his|her|its|their|is|has|uses|holds|owns|does|voting)\b))\s+",
+        prose,
+        re.I,
+    ):
+        if any(start <= separator.start() < end for start, end in holder_spans):
+            continue  # A conjunction within the holder's own name is not a new subject.
+        clauses.append(prose[cursor : separator.start()])
+        cursor = separator.end()
+    clauses.append(prose[cursor:])
+    return [
+        _UNRELATED_INDEPENDENT_RE.sub("", clause)
+        for clause in clauses
+        if _holder_in_text(clause, holder)
+    ]
+
+
+def _assertion_is_unqualified(
+    text: str, start: int, end: int, *, subject_span: tuple[int, int] | None = None
+) -> bool:
+    """Bind certainty to an assertion, preserving independent contrast clauses."""
+    # Names and validated calendar dates are evidence context, not modality.
+    # Preserve offsets because the assertion and its exact subject are already bound.
+    if subject_span is not None:
+        left, right = subject_span
+        text = text[:left] + " " * (right - left) + text[right:]
+    text = re.sub(
+        _SOURCE_DATE_PATTERN,
+        lambda match: (
+            " " * len(match.group())
+            if _parse_source_date(match.group()) is not None
+            else match.group()
+        ),
+        text,
+    )
+    prefix = re.split(r"\b(?:but|however)\b", text[:start], flags=re.I)[-1]
+    if _UNASSERTED_ASSERTION_RE.search(prefix) or _ASSERTION_MODAL_RE.search(prefix):
+        return False
+    suffixes = re.split(r"\b(?:but|however|and)\b", text[end:], flags=re.I)
+    if _ASSERTION_QUALIFIER_RE.search(suffixes[0]):
+        return False
+    for suffix in suffixes[1:]:
+        # An anaphoric qualification refers to the preceding assertion. A new
+        # entity's plans or accounting cannot qualify the holder's assertion.
+        if re.match(
+            r"\s*(?:this|that|it|the (?:accounting treatment|relationship|assertion|claim|interest|holding))\b",
+            suffix,
+            re.I,
+        ) and (
+            _UNASSERTED_ASSERTION_RE.search(suffix)
+            or _ASSERTION_QUALIFIER_RE.search(suffix)
+        ):
+            return False
+        if _ASSERTION_QUALIFIER_RE.match(suffix.lstrip()):
+            return False
+    return True
+
+
+def _supports_non_control_relationship(
+    sentence: str, holder: str, relationship: str
+) -> bool:
+    """Require an asserted relationship in an already holder-bound clause.
+
+    Co-holder associates, names and director affiliations are not accounting
+    relationships. Unsupported language or uncertain assertions grant no control fact.
+    """
+    if _normalized_relationship(relationship) == "INDEPENDENT":
+        return any(
+            term in sentence.casefold()
+            for term in (
+                "independent of the company",
+                "independent of the group",
+                "not controlled",
+                "no control",
+            )
+        )
+    prose = re.sub(
+        r'"[^"\n]*"|“[^”\n]*”|\'[^\'\n]*\'',
+        "",
+        _normalize_corporate_abbreviations(sentence),
+    )
+    normalized_holder = _normalize_corporate_abbreviations(holder).rstrip(".")
+    for match in _ACCOUNTING_RELATIONSHIP_RE.finditer(prose):
+        prefix = prose[: match.start()]
+        subjects = list(
+            re.finditer(rf"(?<!\w){re.escape(normalized_holder)}(?!\w)", prefix, re.I)
+        )
+        if not subjects or not _assertion_is_unqualified(
+            prose, match.start(), match.end(), subject_span=subjects[-1].span()
+        ):
+            continue
+        # A continuation may omit the holder or refer to its investment, but
+        # another named entity inside a possessive clause owns its own assertion.
+        continuation = re.split(
+            r"\b(?:and|but|however)\b", prefix[subjects[-1].end() :], flags=re.I
+        )[-1].strip(" ,")
+        if re.fullmatch(
+            r"(?:is(?: the entity)?|(?:its|his|her|their|the) investment)?",
+            continuation,
+            re.I,
+        ) or (
+            match.group().lower().startswith(("with ", "under "))
+            and re.match(r"(?:owns?|holds?)\b", continuation, re.I)
+        ):
+            return True
+    return False
+
+
+def _majority_is_class_scoped(
+    records: list[ToolEvidenceRecord], holder: str, pct: float
+) -> bool:
+    """A class-only percentage cannot prove majority issuer votes.
+
+    Explicit same-holder total-votes evidence for the claimed percentage resolves
+    class scope; unresolved scope keeps contractual fallback holder-bound.
+    """
+    normalized_holder = _normalize_corporate_abbreviations(holder).rstrip(".")
+    class_scoped = False
+    total_votes_supported = False
+    for record in records:
+        lines = _normalize_corporate_abbreviations(
+            re.sub(r"<[^>]+>", "\n", record.content)
+        ).splitlines()
+        for index, line in enumerate(lines):
+            if not re.search(
+                rf"(?<!\w){re.escape(normalized_holder)}(?!\w)", line, re.I
+            ):
+                continue
+            context = "\n".join(_holder_sentences(line, holder))
+            for preceding in reversed(lines[:index]):
+                if not preceding.strip().startswith("|"):
+                    break
+                context = preceding + "\n" + context
+            class_scoped |= bool(
+                re.search(
+                    r"\bclass\s+(?:[a-z]\b|[ivx]+\b|\d+\b|\w+\s+(?:number|votes?|shares?|common|subordinate|multiple))|\baggregate\s+votes\s*\(",
+                    context,
+                    re.I,
+                )
+            )
+        for sentence in _holder_sentences(record.content, holder):
+            total_votes_supported |= any(
+                float(match.group(1)) == pct
+                for match in re.finditer(
+                    rf"^\s*{re.escape(normalized_holder)}\s+(?:owns?|holds?|controls?)\s+"
+                    r"(?:\d{1,3}(?:\.\d+)?\s*%\s+of\s+(?:the\s+)?class\s+\w+\s+shares?\s+and\s+(?:owns?|holds?|controls?)\s+)?"
+                    r"(\d{1,3}(?:\.\d+)?)\s*%\s+of\s+(?:the\s+)?(?:total|aggregate)\s+(?:voting\s+rights|votes)\b",
+                    sentence,
+                    re.I,
+                )
+            )
+    return class_scoped and not total_votes_supported
+
+
 def _validated_control_status(
     *,
     claimed_status: str,
     relationship: str,
     basis: str,
     pct: float | None,
+    holder: str,
+    ownership_verified: bool,
     supporting_records: list[ToolEvidenceRecord],
     source_url: str | None = None,
 ) -> tuple[str, str]:
+    sentences = [
+        sentence
+        for record in supporting_records
+        for sentence in _holder_sentences(record.content, holder)
+    ]
+    class_scoped = False
+    if ownership_verified and pct is not None and pct > 50.0:
+        if any(
+            _EXPLICIT_NON_CONTROL_RE.search(sentence)
+            or _supports_non_control_relationship(sentence, holder, "EQUITY METHOD")
+            for sentence in sentences
+        ):
+            return "UNKNOWN", "CONFLICTING_CONTROL_EVIDENCE"
+        class_scoped = _majority_is_class_scoped(supporting_records, holder, pct)
+        if not class_scoped:
+            return "CONTROLLED", "MAJORITY_VOTING_RIGHTS"
+
     non_control_rule = _NON_CONTROL_RELATIONSHIPS.get(
         _normalized_relationship(relationship)
     )
     if non_control_rule:
-        basis_value, terms = non_control_rule
-        relationship_records = [
-            record
-            for record in supporting_records
-            if any(term in record[1].casefold() for term in terms)
-        ]
-        if relationship_records:
-            return "NOT_CONTROLLED", basis_value
+        if any(
+            _supports_non_control_relationship(sentence, holder, relationship)
+            for sentence in sentences
+        ):
+            return "NOT_CONTROLLED", non_control_rule
         return "UNKNOWN", "UNKNOWN"
-
-    if pct is not None and pct > 50.0:
-        return "CONTROLLED", "MAJORITY_VOTING_RIGHTS"
 
     if claimed_status.upper() != "CONTROLLED":
         return "UNKNOWN", "UNKNOWN"
@@ -1443,7 +1774,15 @@ def _validated_control_status(
     corroborating_records = [
         record
         for record in supporting_records
-        if any(term in record[1].casefold() for term in control_terms)
+        if any(
+            term in passage.casefold()
+            for passage in (
+                _holder_sentences(record.content, holder)
+                if class_scoped
+                else [record.content]
+            )
+            for term in control_terms
+        )
     ]
     official_support = any(
         _is_primary_evidence(record, source_url) for record in corroborating_records
@@ -1517,9 +1856,11 @@ def _normalize_ownership(
     relationship_records = [
         record
         for record in records
-        if _holder_in_text(record[1], holder)
-        and non_control_rule
-        and any(term in record[1].casefold() for term in non_control_rule[1])
+        if non_control_rule
+        and any(
+            _supports_non_control_relationship(sentence, holder, relationship)
+            for sentence in _holder_sentences(record.content, holder)
+        )
     ]
     relationship_supporting = [
         record
@@ -1556,6 +1897,8 @@ def _normalize_ownership(
             relationship=relationship,
             basis=basis,
             pct=pct,
+            holder=holder,
+            ownership_verified=verified,
             supporting_records=(claim_records if verified else relationship_supporting),
             source_url=normalized_source,
         )
@@ -1638,6 +1981,9 @@ def _normalize_ownership(
         "Controlling Shareholder": controller_value,
         "Control Status": control_status,
         "Control Basis": control_basis,
+        "Relationship": "UNKNOWN"
+        if control_status == "CONTROLLED" and non_control_rule
+        else relationship,
         "Parent Company": parent_value or "UNKNOWN",
         "ENTITY_ROLE_OBSERVED": entity_role,
         "Related Listed Tickers": related,

@@ -17,6 +17,7 @@ from src.tooling.structured_ingress import (
     build_structured_ingress_record,
     merge_structured_inputs,
 )
+from src.utils import format_tool_output_cap
 
 logger = structlog.get_logger(__name__)
 
@@ -34,10 +35,7 @@ def _cap_tool_output(content: str, tool_name: str) -> str:
     trimmed_chars = len(content) - head_size - tail_size
     return (
         content[:head_size]
-        + (
-            f"\n\n[...TRUNCATED {trimmed_chars:,} chars of tool output "
-            f"'{tool_name}'...]\n\n"
-        )
+        + f"\n\n{format_tool_output_cap(trimmed_chars, tool_name)}\n\n"
         + content[-tail_size:]
     )
 

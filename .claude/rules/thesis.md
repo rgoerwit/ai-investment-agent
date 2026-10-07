@@ -3,6 +3,7 @@ paths:
   - "src/thesis_constants.py"
   - "prompts/portfolio_manager.json"
   - "src/validators/**"
+  - "src/agents/verdict_policy.py"
 ---
 
 # The investment thesis
@@ -16,6 +17,7 @@ reference a threshold but must never restate the number; L0 parity in
 
 - Financial health score ≥ 50%
 - Growth score ≥ 50%
+- Marginal-turnaround and data-vacuum growth exceptions permit at most HOLD; independent hard fails retain precedence and ACTIVE_TENDER keeps its event override.
 - Liquidity ≥ $100k daily USD turnover is a hard floor; ≥ $250k is a full pass.
   Between the two is MARGINAL, capped at a 3% position.
 - Analyst coverage < 15 — the "undiscovered" criterion.

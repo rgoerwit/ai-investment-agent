@@ -980,3 +980,170 @@ def test_narrative_explicit_currency_retains_minor_unit_contradictions(
     )
     if currency != source_currency:
         assert field(normalized, "LATEST_RESULTS_EARNINGS_GROWTH_YOY") == "N/A"
+
+
+_OCTOBER6 = next(
+    row
+    for row in json.loads((_FIXTURES / "latest_results_october6.json").read_text())
+    if row["case"] == "1112_HK_captured_flattened_results"
+)
+
+
+def _october6_normalize(report, records):
+    return normalize_foreign_language_evidence(
+        report, [], ticker="1112.HK", additional_records=[_record(r) for r in records]
+    )
+
+
+def test_captured_october6_flattened_statement_and_promoted_consumers():
+    normalized = _october6_normalize(_OCTOBER6["report"], _OCTOBER6["evidence_records"])
+    assert field(normalized, "LATEST_RESULTS_SOURCE_AUTHORITY") == "PRIMARY"
+    assert (
+        field(normalized, "LATEST_RESULTS_NORMALIZATION_REASON") == "SUPPORTED_PRIMARY"
+    )
+    senior, _ = promote_foreign_growth_evidence("", normalized)
+    for metric, growth in zip(
+        ("REVENUE", "EARNINGS"), _OCTOBER6["expected_growth"], strict=True
+    ):
+        assert field(normalized, f"LATEST_RESULTS_{metric}_GROWTH_YOY") == growth
+        assert field(senior, f"LATEST_RESULTS_{metric}_GROWTH_YOY") == growth
+
+
+@pytest.mark.parametrize(
+    "case,accepted",
+    [
+        ("reversed_columns", True),
+        ("no_change", True),
+        ("footnote", True),
+        ("wrong_currency", False),
+        ("mixed_currency", False),
+        ("wrong_scale", False),
+        ("mixed_scale", False),
+        ("reversed_values", False),
+        ("missing_cell", False),
+        ("duplicate_year", False),
+        ("wrong_year", False),
+        ("wrong_months", False),
+        ("duplicate_revenue", False),
+        ("duplicate_earnings", False),
+        ("undated_header", False),
+        ("scope_attributable", False),
+        ("scope_adjusted", False),
+        ("scope_arbitrary", False),
+        ("adjusted_row", False),
+        ("numeric_change", False),
+        ("intervening_period", False),
+        ("split_records", False),
+        ("failed", False),
+        ("blocked", False),
+        ("unapproved", False),
+    ],
+)
+def test_flattened_statement_adversarial_column_unit_scope_and_authority_binding(
+    case, accepted
+):
+    import hashlib
+
+    report = _OCTOBER6["report"]
+    record = copy.deepcopy(_OCTOBER6["evidence_records"][0])
+    text = record["content"]
+    if case == "reversed_columns":
+        text = text.replace("2026\n2025", "2025\n2026")
+        for current, prior in (
+            ("8,695.9", "7,019.2"),
+            ("1,583.3", "1,033.1"),
+            ("1,891.9", "1,100.7"),
+            ("21.8%", "15.7%"),
+            ("610.6", "71.0"),
+            ("919.2", "363.0"),
+            ("10.6%", "5.2%"),
+        ):
+            text = text.replace(f"{current}\n{prior}", f"{prior}\n{current}")
+    elif case == "no_change":
+        import re
+
+        text = text.replace("\nChange\n", "\n")
+        text = re.sub(r"(?m)^\+[\d.]+(?:%|pts)\n", "", text)
+    elif case == "footnote":
+        text = text.replace("Net profit\n", "Net profit†\n")
+    elif case == "wrong_currency":
+        text = text.replace("RMB million", "HKD million")
+    elif case == "mixed_currency":
+        text = text.replace("RMB million", "HKD million", 1)
+    elif case == "wrong_scale":
+        text = text.replace("RMB million", "RMB thousand")
+    elif case == "mixed_scale":
+        text = text.replace("RMB million", "RMB thousand", 1)
+    elif case == "reversed_values":
+        text = text.replace("8,695.9\n7,019.2", "7,019.2\n8,695.9")
+    elif case == "missing_cell":
+        text = text.replace("\n7,019.2", "")
+    elif case == "duplicate_year":
+        text = text.replace("2026\n2025", "2026\n2026")
+    elif case == "wrong_year":
+        text = text.replace("2026\n2025", "2026\n2024")
+    elif case == "wrong_months":
+        text = text.replace("Six months ended", "Year ended")
+    elif case == "duplicate_revenue":
+        text = text.replace(
+            "\nEBITDA*\n", "\nRevenue\n8,695.9\n7,019.2\n+23.9%\nEBITDA*\n"
+        )
+    elif case == "duplicate_earnings":
+        text = text.replace(
+            "\nAdjusted Net profit**\n",
+            "\nNet profit\n610.6\n71.0\n+760.0%\nAdjusted Net profit**\n",
+        )
+    elif case == "undated_header":
+        text = text.replace("Six months ended 30 June", "Interim results")
+    elif case.startswith("scope_"):
+        qualifier = {
+            "scope_attributable": "attributable to owners",
+            "scope_adjusted": "adjusted",
+            "scope_arbitrary": "anything else",
+        }[case]
+        report = report.replace(
+            "Net profit (Profit for the period)", f"Net profit ({qualifier})"
+        )
+    elif case == "adjusted_row":
+        text = text.replace("\nNet profit\n", "\nAdjusted Net profit\n")
+    elif case == "numeric_change":
+        text = text.replace("+760.0%\n", "760.0\n")
+    elif case == "intervening_period":
+        text = text.replace(
+            "\nNet profit\n", "\nSix months ended 30 June 2024\nNet profit\n"
+        )
+    elif case == "failed":
+        record["execution_status"] = "FAILED"
+    elif case == "blocked":
+        record["blocked"] = True
+    elif case == "unapproved":
+        record["authority_by_url"] = [[record["urls"][0], "UNSUPPORTED"]]
+    record["content"] = text
+    record["content_sha256"] = hashlib.sha256(text.encode()).hexdigest()
+    records = [record]
+    if case == "split_records":
+        boundary = text.index("Revenue\n")
+        records = [
+            {**record, "content": text[:boundary]},
+            {**record, "content": text[boundary:]},
+        ]
+        for r in records:
+            r["content_sha256"] = hashlib.sha256(r["content"].encode()).hexdigest()
+    normalized = _october6_normalize(report, records)
+    assert (
+        field(normalized, "LATEST_RESULTS_SOURCE_AUTHORITY") == "PRIMARY"
+    ) is accepted
+    if not accepted:
+        assert field(normalized, "LATEST_RESULTS_EARNINGS_GROWTH_YOY") == "N/A"
+
+
+def test_flattened_table_rejects_conflicting_adjacent_period_labels():
+    import hashlib
+
+    record = copy.deepcopy(_OCTOBER6["evidence_records"][0])
+    record["content"] = record["content"].replace(
+        "Six months ended 30 June", "Three months ended 30 June", 1
+    )
+    record["content_sha256"] = hashlib.sha256(record["content"].encode()).hexdigest()
+    normalized = _october6_normalize(_OCTOBER6["report"], [record])
+    assert field(normalized, "LATEST_RESULTS_SOURCE_AUTHORITY") == "UNSUPPORTED"

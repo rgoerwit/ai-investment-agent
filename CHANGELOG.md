@@ -13,10 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OCF/NI ratios as zero-weight review findings rather than issuer-risk penalties.
 - Block BUY when the Consultant reports MAJOR_CONCERNS: unresolved material
   analysis flaws withhold initiation authority without adding issuer-risk points.
-  Growth exceptions retain their existing authority.
+  Growth exceptions permit at most HOLD, with the active-tender override preserved.
 
 ### Fixed
 
+- Keep EPS rubric lineage on eligible per-share bases, honor verified majority
+  ownership ahead of unrelated independence text, restore capped Junior metrics
+  from inspected ingress, and bind one-cell-per-line comparative results tables.
 - Recognize complete half-year labels, abbreviated English dates, retained Japanese
   fiscal Q1 context, and equivalent currency-bound reporting-unit declarations while
   preserving comparative table and earnings-scope checks. Keep monetary amount

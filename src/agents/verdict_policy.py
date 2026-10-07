@@ -6,7 +6,7 @@ across the PM_BLOCK ``VERDICT:`` line (the source of truth all downstream consum
 read) and the human-readable ``PORTFOLIO MANAGER VERDICT:`` header.
 
 Why it exists (APR.WA, June 2026): the Growth hard-fail has a Data-Vacuum / Marginal-
-Turnaround exception (HOLD/small-BUY when Health is decent, valuation cheap, and the low
+Turnaround exception (HOLD when Health is decent, valuation cheap, and the low
 growth score reflects missing data rather than genuine shrinkage). That exception lived
 in Step-1A prompt prose and was silently overridden when the Step-1C Zone tally — inflated
 by soft/free-form points — crossed 2.0, force-selling a healthy name. This floor relinks
@@ -200,6 +200,48 @@ def apply_required_verdict(
         note=note,
         ticker=ticker,
     )
+    return rewritten, changed
+
+
+def _exception_growth_ceiling_applies(
+    inputs: DecisionInputs, assessment: GrowthGateAssessment
+) -> bool:
+    """Share the exception ceiling between enforcement and PM context."""
+    return (
+        assessment.exception in {"marginal_turnaround", "data_vacuum"}
+        and inputs.decision_metrics.get("m_and_a_status") != "ACTIVE_TENDER"
+    )
+
+
+def maybe_cap_exception_growth_buy_to_hold(
+    content_str: str, *, decision_inputs: DecisionInputs, ticker: str = "UNKNOWN"
+) -> tuple[str, bool]:
+    """A growth exception permits at most HOLD."""
+    assessment = assess_growth_gate(decision_inputs)
+    if not _exception_growth_ceiling_applies(decision_inputs, assessment):
+        return content_str, False
+    exception = assessment.exception
+    assert exception is not None
+    note = (
+        "> **DETERMINISTIC VERDICT CEILING APPLIED — BUY → HOLD**\n"
+        f"> Growth passed only through the {exception.replace('_', ' ')} "
+        "exception, which permits at most HOLD."
+    )
+    rewritten, changed, n_header, n_block = _apply_verdict_rewrite(
+        content_str,
+        required_verdict="HOLD",
+        allowed_from=frozenset({"BUY"}),
+        note=note,
+        ticker=ticker,
+    )
+    if changed:
+        logger.info(
+            "buy_capped_on_growth_exception",
+            ticker=ticker,
+            exception=exception,
+            header_rewrites=n_header,
+            block_rewrites=n_block,
+        )
     return rewritten, changed
 
 
@@ -559,6 +601,11 @@ def render_growth_gate_context(decision_inputs: DecisionInputs) -> str:
         f"- STATUS: {assessment.status}\n"
         f"- REASON: {assessment.reason or 'NONE'}\n"
         f"- MISSING_CURRENT_GROWTH_FIELDS: {missing}"
+        + (
+            "\n- MAX_VERDICT: HOLD (growth passed by exception)"
+            if _exception_growth_ceiling_applies(decision_inputs, assessment)
+            else ""
+        )
     )
 
 

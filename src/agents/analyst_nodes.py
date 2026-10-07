@@ -6,11 +6,18 @@ from datetime import datetime
 from typing import Any
 
 import structlog
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.types import RunnableConfig
 
 from src.charts.extractors.valuation_signals import VALUATION_CONTEXT_TOKENS
+from src.claim_policy import RAW_FINANCIAL_METRICS_INPUT
 from src.config import config as settings_config
 from src.data_block_utils import (
     build_fenced_block,
@@ -33,7 +40,12 @@ from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import failure_artifact, success_artifact
 from src.service_tiers import floor_llm_hard_timeout
 from src.thesis_constants import DRAWDOWN_52WK_RATIO, DRAWDOWN_SMA200_RATIO
+from src.tooling.structured_ingress import (
+    get_structured_ingress_payload,
+    render_structured_ingress_payload,
+)
 from src.tooling.text_boundary import format_untrusted_block
+from src.utils import has_tool_output_cap
 
 from . import message_utils, support
 from . import runtime as agent_runtime
@@ -874,6 +886,68 @@ def _normalize_structured_output(
     return normalized
 
 
+def _final_output_invalid(content: str, agent_key: str) -> bool:
+    """Use the same contract for structural recovery and publication."""
+    from src.utils import detect_truncation
+
+    return should_fail_closed(
+        agent_key,
+        validation=validate_required_output(agent_key, content),
+        truncated=detect_truncation(content, agent=agent_key)["truncated"],
+        content=content,
+    )
+
+
+def _junior_metrics_payload(state: Mapping[str, Any]) -> str:
+    """Accept only the inspected, valid ingress owned by Junior's metrics tool."""
+    payload, _ = get_structured_ingress_payload(state, RAW_FINANCIAL_METRICS_INPUT)
+    records = state.get("structured_inputs")
+    record = (
+        records.get(RAW_FINANCIAL_METRICS_INPUT)
+        if isinstance(records, Mapping)
+        else None
+    )
+    if (
+        not payload
+        or payload.get("error")
+        or not isinstance(record, Mapping)
+        or record.get("agent_key") != "junior_fundamentals_analyst"
+        or record.get("tool_name") != "get_financial_metrics"
+    ):
+        return ""
+    return render_structured_ingress_payload(state, RAW_FINANCIAL_METRICS_INPUT)
+
+
+def _resplice_junior_metrics(content: str, state: Mapping[str, Any]) -> str | None:
+    """Restore the capped metrics section exactly; preserve all other sections."""
+    payload = _junior_metrics_payload(state)
+    first = "### TOOL 1: get_financial_metrics"
+    second = "### TOOL 2: get_fundamental_analysis"
+    if (
+        not payload
+        or content.count(first) != 1
+        or content.count(second) != 1
+        or content.count("=== RAW FINANCIAL DATA FOR ") != 1
+        or content.count("=== END RAW DATA ===") != 1
+    ):
+        return None
+    start = content.index(first) + len(first)
+    end = content.index(second)
+    if end <= start or not has_tool_output_cap(
+        content[start:end], "get_financial_metrics"
+    ):
+        return None
+    repaired = cap_state_value(
+        content[:start] + "\n" + payload + "\n" + content[end:],
+        "raw_fundamentals_data",
+    )
+    return (
+        repaired
+        if not _final_output_invalid(repaired, "junior_fundamentals_analyst")
+        else None
+    )
+
+
 def _should_retry_output(content: str, agent_key: str) -> bool:
     """Return True when the initial output should get one deep-model retry."""
     if support._is_output_insufficient(content, agent_key):
@@ -884,7 +958,7 @@ def _should_retry_output(content: str, agent_key: str) -> bool:
         "foreign_language_analyst",
         "junior_fundamentals_analyst",
     }:
-        return not validate_required_output(agent_key, content)["ok"]
+        return _final_output_invalid(content, agent_key)
     return False
 
 
@@ -929,11 +1003,28 @@ def _build_retry_invocation_messages(
     content: str,
     *,
     force_foreign_repair: bool = False,
+    state: Mapping[str, Any] | None = None,
 ) -> list[Any]:
     """Add the owning agent's structured-output correction for a retry."""
     if agent_key == "junior_fundamentals_analyst":
+        payload = _junior_metrics_payload(state or {})
+        retained_messages = [
+            message.model_copy(update={"content": payload})
+            if payload
+            and isinstance(message, ToolMessage)
+            and message.name == "get_financial_metrics"
+            and message.status != "error"
+            and not message.additional_kwargs.get("blocked")
+            and message_utils.message_agent_key(message) == agent_key
+            and has_tool_output_cap(
+                message_utils.extract_string_content(message.content),
+                "get_financial_metrics",
+            )
+            else message
+            for message in invocation_messages
+        ]
         return [
-            *invocation_messages,
+            *retained_messages,
             HumanMessage(
                 content=(
                     "OUTPUT CONTRACT CORRECTION: Return the required RAW FINANCIAL DATA "
@@ -1477,6 +1568,22 @@ def create_analyst_node(
             )
 
             recovery_event: dict[str, Any] | None = None
+            if agent_key == "junior_fundamentals_analyst" and not has_tool_calls:
+                repaired = _resplice_junior_metrics(content_str, state)
+                if repaired is not None:
+                    recovery_event = support.structural_recovery_event(
+                        agent_key,
+                        "incomplete_structured_output",
+                        llm,
+                        None,
+                        content_str,
+                    )
+                    recovery_event.update(
+                        outcome="accepted_text", repair="structured_ingress_resplice"
+                    )
+                    new_state["structural_recovery_events"] = [recovery_event]
+                    content_str = repaired
+                    logger.info("junior_metrics_resplice_accepted", ticker=ticker)
 
             if (
                 allow_retry
@@ -1539,6 +1646,7 @@ def create_analyst_node(
                         agent_key,
                         content_str,
                         force_foreign_repair=foreign_guidance_needs_repair,
+                        state=state,
                     )
                     # Structural recovery re-renders from evidence already gathered by
                     # the owning analyst. It deliberately exposes no tools: another tool
@@ -1655,6 +1763,11 @@ def create_analyst_node(
                                 recovery_event["outcome"] = (
                                     "accepted_text" if accepted else "rejected_invalid"
                                 )
+                            elif (
+                                agent_key == "junior_fundamentals_analyst"
+                                and _final_output_invalid(retry_content_str, agent_key)
+                            ):
+                                recovery_event["outcome"] = "failed"
                             else:
                                 content_str = retry_content_str
                                 recovery_event["outcome"] = "accepted_text"
@@ -1729,6 +1842,8 @@ def create_analyst_node(
 
             from src.utils import detect_truncation
 
+            if agent_key == "junior_fundamentals_analyst":
+                content_str = cap_state_value(content_str, output_field)
             trunc_info = detect_truncation(content_str, agent=agent_key)
             log_truncation_diagnostic(
                 agent_key=agent_key,
@@ -1749,12 +1864,7 @@ def create_analyst_node(
                 truncated=trunc_info["truncated"],
                 validation=validation if validation["checks"] else None,
             )
-            final_output_invalid = should_fail_closed(
-                agent_key,
-                validation=validation,
-                truncated=trunc_info["truncated"],
-                content=content_str,
-            )
+            final_output_invalid = _final_output_invalid(content_str, agent_key)
             if recovery_event is not None:
                 recovery_event["final_output_valid"] = not final_output_invalid
             if final_output_invalid:

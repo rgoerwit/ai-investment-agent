@@ -388,3 +388,86 @@ async def test_indeterminate_growth_status_agrees_in_prompt_and_saved_policy(cas
     assert result["decision_policy"]["growth_gate"]["status"] == "INDETERMINATE"
     assert result["decision_policy"]["growth_gate"]["exception"] is None
     assert "STATUS: INDETERMINATE" in invoke.call_args.args[1][0].content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pe,tender,final",
+    [(12.52, False, "HOLD"), (14.0, False, "HOLD"), (12.52, True, "BUY")],
+)
+async def test_exception_ceiling_is_saved_before_quick_qualification_and_trace(
+    pe, tender, final
+):
+    from src.liquidity_assessment import LiquidityAssessment
+
+    snapshot = deepcopy(_SNAPSHOT)
+    snapshot["scorecards"] = {
+        "HEALTH": {"percentage": 90.9, "decision_eligible": True},
+        "GROWTH": {"percentage": 0.0, "decision_eligible": True},
+    }
+    for name, field_name, value in (
+        ("coverage", "ANALYST_COVERAGE_ENGLISH", "4"),
+        ("us", "US_REVENUE_PERCENT", "10%"),
+    ):
+        snapshot["claims"][f"claim:{name}"] = {
+            "id": f"claim:{name}",
+            "field": field_name,
+            "value": value,
+            "authority": "PRIMARY",
+            "exactness": "EXACT",
+            "coverage": "FOUND",
+            "decision_eligible": True,
+            "decision_role": "GATE_INPUT",
+            "source_url": f"https://issuer.example/{name}",
+            "evidence_id": "evidence:1:abc",
+        }
+    initial = (
+        _EMPTY.replace("DECISION_FACTS: NONE", "DECISION_FACTS: claim:pe")
+        .replace("DO NOT INITIATE", "BUY")
+        .replace("DO_NOT_INITIATE", "BUY")
+    )
+    invoke = AsyncMock(return_value=SimpleNamespace(content=initial))
+    state = {
+        "company_of_interest": "TEST",
+        "pre_screening_result": "PASS",
+        "red_flags": [],
+        "analysis_snapshot": snapshot,
+        "fundamentals_report": _FUNDAMENTALS.replace(
+            "PE_RATIO_TTM: 12.0",
+            f"PE_RATIO_TTM: {pe}\nREVENUE_CAGR_3Y: 5.1%\nM_AND_A_STATUS: {'ACTIVE_TENDER' if tender else 'NONE'}",
+        ),
+        "liquidity_assessment": LiquidityAssessment(
+            "PASS", average_daily_turnover_usd=500_000
+        ).to_dict(),
+    }
+    context = SimpleNamespace(quick_mode=True, ticker="TEST", trade_date="2026-10-06")
+    with (
+        patch(
+            "src.prompts.get_prompt",
+            return_value=SimpleNamespace(
+                system_message="PM", agent_name="Portfolio Manager"
+            ),
+        ),
+        patch(
+            "src.agents.decision_nodes.agent_runtime.invoke_with_rate_limit_handling",
+            invoke,
+        ),
+    ):
+        result = await create_portfolio_manager_node(
+            SimpleNamespace(model_name="initial"), None
+        )(state, {"configurable": {"context": context}})
+    assert result["artifact_statuses"]["final_trade_decision"]["ok"]
+    assert result["decision_policy"]["final_verdict"] == final
+    assert f"VERDICT: {final}" in result["final_trade_decision"]
+    assert result["decision_trace"]["verdict"] == final
+    adjustments = result["decision_policy"]["adjustments"]
+    if tender:
+        assert not adjustments
+        assert "MAX_VERDICT: HOLD" not in invoke.call_args.args[1][0].content
+    else:
+        assert (
+            len(adjustments) == 1
+            and adjustments[0]["kind"] == "growth_exception_ceiling"
+        )
+        assert "MAX_VERDICT: HOLD" in invoke.call_args.args[1][0].content
+        assert not result["decision_policy"]["qualifications"]

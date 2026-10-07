@@ -1348,3 +1348,118 @@ def test_missing_health_does_not_imply_verified_low_health(health, status, viola
             code_subtotal=0.0,
             pre_screening_result="PASS",
         )[1]
+
+
+@pytest.mark.parametrize(
+    "pe,current_fields,expected",
+    [(12.52, None, "marginal_turnaround"), (14.0, frozenset(), "data_vacuum")],
+)
+def test_exception_growth_caps_buy_to_hold_with_consistent_surfaces_and_idempotence(
+    pe, current_fields, expected
+):
+    from src.agents.verdict_policy import (
+        assess_growth_gate,
+        maybe_cap_exception_growth_buy_to_hold,
+    )
+
+    inputs = _inputs(
+        _data_block(90.9, pe, 0.0, 5.1), current_growth_fields=current_fields
+    )
+    assert assess_growth_gate(inputs).exception == expected
+    initial = _full_pm_output("BUY", "BUY").replace(
+        "POSITION_SIZE: 0.0%", "POSITION_SIZE: 3.0%"
+    )
+    capped, changed = maybe_cap_exception_growth_buy_to_hold(
+        initial, decision_inputs=inputs
+    )
+    assert changed
+    assert "PORTFOLIO MANAGER VERDICT: HOLD" in capped
+    assert "Actual Decision: HOLD" in capped and "**Action**: HOLD" in capped
+    assert "POSITION_SIZE: 0.0%" in capped
+    assert extract_pm_block(capped).verdict == "HOLD"
+    assert "MAX_VERDICT: HOLD" in render_growth_gate_context(inputs)
+    assert maybe_cap_exception_growth_buy_to_hold(capped, decision_inputs=inputs) == (
+        capped,
+        False,
+    )
+
+
+@pytest.mark.parametrize(
+    "verdict,growth,tender",
+    [
+        ("HOLD", 0, False),
+        ("DO_NOT_INITIATE", 0, False),
+        ("SELL", 0, False),
+        ("BUY", 50, False),
+        ("BUY", 66.7, False),
+        ("BUY", 0, True),
+    ],
+)
+def test_exception_ceiling_preserves_other_verdicts_ordinary_growth_and_active_tender(
+    verdict, growth, tender
+):
+    from src.agents.verdict_policy import maybe_cap_exception_growth_buy_to_hold
+
+    inputs = _inputs(_data_block(90.9, 12.52, growth, 5.1))
+    if tender:
+        inputs = replace(
+            inputs,
+            decision_metrics={
+                **inputs.decision_metrics,
+                "m_and_a_status": "ACTIVE_TENDER",
+            },
+        )
+    initial = _pm_output(verdict, verdict)
+    assert maybe_cap_exception_growth_buy_to_hold(initial, decision_inputs=inputs) == (
+        initial,
+        False,
+    )
+    if tender or growth >= 50:
+        assert "MAX_VERDICT" not in render_growth_gate_context(inputs)
+
+
+@pytest.mark.parametrize("failure", ["liquidity", "auto_reject"])
+def test_hard_fail_precedes_exception_ceiling(failure):
+    from src.agents.verdict_policy import maybe_cap_exception_growth_buy_to_hold
+
+    inputs = _inputs(_data_block(90.9, 12.52, 0, 5.1))
+    flags = (
+        [{"type": "REJECT", "action": "AUTO_REJECT"}]
+        if failure == "auto_reject"
+        else []
+    )
+    if failure == "liquidity":
+        inputs = replace(
+            inputs,
+            liquidity=LiquidityAssessment(
+                "FAIL_INSUFFICIENT_LIQUIDITY", average_daily_turnover_usd=99_999
+            ),
+        )
+    initial = _pm_output("BUY", "BUY")
+    violation = assess_verdict_policy(initial, decision_inputs=inputs, red_flags=flags)
+    assert violation is not None and violation.required_verdict == "DO_NOT_INITIATE"
+    rejected, _ = apply_required_verdict(
+        initial,
+        required_verdict=violation.required_verdict,
+        rule=violation.rule,
+        reason=violation.reason,
+    )
+    assert maybe_cap_exception_growth_buy_to_hold(rejected, decision_inputs=inputs) == (
+        rejected,
+        False,
+    )
+
+
+@pytest.mark.parametrize("content", ["no verdict", _pm_output("BUY", "HOLD")])
+def test_exception_ceiling_reuses_guarded_verdict_parser(content):
+    from src.agents.verdict_policy import maybe_cap_exception_growth_buy_to_hold
+
+    result, changed = maybe_cap_exception_growth_buy_to_hold(
+        content, decision_inputs=_inputs(_data_block(90.9, 12.52, 0, 5.1))
+    )
+    if changed:
+        assert "PORTFOLIO MANAGER VERDICT: HOLD" in result
+        assert "VERDICT: HOLD" in result
+        assert "PORTFOLIO MANAGER VERDICT: BUY" not in result
+    else:
+        assert result == content

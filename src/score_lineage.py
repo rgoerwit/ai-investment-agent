@@ -57,7 +57,7 @@ _SCORE_CRITERION_DEPENDENCIES: dict[
             ("REVENUE_GROWTH_TTM",),
         ),
         "EPS_GROWTH": (
-            ("LATEST_RESULTS_EARNINGS_GROWTH_YOY",),
+            # Company profit growth is not a per-share observation.
             ("EARNINGS_GROWTH_MRQ",),
             ("EARNINGS_GROWTH_FY",),
             ("EARNINGS_GROWTH_TTM",),
@@ -522,7 +522,26 @@ def add_validated_derivations(
                 criterion,
                 (),
             ):
-                if all(field in eligible_facts for field in dependency_group):
+                if criterion == "EPS_GROWTH":
+                    # Known statement NI/proxy series remain legitimate earnings
+                    # facts, but cannot substantiate a per-share rubric award.
+                    eps_claims = {
+                        key: claim
+                        for key, claim in claims.items()
+                        if isinstance(claim, Mapping)
+                        and claim.get("source_provider")
+                        not in {
+                            "calculated_from_quarterly",
+                            "calculated_from_statement_net_income_proxy",
+                        }
+                    }
+                    _, dependency_id = _eligible_fact_number(
+                        eps_claims, dependency_group[0]
+                    )
+                    if dependency_id is not None:
+                        resolved = (dependency_id,)
+                        break
+                elif all(field in eligible_facts for field in dependency_group):
                     resolved = tuple(
                         eligible_facts[field] for field in dependency_group
                     )

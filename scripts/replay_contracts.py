@@ -11,9 +11,12 @@ import json
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from src.agents.foreign_language_evidence import (
+    _CONTROL_BASIS_TERMS,
+    _NON_CONTROL_RELATIONSHIPS,
+    _field,
     normalize_foreign_language_evidence,
     unique_latest_results_block,
 )
@@ -27,7 +30,9 @@ from src.pm_claim_audit import (
     normalize_decision_trace_citations,
     validate_decision_trace,
 )
+from src.score_lineage import add_validated_derivations
 from src.tooling.evidence_recorder import DOCUMENT_ACQUISITION_TOOLS, normalize_http_url
+from src.validators.entity_governance_card import ControlStatus
 from src.validators.metric_extractor import extract_metrics
 
 
@@ -93,6 +98,139 @@ def _acquisition_state(
     return status, attempts, cited
 
 
+def _successful_evidence_records(evidence: list[object]) -> list[ToolEvidenceRecord]:
+    """One retained-success filter shared by ownership and results replay."""
+    return [
+        evidence_record_to_tool_evidence(
+            {
+                **r,
+                "urls": [
+                    value for value in r.get("urls", []) if isinstance(value, str)
+                ],
+            }
+        )
+        for r in evidence
+        if isinstance(r, dict)
+        and r.get("execution_status") == "SUCCEEDED"
+        and not r.get("blocked")
+        and isinstance(r.get("content"), str)
+        and isinstance(r.get("tool_name"), str)
+        and isinstance(r.get("urls", []), list)
+        and isinstance(r.get("evidence_status"), str)
+        and r.get("evidence_status") in {"EVIDENCE_FOUND", "RESULTS_FOUND"}
+    ]
+
+
+def _replay_ownership(before: str, after: str, counts: Counter[str]) -> None:
+    """Separate changes in control/basis from evidence-only normalization."""
+    classifications = []
+    for stage, report in (("before", before), ("after", after)):
+        fields = tuple(
+            _field(report, label) or "UNKNOWN"
+            for label in (
+                "Control Status",
+                "Control Basis",
+                "Ownership Evidence Status",
+            )
+        )
+        classifications.append(fields)
+        # Classification labels are finite; never print free-form report values.
+        allowed = (
+            set(get_args(ControlStatus)),
+            {
+                *_CONTROL_BASIS_TERMS,
+                *_NON_CONTROL_RELATIONSHIPS.values(),
+                "MAJORITY_VOTING_RIGHTS",
+                "UNKNOWN",
+                "CONFLICTING_CONTROL_EVIDENCE",
+            },
+            {
+                "CITED",
+                "VERIFIED_URL",
+                "VERIFIED_OFFICIAL_FILING",
+                "DISCLOSED_UNVERIFIED",
+                "REJECTED",
+                "NOT_FOUND",
+                "UNKNOWN",
+            },
+        )
+        for category, value, labels in zip(
+            ("control", "basis", "evidence"), fields, allowed, strict=True
+        ):
+            counts[f"{stage}_{category}:{value if value in labels else 'OTHER'}"] += 1
+    counts["replayed"] += 1
+    if classifications[0][:2] != classifications[1][:2]:
+        counts["substantive_control_changed"] += 1
+    elif before != after and any(
+        _field(before, label) != _field(after, label)
+        for label in (
+            "Largest Shareholder",
+            "Controlling Shareholder",
+            "Relationship",
+            "Influential Entity",
+            "Ownership Evidence Status",
+        )
+    ):
+        counts["relationship_or_evidence_only_changed"] += 1
+
+
+def _replay_eps(snapshot: object, report: object, counts: Counter[str]) -> None:
+    """Replay evidence lineage; unsupported EPS awards are coverage, not risk."""
+    if snapshot is None:
+        counts["missing_snapshot"] += 1
+        return
+    if not isinstance(snapshot, dict) or any(
+        not isinstance(snapshot.get(key, {}), dict) for key in ("claims", "scorecards")
+    ):
+        counts["malformed_snapshot"] += 1
+        return
+    if (
+        snapshot.get("contract_status") != "VALID"
+        or not isinstance(report, str)
+        or not report
+    ):
+        counts["unavailable_contract_or_report"] += 1
+        return
+    try:
+        derived = add_validated_derivations(snapshot, report)
+        cards = [
+            item.get("scorecards", {}).get("GROWTH", {}) for item in (snapshot, derived)
+        ]
+        criteria = [card.get("criteria", {}).get("EPS_GROWTH", {}) for card in cards]
+        dependencies = [criterion.get("derived_from", []) for criterion in criteria]
+        if any(
+            not isinstance(value, list)
+            or any(not isinstance(item, str) for item in value)
+            for value in dependencies
+        ) or any(
+            criterion.get("award", "MISSING") not in {"0", "1", "N/A", "MISSING"}
+            or not isinstance(card.get("lineage_gaps", []), list)
+            for card, criterion in zip(cards, criteria, strict=True)
+        ):
+            raise ValueError("invalid lineage shape")
+        for stage, card, criterion in zip(
+            ("before", "after"), cards, criteria, strict=True
+        ):
+            counts[
+                f"{stage}_growth:{'eligible' if card.get('decision_eligible') is True else 'ineligible' if card.get('decision_eligible') is False else 'unavailable'}"
+            ] += 1
+            counts[f"{stage}_eps_award:{criterion.get('award', 'MISSING')}"] += 1
+        counts["replayed"] += 1
+        if dependencies[0] != dependencies[1]:
+            counts["eps_dependencies_changed"] += 1
+        if (
+            cards[0].get("decision_eligible") is True
+            and cards[1].get("decision_eligible") is False
+        ):
+            counts["growth_eligibility_lost"] += 1
+        if criteria[1].get("award") == "1" and "EPS_GROWTH" in cards[1].get(
+            "lineage_gaps", []
+        ):
+            counts["unsupported_positive_eps_after"] += 1
+    except (ValueError, TypeError, KeyError, AttributeError):
+        counts["malformed_snapshot"] += 1
+
+
 def replay_contracts(paths: Iterable[Path]) -> dict[str, dict[str, int]]:
     """Replay saved successful evidence without models, network, or file writes."""
     counts: dict[str, Counter[str]] = {
@@ -104,6 +242,8 @@ def replay_contracts(paths: Iterable[Path]) -> dict[str, dict[str, int]]:
             "latest_results_acquisition",
             "latest_results_claims",
             "pm_trace",
+            "ownership",
+            "eps_lineage",
         )
     }
     for path in sorted({p.resolve() for p in paths}):
@@ -126,36 +266,16 @@ def replay_contracts(paths: Iterable[Path]) -> dict[str, dict[str, int]]:
                 counts["ocf"]["present" if metric is not None else "missing"] += 1
             foreign = sources.get("foreign_language_report")
             if isinstance(foreign, str) and foreign:
+                records = _successful_evidence_records(evidence)
+                normalized = normalize_foreign_language_evidence(
+                    foreign, [], ticker="REPLAY", additional_records=records
+                )
+                _replay_ownership(foreign, normalized, counts["ownership"])
                 block = unique_latest_results_block(foreign)
                 coverage = extract_block_field_from_text_raw(
                     block or "", "LATEST_RESULTS_COVERAGE_STATUS"
                 )
                 if coverage == "FOUND":
-                    records = [
-                        evidence_record_to_tool_evidence(
-                            {
-                                **r,
-                                "urls": [
-                                    value
-                                    for value in r.get("urls", [])
-                                    if isinstance(value, str)
-                                ],
-                            }
-                        )
-                        for r in evidence
-                        if isinstance(r, dict)
-                        and r.get("execution_status") == "SUCCEEDED"
-                        and not r.get("blocked")
-                        and isinstance(r.get("content"), str)
-                        and isinstance(r.get("tool_name"), str)
-                        and isinstance(r.get("urls", []), list)
-                        and isinstance(r.get("evidence_status"), str)
-                        and r.get("evidence_status")
-                        in {"EVIDENCE_FOUND", "RESULTS_FOUND"}
-                    ]
-                    normalized = normalize_foreign_language_evidence(
-                        foreign, [], ticker="REPLAY", additional_records=records
-                    )
                     normalized_block = unique_latest_results_block(normalized) or ""
                     reason = (
                         extract_block_field_from_text_raw(
@@ -202,6 +322,7 @@ def replay_contracts(paths: Iterable[Path]) -> dict[str, dict[str, int]]:
                         counts["latest_results_claims"][
                             "retained_evidence_truncated"
                         ] += 1
+            _replay_eps(data.get("analysis_snapshot"), report, counts["eps_lineage"])
             decision = final.get("decision")
             if isinstance(decision, str) and decision:
                 snapshot = data.get("analysis_snapshot")
