@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-10-03
+Last updated: 2026-10-07
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
@@ -45,7 +45,7 @@ Canonical fenced blocks require their end marker and legacy fields match exact l
 keys, so `RAW_HEALTH_SCORE` cannot satisfy `HEALTH_SCORE`. Invalid responses are
 classified as cap exhaustion, incomplete structure, or ordinary contract violation.
 Structural recovery is text-only and bounded: full mode applies it to eligible analyst
-outputs, while quick mode limits it to Senior Fundamentals and Portfolio Manager.
+outputs, while quick mode limits it to Foreign Language, Senior Fundamentals and Portfolio Manager.
 
 ## Comparing Analysis Quality Across Runs (October 2026)
 
@@ -247,6 +247,17 @@ single-source tool records on distinct domains.
 Related listed tickers must occur in the same supporting evidence, so an
 unsupported FLA ticker cannot re-enter through Senior's restatement.
 
+Junior Fundamentals requests its two ticker-bound tools in one model turn. Its tool
+node assembles the existing raw-data wrapper from that round’s complete inspected
+outputs before display caps; re-entry closes the exchange without a copying model
+call. Useful inspected neighbors survive partial provider failures with a degradation notice;
+failed, blocked or absent acquisition remains explicitly unavailable,
+and artifact overflow fails closed while canonical metrics remain independent.
+
+Saved decision provenance separates configured bindings and successful models used
+from the accepted PM response model. Aggregate usage alone cannot identify the
+producer after corrections; legacy or unstamped responses report unknown or ambiguous.
+
 Every shared graph tool loop—Market, Sentiment, News, Junior Fundamentals, Foreign
 Language, and Value Trap—is bounded by `ResearchBudgetLedger`. The policy instance is
 shared by its analyst and tool node, so model turns, tool rounds, fan-out, per-tool and
@@ -331,7 +342,10 @@ official-document trust policy, not a producing-tool name, model-written token, 
 ticker, jurisdiction, or inferred issuer domain.
 Latest-results and management-guidance numeric decision eligibility additionally
 requires the asserted values to occur in the URL-bound evidence; URL identity alone is
-insufficient. Approved HTML IR hubs may expose a bounded ranked list of same-host
+insufficient. HTML extraction retains the established cell-per-line text consumed by
+the comparative readers. Row joining and blanket spanning-table exclusion are withdrawn;
+flattened text does not establish source geometry, and ambiguous bindings stay rejected.
+Approved HTML IR hubs may expose a bounded ranked list of same-host
 relative disclosure paths; those children are fetched through the same URL, DNS,
 redirect, size, and inspection controls before they can bind.
 
@@ -598,3 +612,13 @@ Next likely large seams:
 
 This note was refreshed from the current repo layout and recent refactor state.
 It is intentionally shorter than older versions; use `README.md`, `CHANGELOG.md`, tests, and the live tree for deeper detail.
+
+Financial health is assessed at `agents/verdict_policy.py` from `DecisionInputs`,
+including the documented exception using both eligible canonical ratio facts from
+one authoritative snapshot. `thesis_constants.py` owns the boundaries. Missing or
+unreliable health is indeterminate; missing exception proof cannot rescue a reliable
+low score. Active tenders exempt health/growth applicability while preserving their
+raw assessments and independent initiation failures. Stored `health_gate`, PM
+context and report visuals share that assessment; legacy policies without it display
+unknown health. Canonical ratios retain the existing two-decimal producer precision,
+so near-boundary values are assessed conservatively without a tolerance rescue.

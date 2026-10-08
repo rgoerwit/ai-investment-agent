@@ -1463,3 +1463,67 @@ def test_exception_ceiling_reuses_guarded_verdict_parser(content):
         assert "PORTFOLIO MANAGER VERDICT: BUY" not in result
     else:
         assert result == content
+
+
+@pytest.mark.parametrize(
+    "coverage,status", [(None, "INDETERMINATE"), (4, "PASS"), (100, "FAIL")]
+)
+@pytest.mark.parametrize("us_revenue", [None, 10.0, 99.0])
+def test_code_owned_compliance_display_preserves_rationale_and_verdict(
+    coverage, status, us_revenue
+):
+    from src.agents.verdict_policy import (
+        assess_initiation_gates,
+        project_compliance_gates,
+    )
+
+    inputs = replace(
+        _inputs("ADJUSTED_HEALTH_SCORE: 80%\nADJUSTED_GROWTH_SCORE: 20%"),
+        english_analyst_count=coverage,
+        us_revenue_pct=us_revenue,
+    )
+    content = """### PORTFOLIO MANAGER VERDICT: DO NOT INITIATE
+### THESIS COMPLIANCE SUMMARY
+- **Growth Transition**: 99% (Adjusted) - PASS
+- **Analyst Coverage**: 1 - PASS
+- **US Revenue**: Not disclosed - PASS
+- **Liquidity**: FAIL
+**Hard Fail Result**: PASS
+**Qualitative Risks**: Independent source-supported risk +1
+### FINAL POSITION PARAMETERS
+PM discretion: retain economic risks.
+VERDICT: DO_NOT_INITIATE
+"""
+    projected = project_compliance_gates(content, inputs)
+    assert project_compliance_gates(projected, inputs) == projected
+    assert f" - {status};" in projected
+    for gate in assess_initiation_gates(inputs):
+        assert f"{gate.status};" in projected
+        assert (
+            "Unknown" in projected
+            if gate.value is None
+            else f"{gate.value:g}" in projected or gate.rule == "liquidity"
+        )
+    assert "Independent source-supported risk +1" in projected
+    assert "VERDICT: DO_NOT_INITIATE" in projected
+    assert "PM discretion: retain economic risks." in projected
+    assert "99% (Adjusted) - PASS" not in projected
+    assert "Hard Fail Result" in projected
+
+
+@pytest.mark.parametrize(
+    "health,status",
+    [
+        (None, "INDETERMINATE"),
+        (64.0, "HARD_FAIL"),
+        (65.0, "EXCEPTION_MARGINAL_TURNAROUND"),
+    ],
+)
+def test_growth_display_uses_actual_exception_without_changing_policy(health, status):
+    from src.agents.verdict_policy import project_compliance_gates
+
+    inputs = replace(_inputs(_data_block(75, 12, 40, 16)), health_decision_pct=health)
+    text = "### THESIS COMPLIANCE SUMMARY\n- **Growth Transition**: 40% - FAIL\n### FINAL POSITION PARAMETERS\nIndependent tender blocker retained."
+    projected = project_compliance_gates(text, inputs)
+    assert f"(Adjusted) - {status};" in projected
+    assert "Independent tender blocker retained." in projected

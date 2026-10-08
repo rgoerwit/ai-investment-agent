@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
@@ -110,10 +111,14 @@ def _profitability_growth_award(
     )
 
 
-def _eligible_fact_number(
-    claims: Mapping[str, Any], field: str
+def eligible_fact_number(
+    claims: Mapping[str, Any], field: str, *, strict: bool = False
 ) -> tuple[float | None, str | None]:
-    """Return one decision-eligible numeric fact without guessing among conflicts."""
+    """Select a coherent eligible fact; strict reads require a complete scalar.
+
+    Canonical ratio facts are decimal scalar strings produced from RAW_METRICS.
+    Legacy score-lineage consumers retain their unit-aware leading-number read.
+    """
     matches: list[tuple[float, str]] = []
     for existing_claim_id, claim in claims.items():
         if (
@@ -123,7 +128,21 @@ def _eligible_fact_number(
             or not claim.get("decision_eligible")
         ):
             continue
-        value = _text_number(str(claim.get("value", "")))
+        value: float | None
+        if strict:
+            raw = claim.get("value")
+            if claim.get("decision_eligible") is not True:
+                continue
+            text = str(raw).strip()
+            if isinstance(raw, bool) or not re.fullmatch(
+                r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", text
+            ):
+                return None, None
+            value = float(text)
+            if not math.isfinite(value):
+                return None, None
+        else:
+            value = _text_number(str(claim.get("value", "")))
         if value is not None:
             matches.append((value, str(existing_claim_id)))
     if not matches:
@@ -186,10 +205,10 @@ def _health_objective_overrides(
                 }
             )
 
-    direct_ratio, direct_ratio_id = _eligible_fact_number(claims, "NET_DEBT_EBITDA_RAW")
-    debt, debt_id = _eligible_fact_number(claims, "TOTAL_DEBT_RAW")
-    cash, cash_id = _eligible_fact_number(claims, "TOTAL_CASH_RAW")
-    ebitda, ebitda_id = _eligible_fact_number(claims, "EBITDA_RAW")
+    direct_ratio, direct_ratio_id = eligible_fact_number(claims, "NET_DEBT_EBITDA_RAW")
+    debt, debt_id = eligible_fact_number(claims, "TOTAL_DEBT_RAW")
+    cash, cash_id = eligible_fact_number(claims, "TOTAL_CASH_RAW")
+    ebitda, ebitda_id = eligible_fact_number(claims, "EBITDA_RAW")
     ratio = direct_ratio
     ratio_dependencies: tuple[str, ...] = (direct_ratio_id,) if direct_ratio_id else ()
     if ratio is None and None not in {debt, cash, ebitda} and ebitda is not None:
@@ -224,7 +243,7 @@ def _health_objective_overrides(
                 reason="CANONICAL_METRIC_BASIS_CONFLICT",
             )
 
-    raw_fcf, raw_fcf_id = _eligible_fact_number(claims, "FREE_CASH_FLOW_RAW")
+    raw_fcf, raw_fcf_id = eligible_fact_number(claims, "FREE_CASH_FLOW_RAW")
     report_fcf = _text_number(fields.get("FREE_CASH_FLOW", fields.get("FCF", "")))
     if raw_fcf is None or raw_fcf_id is None or report_fcf is None:
         return overrides, dependencies, conflicts
@@ -251,7 +270,7 @@ def _health_objective_overrides(
     else:
         override("FCF_POSITIVE", "0", (raw_fcf_id,))
 
-    market_cap, market_cap_id = _eligible_fact_number(claims, "MARKET_CAP_RAW")
+    market_cap, market_cap_id = eligible_fact_number(claims, "MARKET_CAP_RAW")
     if raw_fcf > 0 and market_cap is not None and market_cap > 0 and market_cap_id:
         threshold = (
             UTILITIES_FCF_YIELD_MIN_PCT if sector == "utilities" else FCF_YIELD_MIN_PCT
@@ -535,7 +554,7 @@ def add_validated_derivations(
                             "calculated_from_statement_net_income_proxy",
                         }
                     }
-                    _, dependency_id = _eligible_fact_number(
+                    _, dependency_id = eligible_fact_number(
                         eps_claims, dependency_group[0]
                     )
                     if dependency_id is not None:

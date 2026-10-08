@@ -56,8 +56,13 @@ async def test_semantic_recovery_is_once_and_records_final_validity(
     repair = SimpleNamespace(model_name="repair")
     invoke = AsyncMock(
         side_effect=[
-            SimpleNamespace(content=initial),
-            SimpleNamespace(content=recovery),
+            SimpleNamespace(
+                content=initial, response_metadata={"model_name": "initial-model"}
+            ),
+            SimpleNamespace(
+                content=recovery,
+                response_metadata={"model_name": "accepted-recovery-model"},
+            ),
         ]
     )
     state = {
@@ -87,6 +92,9 @@ async def test_semantic_recovery_is_once_and_records_final_validity(
     assert event["final_output_valid"] is accepted
     assert event["outcome"] == ("accepted_text" if accepted else "failed")
     assert result["artifact_statuses"]["final_trade_decision"]["ok"] is accepted
+    assert result["artifact_statuses"]["final_trade_decision"].get("model") == (
+        "accepted-recovery-model" if accepted else None
+    )
     assert result["decision_trace"]["status"] == ("VALID" if accepted else "INVALID")
 
 
@@ -340,8 +348,12 @@ async def test_independent_gate_context_floor_and_saved_verdict_agree(
     )
     assert gate["status"] == status
     prompt = invoke.call_args.args[1][0].content
-    assert f"analyst_coverage: {status}" in prompt
-    assert "us_revenue: INDETERMINATE" in prompt
+    assert gate["value"] == coverage
+    value = "Unknown" if coverage is None else f"{coverage} English analysts"
+    assert f"Analyst Coverage: {value} - {status};" in prompt
+    assert (
+        "US Revenue: Unknown - INDETERMINATE; Verified US revenue unavailable" in prompt
+    )
 
 
 @pytest.mark.asyncio
@@ -471,3 +483,248 @@ async def test_exception_ceiling_is_saved_before_quick_qualification_and_trace(
         )
         assert "MAX_VERDICT: HOLD" in invoke.call_args.args[1][0].content
         assert not result["decision_policy"]["qualifications"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path", ["normal", "semantic_repair", "structural_repair", "repair_fails"]
+)
+@pytest.mark.parametrize("initial_verdict", ["BUY", "HOLD"])
+async def test_health_policy_uses_existing_bounded_pm_path_and_preserves_producer(
+    path, initial_verdict
+):
+    from src.report_generator import QuietModeReporter
+
+    snapshot = deepcopy(_SNAPSHOT)
+    snapshot["scorecards"] = {
+        "HEALTH": {"percentage": 39.9, "decision_eligible": True},
+        "GROWTH": {"percentage": 60, "decision_eligible": True},
+    }
+    valid = (
+        _EMPTY.replace("DECISION_FACTS: NONE", "DECISION_FACTS: claim:pe")
+        .replace("DO NOT INITIATE", initial_verdict)
+        .replace("DO_NOT_INITIATE", initial_verdict)
+    )
+    valid = valid.replace(
+        "RISK_TALLY: 1.00",
+        "POSITION_SIZE: 2.5\nSHOW_VALUATION_CHART: YES\nVALUATION_DISCOUNT: 1.0\nRISK_TALLY: 1.00",
+    )
+    initial = (
+        valid
+        if path == "normal"
+        else valid.replace("DECISION_FACTS: claim:pe", "DECISION_FACTS: NONE")
+        if path == "semantic_repair"
+        else "Incomplete PM output"
+    )
+    responses = [
+        SimpleNamespace(
+            content=initial, response_metadata={"model_name": "original-model"}
+        )
+    ]
+    if path != "normal":
+        responses.append(
+            TimeoutError("bounded repair")
+            if path == "repair_fails"
+            else SimpleNamespace(
+                content=valid, response_metadata={"model_name": "repaired-model"}
+            )
+        )
+    invoke = AsyncMock(side_effect=responses)
+    with (
+        patch(
+            "src.prompts.get_prompt",
+            return_value=SimpleNamespace(
+                system_message="PM", agent_name="Portfolio Manager"
+            ),
+        ),
+        patch(
+            "src.agents.decision_nodes.agent_runtime.invoke_with_rate_limit_handling",
+            invoke,
+        ),
+    ):
+        result = await create_portfolio_manager_node(
+            SimpleNamespace(model_name="initial"),
+            None,
+            recovery_llm=SimpleNamespace(model_name="repair"),
+        )(
+            {
+                "company_of_interest": "TEST",
+                "pre_screening_result": "PASS",
+                "red_flags": [],
+                "analysis_snapshot": snapshot,
+                "fundamentals_report": _FUNDAMENTALS,
+            },
+            {},
+        )
+    assert invoke.await_count == (1 if path == "normal" else 2)
+    if path == "repair_fails":
+        assert not result["artifact_statuses"]["final_trade_decision"]["ok"]
+        assert not result.get("decision_policy")
+        return
+    policy = result["decision_policy"]
+    assert (
+        policy["original_verdict"] == initial_verdict
+        and policy["final_verdict"] == "DO_NOT_INITIATE"
+    )
+    assert (
+        policy["health_gate"]["status"] == "FAIL"
+        and policy["health_gate"]["value"] == 39.9
+    )
+    assert policy["adjustments"][0]["rule"] == "financial_health_hard_fail"
+    assert (
+        result["decision_trace"]["status"] == "VALID"
+        and result["decision_trace"]["verdict"] == "DO_NOT_INITIATE"
+    )
+    assert result["decision_trace"]["decision_facts"] == ["claim:pe"]
+    assert result["artifact_statuses"]["final_trade_decision"]["model"] == (
+        "original-model" if path == "normal" else "repaired-model"
+    )
+    assert (
+        result["artifact_statuses"]["final_trade_decision"]["provider"]
+        != "deterministic"
+    )
+    output = result["final_trade_decision"]
+    assert (
+        "VERDICT: DO_NOT_INITIATE" in output
+        and "PORTFOLIO MANAGER VERDICT: DO NOT INITIATE" in output
+    )
+    assert "Financial Health**: 39.9% - FAIL" in output
+    from src.charts.extractors.pm_block import extract_pm_block
+
+    assert extract_pm_block(output).position_size == 0
+    report = QuietModeReporter("TEST").generate_report(
+        {**result, "chart_paths": {"mock": "no writes"}}
+    )
+    assert (
+        "Financial Health: 39.9% - FAIL" in report
+        and "Hard Fail Result: FAIL" in report
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", ["BUY", "HOLD"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "qualified",
+        "tender",
+        "tender_coverage_fail",
+        "ineligible_ratio",
+        "conflicting_ratio",
+    ],
+)
+async def test_actual_pm_preserves_health_exception_tender_and_independent_blockers(
+    verdict, case
+):
+    from src.liquidity_assessment import LiquidityAssessment
+
+    tender = case.startswith("tender")
+    snapshot = deepcopy(_SNAPSHOT)
+    snapshot["scorecards"] = {
+        "HEALTH": {"percentage": 39.9 if tender else 45, "decision_eligible": True},
+        "GROWTH": {"percentage": 40 if tender else 60, "decision_eligible": True},
+    }
+    for field, value in (("PB_RATIO", "0.59"), ("CURRENT_RATIO_RAW", "1.51")):
+        snapshot["claims"][f"claim:{field}"] = {
+            "id": f"claim:{field}",
+            "field": field,
+            "kind": "FACT",
+            "value": value,
+            "authority": "AGGREGATOR",
+            "coverage": "FOUND",
+            "exactness": "EXACT",
+            "decision_eligible": True,
+            "decision_role": "SUPPORT",
+        }
+    for field, value in (
+        ("ANALYST_COVERAGE_ENGLISH", "15" if case == "tender_coverage_fail" else "4"),
+        ("US_REVENUE_PERCENT", "10%"),
+    ):
+        snapshot["claims"][f"claim:{field}"] = {
+            "id": f"claim:{field}",
+            "field": field,
+            "kind": "FACT",
+            "value": value,
+            "authority": "PRIMARY",
+            "coverage": "FOUND",
+            "exactness": "EXACT",
+            "decision_eligible": True,
+            "decision_role": "GATE_INPUT",
+            "source_url": "https://issuer.example/evidence",
+            "evidence_id": "evidence:1:abc",
+        }
+    if case == "ineligible_ratio":
+        snapshot["claims"]["claim:PB_RATIO"]["decision_eligible"] = False
+    if case == "conflicting_ratio":
+        snapshot["claims"]["claim:conflict"] = {
+            **snapshot["claims"]["claim:PB_RATIO"],
+            "id": "claim:conflict",
+            "value": "0.7",
+        }
+    content = (
+        _EMPTY.replace("DECISION_FACTS: NONE", "DECISION_FACTS: claim:pe")
+        .replace("DO NOT INITIATE", verdict)
+        .replace("DO_NOT_INITIATE", verdict)
+    )
+    invoke = AsyncMock(
+        return_value=SimpleNamespace(
+            content=content, response_metadata={"model_name": "accepted-fallback-model"}
+        )
+    )
+    with (
+        patch(
+            "src.prompts.get_prompt",
+            return_value=SimpleNamespace(
+                system_message="PM", agent_name="Portfolio Manager"
+            ),
+        ),
+        patch(
+            "src.agents.decision_nodes.agent_runtime.invoke_with_rate_limit_handling",
+            invoke,
+        ),
+    ):
+        result = await create_portfolio_manager_node(
+            SimpleNamespace(model_name="base"), None
+        )(
+            {
+                "company_of_interest": "TEST",
+                "pre_screening_result": "PASS",
+                "red_flags": [],
+                "analysis_snapshot": snapshot,
+                "fundamentals_report": _FUNDAMENTALS.replace(
+                    "### --- END DATA_BLOCK ---",
+                    f"M_AND_A_STATUS: {'ACTIVE_TENDER' if tender else 'NONE'}\n### --- END DATA_BLOCK ---",
+                ),
+                "liquidity_assessment": LiquidityAssessment(
+                    "PASS", average_daily_turnover_usd=500_000
+                ).to_dict(),
+            },
+            {},
+        )
+    expected = (
+        "DO_NOT_INITIATE"
+        if case in {"tender_coverage_fail", "ineligible_ratio", "conflicting_ratio"}
+        else verdict
+    )
+    assert invoke.await_count == 1
+    assert result["artifact_statuses"]["final_trade_decision"]["ok"]
+    assert (
+        result["artifact_statuses"]["final_trade_decision"]["model"]
+        == "accepted-fallback-model"
+    )
+    assert (
+        result["decision_policy"]["final_verdict"] == expected
+        and result["decision_trace"]["verdict"] == expected
+    )
+    if tender:
+        assert not result["decision_policy"]["health_gate"]["applicable"]
+        assert result["decision_policy"]["health_gate"]["status"] == "FAIL"
+    if case == "qualified":
+        assert (
+            result["decision_policy"]["health_gate"]["exception"]
+            == "deep_value_liquidity"
+        )
+        assert set(result["decision_policy"]["health_gate"]["supporting_ids"]) == {
+            "claim:PB_RATIO",
+            "claim:CURRENT_RATIO_RAW",
+        }

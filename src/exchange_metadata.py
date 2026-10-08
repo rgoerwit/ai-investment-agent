@@ -44,7 +44,13 @@ CURRENCY_DISPLAY_FORMATS = MappingProxyType(
     }
 )
 CURRENCY_CODE_ALIASES = MappingProxyType(
-    {"RMB": "CNY", "NEW TAIWAN DOLLAR": "TWD", "NEW TAIWAN DOLLARS": "TWD"}
+    {
+        "RMB": "CNY",
+        "人民幣": "CNY",
+        "人民币": "CNY",
+        "NEW TAIWAN DOLLAR": "TWD",
+        "NEW TAIWAN DOLLARS": "TWD",
+    }
 )
 # Observed names in source reporting declarations; not monetary amount aliases.
 CURRENCY_REPORTING_NAMES = MappingProxyType(
@@ -68,6 +74,7 @@ CURRENCY_SYMBOL_TO_CODE = MappingProxyType(
         },
         "AU$": "AUD",
         "CAD$": "CAD",
+        "CA$": "CAD",
         "NZ$": "NZD",
     }
 )

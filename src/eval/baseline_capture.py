@@ -14,7 +14,7 @@ from src.error_safety import summarize_exception
 from src.runtime_diagnostics import get_optional_publishable_artifacts
 
 from .capture_contract import NodeCaptureSpec, get_node_capture_spec
-from .capture_validation import validate_capture_bundle
+from .capture_validation import junior_completion_link_reasons, validate_capture_bundle
 from .execution_profile import summarize_agent_llm_profile
 from .git_meta import get_git_metadata
 from .prompt_digest import agent_prompt_payload, stable_digest
@@ -702,6 +702,78 @@ class BaselineCaptureManager:
 
         return wrapped
 
+    def _coalesce_junior_completion(self) -> None:
+        """Keep the observed selector input and final code output as one replay seat."""
+        name = "Junior Fundamentals Analyst"
+        records = [
+            record for record in self._agent_records if record["node_name"] == name
+        ]
+        if not records:
+            return
+        if (
+            records[0]["metadata"].get("execution_kind")
+            == "tool_selection_and_code_completion"
+        ):
+            return
+        terminal = records[-1]
+        status = (terminal.get("output", {}).get("artifact_statuses") or {}).get(
+            "raw_fundamentals_data", {}
+        )
+        if status.get("provider") != "code":
+            return  # Legacy model-produced captures retain their existing contract.
+        first = records[0]
+        metadata = first["metadata"]
+        start, end = metadata["sequence_id"], terminal["metadata"]["sequence_id"]
+        ticker = first["input_state"].get("company_of_interest")
+        if any(
+            record["input_state"].get("company_of_interest") != ticker
+            for record in records
+        ):
+            self.reject_run(["capture_junior_ticker_changed"], stage=name)
+            return
+        if any(
+            "raw_fundamentals_data" in record.get("output", {})
+            for record in records[:-1]
+        ):
+            self.reject_run(["capture_junior_multiple_cycles"], stage=name)
+            return
+        metadata.update(
+            {
+                "execution_kind": "tool_selection_and_code_completion",
+                "artifact_producer": "code",
+                "selector_node_sequence_ids": [
+                    record["metadata"]["sequence_id"] for record in records[:-1]
+                ],
+                "completion_node_sequence_id": end,
+            }
+        )
+        for field in (
+            "llm_call_sequence_ids",
+            "memory_event_sequence_ids",
+            "tool_call_sequence_ids",
+        ):
+            metadata[field] = list(
+                dict.fromkeys(
+                    link
+                    for record in records
+                    for link in record["metadata"].get(field, [])
+                )
+            )
+        metadata["tool_call_sequence_ids"].extend(
+            event["sequence_id"]
+            for event in self._tool_calls
+            if event.get("node_name") == "junior_fund_tools"
+            and isinstance(event.get("node_sequence_id"), int)
+            and start < event["node_sequence_id"] < end
+            and event["sequence_id"] not in metadata["tool_call_sequence_ids"]
+        )
+        first["output"] = terminal["output"]
+        self._agent_records = [
+            record
+            for record in self._agent_records
+            if record["node_name"] != name or record is first
+        ]
+
     def _collect_used_prompts(self) -> dict[str, Any]:
         prompts: dict[str, Any] = {}
         for event in self._node_events:
@@ -831,6 +903,22 @@ class BaselineCaptureManager:
             if record.get("output") is None:
                 reasons.append(f"capture_missing_output:{node_name}")
 
+            reasons.extend(
+                f"capture_{reason}:{node_name}"
+                for reason in junior_completion_link_reasons(
+                    metadata,
+                    record.get("output", {}),
+                    {
+                        "llm": self._build_llm_index(),
+                        "tool": {
+                            event["sequence_id"]: event for event in self._tool_calls
+                        },
+                        "node": {
+                            event["sequence_id"]: event for event in self._node_events
+                        },
+                    },
+                )
+            )
             spec = get_node_capture_spec(node_name)
             llm_ids = metadata.get("llm_call_sequence_ids", [])
             if spec.expects_llm_calls and not llm_ids:
@@ -901,6 +989,7 @@ class BaselineCaptureManager:
 
         manifest = dict(self._run_manifest)
         prompts_used = self._collect_used_prompts()
+        self._coalesce_junior_completion()
         self._attach_agent_execution_profiles()
         manifest["models"] = {
             "defaults": {

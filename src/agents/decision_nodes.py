@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import asdict
 from typing import Any
 
 import structlog
@@ -24,6 +25,7 @@ from src.agents.pm_verdict_metadata import (
 from src.agents.verdict_policy import (
     apply_required_verdict,
     assess_growth_gate,
+    assess_health_gate,
     assess_initiation_gates,
     assess_verdict_policy,
     maybe_cap_exception_growth_buy_to_hold,
@@ -33,6 +35,7 @@ from src.agents.verdict_policy import (
     maybe_qualify_weak_asymmetry_buy,
     maybe_tag_dni_review_candidate,
     normalize_pm_block_contract,
+    project_compliance_gates,
     render_growth_gate_context,
     render_initiation_gate_context,
 )
@@ -45,6 +48,7 @@ from src.data_block_utils import (
 )
 from src.decision_inputs import DecisionInputs
 from src.error_safety import summarize_exception
+from src.llm_runtime.responses import normalize_response
 
 # Verdict canonicalization lives in the neutral, dependency-free parser (it used
 # to live on src.agents.pm_verdict_metadata, which created a charts circular
@@ -84,6 +88,28 @@ from .output_validation import (
 from .state import AgentState
 
 logger = structlog.get_logger(__name__)
+
+
+def _decision_inputs_from_state(
+    state: AgentState,
+    ticker: str,
+    *,
+    metrics: Mapping[str, Any] | None = None,
+    snapshot: Mapping[str, Any] | None = None,
+) -> DecisionInputs:
+    """Use the same decision context, preserving freshly validated inputs."""
+    from src.validators.red_flag_detector import RedFlagDetector
+
+    fundamentals = get_valid_artifact_content(state, "fundamentals_report") or ""
+    return DecisionInputs.from_metrics_and_snapshot(
+        metrics
+        if metrics is not None
+        else RedFlagDetector.extract_metrics(fundamentals, ticker=ticker),
+        RedFlagDetector.detect_sector(fundamentals) if fundamentals else None,
+        snapshot if snapshot is not None else state.get("analysis_snapshot"),
+        ticker=ticker,
+        liquidity=state.get("liquidity_assessment"),
+    )
 
 
 def create_screen_rejection_node() -> Callable:
@@ -167,6 +193,9 @@ def create_screen_rejection_node() -> Callable:
         result["decision_policy"] = {
             "schema_version": 1,
             "source": "deterministic_screen",
+            "health_gate": asdict(
+                assess_health_gate(_decision_inputs_from_state(state, ticker))
+            ),
             "original_verdict": "DO_NOT_INITIATE",
             "final_verdict": "DO_NOT_INITIATE",
             "verdict_changed": False,
@@ -1305,14 +1334,9 @@ NEUTRAL ANALYST (Balanced):
         red_flag_section, code_risk_subtotal = support.format_red_flag_section(
             pre_screening_result, red_flags
         )
-        floor_inputs = DecisionInputs.from_metrics_and_snapshot(
-            RedFlagDetector.extract_metrics(fundamentals or "", ticker=ticker),
-            RedFlagDetector.detect_sector(fundamentals) if fundamentals else None,
-            state.get("analysis_snapshot"),
-            ticker=ticker,
-            liquidity=state.get("liquidity_assessment"),
-        )
+        floor_inputs = _decision_inputs_from_state(state, ticker)
         growth_gate = assess_growth_gate(floor_inputs)
+        health_gate = assess_health_gate(floor_inputs)
         growth_gate_section = (
             "\n\n"
             + render_growth_gate_context(floor_inputs)
@@ -1777,6 +1801,7 @@ RISK TEAM DEBATE:
             ):
                 if applied:
                     policy_qualifications.append({"kind": kind})
+            content_str = project_compliance_gates(content_str, floor_inputs)
             content_str, pm_claim_caveats = audit_pm_claims(
                 content_str,
                 fundamentals=fundamentals,
@@ -1845,6 +1870,7 @@ RISK TEAM DEBATE:
                 "final_trade_decision",
                 cap_state_value(content_str, "final_trade_decision"),
                 provider=support.infer_provider_name(llm),
+                model=normalize_response(response).model,
             )
             result["red_flags"] = pm_generated_red_flags
             result["decision_trace"] = decision_trace
@@ -1855,14 +1881,21 @@ RISK TEAM DEBATE:
                 "verdict_changed": original_verdict != pm_metadata.verdict,
                 "adjustments": policy_adjustments,
                 "qualifications": policy_qualifications,
+                "health_gate": asdict(health_gate),
                 "growth_gate": {
                     "status": growth_gate.status,
                     "hard_fail": growth_gate.hard_fail,
                     "exception": growth_gate.exception,
                     "reason": growth_gate.reason,
+                    "applicable": health_gate.applicable,
                 },
                 "initiation_gates": [
-                    {"rule": gate.rule, "status": gate.status, "reason": gate.reason}
+                    {
+                        "rule": gate.rule,
+                        "status": gate.status,
+                        "reason": gate.reason,
+                        "value": gate.value,
+                    }
                     for gate in assess_initiation_gates(floor_inputs)
                 ],
                 "buy_blockers": buy_blockers,
@@ -2112,8 +2145,8 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
             # analyst-judgment fields (segment flags, ROIC quality, cycle
             # position, …) legitimately ride the parsed DATA_BLOCK — they are the
             # Senior analyst's output, not a competing canonical store.
-            decision_inputs = DecisionInputs.from_metrics_and_snapshot(
-                metrics, sector, analysis_snapshot, ticker=ticker
+            decision_inputs = _decision_inputs_from_state(
+                state, ticker, metrics=metrics, snapshot=analysis_snapshot
             )
 
             red_flags, pre_screening_result = RedFlagDetector.detect_red_flags(

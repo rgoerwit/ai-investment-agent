@@ -874,8 +874,10 @@ class TestQuickModeGraphContracts:
         assert by_seat[SeatId.ANALYST_RETRY].binding.provider == "openai"
         assert by_seat[SeatId.VALUE_TRAP].reasoning_value == "medium"
         assert analyst_kwargs
-        assert all(kwargs["allow_retry"] is True for kwargs in analyst_kwargs)
-        assert all(kwargs["retry_llm"] is not None for kwargs in analyst_kwargs)
+        assert all(kwargs.get("allow_retry", True) is True for kwargs in analyst_kwargs)
+        assert all(
+            kwargs.get("retry_llm", True) is not None for kwargs in analyst_kwargs
+        )
 
     def test_quick_mode_arms_recovery_for_evidence_and_gate_critical_seats(
         self, monkeypatch
@@ -950,8 +952,8 @@ class TestQuickModeGraphContracts:
             16384,
         }
         by_agent = dict(analyst_calls)
-        assert by_agent["junior_fundamentals_analyst"]["allow_retry"] is True
-        assert by_agent["junior_fundamentals_analyst"]["retry_llm"] is not None
+        assert "allow_retry" not in by_agent["junior_fundamentals_analyst"]
+        assert "retry_llm" not in by_agent["junior_fundamentals_analyst"]
         assert by_agent["fundamentals_analyst"]["allow_retry"] is True
         assert by_agent["fundamentals_analyst"]["retry_llm"] is not None
         assert by_agent["foreign_language_analyst"]["allow_retry"] is True
@@ -962,8 +964,8 @@ class TestQuickModeGraphContracts:
                 "foreign_language_analyst",
                 "junior_fundamentals_analyst",
             }:
-                assert kwargs["allow_retry"] is False
-                assert kwargs["retry_llm"] is None
+                assert kwargs.get("allow_retry", False) is False
+                assert kwargs.get("retry_llm") is None
         assert len(pm_calls) == 1
         assert pm_calls[0]["recovery_llm"] is not None
 
@@ -1015,8 +1017,10 @@ class TestQuickModeGraphContracts:
         )
 
         assert analyst_kwargs
-        assert all(kwargs["allow_retry"] is False for kwargs in analyst_kwargs)
-        assert all(kwargs["retry_llm"] is None for kwargs in analyst_kwargs)
+        assert all(
+            kwargs.get("allow_retry", False) is False for kwargs in analyst_kwargs
+        )
+        assert all(kwargs.get("retry_llm") is None for kwargs in analyst_kwargs)
 
 
 class TestDebateReasoningHandoffWiring:

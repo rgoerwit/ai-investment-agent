@@ -268,25 +268,36 @@ def classify_evidence_value(
     blocked: bool = False,
 ) -> tuple[ExecutionStatus, EvidenceStatus, str | None, str]:
     """Classify one inspected tool result without trusting its outer status alone."""
-    content = _bounded_text(value)
+    source = _value_text(value)
+    content = _bounded_text(source)
     if blocked:
         return "BLOCKED", "UNAVAILABLE", "TOOL_BLOCKED", content
 
-    status_match = _STATUS_RE.search(content)
-    reason_match = _REASON_RE.search(content)
+    # Classify the full inspected result; ledger retention limits must not hide a
+    # useful neighbor or a provider error. Unclosed result envelopes prove neither.
+    depth = tag_count = 0
+    for tag in re.finditer(r"(?i)</?result\b", source):
+        depth += -1 if tag.group().startswith("</") else 1
+        tag_count += 1
+        if depth not in {0, 1}:
+            return "SUCCEEDED", "INSUFFICIENT", "MALFORMED_RESULT_ENVELOPE", content
+    if depth:
+        return "SUCCEEDED", "INSUFFICIENT", "MALFORMED_RESULT_ENVELOPE", content
+    blocks = RESULT_ENVELOPE_RE.findall(source)
+    if tag_count != 2 * len(blocks):
+        return "SUCCEEDED", "INSUFFICIENT", "MALFORMED_RESULT_ENVELOPE", content
+
+    status_match = _STATUS_RE.search(source)
+    reason_match = _REASON_RE.search(source)
     status = status_match.group(1).upper() if status_match else ""
     reason = reason_match.group(1).upper() if reason_match else None
 
     # Some adapters return STATUS: EVIDENCE_FOUND around a nested provider error.
     # Error semantics override that optimistic wrapper.
-    error_blocks = [
-        block
-        for block in RESULT_ENVELOPE_RE.findall(content)
-        if _ERROR_ENVELOPE_RE.search(block)
-    ]
+    error_blocks = [block for block in blocks if _ERROR_ENVELOPE_RE.search(block)]
     valid_blocks = [
         block
-        for block in RESULT_ENVELOPE_RE.findall(content)
+        for block in blocks
         if not _ERROR_ENVELOPE_RE.search(block)
         and ("<url>" in block.casefold() or "<content>" in block.casefold())
     ]
@@ -295,9 +306,9 @@ def classify_evidence_value(
             "EVIDENCE_FOUND" if status == "EVIDENCE_FOUND" else "RESULTS_FOUND"
         )
         return "SUCCEEDED", partial_status, "PARTIAL_PROVIDER_ERROR", content
-    if _ERROR_ENVELOPE_RE.search(content):
+    if _ERROR_ENVELOPE_RE.search(source):
         error_status: EvidenceStatus = (
-            "AUTH_ERROR" if _AUTH_ERROR_RE.search(content) else "INSUFFICIENT"
+            "AUTH_ERROR" if _AUTH_ERROR_RE.search(source) else "INSUFFICIENT"
         )
         return "SUCCEEDED", error_status, reason or "EMBEDDED_PROVIDER_ERROR", content
 
@@ -321,13 +332,13 @@ def classify_evidence_value(
         else:
             evidence_status = "INSUFFICIENT"
         return "SUCCEEDED", evidence_status, reason, content
-    if "DOCUMENT_METADATA:" in content:
+    if "DOCUMENT_METADATA:" in source:
         return "SUCCEEDED", "EVIDENCE_FOUND", reason, content
-    if "<search_results" in content or "Foreign Source Search Results" in content:
+    if "<search_results" in source or "Foreign Source Search Results" in source:
         return "SUCCEEDED", "RESULTS_FOUND", reason, content
-    if tool_name == "get_official_filings" and content.strip():
+    if tool_name == "get_official_filings" and source.strip():
         return "SUCCEEDED", "EVIDENCE_FOUND", reason, content
-    if not content.strip():
+    if not source.strip():
         return "SUCCEEDED", "NO_RESULTS", reason, ""
     return "SUCCEEDED", "RESULTS_FOUND", reason, content
 

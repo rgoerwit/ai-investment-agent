@@ -11,13 +11,11 @@ from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     SystemMessage,
-    ToolMessage,
 )
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.types import RunnableConfig
 
 from src.charts.extractors.valuation_signals import VALUATION_CONTEXT_TOKENS
-from src.claim_policy import RAW_FINANCIAL_METRICS_INPUT
 from src.config import config as settings_config
 from src.data_block_utils import (
     build_fenced_block,
@@ -37,15 +35,14 @@ from src.data_block_utils import (
 from src.error_safety import summarize_exception
 from src.forensic_budget import ResearchBudgetLedger, ResearchBudgetPolicy
 from src.runtime_config import get_runtime_config
-from src.runtime_diagnostics import failure_artifact, success_artifact
+from src.runtime_diagnostics import (
+    failure_artifact,
+    is_artifact_complete,
+    success_artifact,
+)
 from src.service_tiers import floor_llm_hard_timeout
 from src.thesis_constants import DRAWDOWN_52WK_RATIO, DRAWDOWN_SMA200_RATIO
-from src.tooling.structured_ingress import (
-    get_structured_ingress_payload,
-    render_structured_ingress_payload,
-)
 from src.tooling.text_boundary import format_untrusted_block
-from src.utils import has_tool_output_cap
 
 from . import message_utils, support
 from . import runtime as agent_runtime
@@ -283,6 +280,29 @@ def _authoritative_metric_warning(
         "are authoritative for downstream scoring; the earlier values are superseded.\n"
         + "\n".join(f"> {line}" for line in conflicts)
         + "\n\n"
+    )
+
+
+def _refresh_authoritative_metric_warning(content: str) -> str:
+    """Refresh only the generated correction block against the final projection."""
+    content = re.sub(
+        rf"(?m)^> \*\*{AUTHORITATIVE_CORRECTION_MARKER}:\*\* The labeled narrative values "
+        r"below conflict with reconciled structured inputs\. The DATA_BLOCK values "
+        r"are authoritative for downstream scoring; the earlier values are superseded\.\n"
+        r"(?:> - [^\n]*\n)*\n?",
+        "",
+        content,
+    )
+    block = extract_last_data_block(content, include_markers=True)
+    body = extract_last_data_block(content, include_markers=False)
+    if block is None or body is None:
+        return content
+    index = content.rfind(block)
+    narrative = content[:index] + content[index + len(block) :]
+    return (
+        content[:index]
+        + _authoritative_metric_warning(narrative, body)
+        + content[index:]
     )
 
 
@@ -898,56 +918,6 @@ def _final_output_invalid(content: str, agent_key: str) -> bool:
     )
 
 
-def _junior_metrics_payload(state: Mapping[str, Any]) -> str:
-    """Accept only the inspected, valid ingress owned by Junior's metrics tool."""
-    payload, _ = get_structured_ingress_payload(state, RAW_FINANCIAL_METRICS_INPUT)
-    records = state.get("structured_inputs")
-    record = (
-        records.get(RAW_FINANCIAL_METRICS_INPUT)
-        if isinstance(records, Mapping)
-        else None
-    )
-    if (
-        not payload
-        or payload.get("error")
-        or not isinstance(record, Mapping)
-        or record.get("agent_key") != "junior_fundamentals_analyst"
-        or record.get("tool_name") != "get_financial_metrics"
-    ):
-        return ""
-    return render_structured_ingress_payload(state, RAW_FINANCIAL_METRICS_INPUT)
-
-
-def _resplice_junior_metrics(content: str, state: Mapping[str, Any]) -> str | None:
-    """Restore the capped metrics section exactly; preserve all other sections."""
-    payload = _junior_metrics_payload(state)
-    first = "### TOOL 1: get_financial_metrics"
-    second = "### TOOL 2: get_fundamental_analysis"
-    if (
-        not payload
-        or content.count(first) != 1
-        or content.count(second) != 1
-        or content.count("=== RAW FINANCIAL DATA FOR ") != 1
-        or content.count("=== END RAW DATA ===") != 1
-    ):
-        return None
-    start = content.index(first) + len(first)
-    end = content.index(second)
-    if end <= start or not has_tool_output_cap(
-        content[start:end], "get_financial_metrics"
-    ):
-        return None
-    repaired = cap_state_value(
-        content[:start] + "\n" + payload + "\n" + content[end:],
-        "raw_fundamentals_data",
-    )
-    return (
-        repaired
-        if not _final_output_invalid(repaired, "junior_fundamentals_analyst")
-        else None
-    )
-
-
 def _should_retry_output(content: str, agent_key: str) -> bool:
     """Return True when the initial output should get one deep-model retry."""
     if support._is_output_insufficient(content, agent_key):
@@ -956,7 +926,6 @@ def _should_retry_output(content: str, agent_key: str) -> bool:
     if agent_key in {
         "fundamentals_analyst",
         "foreign_language_analyst",
-        "junior_fundamentals_analyst",
     }:
         return _final_output_invalid(content, agent_key)
     return False
@@ -1003,39 +972,8 @@ def _build_retry_invocation_messages(
     content: str,
     *,
     force_foreign_repair: bool = False,
-    state: Mapping[str, Any] | None = None,
 ) -> list[Any]:
     """Add the owning agent's structured-output correction for a retry."""
-    if agent_key == "junior_fundamentals_analyst":
-        payload = _junior_metrics_payload(state or {})
-        retained_messages = [
-            message.model_copy(update={"content": payload})
-            if payload
-            and isinstance(message, ToolMessage)
-            and message.name == "get_financial_metrics"
-            and message.status != "error"
-            and not message.additional_kwargs.get("blocked")
-            and message_utils.message_agent_key(message) == agent_key
-            and has_tool_output_cap(
-                message_utils.extract_string_content(message.content),
-                "get_financial_metrics",
-            )
-            else message
-            for message in invocation_messages
-        ]
-        return [
-            *retained_messages,
-            HumanMessage(
-                content=(
-                    "OUTPUT CONTRACT CORRECTION: Return the required RAW FINANCIAL DATA "
-                    "wrapper first, with TOOL 1: get_financial_metrics and TOOL 2: "
-                    "get_fundamental_analysis sections and the exact === END RAW DATA === "
-                    "terminator. Use only retained tool evidence; preserve raw JSON and "
-                    "document unavailable results. Keep prose minimal. Do not invent data "
-                    "or call tools."
-                )
-            ),
-        ]
     if agent_key == "foreign_language_analyst":
         if (
             not force_foreign_repair
@@ -1187,6 +1125,54 @@ def create_analyst_node(
 
     async def analyst_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
+
+        statuses = state.get("artifact_statuses") or {}
+        status = statuses.get(output_field) if isinstance(statuses, dict) else None
+        budgets = state.get("research_budgets") or {}
+        budget = budgets.get(agent_key) if isinstance(budgets, dict) else None
+        if agent_key == "junior_fundamentals_analyst" and (
+            (isinstance(status, dict) and is_artifact_complete(state, output_field))
+            or (
+                isinstance(budget, dict)
+                and budget.get("stop_reason")
+                in {"CODE_RELAY_COMPLETE", "ACQUISITION_INCOMPLETE"}
+            )
+        ):
+            # The terminal visit exposes the exact code-owned artifact to capture
+            # and prompt checks without paying for another model call.
+            content = state.get(output_field, "")
+            matched = (
+                isinstance(status, dict)
+                and status.get("complete") is True
+                and isinstance(status.get("ok"), bool)
+                and isinstance(content, str)
+                and status.get("content") == (content or None)
+                and (
+                    content.startswith(
+                        f"=== RAW FINANCIAL DATA FOR {state.get('company_of_interest', '')} ==="
+                    )
+                    or (not content and status["ok"] is False)
+                )
+            )
+            result = (
+                {output_field: content, "artifact_statuses": {output_field: status}}
+                if matched
+                else failure_artifact(
+                    output_field,
+                    "Current Junior acquisition artifact unavailable",
+                    provider="code",
+                    error_kind="data_unavailable",
+                )
+            )
+            return {
+                **result,
+                "messages": [
+                    AIMessage(
+                        content="Raw acquisition completed by code.", name=agent_key
+                    )
+                ],
+                "sender": agent_key,
+            }
 
         agent_prompt = get_prompt(agent_key)
         if not agent_prompt:
@@ -1530,6 +1516,23 @@ def create_analyst_node(
             if has_tool_calls:
                 return new_state
 
+            if agent_key == "junior_fundamentals_analyst":
+                # No acquisition occurred. Text-only recovery cannot supply evidence.
+                new_state.update(
+                    failure_artifact(
+                        output_field,
+                        "Junior did not request the required data tools",
+                        provider=support.infer_provider_name(llm),
+                        error_kind="output_contract_violation",
+                    )
+                )
+                if research_ledger is not None:
+                    research_ledger.record_outcome("MISSING_REQUIRED_ACQUISITION")
+                    new_state["research_budgets"] = {
+                        agent_key: research_ledger.telemetry()
+                    }
+                return new_state
+
             if research_ledger is not None and not force_research_synthesis:
                 research_ledger.record_model_final()
                 new_state["research_budgets"] = {agent_key: research_ledger.telemetry()}
@@ -1568,23 +1571,6 @@ def create_analyst_node(
             )
 
             recovery_event: dict[str, Any] | None = None
-            if agent_key == "junior_fundamentals_analyst" and not has_tool_calls:
-                repaired = _resplice_junior_metrics(content_str, state)
-                if repaired is not None:
-                    recovery_event = support.structural_recovery_event(
-                        agent_key,
-                        "incomplete_structured_output",
-                        llm,
-                        None,
-                        content_str,
-                    )
-                    recovery_event.update(
-                        outcome="accepted_text", repair="structured_ingress_resplice"
-                    )
-                    new_state["structural_recovery_events"] = [recovery_event]
-                    content_str = repaired
-                    logger.info("junior_metrics_resplice_accepted", ticker=ticker)
-
             if (
                 allow_retry
                 and retry_llm is not None
@@ -1646,7 +1632,6 @@ def create_analyst_node(
                         agent_key,
                         content_str,
                         force_foreign_repair=foreign_guidance_needs_repair,
-                        state=state,
                     )
                     # Structural recovery re-renders from evidence already gathered by
                     # the owning analyst. It deliberately exposes no tools: another tool
@@ -1763,11 +1748,6 @@ def create_analyst_node(
                                 recovery_event["outcome"] = (
                                     "accepted_text" if accepted else "rejected_invalid"
                                 )
-                            elif (
-                                agent_key == "junior_fundamentals_analyst"
-                                and _final_output_invalid(retry_content_str, agent_key)
-                            ):
-                                recovery_event["outcome"] = "failed"
                             else:
                                 content_str = retry_content_str
                                 recovery_event["outcome"] = "accepted_text"
@@ -1842,8 +1822,6 @@ def create_analyst_node(
 
             from src.utils import detect_truncation
 
-            if agent_key == "junior_fundamentals_analyst":
-                content_str = cap_state_value(content_str, output_field)
             trunc_info = detect_truncation(content_str, agent=agent_key)
             log_truncation_diagnostic(
                 agent_key=agent_key,
@@ -1910,6 +1888,7 @@ def create_analyst_node(
                     content_str,
                     derived_snapshot,
                 )
+                content_str = _refresh_authoritative_metric_warning(content_str)
                 new_state["analysis_snapshot"] = derived_snapshot
                 logger.debug(
                     "fundamentals_output",

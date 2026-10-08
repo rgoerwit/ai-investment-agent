@@ -376,7 +376,6 @@ def build_graph_components(
         # The binding inherits each originating seat's visible-output budget.
         allow_retry = plan.status_for(SeatId.ANALYST_RETRY, quick_mode=True).enabled
         recovery_origins = (
-            SeatId.JUNIOR_FUNDAMENTALS,
             SeatId.SENIOR_FUNDAMENTALS,
             SeatId.FOREIGN_LANGUAGE,
             SeatId.PORTFOLIO_MANAGER,
@@ -396,7 +395,6 @@ def build_graph_components(
             SeatId.MARKET,
             SeatId.SENTIMENT,
             SeatId.NEWS,
-            SeatId.JUNIOR_FUNDAMENTALS,
             SeatId.SENIOR_FUNDAMENTALS,
             SeatId.FOREIGN_LANGUAGE,
             SeatId.VALUE_TRAP,
@@ -662,8 +660,6 @@ def build_graph_components(
         "junior_fundamentals_analyst",
         toolkit.get_junior_fundamental_tools(),
         "raw_fundamentals_data",
-        retry_llm=retry_llms.get(SeatId.JUNIOR_FUNDAMENTALS),
-        allow_retry=SeatId.JUNIOR_FUNDAMENTALS in retry_llms,
         research_budget_policy=research_policies["junior_fundamentals_analyst"],
     )
     senior_fund = create_analyst_node(

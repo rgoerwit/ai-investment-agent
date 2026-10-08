@@ -15,7 +15,9 @@ reference a threshold but must never restate the number; L0 parity in
 
 ## Hard requirements
 
-- Financial health score ≥ 50%
+- Reliable financial health below the canonical floor means DO_NOT_INITIATE, enforced
+  in code, unless canonical P/B and current-ratio facts establish the exception;
+  ACTIVE_TENDER remains exempt. Missing or unreliable health is INDETERMINATE.
 - Growth score ≥ 50%
 - Marginal-turnaround and data-vacuum growth exceptions permit at most HOLD; independent hard fails retain precedence and ACTIVE_TENDER keeps its event override.
 - Liquidity ≥ $100k daily USD turnover is a hard floor; ≥ $250k is a full pass.

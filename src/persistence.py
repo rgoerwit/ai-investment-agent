@@ -242,6 +242,41 @@ def _derive_consultant_verdict(consultant_status: dict[str, Any]) -> str:
     return "UNPARSED"
 
 
+def _decision_model_provenance(
+    result: dict, configured_model: str, token_stats: dict
+) -> dict[str, object]:
+    """Keep configured identity, observed seat usage and accepted producer distinct."""
+    status = (result.get("artifact_statuses") or {}).get("final_trade_decision", {})
+    producer = status.get("model") if status.get("ok") else None
+    models = sorted(
+        {
+            str(row["model"])
+            for row in token_stats.get("binding_usage", [])
+            if row.get("seat_id") == "portfolio_manager" and row.get("model")
+        }
+    )
+    models = sorted(
+        set(models)
+        | set(
+            (
+                token_stats.get("agents", {})
+                .get("Portfolio Manager", {})
+                .get("by_model")
+                or {}
+            ).keys()
+        )
+        | ({producer} if producer else set())
+    )
+    # Legacy aggregate usage can establish models used, never which response was
+    # accepted after multiple corrections. Only the accepted boundary stamps that.
+    return {
+        "configured_decision_model": configured_model,
+        "decision_models_used": models,
+        "artifact_decision_model": producer
+        or ("ambiguous" if len(models) > 1 else "unknown"),
+    }
+
+
 def build_run_summary(
     result: dict,
     *,
@@ -297,7 +332,7 @@ def build_run_summary(
         artifact_statuses = result.get("artifact_statuses", {}) or {}
         for status in artifact_statuses.values():
             provider = str((status or {}).get("provider") or "").strip()
-            if provider:
+            if provider and provider not in {"code", "deterministic"}:
                 providers.add(provider)
         return sorted(providers)
 
@@ -563,8 +598,8 @@ def build_run_summary(
         else "COMPLETED"
     )
 
-    # The models that actually answered, not the legacy defaults (see
-    # ActiveModels). Same values the artifact metadata records.
+    # ActiveModels records configured bindings; accepted producer and observed
+    # usage below are separate, so failover cannot masquerade as configuration.
     active = active_models_or_legacy(config, quick_mode=quick_mode)
     handoff_telemetry = _debate_handoff_summary(result)
 
@@ -573,6 +608,9 @@ def build_run_summary(
         "quick_model": active.fast,
         "deep_model": active.reasoning,
         "decision_model": active.decision,
+        **_decision_model_provenance(
+            result, active.decision, get_tracker().get_total_stats()
+        ),
         "provider_preflight": provider_preflight or {},
         "llm_bindings": binding_telemetry,
         # Why a run was slow and expensive. `token_usage.by_tier` already shows
@@ -871,10 +909,7 @@ def save_results_to_file(
     tracker = get_tracker()
     token_stats = tracker.get_total_stats()
 
-    # Provenance must name the models that actually answered. The legacy
-    # QUICK_MODEL/DEEP_MODEL fields are untouched defaults under the
-    # multi-provider schema, so reading them recorded a model the run never
-    # invoked. Fail soft: a metadata field must never cost us the analysis.
+    # Resolve configured bindings separately from observed response provenance.
     binding_plan = resolve_binding_plan(config)
     active = active_models_or_legacy(config, quick_mode=quick_mode, logger=logger_obj)
     legacy_provider = (
@@ -894,6 +929,7 @@ def save_results_to_file(
             "quick_model": active.fast,
             "deep_model": active.reasoning,
             "decision_model": active.decision,
+            **_decision_model_provenance(result, active.decision, token_stats),
             "memory_enabled": runtime_config.enable_memory,
             "online_tools_enabled": config.online_tools,
             # LLM_PROVIDER is retired and metadata-only: under the multi-provider

@@ -439,3 +439,288 @@ async def test_document_tool_uses_html_fallback_and_inspects_text(monkeypatch) -
     assert "evil.example" not in result
     assert "Annual report" in result
     inspection.check.assert_awaited_once()
+
+
+@pytest.mark.parametrize("placement", ["before", "after"])
+@pytest.mark.parametrize(
+    "wrap", ["", "<table><tr><td colspan='2'>Unrelated complex table</td></tr></table>"]
+)
+def test_unchanged_annual_html_fixture_retains_legacy_rejection_and_context(
+    wrap, placement
+):
+    import json
+    from pathlib import Path
+
+    from bs4 import BeautifulSoup
+
+    from src.agents.foreign_language_evidence import normalize_foreign_language_evidence
+    from src.agents.message_utils import make_tool_evidence_record
+
+    fixtures = Path(__file__).parents[1] / "fixtures"
+    html = (fixtures / "official_statement_rows.html").read_bytes()
+    extracted = documents._html_document_text(
+        BeautifulSoup(
+            wrap.encode() + html if placement == "before" else html + wrap.encode(),
+            "html.parser",
+        )
+    )
+    assert "Revenue\n79,068,022\n80,650,914" in extracted
+    assert "For the year ended 31 December 2025" in extracted
+    assert extracted.count("For the year ended 31 December 2025") == 2
+    assert "Independent context" in extracted
+    case = json.loads((fixtures / "latest_results_statements.json").read_text())[0]
+    evidence = {**case["evidence"], "content": extracted}
+    normalized = normalize_foreign_language_evidence(
+        case["report"],
+        [],
+        ticker=case["ticker"],
+        additional_records=[make_tool_evidence_record(**evidence)],
+    )
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED" in normalized
+
+
+@pytest.mark.parametrize(
+    "complex_cells",
+    [
+        "<td rowspan='2'>Revenue</td><td>140</td>",
+        "<td colspan='2'>Revenue 140 100</td>",
+        "<td><table><tr><td>Revenue 140 100</td></tr></table></td>",
+    ],
+)
+def test_legacy_html_flattening_retains_complex_cells_without_claiming_geometry(
+    complex_cells,
+):
+    from bs4 import BeautifulSoup
+
+    text = documents._html_document_text(
+        BeautifulSoup(
+            f"<h2>Currency and period context</h2><table><tr>{complex_cells}</tr></table><p>After</p>",
+            "html.parser",
+        )
+    )
+    assert "HTML TABLE LAYOUT UNSUPPORTED" not in text
+    assert text.count("Revenue") == 1
+    assert "Currency and period context" in text and "After" in text
+
+
+def test_legacy_html_flattening_does_not_invent_empty_cell_values():
+    from bs4 import BeautifulSoup
+
+    text = documents._html_document_text(
+        BeautifulSoup(
+            "<table><tr><td>Revenue</td><td></td><td>100</td></tr></table>",
+            "html.parser",
+        )
+    )
+    assert text == "Revenue\n100"
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "scope",
+        "currency",
+        "scale",
+        "period",
+        "swapped_columns",
+        "missing_cell",
+        "wrong_metric",
+    ],
+)
+def test_html_geometry_does_not_grant_authority_to_wrong_financial_context(defect):
+    import json
+    from pathlib import Path
+
+    from bs4 import BeautifulSoup
+
+    from src.agents.foreign_language_evidence import normalize_foreign_language_evidence
+    from src.agents.message_utils import make_tool_evidence_record
+
+    fixtures = Path(__file__).parents[1] / "fixtures"
+    html = (fixtures / "official_statement_rows.html").read_text()
+    changes = {
+        "scope": ("Profit attributable to owners of the Company", "Operating profit"),
+        "currency": ("RMB’000", "USD’000"),
+        "scale": ("RMB’000", "RMB million"),
+        "period": ("31 December 2025", "30 June 2025"),
+        "swapped_columns": ("<th>2025</th><th>2024</th>", "<th>2024</th><th>2025</th>"),
+        "missing_cell": ("<td>79,068,022</td>", "<td></td>"),
+        "wrong_metric": ("<td>Revenue</td>", "<td>Operating expenses</td>"),
+    }
+    case = json.loads((fixtures / "latest_results_statements.json").read_text())[0]
+
+    def normalized(source):
+        extracted = documents._html_document_text(BeautifulSoup(source, "html.parser"))
+        return normalize_foreign_language_evidence(
+            case["report"],
+            [],
+            ticker=case["ticker"],
+            additional_records=[
+                make_tool_evidence_record(**{**case["evidence"], "content": extracted})
+            ],
+        )
+
+    # The unchanged annual fixture is already unsupported by the legacy reader.
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED" in normalized(html)
+    incorrect = normalized(html.replace(*changes[defect]))
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY" not in incorrect
+    assert "LATEST_RESULTS_REVENUE_GROWTH_YOY: N/A" in incorrect
+
+
+def test_legacy_structural_reader_rejects_intervening_unrelated_text():
+    import json
+    from pathlib import Path
+
+    from bs4 import BeautifulSoup
+
+    from src.agents.foreign_language_evidence import normalize_foreign_language_evidence
+    from src.agents.message_utils import make_tool_evidence_record
+
+    fixtures = Path(__file__).parents[1] / "fixtures"
+    html = (fixtures / "official_statement_rows.html").read_text()
+    # Keep both amounts but separate the candidate header from its row region.
+    html = html.replace(
+        "<tr><td>Revenue</td>",
+        "</tbody></table><table><tr><td colspan='2'>Unrelated spans</td></tr></table><table><tbody><tr><td>Revenue</td>",
+    )
+    text = documents._html_document_text(BeautifulSoup(html, "html.parser"))
+    case = json.loads((fixtures / "latest_results_statements.json").read_text())[0]
+    evidence = {**case["evidence"], "content": text}
+    normalized = normalize_foreign_language_evidence(
+        case["report"],
+        [],
+        ticker=case["ticker"],
+        additional_records=[make_tool_evidence_record(**evidence)],
+    )
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY" not in normalized
+    assert "LATEST_RESULTS_REVENUE_GROWTH_YOY: N/A" in normalized
+
+
+def test_offline_pypdf_layout_trial_preserves_controlled_column_geometry():
+    """Synthetic bytes qualify the trial API; they cannot qualify real source PDFs."""
+    import json
+    import re
+    from pathlib import Path
+
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    from src.agents.foreign_language_evidence import normalize_foreign_language_evidence
+    from src.agents.message_utils import make_tool_evidence_record
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+    )
+    cells = [
+        (72, 740, "CONSOLIDATED INCOME STATEMENT"),
+        (72, 720, "For the year ended 31 December 2025"),
+        (300, 700, "2025"),
+        (420, 700, "2024"),
+        (300, 680, "RMB'000"),
+        (420, 680, "RMB'000"),
+        (72, 660, "Revenue"),
+        (300, 660, "79,068,022"),
+        (420, 660, "80,650,914"),
+        (72, 640, "Profit attributable to owners of the Company"),
+        (300, 640, "4,500,698"),
+        (420, 640, "3,734,429"),
+    ]
+    stream = DecodedStreamObject()
+    stream.set_data(
+        "\n".join(
+            f"BT /F1 7 Tf 1 0 0 1 {x} {y} Tm ({text}) Tj ET" for x, y, text in cells
+        ).encode()
+    )
+    page[NameObject("/Contents")] = stream
+    payload = io.BytesIO()
+    writer.write(payload)
+    read_page = PdfReader(io.BytesIO(payload.getvalue())).pages[0]
+    plain = read_page.extract_text()
+    layout = read_page.extract_text(extraction_mode="layout")
+    assert re.search(r"Revenue[ \t]+79,068,022[ \t]+80,650,914", layout)
+    for number in ("79,068,022", "80,650,914", "4,500,698", "3,734,429"):
+        assert plain.count(number) == layout.count(number) == 1
+    case = json.loads(
+        (
+            Path(__file__).parents[1] / "fixtures/latest_results_statements.json"
+        ).read_text()
+    )[0]
+    evidence = {**case["evidence"], "content": layout}
+    normalized = normalize_foreign_language_evidence(
+        case["report"],
+        [],
+        ticker=case["ticker"],
+        additional_records=[make_tool_evidence_record(**evidence)],
+    )
+    assert "LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY" in normalized
+
+
+@pytest.mark.parametrize("corner", ["", "<td></td>", "<td rowspan='2'></td>"])
+@pytest.mark.parametrize(
+    "extra", ["", "<table><tr><td>Unrelated table</td></tr></table>"]
+)
+def test_controlled_1112_html_repeated_period_cells_keep_existing_support(
+    corner, extra
+):
+    import json
+    from pathlib import Path
+
+    from bs4 import BeautifulSoup
+
+    from src.agents.foreign_language_evidence import normalize_foreign_language_evidence
+    from src.agents.message_utils import make_tool_evidence_record
+
+    fixtures = Path(__file__).parents[1] / "fixtures"
+    case = next(
+        row
+        for row in json.loads((fixtures / "latest_results_october6.json").read_text())
+        if row["ticker"] == "1112.HK"
+    )
+    # Reconstructed geometry from retained cells, never claimed as captured bytes.
+    html = (
+        extra
+        + "<h2>FINANCIAL RESULTS</h2><table>"
+        + f"<tr>{corner}<td>Six months ended 30 June</td><td>Six months ended 30 June</td></tr>"
+        + "<tr><td>2026</td><td>2025</td><td>Change</td></tr><tr><td>RMB million</td><td>RMB million</td></tr><tr><td>(Unaudited)</td><td>(Unaudited)</td></tr><tr><td>Revenue</td><td>8,695.9</td><td>7,019.2</td><td>+23.9%</td></tr><tr><td>Net profit</td><td>610.6</td><td>71.0</td><td>+760.0%</td></tr></table>"
+        + extra
+    )
+
+    def normalized(source):
+        text = documents._html_document_text(BeautifulSoup(source, "html.parser"))
+        saved = case["evidence_records"][0]
+        record = make_tool_evidence_record(
+            tool_name=saved["tool_name"],
+            urls=saved["urls"],
+            evidence_status=saved["evidence_status"],
+            authority_by_url=saved["authority_by_url"],
+            content=text,
+        )
+        return normalize_foreign_language_evidence(
+            case["report"], [], ticker=case["ticker"], additional_records=[record]
+        )
+
+    # Surrounding unrelated prose can still prevent legacy structural binding.
+    assert ("LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY" in normalized(html)) is (
+        not extra
+    )
+    for old, new in [
+        ("2026</td><td>2025", "2025</td><td>2026"),
+        ("RMB million", "USD million"),
+        ("RMB million", "RMB thousand"),
+        ("30 June", "31 December"),
+        ("Net profit", "Operating profit"),
+        ("8,695.9</td><td>7,019.2", "7,019.2</td><td>8,695.9"),
+        ("<td>8,695.9</td>", "<td></td>"),
+    ]:
+        assert "LATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY" not in normalized(
+            html.replace(old, new)
+        )

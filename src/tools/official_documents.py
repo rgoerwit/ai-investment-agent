@@ -383,6 +383,11 @@ async def _download_official(
     raise DocumentExtractionError("DOCUMENT_REDIRECT_LIMIT")
 
 
+def _html_document_text(soup: BeautifulSoup) -> str:
+    """Keep the established flattened-cell grammar used by evidence readers."""
+    return soup.get_text("\n", strip=True)
+
+
 @tool
 async def get_official_document(
     url: str,
@@ -418,7 +423,7 @@ async def get_official_document(
                 final_url,
                 keywords,
             )
-            text = soup.get_text("\n", strip=True)
+            text = _html_document_text(soup)
             extracted = ExtractedDocument(text, "html", 1, (0,))
         elif content_type.startswith("text/"):
             candidate_paths = ()

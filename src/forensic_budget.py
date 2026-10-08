@@ -203,15 +203,15 @@ def graph_research_budget_policies(
             max_tool_calls_per_turn=4,
         ),
         # One round is intentional: both deterministic data tools fit in the
-        # same two-call turn. The two extra model calls reserve synthesis plus
-        # one structural recovery; another tool round would repeat acquisition.
+        # same two-call turn. Code assembles the inspected relay; missing data
+        # remains unavailable rather than triggering text-only regeneration.
         "junior_fundamentals_analyst": GraphResearchBudgetPolicy(
             tool_limits={
                 "get_financial_metrics": 1,
                 "get_fundamental_analysis": 1,
             },
             max_tool_iterations=1,
-            max_llm_calls=3,
+            max_llm_calls=1,
             max_tool_calls_per_turn=2,
         ),
         "foreign_language_analyst": ForeignLanguageBudgetPolicy.from_settings(

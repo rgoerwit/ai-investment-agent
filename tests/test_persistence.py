@@ -1086,3 +1086,110 @@ class TestRecordedModelProvenance:
         assert metadata["quick_model"] == "gemini-3.1-flash-lite"
         assert metadata["deep_model"] == "gemini-3.7-flash"
         assert metadata["decision_model"] == "gemini-3.1-pro-preview"
+
+
+@pytest.mark.parametrize(
+    "models,producer,ok,expected",
+    [
+        ([], None, True, "unknown"),
+        (["fallback"], None, True, "unknown"),
+        (["primary", "fallback"], None, True, "ambiguous"),
+        (["primary", "fallback"], "fallback", True, "fallback"),
+        (["primary"], "rejected", False, "unknown"),
+    ],
+)
+def test_decision_attribution_separates_configuration_usage_and_accepted_producer(
+    models, producer, ok, expected, monkeypatch
+):
+    from src.persistence import _decision_model_provenance, build_run_summary
+    from src.runtime_diagnostics import get_artifact_status, success_artifact
+
+    stats = {
+        "binding_usage": [
+            {"seat_id": "portfolio_manager", "model": model} for model in models
+        ],
+        "failed_attempts": 0,
+        "total_calls": len(models),
+    }
+    result = success_artifact(
+        "final_trade_decision", "VERDICT: HOLD", provider="google", model=producer
+    )
+    result["artifact_statuses"]["final_trade_decision"]["ok"] = ok
+    provenance = _decision_model_provenance(result, "configured", stats)
+    assert provenance["configured_decision_model"] == "configured"
+    assert provenance["artifact_decision_model"] == expected
+    assert provenance["decision_models_used"] == sorted(
+        set(models) | ({producer} if ok and producer else set())
+    )
+    assert get_artifact_status(result, "final_trade_decision").model == producer
+    tracker = MagicMock()
+    tracker.get_total_stats.return_value = stats
+    monkeypatch.setattr("src.token_tracker.get_tracker", lambda: tracker)
+    summary = build_run_summary(result, quick_mode=True, article_requested=False)
+    assert summary["artifact_decision_model"] == provenance["artifact_decision_model"]
+    assert summary["decision_models_used"] == provenance["decision_models_used"]
+
+
+def test_code_produced_relay_is_not_an_answering_llm_provider(monkeypatch):
+    from src.persistence import build_run_summary
+    from src.runtime_diagnostics import success_artifact
+
+    tracker = MagicMock()
+    tracker.get_total_stats.return_value = {"failed_attempts": 0, "total_calls": 0}
+    monkeypatch.setattr("src.token_tracker.get_tracker", lambda: tracker)
+    summary = build_run_summary(
+        success_artifact("raw_fundamentals_data", "raw", provider="code"),
+        quick_mode=True,
+        article_requested=False,
+    )
+    assert "code" not in summary["llm_providers_used"]
+
+
+@pytest.mark.parametrize(
+    "models,producer,ok,expected",
+    [
+        (["primary", "fallback"], "fallback", True, "fallback"),
+        (["primary", "fallback"], "primary", True, "primary"),
+        (["primary", "fallback"], None, True, "ambiguous"),
+        (["fallback"], None, True, "unknown"),
+        (["fallback"], "rejected", False, "unknown"),
+    ],
+)
+def test_producer_provenance_survives_summary_and_saved_metadata(
+    models, producer, ok, expected, tmp_path, monkeypatch
+):
+    from src import persistence
+    from src.runtime_diagnostics import success_artifact
+    from src.token_tracker import TokenTracker
+
+    stats = {
+        **TokenTracker().get_total_stats(),
+        "binding_usage": [
+            {"seat_id": "portfolio_manager", "model": model} for model in models
+        ],
+        "failed_attempts": 1,
+        "total_calls": len(models),
+    }
+    tracker = MagicMock()
+    tracker.get_total_stats.return_value = stats
+    monkeypatch.setattr("src.token_tracker.get_tracker", lambda: tracker)
+    monkeypatch.setattr(
+        persistence, "config", TestRecordedModelProvenance._new_schema_settings()
+    )
+    result = success_artifact(
+        "final_trade_decision", "VERDICT: HOLD", provider="google", model=producer
+    )
+    result["artifact_statuses"]["final_trade_decision"]["ok"] = ok
+    result["run_summary"] = persistence.build_run_summary(
+        result, quick_mode=True, article_requested=False
+    )
+    path = persistence.save_results_to_file(result, "TEST.T", results_dir=tmp_path)
+    saved = json.loads(path.read_text())
+    for key in (
+        "configured_decision_model",
+        "decision_models_used",
+        "artifact_decision_model",
+    ):
+        assert saved["metadata"][key] == result["run_summary"][key]
+    assert saved["metadata"]["artifact_decision_model"] == expected
+    assert "rejected" not in saved["metadata"]["decision_models_used"]

@@ -8,10 +8,12 @@ import structlog
 from langchain_core.messages import AIMessage, ToolMessage
 
 from src.agents import AgentState
+from src.agents.junior_relay import build_junior_relay
 from src.claim_policy import STRUCTURED_INGRESS_SOURCES
 from src.error_safety import summarize_exception
 from src.forensic_budget import ResearchBudgetLedger, ResearchBudgetPolicy
 from src.runtime_services import get_current_tool_service
+from src.ticker_utils import normalize_ticker
 from src.tooling.runtime import ToolInvocation
 from src.tooling.structured_ingress import (
     build_structured_ingress_record,
@@ -196,7 +198,7 @@ def create_agent_tool_node(
                 _success_message(
                     tool_name,
                     tool_id,
-                    content=_cap_tool_output(str(tool_result.value), tool_name),
+                    content=str(tool_result.value),
                     blocked=tool_result.blocked,
                     findings=tool_result.findings,
                 ),
@@ -308,7 +310,19 @@ def create_agent_tool_node(
             tool_id = tc.get("id", tool_name) if isinstance(tc, dict) else tool_name
             tool_id = tool_id if isinstance(tool_id, str) else tool_name
             block_reason: str | None = None
-            if ledger is not None and policy is not None:
+            ticker = state.get("company_of_interest")
+            requested_ticker = tool_args.get("ticker")
+            if agent_key == "junior_fundamentals_analyst" and (
+                not isinstance(ticker, str)
+                or not ticker.strip()
+                or not isinstance(requested_ticker, str)
+                or not requested_ticker.strip()
+                or normalize_ticker(requested_ticker) != normalize_ticker(ticker)
+            ):
+                block_reason = "JUNIOR_TICKER_MISMATCH"
+                if ledger is not None:
+                    block_reason = ledger.block_tool(tool_name, block_reason)
+            elif ledger is not None and policy is not None:
                 if index >= policy.max_tool_calls_per_turn:
                     block_reason = ledger.block_tool(
                         tool_name,
@@ -346,6 +360,25 @@ def create_agent_tool_node(
             outcomes[index] = outcome
         resolved_outcomes = [outcome for outcome in outcomes if outcome is not None]
 
+        relay_update: dict[str, Any] = {}
+        if agent_key == "junior_fundamentals_analyst":
+            relay_update = build_junior_relay(
+                str(state.get("company_of_interest", "")), resolved_outcomes
+            )
+            if ledger is not None:
+                terminal_reason = (
+                    "CODE_RELAY_COMPLETE"
+                    if relay_update["artifact_statuses"]["raw_fundamentals_data"]["ok"]
+                    else "ACQUISITION_INCOMPLETE"
+                )
+                ledger.record_outcome(terminal_reason)
+                ledger.stop_reason = terminal_reason
+
+        # Only model-facing messages are capped. The relay above and registered
+        # metrics ingress both receive the full inspected results owned here.
+        for message, _ in resolved_outcomes:
+            message.content = _cap_tool_output(str(message.content), message.name or "")
+
         if ledger is not None and policy is not None:
             for tc, (message, _) in zip(
                 target_message.tool_calls,
@@ -375,10 +408,11 @@ def create_agent_tool_node(
                     # re-entering the model is cumulatively capped; structured
                     # ingress above retains the complete inspected payload.
                     message.content = ledger.cap_evidence(content)
-            if ledger.tool_rounds_used >= policy.max_tool_iterations:
-                ledger.record_forced_synthesis("TOOL_ROUND_LIMIT")
-            elif not authorized:
-                ledger.record_forced_synthesis("NO_PRODUCTIVE_TOOL_CALLS")
+            if agent_key != "junior_fundamentals_analyst":
+                if ledger.tool_rounds_used >= policy.max_tool_iterations:
+                    ledger.record_forced_synthesis("TOOL_ROUND_LIMIT")
+                elif not authorized:
+                    ledger.record_forced_synthesis("NO_PRODUCTIVE_TOOL_CALLS")
 
         result_messages = [message for message, _ in resolved_outcomes]
         structured_inputs: dict[str, dict[str, Any]] = {}
@@ -388,7 +422,7 @@ def create_agent_tool_node(
                 records,
             )
 
-        result: dict[str, Any] = {"messages": result_messages}
+        result: dict[str, Any] = {"messages": result_messages, **relay_update}
         if structured_inputs:
             result["structured_inputs"] = structured_inputs
         if ledger is not None:

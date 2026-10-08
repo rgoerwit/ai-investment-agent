@@ -315,6 +315,7 @@ class TestAgentToolNodeFiltering:
             "junior_fundamentals_analyst",
         )
         state = {
+            "company_of_interest": "TEST",
             "messages": [
                 AIMessage(
                     name="junior_fundamentals_analyst",
@@ -328,7 +329,7 @@ class TestAgentToolNodeFiltering:
                         }
                     ],
                 )
-            ]
+            ],
         }
 
         result = await node(state, {"configurable": {}})
@@ -398,6 +399,7 @@ class TestAgentToolNodeFiltering:
             "junior_fundamentals_analyst",
         )
         state = {
+            "company_of_interest": "TEST",
             "messages": [
                 AIMessage(
                     name="junior_fundamentals_analyst",
@@ -411,7 +413,7 @@ class TestAgentToolNodeFiltering:
                         }
                     ],
                 )
-            ]
+            ],
         }
 
         result = await node(state, {"configurable": {}})

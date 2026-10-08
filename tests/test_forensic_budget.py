@@ -260,7 +260,9 @@ def test_value_trap_policy_bounds_the_observed_reformulation_pathology() -> None
     assert policy.max_llm_calls == 6
 
 
-def test_junior_fundamentals_budget_is_one_parallel_tool_round_plus_synthesis() -> None:
+def test_junior_fundamentals_budget_is_one_parallel_tool_round_with_code_relay() -> (
+    None
+):
     policy = graph_research_budget_policies(quick_mode=True)[
         "junior_fundamentals_analyst"
     ]
@@ -269,7 +271,7 @@ def test_junior_fundamentals_budget_is_one_parallel_tool_round_plus_synthesis() 
     assert policy.max_tool_calls_per_turn == 2
     assert policy.tool_limit("get_financial_metrics") == 1
     assert policy.tool_limit("get_fundamental_analysis") == 1
-    assert policy.max_llm_calls == 3
+    assert policy.max_llm_calls == 1
 
 
 @pytest.mark.parametrize("quick_mode", (False, True))
@@ -280,4 +282,7 @@ def test_graph_research_policies_reserve_one_structural_recovery_turn(
 
     assert len(policies) == 6
     for agent, policy in policies.items():
-        assert policy.max_llm_calls == policy.max_tool_iterations + 2, agent
+        if agent == "junior_fundamentals_analyst":
+            assert policy.max_llm_calls == 1
+        else:
+            assert policy.max_llm_calls == policy.max_tool_iterations + 2, agent

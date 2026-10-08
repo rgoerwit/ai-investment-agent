@@ -104,22 +104,9 @@ def _ends_with_known_structured_terminator(text: str, agent: str | None) -> bool
     return text.rstrip().endswith(raw_data_end)
 
 
-_TOOL_OUTPUT_CAP_RE = re.compile(
-    r"\[\.\.\.TRUNCATED [\d,]+ chars of tool output '(?P<tool_name>[^'\n]+)'\.\.\.\]"
-)
-
-
 def format_tool_output_cap(removed_chars: int, tool_name: str) -> str:
     """Render the code-owned marker copied by tool-result consumers."""
     return f"[...TRUNCATED {removed_chars:,} chars of tool output '{tool_name}'...]"
-
-
-def has_tool_output_cap(text: str, tool_name: str) -> bool:
-    """Match the producer marker for exactly the expected tool."""
-    return any(
-        match.group("tool_name") == tool_name
-        for match in _TOOL_OUTPUT_CAP_RE.finditer(text)
-    )
 
 
 _CODE_TRUNCATION_MARKERS = (

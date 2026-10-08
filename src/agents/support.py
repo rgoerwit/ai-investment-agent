@@ -904,15 +904,6 @@ def _is_output_insufficient(content: str, agent_key: str) -> bool:
     if not content or len(content) < 50:
         return True
 
-    if agent_key == "junior_fundamentals_analyst":
-        has_tool_output = (
-            "get_financial_metrics" in content.lower()
-            or "financial" in content.lower()
-            or "roe" in content.lower()
-            or "=== RAW" in content
-        )
-        return not has_tool_output or len(content) < 200
-
     if agent_key == "fundamentals_analyst":
         return not has_parseable_data_block(content)
 

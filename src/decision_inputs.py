@@ -203,6 +203,9 @@ class DecisionInputs:
     english_analyst_count: int | None = None
     us_revenue_pct: float | None = None
     liquidity: LiquidityAssessment | None = None
+    health_exception_pb_ratio: float | None = None
+    health_exception_current_ratio: float | None = None
+    health_exception_claim_ids: tuple[str, ...] = ()
 
     @classmethod
     def from_metrics(
@@ -292,6 +295,20 @@ class DecisionInputs:
             else None
         )
         sector_value = getattr(sector, "value", sector)
+        pb = current_ratio = None
+        exception_ids: tuple[str, ...] = ()
+        if snapshot_authoritative:
+            from src.score_lineage import eligible_fact_number
+
+            claims = (snapshot or {}).get("claims")
+            if isinstance(claims, Mapping):
+                pb, pb_id = eligible_fact_number(claims, "PB_RATIO", strict=True)
+                current_ratio, ratio_id = eligible_fact_number(
+                    claims, "CURRENT_RATIO_RAW", strict=True
+                )
+                exception_ids = tuple(
+                    claim_id for claim_id in (pb_id, ratio_id) if claim_id is not None
+                )
         return cls(
             decision_metrics=decision_metrics,
             sector=str(sector_value) if sector_value is not None else None,
@@ -313,6 +330,9 @@ class DecisionInputs:
             growth_coverage_authoritative=snapshot_authoritative,
             snapshot_authoritative=snapshot_authoritative,
             snapshot_status=snapshot_status,
+            health_exception_pb_ratio=pb,
+            health_exception_current_ratio=current_ratio,
+            health_exception_claim_ids=exception_ids,
             english_analyst_count=int(verified_coverage)
             if verified_coverage is not None
             else None,

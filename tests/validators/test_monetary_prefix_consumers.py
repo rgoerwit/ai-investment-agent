@@ -231,3 +231,91 @@ def test_shared_currency_registry_codes_are_recognized(currency, template):
     text = template.format(currency=currency)
     assert parse_monetary_amount(text) == 100_000_000
     assert extract_monetary_currency(text) == currency
+
+
+@pytest.mark.parametrize("currency", ["人民幣", "人民币"])
+def test_observed_chinese_identity_reaches_reporting_declarations(currency):
+    from src.agents.foreign_language_evidence import _heading_has_currency_and_unit
+    from src.fx_normalization import canonical_currency_code
+    from src.monetary import reporting_unit_declarations
+
+    assert canonical_currency_code(currency) == "CNY"
+    assert reporting_unit_declarations(currency + "千元") == (("CNY", 1000.0),)
+    assert _heading_has_currency_and_unit(
+        currency + "千元",
+        {
+            "LATEST_RESULTS_CURRENCY": "CNY",
+            "LATEST_RESULTS_REPORTING_UNIT": "thousands",
+        },
+    )
+    assert not _heading_has_currency_and_unit(
+        "USD " + currency + "千元",
+        {
+            "LATEST_RESULTS_CURRENCY": "CNY",
+            "LATEST_RESULTS_REPORTING_UNIT": "thousands",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "amount,expected",
+    [
+        ("CA$588M", 588e6),
+        ("CA$ 588 M", 588e6),
+        ("-CA$588M", -588e6),
+        ("CA$-588M", -588e6),
+        ("(CA$588M)", -588e6),
+        ("CA$1,234M", 1234e6),
+    ],
+)
+def test_ca_symbol_reaches_complete_ocf_datablock(amount, expected):
+    from src.fx_normalization import canonical_currency_code
+
+    assert canonical_currency_code("CA$") == "CAD"
+    report = f"### --- START DATA_BLOCK ---\nOPERATING_CASH_FLOW: {amount}\nOCF_PERIOD: FY\nMETRIC_SCOPE_OCF: CONSOLIDATED\n### --- END DATA_BLOCK ---"
+    observation = extract_datablock_ocf_observation(report)
+    assert observation.amount == expected
+    assert observation.currency == "CAD"
+    assert extract_metrics(report)["ocf"] == expected
+
+
+@pytest.mark.parametrize(
+    "amount",
+    ["CA$1,5M", "CA$588M USD", "CA$588未知", "--CA$588M", "CA$$588M"],
+)
+def test_new_alias_does_not_loosen_malformed_money(amount):
+    assert parse_ocf_amount(amount) is None
+
+
+@pytest.mark.parametrize("prefix", ["$", "USD ", "(", ")", "+ ", "- ", "( + "])
+@pytest.mark.parametrize("suffix", ["10M", "10M; prior CAD 2M"])
+def test_prefix_storms_reject_numeric_interiors(prefix, suffix):
+    from src.monetary import extract_monetary_currency, iter_monetary_tokens
+
+    amount = prefix * 1000 + suffix
+    assert parse_monetary_amount(amount) is None
+    assert parse_ocf_amount(amount) is None
+    assert list(iter_monetary_tokens(amount)) == []
+    assert extract_monetary_currency(amount) is None
+
+
+def test_public_scanner_malformed_prefixes_finish_under_subprocess_watchdog():
+    import subprocess
+    import sys
+
+    # The subprocess boundary terminates a regressed scanner instead of hanging
+    # pytest. Import/startup overhead is deliberately outside the timing claim.
+    code = """
+from src.monetary import parse_monetary_amount, iter_monetary_tokens
+from src.validators.financial_rules import parse_ocf_amount
+for size in (4000, 16000):
+    for prefix in ("$", "USD ", "(", ")", "+ ", "- ", "( + "):
+        for tail in ("", "10M", "10M; prior CAD 2M"):
+            value = prefix * size + tail
+            assert parse_monetary_amount(value) is None
+            assert parse_ocf_amount(value) is None
+            assert list(iter_monetary_tokens(value)) == []
+"""
+    subprocess.run(
+        [sys.executable, "-c", code], timeout=8, check=True, capture_output=True
+    )

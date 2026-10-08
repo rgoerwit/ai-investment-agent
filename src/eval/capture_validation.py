@@ -74,6 +74,102 @@ def _failed_before_llm(
     return False
 
 
+def junior_completion_link_reasons(
+    metadata: dict[str, Any],
+    output: dict[str, Any],
+    indexes: dict[str, dict[int, dict[str, Any]]],
+) -> list[str]:
+    """Code completion still requires actual selector and acquisition events."""
+    statuses = output.get("artifact_statuses")
+    status = (
+        statuses.get("raw_fundamentals_data", {}) if isinstance(statuses, dict) else {}
+    )
+    if not isinstance(status, dict) or (
+        metadata.get("execution_kind") == "tool_selection_and_code_completion"
+        and (
+            status.get("provider") != "code"
+            or status.get("complete") is not True
+            or status.get("content") != output.get("raw_fundamentals_data")
+        )
+    ):
+        return ["malformed_junior_status"]
+    if (
+        metadata.get("node_name") != "Junior Fundamentals Analyst"
+        or status.get("provider") != "code"
+        or not status.get("ok")
+    ):
+        return []
+    reasons = []
+    selectors = metadata.get("selector_node_sequence_ids")
+    completion = metadata.get("completion_node_sequence_id")
+    if (
+        metadata.get("execution_kind") != "tool_selection_and_code_completion"
+        or not isinstance(selectors, list)
+        or not selectors
+        or not all(type(selector) is int for selector in selectors)
+        or type(completion) is not int
+    ):
+        return ["missing_junior_cycle"]
+    for field in ("llm_call_sequence_ids", "tool_call_sequence_ids"):
+        links = metadata.get(field)
+        if not isinstance(links, list) or not all(type(link) is int for link in links):
+            return ["malformed_junior_event_links"]
+    nodes = indexes.get("node", {})
+    if nodes.get(completion, {}).get("node_name") != "Junior Fundamentals Analyst":
+        reasons.append("missing_junior_completion_event")
+    llms = [
+        indexes["llm"].get(link, {})
+        for link in metadata.get("llm_call_sequence_ids", [])
+    ]
+    for selector in selectors:
+        if (
+            not isinstance(selector, int)
+            or selector >= completion
+            or nodes.get(selector, {}).get("node_name") != "Junior Fundamentals Analyst"
+            or not any(
+                event.get("node_sequence_id") == selector
+                and event.get("node_name") == "Junior Fundamentals Analyst"
+                for event in llms
+            )
+        ):
+            reasons.append("missing_junior_selector_event")
+    if any(
+        event.get("node_name") != "Junior Fundamentals Analyst"
+        or event.get("node_sequence_id") not in selectors
+        for event in llms
+    ):
+        reasons.append("bad_junior_selector_link")
+    tools = [
+        indexes["tool"].get(link, {})
+        for link in metadata.get("tool_call_sequence_ids", [])
+    ]
+    owned = [
+        event
+        for event in tools
+        if event.get("node_name") == "junior_fund_tools"
+        and event.get("agent_key") == "junior_fundamentals_analyst"
+        and isinstance(event.get("node_sequence_id"), int)
+        and min(selectors) < event["node_sequence_id"] < completion
+        and nodes.get(event["node_sequence_id"], {}).get("node_name")
+        == "junior_fund_tools"
+    ]
+    if len(owned) != len(tools):
+        reasons.append("bad_junior_tool_link")
+    for name in ("get_financial_metrics", "get_fundamental_analysis"):
+        if any(
+            sum(
+                event.get("name") == name
+                and event.get("stage") == stage
+                and not event.get("blocked")
+                for event in owned
+            )
+            != 1
+            for stage in ("before", "after")
+        ):
+            reasons.append(f"missing_junior_acquisition_event:{name}")
+    return reasons
+
+
 def validate_agent_bundle(
     agent_dir: Path,
     run_manifest: dict[str, Any],
@@ -141,6 +237,8 @@ def validate_agent_bundle(
         reasons.append("missing_expected_output_field")
     if contains_serialization_fallback(output):
         reasons.append("output_contains_serialization_fallback")
+
+    reasons.extend(junior_completion_link_reasons(metadata, output, event_indexes))
 
     llm_ids = metadata.get("llm_call_sequence_ids", [])
     tool_ids = metadata.get("tool_call_sequence_ids", [])
@@ -247,6 +345,7 @@ def validate_capture_bundle(run_dir: Path) -> CaptureValidationReport:
                 f"llm_response_contains_serialization_fallback:{sequence_id}"
             )
     event_indexes = {
+        "node": _index_rows(node_events),
         "llm": _index_rows(llm_rows),
         "tool": _index_rows(tool_rows),
         "memory": _index_rows(memory_rows),

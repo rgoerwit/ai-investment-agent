@@ -53,8 +53,8 @@ MONETARY_AMOUNT_PATTERN = (
 )
 MONETARY_AMOUNT_RE = re.compile(MONETARY_AMOUNT_PATTERN, re.IGNORECASE)
 _MONETARY_START_RE = re.compile(
-    r"(?<![\w.+'’-])(?=\S)(?:[()+-][\t ]*)*"
-    rf"(?:{_CURRENCY_TOKEN_PATTERN})?[\t ]*(?:[()+-][\t ]*)*\d",
+    r"(?<![\w.+'’-])(?=\S)(?:[()+-][\t ]*){0,2}"
+    rf"(?:(?:{_CURRENCY_TOKEN_PATTERN})[\t ]*){{0,2}}(?:[()+-][\t ]*){{0,2}}\d",
     re.IGNORECASE,
 )
 _MONETARY_MAGNITUDES = {
@@ -79,6 +79,7 @@ _CURRENCY_BOUND_REPORTING_UNITS = MappingProxyType(
         "千円": ("JPY", 1e3),
         "億円": ("JPY", 1e8),
         "人民幣千元": ("CNY", 1e3),
+        "人民币千元": ("CNY", 1e3),
         "백만원": ("KRW", 1e6),
         # Used by multiple currencies; only an explicit source currency binds it.
         "千元": (None, 1e3),

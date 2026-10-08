@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Enforce reliable financial-health failures through the existing verdict correction, preserving the canonical deep-value/current-ratio exception and active-tender exemption; project the same health assessment into saved policy, PM context and reports.
+- Close every completed Junior acquisition with its named terminal message, including empty or malformed failures, preserving current failure provenance and preventing a redundant blocked tool round.
+
 ### Changed
 
 - Treat generic consultant conditions, numerical discrepancies, and suspicious
@@ -18,8 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Keep EPS rubric lineage on eligible per-share bases, honor verified majority
-  ownership ahead of unrelated independence text, restore capped Junior metrics
-  from inspected ingress, and bind one-cell-per-line comparative results tables.
+  ownership ahead of unrelated independence text, preserve Junior originals from
+  inspected ingress, and bind one-cell-per-line comparative results tables.
 - Recognize complete half-year labels, abbreviated English dates, retained Japanese
   fiscal Q1 context, and equivalent currency-bound reporting-unit declarations while
   preserving comparative table and earnings-scope checks. Keep monetary amount
@@ -55,7 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after parenthesized date qualifiers. Accept explicit ISO currency amounts in
   either order for capital exposure, and stop free-text scanners at invalid
   monetary candidates instead of substituting later comparative amounts.
-- Give Junior Fundamentals one bounded text-only contract recovery in quick mode.
+- Relay Junior Fundamentals data from its inspected tool results in code, retaining
+  useful partial results and exposing the same final artifact to prompt checks and
+  baseline capture. Bound currency and sign/bracket prefixes in the amount scanner.
+  Preserve legacy HTML extraction and render canonical initiation gates, measured
+  values, uncertainty, and the hard-fail aggregate in reports.
   Share the Portfolio Manager's structural and semantic correction allowance;
   require eligible decision facts or active gates and retain publication failure
   when the final policy trace is invalid.
