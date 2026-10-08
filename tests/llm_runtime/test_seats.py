@@ -74,7 +74,7 @@ def test_structural_recovery_is_text_only_and_available_in_quick_mode() -> None:
     assert recovery.execution_policy.standard_tier_in_quick_mode is True
 
 
-def test_quick_mode_service_tier_policy_only_unpins_the_portfolio_manager() -> None:
+def test_quick_mode_pins_gate_critical_seats_to_standard_tier() -> None:
     assert (
         SEATS[SeatId.SENIOR_FUNDAMENTALS].execution_policy.standard_tier_in_quick_mode
         is True
@@ -84,10 +84,22 @@ def test_quick_mode_service_tier_policy_only_unpins_the_portfolio_manager() -> N
         SEATS[SeatId.JUNIOR_FUNDAMENTALS].execution_policy.standard_tier_in_quick_mode
         is True
     )
+    # A flex-built PM client carries the 24s quick flex-attempt deadline, which
+    # Google enforces server-side and the standard re-issue inherits (Oct 2026).
     assert (
         SEATS[SeatId.PORTFOLIO_MANAGER].execution_policy.standard_tier_in_quick_mode
-        is False
+        is True
     )
+    unpinned_critical = [
+        seat_id
+        for seat_id, spec in SEATS.items()
+        if spec.quick_intent is ModelIntent.CRITICAL
+        and not (
+            spec.execution_policy.standard_tier_in_quick_mode
+            or spec.execution_policy.standard_tier_only
+        )
+    ]
+    assert unpinned_critical == []
 
 
 def test_callback_names_are_unique_except_intentional_fallback_aliases() -> None:

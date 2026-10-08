@@ -1,6 +1,7 @@
 # LLM Provider Qualification and Operations
 
-Last updated: 2026-10-01 (model failover ladder; pricing-table staleness).
+Last updated: 2026-10-08 (quick PM 504 re-attribution; PM standard pin; run-scoped
+Google SDK retries).
 
 ## Support claims
 
@@ -264,6 +265,19 @@ dropped from flex to standard. The only fallback then was a tier change on the s
 model, and the retry loop's next attempt repeated that same model. A newly released
 model being short of capacity is a property of the model, so the remedy has to change
 the model.
+
+**Correction (2026-10-08).** Those quick-mode PM 504s were not a capacity problem
+alone: our short deadline exposed slower service. The deadline is the 24 s quick
+flex-attempt cap (0.4 × the 60 s quick hard cap). A flex-built
+client carries it as its SDK timeout, google-genai sends it as `X-Server-Timeout` so
+Google enforces it server-side, and the standard re-issue and the failover copy inherit
+it from the instance. The deadline exposed slower `gemini-3.8-flash` service from
+2026-10-06. Containment: the PM is pinned to standard in quick mode again (the 2026-09
+unpin assumed it fit the flex cap), and the Google adapter now takes SDK retries from
+the run-scoped config, so the `--quick` clamp of 2 attempts applies to CRITICAL and
+REASONING seats too, not only FAST. The systemic fix, a per-dispatch deadline instead of
+one fixed at construction, is pending. The failover ladder below still stands for
+genuine model-health failures.
 
 A struggling call now goes down one ladder, each rung owned by the layer that already
 owns that concern:

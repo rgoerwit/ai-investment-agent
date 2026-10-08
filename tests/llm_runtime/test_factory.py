@@ -442,3 +442,121 @@ def test_apac_compatible_adapter_honors_reasoning_override(monkeypatch) -> None:
     assert SeatModelFactory().build(request) is model
     assert captured["reasoning_effort"] == "low"
     assert captured["extra_body"] == {"thinking": {"type": "enabled"}}
+
+
+# --- Run-scoped SDK retries and the quick PM tier pin, on the BUILT client ---
+#
+# These build real ChatGoogleGenerativeAI instances (no network at construction)
+# and read the initialised object, because the defect was a raw settings read
+# that a mock of create_gemini_model's arguments alone would not pin down.
+
+
+@pytest.fixture
+def _reset_flex_state():
+    from src.service_tiers import (
+        _reset_flex_capability_cache_for_tests,
+        _reset_floor_log_cache_for_tests,
+    )
+
+    _reset_flex_capability_cache_for_tests()
+    _reset_floor_log_cache_for_tests()
+    yield
+    _reset_flex_capability_cache_for_tests()
+    _reset_floor_log_cache_for_tests()
+
+
+def _google_settings(*, api_retry_attempts: int) -> Settings:
+    return Settings(
+        _env_file=None,
+        llm_base_provider="google",
+        llm_review_provider="openai",
+        google_api_key="g",
+        openai_api_key="o",
+        google_service_tier="flex",
+        api_retry_attempts=api_retry_attempts,
+    )
+
+
+def _build_google_seat(seat_id: SeatId, settings: Settings, *, quick_mode: bool):
+    from types import SimpleNamespace
+
+    from src.llm_runtime.construction import build_required_model_for_seat
+    from src.runtime_config import build_runtime_config, use_runtime_config
+
+    runtime = build_runtime_config(SimpleNamespace(quick=quick_mode), settings)
+    with use_runtime_config(runtime):
+        return build_required_model_for_seat(
+            seat_id,
+            settings=settings,
+            plan=resolve_binding_plan(settings),
+            quick_mode=quick_mode,
+        )
+
+
+@pytest.mark.parametrize(
+    "seat_id", [SeatId.PORTFOLIO_MANAGER, SeatId.SENIOR_FUNDAMENTALS]
+)
+def test_google_adapter_quick_mode_clamps_sdk_retries(
+    seat_id, restore_runtime_config, _reset_flex_state
+) -> None:
+    llm = _build_google_seat(
+        seat_id, _google_settings(api_retry_attempts=3), quick_mode=True
+    )
+
+    assert llm.max_retries == 2
+
+
+@pytest.mark.parametrize(
+    "seat_id", [SeatId.PORTFOLIO_MANAGER, SeatId.SENIOR_FUNDAMENTALS]
+)
+def test_google_adapter_full_mode_keeps_configured_retries(
+    seat_id, restore_runtime_config, _reset_flex_state
+) -> None:
+    llm = _build_google_seat(
+        seat_id, _google_settings(api_retry_attempts=3), quick_mode=False
+    )
+
+    assert llm.max_retries == 3
+
+
+@pytest.mark.parametrize("quick_mode", [True, False])
+def test_google_adapter_explicit_sdk_retries_win_in_both_modes(
+    quick_mode, restore_runtime_config, _reset_flex_state
+) -> None:
+    assert SEATS[SeatId.HEALTH_CHECK].execution_policy.sdk_max_retries == 1
+    llm = _build_google_seat(
+        SeatId.HEALTH_CHECK,
+        _google_settings(api_retry_attempts=3),
+        quick_mode=quick_mode,
+    )
+
+    assert llm.max_retries == 1
+
+
+def test_google_adapter_quick_clamp_never_raises_retries(
+    restore_runtime_config, _reset_flex_state
+) -> None:
+    llm = _build_google_seat(
+        SeatId.PORTFOLIO_MANAGER,
+        _google_settings(api_retry_attempts=1),
+        quick_mode=True,
+    )
+
+    assert llm.max_retries == 1
+
+
+@pytest.mark.parametrize(
+    ("quick_mode", "expected_tier"), [(True, None), (False, "flex")]
+)
+def test_quick_portfolio_manager_built_model_is_standard_tier(
+    quick_mode, expected_tier, restore_runtime_config, _reset_flex_state
+) -> None:
+    # A standard-tier Gemini instance carries service_tier=None; only a flex
+    # instance gets the quick flex-attempt SDK deadline.
+    llm = _build_google_seat(
+        SeatId.PORTFOLIO_MANAGER,
+        _google_settings(api_retry_attempts=2),
+        quick_mode=quick_mode,
+    )
+
+    assert llm.service_tier == expected_tier

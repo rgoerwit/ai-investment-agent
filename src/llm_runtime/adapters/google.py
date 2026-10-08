@@ -6,6 +6,7 @@ from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.budgets import reserve_class_for_request
 from src.llm_runtime.rate_limits import limiter_for_binding
 from src.llm_runtime.seats import ModelIntent
+from src.runtime_config import get_runtime_config
 
 
 class GoogleAdapter:
@@ -21,6 +22,9 @@ class GoogleAdapter:
 
         settings = request.settings or config
         policy = request.seat.execution_policy
+        # Run-scoped, so the --quick clamp applies (the FAST path already reads
+        # it this way); an explicit policy.sdk_max_retries still wins below.
+        run_retries = get_runtime_config(settings).api_retry_attempts
 
         if not policy.reasoning_control_enabled:
             llm = llms.create_gemini_model(
@@ -30,7 +34,7 @@ class GoogleAdapter:
                 max_retries=(
                     policy.sdk_max_retries
                     if policy.sdk_max_retries is not None
-                    else settings.api_retry_attempts
+                    else run_retries
                 ),
                 callbacks=list(request.callbacks),
                 max_output_tokens=request.output_tokens,
@@ -103,7 +107,7 @@ class GoogleAdapter:
             max_retries=(
                 policy.sdk_max_retries
                 if policy.sdk_max_retries is not None
-                else settings.api_retry_attempts
+                else run_retries
             ),
             callbacks=list(request.callbacks),
             thinking_level=reasoning,

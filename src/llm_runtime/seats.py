@@ -308,10 +308,13 @@ SEATS: dict[SeatId, SeatSpec] = {
         state_field="final_trade_decision",
         normal=ModelIntent.CRITICAL,
         quick=ModelIntent.CRITICAL,
-        # The PM normally fits within the quick flex-attempt cap and retains the
-        # standard fallback, so it follows the configured tier. Senior Fundamentals
-        # keeps the standard pin because its calls exceed the current flex cap.
-        execution_policy=SeatExecutionPolicy(),
+        # Pinned to standard in quick mode. A flex-built client carries the quick
+        # flex-attempt deadline (a fraction of the generic 60s cap, i.e. 24s) as
+        # its SDK timeout; Google enforces it server-side via X-Server-Timeout, and
+        # the standard re-issue and model failover inherit it from the instance.
+        # Oct 2026 quick PM 504s were that deadline exposing slower service. Keep
+        # the pin until per-dispatch deadlines land and evidence supports flex here.
+        execution_policy=SeatExecutionPolicy(standard_tier_in_quick_mode=True),
     ),
     SeatId.ANALYST_RETRY: _seat(
         SeatId.ANALYST_RETRY,

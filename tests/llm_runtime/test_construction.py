@@ -227,11 +227,32 @@ def test_reasoning_and_service_tier_overrides_reach_adapter_request() -> None:
     assert request.service_tier == "flex"
 
 
+@pytest.mark.parametrize("configured_tier", ["flex", "standard"])
+def test_quick_portfolio_manager_is_pinned_to_standard_tier(configured_tier) -> None:
+    settings = _settings(
+        llm_base_provider="google",
+        llm_review_provider="openai",
+        google_service_tier=configured_tier,
+    )
+    plan = resolve_binding_plan(settings)
+    factory = RecordingFactory()
+
+    build_required_model_for_seat(
+        SeatId.PORTFOLIO_MANAGER,
+        settings=settings,
+        plan=plan,
+        factory=factory,
+        quick_mode=True,
+    )
+
+    assert factory.requests[0].service_tier == "standard"
+
+
 @pytest.mark.parametrize(
     ("configured_tier", "expected_pm_tier"),
     [("flex", "flex"), ("standard", "standard")],
 )
-def test_quick_portfolio_manager_honors_configured_google_tier(
+def test_full_mode_portfolio_manager_keeps_configured_google_tier(
     configured_tier, expected_pm_tier
 ) -> None:
     settings = _settings(
@@ -247,7 +268,7 @@ def test_quick_portfolio_manager_honors_configured_google_tier(
         settings=settings,
         plan=plan,
         factory=factory,
-        quick_mode=True,
+        quick_mode=False,
     )
 
     assert factory.requests[0].service_tier == expected_pm_tier
@@ -334,15 +355,17 @@ def test_legacy_junior_uses_standard_only_in_quick_mode(
 
 
 @pytest.mark.parametrize(
-    ("seat_id", "factory_name", "expected_tier"),
+    ("seat_id", "factory_name", "quick_mode", "expected_tier"),
     [
-        (SeatId.SENIOR_FUNDAMENTALS, "apex", "standard"),
-        (SeatId.ANALYST_RETRY, "deep", "standard"),
-        (SeatId.PORTFOLIO_MANAGER, "apex", None),
+        (SeatId.SENIOR_FUNDAMENTALS, "apex", True, "standard"),
+        (SeatId.ANALYST_RETRY, "deep", True, "standard"),
+        (SeatId.PORTFOLIO_MANAGER, "apex", True, "standard"),
+        # Full mode leaves the PM's tier to config (None follows the setting).
+        (SeatId.PORTFOLIO_MANAGER, "apex", False, None),
     ],
 )
 def test_legacy_quick_tier_follows_seat_policy(
-    seat_id, factory_name, expected_tier
+    seat_id, factory_name, quick_mode, expected_tier
 ) -> None:
     settings = Settings(_env_file=None, google_api_key="g", gemini_service_tier="flex")
     plan = resolve_binding_plan(settings)
@@ -358,11 +381,11 @@ def test_legacy_quick_tier_follows_seat_policy(
     request = LegacySeatRequest(
         seat_id=seat_id,
         settings=settings,
-        quick_mode=True,
+        quick_mode=quick_mode,
         callbacks=(),
         output_tokens=None,
         model_override=None,
-        resolved_model=plan.for_seat(seat_id, quick_mode=True).model,
+        resolved_model=plan.for_seat(seat_id, quick_mode=quick_mode).model,
     )
 
     build_legacy_model(request, graph_factories=factories)

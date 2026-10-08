@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Pin the quick-mode Portfolio Manager to the standard Gemini tier again: its
+  2026-10 `504 DEADLINE_EXCEEDED` failures were the 24 s quick flex-attempt deadline,
+  enforced server-side and inherited by the standard re-issue and failover. The Google
+  adapter now honors the run-scoped `--quick` retry clamp, so quick PM, Senior
+  Fundamentals and Analyst Retry calls drop from 3 to 2 SDK attempts when
+  `API_RETRY_ATTEMPTS` is 3; explicit per-seat retry policies are unchanged.
 - Keep EPS rubric lineage on eligible per-share bases, honor verified majority
   ownership ahead of unrelated independence text, preserve Junior originals from
   inspected ingress, and bind one-cell-per-line comparative results tables.

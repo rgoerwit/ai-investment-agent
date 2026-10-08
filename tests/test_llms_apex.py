@@ -83,6 +83,8 @@ class TestApexFactoryUnset:
             result = llms_mod.create_apex_llm("portfolio_manager", quick_mode=True)
         assert result is sentinel
         quick.assert_called_once()
+        # PM pinned to standard in quick mode (seats.py execution policy).
+        assert quick.call_args.kwargs["service_tier"] == "standard"
 
     def test_senior_quick_mode_delegates_to_quick_path(self, monkeypatch):
         _set_cfg(monkeypatch, apex_model="")
@@ -164,7 +166,7 @@ class TestApexFactorySet:
             llms_mod.create_apex_llm("senior_fundamentals", quick_mode=True)
         assert gemini.call_args.kwargs["service_tier"] == "standard"
 
-    def test_quick_pm_explicit_apex_leaves_tier_to_config(self, monkeypatch):
+    def test_quick_pm_explicit_apex_pins_standard_tier(self, monkeypatch):
         _set_cfg(
             monkeypatch,
             apex_model="gemini-3.1-pro-preview",
@@ -173,6 +175,16 @@ class TestApexFactorySet:
         )
         with patch.object(llms_mod, "create_gemini_model") as gemini:
             llms_mod.create_apex_llm("portfolio_manager", quick_mode=True)
+        assert gemini.call_args.kwargs["service_tier"] == "standard"
+
+    def test_full_mode_pm_explicit_apex_leaves_tier_to_config(self, monkeypatch):
+        _set_cfg(
+            monkeypatch,
+            apex_model="gemini-3.1-pro-preview",
+            gemini_service_tier="flex",
+        )
+        with patch.object(llms_mod, "create_gemini_model") as gemini:
+            llms_mod.create_apex_llm("portfolio_manager", quick_mode=False)
         assert gemini.call_args.kwargs["service_tier"] is None
 
     def test_deep_factory_passes_explicit_tier_to_gemini(self):
