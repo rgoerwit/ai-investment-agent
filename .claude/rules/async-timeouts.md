@@ -24,6 +24,15 @@ For a new blocking call site, prefer **`run_blocking_call(policy, fn)`** from
 policies exist for the common cases; use `policy.with_label(f"...:{ticker}")` for a
 per-call label.
 
+**Sync callers: never `with ThreadPoolExecutor(...)` + `future.result(timeout=...)`.**
+`__exit__` calls `shutdown(wait=True)`, so the timeout bounds nothing, and executor
+workers are joined at interpreter exit even after `shutdown(wait=False)`. Use
+`run_blocking_call_sync(policy, fn)` with an `InFlightLimit` on the policy: one daemon
+thread per call, a slot held until the thread really ends, fail-fast
+`BlockingCallSaturatedError` when full. An `InFlightLimit` on an async policy does the
+same for `run_blocking_call` — use it where repeated stalls could pile up orphans.
+None of this stops the stalled work; it bounds the caller and the orphan count.
+
 LLM `ainvoke` is bounded the same way: `invoke_with_rate_limit_handling` in
 `src/agents/runtime.py` wraps every call in `run_with_hard_timeout`. That wrap is the
 load-bearing safety net against provider-side slow tails, where SDK-internal retries
@@ -37,6 +46,9 @@ rather than that the work finishes.
 
 `tests/test_to_thread_timeout_consistency.py` enforces this statically: every
 `asyncio.to_thread` must be enclosed by `run_with_hard_timeout` or be allowlisted with
-a justification, and `wait_for(to_thread(...))` is flagged as a regression.
+a justification, and `wait_for(to_thread(...))` is flagged as a regression. It
+resolves asyncio aliases (`import asyncio as aio`, `from asyncio import ...`, injected
+`asyncio_module=asyncio` parameters) — the injected spelling is how `src/data/gap_fill.py` hid a
+`wait_for(to_thread(...))` from the literal-prefix version of the guard.
 
 Full history: `docs/CODEBASE_MEMORY.md`.

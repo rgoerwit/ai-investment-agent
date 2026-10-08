@@ -26,6 +26,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adapter now honors the run-scoped `--quick` retry clamp, so quick PM, Senior
   Fundamentals and Analyst Retry calls drop from 3 to 2 SDK attempts when
   `API_RETRY_ATTEMPTS` is 3; explicit per-seat retry policies are unchanged.
+- Bound the caller's wait in the gap-fill company-name lookup (previously
+  `wait_for(to_thread)`, which waits on an uncancellable thread) and the sync Tavily
+  search (whose `with ThreadPoolExecutor` exit joined the stalled worker). Each now
+  runs on a daemon thread capped by an `InFlightLimit`, so stalls cannot pile up
+  threads or hold interpreter exit, and saturation returns the usual fallback at once.
+  The Tavily worker shares the caller's absolute deadline: a late search result is
+  discarded before inspection, and inspection gets only the remaining time. Neither
+  client exposes a transport timeout, so a stalled request still runs until it ends or
+  the process exits. The `to_thread` guard now resolves asyncio aliases.
 - Keep EPS rubric lineage on eligible per-share bases, honor verified majority
   ownership ahead of unrelated independence text, preserve Junior originals from
   inspected ingress, and bind one-cell-per-line comparative results tables.

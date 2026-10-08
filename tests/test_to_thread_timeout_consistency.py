@@ -16,6 +16,10 @@ The test fails when:
   * A site is moved off the canonical ``run_with_hard_timeout`` without an
     explicit allowlist entry justifying why.
 
+Both checks resolve every name a module uses for asyncio — ``import asyncio as
+aio``, ``from asyncio import to_thread``, and injected parameters such as
+``asyncio_module: Any = asyncio`` — not just the literal ``asyncio.`` prefix.
+
 When you legitimately need an exception (e.g. the call is protected by an
 *outer* wrapper one or more frames away), add an entry to
 ``OUTER_WRAPPED_ALLOWLIST`` with a short justification.
@@ -24,7 +28,10 @@ When you legitimately need an exception (e.g. the call is protected by an
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass
 from pathlib import Path
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # Allowlist
@@ -51,6 +58,12 @@ OUTER_WRAPPED_ALLOWLIST: dict[str, str] = {
     ),
     "src/data/source_fetchers.py:66": (
         "wrapped by run_with_hard_timeout in fetch_all_sources_parallel"
+    ),
+    # The yahooquery builder lambda (asyncio reached via the injectable
+    # ``asyncio_module`` parameter) is awaited inside run_with_hard_timeout in
+    # fetch_all_sources_parallel's _run_one.
+    "src/data/source_fetchers.py:288": (
+        "builder lambda awaited under run_with_hard_timeout in _run_one"
     ),
     # IBKR services: the ib_async client has its own per-request timeouts and
     # an outer connection-level timeout; sync wrappers are short and CPU-bound
@@ -99,15 +112,86 @@ OUTER_WRAPPED_ALLOWLIST: dict[str, str] = {
 }
 
 
-def _is_to_thread_call(node: ast.AST) -> bool:
-    """Return True if *node* is the ``asyncio.to_thread(...)`` call expression."""
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "to_thread"
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "asyncio"
-    )
+@dataclass(frozen=True)
+class _AsyncioNames:
+    """Every spelling under which one module reaches ``asyncio`` primitives.
+
+    Matching only the literal ``asyncio.to_thread`` misses the injectable
+    ``asyncio_module: Any = asyncio`` parameter pattern used in src/data/ — which
+    is exactly how ``gap_fill.py`` hid a ``wait_for(to_thread(...))`` from this
+    guard. Resolution is module-wide rather than scope-precise: a name bound to
+    asyncio anywhere in the module counts everywhere in it. That over-approximates
+    only for a module that reuses one name for two different objects.
+    """
+
+    module_aliases: frozenset[str]
+    to_thread_names: frozenset[str]
+    wait_for_names: frozenset[str]
+
+    def _is_primitive(self, node: ast.AST, attr: str, bare: frozenset[str]) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        if isinstance(func, ast.Name):
+            return func.id in bare
+        return (
+            isinstance(func, ast.Attribute)
+            and func.attr == attr
+            and isinstance(func.value, ast.Name)
+            and func.value.id in self.module_aliases
+        )
+
+    def is_to_thread(self, node: ast.AST) -> bool:
+        return self._is_primitive(node, "to_thread", self.to_thread_names)
+
+    def is_wait_for(self, node: ast.AST) -> bool:
+        return self._is_primitive(node, "wait_for", self.wait_for_names)
+
+
+def _resolve_asyncio_names(tree: ast.AST) -> _AsyncioNames:
+    modules = {"asyncio"}
+    to_thread: set[str] = set()
+    wait_for: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "asyncio":
+                    modules.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "asyncio":
+            for alias in node.names:
+                if alias.name == "to_thread":
+                    to_thread.add(alias.asname or alias.name)
+                elif alias.name == "wait_for":
+                    wait_for.add(alias.asname or alias.name)
+
+    def _is_module_ref(value: ast.AST | None) -> bool:
+        return isinstance(value, ast.Name) and value.id in modules
+
+    # Second pass: names re-bound to the module (``aio = asyncio``) and
+    # parameters defaulting to it (``asyncio_module: Any = asyncio``).
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _is_module_ref(node.value):
+            modules.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and _is_module_ref(node.value)
+        ):
+            modules.add(node.target.id)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            args = node.args
+            positional = [*args.posonlyargs, *args.args]
+            for arg, default in zip(
+                positional[len(positional) - len(args.defaults) :],
+                args.defaults,
+                strict=True,
+            ):
+                if _is_module_ref(default):
+                    modules.add(arg.arg)
+            for arg, kw_default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
+                if _is_module_ref(kw_default):
+                    modules.add(arg.arg)
+    return _AsyncioNames(frozenset(modules), frozenset(to_thread), frozenset(wait_for))
 
 
 def _is_run_with_hard_timeout_call(node: ast.AST) -> bool:
@@ -122,24 +206,15 @@ def _is_run_with_hard_timeout_call(node: ast.AST) -> bool:
     return False
 
 
-def _is_wait_for_call(node: ast.AST) -> bool:
-    """Return True if *node* is an ``asyncio.wait_for(...)`` call."""
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "wait_for"
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "asyncio"
-    )
-
-
 def _attach_parents(tree: ast.AST) -> None:
     for parent in ast.walk(tree):
         for child in ast.iter_child_nodes(parent):
             child.parent = parent  # type: ignore[attr-defined]
 
 
-def _enclosing_timeout_call(to_thread_node: ast.Call) -> str | None:
+def _enclosing_timeout_call(
+    to_thread_node: ast.Call, names: _AsyncioNames
+) -> str | None:
     """Walk up the parent chain. Return the timeout-call name, or None.
 
     A ``to_thread`` call is considered properly enclosed when the *first*
@@ -156,7 +231,7 @@ def _enclosing_timeout_call(to_thread_node: ast.Call) -> str | None:
             if parent.args and parent.args[0] is node:
                 if _is_run_with_hard_timeout_call(parent):
                     return "run_with_hard_timeout"
-                if _is_wait_for_call(parent):
+                if names.is_wait_for(parent):
                     return "asyncio.wait_for"
             # Other surrounding calls (gather, ensure_future, etc.) do not
             # provide a wall-clock bound. Stop walking — wrapping happens at
@@ -183,6 +258,40 @@ def _enclosing_timeout_call(to_thread_node: ast.Call) -> str | None:
         return None
 
 
+def _scan_to_thread_sites(source: str) -> list[tuple[int, str | None]]:
+    """Return ``(lineno, enclosing timeout primitive or None)`` per to_thread call."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    names = _resolve_asyncio_names(tree)
+    _attach_parents(tree)
+    return [
+        (node.lineno, _enclosing_timeout_call(node, names))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and names.is_to_thread(node)
+    ]
+
+
+def _unbounded_to_thread_lines(source: str) -> list[int]:
+    return [line for line, wrapper in _scan_to_thread_sites(source) if wrapper is None]
+
+
+def _wait_for_to_thread_lines(source: str) -> list[int]:
+    return [
+        line
+        for line, wrapper in _scan_to_thread_sites(source)
+        if wrapper == "asyncio.wait_for"
+    ]
+
+
+def _src_files() -> list[tuple[str, str]]:
+    return [
+        (py_file.as_posix(), py_file.read_text())
+        for py_file in sorted(Path("src").rglob("*.py"))
+    ]
+
+
 def test_every_to_thread_has_a_hard_timeout():
     """Every asyncio.to_thread call must be enclosed by a timeout primitive.
 
@@ -192,23 +301,11 @@ def test_every_to_thread_has_a_hard_timeout():
     Prefer ``run_with_hard_timeout`` for any to_thread wrapping a sync HTTP
     or network call.
     """
-    src_root = Path("src")
     violations: list[str] = []
 
-    for py_file in sorted(src_root.rglob("*.py")):
-        rel = py_file.as_posix()
-        source = py_file.read_text()
-        try:
-            tree = ast.parse(source)
-        except SyntaxError:
-            continue
-        _attach_parents(tree)
-        for node in ast.walk(tree):
-            if not _is_to_thread_call(node):
-                continue
-            location = f"{rel}:{node.lineno}"
-            if _enclosing_timeout_call(node) is not None:
-                continue
+    for rel, source in _src_files():
+        for lineno in _unbounded_to_thread_lines(source):
+            location = f"{rel}:{lineno}"
             if location in OUTER_WRAPPED_ALLOWLIST:
                 continue
             violations.append(location)
@@ -237,17 +334,8 @@ def test_allowlist_entries_still_point_at_to_thread_calls():
         if not path.exists():
             stale.append(f"{location} (file does not exist)")
             continue
-        source = path.read_text()
-        try:
-            tree = ast.parse(source)
-        except SyntaxError:
-            continue
-        found = False
-        for node in ast.walk(tree):
-            if _is_to_thread_call(node) and node.lineno == lineno:
-                found = True
-                break
-        if not found:
+        lines = {line for line, _wrapper in _scan_to_thread_sites(path.read_text())}
+        if lineno not in lines:
             stale.append(f"{location} (no asyncio.to_thread call at this line)")
 
     assert not stale, (
@@ -268,28 +356,107 @@ def test_to_thread_blocking_io_prefers_hard_timeout():
 
     This is the test that prevents the regression that caused the 0883.HK
     overnight hang to recur. Any ``asyncio.wait_for(asyncio.to_thread(...))``
-    should be re-written as ``run_with_hard_timeout(asyncio.to_thread(...))``.
+    should be re-written as ``run_with_hard_timeout(asyncio.to_thread(...))``
+    — whatever name asyncio is reached through.
     """
-    src_root = Path("src")
-    violations: list[str] = []
-
-    for py_file in sorted(src_root.rglob("*.py")):
-        rel = py_file.as_posix()
-        source = py_file.read_text()
-        try:
-            tree = ast.parse(source)
-        except SyntaxError:
-            continue
-        _attach_parents(tree)
-        for node in ast.walk(tree):
-            if not _is_to_thread_call(node):
-                continue
-            wrapper = _enclosing_timeout_call(node)
-            if wrapper == "asyncio.wait_for":
-                violations.append(f"{rel}:{node.lineno}")
+    violations = [
+        f"{rel}:{lineno}"
+        for rel, source in _src_files()
+        for lineno in _wait_for_to_thread_lines(source)
+    ]
 
     assert not violations, (
         "asyncio.wait_for(asyncio.to_thread(...)) detected — this does NOT "
         "reliably bound blocking I/O (see src/async_utils.py docstring). "
         "Replace with run_with_hard_timeout. Sites:\n  - " + "\n  - ".join(violations)
     )
+
+
+# ---------------------------------------------------------------------------
+# The scanner itself, proven against planted regressions
+# ---------------------------------------------------------------------------
+
+# The exact shape gap_fill.py carried until the fix: asyncio injected as a
+# parameter default, so neither primitive was spelled ``asyncio.<name>``.
+_INJECTED_ALIAS_FIXTURE = """
+import asyncio
+from typing import Any
+
+async def lookup(ticker_obj, *, asyncio_module: Any = asyncio):
+    info = await asyncio_module.wait_for(
+        asyncio_module.to_thread(lambda: ticker_obj.info),
+        timeout=5,
+    )
+    return info
+"""
+
+
+@pytest.mark.parametrize(
+    ("label", "source", "expected_line"),
+    [
+        ("injected parameter default", _INJECTED_ALIAS_FIXTURE, 7),
+        (
+            "import asyncio as aio",
+            "import asyncio as aio\n"
+            "async def f(g):\n"
+            "    return await aio.wait_for(aio.to_thread(g), timeout=1)\n",
+            3,
+        ),
+        (
+            "from asyncio import names",
+            "from asyncio import to_thread, wait_for\n"
+            "async def f(g):\n"
+            "    return await wait_for(to_thread(g), timeout=1)\n",
+            3,
+        ),
+        (
+            "keyword-only default",
+            "import asyncio\n"
+            "async def f(g, *, aio=asyncio):\n"
+            "    return await aio.wait_for(aio.to_thread(g), timeout=1)\n",
+            3,
+        ),
+        (
+            "module-level rebinding",
+            "import asyncio\n"
+            "aio = asyncio\n"
+            "async def f(g):\n"
+            "    return await aio.wait_for(aio.to_thread(g), timeout=1)\n",
+            4,
+        ),
+    ],
+)
+def test_scanner_flags_aliased_wait_for_to_thread(
+    label: str, source: str, expected_line: int
+) -> None:
+    assert _wait_for_to_thread_lines(source) == [expected_line], label
+
+
+def test_scanner_accepts_aliased_hard_timeout_and_flags_bare_alias() -> None:
+    bounded = (
+        "import asyncio\n"
+        "from src.async_utils import run_with_hard_timeout\n"
+        "async def f(g, asyncio_module=asyncio):\n"
+        "    return await run_with_hard_timeout(\n"
+        "        asyncio_module.to_thread(g), timeout=1, label='x'\n"
+        "    )\n"
+    )
+    unbounded = (
+        "import asyncio\n"
+        "async def f(g, asyncio_module=asyncio):\n"
+        "    return await asyncio_module.to_thread(g)\n"
+    )
+    assert _wait_for_to_thread_lines(bounded) == []
+    assert _unbounded_to_thread_lines(bounded) == []
+    assert _unbounded_to_thread_lines(unbounded) == [3]
+
+
+def test_scanner_ignores_unrelated_to_thread_receivers() -> None:
+    """Only names resolved to asyncio count — no false positive on other objects."""
+    source = (
+        "import anyio\n"
+        "async def f(g, pool):\n"
+        "    await pool.wait_for(pool.to_thread(g))\n"
+        "    await anyio.to_thread.run_sync(g)\n"
+    )
+    assert _scan_to_thread_sites(source) == []

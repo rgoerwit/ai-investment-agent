@@ -5,12 +5,18 @@ This module exists to avoid circular imports between toolkit.py and enhanced_sen
 """
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
+import time
 from typing import Any, Literal
 
 import structlog
 
+from src.blocking_io import (
+    BlockingCallPolicy,
+    BlockingCallSaturatedError,
+    BlockingCallTimeoutError,
+    InFlightLimit,
+    run_blocking_call_sync,
+)
 from src.config import config
 from src.error_safety import summarize_exception
 from src.runtime_services import get_current_inspection_service
@@ -22,6 +28,15 @@ logger = structlog.get_logger(__name__)
 # Web searches can hang indefinitely; this prevents blocking the entire agent
 TAVILY_TIMEOUT_SECONDS = 30
 TavilyProfile = Literal["news_basic", "finance_deep"]
+
+# Sync entrypoint only (search_tavily_sync_inspected). Its callers — the
+# article writer's fact-check lookup and the portfolio manager's macro-news
+# lookup — run one search at a time, so two slots leave headroom while capping
+# how many stalled workers can be parked at once.
+_TAVILY_SYNC_IN_FLIGHT = InFlightLimit(2)
+_TAVILY_SYNC_POLICY = BlockingCallPolicy(
+    "tavily.sync_search", TAVILY_TIMEOUT_SECONDS, in_flight=_TAVILY_SYNC_IN_FLIGHT
+)
 
 # Will be set by toolkit.py after tavily_tool is initialized
 _tavily_tool = None
@@ -234,23 +249,36 @@ def search_tavily_sync_inspected(
     timeout: float = TAVILY_TIMEOUT_SECONDS,
     include_answer: bool = False,
 ) -> Any:
-    """Synchronous Tavily entrypoint for non-async call sites."""
+    """Synchronous Tavily entrypoint for non-async call sites.
+
+    *timeout* bounds the caller's whole wait — search and inspection together —
+    because both run in one worker. The worker is a daemon thread drawn from
+    ``_TAVILY_SYNC_POLICY``'s in-flight limit: a stalled search is orphaned
+    (``langchain_tavily``'s sync client has no transport timeout to end it),
+    but repeated stalls cannot accumulate past the limit, and once saturated
+    further calls return ``None`` immediately rather than waiting out *timeout*.
+
+    The worker checks the same absolute deadline: a search that completes
+    after it is discarded before inspection, and inspection gets only the
+    remaining allowance (an inspection timeout returns ``None``, never the
+    uninspected payload).
+
+    Search failures and timeouts return ``None``; an inspection failure
+    propagates, as before.
+    """
     tool = _build_tavily_tool(profile, include_answer=include_answer)
     if tool is None:
         return None
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(tool.invoke, {"query": query})
+    # The worker shares the caller's absolute deadline. Without it, a search
+    # that finishes after the caller gave up would still start inspection —
+    # possibly a paid LLM call — for a result nobody will read, and hold its
+    # slot for as long as that takes.
+    deadline = time.monotonic() + timeout
+
+    def _search_then_inspect() -> Any:
         try:
-            raw = future.result(timeout=timeout)
-        except FuturesTimeoutError:
-            logger.warning(
-                "tavily_search_timeout",
-                query=query[:100],
-                timeout_seconds=timeout,
-                profile=profile,
-            )
-            return None
+            raw = tool.invoke({"query": query})
         except Exception as exc:
             logger.warning(
                 "tavily_search_error",
@@ -259,6 +287,50 @@ def search_tavily_sync_inspected(
                 profile=profile,
             )
             return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning(
+                "tavily_search_late_result_discarded",
+                query=query[:100],
+                timeout_seconds=timeout,
+                profile=profile,
+            )
+            return None
+        # Own event loop: this runs on a worker thread, so it is safe even
+        # when the sync caller sits inside a running loop. wait_for is safe
+        # here: inspection is pure async code that honours cancellation.
+        try:
+            return asyncio.run(
+                asyncio.wait_for(_inspect_tavily_result(raw, query), remaining)
+            )
+        except TimeoutError:
+            # Fail closed: an uninspected payload is never returned.
+            logger.warning(
+                "tavily_inspection_timeout",
+                query=query[:100],
+                timeout_seconds=timeout,
+                profile=profile,
+            )
+            return None
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        return executor.submit(asyncio.run, _inspect_tavily_result(raw, query)).result()
+    policy = _TAVILY_SYNC_POLICY.with_timeout(timeout).with_label(
+        f"{_TAVILY_SYNC_POLICY.label}:{profile}:{query[:60]}"
+    )
+    try:
+        return run_blocking_call_sync(policy, _search_then_inspect)
+    except BlockingCallSaturatedError:
+        logger.warning(
+            "tavily_search_saturated",
+            query=query[:100],
+            max_in_flight=_TAVILY_SYNC_IN_FLIGHT.max_in_flight,
+            profile=profile,
+        )
+        return None
+    except BlockingCallTimeoutError:
+        logger.warning(
+            "tavily_search_timeout",
+            query=query[:100],
+            timeout_seconds=timeout,
+            profile=profile,
+        )
+        return None
