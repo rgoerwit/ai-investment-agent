@@ -458,9 +458,9 @@ async def test_real_tool_deadline_cancels_worker_and_retains_neighbor(
     chosen = tools()
     chosen[1].ainvoke.side_effect = stalled
     timeout_owner = (
-        "src.graph.tool_nodes._TOOL_CALL_TIMEOUT_SECONDS"
+        "src.graph.tool_nodes.settings_config.tool_execution_with_inspection_timeout_seconds"
         if owner == "node"
-        else "src.tooling.runtime.TOOL_CALL_TIMEOUT_SECONDS"
+        else "src.tooling.runtime.settings_config.tool_execution_timeout_seconds"
     )
     monkeypatch.setattr(timeout_owner, 0.02)
     _, result = await asyncio.wait_for(relay(chosen), timeout=2)

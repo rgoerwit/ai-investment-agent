@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-10-07
+Last updated: 2026-10-08
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
@@ -458,6 +458,27 @@ The current trust-boundary model is:
 - inspect cached or replayed untrusted context before it re-enters prompts
 - inspect financial-API free-text fields before they become prompt-visible
 - keep blocked content out of primary prompt paths rather than storing sentinel text as valid analysis
+
+**Two tool deadlines, on purpose (October 2026).** `ToolExecutionService.execute`
+in `src/tooling/runtime.py` bounds only the tool runner
+(`TOOL_EXECUTION_TIMEOUT_SECONDS`, 45 s). The `after()` hooks — content
+inspection, including an LLM injection judge — run *after* that bound is
+released, so the graph tool node in `src/graph/tool_nodes.py` wraps the whole
+call, hooks included, in a wider scope
+(`TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS`, 120 s) that fails closed as
+`TOOL_TIMEOUT`. The outer scope looks redundant and is not: it is the only bound
+on inspection. `Settings` rejects an outer scope narrower than the inner one.
+
+The outer scope uses `run_with_hard_timeout`, not `asyncio.wait_for`: `wait_for`
+waits on the cancelled call, so a hook that swallows or outlives cancellation
+held the node past its scope and, on Python 3.12, could still return its late,
+uninspected result through `wait_for`. Both scopes clamp to a caller's enclosing
+deadline (`current_enclosing_deadline`) when one is bound, but tool scopes never
+*bind* it: the judge fails open when admission refuses it, so a bound deadline
+would turn a fail-closed timeout into uninspected content. Only the graph tool
+node has the outer scope; the Consultant, Auditor, Legal Counsel, article editor
+and evidence preflight call the service directly, so their inspection hooks are
+bounded only by whatever deadline their own caller holds.
 
 ### IBKR path
 

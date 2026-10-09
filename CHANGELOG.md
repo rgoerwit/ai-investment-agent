@@ -47,6 +47,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   graph-build flag. Inside an invocation, a seat's explicit client timeout (the
   Health Check's 10 s) is now the request ceiling, and a request takes its
   ceiling from the vendor that receives it.
+- The two tool deadlines are now settings, defaults unchanged:
+  `TOOL_EXECUTION_TIMEOUT_SECONDS` (45 s, the tool runner) and
+  `TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS` (120 s, a graph tool call
+  including the content-inspection hooks that run after the runner's bound is
+  released). Configuring the second below the first is rejected at startup. Both
+  shrink to a caller's remaining enclosing deadline when one is bound, and a call
+  whose caller deadline has already passed fails as a timeout without starting
+  the tool. **Behaviour change:** the graph tool node's outer scope is now
+  deadline-only (`run_with_hard_timeout`) rather than `asyncio.wait_for`, so a
+  stalled inspection hook that ignores cancellation returns `TOOL_TIMEOUT` on time
+  and its late, uninspected result is discarded instead of being returned.
 - The APAC specialist's 240 s is now its node total
   (`APAC_NODE_TOTAL_TIMEOUT_SECONDS`), shared by the first call and the direct
   retry, rather than a fresh 240 s per call.

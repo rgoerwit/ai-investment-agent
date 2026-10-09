@@ -230,7 +230,9 @@ async def test_execute_times_out_runner_and_skips_after_hooks():
     async def slow_runner(_args):
         await asyncio.sleep(1)
 
-    with patch("src.tooling.runtime.TOOL_CALL_TIMEOUT_SECONDS", 0.01):
+    with patch(
+        "src.tooling.runtime.settings_config.tool_execution_timeout_seconds", 0.01
+    ):
         with patch("src.tooling.runtime.logger") as mock_logger:
             with pytest.raises(TimeoutError, match="get_news"):
                 await service.execute(

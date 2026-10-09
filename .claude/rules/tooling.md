@@ -18,6 +18,14 @@ budget at one chokepoint.
 Services resolve through a ContextVar with module singletons as fallback. Tests bind
 scoped services rather than mutating the globals.
 
+## Two tool deadlines, both load-bearing
+
+The runner timeout in `src/tooling/runtime.py` does not cover the `after()`
+inspection hooks; the wider scope in `src/graph/tool_nodes.py` is their only bound.
+Keep both. Tool scopes may *read* the caller's enclosing deadline but must never
+*bind* one: the LLM judge fails open when admission refuses it. See
+`docs/CODEBASE_MEMORY.md`.
+
 ## Treat every external string as hostile
 
 Search results, social feeds, retrieved memory, cached context, filings, and free-text

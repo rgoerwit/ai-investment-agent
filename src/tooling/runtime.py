@@ -14,13 +14,37 @@ from typing import Any, Literal, Protocol, TypeAlias
 import structlog
 
 from src.async_utils import run_with_hard_timeout
+from src.config import config as settings_config
 from src.error_safety import redact_sensitive_text
+from src.llm_runtime import timeouts as deadline_clock
 from src.observability import start_tool_observation
 from src.runtime_diagnostics import classify_failure
 
 logger = structlog.get_logger(__name__)
 
-TOOL_CALL_TIMEOUT_SECONDS = 45.0
+
+def clamp_to_enclosing_deadline(default_seconds: float) -> float:
+    """``min(default_seconds, remaining)`` under the caller's enclosing deadline.
+
+    The enclosing deadline is the absolute node deadline bound by
+    ``enclosing_deadline`` in ``src/llm_runtime/timeouts.py``; with none bound
+    the default stands. A result ``<= 0`` means the caller's allowance is
+    already spent, and the caller must fail as a timeout without starting work.
+
+    Tool scopes read this deadline but never bind it: binding it around a tool
+    call would also cap the LLM inspection judge inside the call, and the judge
+    fails *open* when refused, where the tool scope's own timeout fails closed.
+    """
+    deadline = deadline_clock.current_enclosing_deadline()
+    if deadline is None:
+        return float(default_seconds)
+    return min(float(default_seconds), deadline - deadline_clock.now())
+
+
+def tool_execution_timeout_seconds() -> float:
+    """The runner's allowance for this call: the setting, clamped to the caller."""
+    return clamp_to_enclosing_deadline(settings_config.tool_execution_timeout_seconds)
+
 
 ToolSource: TypeAlias = Literal[
     "toolnode", "preflight", "consultant", "editor", "legal_counsel", "auditor"
@@ -110,7 +134,13 @@ class ToolExecutionService:
                 findings=[redact_sensitive_text(str(exc))],
             )
 
+        # Read after the before() hooks, so time they spent counts against a
+        # caller deadline rather than extending it.
+        timeout_seconds = tool_execution_timeout_seconds()
         try:
+            if timeout_seconds <= 0:
+                # The caller's allowance is already spent: never start the tool.
+                raise asyncio.TimeoutError("enclosing deadline already passed")
             with start_tool_observation(
                 tool_name=call.name,
                 input_payload={
@@ -126,7 +156,7 @@ class ToolExecutionService:
                 result = ToolResult(
                     value=await run_with_hard_timeout(
                         runner(call.args),
-                        timeout=TOOL_CALL_TIMEOUT_SECONDS,
+                        timeout=timeout_seconds,
                         label=f"tool:{call.name}",
                     )
                 )
@@ -136,10 +166,10 @@ class ToolExecutionService:
                 tool=call.name,
                 source=call.source,
                 agent_key=call.agent_key,
-                timeout_seconds=TOOL_CALL_TIMEOUT_SECONDS,
+                timeout_seconds=timeout_seconds,
             )
             raise TimeoutError(
-                f"Tool call '{call.name}' exceeded {TOOL_CALL_TIMEOUT_SECONDS:.1f}s"
+                f"Tool call '{call.name}' exceeded {max(timeout_seconds, 0.0):.1f}s"
             ) from exc
         except Exception as exc:
             # after() hooks only run for successfully produced tool outputs.

@@ -1249,6 +1249,31 @@ class Settings(BaseSettings):
             "process shutdown; on timeout the process forces os._exit()."
         ),
     )
+    # Two nested tool scopes, kept separate on purpose. The execution scope
+    # bounds the tool runner inside ToolExecutionService; the graph tool node's
+    # wider scope also bounds the after() inspection hooks, which run outside
+    # the runner's timeout (an LLM judge can take longer than the tool). The
+    # wider scope must be at least the narrower one; see
+    # _validate_tool_timeout_scopes and docs/CODEBASE_MEMORY.md.
+    tool_execution_timeout_seconds: float = Field(
+        default=45.0,
+        gt=0.0,
+        validation_alias="TOOL_EXECUTION_TIMEOUT_SECONDS",
+        description=(
+            "Hard wall-clock cap (seconds) on one tool runner call, excluding "
+            "the before()/after() hooks."
+        ),
+    )
+    tool_execution_with_inspection_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0.0,
+        validation_alias="TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS",
+        description=(
+            "Hard wall-clock cap (seconds) on one graph tool call including its "
+            "hook chain and content inspection; a timeout fails closed as "
+            "TOOL_TIMEOUT."
+        ),
+    )
     llm_base_output_tokens: int = Field(
         default=32768,
         ge=1024,
@@ -1605,6 +1630,26 @@ class Settings(BaseSettings):
         # Use validation_alias for env var names
         populate_by_name=True,
     )
+
+    @model_validator(mode="after")
+    def _validate_tool_timeout_scopes(self) -> "Settings":
+        """Reject an inspection scope narrower than the execution scope it encloses.
+
+        Below it, the outer scope fires before the runner's own timeout, so
+        every slow tool is reported as an inspection timeout and inspection is
+        left no time at all.
+        """
+        if (
+            self.tool_execution_with_inspection_timeout_seconds
+            < self.tool_execution_timeout_seconds
+        ):
+            raise ValueError(
+                "TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS "
+                f"({self.tool_execution_with_inspection_timeout_seconds:g}) must be "
+                "at least TOOL_EXECUTION_TIMEOUT_SECONDS "
+                f"({self.tool_execution_timeout_seconds:g})"
+            )
+        return self
 
     @model_validator(mode="after")
     def setup_environment(self) -> "Settings":

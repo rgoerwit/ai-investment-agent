@@ -134,6 +134,18 @@ _SETTINGS_ENV_CASES = [
         "200",
         200.0,
     ),
+    (
+        "tool_execution_timeout_seconds",
+        "TOOL_EXECUTION_TIMEOUT_SECONDS",
+        "30",
+        30.0,
+    ),
+    (
+        "tool_execution_with_inspection_timeout_seconds",
+        "TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS",
+        "150",
+        150.0,
+    ),
     ("gemini_rpm_limit", "GEMINI_RPM_LIMIT", "123", 123),
     ("enable_consultant", "ENABLE_CONSULTANT", "false", False),
     ("max_debate_rounds", "MAX_DEBATE_ROUNDS", "1", 1),
