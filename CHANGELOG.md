@@ -71,6 +71,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shrinks to a caller's remaining enclosing deadline when one is bound; a call
   whose caller deadline has already passed takes its existing timeout fallback
   without starting.
+- The research deadlines are now settings, one per scope, defaults unchanged: a
+  Tavily web search (`TAVILY_SEARCH_TIMEOUT_SECONDS`, 30 s), a Tavily extract
+  (`TAVILY_EXTRACT_TIMEOUT_SECONDS`, 30 s), the gap-fill search inside a metrics
+  fetch (`GAP_FILL_SEARCH_TIMEOUT_SECONDS`, 5 s), the wait for a DuckDuckGo search
+  (`DDG_SEARCH_TIMEOUT_SECONDS`, 8 s) and its client's HTTP timeout
+  (`DDG_HTTP_TIMEOUT_SECONDS`, 5 s), the official-filings lookup
+  (`OFFICIAL_FILINGS_LOOKUP_TIMEOUT_SECONDS`, 20 s), one filing fetcher
+  (`FILING_FETCH_TIMEOUT_SECONDS`, 30 s), an official-document download
+  (`OFFICIAL_DOCUMENT_DOWNLOAD_TIMEOUT_SECONDS`, 35 s), its DNS check
+  (`OFFICIAL_DOCUMENT_DNS_TIMEOUT_SECONDS`, 5 s) and PDF extraction
+  (`OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS`, 20 s), and the editor's reference
+  fetch (`REFERENCE_FETCH_TIMEOUT_SECONDS`, 10 s). Each is read at the call and
+  shrinks to a caller's remaining enclosing deadline when one is bound, including
+  an explicit per-call Tavily timeout and the sync Tavily worker's shared
+  deadline; a call whose caller deadline has already passed takes its existing
+  timeout fallback without starting.
 - The APAC specialist's 240 s is now its node total
   (`APAC_NODE_TOTAL_TIMEOUT_SECONDS`), shared by the first call and the direct
   retry, rather than a fresh 240 s per call.

@@ -7,7 +7,9 @@ from urllib.parse import urlparse
 import structlog
 from langchain_core.tools import tool
 
+from src.config import config
 from src.error_safety import summarize_exception
+from src.llm_runtime.timeouts import require_allowance
 from src.runtime_services import get_current_inspection_service
 from src.ticker_utils import normalize_ticker
 from src.tooling.inspector import InspectionEnvelope, SourceKind
@@ -15,7 +17,6 @@ from src.tools import shared
 
 logger = structlog.get_logger(__name__)
 
-OFFICIAL_FILINGS_TIMEOUT_SECONDS = 20.0
 GUIDANCE_EXTRACTION_MAX_URLS = 3
 ResearchPurpose = Literal[
     "latest_results",
@@ -234,16 +235,19 @@ async def get_official_filings(
     normalized = normalize_ticker(ticker)
     logger.info("official_filings_lookup", ticker=normalized)
 
+    # The whole lookup's bound, read now; the registry's per-fetcher bound
+    # (FILING_FETCH_TIMEOUT_SECONDS) sits inside it.
+    timeout = config.official_filings_lookup_timeout_seconds
     try:
-        result = await asyncio.wait_for(
-            registry.fetch(normalized),
-            timeout=OFFICIAL_FILINGS_TIMEOUT_SECONDS,
-        )
+        # Shrunk to a caller's deadline before registry.fetch() creates its
+        # coroutine; a spent allowance reports LOOKUP_TIMEOUT without starting.
+        timeout = require_allowance(timeout, label="official_filings")
+        result = await asyncio.wait_for(registry.fetch(normalized), timeout=timeout)
     except asyncio.TimeoutError:
         logger.warning(
             "official_filings_timeout",
             ticker=normalized,
-            timeout_seconds=OFFICIAL_FILINGS_TIMEOUT_SECONDS,
+            timeout_seconds=timeout,
         )
         return (
             "STATUS: INSUFFICIENT_DATA\n"

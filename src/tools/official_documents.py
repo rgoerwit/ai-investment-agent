@@ -23,6 +23,7 @@ from src.config import config
 from src.error_safety import summarize_exception
 from src.exchange_metadata import registered_official_document_hosts
 from src.forensic_budget import AuditorBudgetPolicy
+from src.llm_runtime.timeouts import require_allowance
 from src.runtime_services import (
     get_current_inspection_service,
     get_current_issuer_hosts,
@@ -43,9 +44,13 @@ _OFFICIAL_HOST_SUFFIXES = (
     "sec.gov",
     *registered_official_document_hosts(),
 )
+# Each policy's number is only the shipped default of its setting (pinned by a
+# parity test): each call applies OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS or
+# OFFICIAL_DOCUMENT_DNS_TIMEOUT_SECONDS with with_timeout(), read at the call
+# and shrunk to a caller's enclosing deadline. The download timeout is
+# OFFICIAL_DOCUMENT_DOWNLOAD_TIMEOUT_SECONDS.
 _PDF_POLICY = BlockingCallPolicy("official_document_pdf_extract", 20.0)
 _DNS_POLICY = BlockingCallPolicy("official_document_dns_check", 5.0)
-_DOCUMENT_TIMEOUT_SECONDS = 35.0
 _MIN_USEFUL_TEXT_CHARS = 200
 _DEFAULT_KEYWORDS = (
     "statement of financial position",
@@ -207,7 +212,15 @@ async def _ensure_public_hostname(url: str) -> None:
         return addresses
 
     try:
-        addresses = await run_blocking_call(_DNS_POLICY, _resolve)
+        # A spent caller deadline raises TimeoutError here, before any lookup,
+        # and fails the document exactly as a DNS timeout does.
+        policy = _DNS_POLICY.with_timeout(
+            require_allowance(
+                config.official_document_dns_timeout_seconds,
+                label=_DNS_POLICY.label,
+            )
+        )
+        addresses = await run_blocking_call(policy, _resolve)
     except Exception as exc:
         raise DocumentExtractionError("DOCUMENT_DNS_FAILED") from exc
     if not addresses:
@@ -268,6 +281,15 @@ async def _extract_with_pdftotext(
     executable = shutil.which("pdftotext")
     if executable is None:
         raise DocumentExtractionError("PDF_PARSER_UNAVAILABLE")
+    # Read now (pypdf may have used part of a caller's deadline) and resolved
+    # before the subprocess exists, so a spent allowance spawns nothing.
+    try:
+        timeout = require_allowance(
+            config.official_document_extract_timeout_seconds,
+            label="official_document_pdftotext",
+        )
+    except TimeoutError as exc:
+        raise DocumentExtractionError("EXTRACTION_TIMEOUT") from exc
     process = await asyncio.create_subprocess_exec(
         executable,
         "-f",
@@ -282,7 +304,7 @@ async def _extract_with_pdftotext(
     )
     try:
         stdout, _ = await asyncio.wait_for(
-            process.communicate(payload), timeout=_PDF_POLICY.hard_timeout_seconds
+            process.communicate(payload), timeout=timeout
         )
     except TimeoutError as exc:
         process.kill()
@@ -307,8 +329,16 @@ async def extract_pdf_text(
     search_terms = terms or _DEFAULT_KEYWORDS
     primary_reason = "PDF_PARSER_UNAVAILABLE"
     try:
+        # A spent caller deadline raises TimeoutError before the thread starts
+        # and takes the EXTRACTION_TIMEOUT path below, as a pypdf stall does.
+        pdf_policy = _PDF_POLICY.with_timeout(
+            require_allowance(
+                config.official_document_extract_timeout_seconds,
+                label=_PDF_POLICY.label,
+            )
+        )
         extracted = await run_blocking_call(
-            _PDF_POLICY,
+            pdf_policy,
             lambda: _extract_with_pypdf(
                 payload,
                 max_pages=policy.max_document_pages,
@@ -349,7 +379,16 @@ async def _download_official(
     url: str, max_bytes: int, extra_hosts: tuple[str, ...] = ()
 ) -> tuple[bytes, str, str]:
     current = url
-    async with httpx.AsyncClient(timeout=_DOCUMENT_TIMEOUT_SECONDS) as client:
+    # httpx applies this to each phase (connect, read, write, pool), not to the
+    # whole download. Read now and shrunk to a caller's enclosing deadline; a
+    # spent allowance raises TimeoutError before the client opens, which
+    # get_official_document reports as DOCUMENT_RETRIEVAL_FAILED, as it does an
+    # httpx timeout.
+    timeout = require_allowance(
+        config.official_document_download_timeout_seconds,
+        label="official_document_download",
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
         for _ in range(4):
             if not _official_url(current, extra_hosts):
                 raise DocumentExtractionError("UNAPPROVED_DOCUMENT_HOST")

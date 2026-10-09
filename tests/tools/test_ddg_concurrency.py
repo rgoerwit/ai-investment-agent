@@ -245,7 +245,7 @@ async def test_hung_search_does_not_disable_subsequent_searches():
     with (
         patch.object(shared, "DDGS_AVAILABLE", True),
         patch("ddgs.DDGS", _FirstHangsRestWork),
-        patch.object(shared, "DDG_SEARCH_TIMEOUT_SECONDS", 0.3),
+        patch.object(shared.config, "ddg_search_timeout_seconds", 0.3),
     ):
         # Launch the hung search; wait until its worker is actually blocked.
         hung = asyncio.ensure_future(shared._ddg_search("hung"))

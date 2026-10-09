@@ -12,10 +12,9 @@ import structlog
 
 from src.config import config
 from src.error_safety import summarize_exception
+from src.llm_runtime.timeouts import require_allowance
 
 logger = structlog.get_logger(__name__)
-
-DDG_SEARCH_TIMEOUT_SECONDS = 8.0
 
 # DDG concurrency safety
 # ----------------------
@@ -34,7 +33,7 @@ DDG_SEARCH_TIMEOUT_SECONDS = 8.0
 # threads can be inside DDG's lazy HTTP-client init at once. (2) The dedicated
 # executor uses a small worker pool (not a single worker): a DDG call that
 # hangs on an uncancellable socket read orphans just one worker thread
-# (``run_with_hard_timeout`` bounds the caller at DDG_SEARCH_TIMEOUT_SECONDS
+# (``run_with_hard_timeout`` bounds the caller at ``ddg_search_timeout_seconds``
 # but cannot reclaim the OS thread), leaving the other workers free. A single
 # worker would be permanently saturated by the first hang, silently disabling
 # DDG fallback for the rest of the process. Network I/O (``.text()``) runs
@@ -514,12 +513,24 @@ async def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
     if not DDGS_AVAILABLE:
         return []
 
+    # Two scopes, both read now: the caller's wait for the whole search, and
+    # the ddgs client's own per-request HTTP timeout inside the worker.
+    timeout = config.ddg_search_timeout_seconds
     try:
         from ddgs import DDGS
 
+        # Both shrink to a caller's enclosing deadline before the worker is
+        # scheduled, so a spent deadline submits nothing to the pool. ddgs
+        # takes whole seconds, so a clamped HTTP bound rounds up; the caller's
+        # wait above is the bound that holds.
+        timeout = require_allowance(timeout, label="ddg.search")
+        http_timeout = math.ceil(
+            require_allowance(config.ddg_http_timeout_seconds, label="ddg.http")
+        )
+
         def _sync_search():
             with _DDG_INIT_LOCK:
-                client = DDGS(timeout=5)
+                client = DDGS(timeout=http_timeout)
             # Materialize inside the worker thread (defensive: .text() returns a
             # list today, but pin it so no lazy iterator escapes the pool).
             return list(client.text(query, max_results=max_results))
@@ -527,7 +538,7 @@ async def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
         loop = asyncio.get_running_loop()
         results = await run_with_hard_timeout(
             loop.run_in_executor(_get_ddg_executor(), _sync_search),
-            timeout=DDG_SEARCH_TIMEOUT_SECONDS,
+            timeout=timeout,
             label=f"ddg:{query[:60]}",
         )
         return results if results else []
@@ -535,7 +546,7 @@ async def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
         logger.debug(
             "ddg_search_timeout",
             query=query[:100],
-            timeout_seconds=DDG_SEARCH_TIMEOUT_SECONDS,
+            timeout_seconds=timeout,
         )
         return []
     except Exception as exc:

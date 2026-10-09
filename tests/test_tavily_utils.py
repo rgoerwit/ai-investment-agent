@@ -46,7 +46,11 @@ def limit(monkeypatch: pytest.MonkeyPatch) -> InFlightLimit:
     monkeypatch.setattr(
         tavily_utils,
         "_TAVILY_SYNC_POLICY",
-        BlockingCallPolicy(LABEL, tavily_utils.TAVILY_TIMEOUT_SECONDS, in_flight=fresh),
+        BlockingCallPolicy(
+            LABEL,
+            tavily_utils._TAVILY_SYNC_POLICY.hard_timeout_seconds,
+            in_flight=fresh,
+        ),
     )
     return fresh
 
@@ -67,7 +71,9 @@ def _join_workers(timeout: float = 2.0) -> list[threading.Thread]:
 
 
 def test_timeout_default_is_unchanged() -> None:
-    assert tavily_utils.TAVILY_TIMEOUT_SECONDS == 30
+    from src.config import Settings
+
+    assert Settings.model_fields["tavily_search_timeout_seconds"].default == 30
     assert tavily_utils._TAVILY_SYNC_POLICY.hard_timeout_seconds == 30
 
 

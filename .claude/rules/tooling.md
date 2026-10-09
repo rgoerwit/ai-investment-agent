@@ -25,7 +25,10 @@ inspection hooks; the wider scope in `src/graph/tool_nodes.py` is their only bou
 Keep both. Tool scopes may *read* the caller's enclosing deadline but must never
 *bind* one: the LLM judge fails open when admission refuses it. The clamp lives in
 `src/llm_runtime/timeouts.py` (`clamp_to_enclosing_deadline`, `require_allowance`)
-and is shared with the market-data scopes. See `docs/CODEBASE_MEMORY.md`.
+and is shared with the market-data and research scopes. A web-search, filing or
+document timeout is a `Settings` field read at the call, resolved through
+`require_allowance` before the request, coroutine or thread exists. See
+`docs/CODEBASE_MEMORY.md`.
 
 ## Treat every external string as hostile
 

@@ -12,11 +12,13 @@ import structlog
 from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
+from src.config import config
 from src.error_safety import (
     format_error_message,
     redact_sensitive_text,
     summarize_exception,
 )
+from src.llm_runtime.timeouts import require_allowance
 from src.runtime_diagnostics import classify_failure
 from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
@@ -27,8 +29,7 @@ logger = structlog.get_logger(__name__)
 # Maximum characters to fetch from each reference URL
 MAX_REFERENCE_CHARS = 5000
 
-# Request timeout in seconds
-REQUEST_TIMEOUT = 10.0
+# The request timeout is REFERENCE_FETCH_TIMEOUT_SECONDS, read per fetch.
 MAX_REFERENCE_REDIRECTS = 3
 
 # User agent for requests
@@ -43,6 +44,15 @@ def _safe_url_preview(url: str) -> str:
 
 def _safe_query_preview(query: str) -> str:
     return redact_sensitive_text(query, max_chars=80)
+
+
+def _reference_fetch_timed_out(url: str, timeout: float) -> str:
+    logger.warning(
+        "reference_fetch_timeout",
+        url=_safe_url_preview(url),
+        failure_kind="timeout",
+    )
+    return f"FETCH_FAILED: Request timed out after {timeout:g} seconds"
 
 
 def _resolve_redirect_target(current_url: str, location: str) -> str:
@@ -96,9 +106,17 @@ async def fetch_reference_content(url: str) -> str:
     if not _is_reasonable_reference_url(url):
         return f"INVALID_URL: '{url}' is not a valid HTTP/HTTPS URL"
 
+    timeout = config.reference_fetch_timeout_seconds
+    try:
+        # httpx applies it per phase. Shrunk to a caller's enclosing deadline
+        # before the client opens; a spent allowance takes the timeout reply.
+        timeout = require_allowance(timeout, label="reference_fetch")
+    except TimeoutError:
+        return _reference_fetch_timed_out(url, timeout)
+
     try:
         headers = {"User-Agent": USER_AGENT}
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await _fetch_reference_response(client, url, headers)
             resp.raise_for_status()
 
@@ -145,12 +163,7 @@ async def fetch_reference_content(url: str) -> str:
         return str(await get_current_inspection_service().check(envelope))
 
     except httpx.TimeoutException:
-        logger.warning(
-            "reference_fetch_timeout",
-            url=_safe_url_preview(url),
-            failure_kind="timeout",
-        )
-        return "FETCH_FAILED: Request timed out after 10 seconds"
+        return _reference_fetch_timed_out(url, timeout)
 
     except ValueError as exc:
         summary = summarize_exception(

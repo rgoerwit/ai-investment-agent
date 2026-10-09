@@ -19,24 +19,39 @@ from src.blocking_io import (
 )
 from src.config import config
 from src.error_safety import summarize_exception
+from src.llm_runtime.timeouts import require_allowance
 from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
 
 logger = structlog.get_logger(__name__)
 
-# Tavily timeout configuration (seconds)
-# Web searches can hang indefinitely; this prevents blocking the entire agent
-TAVILY_TIMEOUT_SECONDS = 30
+# Web searches can hang indefinitely, so every entrypoint is bounded. The bound
+# is a setting read at the call (TAVILY_SEARCH_TIMEOUT_SECONDS, or
+# TAVILY_EXTRACT_TIMEOUT_SECONDS for extraction) unless the caller passes its
+# own, and either way it shrinks to a caller's enclosing deadline.
 TavilyProfile = Literal["news_basic", "finance_deep"]
 
 # Sync entrypoint only (search_tavily_sync_inspected). Its callers — the
 # article writer's fact-check lookup and the portfolio manager's macro-news
 # lookup — run one search at a time, so two slots leave headroom while capping
-# how many stalled workers can be parked at once.
+# how many stalled workers can be parked at once. The 30 s here is only the
+# shipped default of tavily_search_timeout_seconds (pinned by a parity test);
+# each call applies the resolved bound with with_timeout().
 _TAVILY_SYNC_IN_FLIGHT = InFlightLimit(2)
 _TAVILY_SYNC_POLICY = BlockingCallPolicy(
-    "tavily.sync_search", TAVILY_TIMEOUT_SECONDS, in_flight=_TAVILY_SYNC_IN_FLIGHT
+    "tavily.sync_search", 30.0, in_flight=_TAVILY_SYNC_IN_FLIGHT
 )
+
+
+def _search_timeout(timeout: float | None) -> float:
+    """The caller's own bound when it passes one, else the setting, read now.
+
+    Each entrypoint then shrinks it with ``require_allowance`` *before* the
+    request is created; a spent caller deadline raises TimeoutError there,
+    which the entrypoint handles exactly like its own timeout.
+    """
+    return config.tavily_search_timeout_seconds if timeout is None else timeout
+
 
 # Will be set by toolkit.py after tavily_tool is initialized
 _tavily_tool = None
@@ -102,7 +117,7 @@ async def _inspect_tavily_result(raw: Any, query_text: str) -> Any:
 
 
 async def tavily_search_with_timeout(
-    query: dict[str, str], timeout: float = TAVILY_TIMEOUT_SECONDS
+    query: dict[str, str], timeout: float | None = None
 ) -> Any:
     """
     Execute Tavily search with timeout protection.
@@ -111,7 +126,8 @@ async def tavily_search_with_timeout(
 
     Args:
         query: Query dict for tavily_tool.ainvoke (e.g., {"query": "search terms"})
-        timeout: Maximum seconds to wait (default: TAVILY_TIMEOUT_SECONDS)
+        timeout: Maximum seconds to wait (default: TAVILY_SEARCH_TIMEOUT_SECONDS),
+            shrunk to a caller's enclosing deadline
 
     Returns:
         Tavily search results (inspected), or None if timeout/error occurs
@@ -120,7 +136,11 @@ async def tavily_search_with_timeout(
         return None
     from src.async_utils import run_with_hard_timeout
 
+    timeout = _search_timeout(timeout)
     try:
+        # Resolved before ainvoke() creates the request coroutine, so a spent
+        # caller deadline leaves nothing un-awaited.
+        timeout = require_allowance(timeout, label="tavily.search")
         raw = await run_with_hard_timeout(
             _tavily_tool.ainvoke(query),
             timeout=timeout,
@@ -150,17 +170,23 @@ async def search_tavily_inspected(
     query: str,
     *,
     profile: TavilyProfile,
-    timeout: float = TAVILY_TIMEOUT_SECONDS,
+    timeout: float | None = None,
     include_answer: bool = False,
 ) -> Any:
-    """Run a profile-scoped Tavily search behind inspection boundaries."""
+    """Run a profile-scoped Tavily search behind inspection boundaries.
+
+    *timeout* defaults to ``TAVILY_SEARCH_TIMEOUT_SECONDS`` and is shrunk to a
+    caller's enclosing deadline.
+    """
     tool = _build_tavily_tool(profile, include_answer=include_answer)
     if tool is None:
         return None
 
     from src.async_utils import run_with_hard_timeout
 
+    timeout = _search_timeout(timeout)
     try:
+        timeout = require_allowance(timeout, label=f"tavily.search:{profile}")
         raw = await run_with_hard_timeout(
             tool.ainvoke({"query": query}),
             timeout=timeout,
@@ -190,9 +216,13 @@ async def extract_tavily_inspected(
     urls: list[str],
     *,
     query: str,
-    timeout: float = TAVILY_TIMEOUT_SECONDS,
+    timeout: float | None = None,
 ) -> Any:
-    """Extract query-relevant chunks from a bounded list of discovered URLs."""
+    """Extract query-relevant chunks from a bounded list of discovered URLs.
+
+    *timeout* defaults to ``TAVILY_EXTRACT_TIMEOUT_SECONDS`` and is shrunk to a
+    caller's enclosing deadline.
+    """
     api_key = config.get_tavily_api_key()
     if not api_key or not urls:
         return None
@@ -218,7 +248,10 @@ async def extract_tavily_inspected(
     )
     from src.async_utils import run_with_hard_timeout
 
+    if timeout is None:
+        timeout = config.tavily_extract_timeout_seconds
     try:
+        timeout = require_allowance(timeout, label="tavily.extract")
         raw = await run_with_hard_timeout(
             tool.ainvoke({"urls": urls[:3]}),
             timeout=timeout,
@@ -246,13 +279,15 @@ def search_tavily_sync_inspected(
     query: str,
     *,
     profile: TavilyProfile,
-    timeout: float = TAVILY_TIMEOUT_SECONDS,
+    timeout: float | None = None,
     include_answer: bool = False,
 ) -> Any:
     """Synchronous Tavily entrypoint for non-async call sites.
 
-    *timeout* bounds the caller's whole wait — search and inspection together —
-    because both run in one worker. The worker is a daemon thread drawn from
+    *timeout* (default ``TAVILY_SEARCH_TIMEOUT_SECONDS``, shrunk to a caller's
+    enclosing deadline) bounds the caller's whole wait — search and inspection
+    together — because both run in one worker. A caller deadline already spent
+    returns ``None`` without starting a worker. The worker is a daemon thread drawn from
     ``_TAVILY_SYNC_POLICY``'s in-flight limit: a stalled search is orphaned
     (``langchain_tavily``'s sync client has no transport timeout to end it),
     but repeated stalls cannot accumulate past the limit, and once saturated
@@ -270,10 +305,22 @@ def search_tavily_sync_inspected(
     if tool is None:
         return None
 
-    # The worker shares the caller's absolute deadline. Without it, a search
-    # that finishes after the caller gave up would still start inspection —
-    # possibly a paid LLM call — for a result nobody will read, and hold its
-    # slot for as long as that takes.
+    timeout = _search_timeout(timeout)
+    try:
+        timeout = require_allowance(timeout, label=_TAVILY_SYNC_POLICY.label)
+    except TimeoutError:
+        logger.warning(
+            "tavily_search_timeout",
+            query=query[:100],
+            timeout_seconds=timeout,
+            profile=profile,
+        )
+        return None
+
+    # The worker shares the caller's absolute deadline, taken from the clamped
+    # bound. Without it, a search that finishes after the caller gave up would
+    # still start inspection — possibly a paid LLM call — for a result nobody
+    # will read, and hold its slot for as long as that takes.
     deadline = time.monotonic() + timeout
 
     def _search_then_inspect() -> Any:

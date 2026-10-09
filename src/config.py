@@ -1360,6 +1360,110 @@ class Settings(BaseSettings):
             "Hard cap (seconds) on the Consultant's yfinance spot-check lookup."
         ),
     )
+    # Research deadlines: web search, filing lookup and fetch, document download
+    # and extraction. Same rules as the market-data block above: one field per
+    # scope (30 s Tavily search vs 30 s Tavily extract vs 30 s filing fetch stay
+    # separate), read at the call, clamped to a caller's enclosing deadline.
+    tavily_search_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        validation_alias="TAVILY_SEARCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on one Tavily web search. On the async paths it "
+            "bounds the search; on the sync path it bounds search and "
+            "inspection together. On timeout the search returns no results."
+        ),
+    )
+    tavily_extract_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        validation_alias="TAVILY_EXTRACT_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on one Tavily extract request over discovered "
+            "guidance URLs."
+        ),
+    )
+    gap_fill_search_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+        validation_alias="GAP_FILL_SEARCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the Tavily search that fills missing "
+            "financial-metric fields inside a metrics fetch."
+        ),
+    )
+    ddg_search_timeout_seconds: float = Field(
+        default=8.0,
+        gt=0.0,
+        validation_alias="DDG_SEARCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the caller's wait for one DuckDuckGo fallback "
+            "search; on timeout the search contributes no results."
+        ),
+    )
+    ddg_http_timeout_seconds: int = Field(
+        default=5,
+        ge=1,
+        validation_alias="DDG_HTTP_TIMEOUT_SECONDS",
+        description=(
+            "HTTP client timeout (whole seconds) handed to the ddgs client for "
+            "each request it makes inside one DuckDuckGo search."
+        ),
+    )
+    official_filings_lookup_timeout_seconds: float = Field(
+        default=20.0,
+        gt=0.0,
+        validation_alias="OFFICIAL_FILINGS_LOOKUP_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the get_official_filings tool's whole lookup; "
+            "on timeout the tool reports LOOKUP_TIMEOUT."
+        ),
+    )
+    filing_fetch_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        validation_alias="FILING_FETCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on one filing API fetcher (EDINET and peers) "
+            "inside the filing registry; on timeout the registry returns None."
+        ),
+    )
+    official_document_download_timeout_seconds: float = Field(
+        default=35.0,
+        gt=0.0,
+        validation_alias="OFFICIAL_DOCUMENT_DOWNLOAD_TIMEOUT_SECONDS",
+        description=(
+            "httpx timeout (seconds, applied to each of connect, read, write and "
+            "pool) on an official-document download."
+        ),
+    )
+    official_document_dns_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+        validation_alias="OFFICIAL_DOCUMENT_DNS_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the public-address DNS check before each "
+            "official-document request."
+        ),
+    )
+    official_document_extract_timeout_seconds: float = Field(
+        default=20.0,
+        gt=0.0,
+        validation_alias="OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on each PDF text-extraction backend (pypdf, then "
+            "pdftotext) for one official document."
+        ),
+    )
+    reference_fetch_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias="REFERENCE_FETCH_TIMEOUT_SECONDS",
+        description=(
+            "httpx timeout (seconds, per phase) on the editor's fetch of one "
+            "article reference URL."
+        ),
+    )
     llm_base_output_tokens: int = Field(
         default=32768,
         ge=1024,

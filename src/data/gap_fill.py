@@ -119,7 +119,13 @@ async def _fetch_tavily_gaps_impl(
         else:
             query = query_builder(symbol, company_name, field_terms.get(field, field))
         try:
-            result = await search_fn(query, profile="finance_deep", timeout=5)
+            # Its own narrow bound, read per search; search_tavily_inspected
+            # shrinks it to a caller's enclosing deadline.
+            result = await search_fn(
+                query,
+                profile="finance_deep",
+                timeout=config.gap_fill_search_timeout_seconds,
+            )
             if isinstance(result, dict) and "results" in result:
                 search_results[field] = "\n".join(
                     item.get("content", "") for item in result["results"]

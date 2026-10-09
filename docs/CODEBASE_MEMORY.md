@@ -504,6 +504,26 @@ so in practice the clamp is inert until a run-level deadline is bound. Not yet
 settings: the advisory benchmark and price-snapshot history fetches in
 `src/main.py` (10 s each) and the report-header name lookup in `src/output.py`.
 
+The research deadlines follow the same rules and sit next to the market-data
+block. Three 30 s values stay three fields: a Tavily search, a Tavily extract and
+one filing fetcher. Two pairs are nested scopes, not duplicates. The 20 s
+`get_official_filings` lookup in `src/tools/research.py` wraps the 30 s per-fetcher
+bound in `src/data/filings/registry.py`, so today the outer one fires first. The
+8 s DuckDuckGo wait in `src/tools/shared.py` wraps the ddgs client's own 5 s HTTP
+timeout. The gap-fill search keeps its narrow 5 s as its own field and passes it
+explicitly. Every Tavily entrypoint clamps an explicit per-call timeout too, not
+just the default. On the sync path the worker's absolute deadline is taken from
+the clamped bound, so a late result is discarded before paid inspection starts.
+Two caveats. httpx applies a timeout to each phase (connect, read, write, pool),
+so the clamp narrows the official-document download and the editor's reference
+fetch per phase but does not cap the whole download. And ddgs takes whole
+seconds, so its clamped HTTP timeout rounds up; the clamped wait around it is
+the bound that holds. Left to other categories: the ownership tool's 8 s yfinance
+properties (`src/tools/ownership.py`), StockTwits' 10 s HTTP
+(`src/stocktwits_api.py`) and the retrospective's 15 s yfinance fetch are
+market-data reads. The ddgs warm-up `DDGS(timeout=1)` runs at import, with no
+request to bound.
+
 ### IBKR path
 
 Main files:

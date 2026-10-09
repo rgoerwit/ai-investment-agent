@@ -25,12 +25,12 @@ side is not.
 
 ## Deadlines are settings, one per scope
 
-A market-data timeout is a `Settings` field read at the call, never a literal or a
-module-level `ClientTimeout`. Pass it through `require_allowance` from
-`src/llm_runtime/timeouts.py` *before* creating the coroutine or thread, so a spent
-caller deadline takes the existing fallback without starting work. Read the
-enclosing deadline; never bind one around a fetch that runs content inspection.
-Group by meaning, not value. See `docs/CODEBASE_MEMORY.md`.
+A market-data or filing-fetch timeout is a `Settings` field read at the call,
+never a literal or a module-level `ClientTimeout`. Pass it through
+`require_allowance` from `src/llm_runtime/timeouts.py` *before* creating the
+coroutine or thread, so a spent caller deadline takes the existing fallback
+without starting work. Read the enclosing deadline; never bind one around a
+fetch that runs content inspection. Group by meaning, not value. See `docs/CODEBASE_MEMORY.md`.
 
 ## Filing authority is not blind authority
 
