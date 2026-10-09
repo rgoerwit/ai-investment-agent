@@ -24,7 +24,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _fake_runtime(model: str) -> SimpleNamespace:
-    return SimpleNamespace(deep_think_llm=model, api_retry_attempts=2)
+    return SimpleNamespace(deep_think_llm=model, llm_attempts=2)
 
 
 class TestWriterFallbackFactory:

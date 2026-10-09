@@ -471,38 +471,12 @@ def floor_llm_total_timeout(
     return floor
 
 
-# Fraction of the quick-mode outer hard cap allotted to a single flex attempt's
-# SDK client timeout, so a flex attempt PLUS its standard-tier re-issue both fit
-# inside one run_with_hard_timeout window (2 x fraction < 1, with margin).
-FLEX_QUICK_ATTEMPT_FRACTION = 0.4
-
-
-def flex_attempt_client_timeout(
-    base_seconds: float,
-    *,
-    provider: str | None,
-    cfg: Any = None,
-    label: str = "llm_call",
-) -> float:
-    """SDK client timeout for a flex-tier model instance.
-
-    - **Full mode**: floor up to ``FLEX_LLM_TIMEOUT_SECONDS`` so a legitimately
-      queued flex call (1-15 min) is not killed by a short socket timeout.
-    - **Quick mode**: cap *below* the quick outer hard cap
-      (``quick_llm_call_hard_timeout_seconds``) so a queued flex call raises a
-      timeout in time for a standard-tier re-issue within the same
-      ``run_with_hard_timeout`` window, instead of being guillotined by the
-      outer cap (which would bypass the transport fallback). See the
-      flex-fallback x timeout matrix in the mitigation plan.
-
-    No-op (returns ``base_seconds``) when flex is off for the provider.
-    """
-    if not provider_flex_active(provider, cfg):
-        return base_seconds
-    if _quick_mode_active(cfg):
-        outer = float(getattr(_cfg(cfg), "quick_llm_call_hard_timeout_seconds", 60.0))
-        return min(base_seconds, max(5.0, outer * FLEX_QUICK_ATTEMPT_FRACTION))
-    return floor_llm_timeout(base_seconds, provider=provider, cfg=cfg, label=label)
+# The flex *request* timeout is no longer a property of a model instance. It was
+# (``flex_attempt_client_timeout``, removed October 2026): set at construction,
+# it survived the standard re-issue, degraded-standard calls and model failover,
+# and Google enforced it server-side. Each request is now sized at dispatch from
+# the invocation deadline -- see ``request_timeout`` in
+# ``src/llm_runtime/timeouts.py`` and ``FLEX_QUICK_ATTEMPT_FRACTION`` in Settings.
 
 
 def _reset_floor_log_cache_for_tests() -> None:

@@ -42,6 +42,11 @@ FAILOVER_FAILURE_KINDS = frozenset({"server_error", "timeout"})
 _FAILOVER_ATTEMPT: ContextVar[bool] = ContextVar("llm_failover_attempt", default=False)
 
 
+def in_failover_attempt() -> bool:
+    """Whether the current call is being served as a failover attempt."""
+    return _FAILOVER_ATTEMPT.get()
+
+
 @contextmanager
 def failover_attempt() -> Iterator[None]:
     """Mark the calls made inside this block as a failover attempt."""
@@ -75,7 +80,9 @@ class ModelFailoverMixin:
             target_model=target,
             service_tier=self._failover_standard_tier,
         )
-        # The copy has no failover of its own, so it cannot recurse.
+        # The copy has no failover of its own, so it cannot recurse. It carries no
+        # deadline either: its dispatch reads the same invocation ContextVar
+        # (src/llm_runtime/timeouts.py), so failover never gets a fresh clock.
         return self.model_copy(  # type: ignore[attr-defined]
             update={
                 self._failover_model_field: target,

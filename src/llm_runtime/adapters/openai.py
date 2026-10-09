@@ -8,6 +8,12 @@ from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.budgets import resolve_generation_budget, stamp_budget_metadata
 from src.llm_runtime.profiles import resolve_sampling_temperature
 from src.llm_runtime.rate_limits import limiter_for_binding
+from src.llm_runtime.seats import SEATS, SeatId
+from src.llm_runtime.timeouts import (
+    construction_transport_attempts,
+    policy_for_seat,
+    sdk_max_retries,
+)
 
 
 class OpenAIAdapter:
@@ -18,6 +24,16 @@ class OpenAIAdapter:
 
         settings = request.settings or config
         policy = request.seat.execution_policy
+        # The OpenAI SDK fixes retries on the client (no per-request override),
+        # so the client is built with the seat's policy attempts: one when the
+        # runtime loop owns retries. The request timeout is the policy's
+        # standard ceiling; a tiered transport re-sizes each request at dispatch.
+        attempts = construction_transport_attempts(
+            request.seat, vendor="openai", cfg=settings
+        )
+        request_cap = policy_for_seat(
+            request.seat, provider="openai", cfg=settings
+        ).request_cap
         if request.service_tier == "flex":
             # Keep the incident-tested flex retry/downgrade transport intact
             # during facade extraction. Standard OpenAI construction below is
@@ -39,6 +55,9 @@ class OpenAIAdapter:
                 intent=request.binding.intent,
                 settings=settings,
                 include_reasoning_output=request.include_reasoning_output,
+                request_timeout_seconds=request_cap,
+                transport_attempts=attempts,
+                timeout_class=request.seat.timeout_class,
             )
         else:
             from langchain_openai import ChatOpenAI
@@ -53,10 +72,8 @@ class OpenAIAdapter:
                 "model": request.binding.model,
                 "api_key": settings.get_openai_api_key(),
                 "callbacks": list(request.callbacks),
-                "timeout": policy.client_timeout_seconds or 120,
-                "max_retries": (
-                    policy.sdk_max_retries if policy.sdk_max_retries is not None else 3
-                ),
+                "timeout": request_cap,
+                "max_retries": sdk_max_retries("openai", attempts),
                 "max_completion_tokens": budget.api_cap_tokens,
                 "streaming": False,
                 "use_responses_api": True,
@@ -85,6 +102,7 @@ class OpenAIAdapter:
                 # service_tier="auto" it behaves exactly like ChatOpenAI.
                 from src import llms
 
+                kwargs["budget_timeout_class"] = request.seat.timeout_class.value
                 model = llms._get_flex_fallback_chat_openai_cls()(**kwargs)
             else:
                 model = ChatOpenAI(**kwargs)
@@ -113,10 +131,19 @@ class OpenAIAdapter:
         raw_api_key = config.get_openai_api_key()
         api_key = SecretStr(raw_api_key) if raw_api_key else None
         base_url = config.get_openai_api_base()
+        consultant = SEATS[SeatId.CONSULTANT]
         kwargs: dict[str, Any] = {
             "model": model_name,
-            "timeout": 120,
-            "max_retries": 3,
+            "timeout": policy_for_seat(
+                consultant, provider="openai", cfg=config
+            ).request_cap,
+            # The Consultant's policy: one request per dispatch (was 3 retries).
+            "max_retries": sdk_max_retries(
+                "openai",
+                construction_transport_attempts(
+                    consultant, vendor="openai", cfg=config
+                ),
+            ),
             "streaming": False,
             "api_key": api_key,
         }

@@ -396,7 +396,9 @@ class ArticleWriter:
         llm = create_writer_llm(
             temperature=temperature,
             timeout=config.api_timeout,
-            max_retries=get_runtime_config(config).api_retry_attempts,
+            # Total attempts (the writer is invoked directly, so its SDK
+            # attempts are its whole retry budget).
+            transport_attempts=get_runtime_config(config).llm_attempts,
             callbacks=[
                 TokenTrackingCallback("Article Writer", get_tracker()),
                 *self._callbacks,

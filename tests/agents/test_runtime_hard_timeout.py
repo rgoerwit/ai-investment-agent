@@ -48,6 +48,17 @@ def _reset_circuit_breaker():
     reset_circuit_breaker_for_tests()
 
 
+def _seat_names(timeout_class):
+    """Display names of the registered seats in a timeout class (the real registry)."""
+    from src.llm_runtime.seats import SEATS
+
+    return frozenset(
+        spec.callback_name
+        for spec in SEATS.values()
+        if spec.timeout_class is timeout_class
+    )
+
+
 class TestApiRetryAttemptsDefault:
     """The SDK retry budget must stay small to bound worst-case call duration.
 
@@ -64,9 +75,9 @@ class TestApiRetryAttemptsDefault:
         # 10 retries × 300s timeout (api_timeout) = 50 min per single LLM call.
         # We cap retries low so the SDK can't hang on its own retries; outer
         # invoke_with_rate_limit_handling already retries 3× with backoff.
-        default = self._field_default("api_retry_attempts")
+        default = self._field_default("llm_attempts")
         assert default <= 3, (
-            f"api_retry_attempts default must stay small (≤3); got {default}. "
+            f"llm_attempts default must stay small (≤3); got {default}. "
             "At higher values the Gemini SDK can park a single ainvoke() for "
             "tens of minutes via internal retries, defeating wall-clock "
             "timeouts. See May 2026 HK ticker slow-tail incident."
@@ -92,10 +103,8 @@ class TestApexQuickHardTimeout:
     DATA_BLOCK / PM_BLOCK the hard gates depend on (2026-07-06 fix)."""
 
     def test_apex_seat_gets_apex_budget(self, monkeypatch):
-        from src.agents.runtime import (
-            APEX_SEAT_CONTEXTS,
-            quick_mode_hard_timeout_seconds,
-        )
+        from src.agents.runtime import quick_mode_hard_timeout_seconds
+        from src.llm_runtime.timeouts import TimeoutClass
 
         monkeypatch.setattr(
             settings_config, "apex_quick_llm_call_hard_timeout_seconds", 180.0
@@ -103,7 +112,11 @@ class TestApexQuickHardTimeout:
         monkeypatch.setattr(
             settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
         )
-        for context in APEX_SEAT_CONTEXTS:
+        assert _seat_names(TimeoutClass.APEX) == {
+            "Fundamentals Analyst",
+            "Portfolio Manager",
+        }
+        for context in _seat_names(TimeoutClass.APEX):
             assert quick_mode_hard_timeout_seconds(context, settings_config) == 180.0
 
     def test_non_apex_agent_gets_flat_quick_budget(self, monkeypatch):
@@ -151,10 +164,8 @@ class TestApexQuickHardTimeout:
         outruns the flat cap: on 2026-08-03 kimi-k3 blew the 60s quick cap on 6/6
         smoke-suite tickers and every baseline capture was rejected.
         """
-        from src.agents.runtime import (
-            CROSS_CHECK_SEAT_CONTEXTS,
-            quick_mode_hard_timeout_seconds,
-        )
+        from src.agents.runtime import quick_mode_hard_timeout_seconds
+        from src.llm_runtime.timeouts import TimeoutClass
 
         monkeypatch.setattr(
             settings_config, "cross_check_quick_llm_call_hard_timeout_seconds", 180.0
@@ -162,7 +173,10 @@ class TestApexQuickHardTimeout:
         monkeypatch.setattr(
             settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
         )
-        for context in CROSS_CHECK_SEAT_CONTEXTS:
+        assert {"Consultant", "Global Forensic Auditor"} <= _seat_names(
+            TimeoutClass.CROSS_CHECK
+        )
+        for context in _seat_names(TimeoutClass.CROSS_CHECK):
             assert quick_mode_hard_timeout_seconds(context, settings_config) == 180.0
         # The real, decorated call-site spellings must resolve too.
         for context in (
@@ -208,11 +222,8 @@ class TestApexQuickHardTimeout:
         must pass an explicit ``canonical_agent``; this scans ``src/agents`` and
         fails if a gate-critical/cross-check seat is left to derivation.
         """
-        from src.agents.runtime import (
-            APEX_SEAT_CONTEXTS,
-            CROSS_CHECK_SEAT_CONTEXTS,
-            quick_mode_hard_timeout_seconds,
-        )
+        from src.agents.runtime import quick_mode_hard_timeout_seconds
+        from src.llm_runtime.timeouts import TimeoutClass
 
         monkeypatch.setattr(
             settings_config, "apex_quick_llm_call_hard_timeout_seconds", 180.0
@@ -224,7 +235,9 @@ class TestApexQuickHardTimeout:
             settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
         )
 
-        big_seats = set(APEX_SEAT_CONTEXTS) | set(CROSS_CHECK_SEAT_CONTEXTS)
+        big_seats = _seat_names(TimeoutClass.APEX) | _seat_names(
+            TimeoutClass.CROSS_CHECK
+        )
         agents_dir = Path(__file__).resolve().parents[2] / "src" / "agents"
         offenders: list[str] = []
 
@@ -297,20 +310,21 @@ class TestApexQuickHardTimeout:
             == 60.0
         )
 
-    def test_apex_seat_contexts_match_prompt_agent_names(self):
-        # APEX_SEAT_CONTEXTS must equal the on-disk agent_name of the two APEX
-        # seats, or the larger budget silently stops applying after a rename.
+    def test_apex_seat_display_names_match_prompt_agent_names(self):
+        # The APEX class's display names must equal the on-disk agent_name of
+        # those seats' prompts, or the larger budget silently stops applying
+        # after a rename (the runtime resolves the class from the agent name).
         import json
 
-        from src.agents.runtime import APEX_SEAT_CONTEXTS
-        from src.llms import APEX_SEATS
+        from src.llm_runtime.seats import SEATS
+        from src.llm_runtime.timeouts import TimeoutClass
 
         names = set()
-        for seat in APEX_SEATS:
-            key = "fundamentals_analyst" if seat == "senior_fundamentals" else seat
-            with open(f"prompts/{key}.json") as fh:
-                names.add(json.load(fh)["agent_name"])
-        assert APEX_SEAT_CONTEXTS == names
+        for spec in SEATS.values():
+            if spec.timeout_class is TimeoutClass.APEX:
+                with open(f"prompts/{spec.prompt_key}.json") as fh:
+                    names.add(json.load(fh)["agent_name"])
+        assert _seat_names(TimeoutClass.APEX) == names
 
 
 class TestHardTimeoutWrap:

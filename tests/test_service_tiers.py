@@ -9,10 +9,8 @@ import pytest
 from src.config import config as global_config
 from src.runtime_config import RuntimeConfig, use_runtime_config
 from src.service_tiers import (
-    FLEX_QUICK_ATTEMPT_FRACTION,
     _reset_flex_capability_cache_for_tests,
     _reset_floor_log_cache_for_tests,
-    flex_attempt_client_timeout,
     floor_llm_hard_timeout,
     floor_llm_timeout,
     floor_llm_total_timeout,
@@ -184,40 +182,24 @@ class TestQuickModeFloorBypass:
         assert floor_llm_timeout(120.0, provider="google", cfg=cfg) == 900.0
 
 
-class TestFlexAttemptClientTimeout:
-    """Fix A3 step 1: the flex-attempt SDK client timeout. Full mode floors up
-    (queued flex calls survive); quick mode caps below the outer hard cap so a
-    queued call raises in time for a standard re-issue within the same wrapper."""
+class TestFlexAttemptFraction:
+    """The quick flex request share now lives in Settings and is applied per
+    dispatch (src/llm_runtime/timeouts.py); the construction-time
+    flex_attempt_client_timeout helper is gone."""
 
-    def test_noop_when_flex_off(self):
-        cfg = _cfg()  # standard/auto
-        assert flex_attempt_client_timeout(120.0, provider="google", cfg=cfg) == 120.0
+    def test_default_fraction_leaves_headroom_for_standard_reissue(self):
+        # The flex request AND its standard re-issue share one invocation, so
+        # the flex share must leave room for a useful standard request.
+        from src.config import Settings
 
-    def test_full_mode_floors_up(self):
-        cfg = _cfg(gemini="flex", floor=900)
-        assert flex_attempt_client_timeout(120.0, provider="google", cfg=cfg) == 900.0
+        fraction = Settings.model_fields["flex_quick_attempt_fraction"].default
+        assert 0.0 < fraction <= 0.45
 
-    def test_quick_mode_caps_below_outer_hard_cap(self):
-        cfg = _cfg(gemini="flex", quick_hard_cap=60)
-        with use_runtime_config(_quick_runtime()):
-            got = flex_attempt_client_timeout(120.0, provider="google", cfg=cfg)
-        assert got == pytest.approx(60 * FLEX_QUICK_ATTEMPT_FRACTION)
-        assert got < 60  # strictly below the quick outer hard cap
+    def test_construction_time_helper_is_removed(self):
+        import src.service_tiers as tiers
 
-    def test_quick_mode_never_raises_base(self):
-        # A base already below the cap must not be inflated.
-        cfg = _cfg(openai="flex", quick_hard_cap=60)
-        with use_runtime_config(_quick_runtime()):
-            got = flex_attempt_client_timeout(10.0, provider="openai", cfg=cfg)
-        assert got == 10.0
-
-    def test_fraction_leaves_headroom_for_standard_reissue(self):
-        # The flex attempt AND its standard re-issue share one outer window, so
-        # 2 x T_internal must fit under the outer cap with margin.
-        assert 0.0 < FLEX_QUICK_ATTEMPT_FRACTION <= 0.45, (
-            "FLEX_QUICK_ATTEMPT_FRACTION must leave >=10% margin after two "
-            "attempts (flex + standard re-issue) under the outer hard cap."
-        )
+        assert not hasattr(tiers, "flex_attempt_client_timeout")
+        assert not hasattr(tiers, "FLEX_QUICK_ATTEMPT_FRACTION")
 
 
 class TestFlexHealthDowngrade:

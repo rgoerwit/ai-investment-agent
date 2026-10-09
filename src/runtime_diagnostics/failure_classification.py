@@ -408,10 +408,12 @@ def classify_failure(
     ):
         kind: FailureKind = "dns_resolution"
         retryable = True
-    elif any(
+    elif isinstance(exc, TimeoutError) or any(
         marker in combined
         for marker in ("timed out", "timeout", "readtimeout", "connecttimeout")
     ):
+        # The type check covers TimeoutError subclasses whose name and message
+        # carry no marker, e.g. the budget refusal (src/llm_runtime/timeouts.py).
         kind = "timeout"
         retryable = True
     elif type(root).__name__ in {"YFPricesMissingError", "YFTzMissingError"} or any(

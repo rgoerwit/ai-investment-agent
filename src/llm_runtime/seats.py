@@ -1,9 +1,11 @@
 """Canonical registry for every application-owned LLM consumer."""
 
+import warnings
 from dataclasses import dataclass
 from enum import StrEnum
 
 from src.llm_runtime.capabilities import Capability
+from src.llm_runtime.timeouts import TimeoutClass
 
 
 class SeatId(StrEnum):
@@ -79,7 +81,15 @@ class SeatExecutionPolicy:
     """Stable call semantics that belong to a seat rather than a provider."""
 
     sampling_temperature: float | None = None
+    # Standard per-request ceiling override; dispatch still sizes each request
+    # from the invocation deadline (src/llm_runtime/timeouts.py).
     client_timeout_seconds: float | None = None
+    # Total SDK attempts the client is built with (one meaning on every vendor).
+    transport_attempts: int | None = None
+    # DEPRECATED alias for ``transport_attempts``. It meant total attempts on
+    # Google but retries after the first request on OpenAI/Anthropic, so it is
+    # translated per vendor by ``resolved_transport_attempts``. An explicit
+    # ``transport_attempts`` always wins.
     sdk_max_retries: int | None = None
     standard_tier_only: bool = False
     # Gate-critical seats must not queue on a best-effort tier under ``--quick``:
@@ -97,8 +107,33 @@ class SeatExecutionPolicy:
             raise ValueError("sampling_temperature must be between 0.0 and 2.0")
         if self.client_timeout_seconds is not None and self.client_timeout_seconds <= 0:
             raise ValueError("client_timeout_seconds must be positive")
-        if self.sdk_max_retries is not None and self.sdk_max_retries < 0:
-            raise ValueError("sdk_max_retries cannot be negative")
+        if self.transport_attempts is not None and self.transport_attempts < 1:
+            raise ValueError("transport_attempts counts total attempts; must be >= 1")
+        if self.sdk_max_retries is not None:
+            if self.sdk_max_retries < 0:
+                raise ValueError("sdk_max_retries cannot be negative")
+            warnings.warn(
+                "SeatExecutionPolicy.sdk_max_retries is deprecated; use "
+                "transport_attempts (total attempts on every vendor)",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+
+    def resolved_transport_attempts(self, vendor: str) -> int | None:
+        """Total SDK attempts for ``vendor``, or None to use the policy default.
+
+        Precedence: ``transport_attempts``, then the deprecated
+        ``sdk_max_retries`` translated from its old per-vendor meaning (Google
+        counted total attempts, and treats 0 as 1; every other vendor counted
+        retries after the first request).
+        """
+        if self.transport_attempts is not None:
+            return self.transport_attempts
+        if self.sdk_max_retries is None:
+            return None
+        if vendor == "google":
+            return max(1, self.sdk_max_retries)
+        return self.sdk_max_retries + 1
 
 
 @dataclass(frozen=True)
@@ -118,6 +153,17 @@ class SeatSpec:
     optional_mode_field: str | None = None
     execution_policy: SeatExecutionPolicy = SeatExecutionPolicy()
     disabled_in_quick_mode: bool = False
+    timeout_class: TimeoutClass = TimeoutClass.STANDARD
+
+    def __post_init__(self) -> None:
+        # Every registered seat carries a real class; AUXILIARY is reserved for
+        # callers that are not seats, so a seat cannot opt out of its budget.
+        if not isinstance(self.timeout_class, TimeoutClass):
+            raise TypeError(f"{self.seat_id}: timeout_class must be a TimeoutClass")
+        if self.timeout_class is TimeoutClass.AUXILIARY:
+            raise ValueError(
+                f"{self.seat_id}: AUXILIARY is reserved for unregistered callers"
+            )
 
 
 _TEXT = frozenset({Capability.TEXT_GENERATION})
@@ -141,6 +187,7 @@ def _seat(
     optional_mode_field: str | None = None,
     execution_policy: SeatExecutionPolicy = SeatExecutionPolicy(),
     disabled_in_quick_mode: bool = False,
+    timeout_class: TimeoutClass = TimeoutClass.STANDARD,
 ) -> SeatSpec:
     return SeatSpec(
         seat_id=seat_id,
@@ -158,6 +205,7 @@ def _seat(
         optional_mode_field=optional_mode_field,
         execution_policy=execution_policy,
         disabled_in_quick_mode=disabled_in_quick_mode,
+        timeout_class=timeout_class,
     )
 
 
@@ -170,6 +218,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         state_field="market_report",
         requires=_TOOLS,
         retry=ModelIntent.REASONING,
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.SENTIMENT: _seat(
         SeatId.SENTIMENT,
@@ -179,6 +228,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         state_field="sentiment_report",
         requires=_TOOLS,
         retry=ModelIntent.REASONING,
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.NEWS: _seat(
         SeatId.NEWS,
@@ -188,6 +238,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         state_field="news_report",
         requires=_TOOLS,
         retry=ModelIntent.REASONING,
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.JUNIOR_FUNDAMENTALS: _seat(
         SeatId.JUNIOR_FUNDAMENTALS,
@@ -203,6 +254,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         # cut at 24s, re-issued at standard with 36s left, and killed at the 60s
         # cap -- 64 of 71 Junior failures, rising to 18% of runs on busy days.
         execution_policy=SeatExecutionPolicy(standard_tier_in_quick_mode=True),
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.SENIOR_FUNDAMENTALS: _seat(
         SeatId.SENIOR_FUNDAMENTALS,
@@ -215,6 +267,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         requires=_TOOLS,
         retry=ModelIntent.REASONING,
         execution_policy=SeatExecutionPolicy(standard_tier_in_quick_mode=True),
+        timeout_class=TimeoutClass.APEX,
     ),
     SeatId.FOREIGN_LANGUAGE: _seat(
         SeatId.FOREIGN_LANGUAGE,
@@ -224,6 +277,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         state_field="foreign_language_report",
         requires=_TOOLS,
         retry=ModelIntent.REASONING,
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.LEGAL_COUNSEL: _seat(
         SeatId.LEGAL_COUNSEL,
@@ -232,6 +286,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         budget_key="Legal Counsel",
         state_field="legal_report",
         requires=_TOOLS,
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.VALUE_TRAP: _seat(
         SeatId.VALUE_TRAP,
@@ -242,6 +297,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         requires=_TOOLS,
         retry=ModelIntent.REASONING,
         adjustment=ReasoningAdjustment.ONE_STEP,
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.BULL: _seat(
         SeatId.BULL,
@@ -249,6 +305,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         prompt_key="bull_researcher",
         budget_key="Bull Researcher",
         normal=ModelIntent.REASONING,
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.BEAR: _seat(
         SeatId.BEAR,
@@ -256,6 +313,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         prompt_key="bear_researcher",
         budget_key="Bear Researcher",
         normal=ModelIntent.REASONING,
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.RESEARCH_MANAGER: _seat(
         SeatId.RESEARCH_MANAGER,
@@ -264,6 +322,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         budget_key="Research Manager",
         state_field="investment_plan",
         normal=ModelIntent.REASONING,
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.VALUATION: _seat(
         SeatId.VALUATION,
@@ -271,6 +330,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         prompt_key="valuation_calculator",
         budget_key="Valuation Calculator",
         state_field="valuation_report",
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.TRADER: _seat(
         SeatId.TRADER,
@@ -278,6 +338,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         prompt_key="trader",
         budget_key="Trader",
         state_field="trader_investment_plan",
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.RISKY: _seat(
         SeatId.RISKY,
@@ -285,6 +346,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         prompt_key="risky_analyst",
         budget_key="Risky Analyst",
         normal=ModelIntent.REASONING,
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.SAFE: _seat(
         SeatId.SAFE,
@@ -292,6 +354,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         prompt_key="safe_analyst",
         budget_key="Safe Analyst",
         normal=ModelIntent.REASONING,
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.NEUTRAL: _seat(
         SeatId.NEUTRAL,
@@ -299,6 +362,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         prompt_key="neutral_analyst",
         budget_key="Neutral Analyst",
         normal=ModelIntent.REASONING,
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.PORTFOLIO_MANAGER: _seat(
         SeatId.PORTFOLIO_MANAGER,
@@ -308,13 +372,14 @@ SEATS: dict[SeatId, SeatSpec] = {
         state_field="final_trade_decision",
         normal=ModelIntent.CRITICAL,
         quick=ModelIntent.CRITICAL,
-        # Pinned to standard in quick mode. A flex-built client carries the quick
-        # flex-attempt deadline (a fraction of the generic 60s cap, i.e. 24s) as
-        # its SDK timeout; Google enforces it server-side via X-Server-Timeout, and
-        # the standard re-issue and model failover inherit it from the instance.
-        # Oct 2026 quick PM 504s were that deadline exposing slower service. Keep
-        # the pin until per-dispatch deadlines land and evidence supports flex here.
+        # Pinned to standard in quick mode. Oct 2026 quick PM 504s were a 24s
+        # flex-attempt deadline, fixed on the flex-built client, that Google
+        # enforced server-side and the standard re-issue and failover inherited.
+        # Requests are now sized per dispatch from the invocation deadline
+        # (src/llm_runtime/timeouts.py), but the pin stays until measured latency,
+        # cost per publishable completion and failure rate support flex here.
         execution_policy=SeatExecutionPolicy(standard_tier_in_quick_mode=True),
+        timeout_class=TimeoutClass.APEX,
     ),
     SeatId.ANALYST_RETRY: _seat(
         SeatId.ANALYST_RETRY,
@@ -323,6 +388,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         quick=ModelIntent.REASONING,
         requires=_TEXT,
         execution_policy=SeatExecutionPolicy(standard_tier_in_quick_mode=True),
+        timeout_class=TimeoutClass.STANDARD,
     ),
     SeatId.CONSULTANT: _seat(
         SeatId.CONSULTANT,
@@ -335,7 +401,10 @@ SEATS: dict[SeatId, SeatSpec] = {
         normal=ModelIntent.REASONING,
         requires=_TOOLS,
         optional_mode_field="llm_consultant_mode",
-        execution_policy=SeatExecutionPolicy(sdk_max_retries=0),
+        # One request per dispatch; the runtime loop and the consultant's own
+        # deadline own any retry. (Was sdk_max_retries=0, i.e. zero retries.)
+        execution_policy=SeatExecutionPolicy(transport_attempts=1),
+        timeout_class=TimeoutClass.CROSS_CHECK,
     ),
     SeatId.AUDITOR: _seat(
         SeatId.AUDITOR,
@@ -349,6 +418,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         requires=_TOOLS,
         optional_mode_field="llm_auditor_mode",
         disabled_in_quick_mode=True,
+        timeout_class=TimeoutClass.CROSS_CHECK,
     ),
     SeatId.AUDITOR_ESCALATION: _seat(
         SeatId.AUDITOR_ESCALATION,
@@ -362,6 +432,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         requires=_TOOLS,
         optional_mode_field="llm_auditor_mode",
         disabled_in_quick_mode=True,
+        timeout_class=TimeoutClass.CROSS_CHECK,
     ),
     SeatId.APAC: _seat(
         SeatId.APAC,
@@ -376,6 +447,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         requires=_TEXT,
         optional_mode_field="llm_apac_mode",
         disabled_in_quick_mode=True,
+        timeout_class=TimeoutClass.REGIONAL,
     ),
     SeatId.APAC_DIRECT_RETRY: _seat(
         SeatId.APAC_DIRECT_RETRY,
@@ -389,6 +461,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         requires=_TEXT,
         optional_mode_field="llm_apac_mode",
         disabled_in_quick_mode=True,
+        timeout_class=TimeoutClass.REGIONAL,
     ),
     SeatId.ARTICLE_WRITER: _seat(
         SeatId.ARTICLE_WRITER,
@@ -398,6 +471,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         stage=AuthorityStage.EDITORIAL,
         normal=ModelIntent.PROSE,
         quick=ModelIntent.PROSE,
+        timeout_class=TimeoutClass.EDITORIAL,
     ),
     SeatId.ARTICLE_WRITER_REVIEW_FALLBACK: _seat(
         SeatId.ARTICLE_WRITER_REVIEW_FALLBACK,
@@ -407,6 +481,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         stage=AuthorityStage.EDITORIAL,
         normal=ModelIntent.PROSE,
         quick=ModelIntent.PROSE,
+        timeout_class=TimeoutClass.EDITORIAL,
     ),
     SeatId.ARTICLE_WRITER_BASE_FALLBACK: _seat(
         SeatId.ARTICLE_WRITER_BASE_FALLBACK,
@@ -416,6 +491,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         stage=AuthorityStage.EDITORIAL,
         normal=ModelIntent.PROSE,
         quick=ModelIntent.PROSE,
+        timeout_class=TimeoutClass.EDITORIAL,
     ),
     SeatId.EDITOR: _seat(
         SeatId.EDITOR,
@@ -434,6 +510,7 @@ SEATS: dict[SeatId, SeatSpec] = {
             }
         ),
         optional_mode_field="llm_editor_mode",
+        timeout_class=TimeoutClass.EDITORIAL,
     ),
     SeatId.CONTENT_INSPECTOR: _seat(
         SeatId.CONTENT_INSPECTOR,
@@ -446,6 +523,7 @@ SEATS: dict[SeatId, SeatSpec] = {
             sampling_temperature=0.0,
             standard_tier_only=True,
         ),
+        timeout_class=TimeoutClass.OPERATIONAL,
     ),
     SeatId.MACRO_CONTEXT: _seat(
         SeatId.MACRO_CONTEXT,
@@ -454,12 +532,14 @@ SEATS: dict[SeatId, SeatSpec] = {
         group=BindingGroup.OPERATIONAL,
         stage=AuthorityStage.OPERATIONAL,
         execution_policy=SeatExecutionPolicy(sampling_temperature=0.1),
+        timeout_class=TimeoutClass.OPERATIONAL,
     ),
     SeatId.RETROSPECTIVE: _seat(
         SeatId.RETROSPECTIVE,
         "Retrospective Lessons",
         group=BindingGroup.OPERATIONAL,
         stage=AuthorityStage.OPERATIONAL,
+        timeout_class=TimeoutClass.OPERATIONAL,
     ),
     SeatId.HEALTH_CHECK: _seat(
         SeatId.HEALTH_CHECK,
@@ -469,11 +549,14 @@ SEATS: dict[SeatId, SeatSpec] = {
         execution_policy=SeatExecutionPolicy(
             sampling_temperature=0.0,
             client_timeout_seconds=10.0,
-            sdk_max_retries=1,
+            # Exactly one request: a probe, not a workload. (Was sdk_max_retries=1
+            # in Google's total-attempts meaning.)
+            transport_attempts=1,
             standard_tier_only=True,
             reasoning_control_enabled=False,
             output_token_override_enabled=False,
         ),
+        timeout_class=TimeoutClass.OPERATIONAL,
     ),
     SeatId.PORTFOLIO_MACRO_CLASSIFIER: _seat(
         SeatId.PORTFOLIO_MACRO_CLASSIFIER,
@@ -482,6 +565,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         stage=AuthorityStage.OPERATIONAL,
         normal=ModelIntent.REASONING,
         quick=ModelIntent.CLASSIFIER,
+        timeout_class=TimeoutClass.OPERATIONAL,
     ),
     SeatId.SIGNAL_PROCESSOR: _seat(
         SeatId.SIGNAL_PROCESSOR,
@@ -490,6 +574,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         stage=AuthorityStage.OPERATIONAL,
         normal=ModelIntent.CLASSIFIER,
         quick=ModelIntent.CLASSIFIER,
+        timeout_class=TimeoutClass.OPERATIONAL,
     ),
     SeatId.SEMANTIC_JUDGE: _seat(
         SeatId.SEMANTIC_JUDGE,
@@ -498,6 +583,7 @@ SEATS: dict[SeatId, SeatSpec] = {
         stage=AuthorityStage.EVALUATION,
         normal=ModelIntent.REASONING,
         quick=ModelIntent.FAST,
+        timeout_class=TimeoutClass.OPERATIONAL,
     ),
 }
 

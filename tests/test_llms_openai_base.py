@@ -180,7 +180,9 @@ class TestCompatibleTimeoutIsIndependentOfServiceTier:
         # The flex floor must not be what stretches a compatible client.
         assert kwargs["timeout"] == 120
 
-    def test_openai_proper_flex_still_floors_the_timeout(self, monkeypatch):
+    def test_openai_proper_flex_sets_the_tier_but_not_a_client_timeout(
+        self, monkeypatch
+    ):
         _set_base(monkeypatch, "")
         monkeypatch.setattr(llms_mod.config, "openai_service_tier", "flex")
         kwargs = {"model": "gpt-5.4", "timeout": 120}
@@ -188,4 +190,6 @@ class TestCompatibleTimeoutIsIndependentOfServiceTier:
         llms_mod._apply_openai_service_tier(kwargs, label="test")
 
         assert kwargs["service_tier"] == "flex"
-        assert kwargs["timeout"] > 120
+        # The flex request timeout is sized per dispatch from the invocation
+        # deadline; a construction-time floor would outlive a tier change.
+        assert kwargs["timeout"] == 120

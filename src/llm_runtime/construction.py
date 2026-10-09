@@ -74,7 +74,7 @@ def build_legacy_model(
     callbacks = list(request.callbacks)
     output_tokens = request.output_tokens
     model_override = request.model_override
-    reasoning_output_kwargs = (
+    reasoning_output_kwargs: dict[str, Any] = (
         {"include_thoughts": True} if request.include_reasoning_output else {}
     )
     quick_factory = (
@@ -170,8 +170,9 @@ def build_legacy_model(
         return llms.create_gemini_model(
             request.resolved_model or runtime.quick_think_llm,
             temperature=0.0,
-            timeout=10,
-            max_retries=1,
+            timeout=int(policy.client_timeout_seconds or 10),
+            # Google's max_retries is total attempts: exactly one request.
+            max_retries=policy.resolved_transport_attempts("google") or 1,
             service_tier="standard",
             api_key=settings.get_google_api_key(),
             settings=settings,
@@ -219,7 +220,7 @@ def build_legacy_model(
                 if policy.client_timeout_seconds is not None
                 else None
             ),
-            max_retries=policy.sdk_max_retries,
+            max_retries=policy.resolved_transport_attempts("google"),
             callbacks=callbacks,
             max_output_tokens=output_tokens,
             service_tier=pinned_tier,
@@ -235,7 +236,7 @@ def build_legacy_model(
             if policy.client_timeout_seconds is not None
             else None
         ),
-        max_retries=policy.sdk_max_retries,
+        max_retries=policy.resolved_transport_attempts("google"),
         callbacks=callbacks,
         max_output_tokens=output_tokens,
         service_tier=pinned_tier,

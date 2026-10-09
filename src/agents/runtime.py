@@ -21,10 +21,21 @@ from src.agents.output_validation import (
 from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
 from src.error_safety import summarize_exception
+from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.failover import (
     FAILOVER_FAILURE_KINDS,
     failover_attempt,
     failover_target,
+)
+from src.llm_runtime.timeouts import (
+    BudgetExhausted,
+    TimeoutClass,
+    current_enclosing_deadline,
+    invocation_scope,
+    quick_invocation_cap,
+    resolve_budget_policy,
+    retry_wait_allowance,
+    timeout_class_for_agent,
 )
 from src.llm_usage import extract_token_usage_breakdown
 from src.runtime_config import get_runtime_config
@@ -38,11 +49,9 @@ from src.runtime_diagnostics import (
     retry_disposition,
 )
 from src.service_tiers import (
-    floor_llm_hard_timeout,
     runnable_attempt_tier,
     track_tier_attempt,
 )
-from src.token_tracker import canonical_display_name
 
 logger = structlog.get_logger(__name__)
 
@@ -63,15 +72,18 @@ def _attempt_budget_fields(runnable: Any, usage: Any) -> dict[str, int | None]:
     }
 
 
-# Graph node labels (agent_name / context) of the two gate-critical APEX seats.
-# These run the biggest, most rule-dense prompts on the APEX model and need a
-# larger --quick per-call budget than the flat quick cap sized for cheap flash
-# data-gathering agents. Kept in lockstep with APEX_SEATS in src/llms.py via
-# tests/agents/test_runtime_hard_timeout.py (the seats' prompt agent_name).
-APEX_SEAT_CONTEXTS = frozenset({"Fundamentals Analyst", "Portfolio Manager"})
-# Canonical display names — see canonical_display_name() below on why these are
-# not the raw context strings.
-CROSS_CHECK_SEAT_CONTEXTS = frozenset({"Consultant", "Global Forensic Auditor"})
+def resolve_invocation_timeout_class(
+    context: str, canonical_agent: str | None = None
+) -> TimeoutClass:
+    """The budget class for an invocation, from the registered seat's identity.
+
+    Seat identity comes from ``canonical_agent`` when the call site supplies one,
+    and is otherwise derived from the (possibly decorated) context through the
+    seat registry's display names — never a hand-kept string set. A context no
+    seat claims (``"pm_verdict_recovery"`` without its canonical agent, a test
+    label) gets the bounded generic ``AUXILIARY`` policy.
+    """
+    return timeout_class_for_agent(canonical_agent or context) or TimeoutClass.AUXILIARY
 
 
 def _validate_llm_input_tool_history(
@@ -101,6 +113,9 @@ def quick_mode_hard_timeout_seconds(
 ) -> float:
     """Per-call hard wall-clock cap for a single ``--quick`` LLM ainvoke.
 
+    A thin view over ``src/llm_runtime/timeouts.py``: the seat's
+    ``TimeoutClass`` (carried on its ``SeatSpec``) chooses the budget.
+
     Three budgets, by why the seat needs one:
 
     * Gate-critical APEX seats (Senior Fundamentals, Portfolio Manager) get
@@ -128,14 +143,9 @@ def quick_mode_hard_timeout_seconds(
     ``canonical_agent``; ``tests/agents/test_runtime_hard_timeout.py::
     TestSeatBudgetCoversEveryCallSite`` scans the source and fails if one does not.
     """
-    seat = canonical_display_name(canonical_agent or context)
-    if seat in APEX_SEAT_CONTEXTS:
-        return float(getattr(cfg, "apex_quick_llm_call_hard_timeout_seconds", 180.0))
-    if seat in CROSS_CHECK_SEAT_CONTEXTS:
-        return float(
-            getattr(cfg, "cross_check_quick_llm_call_hard_timeout_seconds", 180.0)
-        )
-    return float(getattr(cfg, "quick_llm_call_hard_timeout_seconds", 60.0))
+    return quick_invocation_cap(
+        resolve_invocation_timeout_class(context, canonical_agent), cfg
+    )
 
 
 @contextmanager
@@ -438,6 +448,8 @@ def _detect_provider_refusal(result: Any) -> RefusalSignal | None:
 
 def _timeout_failure_origin(exc: BaseException) -> str | None:
     """Classify timeout source without changing the stable failure_kind."""
+    if isinstance(exc, BudgetExhausted):
+        return "budget_exhausted"
     text = f"{type(exc).__name__}: {exc}".lower()
     cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
     cause_type = type(cause).__name__ if cause is not None else ""
@@ -457,12 +469,13 @@ async def invoke_with_rate_limit_handling(
     runnable,
     input_data: dict[str, Any] | list[Any],
     max_attempts: int = 3,
-    max_transient_attempts: int = 2,
+    max_transient_attempts: int | None = None,
     context: str = "LLM",
     provider: str | None = None,
     model_name: str | None = None,
     canonical_agent: str | None = None,
     overall_timeout_seconds: float | None = None,
+    timeout_class: TimeoutClass | None = None,
 ) -> Any:
     """
     Invoke an LLM with explicit 429 and transient error handling.
@@ -470,6 +483,16 @@ async def invoke_with_rate_limit_handling(
     ``canonical_agent`` is the display-namespace identity for cost/diagnostic
     joins; when omitted the token tracker derives it from ``context`` (which may
     carry a round/retry suffix).
+
+    This is the owning boundary for the call's deadlines
+    (``src/llm_runtime/timeouts.py``). Each attempt gets an absolute deadline,
+    ``min(now + invocation_cap, enclosing)``, where *enclosing* is the earlier of
+    ``overall_timeout_seconds`` and any node deadline bound by
+    ``enclosing_deadline``. The deadline is bound in a ContextVar for the
+    attempt's dispatches, which size every request from it and send one SDK
+    attempt each. Retries are owned here: ``max_transient_attempts`` defaults to
+    the run's ``llm_attempts`` (total), and each retry and backoff is re-admitted
+    against the enclosing deadline.
     """
     _validate_llm_input_tool_history(
         input_data,
@@ -493,26 +516,27 @@ async def invoke_with_rate_limit_handling(
             overall_timeout_seconds=overall_timeout_seconds,
         )
 
-    if runtime_config.quick_mode_active:
-        hard_timeout = quick_mode_hard_timeout_seconds(
-            context, settings_config, canonical_agent=canonical_agent
-        )
-    else:
-        hard_timeout = float(runtime_config.llm_call_hard_timeout_seconds)
-    # Flex tier: queued calls may take minutes; floor the hard cap so a
-    # legitimately-slow flex call (plus its potential standard-tier fallback
-    # attempt) isn't killed and fed to the circuit breaker as a timeout.
-    hard_timeout = floor_llm_hard_timeout(
-        hard_timeout,
+    # One policy for this invocation: the seat class picks the per-attempt cap
+    # (quick APEX / cross-check / flat), floored for full-mode flex inside the
+    # resolver so a queued flex request plus its standard re-issue fit.
+    budget_policy = resolve_budget_policy(
+        timeout_class or resolve_invocation_timeout_class(context, canonical_agent),
         provider=resolved_provider,
         cfg=settings_config,
-        label=f"invoke_hard_timeout:{resolved_provider}",
+        runtime_config=runtime_config,
     )
+    hard_timeout = budget_policy.invocation_cap
     deadline = (
-        time.monotonic() + float(overall_timeout_seconds)
+        llm_timeouts.now() + float(overall_timeout_seconds)
         if overall_timeout_seconds is not None
         else None
     )
+    # The node/ticker deadline can only shorten this call, never extend it.
+    node_deadline = current_enclosing_deadline()
+    if node_deadline is not None:
+        deadline = node_deadline if deadline is None else min(deadline, node_deadline)
+    if max_transient_attempts is None:
+        max_transient_attempts = budget_policy.attempts
 
     breaker_enabled = bool(
         getattr(settings_config, "llm_circuit_breaker_enabled", True)
@@ -526,8 +550,15 @@ async def invoke_with_rate_limit_handling(
     failover_model = failover_target(runnable)
     failing_over = False
 
+    dispatch_records: list[dict[str, Any]] = []
+
+    def _dispatches() -> list[dict[str, Any]]:
+        # Copies: an orphaned request may still update its record later.
+        return [dict(record) for record in dispatch_records]
+
     for attempt in range(max_attempts):
         attempt_started = time.monotonic()
+        dispatch_records = []
         initial_tier = (
             "standard"
             if failing_over
@@ -538,13 +569,20 @@ async def invoke_with_rate_limit_handling(
         try:
             effective_timeout = hard_timeout
             if deadline is not None:
-                remaining = deadline - time.monotonic()
+                remaining = deadline - llm_timeouts.now()
                 if remaining <= 0:
                     raise TimeoutError(
-                        f"{context} exceeded {overall_timeout_seconds:.1f}s "
-                        "overall LLM timeout"
+                        f"{context} exceeded its overall LLM deadline"
+                        + (
+                            f" of {overall_timeout_seconds:.1f}s"
+                            if overall_timeout_seconds is not None
+                            else ""
+                        )
                     )
                 effective_timeout = min(hard_timeout, max(0.1, remaining))
+            # The absolute deadline every dispatch in this attempt is sized from.
+            # A retry gets a fresh allowance, capped by the enclosing deadline.
+            attempt_deadline = llm_timeouts.now() + effective_timeout
 
             if breaker is not None:
                 breaker.before_call(
@@ -555,7 +593,11 @@ async def invoke_with_rate_limit_handling(
             if network_breaker is not None:
                 network_breaker.before_call()
 
-            with track_tier_attempt(initial_tier) as tier_attempt:
+            with (
+                track_tier_attempt(initial_tier) as tier_attempt,
+                invocation_scope(budget_policy, attempt_deadline) as scope,
+            ):
+                dispatch_records = scope.dispatches
                 try:
                     with failover_attempt() if failing_over else nullcontext():
                         result = await run_with_hard_timeout(
@@ -693,6 +735,7 @@ async def invoke_with_rate_limit_handling(
                         failure_kind="output_cap_exhausted",
                         failure_origin="provider_completion",
                         retryable=False,
+                        dispatches=_dispatches(),
                     )
                 logger.warning(
                     "llm_output_cap_exhausted",
@@ -758,6 +801,7 @@ async def invoke_with_rate_limit_handling(
                         "configured_reasoning_reserve_tokens"
                     ],
                     service_tier=attempted_tier,
+                    dispatches=_dispatches(),
                 )
             if not quiet_mode:
                 logger.info(
@@ -858,8 +902,12 @@ async def invoke_with_rate_limit_handling(
             # circuit breakers so a run's repeated refusals cannot trip them and
             # fast-fail unrelated sibling agents. (Same rationale as the flex
             # queue-event exclusion above.)
+            # A budget refusal sent no request at all: it says nothing about the
+            # provider's health.
             exclude_from_breakers = (
-                flex_latency_timeout_quick or details.kind == "provider_safety_block"
+                flex_latency_timeout_quick
+                or details.kind == "provider_safety_block"
+                or isinstance(exc, BudgetExhausted)
             )
             if breaker is not None and not exclude_from_breakers:
                 breaker.record_outcome(
@@ -920,6 +968,7 @@ async def invoke_with_rate_limit_handling(
                     failure_origin=failure_origin,
                     retryable=details.retryable,
                     service_tier=attempted_tier,
+                    dispatches=_dispatches(),
                 )
 
             retry_class = retry_disposition(details)
@@ -929,27 +978,34 @@ async def invoke_with_rate_limit_handling(
                 and attempt < max_attempts - 1
             ):
                 jitter = random.uniform(1, 10)
-                wait_time = (60 * (attempt + 1)) + jitter
-                if deadline is not None:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        logger.error(
-                            "llm_call_failed",
-                            context=context,
-                            provider=resolved_provider,
-                            model=resolved_model,
-                            runnable_class=class_name,
-                            attempt=attempt + 1,
-                            max_attempts=max_attempts,
-                            failure_kind=details.kind,
-                            host=details.host,
-                            retryable=details.retryable,
-                            error_type=details.error_type,
-                            root_cause_type=details.root_cause_type,
-                            error_message=details.message,
-                        )
-                        raise
-                    wait_time = min(wait_time, max(0.0, remaining))
+                # Admission: a rate-limit wait is not shortened to fit -- a
+                # request sent before the provider's window reopens is wasted --
+                # so a wait that leaves no useful attempt refuses the retry.
+                admitted_wait = retry_wait_allowance(
+                    budget_policy,
+                    deadline,
+                    (60 * (attempt + 1)) + jitter,
+                    rate_limited=True,
+                )
+                if admitted_wait is None:
+                    logger.error(
+                        "llm_call_failed",
+                        context=context,
+                        provider=resolved_provider,
+                        model=resolved_model,
+                        runnable_class=class_name,
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        failure_kind=details.kind,
+                        host=details.host,
+                        retryable=details.retryable,
+                        error_type=details.error_type,
+                        root_cause_type=details.root_cause_type,
+                        error_message=details.message,
+                        retry_refused="budget",
+                    )
+                    raise
+                wait_time = admitted_wait
                 logger.warning(
                     "llm_call_retry",
                     context=context,
@@ -983,6 +1039,33 @@ async def invoke_with_rate_limit_handling(
                 and (not flex_latency_timeout_quick or fail_over)
                 and attempt < transient_max_attempts - 1
             ):
+                # Admission before the retry (and before its backoff): the
+                # retry needs a useful attempt's worth of the enclosing
+                # deadline, and the backoff is clamped so that still fits.
+                admitted_wait = retry_wait_allowance(
+                    budget_policy,
+                    deadline,
+                    0.0 if fail_over else 5 * (attempt + 1) + random.uniform(1, 3),
+                    rate_limited=False,
+                )
+                if admitted_wait is None:
+                    logger.error(
+                        "llm_call_failed",
+                        context=context,
+                        provider=resolved_provider,
+                        model=resolved_model,
+                        runnable_class=class_name,
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        failure_kind=details.kind,
+                        host=details.host,
+                        retryable=details.retryable,
+                        error_type=details.error_type,
+                        root_cause_type=details.root_cause_type,
+                        error_message=details.message,
+                        retry_refused="budget",
+                    )
+                    raise
                 if fail_over:
                     logger.warning(
                         "llm_call_failover",
@@ -997,27 +1080,7 @@ async def invoke_with_rate_limit_handling(
                     failing_over = True
                     # A different model is not waiting out this one's outage.
                     continue
-                wait_time = 5 * (attempt + 1) + random.uniform(1, 3)
-                if deadline is not None:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        logger.error(
-                            "llm_call_failed",
-                            context=context,
-                            provider=resolved_provider,
-                            model=resolved_model,
-                            runnable_class=class_name,
-                            attempt=attempt + 1,
-                            max_attempts=max_attempts,
-                            failure_kind=details.kind,
-                            host=details.host,
-                            retryable=details.retryable,
-                            error_type=details.error_type,
-                            root_cause_type=details.root_cause_type,
-                            error_message=details.message,
-                        )
-                        raise
-                    wait_time = min(wait_time, max(0.0, remaining))
+                wait_time = admitted_wait
                 logger.warning(
                     "llm_call_retry",
                     context=context,

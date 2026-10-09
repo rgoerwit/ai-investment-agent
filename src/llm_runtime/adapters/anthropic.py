@@ -7,6 +7,7 @@ from langchain_core.language_models import BaseChatModel
 from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.profiles import ReasoningApiMode
 from src.llm_runtime.rate_limits import limiter_for_binding
+from src.llm_runtime.timeouts import construction_transport_attempts, sdk_max_retries
 
 # Long-form default for a seat that expresses no preference. Anthropic counts
 # thinking tokens against max_tokens, so this must stay generous enough for an
@@ -35,7 +36,15 @@ class AnthropicAdapter:
         kwargs: dict[str, Any] = {
             "model": request.binding.model,
             "max_tokens": request.output_tokens or _DEFAULT_ANTHROPIC_OUTPUT_TOKENS,
-            "max_retries": 3,
+            # Total attempts translated to Anthropic's retries-after-first. The
+            # writer is invoked directly, so this is its whole retry budget
+            # (was max_retries=3, i.e. four requests; now three).
+            "max_retries": sdk_max_retries(
+                "anthropic",
+                construction_transport_attempts(
+                    request.seat, vendor="anthropic", cfg=settings
+                ),
+            ),
             "timeout": float(settings.api_timeout),
             "callbacks": list(request.callbacks),
             "anthropic_api_key": api_key,

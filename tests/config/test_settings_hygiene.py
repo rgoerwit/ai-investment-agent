@@ -121,7 +121,19 @@ def test_pytest_does_not_load_operator_environment_file():
 
 
 _SETTINGS_ENV_CASES = [
+    ("llm_attempts", "LLM_ATTEMPTS", "7", 7),
+    # Deprecated spelling, still honoured through the alias property.
     ("api_retry_attempts", "API_RETRY_ATTEMPTS", "7", 7),
+    ("llm_attempts", "API_RETRY_ATTEMPTS", "7", 7),
+    ("flex_quick_attempt_fraction", "FLEX_QUICK_ATTEMPT_FRACTION", "0.3", 0.3),
+    ("llm_min_useful_attempt_seconds", "LLM_MIN_USEFUL_ATTEMPT_SECONDS", "7", 7.0),
+    ("llm_dispatch_margin_seconds", "LLM_DISPATCH_MARGIN_SECONDS", "3", 3.0),
+    (
+        "apac_node_total_timeout_seconds",
+        "APAC_NODE_TOTAL_TIMEOUT_SECONDS",
+        "200",
+        200.0,
+    ),
     ("gemini_rpm_limit", "GEMINI_RPM_LIMIT", "123", 123),
     ("enable_consultant", "ENABLE_CONSULTANT", "false", False),
     ("max_debate_rounds", "MAX_DEBATE_ROUNDS", "1", 1),

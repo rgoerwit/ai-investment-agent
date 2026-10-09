@@ -14,7 +14,8 @@ class RuntimeConfig:
     deep_think_llm: str
     enable_memory: bool
     langfuse_enabled: bool
-    api_retry_attempts: int
+    # Total attempts for one LLM call; see Settings.llm_attempts.
+    llm_attempts: int
     google_rpm_limit: int
     llm_call_hard_timeout_seconds: float
     quick_mode_active: bool
@@ -32,6 +33,11 @@ class RuntimeConfig:
     base_fast_model_override: str | None = None
     base_reasoning_model_override: str | None = None
 
+    @property
+    def api_retry_attempts(self) -> int:
+        """Deprecated alias of ``llm_attempts`` (total attempts)."""
+        return self.llm_attempts
+
     @classmethod
     def from_config(cls, base_config: Any) -> RuntimeConfig:
         google_rpm_limit = (
@@ -44,7 +50,7 @@ class RuntimeConfig:
             deep_think_llm=base_config.deep_think_llm,
             enable_memory=base_config.enable_memory,
             langfuse_enabled=base_config.langfuse_enabled,
-            api_retry_attempts=base_config.api_retry_attempts,
+            llm_attempts=base_config.llm_attempts,
             google_rpm_limit=google_rpm_limit,
             llm_call_hard_timeout_seconds=base_config.llm_call_hard_timeout_seconds,
             quick_mode_active=getattr(base_config, "quick_mode_active", False),
@@ -69,7 +75,7 @@ def build_runtime_config(args: Any, base_config: Any) -> RuntimeConfig:
     if getattr(args, "quick", False):
         runtime_config = runtime_config.with_overrides(
             quick_mode_active=True,
-            api_retry_attempts=min(runtime_config.api_retry_attempts, 2),
+            llm_attempts=min(runtime_config.llm_attempts, 2),
             google_rpm_limit=min(runtime_config.google_rpm_limit, 360),
             llm_call_hard_timeout_seconds=min(
                 runtime_config.llm_call_hard_timeout_seconds,
@@ -111,7 +117,7 @@ def quick_runtime_clamp_changes(
     if not getattr(args, "quick", False):
         return {}
     changes: dict[str, dict[str, Any]] = {}
-    for field in ("api_retry_attempts", "llm_call_hard_timeout_seconds"):
+    for field in ("llm_attempts", "llm_call_hard_timeout_seconds"):
         before = getattr(base_config, field)
         after = getattr(runtime_config, field)
         if after < before:

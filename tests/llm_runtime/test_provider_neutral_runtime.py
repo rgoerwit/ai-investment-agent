@@ -21,6 +21,7 @@ from unittest.mock import Mock
 import pytest
 
 from src.llm_runtime.adapters.base import SeatModelRequest
+from src.llm_runtime.seats import SEATS, SeatId
 
 SRC = Path(__file__).resolve().parents[2] / "src"
 
@@ -168,7 +169,8 @@ class TestAnthropicHonoursTheOutputBudgetContract:
         settings.api_timeout = 120
         return SeatModelRequest(
             binding=binding,
-            seat=Mock(),
+            # A real seat: the adapter reads its timeout class and attempt policy.
+            seat=SEATS[SeatId.ARTICLE_WRITER],
             quick_mode=False,
             callbacks=(),
             output_tokens=output_tokens,

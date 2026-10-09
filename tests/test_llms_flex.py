@@ -206,14 +206,17 @@ class TestGeminiFlexFallback:
 
 
 class TestCreateGeminiModelWiring:
-    def test_flex_config_builds_tiered_instance_with_floored_timeout(self, monkeypatch):
+    def test_flex_config_builds_tiered_instance_without_rewriting_timeout(
+        self, monkeypatch
+    ):
         _set_cfg(monkeypatch, gemini_service_tier="flex")
         _set_cfg(monkeypatch, flex_llm_timeout_seconds=900)
         llm = llms_mod.create_gemini_model("gemini-3.5-flash", 0.3, 60, 2)
         assert isinstance(llm, llms_mod._TieredChatGoogleGenerativeAI)
         assert llm.service_tier == "flex"
-        # SDK client timeout floored so queued flex calls aren't killed
-        assert llm.timeout >= 900
+        # The constructed timeout is only a standard ceiling: the flex request
+        # timeout is sized per dispatch, so a tier change cannot inherit it.
+        assert llm.timeout == 60
 
     def test_standard_config_leaves_timeout_and_tier_alone(self, monkeypatch):
         _set_cfg(monkeypatch, gemini_service_tier="standard")
@@ -239,7 +242,8 @@ class TestOpenAIFlexWiring:
         kwargs = {"model": "gpt-5.4", "timeout": 120}
         llms_mod._apply_openai_service_tier(kwargs, label="test")
         assert kwargs["service_tier"] == "flex"
-        assert kwargs["timeout"] >= 900
+        # No construction-time flex timeout: dispatch sizes each request.
+        assert kwargs["timeout"] == 120
         assert kwargs["flex_fallback_to_standard"] is True
 
     def test_apply_openai_service_tier_noop_when_auto(self, monkeypatch):

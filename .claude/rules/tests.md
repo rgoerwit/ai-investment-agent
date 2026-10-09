@@ -5,6 +5,14 @@ paths:
 
 # Writing tests here
 
+## Running under a sandbox
+
+A bare `pytest` can abort during rootdir collection with a `PermissionError` on a
+file outside the test tree that the sandbox denies. That is not a suite failure, and
+the boundary is not to be bypassed. Keep collection off the repository root instead:
+`poetry run pytest <paths> -q -p no:cacheprovider --rootdir=tests --confcutdir=tests`.
+No conftest lives above `tests/`, so `tests/conftest.py` and its isolation still load.
+
 ## Markers and scope
 
 Mark anything over five seconds `slow` and anything needing the network

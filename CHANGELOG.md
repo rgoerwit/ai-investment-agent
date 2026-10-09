@@ -12,6 +12,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Attempt counts now mean total attempts on every vendor. `API_RETRY_ATTEMPTS` is
+  renamed `LLM_ATTEMPTS` (the old name is still read; the new one wins) and
+  `SeatExecutionPolicy.sdk_max_retries` is renamed `transport_attempts` (the old
+  field still works, translated per vendor). Under the application retry loop each
+  request sends one SDK attempt and the loop owns retries, defaulting to
+  `LLM_ATTEMPTS`. **Behaviour change on OpenAI and Anthropic:** at the same
+  configured value, clients make one fewer request (editor, writer and their
+  fallbacks: 3 requests instead of 4; the writer's `LLM_ATTEMPTS` is now total);
+  the Auditor, APAC specialist and the Consultant's alternate transport go from
+  2-4 SDK requests per call to one; the OpenAI-bound Health Check makes exactly
+  one request instead of two. The loop's transient-retry budget, previously a
+  fixed 2, now defaults to `LLM_ATTEMPTS`: at a configured 3, a full-mode call can
+  make three attempts of up to the 1,350 s flex-floored cap instead of two, until
+  an enclosing deadline bounds it.
+- The APAC specialist's 240 s is now its node total
+  (`APAC_NODE_TOTAL_TIMEOUT_SECONDS`), shared by the first call and the direct
+  retry, rather than a fresh 240 s per call.
+- Seat timeout budgets are chosen by a `TimeoutClass` on each registered seat
+  rather than by matching display names; new knobs `FLEX_QUICK_ATTEMPT_FRACTION`
+  (0.4), `LLM_MIN_USEFUL_ATTEMPT_SECONDS` (5) and `LLM_DISPATCH_MARGIN_SECONDS` (2).
 - Treat generic consultant conditions, numerical discrepancies, and suspicious
   OCF/NI ratios as zero-weight review findings rather than issuer-risk penalties.
 - Block BUY when the Consultant reports MAJOR_CONCERNS: unresolved material
@@ -20,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Size every LLM request at dispatch from the invocation's absolute deadline
+  instead of a timeout fixed on the client at construction. The flex-attempt
+  timeout (24 s quick, 900 s full) no longer rides along on the standard re-issue,
+  on calls sent at standard after flex degrades, or on the model-failover copy;
+  a request with less than `LLM_MIN_USEFUL_ATTEMPT_SECONDS` left is refused before
+  any transport call, and each call attempt now records its `dispatches`
+  (tier, model, timeout sent, remaining allowance, configured attempts, outcome).
+  The full-mode latency fallback to standard is reachable again.
 - Pin the quick-mode Portfolio Manager to the standard Gemini tier again: its
   2026-10 `504 DEADLINE_EXCEEDED` failures were the 24 s quick flex-attempt deadline,
   enforced server-side and inherited by the standard re-issue and failover. The Google

@@ -835,6 +835,14 @@ class Settings(BaseSettings):
         validation_alias="APAC_SPECIALIST_API_KEY",
         description="API key for the optional APAC Regional Specialist",
     )
+    # A node total, not a request timeout: it is the APAC node's enclosing
+    # deadline, so its first call and the direct retry share one allowance.
+    apac_node_total_timeout_seconds: float = Field(
+        default=240.0,
+        gt=0.0,
+        validation_alias="APAC_NODE_TOTAL_TIMEOUT_SECONDS",
+        description="Total wall-clock budget for the APAC specialist node",
+    )
     editor_model: str | None = Field(
         default=None,
         validation_alias="EDITOR_MODEL",
@@ -1038,17 +1046,55 @@ class Settings(BaseSettings):
         validation_alias="QUICK_LLM_API_TIMEOUT_SECONDS",
         description="Provider SDK timeout in seconds for quick-mode Gemini LLMs",
     )
-    # Lowered from 10 -> 2: at 10 retries × 300s timeout, a single hung Gemini
-    # call could legitimately consume 50min before raising. The outer
-    # `invoke_with_rate_limit_handling` already retries 3× with backoff, so
-    # SDK-level retries are deliberately tight. Bump if you see frequent
-    # transient 5xx errors that aren't being absorbed.
-    api_retry_attempts: int = Field(
+    # TOTAL attempts for one LLM call (one meaning on every vendor). Under the
+    # application retry loop (`invoke_with_rate_limit_handling`) this is the
+    # transient-retry budget and each dispatch sends a single SDK attempt; a
+    # caller that invokes a model directly gets it as the client's SDK attempts.
+    # Lowered from 10 -> 2 in May 2026: at 10 x 300s a single hung Gemini call
+    # could consume 50 min before raising.
+    # API_RETRY_ATTEMPTS is the deprecated spelling; LLM_ATTEMPTS wins when both
+    # are set. Its value carries over unchanged: Google, its main consumer,
+    # already counted total attempts.
+    llm_attempts: int = Field(
         default=2,
         ge=0,
-        validation_alias="API_RETRY_ATTEMPTS",
-        description="Number of retry attempts for failed API calls",
+        validation_alias=AliasChoices("LLM_ATTEMPTS", "API_RETRY_ATTEMPTS"),
+        description="Total attempts for one LLM call (0 is treated as 1)",
     )
+    # Per-dispatch admission (src/llm_runtime/timeouts.py). A request is refused,
+    # not sent, when less than the minimum useful attempt remains; the margin is
+    # held back so a request's own deadline fires before the hard cap does.
+    llm_min_useful_attempt_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+        validation_alias="LLM_MIN_USEFUL_ATTEMPT_SECONDS",
+        description="Smallest remaining allowance worth sending a request for",
+    )
+    llm_dispatch_margin_seconds: float = Field(
+        default=2.0,
+        ge=0.0,
+        validation_alias="LLM_DISPATCH_MARGIN_SECONDS",
+        description="Seconds kept back from each request deadline",
+    )
+    # A quick-mode flex request may queue for this share of its invocation cap,
+    # leaving the rest for a standard re-issue inside the same allowance.
+    flex_quick_attempt_fraction: float = Field(
+        default=0.4,
+        gt=0.0,
+        le=0.9,
+        validation_alias="FLEX_QUICK_ATTEMPT_FRACTION",
+        description="Share of a quick invocation cap a flex request may use",
+    )
+
+    @property
+    def api_retry_attempts(self) -> int:
+        """Deprecated alias of ``llm_attempts`` (total attempts)."""
+        return self.llm_attempts
+
+    @api_retry_attempts.setter
+    def api_retry_attempts(self, value: int) -> None:
+        self.llm_attempts = value
+
     # Wall-clock ceiling for a single `runnable.ainvoke()` call. Enforced via
     # `run_with_hard_timeout` in `invoke_with_rate_limit_handling` so a hung
     # provider SDK can't park a worker for hours. Keep tight for screening; use

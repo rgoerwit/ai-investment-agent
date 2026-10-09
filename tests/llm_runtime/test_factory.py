@@ -264,7 +264,10 @@ def test_openai_adapter_omits_temperature_but_keeps_health_bounds(monkeypatch) -
 
     assert SeatModelFactory().build(request) is model
     assert captured["timeout"] == 10.0
-    assert captured["max_retries"] == 1
+    # transport_attempts=1 is total attempts on every vendor: exactly one
+    # request, i.e. zero OpenAI retries. (The old sdk_max_retries=1 meant total
+    # on Google but one *retry* here -- two requests for a health probe.)
+    assert captured["max_retries"] == 0
     assert "temperature" not in captured
 
 
@@ -523,7 +526,7 @@ def test_google_adapter_full_mode_keeps_configured_retries(
 def test_google_adapter_explicit_sdk_retries_win_in_both_modes(
     quick_mode, restore_runtime_config, _reset_flex_state
 ) -> None:
-    assert SEATS[SeatId.HEALTH_CHECK].execution_policy.sdk_max_retries == 1
+    assert SEATS[SeatId.HEALTH_CHECK].execution_policy.transport_attempts == 1
     llm = _build_google_seat(
         SeatId.HEALTH_CHECK,
         _google_settings(api_retry_attempts=3),

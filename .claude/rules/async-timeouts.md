@@ -39,6 +39,13 @@ load-bearing safety net against provider-side slow tails, where SDK-internal ret
 could otherwise park a single call for the better part of an hour. Do not remove it in
 a refactor; a test guards its presence.
 
+**Admission over floors.** Inside that wrap, an LLM request is admitted against the
+absolute deadline it inherits (`src/llm_runtime/timeouts.py`): it is sized to
+`remaining - margin`, refused with `BudgetExhausted` when less than a useful
+attempt remains, and every retry and backoff is re-admitted against the enclosing
+deadline. Do not stretch a ceiling with a floor to make a slow request fit; give
+the work an enclosing deadline (`enclosing_deadline`) and let admission truncate.
+
 **A deadline is not a bound.** A checkpoint bounds nothing that follows it, and a call
 starting just under the deadline can still run a full per-call timeout past it. Wrap
 the whole workflow at one ceiling instead, and prove the node *returns promptly*

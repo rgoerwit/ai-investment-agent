@@ -6,7 +6,7 @@ from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.budgets import reserve_class_for_request
 from src.llm_runtime.rate_limits import limiter_for_binding
 from src.llm_runtime.seats import ModelIntent
-from src.runtime_config import get_runtime_config
+from src.llm_runtime.timeouts import construction_transport_attempts, sdk_max_retries
 
 
 class GoogleAdapter:
@@ -22,25 +22,30 @@ class GoogleAdapter:
 
         settings = request.settings or config
         policy = request.seat.execution_policy
-        # Run-scoped, so the --quick clamp applies (the FAST path already reads
-        # it this way); an explicit policy.sdk_max_retries still wins below.
-        run_retries = get_runtime_config(settings).api_retry_attempts
+        timeout_class = request.seat.timeout_class
+        # Total attempts the client is built with. Run-scoped, so the --quick
+        # clamp applies; a seat's explicit transport_attempts (or its deprecated
+        # sdk_max_retries, translated) wins. Only direct callers use this value:
+        # under the runtime loop each dispatch sends one attempt per request.
+        built_retries = sdk_max_retries(
+            "google",
+            construction_transport_attempts(
+                request.seat, vendor="google", cfg=settings
+            ),
+        )
 
         if not policy.reasoning_control_enabled:
             llm = llms.create_gemini_model(
                 request.binding.model,
                 temperature=policy.sampling_temperature or 0.0,
                 timeout=int(policy.client_timeout_seconds or settings.api_timeout),
-                max_retries=(
-                    policy.sdk_max_retries
-                    if policy.sdk_max_retries is not None
-                    else run_retries
-                ),
+                max_retries=built_retries,
                 callbacks=list(request.callbacks),
                 max_output_tokens=request.output_tokens,
                 service_tier=request.service_tier,
                 api_key=settings.get_google_api_key(),
                 settings=settings,
+                timeout_class=timeout_class,
             )
             llm.rate_limiter = limiter_for_binding(
                 settings,
@@ -73,7 +78,7 @@ class GoogleAdapter:
                     if policy.client_timeout_seconds is not None
                     else None
                 ),
-                max_retries=policy.sdk_max_retries,
+                max_retries=policy.resolved_transport_attempts("google"),
                 callbacks=list(request.callbacks),
                 max_output_tokens=request.output_tokens,
                 service_tier=request.service_tier,
@@ -85,6 +90,7 @@ class GoogleAdapter:
                 api_key=settings.get_google_api_key(),
                 settings=settings,
                 include_thoughts=request.include_reasoning_output,
+                timeout_class=timeout_class,
             )
 
         reasoning = request.reasoning_value
@@ -104,11 +110,7 @@ class GoogleAdapter:
                 else 0.3
             ),
             timeout=int(policy.client_timeout_seconds or settings.api_timeout),
-            max_retries=(
-                policy.sdk_max_retries
-                if policy.sdk_max_retries is not None
-                else run_retries
-            ),
+            max_retries=built_retries,
             callbacks=list(request.callbacks),
             thinking_level=reasoning,
             max_output_tokens=request.output_tokens,
@@ -117,6 +119,7 @@ class GoogleAdapter:
             api_key=settings.get_google_api_key(),
             settings=settings,
             include_thoughts=request.include_reasoning_output,
+            timeout_class=timeout_class,
         )
         llm.rate_limiter = limiter_for_binding(
             settings,

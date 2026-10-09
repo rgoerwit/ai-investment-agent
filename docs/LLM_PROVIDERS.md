@@ -1,7 +1,7 @@
 # LLM Provider Qualification and Operations
 
-Last updated: 2026-10-08 (quick PM 504 re-attribution; PM standard pin; run-scoped
-Google SDK retries).
+Last updated: 2026-10-08 (per-dispatch request budgets and application-owned
+retries; quick PM 504 re-attribution; PM standard pin).
 
 ## Support claims
 
@@ -275,9 +275,11 @@ it from the instance. The deadline exposed slower `gemini-3.8-flash` service fro
 2026-10-06. Containment: the PM is pinned to standard in quick mode again (the 2026-09
 unpin assumed it fit the flex cap), and the Google adapter now takes SDK retries from
 the run-scoped config, so the `--quick` clamp of 2 attempts applies to CRITICAL and
-REASONING seats too, not only FAST. The systemic fix, a per-dispatch deadline instead of
-one fixed at construction, is pending. The failover ladder below still stands for
-genuine model-health failures.
+REASONING seats too, not only FAST. The systemic fix -- a per-dispatch deadline
+instead of one fixed at construction -- landed the same day; see *Request budgets*
+below. The pins on the PM, Junior and Senior Fundamentals stay until measured latency,
+cost per publishable completion and failure rate justify flex. The failover ladder
+below still stands for genuine model-health failures.
 
 A struggling call now goes down one ladder, each rung owned by the layer that already
 owns that concern:
@@ -326,6 +328,70 @@ nodes.** The first version probed `bound`/`first`/`last` with `getattr`. On a mo
 every attribute access returns a new mock, so the walk never terminated. It runs on
 every LLM invocation, so it hung any test that passed a mock LLM. That hang is what
 killed the session that wrote it.
+
+### Request budgets: one policy, an absolute deadline, per-dispatch sizing
+
+The construction-time timeout was the shared defect behind the October PM 504s,
+and it was not PM-specific: every flex seat and the OpenAI flex path built their
+client with a flex-attempt timeout (24 s quick, 900 s full), while the tier is
+chosen *per call*. Re-issue, degraded-standard calls and the failover copy all
+inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
+
+- **`TimeoutClass` on every `SeatSpec`** (`STANDARD`, `APEX`, `CROSS_CHECK`,
+  `REGIONAL`, `EDITORIAL`, `OPERATIONAL`) replaces the hand-kept display-name sets
+  that chose a seat's quick cap. `AUXILIARY` is reserved for contexts no seat
+  claims and cannot be registered.
+- **`BudgetPolicy`** is resolved from (class, run mode, provider): the per-attempt
+  invocation cap (full-mode flex floor included), the flex request ceiling (quick:
+  `FLEX_QUICK_ATTEMPT_FRACTION` x cap; full: `FLEX_LLM_TIMEOUT_SECONDS`), the
+  standard request ceiling (the value clients were already built with), the minimum
+  useful attempt and the margin (`LLM_MIN_USEFUL_ATTEMPT_SECONDS`,
+  `LLM_DISPATCH_MARGIN_SECONDS`), and `LLM_ATTEMPTS`.
+- **The deadline is absolute and lives in a ContextVar**, never on the model.
+  `invoke_with_rate_limit_handling` sets `min(now + cap, enclosing)` per attempt,
+  where *enclosing* is `overall_timeout_seconds` or a node scope
+  (`enclosing_deadline`; the APAC node's `APAC_NODE_TOTAL_TIMEOUT_SECONDS` is one).
+  A retry or failover attempt gets a fresh allowance; nothing renews the enclosing
+  deadline.
+- **Every dispatch is admitted and sized**: flex, standard re-issue, a call sent at
+  standard because flex is degraded, and the failover copy (which reads the same
+  ContextVar, so it never gets a fresh clock). `remaining = deadline - now - margin`;
+  below the minimum useful attempt the request is refused with `BudgetExhausted`
+  before any transport call. A flex share below the minimum goes straight to
+  standard. `BudgetExhausted` is a `TimeoutError` but is never a flex-health signal
+  and never counted by the circuit breakers.
+- **Application-owned retries.** Under the runtime loop each request carries one
+  SDK attempt. Google takes it per request (`max_retries=1`, which
+  langchain-google-genai maps to `HttpRetryOptions(attempts=1)`); the OpenAI SDK
+  fixes retries on the client, so runtime-owned OpenAI-family seats are built with
+  zero retries. The loop's transient budget defaults to `LLM_ATTEMPTS`, and every
+  retry and backoff is re-admitted against the enclosing deadline: a transient
+  backoff is clamped to fit, a rate-limit wait that leaves no useful attempt
+  refuses the retry.
+- **Callers that invoke a model directly** (writer, editor review, retrospective,
+  semantic judge, health check) keep the client's constructed timeout and SDK
+  attempts; only a flex request is sized for them. They are not yet on the policy.
+- **Telemetry**: each `call_attempts` entry carries `dispatches` -- phase, tier,
+  model, timeout sent, remaining allowance, configured attempt limit, outcome,
+  elapsed. Configured limits, not observed physical retries; no payloads.
+
+**Attempt counts have one meaning: total attempts.** `API_RETRY_ATTEMPTS` became
+`LLM_ATTEMPTS` (the old name is still read; the new one wins; the value carries over
+unchanged because Google, its main consumer, already counted totals) and
+`SeatExecutionPolicy.sdk_max_retries` became `transport_attempts` (the old field
+still works, translated: it meant total on Google and *retries* elsewhere;
+`transport_attempts` wins). Consequence on OpenAI and Anthropic: at the same
+configured value a direct-caller client now makes one request fewer (the editor
+and writer literals of 3 now mean three requests, not four), and the runtime-owned
+Auditor, APAC and Consultant transport-fallback clients went from 2-4 SDK requests
+per call to one, with retries owned by the runtime loop.
+
+**Verified against the installed SDKs** (google-genai 2.24.0, langchain-google-genai
+4.4.0, langchain-openai 1.6.2, openai 3.14.1): a per-request `timeout` reaches the
+request layer on Google (`X-Server-Timeout`, the ceiling of the seconds) and on both
+OpenAI request paths (Responses and Chat Completions `create(timeout=...)`); OpenAI
+has no per-request `max_retries`. `tests/llm_runtime/test_timeouts.py` pins both
+through the SDKs' own request layers.
 
 ## Embedding collections
 

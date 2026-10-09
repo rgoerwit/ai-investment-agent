@@ -279,7 +279,7 @@ class TestConfigDataclass:
     def test_config_integer_defaults(self):
         """Test that integer conversions work correctly.
 
-        For env-overridable integers (e.g. api_retry_attempts) we read the
+        For env-overridable integers (e.g. llm_attempts) we read the
         Settings field default directly rather than instantiate Config(), since
         pydantic-settings still loads the developer's local .env even after
         os.environ is cleared.
@@ -291,7 +291,7 @@ class TestConfigDataclass:
         assert config.max_debate_rounds == 2
         assert isinstance(config.api_timeout, int)
         assert config.api_timeout > 0
-        assert Settings.model_fields["api_retry_attempts"].default == 2
+        assert Settings.model_fields["llm_attempts"].default == 2
 
     @patch.dict(os.environ, {}, clear=True)
     def test_config_float_defaults(self):

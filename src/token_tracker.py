@@ -437,6 +437,12 @@ class LLMCallAttempt:
     failure_kind: str | None = None
     failure_origin: str | None = None
     retryable: bool | None = None
+    # Transport requests made inside this attempt (flex, standard re-issue,
+    # failover), each with its effective tier, model, request timeout sent,
+    # remaining allowance at dispatch, configured SDK attempt limit, outcome and
+    # elapsed time. Configured limits, not observed physical retries; never
+    # payloads, headers or client reprs. See src/llm_runtime/timeouts.py.
+    dispatches: list[dict[str, Any]] = field(default_factory=list)
 
 
 class TokenTracker:
@@ -571,6 +577,7 @@ class TokenTracker:
         failure_kind: str | None = None,
         failure_origin: str | None = None,
         retryable: bool | None = None,
+        dispatches: list[dict[str, Any]] | None = None,
     ) -> None:
         """Record one provider call attempt, including failed attempts.
 
@@ -604,6 +611,7 @@ class TokenTracker:
             failure_kind=failure_kind,
             failure_origin=failure_origin,
             retryable=retryable,
+            dispatches=list(dispatches or []),
         )
         with self._lock:
             self.call_attempts.append(attempt_record)

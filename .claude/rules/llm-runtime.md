@@ -70,6 +70,19 @@ per-node backup model for transport errors.** Any walk of a composed runnable mu
 descend only real LangChain composition types: attribute probing never terminates
 on a mock.
 
+## Request deadlines are sized at dispatch, never at construction
+
+**A tier switch, re-issue or failover re-sizes from the enclosing absolute
+deadline; never fix a request deadline at construction.** The tier is chosen per
+call, and Google enforces the client timeout server-side, so a timeout baked into
+a flex-built client rode along on the standard re-issue, degraded-standard calls
+and the failover copy (the October 2026 quick PM 504s). The deadline lives in a
+ContextVar set by `invoke_with_rate_limit_handling`, not on the model; the policy,
+`TimeoutClass` and admission live in `src/llm_runtime/timeouts.py`. Attempt counts
+are **total** attempts everywhere; translate to a vendor's `max_retries` only via
+`sdk_max_retries`. A seat's budget class is data on its `SeatSpec`, never a
+display-name set.
+
 Attempt telemetry must use the transport tier actually reached, including an in-call
 flex-to-standard retry or model failover. A quick-mode timeout after a flex latency
 fallback is still queue-affected even if the final request used standard; capacity
