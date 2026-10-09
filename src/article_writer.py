@@ -20,6 +20,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from src.agents.message_utils import validate_tool_history
+from src.agents.runtime import invoke_with_rate_limit_handling
 from src.article_audit import (
     audit_article_citations,
     extract_source_confidence_context,
@@ -34,7 +35,7 @@ from src.llm_runtime.construction import (
     build_required_model_for_seat,
     writer_seat_fallback_chain,
 )
-from src.llm_runtime.seats import SeatId
+from src.llm_runtime.seats import SEATS, SeatId
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import (
     classify_failure,
@@ -1793,11 +1794,8 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
             if self.llm_with_tools:
                 for iteration in range(self.MAX_TOOL_ITERATIONS):
                     validate_tool_history(messages, agent_key="article_editor")
-                    response = await self.llm_with_tools.ainvoke(
-                        messages,
-                        config=cast(
-                            Any, self._invoke_config(workflow="editor_tool_review")
-                        ),
+                    response = await self._invoke_review_llm(
+                        self.llm_with_tools, messages, workflow="editor_tool_review"
                     )
 
                     tool_calls = getattr(response, "tool_calls", None)
@@ -1850,20 +1848,42 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
 
         if self.review_llm:
             with _structured_review_warning_policy():
-                result = await self.review_llm.ainvoke(
+                result = await self._invoke_review_llm(
+                    self.review_llm,
                     final_messages,
-                    config=self._invoke_config(workflow="editor_structured_review"),
+                    workflow="editor_structured_review",
                 )
             if isinstance(result, BaseModel):
                 return result.model_dump()
             if isinstance(result, dict):
                 return result
 
-        response = await self.llm.ainvoke(
-            final_messages,
-            config=cast(Any, self._invoke_config(workflow="editor_final_review")),
+        response = await self._invoke_review_llm(
+            self.llm, final_messages, workflow="editor_final_review"
         )
         return self._extract_review_result(response)
+
+    async def _invoke_review_llm(
+        self, runnable: Any, messages: list, *, workflow: str
+    ) -> Any:
+        """One editor call, owned by the runtime loop like every graph seat.
+
+        It was uncapped: a bare ``ainvoke`` bounded only by the client's own
+        timeout and SDK retries. The runtime now applies the seat's budget
+        (cap per attempt, every request sized from the remaining allowance,
+        application-owned retries). A failure still raises into ``review``,
+        which degrades to REVISE with ``review_error``.
+        """
+        editor_seat = SEATS[SeatId.EDITOR].callback_name
+        return await invoke_with_rate_limit_handling(
+            runnable,
+            messages,
+            context=editor_seat,
+            canonical_agent=editor_seat,
+            provider=get_runtime_provider(self.llm),
+            model_name=get_model_name(self.llm),
+            config=cast(Any, self._invoke_config(workflow=workflow)),
+        )
 
     def _extract_review_result(self, response) -> dict:
         """

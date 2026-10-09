@@ -32,7 +32,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -49,14 +49,16 @@ class TimeoutClass(StrEnum):
     # Gate-critical seats (Senior Fundamentals, Portfolio Manager): the largest,
     # most rule-dense prompts, given a larger --quick cap.
     APEX = "apex"
-    # The OpenAI cross-check plane (Consultant, Auditor): a vendor-latency
+    # The review plane (Consultant, Auditor, Article Editor): a vendor-latency
     # allowance, not a criticality one.
     CROSS_CHECK = "cross_check"
     # The APAC regional specialist, whose node total is its enclosing deadline.
     REGIONAL = "regional"
-    # Writer, editor and their fallbacks: today invoked outside the runtime loop.
+    # The writer and its fallbacks: still invoked outside the runtime loop.
     EDITORIAL = "editorial"
-    # Operational helpers (macro context, inspectors, retrospective, health check).
+    # Operational helpers (macro context, inspectors, retrospective, health check,
+    # semantic judge). Mixed: some run under the runtime loop, some directly, so
+    # a seat that the loop owns says so with ``transport_attempts=1``.
     OPERATIONAL = "operational"
     # Reserved for callers that are not registered seats; never valid on a SeatSpec.
     AUXILIARY = "auxiliary"
@@ -135,6 +137,9 @@ class BudgetPolicy:
     attempts: int
     # SDK attempts per dispatch under an application-owned invocation.
     transport_attempts: int = 1
+    # A seat's explicit client timeout (``client_timeout_seconds``), kept so a
+    # re-resolution for another provider still honours it.
+    request_cap_override: float | None = None
 
 
 @dataclass
@@ -313,7 +318,38 @@ def resolve_budget_policy(
         min_useful_attempt=min_useful,
         margin=margin,
         attempts=attempts,
+        request_cap_override=(
+            float(request_cap_override) if request_cap_override is not None else None
+        ),
     )
+
+
+def _provider_family(provider: str | None) -> str:
+    """The request-ceiling family a provider label belongs to."""
+    family = (provider or "").strip().lower()
+    return "google" if family in ("", "google", "gemini") else family
+
+
+def policy_for_provider(
+    policy: BudgetPolicy, provider: str | None, *, cfg: Any = None
+) -> BudgetPolicy:
+    """The scope's policy with its request ceiling re-derived for ``provider``.
+
+    The invocation's allowance (cap, margin, minimum useful attempt, attempts)
+    belongs to the invocation and is kept, as is the deadline it was opened
+    with. Only the per-request ceiling is a property of the vendor that
+    actually receives the request: a delegate on another vendor must not send
+    the original vendor's ceiling. A seat's explicit client timeout still wins.
+    """
+    if _provider_family(policy.provider) == _provider_family(provider):
+        return policy
+    if policy.request_cap_override is not None:
+        request_cap = policy.request_cap_override
+    else:
+        request_cap = _standard_request_cap(
+            policy.timeout_class, provider, _settings(cfg), policy.quick_mode
+        )
+    return replace(policy, provider=provider, request_cap=request_cap)
 
 
 def request_timeout(
@@ -364,27 +400,47 @@ def retry_wait_allowance(
     return max(0.0, min(wait, available))
 
 
-def _seat_class_index() -> dict[str, TimeoutClass]:
+def _seat_index() -> dict[str, SeatSpec]:
+    """Display name -> seat, for the facts an invocation's budget depends on.
+
+    Several seats may share a display name (the two writer fallbacks); they
+    must then agree on everything the budget reads, or the name is ambiguous.
+    """
     from src.llm_runtime.seats import SEATS
 
-    index: dict[str, TimeoutClass] = {}
+    index: dict[str, SeatSpec] = {}
     for spec in SEATS.values():
         existing = index.get(spec.callback_name)
-        if existing is not None and existing is not spec.timeout_class:
-            raise ValueError(
-                f"display name {spec.callback_name!r} maps to two timeout classes"
-            )
-        index[spec.callback_name] = spec.timeout_class
+        if existing is not None:
+            if existing.timeout_class is not spec.timeout_class:
+                raise ValueError(
+                    f"display name {spec.callback_name!r} maps to two timeout classes"
+                )
+            if (
+                existing.execution_policy.client_timeout_seconds
+                != spec.execution_policy.client_timeout_seconds
+            ):
+                raise ValueError(
+                    f"display name {spec.callback_name!r} maps to two client timeouts"
+                )
+            continue
+        index[spec.callback_name] = spec
     return index
 
 
-def timeout_class_for_agent(name: str | None) -> TimeoutClass | None:
-    """The registered seat's class for a (possibly decorated) agent name, if any."""
+def seat_for_agent(name: str | None) -> SeatSpec | None:
+    """The registered seat for a (possibly decorated) agent name, if any."""
     if not name:
         return None
     from src.token_tracker import canonical_display_name
 
-    return _seat_class_index().get(canonical_display_name(name))
+    return _seat_index().get(canonical_display_name(name))
+
+
+def timeout_class_for_agent(name: str | None) -> TimeoutClass | None:
+    """The registered seat's class for a (possibly decorated) agent name, if any."""
+    seat = seat_for_agent(name)
+    return seat.timeout_class if seat is not None else None
 
 
 def policy_for_seat(
@@ -393,10 +449,16 @@ def policy_for_seat(
     provider: str | None = None,
     cfg: Any = None,
     runtime_config: RuntimeConfig | None = None,
+    timeout_class: TimeoutClass | None = None,
 ) -> BudgetPolicy:
-    """The budget for a registered seat, honouring its explicit client timeout."""
+    """The budget for a registered seat, honouring its explicit client timeout.
+
+    ``timeout_class`` lets a caller choose a different budget family for one
+    invocation; the seat's client timeout is a property of its client and
+    applies either way.
+    """
     return resolve_budget_policy(
-        seat.timeout_class,
+        timeout_class or seat.timeout_class,
         provider=provider,
         cfg=cfg,
         runtime_config=runtime_config,

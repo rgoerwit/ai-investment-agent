@@ -1551,8 +1551,6 @@ def _warn_quick_timeout_config_drift(args: argparse.Namespace) -> None:
     drift: dict[str, float | int] = {}
     if config.quick_llm_api_timeout_seconds > 120:
         drift["QUICK_LLM_API_TIMEOUT_SECONDS"] = config.quick_llm_api_timeout_seconds
-    if config.llm_call_hard_timeout_seconds > 120:
-        drift["LLM_CALL_HARD_TIMEOUT_SECONDS"] = config.llm_call_hard_timeout_seconds
     if config.api_retry_attempts > 2:
         drift["API_RETRY_ATTEMPTS"] = config.api_retry_attempts
     configured_google_rpm = (
@@ -1578,7 +1576,6 @@ def _warn_quick_timeout_config_drift(args: argparse.Namespace) -> None:
         config=drift,
         suggested_defaults={
             "QUICK_LLM_API_TIMEOUT_SECONDS": 120,
-            "LLM_CALL_HARD_TIMEOUT_SECONDS": 120,
             "API_RETRY_ATTEMPTS": 2,
             "GOOGLE_RPM_LIMIT": "15-360",
         },

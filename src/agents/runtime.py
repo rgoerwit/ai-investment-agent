@@ -29,12 +29,15 @@ from src.llm_runtime.failover import (
 )
 from src.llm_runtime.timeouts import (
     BudgetExhausted,
+    BudgetPolicy,
     TimeoutClass,
     current_enclosing_deadline,
     invocation_scope,
+    policy_for_seat,
     quick_invocation_cap,
     resolve_budget_policy,
     retry_wait_allowance,
+    seat_for_agent,
     timeout_class_for_agent,
 )
 from src.llm_usage import extract_token_usage_breakdown
@@ -84,6 +87,40 @@ def resolve_invocation_timeout_class(
     label) gets the bounded generic ``AUXILIARY`` policy.
     """
     return timeout_class_for_agent(canonical_agent or context) or TimeoutClass.AUXILIARY
+
+
+def resolve_invocation_budget(
+    context: str,
+    canonical_agent: str | None = None,
+    *,
+    provider: str | None = None,
+    timeout_class: TimeoutClass | None = None,
+    runtime_config: Any = None,
+) -> BudgetPolicy:
+    """The one budget an invocation runs under, as the runtime loop resolves it.
+
+    A context that resolves to a registered seat gets ``policy_for_seat``, so
+    the seat's explicit client timeout (``client_timeout_seconds``) is the
+    request ceiling inside the invocation as it is outside it; resolving the
+    class alone dropped it for every scoped dispatch. Callers that need the
+    invocation cap (the analyst structural retry's overall budget) read it
+    here rather than recomputing it beside the runtime.
+    """
+    seat = seat_for_agent(canonical_agent or context)
+    if seat is not None:
+        return policy_for_seat(
+            seat,
+            provider=provider,
+            cfg=settings_config,
+            runtime_config=runtime_config,
+            timeout_class=timeout_class,
+        )
+    return resolve_budget_policy(
+        timeout_class or TimeoutClass.AUXILIARY,
+        provider=provider,
+        cfg=settings_config,
+        runtime_config=runtime_config,
+    )
 
 
 def _validate_llm_input_tool_history(
@@ -476,13 +513,15 @@ async def invoke_with_rate_limit_handling(
     canonical_agent: str | None = None,
     overall_timeout_seconds: float | None = None,
     timeout_class: TimeoutClass | None = None,
+    config: Any = None,
 ) -> Any:
     """
     Invoke an LLM with explicit 429 and transient error handling.
 
     ``canonical_agent`` is the display-namespace identity for cost/diagnostic
     joins; when omitted the token tracker derives it from ``context`` (which may
-    carry a round/retry suffix).
+    carry a round/retry suffix). ``config`` is forwarded to ``ainvoke`` (tracing
+    metadata for callers outside the graph); omitted, the call is unchanged.
 
     This is the owning boundary for the call's deadlines
     (``src/llm_runtime/timeouts.py``). Each attempt gets an absolute deadline,
@@ -519,10 +558,11 @@ async def invoke_with_rate_limit_handling(
     # One policy for this invocation: the seat class picks the per-attempt cap
     # (quick APEX / cross-check / flat), floored for full-mode flex inside the
     # resolver so a queued flex request plus its standard re-issue fit.
-    budget_policy = resolve_budget_policy(
-        timeout_class or resolve_invocation_timeout_class(context, canonical_agent),
+    budget_policy = resolve_invocation_budget(
+        context,
+        canonical_agent,
         provider=resolved_provider,
-        cfg=settings_config,
+        timeout_class=timeout_class,
         runtime_config=runtime_config,
     )
     hard_timeout = budget_policy.invocation_cap
@@ -601,7 +641,11 @@ async def invoke_with_rate_limit_handling(
                 try:
                     with failover_attempt() if failing_over else nullcontext():
                         result = await run_with_hard_timeout(
-                            runnable.ainvoke(input_data),
+                            (
+                                runnable.ainvoke(input_data)
+                                if config is None
+                                else runnable.ainvoke(input_data, config=config)
+                            ),
                             timeout=effective_timeout,
                             label=f"llm:{context}:{resolved_provider}:{resolved_model}",
                         )

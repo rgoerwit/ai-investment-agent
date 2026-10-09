@@ -67,10 +67,29 @@ from .state import AgentState
 
 logger = structlog.get_logger(__name__)
 
-# Seeded from config so the full-mode budgets sit beside their quick-mode
-# sibling; kept as module constants because that is the seam tests patch.
-CONSULTANT_CALL_TIMEOUT_SECONDS = settings_config.consultant_call_timeout_seconds
-CONSULTANT_TOTAL_TIMEOUT_SECONDS = settings_config.consultant_total_timeout_seconds
+
+def consultant_call_timeout_seconds() -> float:
+    """Full-mode per-call Consultant cap, read from config at call time.
+
+    These were module constants seeded at import, so a config change after
+    import (a test override, a run-scoped settings object) never reached them.
+    """
+    return float(settings_config.consultant_call_timeout_seconds)
+
+
+def consultant_total_timeout_seconds(*, quick: bool | None = None) -> float:
+    """The Consultant node's total wall-clock budget, read at call time.
+
+    Quick mode comes from the run config (one source for the whole run), not
+    the graph-build argument; ``quick`` exists only for an explicit override.
+    """
+    if quick is None:
+        quick = get_runtime_config(settings_config).quick_mode_active
+    if quick:
+        return float(settings_config.consultant_quick_total_timeout_seconds)
+    return float(settings_config.consultant_total_timeout_seconds)
+
+
 # Headroom between the cooperative deadline (checked before each tool fan-out)
 # and the hard node bound below it. Wide enough that the graceful path — which
 # still produces a usable partial review — wins on any ordinary overshoot, and
@@ -170,8 +189,10 @@ async def _invoke_consultant_with_deadline(
     model_name: str | None,
     ticker: str,
     deadline: float,
-    total_timeout: float = CONSULTANT_TOTAL_TIMEOUT_SECONDS,
+    total_timeout: float | None = None,
 ) -> object:
+    if total_timeout is None:
+        total_timeout = consultant_total_timeout_seconds()
     remaining = remaining_consultant_budget(deadline)
     if remaining <= 0:
         raise TimeoutError(
@@ -181,7 +202,7 @@ async def _invoke_consultant_with_deadline(
     # Flex tier: a queued call may legitimately take minutes; floor the
     # per-call cap (the shrinking `remaining` budget still bounds the loop).
     per_call_cap = floor_llm_hard_timeout(
-        CONSULTANT_CALL_TIMEOUT_SECONDS,
+        consultant_call_timeout_seconds(),
         provider=provider,
         label="consultant_call_timeout",
     )
@@ -362,9 +383,7 @@ def create_consultant_node(
         cannot disagree about how long this seat is allowed to run.
         """
         return floor_llm_total_timeout(
-            settings_config.consultant_quick_total_timeout_seconds
-            if quick_mode
-            else CONSULTANT_TOTAL_TIMEOUT_SECONDS,
+            consultant_total_timeout_seconds(),
             provider=support.infer_provider_name(llm_with_tools or llm),
             label="consultant_total_timeout",
         )

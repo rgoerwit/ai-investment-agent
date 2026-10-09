@@ -83,6 +83,17 @@ are **total** attempts everywhere; translate to a vendor's `max_retries` only vi
 `sdk_max_retries`. A seat's budget class is data on its `SeatSpec`, never a
 display-name set.
 
+**A caller outside the graph invokes through `invoke_with_rate_limit_handling`,
+keyed by its seat's display name — never a bare `ainvoke` under a cap it computed
+itself.** The editor review, retrospective lesson and semantic judge were moved
+there; a bare `invocation_scope` would size the requests but drop the retries,
+since a scoped Google request sends one SDK attempt. A seat whose calls the loop
+owns but whose class is mixed declares `transport_attempts=1`. Read a cap from
+`resolve_invocation_budget` in `src/agents/runtime.py`, which resolves the seat (so
+its `client_timeout_seconds` holds inside the scope); a dispatch keeps the scope's
+deadline but takes the ceiling of the vendor it sends to (`policy_for_provider`).
+Still direct: the writer chain and the health check.
+
 Attempt telemetry must use the transport tier actually reached, including an in-call
 flex-to-standard retry or model failover. A quick-mode timeout after a flex latency
 fallback is still queue-affected even if the final request used standard; capacity

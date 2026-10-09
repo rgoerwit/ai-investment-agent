@@ -695,11 +695,23 @@ class TestAttemptSemantics:
         assert sdk_max_retries("openai", 3) == 2
 
     def test_runtime_owned_openai_seats_are_built_with_one_attempt(self):
-        for seat in (SeatId.CONSULTANT, SeatId.AUDITOR, SeatId.APAC):
-            assert construction_transport_attempts(SEATS[seat], vendor="openai") == 1
-        # Editorial seats are still invoked directly: they keep a small SDK budget.
+        for seat in (
+            SeatId.CONSULTANT,
+            SeatId.AUDITOR,
+            SeatId.APAC,
+            # Migrated onto the runtime loop in Step 4a.
+            SeatId.EDITOR,
+            SeatId.RETROSPECTIVE,
+            SeatId.SEMANTIC_JUDGE,
+        ):
+            for vendor in ("openai", "anthropic"):
+                assert construction_transport_attempts(SEATS[seat], vendor=vendor) == 1
+        # The writer is still invoked directly: it keeps a small SDK budget.
         assert (
-            construction_transport_attempts(SEATS[SeatId.EDITOR], vendor="openai") == 3
+            construction_transport_attempts(
+                SEATS[SeatId.ARTICLE_WRITER], vendor="openai"
+            )
+            == 3
         )
 
     def test_google_built_attempts_stay_the_run_scoped_llm_attempts(self):

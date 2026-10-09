@@ -2152,7 +2152,12 @@ class TestSavedDiagnostics:
         warning = logger.warning.call_args
         assert warning.args == ("quick_timeout_config_drift",)
         assert warning.kwargs["config"]["QUICK_LLM_API_TIMEOUT_SECONDS"] == 300
-        assert warning.kwargs["config"]["LLM_CALL_HARD_TIMEOUT_SECONDS"] == 600.0
+        # Quick mode no longer clamps the full-mode per-call cap (each seat's
+        # TimeoutClass supplies the quick cap), so a large value is not drift.
+        assert "LLM_CALL_HARD_TIMEOUT_SECONDS" not in warning.kwargs["config"]
+        assert (
+            "LLM_CALL_HARD_TIMEOUT_SECONDS" not in warning.kwargs["suggested_defaults"]
+        )
         assert warning.kwargs["config"]["API_RETRY_ATTEMPTS"] == 3
         assert warning.kwargs["config"]["GEMINI_RPM_LIMIT"] == 1000
 

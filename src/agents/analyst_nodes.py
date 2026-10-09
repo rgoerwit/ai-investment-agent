@@ -40,7 +40,6 @@ from src.runtime_diagnostics import (
     is_artifact_complete,
     success_artifact,
 )
-from src.service_tiers import floor_llm_hard_timeout
 from src.thesis_constants import DRAWDOWN_52WK_RATIO, DRAWDOWN_SMA200_RATIO
 from src.tooling.text_boundary import format_untrusted_block
 
@@ -1642,34 +1641,29 @@ def create_analyst_node(
                     # seat and origin in persisted binding telemetry.
                     retry_runnable = prompt_template | retry_llm
 
-                    # In --quick, base the retry's overall budget on the same
-                    # per-seat cap the main path uses (larger for gate-critical APEX
-                    # seats), so a retry can't clip an APEX seat below its 180s
-                    # allowance. Full mode keeps the standard hard cap.
-                    _retry_rc = get_runtime_config(settings_config)
-                    _retry_base_seconds = (
-                        agent_runtime.quick_mode_hard_timeout_seconds(
-                            agent_prompt.agent_name, settings_config
-                        )
-                        if _retry_rc.quick_mode_active
-                        else float(_retry_rc.llm_call_hard_timeout_seconds)
+                    # The retry's whole budget (every transient attempt together)
+                    # is one invocation cap of the originating seat, read from the
+                    # same resolver the runtime sizes the call with: the seat's
+                    # class in --quick (180 s for gate-critical APEX seats), the
+                    # flex-floored hard cap in full mode.
+                    _retry_context = f"{agent_prompt.agent_name} (RETRY-HIGH)"
+                    _retry_provider = support.infer_provider_name(retry_llm)
+                    _retry_budget = agent_runtime.resolve_invocation_budget(
+                        _retry_context,
+                        agent_prompt.agent_name,
+                        provider=_retry_provider,
+                        runtime_config=get_runtime_config(settings_config),
                     )
                     try:
                         retry_response = (
                             await agent_runtime.invoke_with_rate_limit_handling(
                                 retry_runnable,
                                 {"messages": retry_messages},
-                                context=f"{agent_prompt.agent_name} (RETRY-HIGH)",
+                                context=_retry_context,
                                 canonical_agent=agent_prompt.agent_name,
-                                provider=support.infer_provider_name(retry_llm),
+                                provider=_retry_provider,
                                 model_name=support.get_model_name(retry_llm),
-                                # Floor for flex: an un-floored overall budget
-                                # would clamp the flex-aware hard cap back down.
-                                overall_timeout_seconds=floor_llm_hard_timeout(
-                                    _retry_base_seconds,
-                                    provider=support.infer_provider_name(retry_llm),
-                                    label="analyst_retry_overall_timeout",
-                                ),
+                                overall_timeout_seconds=_retry_budget.invocation_cap,
                             )
                         )
                         retry_response.name = agent_key

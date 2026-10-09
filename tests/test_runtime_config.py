@@ -68,7 +68,9 @@ def test_build_runtime_config_applies_cli_overrides_without_mutating_base() -> N
         langfuse_enabled=True,
         llm_attempts=2,
         google_rpm_limit=360,
-        llm_call_hard_timeout_seconds=120.0,
+        # Not clamped: in --quick each invocation's cap comes from its seat's
+        # TimeoutClass, and this full-mode value is never read.
+        llm_call_hard_timeout_seconds=600.0,
         quick_mode_active=True,
         images_dir=Path("images"),
         quiet_mode=False,
@@ -180,7 +182,6 @@ def test_clamp_change_summary_only_reports_lowered_values() -> None:
     assert quick_runtime_clamp_changes(_args(quick=True), base, runtime_config) == {
         "llm_attempts": {"from": 5, "to": 2},
         "google_rpm_limit": {"from": 1000, "to": 360},
-        "llm_call_hard_timeout_seconds": {"from": 600.0, "to": 120.0},
     }
 
 

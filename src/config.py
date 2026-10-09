@@ -1104,8 +1104,9 @@ class Settings(BaseSettings):
         gt=0.0,
         validation_alias="LLM_CALL_HARD_TIMEOUT_SECONDS",
         description=(
-            "Hard wall-clock cap (seconds) for a single LLM ainvoke; "
-            "raised as TimeoutError if exceeded."
+            "Hard wall-clock cap (seconds) for a single LLM ainvoke in full "
+            "mode; raised as TimeoutError if exceeded. --quick uses the per-class "
+            "quick caps instead."
         ),
     )
     # Tighter per-call cap for --quick mode. Quick Gemini Flash calls should
@@ -1137,7 +1138,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    # The OpenAI cross-check plane (Consultant + Forensic Auditor) is budgeted
+    # The review plane (Consultant, Forensic Auditor, Article Editor) is budgeted
     # separately from the APEX seats: its constraint is *vendor latency*, not
     # gate-criticality. Both seats can be pointed at an OpenAI-compatible endpoint
     # via OPENAI_API_BASE, and a reasoning vendor there can exceed the flat 60s
@@ -1145,7 +1146,8 @@ class Settings(BaseSettings):
     # 2026-08-03 the auditor timed out on 6/6 smoke-suite tickers and every
     # baseline capture was rejected. Kept distinct from the APEX knob so tuning
     # one cannot silently starve the other.
-    # Scope note: in practice this governs the **Auditor**. The Consultant passes
+    # Scope note: in practice this governs the **Auditor** and, since October
+    # 2026, the Article Editor's review calls. The Consultant passes
     # its own `overall_timeout_seconds` = min(CONSULTANT_CALL_TIMEOUT_SECONDS,
     # remaining-of-CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS), which overrides this
     # cap — so raising this alone does not lengthen a Consultant call. Tune the
@@ -1155,9 +1157,9 @@ class Settings(BaseSettings):
         gt=0.0,
         validation_alias="CROSS_CHECK_QUICK_LLM_CALL_HARD_TIMEOUT_SECONDS",
         description=(
-            "Hard wall-clock cap (seconds) for a single OpenAI cross-check-seat "
-            "LLM ainvoke in --quick mode. Governs the Forensic Auditor; the "
-            "Consultant supplies its own tighter per-call deadline."
+            "Hard wall-clock cap (seconds) for a single review-plane LLM ainvoke "
+            "in --quick mode. Governs the Forensic Auditor and Article Editor; "
+            "the Consultant supplies its own tighter per-call deadline."
         ),
     )
     # An *optional* seat must never cost the ticker. The Auditor loops up to

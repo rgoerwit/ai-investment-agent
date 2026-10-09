@@ -73,14 +73,13 @@ _CURRENT_RUNTIME_CONFIG: ContextVar[RuntimeConfig | None] = ContextVar(
 def build_runtime_config(args: Any, base_config: Any) -> RuntimeConfig:
     runtime_config = RuntimeConfig.from_config(base_config)
     if getattr(args, "quick", False):
+        # No per-call cap clamp here: in --quick every LLM invocation's cap comes
+        # from its seat's TimeoutClass (``src/llm_runtime/timeouts.py``), and
+        # ``llm_call_hard_timeout_seconds`` is read only in full mode.
         runtime_config = runtime_config.with_overrides(
             quick_mode_active=True,
             llm_attempts=min(runtime_config.llm_attempts, 2),
             google_rpm_limit=min(runtime_config.google_rpm_limit, 360),
-            llm_call_hard_timeout_seconds=min(
-                runtime_config.llm_call_hard_timeout_seconds,
-                120.0,
-            ),
         )
     # Each flag drives both schemas: the legacy factories read
     # ``quick_think_llm``/``deep_think_llm``, while the provider-scoped resolver
@@ -117,11 +116,10 @@ def quick_runtime_clamp_changes(
     if not getattr(args, "quick", False):
         return {}
     changes: dict[str, dict[str, Any]] = {}
-    for field in ("llm_attempts", "llm_call_hard_timeout_seconds"):
-        before = getattr(base_config, field)
-        after = getattr(runtime_config, field)
-        if after < before:
-            changes[field] = {"from": before, "to": after}
+    before = base_config.llm_attempts
+    after = runtime_config.llm_attempts
+    if after < before:
+        changes["llm_attempts"] = {"from": before, "to": after}
     configured_google_rpm = (
         base_config.google_rpm_limit
         if getattr(base_config, "llm_base_provider", None) is not None

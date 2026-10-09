@@ -1,7 +1,9 @@
 # LLM Provider Qualification and Operations
 
-Last updated: 2026-10-08 (per-dispatch request budgets and application-owned
-retries; quick PM 504 re-attribution; PM standard pin).
+Last updated: 2026-10-08 (editor review, retrospective lesson and semantic judge
+moved onto the budget policy; seat client timeout and vendor ceiling inside an
+invocation; per-dispatch request budgets and application-owned retries; quick PM
+504 re-attribution; PM standard pin).
 
 ## Support claims
 
@@ -368,9 +370,35 @@ inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
   retry and backoff is re-admitted against the enclosing deadline: a transient
   backoff is clamped to fit, a rate-limit wait that leaves no useful attempt
   refuses the retry.
-- **Callers that invoke a model directly** (writer, editor review, retrospective,
-  semantic judge, health check) keep the client's constructed timeout and SDK
-  attempts; only a flex request is sized for them. They are not yet on the policy.
+- **Former direct callers are on the policy.** The Article Editor's review (tool
+  loop, structured and plain final review), the retrospective lesson and the
+  semantic judge go through `invoke_with_rate_limit_handling`, keyed by their
+  seat's display name, so they get the cap, the absolute deadline, per-dispatch
+  sizing and the loop's retries; their seats are built with one SDK attempt. They
+  were routed through the loop rather than given a bare `invocation_scope`,
+  because inside a scope Google sends one SDK attempt per request: without the
+  loop's retries these callers would have lost the resilience their SDK retries
+  used to give. Each keeps its failure behaviour (editor: REVISE with
+  `review_error`; lesson: `None`; judge: an exception, or HARD_FAIL for a
+  refusal). The editor was uncapped; it now has the review-plane (`CROSS_CHECK`)
+  budget, since it is bound to the same group as the Consultant and Auditor. The
+  analyst structural retry reads its overall budget from the same resolver
+  (`resolve_invocation_budget`) instead of recomputing it. Still direct: the
+  writer and its fallbacks, and the health check; for them only a flex request
+  is sized.
+- **The seat, not just its class, resolves the policy.** Inside an invocation the
+  runtime looks up the registered seat (`seat_for_agent`) and resolves through
+  `policy_for_seat`, so a seat's explicit `client_timeout_seconds` (the Health
+  Check's 10 s) is the request ceiling there too; resolving the class alone had
+  dropped it for every scoped dispatch.
+- **The ceiling follows the vendor that receives the request.** A dispatch keeps
+  the invocation's deadline but re-derives the per-request ceiling for its own
+  provider (`policy_for_provider`). Model failover is same-vendor by validation,
+  so a delegate on another vendor is not reachable today; this keeps a future
+  cross-vendor delegate from sending the original vendor's ceiling.
+- **`--quick` no longer clamps `LLM_CALL_HARD_TIMEOUT_SECONDS`.** Every quick cap
+  comes from the seat's class; the clamp's last readers (retrospective and judge)
+  are on the resolver, so the full-mode value is read only in full mode.
 - **Telemetry**: each `call_attempts` entry carries `dispatches` -- phase, tier,
   model, timeout sent, remaining allowance, configured attempt limit, outcome,
   elapsed. Configured limits, not observed physical retries; no payloads.
@@ -381,8 +409,9 @@ unchanged because Google, its main consumer, already counted totals) and
 `SeatExecutionPolicy.sdk_max_retries` became `transport_attempts` (the old field
 still works, translated: it meant total on Google and *retries* elsewhere;
 `transport_attempts` wins). Consequence on OpenAI and Anthropic: at the same
-configured value a direct-caller client now makes one request fewer (the editor
-and writer literals of 3 now mean three requests, not four), and the runtime-owned
+configured value a direct-caller client now makes one request fewer (the writer
+literal of 3 now means three requests, not four; the editor has since moved onto
+the loop and sends one SDK attempt per request), and the runtime-owned
 Auditor, APAC and Consultant transport-fallback clients went from 2-4 SDK requests
 per call to one, with retries owned by the runtime loop.
 

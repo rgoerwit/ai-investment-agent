@@ -18,14 +18,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field still works, translated per vendor). Under the application retry loop each
   request sends one SDK attempt and the loop owns retries, defaulting to
   `LLM_ATTEMPTS`. **Behaviour change on OpenAI and Anthropic:** at the same
-  configured value, clients make one fewer request (editor, writer and their
-  fallbacks: 3 requests instead of 4; the writer's `LLM_ATTEMPTS` is now total);
+  configured value, clients make one fewer request (the writer and its
+  fallbacks: 3 requests instead of 4; the editor now sends one per request under
+  the loop, below);
   the Auditor, APAC specialist and the Consultant's alternate transport go from
   2-4 SDK requests per call to one; the OpenAI-bound Health Check makes exactly
   one request instead of two. The loop's transient-retry budget, previously a
   fixed 2, now defaults to `LLM_ATTEMPTS`: at a configured 3, a full-mode call can
   make three attempts of up to the 1,350 s flex-floored cap instead of two, until
   an enclosing deadline bounds it.
+- The Article Editor's review, the retrospective lesson and the semantic judge now
+  run under the runtime retry loop, like the graph seats: each call is capped by
+  its seat's budget, every request is sized from the remaining allowance, and
+  retries are owned by the loop (one SDK attempt per request; these seats are now
+  built with one attempt on OpenAI and Anthropic). **Behaviour changes:** the
+  editor review was uncapped and is now capped per call at the review-plane budget
+  (`CROSS_CHECK_QUICK_LLM_CALL_HARD_TIMEOUT_SECONDS`, 180 s, in `--quick`;
+  `LLM_CALL_HARD_TIMEOUT_SECONDS` in full mode), and a timeout degrades the review
+  to REVISE as any other editor failure does; the editor seat moves from the
+  editorial to the cross-check budget class. The `--quick` retrospective lesson
+  and judge caps follow their class (`QUICK_LLM_CALL_HARD_TIMEOUT_SECONDS`, 60 s)
+  instead of the removed `min(LLM_CALL_HARD_TIMEOUT_SECONDS, 120)` clamp, which no
+  longer exists; `LLM_CALL_HARD_TIMEOUT_SECONDS` is read only in full mode and is
+  no longer reported as quick-mode drift. A refused judge response is still a
+  HARD_FAIL. The analyst structural retry reads its overall budget from the same
+  resolver (unchanged values). Consultant budgets are read from config at call
+  time, and their quick/full choice follows the run config rather than the
+  graph-build flag. Inside an invocation, a seat's explicit client timeout (the
+  Health Check's 10 s) is now the request ceiling, and a request takes its
+  ceiling from the vendor that receives it.
 - The APAC specialist's 240 s is now its node total
   (`APAC_NODE_TOTAL_TIMEOUT_SECONDS`), shared by the first call and the direct
   retry, rather than a fresh 240 s per call.

@@ -6,6 +6,7 @@ to ensure the consultant doesn't break existing functionality under stress.
 """
 
 import asyncio
+import contextlib
 import copy
 import json
 import time
@@ -22,6 +23,18 @@ from src.agents.consultant_nodes import (
 )
 from src.agents.forensic_repair import canonicalize_forensic_auditor_output
 from src.report_generator import QuietModeReporter
+from src.runtime_config import RuntimeConfig, use_runtime_config
+
+
+def _quick_run():
+    """Bind a --quick run config, the one source of the Consultant's budget mode."""
+    from src.config import config as config_singleton
+
+    return use_runtime_config(
+        RuntimeConfig.from_config(config_singleton).with_overrides(
+            quick_mode_active=True
+        )
+    )
 
 
 class TestDataFormatEdgeCases:
@@ -886,10 +899,11 @@ class TestErrorPropagation:
         ):
             with patch("src.prompts.get_prompt") as mock_get_prompt:
                 with patch(
-                    "src.agents.consultant_nodes.CONSULTANT_CALL_TIMEOUT_SECONDS", 0.05
+                    "src.agents.consultant_nodes.settings_config.consultant_call_timeout_seconds",
+                    0.05,
                 ):
                     with patch(
-                        "src.agents.consultant_nodes.CONSULTANT_TOTAL_TIMEOUT_SECONDS",
+                        "src.agents.consultant_nodes.settings_config.consultant_total_timeout_seconds",
                         0.08,
                     ):
                         mock_prompt = Mock()
@@ -1427,7 +1441,9 @@ class TestConsultantQuickEnvelope:
         )
         # Force the per-call cap above the total so the total is the binding
         # constraint and shows up in the recorded timeout.
-        monkeypatch.setattr(cn_mod, "CONSULTANT_CALL_TIMEOUT_SECONDS", 999.0)
+        monkeypatch.setattr(
+            cn_mod.settings_config, "consultant_call_timeout_seconds", 999.0
+        )
 
         seen_timeouts: list[float] = []
 
@@ -1442,8 +1458,13 @@ class TestConsultantQuickEnvelope:
         mock_prompt = Mock()
         mock_prompt.system_message = "You are a consultant."
         mock_prompt.agent_name = "External Consultant"
-        with patch("src.prompts.get_prompt", return_value=mock_prompt):
+        with (
+            patch("src.prompts.get_prompt", return_value=mock_prompt),
+            contextlib.ExitStack() as stack,
+        ):
             node = create_consultant_node(Mock(), "consultant", quick_mode=True)
+            # The budget's quick mode comes from the run config, not the build flag.
+            stack.enter_context(_quick_run())
             state = {
                 "company_of_interest": "TST",
                 "company_name": "Test Co",
@@ -1475,7 +1496,9 @@ class TestConsultantQuickEnvelope:
         monkeypatch.setattr(
             config_singleton, "consultant_quick_total_timeout_seconds", 10.0
         )
-        monkeypatch.setattr(cn_mod, "CONSULTANT_CALL_TIMEOUT_SECONDS", 999.0)
+        monkeypatch.setattr(
+            cn_mod.settings_config, "consultant_call_timeout_seconds", 999.0
+        )
 
         seen_timeouts: list[float] = []
 
@@ -1490,8 +1513,13 @@ class TestConsultantQuickEnvelope:
         mock_prompt = Mock()
         mock_prompt.system_message = "x"
         mock_prompt.agent_name = "External Consultant"
-        with patch("src.prompts.get_prompt", return_value=mock_prompt):
+        with (
+            patch("src.prompts.get_prompt", return_value=mock_prompt),
+            contextlib.ExitStack() as stack,
+        ):
             node = create_consultant_node(Mock(), "consultant", quick_mode=True)
+            # The budget's quick mode comes from the run config, not the build flag.
+            stack.enter_context(_quick_run())
             await node(
                 {
                     "company_of_interest": "TST",

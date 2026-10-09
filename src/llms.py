@@ -45,6 +45,7 @@ from src.llm_runtime.timeouts import (
     TimeoutClass,
     construction_transport_attempts,
     current_dispatch_scope,
+    policy_for_provider,
     request_timeout,
     resolve_budget_policy,
     sdk_max_retries,
@@ -715,7 +716,9 @@ def _dispatch_budget(
 ) -> tuple[BudgetPolicy, float | None, DispatchScope | None]:
     scope = current_dispatch_scope()
     if scope is not None:
-        return scope.policy, scope.deadline, scope
+        # The deadline is the invocation's; the request ceiling is the vendor's
+        # that actually receives this request (a delegate could be another one).
+        return policy_for_provider(scope.policy, provider), scope.deadline, scope
     raw_class = getattr(model, "budget_timeout_class", None)
     timeout_class = (
         TimeoutClass(raw_class)
@@ -2489,6 +2492,12 @@ def create_editor_llm(
         effort_preference=_EFFORT_PREFERENCE_FULL,
         intent=ModelIntent.REASONING,
         settings=settings,
+        # The editor's review calls run under the runtime loop, which owns
+        # their retries: the seat's policy, as the provider-scoped path builds it.
+        transport_attempts=construction_transport_attempts(
+            SEATS[SeatId.EDITOR], vendor="openai", cfg=settings
+        ),
+        timeout_class=SEATS[SeatId.EDITOR].timeout_class,
     )
 
 

@@ -2500,34 +2500,28 @@ FAILURE_MODE: {UNRESOLVED_PRICE_ONLY} | CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_B
                 "ticker": comparison.get("ticker"),
             }
         )
-        from src.config import config as settings_config
-        from src.service_tiers import floor_llm_hard_timeout
+        from src.agents.runtime import invoke_with_rate_limit_handling
+        from src.llm_runtime.seats import SEATS
 
-        # The flex floor is provider-scoped, so it must follow the seat's actual
+        # The budget is provider-scoped, so it must follow the seat's actual
         # binding rather than assume Google: SeatId.RETROSPECTIVE is bindable,
         # and hardcoding a vendor here gave a non-Google operational plane the
         # wrong ceiling (and a misleading provider in every diagnostic below).
         lesson_provider = get_runtime_provider(llm)
         lesson_model = get_model_name(llm)
-        hard_timeout = floor_llm_hard_timeout(
-            float(get_runtime_config(settings_config).llm_call_hard_timeout_seconds),
+        # The runtime loop owns the deadline: the seat's OPERATIONAL policy caps
+        # each attempt, sizes every request from the remaining allowance, and
+        # owns the retries (the seat sends one SDK attempt per request).
+        lesson_seat = SEATS[SeatId.RETROSPECTIVE].callback_name
+        response = await invoke_with_rate_limit_handling(
+            llm,
+            [HumanMessage(content=prompt)],
+            context=lesson_seat,
+            canonical_agent=lesson_seat,
             provider=lesson_provider,
-            label="retrospective_lesson_timeout",
+            model_name=lesson_model,
+            config=cast(Any, invoke_config) if invoke_config else None,
         )
-        if invoke_config:
-            response = await run_with_hard_timeout(
-                llm.ainvoke(
-                    [HumanMessage(content=prompt)], config=cast(Any, invoke_config)
-                ),
-                timeout=hard_timeout,
-                label=f"llm:retrospective_lesson:{comparison.get('ticker', '?')}",
-            )
-        else:
-            response = await run_with_hard_timeout(
-                llm.ainvoke([HumanMessage(content=prompt)]),
-                timeout=hard_timeout,
-                label=f"llm:retrospective_lesson:{comparison.get('ticker', '?')}",
-            )
 
         from src.agents import extract_string_content
 

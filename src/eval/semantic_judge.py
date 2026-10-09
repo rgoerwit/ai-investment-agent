@@ -8,8 +8,7 @@ from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.async_utils import run_with_hard_timeout
-from src.config import config
+from src.agents.runtime import ProviderRefusalError, invoke_with_rate_limit_handling
 from src.eval.capture_contract import get_node_capture_spec, iter_stage3_judge_specs
 from src.eval.constants import CURRENT_CAPTURE_SCHEMA_VERSION
 from src.eval.prompt_checks import (
@@ -18,8 +17,7 @@ from src.eval.prompt_checks import (
     PromptCheckSuiteExecution,
 )
 from src.llm_runtime.construction import build_required_model_for_seat
-from src.llm_runtime.seats import SeatId
-from src.runtime_config import get_runtime_config
+from src.llm_runtime.seats import SEATS, SeatId
 
 JudgeVerdict = Literal["PASS", "SOFT_FAIL", "HARD_FAIL", "SKIPPED"]
 
@@ -367,16 +365,30 @@ class SemanticJudge:
             f"{_clip_text_for_judge(current_text)}"
         )
         system_message = rubric + _checklist_suffix(rubric_family)
-        response = await run_with_hard_timeout(
-            self._llm.ainvoke(
+        judge_seat = SEATS[SeatId.SEMANTIC_JUDGE].callback_name
+        try:
+            # The runtime loop owns the deadline and the retries: the seat's
+            # OPERATIONAL policy caps each attempt and sizes every request.
+            response = await invoke_with_rate_limit_handling(
+                self._llm,
                 [
                     SystemMessage(content=system_message),
                     HumanMessage(content=user_text),
-                ]
-            ),
-            timeout=get_runtime_config(config).llm_call_hard_timeout_seconds,
-            label="semantic_judge",
-        )
+                ],
+                context=judge_seat,
+                canonical_agent=judge_seat,
+            )
+        except ProviderRefusalError:
+            # A blocked judge response used to arrive as empty content and
+            # parse as HARD_FAIL; the runtime now raises it. Keep the verdict.
+            return JudgeResult(
+                prompt_key=prompt_key,
+                rubric_family=rubric_family,
+                verdict="HARD_FAIL",
+                score=0.0,
+                signals=("judge response refused by the provider",),
+                baseline_run_id=baseline_run_id,
+            )
         raw_response = _message_text(response)
         parsed = self._parse_response(raw_response)
         return JudgeResult(

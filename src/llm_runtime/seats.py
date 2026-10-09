@@ -510,7 +510,10 @@ SEATS: dict[SeatId, SeatSpec] = {
             }
         ),
         optional_mode_field="llm_editor_mode",
-        timeout_class=TimeoutClass.EDITORIAL,
+        # Review-plane budget: bound to the same group as the Consultant and
+        # Auditor, and its review calls run under the runtime loop, which owns
+        # their retries (one SDK attempt per request). Uncapped before Oct 2026.
+        timeout_class=TimeoutClass.CROSS_CHECK,
     ),
     SeatId.CONTENT_INSPECTOR: _seat(
         SeatId.CONTENT_INSPECTOR,
@@ -539,6 +542,9 @@ SEATS: dict[SeatId, SeatSpec] = {
         "Retrospective Lessons",
         group=BindingGroup.OPERATIONAL,
         stage=AuthorityStage.OPERATIONAL,
+        # Invoked through the runtime loop, which owns its retries: one SDK
+        # attempt per request on every vendor.
+        execution_policy=SeatExecutionPolicy(transport_attempts=1),
         timeout_class=TimeoutClass.OPERATIONAL,
     ),
     SeatId.HEALTH_CHECK: _seat(
@@ -583,6 +589,9 @@ SEATS: dict[SeatId, SeatSpec] = {
         stage=AuthorityStage.EVALUATION,
         normal=ModelIntent.REASONING,
         quick=ModelIntent.FAST,
+        # Invoked through the runtime loop, which owns its retries: one SDK
+        # attempt per request on every vendor.
+        execution_policy=SeatExecutionPolicy(transport_attempts=1),
         timeout_class=TimeoutClass.OPERATIONAL,
     ),
 }
