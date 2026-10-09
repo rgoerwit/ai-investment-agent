@@ -16,29 +16,11 @@ import structlog
 from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
 from src.error_safety import redact_sensitive_text
-from src.llm_runtime import timeouts as deadline_clock
+from src.llm_runtime.timeouts import clamp_to_enclosing_deadline
 from src.observability import start_tool_observation
 from src.runtime_diagnostics import classify_failure
 
 logger = structlog.get_logger(__name__)
-
-
-def clamp_to_enclosing_deadline(default_seconds: float) -> float:
-    """``min(default_seconds, remaining)`` under the caller's enclosing deadline.
-
-    The enclosing deadline is the absolute node deadline bound by
-    ``enclosing_deadline`` in ``src/llm_runtime/timeouts.py``; with none bound
-    the default stands. A result ``<= 0`` means the caller's allowance is
-    already spent, and the caller must fail as a timeout without starting work.
-
-    Tool scopes read this deadline but never bind it: binding it around a tool
-    call would also cap the LLM inspection judge inside the call, and the judge
-    fails *open* when refused, where the tool scope's own timeout fails closed.
-    """
-    deadline = deadline_clock.current_enclosing_deadline()
-    if deadline is None:
-        return float(default_seconds)
-    return min(float(default_seconds), deadline - deadline_clock.now())
 
 
 def tool_execution_timeout_seconds() -> float:

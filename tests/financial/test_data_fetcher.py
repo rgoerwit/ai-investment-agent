@@ -77,7 +77,8 @@ class TestParallelExecution:
 
         assert first == second
         assert first is not second
-        fetcher._get_financial_metrics_uncached.assert_awaited_once_with("TEST", 30)
+        # None: the aggregate bound is resolved from Settings inside the fetch.
+        fetcher._get_financial_metrics_uncached.assert_awaited_once_with("TEST", None)
 
     @pytest.mark.asyncio
     async def test_get_financial_metrics_coalesces_inflight_calls(self, fetcher):
@@ -871,35 +872,41 @@ class TestPanicMode:
     async def test_tavily_gap_fill_name_lookup_timeout_falls_back_to_symbol(
         self, fetcher
     ):
-        """Timed-out company-name lookups should not block gap filling."""
+        """Timed-out company-name lookups should not block gap filling.
+
+        The lookup runs on a daemon worker (run_blocking_call), not to_thread,
+        so the stall is a blocking ``.info`` released at the end of the test,
+        which also frees its slot in the shared in-flight cap.
+        """
+        import threading
+
+        from src.config import config as settings
+
         fetcher.tavily_client = MagicMock()
-        original_wait_for = asyncio.wait_for
+        release = threading.Event()
 
-        async def slow_to_thread(_func):
-            await asyncio.sleep(1)
+        class _StalledTicker:
+            @property
+            def info(self):
+                release.wait(5)
+                return {"longName": "Late Name"}
 
-        async def fast_timeout(awaitable, timeout):
-            return await original_wait_for(awaitable, timeout=0.01)
-
-        with patch("src.data.fetcher.yf.Ticker", return_value=MagicMock()):
-            with patch(
-                "src.data.fetcher.asyncio.to_thread",
-                side_effect=slow_to_thread,
+        try:
+            with (
+                patch.object(settings, "company_name_lookup_timeout_seconds", 0.01),
+                patch("src.data.fetcher.yf.Ticker", return_value=_StalledTicker()),
+                patch(
+                    "src.data.fetcher.generate_strict_search_query",
+                    side_effect=lambda symbol, company_name, term: (
+                        f"{symbol}|{company_name}|{term}"
+                    ),
+                ),
+                patch("src.data.fetcher.search_tavily_inspected") as mock_search,
             ):
-                with patch(
-                    "src.data.fetcher.asyncio.wait_for", side_effect=fast_timeout
-                ):
-                    with patch(
-                        "src.data.fetcher.generate_strict_search_query",
-                        side_effect=lambda symbol, company_name, term: (
-                            f"{symbol}|{company_name}|{term}"
-                        ),
-                    ):
-                        with patch(
-                            "src.data.fetcher.search_tavily_inspected"
-                        ) as mock_search:
-                            mock_search.return_value = {"results": []}
-                            await fetcher._fetch_tavily_gaps("TEST", ["returnOnEquity"])
+                mock_search.return_value = {"results": []}
+                await fetcher._fetch_tavily_gaps("TEST", ["returnOnEquity"])
+        finally:
+            release.set()
 
         query = mock_search.call_args.args[0]
         assert query.startswith("TEST|TEST|")

@@ -15,11 +15,23 @@ import structlog
 
 from src.config import config
 from src.data.interfaces import FinancialFetcher
+from src.llm_runtime.timeouts import require_allowance
 
 logger = structlog.get_logger(__name__)
 
-# Default timeout for HTTP requests (session-level safety net + per-request)
-_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
+def _request_timeout() -> aiohttp.ClientTimeout:
+    """HTTP total for one request (session safety net + per-request), read now.
+
+    Shrunk to a caller's enclosing deadline; raises TimeoutError when that
+    is spent, which the request handler treats as a timed-out request.
+    """
+    return aiohttp.ClientTimeout(
+        total=require_allowance(
+            config.market_data_vendor_http_timeout_seconds,
+            label="alpha_vantage.request",
+        )
+    )
 
 
 class AlphaVantageFetcher(FinancialFetcher):
@@ -83,9 +95,10 @@ class AlphaVantageFetcher(FinancialFetcher):
         try:
             logger.debug("alpha_vantage_request", symbol=symbol)
 
-            async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+            timeout = _request_timeout()
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(
-                    self.base_url, params=params, timeout=_TIMEOUT
+                    self.base_url, params=params, timeout=timeout
                 ) as response:
                     if response.status != 200:
                         # HTTP errors are debug level - not user-facing issues

@@ -1274,6 +1274,92 @@ class Settings(BaseSettings):
             "TOOL_TIMEOUT."
         ),
     )
+    # Market-data deadlines: one field per scope, not per value. Several share a
+    # number by coincidence (10 s HTTP vs 10 s ticker resolution, 8 s FX vs 8 s
+    # spot check) and stay separate. Each is clamped at the call to a caller's
+    # enclosing deadline when one is bound; none is required to be narrower
+    # than the scope around it. See docs/CODEBASE_MEMORY.md.
+    market_data_aggregate_fetch_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        validation_alias="MARKET_DATA_AGGREGATE_FETCH_TIMEOUT_SECONDS",
+        description=(
+            "Wall-clock cap (seconds) on one whole financial-metrics fetch "
+            "(resolution, parallel sources, gap fill); on timeout the fetch "
+            "returns an empty payload."
+        ),
+    )
+    market_data_per_source_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0.0,
+        validation_alias="MARKET_DATA_PER_SOURCE_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on each data source in the parallel fetch; a "
+            "source that exceeds it is recorded as a timeout and skipped."
+        ),
+    )
+    market_data_vendor_http_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias="MARKET_DATA_VENDOR_HTTP_TIMEOUT_SECONDS",
+        description=(
+            "aiohttp total timeout (seconds) on one FMP, EODHD or Alpha Vantage "
+            "fundamentals request."
+        ),
+    )
+    market_data_anchor_lookup_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+        validation_alias="MARKET_DATA_ANCHOR_LOOKUP_TIMEOUT_SECONDS",
+        description=(
+            "aiohttp total timeout (seconds) on a lightweight filtered EODHD "
+            "request (anchor metrics, company name)."
+        ),
+    )
+    market_data_ticker_resolution_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias="MARKET_DATA_TICKER_RESOLUTION_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on one mnemonic-to-numeric ticker resolution "
+            "lookup (yahooquery search or search fallback)."
+        ),
+    )
+    market_data_price_history_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0.0,
+        validation_alias="MARKET_DATA_PRICE_HISTORY_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on one yfinance price-history download; the "
+            "resolved-ticker retry gets its own."
+        ),
+    )
+    company_name_lookup_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+        validation_alias="COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on each source in the company-name fallback "
+            "chain and on the gap-fill name lookup."
+        ),
+    )
+    fx_rate_fetch_timeout_seconds: float = Field(
+        default=8.0,
+        gt=0.0,
+        validation_alias="FX_RATE_FETCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on one live FX rate fetch; on timeout the "
+            "static fallback table is used."
+        ),
+    )
+    consultant_spot_check_timeout_seconds: float = Field(
+        default=8.0,
+        gt=0.0,
+        validation_alias="CONSULTANT_SPOT_CHECK_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the Consultant's yfinance spot-check lookup."
+        ),
+    )
     llm_base_output_tokens: int = Field(
         default=32768,
         ge=1024,

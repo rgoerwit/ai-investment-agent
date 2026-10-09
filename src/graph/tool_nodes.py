@@ -14,9 +14,10 @@ from src.claim_policy import STRUCTURED_INGRESS_SOURCES
 from src.config import config as settings_config
 from src.error_safety import summarize_exception
 from src.forensic_budget import ResearchBudgetLedger, ResearchBudgetPolicy
+from src.llm_runtime.timeouts import clamp_to_enclosing_deadline
 from src.runtime_services import get_current_tool_service
 from src.ticker_utils import normalize_ticker
-from src.tooling.runtime import ToolInvocation, clamp_to_enclosing_deadline
+from src.tooling.runtime import ToolInvocation
 from src.tooling.structured_ingress import (
     build_structured_ingress_record,
     merge_structured_inputs,

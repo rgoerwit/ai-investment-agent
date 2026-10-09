@@ -58,6 +58,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deadline-only (`run_with_hard_timeout`) rather than `asyncio.wait_for`, so a
   stalled inspection hook that ignores cancellation returns `TOOL_TIMEOUT` on time
   and its late, uninspected result is discarded instead of being returned.
+- The market-data deadlines are now settings, one per scope, defaults unchanged:
+  the whole metrics fetch (`MARKET_DATA_AGGREGATE_FETCH_TIMEOUT_SECONDS`, 30 s),
+  each parallel source (`MARKET_DATA_PER_SOURCE_TIMEOUT_SECONDS`, 15 s), a vendor
+  HTTP request (`MARKET_DATA_VENDOR_HTTP_TIMEOUT_SECONDS`, 10 s), the lightweight
+  EODHD lookup (`MARKET_DATA_ANCHOR_LOOKUP_TIMEOUT_SECONDS`, 5 s), ticker
+  resolution (`MARKET_DATA_TICKER_RESOLUTION_TIMEOUT_SECONDS`, 10 s), price
+  history (`MARKET_DATA_PRICE_HISTORY_TIMEOUT_SECONDS`, 15 s), each company-name
+  source (`COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS`, 5 s), a live FX rate
+  (`FX_RATE_FETCH_TIMEOUT_SECONDS`, 8 s) and the Consultant's spot check
+  (`CONSULTANT_SPOT_CHECK_TIMEOUT_SECONDS`, 8 s). Each is read at the call and
+  shrinks to a caller's remaining enclosing deadline when one is bound; a call
+  whose caller deadline has already passed takes its existing timeout fallback
+  without starting.
 - The APAC specialist's 240 s is now its node total
   (`APAC_NODE_TOTAL_TIMEOUT_SECONDS`), shared by the first call and the direct
   retry, rather than a fresh 240 s per call.

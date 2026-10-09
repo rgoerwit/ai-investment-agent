@@ -28,6 +28,7 @@ from src.error_safety import (
     safe_error_payload,
     summarize_exception,
 )
+from src.llm_runtime.timeouts import require_allowance
 from src.mcp.errors import MCPCallError, make_mcp_tool_name
 from src.runtime_diagnostics import classify_failure
 from src.runtime_services import (
@@ -37,8 +38,6 @@ from src.runtime_services import (
 from src.tooling.runtime import ToolInvocation, ToolResult
 
 logger = structlog.get_logger(__name__)
-
-SPOT_CHECK_TIMEOUT_SECONDS = 8.0
 
 # Fields the consultant is allowed to spot-check (decision-critical metrics only)
 ALLOWED_FIELDS = frozenset(
@@ -363,11 +362,17 @@ async def spot_check_metric(
             }
         )
 
+    # Read at call time; a spent caller deadline takes the timeout path below
+    # without starting the lookup.
+    timeout_seconds = config.consultant_spot_check_timeout_seconds
     try:
+        timeout_seconds = require_allowance(
+            timeout_seconds, label="consultant_spot_check"
+        )
         stock = yf.Ticker(ticker)
         info = await run_with_hard_timeout(
             asyncio.to_thread(lambda: stock.info),
-            timeout=SPOT_CHECK_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
             label=f"consultant_spot_check:{ticker}",
         )
         value = info.get(metric)
@@ -385,7 +390,7 @@ async def spot_check_metric(
             "spot_check_timeout",
             ticker=ticker,
             metric=metric,
-            timeout_seconds=SPOT_CHECK_TIMEOUT_SECONDS,
+            timeout_seconds=timeout_seconds,
         )
         return json.dumps(
             {

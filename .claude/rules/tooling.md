@@ -23,8 +23,9 @@ scoped services rather than mutating the globals.
 The runner timeout in `src/tooling/runtime.py` does not cover the `after()`
 inspection hooks; the wider scope in `src/graph/tool_nodes.py` is their only bound.
 Keep both. Tool scopes may *read* the caller's enclosing deadline but must never
-*bind* one: the LLM judge fails open when admission refuses it. See
-`docs/CODEBASE_MEMORY.md`.
+*bind* one: the LLM judge fails open when admission refuses it. The clamp lives in
+`src/llm_runtime/timeouts.py` (`clamp_to_enclosing_deadline`, `require_allowance`)
+and is shared with the market-data scopes. See `docs/CODEBASE_MEMORY.md`.
 
 ## Treat every external string as hostile
 

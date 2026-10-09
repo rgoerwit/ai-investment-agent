@@ -175,6 +175,38 @@ def current_enclosing_deadline() -> float | None:
     return _ENCLOSING_DEADLINE.get()
 
 
+def clamp_to_enclosing_deadline(default_seconds: float) -> float:
+    """``min(default_seconds, remaining)`` under the caller's enclosing deadline.
+
+    The enclosing deadline is the absolute node deadline bound by
+    ``enclosing_deadline``; with none bound the default stands. A result
+    ``<= 0`` means the caller's allowance is already spent, and the caller must
+    fail as a timeout without starting work.
+
+    Operational scopes (tool calls, market-data fetches) read this deadline but
+    never bind it: binding it around such a call would also cap any LLM
+    inspection judge inside it, and the judge fails *open* when refused, where
+    the scope's own timeout fails closed.
+    """
+    deadline = current_enclosing_deadline()
+    if deadline is None:
+        return float(default_seconds)
+    return min(float(default_seconds), deadline - now())
+
+
+def require_allowance(default_seconds: float, *, label: str) -> float:
+    """``clamp_to_enclosing_deadline``, raising ``TimeoutError`` once it is spent.
+
+    For a call site whose existing timeout handling is the fallback: a spent
+    caller allowance takes the same path as the call's own timeout, without
+    starting the call (``run_with_hard_timeout`` rejects a non-positive bound).
+    """
+    seconds = clamp_to_enclosing_deadline(default_seconds)
+    if seconds <= 0:
+        raise TimeoutError(f"{label!r}: enclosing deadline already passed")
+    return seconds
+
+
 @contextmanager
 def invocation_scope(policy: BudgetPolicy, deadline: float) -> Iterator[DispatchScope]:
     """Bind one application attempt's deadline for the dispatches made inside it.

@@ -202,6 +202,12 @@ def run_blocking_call_sync(policy: BlockingCallPolicy, fn: Callable[[], T]) -> T
         ) from None
 
 
+# The yfinance-info, yahooquery, FX and gap-fill policies carry a label and (for
+# gap fill) a shared in-flight cap; their numbers are only the shipped defaults.
+# Each call site applies its Settings field with with_timeout(), clamped to a
+# caller's enclosing deadline: COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS and
+# FX_RATE_FETCH_TIMEOUT_SECONDS. tests/data/test_market_data_timeouts.py pins
+# these numbers to the Settings defaults.
 YFINANCE_INFO_POLICY = BlockingCallPolicy("yfinance.info", 5.0)
 YAHOOQUERY_QUOTE_TYPE_POLICY = BlockingCallPolicy("yahooquery.quote_type", 5.0)
 OUTPUT_COMPANY_NAME_POLICY = BlockingCallPolicy("output_company_name", 6.0)

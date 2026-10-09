@@ -146,6 +146,20 @@ _SETTINGS_ENV_CASES = [
         "150",
         150.0,
     ),
+    *[
+        (field, field.upper(), "7.5", 7.5)
+        for field in (
+            "market_data_aggregate_fetch_timeout_seconds",
+            "market_data_per_source_timeout_seconds",
+            "market_data_vendor_http_timeout_seconds",
+            "market_data_anchor_lookup_timeout_seconds",
+            "market_data_ticker_resolution_timeout_seconds",
+            "market_data_price_history_timeout_seconds",
+            "company_name_lookup_timeout_seconds",
+            "fx_rate_fetch_timeout_seconds",
+            "consultant_spot_check_timeout_seconds",
+        )
+    ],
     ("gemini_rpm_limit", "GEMINI_RPM_LIMIT", "123", 123),
     ("enable_consultant", "ENABLE_CONSULTANT", "false", False),
     ("max_debate_rounds", "MAX_DEBATE_ROUNDS", "1", 1),

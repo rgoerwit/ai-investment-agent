@@ -480,6 +480,30 @@ node has the outer scope; the Consultant, Auditor, Legal Counsel, article editor
 and evidence preflight call the service directly, so their inspection hooks are
 bounded only by whatever deadline their own caller holds.
 
+**Market-data deadlines are grouped by scope, not by value (October 2026).**
+The fields sit together in `Settings` in `src/config.py`. Equal numbers do not mean
+one field: the 10 s vendor HTTP total and the 10 s ticker-resolution lookup, or the
+8 s FX fetch and the 8 s Consultant spot check, bound different things and are
+tuned separately. One field does cover several sites when the meaning is the same:
+the four company-name sources in `src/ticker_utils.py` and the gap-fill name
+lookup share `COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS`, and FMP, EODHD and Alpha
+Vantage share the vendor HTTP total. EODHD's filtered lookup keeps its own 5 s.
+The `BlockingCallPolicy` constants in `src/blocking_io.py` keep their label and
+in-flight cap, but their number is only the default; each call site applies its
+field with `with_timeout()`.
+
+Every site clamps to `clamp_to_enclosing_deadline` / `require_allowance` in
+`src/llm_runtime/timeouts.py`, moved there from `src/tooling/runtime.py` so the
+data layer does not import tooling. A spent caller allowance raises
+`TimeoutError` *before* the coroutine or thread is created, so it takes the
+site's existing timeout fallback and leaves no un-awaited request. As with the
+tool scopes, the aggregate metrics fetch reads the enclosing deadline but never
+binds one: gap fill runs content inspection, and its LLM judge fails open when
+admission refuses it. Today only the APAC specialist binds an enclosing deadline,
+so in practice the clamp is inert until a run-level deadline is bound. Not yet
+settings: the advisory benchmark and price-snapshot history fetches in
+`src/main.py` (10 s each) and the report-header name lookup in `src/output.py`.
+
 ### IBKR path
 
 Main files:

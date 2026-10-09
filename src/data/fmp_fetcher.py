@@ -31,11 +31,24 @@ import structlog
 from src.config import config
 from src.data.interfaces import FinancialFetcher
 from src.error_safety import redact_sensitive_text, summarize_exception
+from src.llm_runtime.timeouts import require_allowance
 
 logger = structlog.get_logger(__name__)
 
-# Default timeout for HTTP requests (session-level safety net + per-request)
-_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
+def _request_timeout() -> aiohttp.ClientTimeout:
+    """HTTP total for one request (session safety net + per-request), read now.
+
+    Shrunk to a caller's enclosing deadline; raises TimeoutError when that
+    is spent, which the request handler treats as a failed request.
+    """
+    return aiohttp.ClientTimeout(
+        total=require_allowance(
+            config.market_data_vendor_http_timeout_seconds, label="fmp.request"
+        )
+    )
+
+
 _COOLDOWN_MINUTES = 15
 
 _FMP_SUBSCRIPTION_MARKERS = (
@@ -135,10 +148,9 @@ class FMPFetcher(FinancialFetcher):
         params["apikey"] = self.api_key
 
         try:
-            async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
-                async with session.get(
-                    url, params=params, timeout=_TIMEOUT
-                ) as response:
+            timeout = _request_timeout()
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, params=params, timeout=timeout) as response:
                     if response.status == 200:
                         try:
                             data = await response.json()

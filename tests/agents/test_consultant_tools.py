@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.config import config as consultant_config
 from src.consultant_tools import (
     FMP_FIELD_MAP,
     get_consultant_tools,
@@ -62,7 +63,9 @@ class TestSpotCheckMetric:
 
         with patch("src.consultant_tools.yf.Ticker") as mock_ticker:
             mock_ticker.return_value.info = {"trailingPE": 12.5}
-            with patch("src.consultant_tools.SPOT_CHECK_TIMEOUT_SECONDS", 0.01):
+            with patch.object(
+                consultant_config, "consultant_spot_check_timeout_seconds", 0.01
+            ):
                 with patch(
                     "src.consultant_tools.asyncio.to_thread",
                     side_effect=slow_to_thread,

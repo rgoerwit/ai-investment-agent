@@ -49,7 +49,7 @@ import pytest
 OUTER_WRAPPED_ALLOWLIST: dict[str, str] = {
     # source_fetchers.py: each builder is wrapped by run_with_hard_timeout in
     # fetch_all_sources_parallel (src/data/source_fetchers.py:263) under
-    # PER_SOURCE_TIMEOUT=15. Inner to_thread calls inherit that bound.
+    # MARKET_DATA_PER_SOURCE_TIMEOUT_SECONDS. Inner to_thread calls inherit that bound.
     "src/data/source_fetchers.py:33": (
         "wrapped by run_with_hard_timeout in fetch_all_sources_parallel"
     ),

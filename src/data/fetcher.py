@@ -117,6 +117,10 @@ from src.fx_normalization import (
     is_near_minor_unit_ratio,
     normalize_minor_unit_amount,
 )
+from src.llm_runtime.timeouts import (
+    clamp_to_enclosing_deadline,
+    require_allowance,
+)
 from src.runtime_services import get_current_market_data_fetcher
 from src.tavily_utils import search_tavily_inspected
 from src.ticker_policy import (
@@ -173,7 +177,6 @@ DEBT_EQUITY_PERCENTAGE_THRESHOLD = 10.0
 FX_CACHE_TTL_SECONDS = 3600
 FETCH_RESULT_CACHE_TTL_SECONDS = 30
 PRICE_HISTORY_CACHE_TTL_SECONDS = 30
-PER_SOURCE_TIMEOUT = 15
 
 RECENT_SPLIT_WINDOW_DAYS = 180
 SPLIT_RATIO_MATCH_TOLERANCE = 0.25
@@ -806,7 +809,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         return await fetch_all_sources_parallel_impl(
             self,
             symbol,
-            PER_SOURCE_TIMEOUT,
+            config.market_data_per_source_timeout_seconds,
             logger_obj=logger,
             asyncio_module=asyncio,
         )
@@ -1535,9 +1538,13 @@ class SmartMarketDataFetcher(FinancialFetcher):
         try:
             from yahooquery import search as yq_search
 
+            timeout = require_allowance(
+                config.market_data_ticker_resolution_timeout_seconds,
+                label="yahooquery_search",
+            )
             result = await run_with_hard_timeout(
                 asyncio.to_thread(yq_search, base),
-                timeout=10,
+                timeout=timeout,
                 label=f"yahooquery_search:{base}",
             )
             quotes = result.get("quotes", []) if isinstance(result, dict) else []
@@ -1599,9 +1606,13 @@ class SmartMarketDataFetcher(FinancialFetcher):
             query = f"{symbol} yahoo finance ticker numeric code"
 
             # Use Tavily to find the mapping
+            timeout = require_allowance(
+                config.market_data_ticker_resolution_timeout_seconds,
+                label="tavily_ticker_resolve",
+            )
             result = await run_with_hard_timeout(
                 asyncio.to_thread(self.tavily_client.search, query, max_results=1),
-                timeout=10,
+                timeout=timeout,
                 label=f"tavily_ticker_resolve:{symbol}",
             )
 
@@ -1645,10 +1656,22 @@ class SmartMarketDataFetcher(FinancialFetcher):
             return None
 
     async def _get_financial_metrics_uncached(
-        self, ticker: str, timeout: int = 30
+        self, ticker: str, timeout: float | None = None
     ) -> dict[str, Any]:
-        """Hard wall-clock limit on the entire metrics fetch cycle."""
+        """Hard wall-clock limit on the entire metrics fetch cycle.
+
+        *timeout* defaults to ``MARKET_DATA_AGGREGATE_FETCH_TIMEOUT_SECONDS``
+        and is shrunk to a caller's enclosing deadline. The scope reads that
+        deadline but does not bind one for the stages inside it: gap fill runs
+        content inspection, whose LLM judge fails open when refused.
+        """
+        if timeout is None:
+            timeout = config.market_data_aggregate_fetch_timeout_seconds
+        timeout = clamp_to_enclosing_deadline(timeout)
         try:
+            if timeout <= 0:
+                # The caller's allowance is already spent: never start the fetch.
+                raise asyncio.TimeoutError("enclosing deadline already passed")
             return await asyncio.wait_for(
                 self._fetch_metrics_inner(ticker),
                 timeout=timeout,
@@ -1931,7 +1954,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
             )
 
     async def get_financial_metrics(
-        self, ticker: str, timeout: int = 30
+        self, ticker: str, timeout: float | None = None
     ) -> dict[str, Any]:
         """Return unified metrics with short-lived per-process caching and inflight dedupe."""
         cached = self._get_cached_metrics(ticker)
@@ -1982,9 +2005,13 @@ class SmartMarketDataFetcher(FinancialFetcher):
             if not history_kwargs:
                 history_kwargs["period"] = period
 
+            timeout = require_allowance(
+                config.market_data_price_history_timeout_seconds,
+                label="yfinance.history",
+            )
             hist = await run_with_hard_timeout(
                 asyncio.to_thread(stock.history, **history_kwargs),
-                timeout=15,
+                timeout=timeout,
                 label=f"yfinance.history:{ticker}",
             )
             if hist.empty:
@@ -1994,9 +2021,14 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         "history_ticker_resolved", original=ticker, resolved=resolved
                     )
                     stock = yf.Ticker(resolved)
+                    # Its own allowance, re-read after resolution spent time.
+                    timeout = require_allowance(
+                        config.market_data_price_history_timeout_seconds,
+                        label="yfinance.history",
+                    )
                     hist = await run_with_hard_timeout(
                         asyncio.to_thread(stock.history, **history_kwargs),
-                        timeout=15,
+                        timeout=timeout,
                         label=f"yfinance.history:{resolved}",
                     )
             return hist
