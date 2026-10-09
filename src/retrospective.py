@@ -53,6 +53,7 @@ from src.lesson_disposition import (
     derive_disposition,
     render_record,
 )
+from src.llm_runtime.timeouts import require_allowance
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import classify_failure, get_runtime_provider
 from src.runtime_diagnostics.failure_classification import ProviderName, get_model_name
@@ -1789,9 +1790,16 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
 
             return result
 
+        # RETROSPECTIVE_PRICE_FETCH_TIMEOUT_SECONDS, read at the call and shrunk
+        # to a caller's enclosing deadline before the thread is created; a spent
+        # deadline takes the timeout path below without starting the fetch.
+        fetch_timeout = require_allowance(
+            config.retrospective_price_fetch_timeout_seconds,
+            label="retrospective_yfinance",
+        )
         data = await run_with_hard_timeout(
             asyncio.to_thread(_fetch_current_data),
-            timeout=15.0,
+            timeout=fetch_timeout,
             label=f"retrospective_yfinance:{ticker}",
         )
 

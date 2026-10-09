@@ -42,6 +42,7 @@ from src.eval import (
     reset_active_capture_manager,
     set_active_capture_manager,
 )
+from src.llm_runtime.timeouts import require_allowance
 from src.runtime_config import (
     bind_runtime_config,
     build_runtime_config,
@@ -378,9 +379,14 @@ async def _fetch_market_context(ticker: str, trade_date: str) -> str:
 
         suffix = get_ticker_suffix(ticker)
         benchmark = EXCHANGE_BENCHMARK.get(suffix, FALLBACK_BENCHMARK)
+        # Resolved before the thread is created; a spent caller deadline takes
+        # the empty-note fallback below without starting the fetch.
+        fetch_timeout = require_allowance(
+            config.market_context_fetch_timeout_seconds, label="market_context"
+        )
         hist = await run_with_hard_timeout(
             asyncio.to_thread(lambda: yf.Ticker(benchmark).history(period="2d")),
-            timeout=10,
+            timeout=fetch_timeout,
             label=f"market_context:{benchmark}",
         )
         if len(hist) >= 2:
@@ -421,11 +427,14 @@ async def _fetch_price_snapshot(ticker: str) -> dict[str, float] | None:
         # auto_adjust=False: the trigger must share the DATA_BLOCK's basis
         # (vendor fiftyTwoWeekHigh is unadjusted; adjusted highs sit lower and
         # silently under-trigger — 6831.HK 2026-07-02: 8.73 adjusted vs 9.81).
+        fetch_timeout = require_allowance(
+            config.price_snapshot_fetch_timeout_seconds, label="price_snapshot"
+        )
         hist = await run_with_hard_timeout(
             asyncio.to_thread(
                 lambda: yf.Ticker(ticker).history(period="1y", auto_adjust=False)
             ),
-            timeout=10,
+            timeout=fetch_timeout,
             label=f"price_snapshot:{ticker}",
         )
         closes = hist["Close"].dropna()

@@ -25,7 +25,6 @@ _REQUIRED_TRACE_METHODS = (
     "get_current_trace_id",
     "get_trace_url",
 )
-_DEFAULT_FLUSH_TIMEOUT_SECONDS = 2.0
 
 _ACTIVE_TRACE_CONTEXT: ContextVar[TraceContext | None] = ContextVar(
     "active_trace_context", default=None
@@ -692,15 +691,20 @@ def create_deferred_score(
         )
 
 
-def flush_traces(timeout_seconds: float = _DEFAULT_FLUSH_TIMEOUT_SECONDS) -> None:
+def flush_traces(timeout_seconds: float | None = None) -> None:
     """Best-effort flush/shutdown of the active Langfuse client.
 
     The Langfuse SDK can block while draining worker queues during shutdown.
     Bound that wait so CLI failure/exit paths are not hostage to exporter state.
+    The bound is ``timeout_seconds`` when given, else
+    ``LANGFUSE_FLUSH_TIMEOUT_SECONDS`` read now. It is a shutdown path, run
+    after any caller deadline, so it is not clamped to one.
     """
     settings = _current_settings()
     if not _runtime_langfuse_enabled(settings) or not _langfuse_keys_present(settings):
         return
+    if timeout_seconds is None:
+        timeout_seconds = settings.langfuse_flush_timeout_seconds
 
     try:
         from langfuse import get_client

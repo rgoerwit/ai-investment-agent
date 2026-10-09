@@ -1360,6 +1360,63 @@ class Settings(BaseSettings):
             "Hard cap (seconds) on the Consultant's yfinance spot-check lookup."
         ),
     )
+    ownership_section_timeout_seconds: float = Field(
+        default=8.0,
+        gt=0.0,
+        validation_alias="OWNERSHIP_SECTION_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on each yfinance ownership section (institutional "
+            "holders, insider transactions, major holders); on timeout that "
+            "section is marked unavailable and the others still run."
+        ),
+    )
+    stocktwits_http_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias="STOCKTWITS_HTTP_TIMEOUT_SECONDS",
+        description=(
+            "aiohttp total timeout (seconds) on one StockTwits stream request; "
+            "on timeout the sentiment lookup returns an error payload."
+        ),
+    )
+    retrospective_price_fetch_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0.0,
+        validation_alias="RETROSPECTIVE_PRICE_FETCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the retrospective's whole yfinance fetch for "
+            "one past snapshot (stock history plus benchmark and its fallback); "
+            "on timeout that snapshot is skipped."
+        ),
+    )
+    market_context_fetch_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias="MARKET_CONTEXT_FETCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the advisory two-day benchmark history fetch "
+            "behind the market note; on timeout the note is omitted."
+        ),
+    )
+    price_snapshot_fetch_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias="PRICE_SNAPSHOT_FETCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the advisory one-year price history fetch for "
+            "the drawdown-investigation snapshot; on timeout there is no snapshot."
+        ),
+    )
+    output_company_name_timeout_seconds: float = Field(
+        default=6.0,
+        gt=0.0,
+        validation_alias="OUTPUT_COMPANY_NAME_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the whole report-header company-name lookup "
+            "(every candidate symbol); on timeout the header uses the ticker. "
+            "Each candidate also has COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS."
+        ),
+    )
     # Research deadlines: web search, filing lookup and fetch, document download
     # and extraction. Same rules as the market-data block above: one field per
     # scope (30 s Tavily search vs 30 s Tavily extract vs 30 s filing fetch stay
@@ -1498,6 +1555,59 @@ class Settings(BaseSettings):
             "Hard cap (seconds) on the wait for one MCP tool call's result once "
             "the session is open. Matches the tool runner's default, which "
             "bounds the whole call (session open included) and so fires first."
+        ),
+    )
+    # Operational deadlines: health-check probe, embeddings, and the two
+    # shutdown paths. Same one-field-per-scope rule (15 s health probe vs 15 s
+    # embeddings probe; 2 s client close vs 2 s trace flush stay separate). Only
+    # the embedding call clamps to a caller's enclosing deadline: the health
+    # check is a top-level entrypoint, the embeddings probe initialises a
+    # process-wide client whose failure is cached, and the shutdown paths run
+    # after any caller deadline under SHUTDOWN_HARD_TIMEOUT_SECONDS.
+    health_check_connectivity_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0.0,
+        validation_alias="HEALTH_CHECK_CONNECTIVITY_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the health check's one-word LLM probe; on "
+            "timeout the connectivity check fails. The HEALTH_CHECK seat's own "
+            "client timeout sits inside it."
+        ),
+    )
+    memory_embedding_healthcheck_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0.0,
+        validation_alias="MEMORY_EMBEDDING_HEALTHCHECK_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the embedding client's startup probe; on "
+            "timeout memory runs without embeddings for the process."
+        ),
+    )
+    memory_embedding_call_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        validation_alias="MEMORY_EMBEDDING_CALL_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on one embedding request for a memory read or "
+            "write, per attempt; shrinks to a caller's enclosing deadline."
+        ),
+    )
+    genai_client_close_timeout_seconds: float = Field(
+        default=2.0,
+        gt=0.0,
+        validation_alias="GENAI_CLIENT_CLOSE_TIMEOUT_SECONDS",
+        description=(
+            "Cap (seconds) on closing each Google GenAI async client at shutdown; "
+            "on timeout the client is dropped and shutdown continues."
+        ),
+    )
+    langfuse_flush_timeout_seconds: float = Field(
+        default=2.0,
+        gt=0.0,
+        validation_alias="LANGFUSE_FLUSH_TIMEOUT_SECONDS",
+        description=(
+            "Cap (seconds) on the Langfuse flush/shutdown at the end of a run; "
+            "on timeout the flush is abandoned and the run exits."
         ),
     )
     llm_base_output_tokens: int = Field(

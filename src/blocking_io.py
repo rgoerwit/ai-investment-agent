@@ -205,12 +205,21 @@ def run_blocking_call_sync(policy: BlockingCallPolicy, fn: Callable[[], T]) -> T
 # The yfinance-info, yahooquery, FX and gap-fill policies carry a label and (for
 # gap fill) a shared in-flight cap; their numbers are only the shipped defaults.
 # Each call site applies its Settings field with with_timeout(), clamped to a
-# caller's enclosing deadline: COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS and
-# FX_RATE_FETCH_TIMEOUT_SECONDS. tests/data/test_market_data_timeouts.py pins
-# these numbers to the Settings defaults.
+# caller's enclosing deadline: COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS,
+# OUTPUT_COMPANY_NAME_TIMEOUT_SECONDS and FX_RATE_FETCH_TIMEOUT_SECONDS.
+# tests/data/test_market_data_timeouts.py and tests/test_operational_timeouts.py
+# pin these numbers to the Settings defaults.
 YFINANCE_INFO_POLICY = BlockingCallPolicy("yfinance.info", 5.0)
 YAHOOQUERY_QUOTE_TYPE_POLICY = BlockingCallPolicy("yahooquery.quote_type", 5.0)
 OUTPUT_COMPANY_NAME_POLICY = BlockingCallPolicy("output_company_name", 6.0)
+# One candidate symbol's yfinance .info inside the sync report-header lookup.
+# Sync caller, so a daemon worker with a slot cap rather than an executor
+# (whose workers are joined at interpreter exit). The lookup runs once or
+# twice per run, so two slots leave headroom; on saturation the header falls
+# back to the ticker.
+OUTPUT_COMPANY_NAME_INFO_POLICY = BlockingCallPolicy(
+    "output_company_name.yfinance_info", 5.0, in_flight=InFlightLimit(2)
+)
 FX_RATE_POLICY = BlockingCallPolicy("fx_rate", 8.0)
 # Gap-fill company-name lookup: same 5 s budget as YFINANCE_INFO_POLICY, but
 # bounded so a stalled Yahoo endpoint cannot accumulate one orphan per ticker

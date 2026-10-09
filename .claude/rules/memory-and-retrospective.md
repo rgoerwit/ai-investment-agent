@@ -29,6 +29,11 @@ runs on a daemon thread with a join timeout, and every embedding call is wrapped
 the hard-timeout helper. Do not "fix" this through the library's own request-options
 field, which is declared and never consumed.
 
+Both bounds are `Settings` fields read from the live `src.config.config`, because
+memory tests replace `src.memory.config` with a mock. Clamp only the per-request
+bound to a caller's enclosing deadline. Never clamp the startup probe, whose failure
+is cached for the process. See `docs/CODEBASE_MEMORY.md`.
+
 ## The retrospective may not adjudicate the thesis
 
 Excess return is price minus benchmark. That says only what the country index does not

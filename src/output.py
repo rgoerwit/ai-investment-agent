@@ -6,8 +6,6 @@ import hashlib
 import json
 import os
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -653,27 +651,43 @@ async def handle_article_generation(
             )
 
 
-def _load_company_name_for_output(
-    ticker: str,
-    *,
-    thread_pool_executor_cls=ThreadPoolExecutor,
-) -> str | None:
-    """Best-effort company-name lookup for markdown output contexts."""
-    executor = None
+def _load_company_name_for_output(ticker: str) -> str | None:
+    """Best-effort company-name lookup for markdown output contexts.
+
+    Each candidate symbol's yfinance ``.info`` runs on a slot-capped daemon
+    worker (``run_blocking_call_sync``), bounded by
+    ``COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS`` shrunk to a caller's enclosing
+    deadline. A stalled lookup returns None at that bound and leaves nothing an
+    executor would join at interpreter exit.
+    """
     try:
         import yfinance as yf
 
+        from src.blocking_io import (
+            OUTPUT_COMPANY_NAME_INFO_POLICY,
+            run_blocking_call_sync,
+        )
+        from src.llm_runtime.timeouts import require_allowance
         from src.ticker_utils import (
             _company_name_lookup_candidates,
             _is_valid_company_name,
         )
 
-        executor = thread_pool_executor_cls(max_workers=1)
         for lookup_ticker, _lookup_strategy in _company_name_lookup_candidates(ticker):
-            future = executor.submit(
-                lambda symbol=lookup_ticker: yf.Ticker(symbol).info
+            # Resolved per candidate, before its worker starts; a spent caller
+            # deadline raises TimeoutError and ends the lookup like a stall.
+            timeout_seconds = require_allowance(
+                config.company_name_lookup_timeout_seconds,
+                label=OUTPUT_COMPANY_NAME_INFO_POLICY.label,
             )
-            info = future.result(timeout=5)
+            policy = OUTPUT_COMPANY_NAME_INFO_POLICY.with_label(
+                f"{OUTPUT_COMPANY_NAME_INFO_POLICY.label}:{lookup_ticker}"
+            ).with_timeout(timeout_seconds)
+
+            def _fetch_info(symbol: str = lookup_ticker) -> Any:
+                return yf.Ticker(symbol).info
+
+            info = run_blocking_call_sync(policy, _fetch_info)
             if not info:
                 continue
             raw_name = info.get("longName") or info.get("shortName")
@@ -684,26 +698,31 @@ def _load_company_name_for_output(
                 # the writer downstream both want the full legal name.
                 return raw_name.strip()
         return None
-    except FuturesTimeoutError:
+    except TimeoutError:
+        # A stall, a saturated slot cap or a spent caller deadline.
         return None
     except Exception:
         return None
-    finally:
-        shutdown = getattr(executor, "shutdown", None)
-        if shutdown is not None:
-            try:
-                shutdown(wait=False, cancel_futures=True)
-            except TypeError:
-                shutdown(wait=False)
 
 
 async def _load_company_name_for_output_async(ticker: str) -> str | None:
-    """Async wrapper for output paths running inside the main event loop."""
+    """Async wrapper for output paths running inside the main event loop.
+
+    Bounded as a whole by ``OUTPUT_COMPANY_NAME_TIMEOUT_SECONDS``, shrunk to a
+    caller's enclosing deadline before the worker starts.
+    """
     from src.blocking_io import OUTPUT_COMPANY_NAME_POLICY, run_blocking_call
+    from src.llm_runtime.timeouts import require_allowance
 
     try:
+        timeout_seconds = require_allowance(
+            config.output_company_name_timeout_seconds,
+            label=OUTPUT_COMPANY_NAME_POLICY.label,
+        )
         return await run_blocking_call(
-            OUTPUT_COMPANY_NAME_POLICY.with_label(f"output_company_name:{ticker}"),
+            OUTPUT_COMPANY_NAME_POLICY.with_label(
+                f"output_company_name:{ticker}"
+            ).with_timeout(timeout_seconds),
             lambda: _load_company_name_for_output(ticker),
         )
     except TimeoutError:

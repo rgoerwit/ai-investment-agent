@@ -21,10 +21,12 @@ import structlog
 from tenacity import (
     retry,
     retry_if_exception_type,
+    retry_if_not_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
 
+import src.config as config_module
 from src.async_utils import run_with_hard_timeout
 from src.config import config
 from src.embeddings import (
@@ -38,6 +40,7 @@ from src.error_safety import (
     safe_error_payload,
     summarize_exception,
 )
+from src.llm_runtime.timeouts import clamp_to_enclosing_deadline
 from src.runtime_diagnostics import classify_failure
 from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
@@ -75,6 +78,42 @@ def _record_capture_memory_event(payload: dict[str, Any]) -> None:
         pass
 
 
+class EmbeddingAllowanceSpent(TimeoutError):
+    """The caller's enclosing deadline passed before an embedding attempt began.
+
+    A ``TimeoutError``, so callers that already treat an embedding timeout as
+    "no memory" handle it unchanged. Excluded from the tenacity retry: a spent
+    deadline stays spent, so a retry could only add backoff sleeps.
+    """
+
+
+def _embedding_healthcheck_timeout() -> float:
+    """The embeddings startup probe's bound, read now from the live settings.
+
+    Read from the live singleton rather than this module's ``config`` name, which
+    many tests replace with a mock. Not clamped to a caller deadline: the probe
+    initialises a process-wide client and its failure is cached for the process,
+    so one caller's short deadline must not disable embeddings for every caller.
+    """
+    return config_module.config.memory_embedding_healthcheck_timeout_seconds
+
+
+def _embedding_call_timeout(collection: str) -> float:
+    """One embedding attempt's bound, clamped to the caller's enclosing deadline.
+
+    Raises ``EmbeddingAllowanceSpent`` when the caller's allowance is already
+    spent, before any request is created.
+    """
+    seconds = clamp_to_enclosing_deadline(
+        config_module.config.memory_embedding_call_timeout_seconds
+    )
+    if seconds <= 0:
+        raise EmbeddingAllowanceSpent(
+            f"memory_embedding:{collection}: enclosing deadline already passed"
+        )
+    return seconds
+
+
 def _is_missing_collection_error(exc: Exception) -> bool:
     message = str(exc)
     return "does not exist" in message or "Collection not found" in message
@@ -99,9 +138,9 @@ class FinancialSituationMemory:
     # google-genai passes timeout=None per-request when HttpOptions.timeout is
     # unset, which in httpx DISABLES all timeouts (overriding even the client
     # default) — an unreachable endpoint blocks the SSL read forever (hung the
-    # 2026-07-11 full-suite pytest run). Both embedding paths are bounded here.
-    _HEALTHCHECK_TIMEOUT_SECONDS = 15.0
-    _EMBEDDING_CALL_TIMEOUT_SECONDS = 30.0
+    # 2026-07-11 full-suite pytest run). Both embedding paths are bounded here,
+    # by MEMORY_EMBEDDING_HEALTHCHECK_TIMEOUT_SECONDS and
+    # MEMORY_EMBEDDING_CALL_TIMEOUT_SECONDS.
     _shared_embeddings: Any | None = None
     _shared_embeddings_available: bool = False
     _shared_embeddings_key: tuple[str, str, int | None, str] | None = None
@@ -243,12 +282,12 @@ class FinancialSituationMemory:
                     name="memory-embeddings-healthcheck",
                     daemon=True,
                 )
+                probe_timeout = _embedding_healthcheck_timeout()
                 probe_thread.start()
-                probe_thread.join(timeout=cls._HEALTHCHECK_TIMEOUT_SECONDS)
+                probe_thread.join(timeout=probe_timeout)
                 if probe_thread.is_alive():
                     raise TimeoutError(
-                        "embeddings healthcheck exceeded "
-                        f"{cls._HEALTHCHECK_TIMEOUT_SECONDS:.0f}s"
+                        f"embeddings healthcheck exceeded {probe_timeout:g}s"
                     )
                 if error_box:
                     raise error_box[0]
@@ -330,7 +369,10 @@ class FinancialSituationMemory:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(Exception),
+        retry=(
+            retry_if_exception_type(Exception)
+            & retry_if_not_exception_type(EmbeddingAllowanceSpent)
+        ),
     )
     async def _get_embedding(self, text: str) -> list[float]:
         """
@@ -351,17 +393,25 @@ class FinancialSituationMemory:
         # Truncate text to avoid token limits
         truncated_text = text[:9000]
 
+        # A spent caller deadline fails here, before a rate-limiter token is
+        # taken or a request created.
+        _embedding_call_timeout(self.name)
+
         # Import rate limiter here to avoid circular dependency
         # Use rate limiter to share RPM quota with LLM calls
         try:
             from src.llms import GLOBAL_RATE_LIMITER
 
             async with GLOBAL_RATE_LIMITER:
+                # Re-resolved after the limiter wait, before the request.
+                timeout = _embedding_call_timeout(self.name)
                 embedding = await run_with_hard_timeout(
                     self.embeddings.aembed_query(truncated_text),
-                    timeout=self._EMBEDDING_CALL_TIMEOUT_SECONDS,
+                    timeout=timeout,
                     label=f"memory_embedding:{self.name}",
                 )
+        except EmbeddingAllowanceSpent:
+            raise
         except Exception as exc:
             # Fallback if rate limiter not available or incompatible (e.g., in tests)
             # Catch all exceptions to handle import errors, attribute errors, type errors, etc.
@@ -388,9 +438,10 @@ class FinancialSituationMemory:
                 error_message=details.message,
                 fallback="direct_embed_query",
             )
+            timeout = _embedding_call_timeout(self.name)
             embedding = await run_with_hard_timeout(
                 self.embeddings.aembed_query(truncated_text),
-                timeout=self._EMBEDDING_CALL_TIMEOUT_SECONDS,
+                timeout=timeout,
                 label=f"memory_embedding_fallback:{self.name}",
             )
 

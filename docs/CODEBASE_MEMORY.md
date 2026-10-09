@@ -500,9 +500,21 @@ site's existing timeout fallback and leaves no un-awaited request. As with the
 tool scopes, the aggregate metrics fetch reads the enclosing deadline but never
 binds one: gap fill runs content inspection, and its LLM judge fails open when
 admission refuses it. Today only the APAC specialist binds an enclosing deadline,
-so in practice the clamp is inert until a run-level deadline is bound. Not yet
-settings: the advisory benchmark and price-snapshot history fetches in
-`src/main.py` (10 s each) and the report-header name lookup in `src/output.py`.
+so in practice the clamp is inert until a run-level deadline is bound. Six
+later fields joined the block with the same clamp: the ownership tool's 8 s per
+yfinance section, StockTwits' 10 s request, the retrospective's 15 s fetch, the
+two advisory 10 s fetches in `src/main.py` (market note and price snapshot,
+kept apart) and the report-header name lookup's 6 s whole in `src/output.py`.
+That lookup's inner per-candidate 5 s reuses `COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS`,
+because it is the same thing: one yfinance `.info` for a name.
+
+The report-header lookup was also the sync-caller bug class. It was not a `with`
+block. It called `shutdown(wait=False, cancel_futures=True)`, so the caller did
+return on time and a mock-based test said so. But `concurrent.futures` joins every
+executor worker at interpreter exit, so a stalled Yahoo read could hold the
+process open after the report was written. It also built a fresh executor per
+call, so each stall left another worker. A test that only checks the caller's
+return time cannot catch this; check that the worker is a daemon.
 
 The research deadlines follow the same rules and sit next to the market-data
 block. Three 30 s values stay three fields: a Tavily search, a Tavily extract and
@@ -518,10 +530,10 @@ Two caveats. httpx applies a timeout to each phase (connect, read, write, pool),
 so the clamp narrows the official-document download and the editor's reference
 fetch per phase but does not cap the whole download. And ddgs takes whole
 seconds, so its clamped HTTP timeout rounds up; the clamped wait around it is
-the bound that holds. Left to other categories: the ownership tool's 8 s yfinance
-properties (`src/tools/ownership.py`), StockTwits' 10 s HTTP
-(`src/stocktwits_api.py`) and the retrospective's 15 s yfinance fetch are
-market-data reads. The ddgs warm-up `DDGS(timeout=1)` runs at import, with no
+the bound that holds. The ownership tool's 8 s yfinance properties
+(`src/tools/ownership.py`), StockTwits' 10 s HTTP (`src/stocktwits_api.py`) and
+the retrospective's 15 s yfinance fetch are market-data reads and sit in that
+block. The ddgs warm-up `DDGS(timeout=1)` runs at import, with no
 request to bound.
 
 The MCP deadlines follow the same rules, but each goes to an SDK parameter
@@ -543,6 +555,24 @@ client or subprocess exists. If the session is already open, it is raised after
 the session closes, never inside it. An `MCPCallError` raised inside the session
 body comes back wrapped in the SDK's task groups and would be reclassified as a
 generic error. See `docs/MCP.md`.
+
+The operational deadlines close the category, and most deliberately do **not**
+clamp. The health check's 15 s probe is a top-level entrypoint, so nothing binds
+a deadline around it. Its HEALTH_CHECK seat's 10 s client timeout sits inside
+it, and it still calls `ainvoke` directly. The embeddings startup probe (15 s) is
+unclamped because its result is cached for the process: one caller's short
+deadline would turn embeddings off for every later caller. The 2 s GenAI client
+close and the 2 s Langfuse flush run on the shutdown path, after any caller
+deadline and inside `SHUTDOWN_HARD_TIMEOUT_SECONDS` (the cleanup half). They
+keep their defaults because they set how long exit can take. Only the 30 s
+embedding request clamps. A spent allowance raises `EmbeddingAllowanceSpent`
+before a rate-limiter token is taken, and tenacity's retry excludes it. Without
+that exclusion, the three-attempt retry would add about 6 s of backoff to a
+deadline that had already passed. The close keeps `asyncio.wait_for`, which is
+safe there because `aclose()` is native async I/O, not a parked thread. The
+memory timeouts read the live `src.config.config` rather than `src.memory.config`,
+which about 28 memory tests replace with a `MagicMock`; a mock attribute would
+reach `Thread.join(timeout=...)` and fail the probe.
 
 ### IBKR path
 

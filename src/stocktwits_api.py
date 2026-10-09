@@ -3,10 +3,11 @@ from typing import Any
 import aiohttp
 import structlog
 
-logger = structlog.get_logger(__name__)
+from src.config import config
+from src.error_safety import summarize_exception
+from src.llm_runtime.timeouts import require_allowance
 
-# Default timeout for HTTP requests
-_TIMEOUT = aiohttp.ClientTimeout(total=10)
+logger = structlog.get_logger(__name__)
 
 
 class StockTwitsAPI:
@@ -36,10 +37,21 @@ class StockTwitsAPI:
 
         headers = {"User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)"}
 
-        async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+        # STOCKTWITS_HTTP_TIMEOUT_SECONDS, read at the call and shrunk to a
+        # caller's enclosing deadline before the session is opened; a spent
+        # deadline returns the same error payload as a request timeout.
+        try:
+            timeout_seconds = require_allowance(
+                config.stocktwits_http_timeout_seconds, label="stocktwits"
+            )
+        except TimeoutError as e:
+            return self._fetch_failed(ticker, e)
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             try:
                 async with session.get(
-                    url, headers=headers, timeout=_TIMEOUT
+                    url, headers=headers, timeout=timeout
                 ) as response:
                     if response.status == 404:
                         return {"error": "Symbol not found on StockTwits"}
@@ -54,11 +66,14 @@ class StockTwitsAPI:
                     return self._process_messages(messages, clean_ticker)
 
             except Exception as e:
-                from src.error_safety import summarize_exception
+                return self._fetch_failed(ticker, e)
 
-                summary = summarize_exception(e, operation="stocktwits_fetch")
-                logger.error("stocktwits_fetch_failed", ticker=ticker, **summary)
-                return {"error": f"{summary['error_type']} (details in operator logs)"}
+    @staticmethod
+    def _fetch_failed(ticker: str, error: Exception) -> dict[str, Any]:
+        """Log a failed fetch and return the caller-facing error payload."""
+        summary = summarize_exception(error, operation="stocktwits_fetch")
+        logger.error("stocktwits_fetch_failed", ticker=ticker, **summary)
+        return {"error": f"{summary['error_type']} (details in operator logs)"}
 
     def _process_messages(self, messages: list[dict], ticker: str) -> dict[str, Any]:
         """Analyze messages for Bullish/Bearish tags."""

@@ -10,22 +10,31 @@ import yfinance as yf
 from langchain_core.tools import tool
 
 from src.async_utils import run_with_hard_timeout
+from src.config import config
 from src.error_safety import summarize_exception
+from src.llm_runtime.timeouts import require_allowance
 from src.ticker_utils import normalize_ticker
 
 logger = structlog.get_logger(__name__)
-
-OWNERSHIP_SECTION_TIMEOUT_SECONDS = 8.0
 
 
 async def _load_ownership_property(
     yf_ticker: yf.Ticker, property_name: str, ticker: str
 ) -> object:
-    """Bound blocking yfinance ownership-property access."""
+    """Bound blocking yfinance ownership-property access.
+
+    The bound is OWNERSHIP_SECTION_TIMEOUT_SECONDS, read at the call and shrunk
+    to a caller's enclosing deadline before the thread is created; a spent
+    deadline takes the section's timeout path without starting the fetch.
+    """
+    timeout_seconds = config.ownership_section_timeout_seconds
     try:
+        timeout_seconds = require_allowance(
+            timeout_seconds, label=f"yfinance.{property_name}"
+        )
         return await run_with_hard_timeout(
             asyncio.to_thread(lambda: getattr(yf_ticker, property_name)),
-            timeout=OWNERSHIP_SECTION_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
             label=f"yfinance.{property_name}:{ticker}",
         )
     except asyncio.TimeoutError:
@@ -33,7 +42,7 @@ async def _load_ownership_property(
             "ownership_structure_timeout",
             ticker=ticker,
             section=property_name,
-            timeout_seconds=OWNERSHIP_SECTION_TIMEOUT_SECONDS,
+            timeout_seconds=timeout_seconds,
         )
         raise
 

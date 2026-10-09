@@ -17,6 +17,7 @@ from pathlib import Path
 import structlog
 
 from src.async_utils import run_with_hard_timeout
+from src.config import config
 from src.error_safety import summarize_exception
 from src.runtime_diagnostics import get_runtime_provider
 from src.runtime_diagnostics.failure_classification import get_model_name
@@ -42,9 +43,11 @@ logging.getLogger("httpcore2").setLevel(logging.WARNING)
 logging.getLogger("google.ai").setLevel(logging.WARNING)
 logging.getLogger("chromadb").setLevel(logging.ERROR)
 
-# Deliberately brief: this is a liveness probe, not a work call. The
-# HEALTH_CHECK seat pins standard tier so it can never queue behind flex.
-_CONNECTIVITY_TIMEOUT_SECONDS = 15.0
+# The probe's bound is HEALTH_CHECK_CONNECTIVITY_TIMEOUT_SECONDS, read at the
+# call. Deliberately brief: this is a liveness probe, not a work call. The
+# HEALTH_CHECK seat pins standard tier so it can never queue behind flex. Not
+# clamped to an enclosing deadline: the health check is a top-level entrypoint
+# and nothing binds one around it.
 
 
 def get_package_version(module_name: str, package_name: str | None = None) -> str:
@@ -189,9 +192,10 @@ async def check_llm_connectivity() -> bool:
         # policy already pins standard tier, one retry and a short client
         # timeout, and the generic wrapper could floor this deliberately-brief
         # probe up to a provider's flex ceiling.
+        timeout_seconds = config.health_check_connectivity_timeout_seconds
         response = await run_with_hard_timeout(
             llm.ainvoke("Respond with just the word 'OK'."),
-            timeout=_CONNECTIVITY_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
             label="health_check_connectivity",
         )
 

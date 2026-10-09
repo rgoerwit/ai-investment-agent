@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.config import config
 from src.llms import _LazyRateLimiterProxy
 from src.memory import (
     FinancialSituationMemory,
@@ -204,8 +205,8 @@ class TestFinancialSituationMemoryInitialization:
 
                 with (
                     patch.object(
-                        FinancialSituationMemory,
-                        "_HEALTHCHECK_TIMEOUT_SECONDS",
+                        config,
+                        "memory_embedding_healthcheck_timeout_seconds",
                         0.1,
                     ),
                     patch.object(
@@ -358,9 +359,7 @@ class TestSituationStorage:
         memory.embeddings.aembed_query = _stall
 
         with (
-            patch.object(
-                FinancialSituationMemory, "_EMBEDDING_CALL_TIMEOUT_SECONDS", 0.05
-            ),
+            patch.object(config, "memory_embedding_call_timeout_seconds", 0.05),
             patch(
                 "src.llms.GLOBAL_RATE_LIMITER",
                 _LazyRateLimiterProxy(lambda: _InstantLimiter()),

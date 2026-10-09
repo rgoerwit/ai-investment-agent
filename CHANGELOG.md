@@ -103,6 +103,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   direct `MCPRuntime.call_tool` or `list_tools_for_scope` caller had no bound). A
   timed-out request (`REQUEST_TIMEOUT`, -32001) now classifies as a retryable
   `transport` error rather than `protocol`.
+- The operational deadlines are now settings, one per scope, defaults unchanged:
+  the health check's LLM probe (`HEALTH_CHECK_CONNECTIVITY_TIMEOUT_SECONDS`,
+  15 s), the embeddings startup probe
+  (`MEMORY_EMBEDDING_HEALTHCHECK_TIMEOUT_SECONDS`, 15 s), one embedding request
+  (`MEMORY_EMBEDDING_CALL_TIMEOUT_SECONDS`, 30 s), closing a Google GenAI client
+  at shutdown (`GENAI_CLIENT_CLOSE_TIMEOUT_SECONDS`, 2 s) and the Langfuse flush
+  (`LANGFUSE_FLUSH_TIMEOUT_SECONDS`, 2 s). Only the embedding request shrinks to
+  a caller's remaining enclosing deadline; a spent allowance sends no request
+  and is not retried. The health check, the startup probe (whose failure is
+  cached for the process) and the shutdown paths are not clamped.
+- Six more market-data deadlines are settings, defaults unchanged, each clamped
+  to a caller's enclosing deadline: each yfinance ownership section
+  (`OWNERSHIP_SECTION_TIMEOUT_SECONDS`, 8 s), a StockTwits request
+  (`STOCKTWITS_HTTP_TIMEOUT_SECONDS`, 10 s), the retrospective's price fetch
+  (`RETROSPECTIVE_PRICE_FETCH_TIMEOUT_SECONDS`, 15 s), the advisory market note
+  and price snapshot (`MARKET_CONTEXT_FETCH_TIMEOUT_SECONDS`,
+  `PRICE_SNAPSHOT_FETCH_TIMEOUT_SECONDS`, 10 s each) and the report-header name
+  lookup (`OUTPUT_COMPANY_NAME_TIMEOUT_SECONDS`, 6 s; each candidate symbol uses
+  `COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS`).
+- **Fixed:** the synchronous report-header company-name lookup ran each
+  candidate on a `ThreadPoolExecutor` worker. The caller returned on time, but
+  executor workers are joined at interpreter exit, so a stalled Yahoo read could
+  hold the process open after the report was written, and each stalled call
+  left another worker. It now runs on a slot-capped daemon worker
+  (`run_blocking_call_sync`, two slots); a full cap falls back to the ticker.
 - The APAC specialist's 240 s is now its node total
   (`APAC_NODE_TOTAL_TIMEOUT_SECONDS`), shared by the first call and the direct
   retry, rather than a fresh 240 s per call.
