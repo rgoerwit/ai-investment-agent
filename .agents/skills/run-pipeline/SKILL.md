@@ -19,5 +19,14 @@ satisfy Stage 2, and reconciliation treats quick BUYs as non-investable.
 4. Require a current, publishable full report for a purchase. On interruption,
    state the verified status and resume the appropriate stage.
 
+The per-ticker timeout settings feed `scripts/pipeline_signals.sh`, which passes an
+absolute epoch deadline to the child. `src/llm_runtime/run_deadline.py` translates
+it to a monotonic analysis deadline with a publication reserve; `src/main.py`
+binds it around analysis rather than final rendering, persistence or shutdown.
+Read the defaults from their owners, not copied values in guidance. Do not inject
+an artificial pipeline deadline into a manual run. Distinguish budget admission
+failure from watchdog signals and exit records; a truncated retry ladder is a
+bounded-work diagnostic, not a promise of completion or evidence of provider failure.
+
 When changing this workflow, inspect reuse, completeness, watchdog, failure,
 and marker paths together, then run focused pipeline tests and static checks.

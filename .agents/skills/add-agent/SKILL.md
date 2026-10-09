@@ -15,14 +15,20 @@ For an LLM-backed role:
    runtime modules.
 2. Add or update the prompt through structured JSON handling under `prompts/`.
 3. Register the canonical seat and capabilities in `src/llm_runtime/seats.py`; construct
-   it through `src/llm_runtime/construction.py`.
+   it through `src/llm_runtime/construction.py`. Choose its timeout class and
+   transport-attempt policy from the owning budget architecture in
+   `src/llm_runtime/timeouts.py`; counts mean total attempts, not provider-specific
+   retries. Do not introduce a context-name exception or construction-time flex cap.
 4. Add node logic in the owning `src/agents/` module and tools in the owning
    `src/tools/` module. Tool execution must stay inside the inspection and audit chain.
 5. Update state, reducers, graph wiring, retry/fallback behavior, output budgets,
    persistence, attribution, and publication requirements only where the role needs
    them. Parallel branches require isolated fields or an intentional reducer.
 6. Add contract tests for seat registration, prompt loading, graph topology, attribution,
-   malformed/refused output, retry behavior, and saved-artifact semantics.
+   malformed/refused output, retry behavior, and saved-artifact semantics. Exercise
+   the actual adapter's dispatch options under an exhausted or nearly spent
+   deadline, including corrections, degraded-tier dispatch and failover. A model's
+   configuration fields alone do not prove its request deadline or retry options.
 7. Run `make test-prompts`, the relevant targeted tests, and `make check-all`.
 
 Do not copy thresholds, model defaults, or enum values into this skill. Read them from
