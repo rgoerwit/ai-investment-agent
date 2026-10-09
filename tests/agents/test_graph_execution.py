@@ -1,7 +1,5 @@
 """Fixed test_graph_execution.py - removed pytestmark from non-async tests."""
 
-import sys
-from types import ModuleType
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -507,7 +505,9 @@ class TestAuditorLLMConfiguration:
 
         from src.llms import create_auditor_llm
 
-        with _patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with _patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
             with _patch("src.llms.config") as cfg:
                 cfg.enable_consultant = True
@@ -535,7 +535,9 @@ class TestAuditorLLMConfiguration:
 
         from src.llms import create_auditor_llm
 
-        with _patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with _patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
             with _patch("src.llms.config") as cfg:
                 cfg.enable_consultant = True
@@ -554,8 +556,8 @@ class TestAuditorLLMReasoning:
 
     def test_auditor_gpt5_uses_medium_reasoning_effort(self, monkeypatch):
         import src.llms as llms
+        from src.llm_runtime.adapters import transports
 
-        stub_module = ModuleType("langchain_openai")
         captured = {}
 
         class StubChatOpenAI:
@@ -563,9 +565,7 @@ class TestAuditorLLMReasoning:
                 captured.update(kwargs)
                 self.model_name = kwargs["model"]
 
-        stub_module.ChatOpenAI = StubChatOpenAI
-
-        monkeypatch.setitem(sys.modules, "langchain_openai", stub_module)
+        monkeypatch.setattr(transports, "new_openai_chat", StubChatOpenAI)
         monkeypatch.setattr(llms.config, "enable_consultant", True)
         monkeypatch.setattr(
             type(llms.config), "get_openai_api_key", lambda self: "fake-key"

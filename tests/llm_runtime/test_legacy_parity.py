@@ -181,16 +181,15 @@ _OPENAI_REVIEW_PARITY_CASES = tuple(
 def test_openai_review_legacy_and_provider_scoped_contracts_match(
     monkeypatch, seat_id: SeatId, quick_mode: bool
 ) -> None:
-    import langchain_openai
-
     from src import llms
+    from src.llm_runtime.adapters import transports
 
     monkeypatch.setattr(
         llms,
         "_construct_chat_openai",
         lambda kwargs, **_ignored: _FakeOpenAITransport(**kwargs),
     )
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", _FakeOpenAITransport)
+    monkeypatch.setattr(transports, "new_openai_chat", _FakeOpenAITransport)
     output_tokens = _REVIEW_OUTPUT_TOKENS.get(seat_id, 4096)
     legacy = build_required_model_for_seat(
         seat_id,
@@ -218,16 +217,15 @@ def test_openai_auditor_parity_is_full_mode_only() -> None:
 def test_provider_scoped_auditor_escalation_is_deliberately_stronger_than_legacy(
     monkeypatch,
 ) -> None:
-    import langchain_openai
-
     from src import llms
+    from src.llm_runtime.adapters import transports
 
     monkeypatch.setattr(
         llms,
         "_construct_chat_openai",
         lambda kwargs, **_ignored: _FakeOpenAITransport(**kwargs),
     )
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", _FakeOpenAITransport)
+    monkeypatch.setattr(transports, "new_openai_chat", _FakeOpenAITransport)
     legacy = build_required_model_for_seat(
         SeatId.AUDITOR_ESCALATION,
         settings=_legacy_openai_settings(),
@@ -257,15 +255,14 @@ def test_provider_scoped_auditor_escalation_is_deliberately_stronger_than_legacy
 def test_consultant_legacy_and_new_construction_contracts_match(
     monkeypatch,
 ) -> None:
-    import langchain_openai
-
     from src import llms
+    from src.llm_runtime.adapters import transports
 
     monkeypatch.setattr(
         llms, "_construct_chat_openai", lambda kwargs: _FakeOpenAITransport(**kwargs)
     )
     monkeypatch.setattr(llms, "_get_openai_rate_limiter", lambda: None)
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", _FakeOpenAITransport)
+    monkeypatch.setattr(transports, "new_openai_chat", _FakeOpenAITransport)
     monkeypatch.setattr(llms.config, "enable_consultant", True)
     monkeypatch.setattr(llms.config, "openai_service_tier", "auto")
     monkeypatch.setattr(llms.config, "consultant_model", "gpt-5.4")

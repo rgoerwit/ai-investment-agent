@@ -127,7 +127,7 @@ class TestOpenAIRateLimiter:
         return mock_cfg
 
     # ChatOpenAI is imported inside the function body, so we patch the source module.
-    _CHATOPENAI_TARGET = "langchain_openai.ChatOpenAI"
+    _CHATOPENAI_TARGET = "src.llm_runtime.adapters.transports.new_openai_chat"
 
     @pytest.mark.parametrize("factory_name,kwargs", _OPENAI_FACTORIES)
     def test_rate_limiter_attached_when_rpm_set(

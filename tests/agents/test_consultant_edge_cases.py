@@ -738,13 +738,15 @@ class TestConfigurationEdgeCases:
         """Test consultant handles invalid model names gracefully."""
         # Skip if langchain-openai not installed
         try:
-            import langchain_openai
+            import langchain_openai  # noqa: F401
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
         from src.llms import create_consultant_llm
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_llm = Mock()
             mock_chatgpt.return_value = mock_llm
 
@@ -802,7 +804,7 @@ class TestConfigurationEdgeCases:
                 cn.settings_config, "openai_api_base", "https://api.moonshot.cn/v1"
             ),
             patch.object(cn.settings_config, "openai_api_key", SecretStr("k")),
-            patch("langchain_openai.ChatOpenAI", fake_cls),
+            patch("src.llm_runtime.adapters.transports.new_openai_chat", fake_cls),
         ):
             _create_openai_responses_fallback_llm(Mock())
 
@@ -824,7 +826,7 @@ class TestConfigurationEdgeCases:
             patch.object(cn.support, "get_model_name", return_value="gpt-5.4"),
             patch.object(cn.settings_config, "openai_api_base", ""),
             patch.object(cn.settings_config, "openai_api_key", SecretStr("k")),
-            patch("langchain_openai.ChatOpenAI", fake_cls),
+            patch("src.llm_runtime.adapters.transports.new_openai_chat", fake_cls),
         ):
             _create_openai_responses_fallback_llm(Mock())
 

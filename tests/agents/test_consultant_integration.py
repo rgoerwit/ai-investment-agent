@@ -40,11 +40,13 @@ class TestConsultantNodeCreation:
         """Test successful consultant LLM creation with valid config."""
         # Skip if langchain-openai not installed (it's optional)
         try:
-            import langchain_openai
+            from src.llm_runtime.adapters import transports
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_llm = Mock()
             mock_chatgpt.return_value = mock_llm
 
@@ -1530,7 +1532,7 @@ class TestConsultantQuickMode:
         """Test that consultant uses CONSULTANT_QUICK_MODEL when quick_mode=True."""
         # Skip if langchain-openai not installed (it's optional)
         try:
-            import langchain_openai
+            from src.llm_runtime.adapters import transports
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
@@ -1538,7 +1540,9 @@ class TestConsultantQuickMode:
 
         from src.llms import create_consultant_llm
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
             with patch("src.llms.config") as mock_config:
@@ -1558,7 +1562,7 @@ class TestConsultantQuickMode:
         """Test that consultant uses CONSULTANT_MODEL when quick_mode=False."""
         # Skip if langchain-openai not installed (it's optional)
         try:
-            import langchain_openai
+            from src.llm_runtime.adapters import transports
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
@@ -1566,7 +1570,9 @@ class TestConsultantQuickMode:
 
         from src.llms import create_consultant_llm
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
             with patch("src.llms.config") as mock_config:
@@ -1585,7 +1591,7 @@ class TestConsultantQuickMode:
         """Test that consultant defaults to gpt-4o-mini when CONSULTANT_QUICK_MODEL not set."""
         # Skip if langchain-openai not installed (it's optional)
         try:
-            import langchain_openai
+            from src.llm_runtime.adapters import transports
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
@@ -1593,7 +1599,9 @@ class TestConsultantQuickMode:
 
         from src.llms import create_consultant_llm
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
             with patch("src.llms.config") as mock_config:
@@ -1611,7 +1619,7 @@ class TestConsultantQuickMode:
     def test_consultant_gpt5_uses_medium_reasoning_effort(self):
         """GPT-5 consultant should stay on normal reasoning, not pro-style deep compute."""
         try:
-            import langchain_openai
+            from src.llm_runtime.adapters import transports
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
@@ -1619,7 +1627,9 @@ class TestConsultantQuickMode:
 
         from src.llms import create_consultant_llm
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
             with patch("src.llms.config") as mock_config:
@@ -1642,13 +1652,15 @@ class TestConsultantQuickMode:
     def test_consultant_quick_gpt5_mini_uses_low_reasoning_effort(self):
         """Quick-mode gpt-5-mini variants should use 'low' (mini rejects 'minimal')."""
         try:
-            import langchain_openai
+            from src.llm_runtime.adapters import transports
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
         from unittest.mock import MagicMock, patch
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
             with patch("src.llms.config") as mock_config:
@@ -1680,7 +1692,9 @@ class TestConsultantQuickMode:
 
         from unittest.mock import MagicMock, patch
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
             with patch("src.llms.config") as mock_config:
@@ -1698,13 +1712,15 @@ class TestConsultantQuickMode:
     def test_quick_mode_falls_back_to_full_consultant_model_when_blank(self):
         """Blank quick model should not disable consultant; it should fall back."""
         try:
-            import langchain_openai
+            from src.llm_runtime.adapters import transports
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
         from unittest.mock import MagicMock, patch
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
             with patch("src.llms.config") as mock_config:

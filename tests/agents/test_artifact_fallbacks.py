@@ -410,7 +410,8 @@ VERDICT: BUY
             "src.agents.runtime.invoke_with_rate_limit_handling", new=invoke_mock
         ):
             with patch(
-                "langchain_openai.ChatOpenAI", return_value=fallback_llm
+                "src.llm_runtime.adapters.transports.new_openai_chat",
+                return_value=fallback_llm,
             ) as mock_chat:
                 node = create_auditor_node(initial_llm, [])
                 result = await node(

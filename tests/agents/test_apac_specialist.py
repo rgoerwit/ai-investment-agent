@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
-from types import ModuleType
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -346,6 +344,7 @@ def test_apac_llm_factory_gates_quick_disabled_and_missing_key(monkeypatch):
 
 def test_apac_llm_factory_passes_deepseek_kwargs(monkeypatch):
     from src import llms
+    from src.llm_runtime.adapters import transports
 
     captured = {}
 
@@ -353,9 +352,7 @@ def test_apac_llm_factory_passes_deepseek_kwargs(monkeypatch):
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    fake_module = ModuleType("langchain_openai")
-    fake_module.ChatOpenAI = FakeChatOpenAI
-    monkeypatch.setitem(sys.modules, "langchain_openai", fake_module)
+    monkeypatch.setattr(transports, "new_openai_chat", FakeChatOpenAI)
     monkeypatch.setattr(llms.config, "enable_apac_specialist", True)
     monkeypatch.setattr(
         type(llms.config),
@@ -375,10 +372,15 @@ def test_apac_llm_factory_passes_deepseek_kwargs(monkeypatch):
     assert captured["reasoning_effort"] == "max"
     assert captured["extra_body"] == {"thinking": {"type": "enabled"}}
     assert "temperature" not in captured
+    # The APAC base URL is a compatible vendor, named explicitly.
+    assert captured["dispatch_provider"] == transports.OPENAI_COMPATIBLE_PROVIDER
+    assert captured["budget_timeout_class"] == "regional"
+    assert "service_tier" not in captured
 
 
 def test_apac_direct_retry_factory_disables_thinking_and_sdk_retries(monkeypatch):
     from src import llms
+    from src.llm_runtime.adapters import transports
 
     captured = {}
 
@@ -386,9 +388,7 @@ def test_apac_direct_retry_factory_disables_thinking_and_sdk_retries(monkeypatch
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    fake_module = ModuleType("langchain_openai")
-    fake_module.ChatOpenAI = FakeChatOpenAI
-    monkeypatch.setitem(sys.modules, "langchain_openai", fake_module)
+    monkeypatch.setattr(transports, "new_openai_chat", FakeChatOpenAI)
     monkeypatch.setattr(llms.config, "enable_apac_specialist", True)
     monkeypatch.setattr(
         type(llms.config), "get_apac_specialist_api_key", lambda self: "sk-test"

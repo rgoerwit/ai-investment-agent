@@ -258,12 +258,16 @@ class TestConstruction:
         assert model.failover_model == "gpt-5.4"
         assert model.service_tier != "flex"  # failover capability, not flex
 
-    def test_openai_seat_without_failover_stays_plain(self):
+    def test_openai_seat_without_failover_has_no_failover_target(self):
+        # Every OpenAI client is the deadline-aware transport (there is no
+        # plain-client branch); without a configured failover it has no target.
         settings = _settings(openai_service_tier="auto")
         model = build_model_for_seat(
             SeatId.CONSULTANT, settings=settings, plan=resolve_binding_plan(settings)
         )
-        assert not isinstance(model, ModelFailoverMixin)
+        assert isinstance(model, llms_mod._get_flex_fallback_chat_openai_cls())
+        assert model.failover_model is None
+        assert failover_target(model) is None
 
     def test_attach_refuses_a_transport_that_cannot_serve_it(self):
         with pytest.raises(TypeError, match="cannot serve a model failover"):
@@ -341,6 +345,7 @@ class TestTransport:
             api_key="k",
             service_tier="flex",
             failover_model="gpt-5.4",
+            dispatch_provider="openai",
         )
         captured = []
 

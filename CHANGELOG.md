@@ -12,6 +12,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Every OpenAI, OpenAI-compatible and Anthropic client is now sized at dispatch
+  for the vendor it names. Before, only the flex-tier OpenAI client and Gemini
+  were. The canonical OpenAI adapter without a failover, the DeepSeek, z.ai,
+  Moonshot and xAI clients, the Consultant's alternate transport, the legacy
+  Consultant, Auditor, Editor and writer-fallback factories, the APAC factory
+  and both Anthropic writers sent their construction-time timeout. Every
+  constructor now passes its provider explicitly, and a missing one is an error.
+  **Behaviour change inside an invocation:** a compatible vendor is sized against
+  its `OPENAI_COMPATIBLE_CLIENT_TIMEOUT_SECONDS` ceiling instead of the 120 s
+  OpenAI cap, and its model-failover copy no longer sends `service_tier`. The
+  Consultant's alternate transport on a compatible base is built with that
+  ceiling too. Requests outside an invocation keep their built timeout. Streaming
+  on these clients and on Gemini is refused: `.stream()` runs as a sized
+  non-streaming call, and `streaming=True` or a `stream` argument raises.
 - The per-ticker pipeline watchdog is now a hard ceiling inside the analysis.
   `STAGE1_TICKER_TIMEOUT_SECONDS` (600) and `STAGE2_TICKER_TIMEOUT_SECONDS` (2400)
   are settings that `scripts/run_pipeline.sh` reads through

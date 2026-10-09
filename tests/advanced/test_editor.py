@@ -539,7 +539,9 @@ class TestCreateEditorLLM:
         """Editor should use the OpenAI Responses API via ChatOpenAI."""
         from src.llms import create_editor_llm
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
             with patch("src.llms.config") as mock_config:
                 mock_config.enable_consultant = True
@@ -560,7 +562,9 @@ class TestCreateEditorLLM:
         """Non-pro GPT-5 editor models should opt into medium reasoning effort."""
         from src.llms import create_editor_llm
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             llm = MagicMock()
             mock_chatgpt.return_value = llm
             with patch("src.llms.config") as mock_config:

@@ -187,9 +187,8 @@ class TestAnthropicHonoursTheOutputBudgetContract:
     def test_the_requested_cap_reaches_the_client(
         self, monkeypatch, requested, expected
     ):
-        import sys
-
         from src.llm_runtime.adapters import anthropic as adapter_mod
+        from src.llm_runtime.adapters import transports
 
         captured: dict = {}
 
@@ -198,9 +197,7 @@ class TestAnthropicHonoursTheOutputBudgetContract:
                 captured.update(kwargs)
                 self.rate_limiter = None
 
-        fake_module = Mock()
-        fake_module.ChatAnthropic = _FakeChatAnthropic
-        monkeypatch.setitem(sys.modules, "langchain_anthropic", fake_module)
+        monkeypatch.setattr(transports, "new_anthropic_chat", _FakeChatAnthropic)
         monkeypatch.setattr(adapter_mod, "limiter_for_binding", lambda *a, **k: None)
 
         adapter_mod.AnthropicAdapter().build(self._request(requested))

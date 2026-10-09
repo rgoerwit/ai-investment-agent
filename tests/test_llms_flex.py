@@ -262,14 +262,18 @@ class TestOpenAIFlexWiring:
         llms_mod._apply_openai_service_tier(kwargs, label="test")
         assert "service_tier" not in kwargs
 
-    def test_construct_chat_openai_uses_subclass_only_for_flex(self):
+    def test_construct_chat_openai_is_deadline_aware_with_or_without_flex(self):
+        # No plain-client branch: a standard-tier client must pass the dispatch
+        # check too, or it sends its construction-time timeout in a scope.
         flex_cls = llms_mod._get_flex_fallback_chat_openai_cls()
         llm = llms_mod._construct_chat_openai(
             {"model": "gpt-5.4", "api_key": "k", "service_tier": "flex"}
         )
         assert isinstance(llm, flex_cls)
-        plain = llms_mod._construct_chat_openai({"model": "gpt-5.4", "api_key": "k"})
-        assert not isinstance(plain, flex_cls)
+        standard = llms_mod._construct_chat_openai({"model": "gpt-5.4", "api_key": "k"})
+        assert isinstance(standard, flex_cls)
+        assert standard.service_tier is None
+        assert standard.dispatch_provider == "openai"
 
     def test_consultant_llm_gets_flex_tier(self, monkeypatch):
         _set_cfg(monkeypatch, openai_service_tier="flex")
@@ -289,6 +293,7 @@ class TestOpenAIFlexWiring:
             model="gpt-5.4",
             api_key="test-key",
             service_tier="flex",
+            dispatch_provider="openai",
             flex_fallback_to_standard=True,
         )
         calls: list[dict] = []
@@ -314,6 +319,7 @@ class TestOpenAIFlexWiring:
             model="gpt-4o-mini-retired",
             api_key="test-key",
             service_tier="flex",
+            dispatch_provider="openai",
         )
         calls: list[dict] = []
 
@@ -484,6 +490,7 @@ class TestOpenAIFlexLatencyFallback:
             model="gpt-5.4",
             api_key="test-key",
             service_tier="flex",
+            dispatch_provider="openai",
             flex_fallback_to_standard=True,
         )
         calls: list[dict] = []
@@ -515,6 +522,7 @@ class TestOpenAIFlexLatencyFallback:
             model="gpt-5.4",
             api_key="test-key",
             service_tier="flex",
+            dispatch_provider="openai",
             flex_fallback_to_standard=False,
         )
 
@@ -563,7 +571,12 @@ class TestFlexHealthGatesTheTransports:
 
     def test_openai_falls_back_to_auto_once_degraded(self):
         cls = llms_mod._get_flex_fallback_chat_openai_cls()
-        model = cls(model="gpt-5.4", api_key="k", service_tier="flex")
+        model = cls(
+            model="gpt-5.4",
+            api_key="k",
+            service_tier="flex",
+            dispatch_provider="openai",
+        )
         assert model._effective_tier({}) == "flex"
 
         self._degrade("openai")
@@ -577,7 +590,12 @@ class TestFlexHealthGatesTheTransports:
             model="gemini-3.6-flash", google_api_key="k", service_tier="flex"
         )
         openai_cls = llms_mod._get_flex_fallback_chat_openai_cls()
-        openai = openai_cls(model="gpt-5.4", api_key="k", service_tier="flex")
+        openai = openai_cls(
+            model="gpt-5.4",
+            api_key="k",
+            service_tier="flex",
+            dispatch_provider="openai",
+        )
 
         self._degrade("google")
 

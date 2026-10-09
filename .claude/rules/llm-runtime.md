@@ -83,6 +83,17 @@ are **total** attempts everywhere; translate to a vendor's `max_retries` only vi
 `sdk_max_retries`. A seat's budget class is data on its `SeatSpec`, never a
 display-name set.
 
+**No plain OpenAI-family or Anthropic client.** Build every one with
+`new_openai_chat` / `new_anthropic_chat` in
+`src/llm_runtime/adapters/transports.py`, passing `dispatch_provider` (the vendor
+that receives the request) and the seat's `budget_timeout_class` explicitly. Never
+infer or default the provider: it selects the request ceiling and the flex-health
+key, and the factory's `_llm_runtime_provider` stamp lands only after construction.
+A compatible vendor never gets a `service_tier`. Tests patch those two seam
+functions, never `langchain_openai.ChatOpenAI`/`ChatAnthropic`.
+`tests/architecture/test_llm_constructor_boundary.py` rejects a plain client.
+Streaming stays refused until it is sized at dispatch and qualified.
+
 **A caller outside the graph invokes through `invoke_with_rate_limit_handling`,
 keyed by its seat's display name — never a bare `ainvoke` under a cap it computed
 itself.** The editor review, retrospective lesson and semantic judge were moved

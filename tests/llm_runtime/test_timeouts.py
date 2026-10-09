@@ -899,6 +899,7 @@ class TestSdkRequestLayer:
             timeout=120,
             max_retries=0,
             use_responses_api=use_responses_api,
+            dispatch_provider="openai",
         )
         with _quick():
             policy = _policy(TimeoutClass.CROSS_CHECK, provider="openai")

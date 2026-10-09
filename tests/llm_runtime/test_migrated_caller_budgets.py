@@ -273,7 +273,13 @@ class TestRequestCeilingFollowsTheDispatchingVendor:
             raise RuntimeError("captured")
 
         cls = llms_mod._get_flex_fallback_chat_openai_cls()
-        llm = cls(model="gpt-5.4", api_key="k", timeout=999, max_retries=0)
+        llm = cls(
+            model="gpt-5.4",
+            api_key="k",
+            timeout=999,
+            max_retries=0,
+            dispatch_provider="openai",
+        )
         with _run(quick=False):
             google = resolve_budget_policy(TimeoutClass.STANDARD, provider="google")
             assert google.request_cap == 300.0
@@ -297,7 +303,13 @@ class TestRequestCeilingFollowsTheDispatchingVendor:
             raise RuntimeError("captured")
 
         cls = llms_mod._get_flex_fallback_chat_openai_cls()
-        llm = cls(model="gpt-5.4", api_key="k", timeout=999, max_retries=0)
+        llm = cls(
+            model="gpt-5.4",
+            api_key="k",
+            timeout=999,
+            max_retries=0,
+            dispatch_provider="openai",
+        )
         with _run(quick=False):
             google = resolve_budget_policy(TimeoutClass.STANDARD, provider="google")
             with (

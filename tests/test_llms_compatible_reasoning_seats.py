@@ -47,7 +47,10 @@ def _build(factory, cfg, **kwargs):
     """Run a seat factory against a fake ChatOpenAI and return (llm, kwargs)."""
     fake_cls = MagicMock()
     fake_cls.return_value = MagicMock()
-    with patch("langchain_openai.ChatOpenAI", fake_cls), patch("src.llms.config", cfg):
+    with (
+        patch("src.llm_runtime.adapters.transports.new_openai_chat", fake_cls),
+        patch("src.llms.config", cfg),
+    ):
         llm = factory(**kwargs)
     assert fake_cls.call_args is not None, "factory did not construct a client"
     return llm, fake_cls.call_args.kwargs

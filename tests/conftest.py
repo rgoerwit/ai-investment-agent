@@ -134,8 +134,9 @@ def setup_test_env(test_chroma_persist_dir: Path):
         "FINNHUB_API_KEY": "test-key",
         # Service tiers must be pinned to defaults: an operator .env with
         # GEMINI/OPENAI_SERVICE_TIER=flex flips llms.py construction paths
-        # (flex subclasses bypass ChatOpenAI/ChatGoogleGenerativeAI mocks) and
-        # floors timeout assertions (35 s quick budgets become 1350 s). Flex
+        # (the flex path goes through _build_openai_chat, and Gemini's flex
+        # path bypasses ChatGoogleGenerativeAI mocks) and floors timeout
+        # assertions (35 s quick budgets become 1350 s). Flex
         # behavior is tested explicitly via config patching in
         # tests/test_llms_flex.py / tests/test_service_tiers.py.
         "GEMINI_SERVICE_TIER": "standard",

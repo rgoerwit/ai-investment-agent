@@ -102,7 +102,7 @@ def test_construct_chat_openai_passes_custom_base(monkeypatch):
     _set_base(monkeypatch, "https://api.moonshot.cn/v1")
     fake_cls = MagicMock()
 
-    with patch("langchain_openai.ChatOpenAI", fake_cls):
+    with patch("src.llm_runtime.adapters.transports.new_openai_chat", fake_cls):
         llms_mod._construct_chat_openai(
             {
                 "model": "kimi-k2",
@@ -121,7 +121,7 @@ def test_construct_chat_openai_default_keeps_responses_api(monkeypatch):
     _set_base(monkeypatch, "")
     fake_cls = MagicMock()
 
-    with patch("langchain_openai.ChatOpenAI", fake_cls):
+    with patch("src.llm_runtime.adapters.transports.new_openai_chat", fake_cls):
         llms_mod._construct_chat_openai(
             {
                 "model": "gpt-5.4",

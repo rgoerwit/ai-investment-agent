@@ -4,6 +4,7 @@ from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 
+from src.llm_runtime.adapters import transports
 from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.budgets import resolve_generation_budget, stamp_budget_metadata
 from src.llm_runtime.profiles import resolve_sampling_temperature
@@ -42,8 +43,6 @@ class CompatibleAdapter:
             raise ValueError(
                 "compatible transport is restricted to reviewed APAC/Moonshot seats"
             )
-        from langchain_openai import ChatOpenAI
-
         from src.config import config
 
         settings = request.settings or config
@@ -108,6 +107,10 @@ class CompatibleAdapter:
             "callbacks": list(request.callbacks),
             "max_completion_tokens": budget.api_cap_tokens,
             "streaming": False,
+            # The bound vendor, explicitly: it selects the compatible request
+            # ceiling at dispatch, and a compatible vendor never gets a tier.
+            "dispatch_provider": provider,
+            "budget_timeout_class": request.seat.timeout_class.value,
         }
         if seat_id in self._APAC_SEATS:
             kwargs["extra_body"] = {
@@ -124,7 +127,7 @@ class CompatibleAdapter:
         )
         if temperature is not None:
             kwargs["temperature"] = temperature
-        llm = ChatOpenAI(**kwargs)
+        llm = transports.new_openai_chat(**kwargs)
         llm.rate_limiter = limiter_for_binding(
             settings,
             request.binding.identity.vendor_id,

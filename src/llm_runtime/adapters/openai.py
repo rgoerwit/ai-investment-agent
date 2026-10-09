@@ -1,9 +1,11 @@
 """OpenAI-native chat adapter."""
 
 from typing import Any
+from urllib.parse import urlsplit
 
 from langchain_core.language_models import BaseChatModel
 
+from src.llm_runtime.adapters import transports
 from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.budgets import resolve_generation_budget, stamp_budget_metadata
 from src.llm_runtime.profiles import resolve_sampling_temperature
@@ -14,6 +16,8 @@ from src.llm_runtime.timeouts import (
     policy_for_seat,
     sdk_max_retries,
 )
+
+_OPENAI_NATIVE_HOST = "api.openai.com"
 
 
 class OpenAIAdapter:
@@ -60,8 +64,6 @@ class OpenAIAdapter:
                 timeout_class=request.seat.timeout_class,
             )
         else:
-            from langchain_openai import ChatOpenAI
-
             budget = resolve_generation_budget(
                 settings,
                 intent_tokens=request.output_tokens or 8192,
@@ -78,6 +80,9 @@ class OpenAIAdapter:
                 "streaming": False,
                 "use_responses_api": True,
                 "output_version": "responses/v1",
+                # The binding's provider, explicitly: it sizes every request.
+                "dispatch_provider": request.binding.provider,
+                "budget_timeout_class": request.seat.timeout_class.value,
             }
             base_url = settings.get_openai_api_base()
             if base_url:
@@ -97,15 +102,9 @@ class OpenAIAdapter:
             )
             if temperature is not None:
                 kwargs["temperature"] = temperature
-            if request.binding.failover_model:
-                # Only the tiered transport can serve a failover attempt; with
-                # service_tier="auto" it behaves exactly like ChatOpenAI.
-                from src import llms
-
-                kwargs["budget_timeout_class"] = request.seat.timeout_class.value
-                model = llms._get_flex_fallback_chat_openai_cls()(**kwargs)
-            else:
-                model = ChatOpenAI(**kwargs)
+            # Always the deadline-aware transport: it also serves a failover
+            # attempt, and with no service tier it sends what ChatOpenAI would.
+            model = transports.new_openai_chat(**kwargs)
             stamp_budget_metadata(
                 model,
                 callbacks=request.callbacks,
@@ -121,9 +120,14 @@ class OpenAIAdapter:
         return model
 
     def build_transport_fallback(self, model_name: str) -> BaseChatModel:
-        """Build the Consultant's alternate OpenAI transport in one owned seam."""
+        """Build the Consultant's alternate OpenAI transport in one owned seam.
 
-        from langchain_openai import ChatOpenAI
+        Deadline-aware like every other OpenAI-family client. A custom base URL
+        here is an OpenAI-*compatible* endpoint (the Responses API fields are
+        dropped for it below), so it is sized against the compatible ceiling,
+        not the OpenAI request cap.
+        """
+
         from pydantic import SecretStr
 
         from src.config import config
@@ -131,11 +135,16 @@ class OpenAIAdapter:
         raw_api_key = config.get_openai_api_key()
         api_key = SecretStr(raw_api_key) if raw_api_key else None
         base_url = config.get_openai_api_base()
+        provider = (
+            transports.OPENAI_NATIVE_PROVIDER
+            if not base_url or urlsplit(base_url).hostname == _OPENAI_NATIVE_HOST
+            else transports.OPENAI_COMPATIBLE_PROVIDER
+        )
         consultant = SEATS[SeatId.CONSULTANT]
         kwargs: dict[str, Any] = {
             "model": model_name,
             "timeout": policy_for_seat(
-                consultant, provider="openai", cfg=config
+                consultant, provider=provider, cfg=config
             ).request_cap,
             # The Consultant's policy: one request per dispatch (was 3 retries).
             "max_retries": sdk_max_retries(
@@ -146,6 +155,8 @@ class OpenAIAdapter:
             ),
             "streaming": False,
             "api_key": api_key,
+            "dispatch_provider": provider,
+            "budget_timeout_class": consultant.timeout_class.value,
         }
         if base_url:
             kwargs["base_url"] = base_url
@@ -154,4 +165,4 @@ class OpenAIAdapter:
                 use_responses_api=True,
                 output_version="responses/v1",
             )
-        return ChatOpenAI(**kwargs)
+        return transports.new_openai_chat(**kwargs)

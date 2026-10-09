@@ -90,7 +90,7 @@ def test_google_reasoning_handoff_requests_readable_thoughts(monkeypatch) -> Non
 def test_openai_reasoning_handoff_requests_summary_without_duplicate_effort(
     monkeypatch,
 ) -> None:
-    import langchain_openai
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -110,7 +110,7 @@ def test_openai_reasoning_handoff_requests_summary_without_duplicate_effort(
         captured.update(kwargs)
         return model
 
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", fake_openai)
+    monkeypatch.setattr(transports, "new_openai_chat", fake_openai)
     request = SeatModelRequest(
         plan.bindings[SeatId.BULL],
         SEATS[SeatId.BULL],
@@ -136,7 +136,7 @@ def test_compat_adapter_rejects_unqualified_tool_seat() -> None:
 
 
 def test_moonshot_review_adapter_honors_reasoning_override(monkeypatch) -> None:
-    import langchain_openai
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -157,7 +157,7 @@ def test_moonshot_review_adapter_honors_reasoning_override(monkeypatch) -> None:
         captured.update(kwargs)
         return model
 
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", fake_chat_openai)
+    monkeypatch.setattr(transports, "new_openai_chat", fake_chat_openai)
     request = SeatModelRequest(
         plan.bindings[SeatId.CONSULTANT],
         SEATS[SeatId.CONSULTANT],
@@ -235,7 +235,7 @@ def test_google_adapter_honors_specialized_seat_execution_policy(
 
 
 def test_openai_adapter_omits_temperature_but_keeps_health_bounds(monkeypatch) -> None:
-    import langchain_openai
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -254,7 +254,7 @@ def test_openai_adapter_omits_temperature_but_keeps_health_bounds(monkeypatch) -
         captured.update(kwargs)
         return model
 
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", fake_chat_openai)
+    monkeypatch.setattr(transports, "new_openai_chat", fake_chat_openai)
     request = SeatModelRequest(
         plan.bindings[SeatId.HEALTH_CHECK],
         SEATS[SeatId.HEALTH_CHECK],
@@ -272,7 +272,7 @@ def test_openai_adapter_omits_temperature_but_keeps_health_bounds(monkeypatch) -
 
 
 def test_standard_openai_adapter_builds_normalized_budget_contract(monkeypatch) -> None:
-    import langchain_openai
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -293,7 +293,7 @@ def test_standard_openai_adapter_builds_normalized_budget_contract(monkeypatch) 
         captured.update(kwargs)
         return model
 
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", fake_chat_openai)
+    monkeypatch.setattr(transports, "new_openai_chat", fake_chat_openai)
     request = SeatModelRequest(
         plan.bindings[SeatId.MARKET],
         SEATS[SeatId.MARKET],
@@ -310,7 +310,7 @@ def test_standard_openai_adapter_builds_normalized_budget_contract(monkeypatch) 
 
 
 def test_openai_adapter_honors_reviewed_official_base_url(monkeypatch) -> None:
-    import langchain_openai
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -329,7 +329,7 @@ def test_openai_adapter_honors_reviewed_official_base_url(monkeypatch) -> None:
         captured.update(kwargs)
         return model
 
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", fake_chat_openai)
+    monkeypatch.setattr(transports, "new_openai_chat", fake_chat_openai)
     request = SeatModelRequest(
         plan.bindings[SeatId.MARKET],
         SEATS[SeatId.MARKET],
@@ -344,7 +344,7 @@ def test_openai_adapter_honors_reviewed_official_base_url(monkeypatch) -> None:
 
 
 def test_standard_openai_adapter_does_not_import_google_facade(monkeypatch) -> None:
-    import langchain_openai
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -358,7 +358,7 @@ def test_standard_openai_adapter_does_not_import_google_facade(monkeypatch) -> N
         deepseek_api_key="d",
     )
     plan = resolve_binding_plan(settings)
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", lambda **kwargs: MagicMock())
+    monkeypatch.setattr(transports, "new_openai_chat", lambda **kwargs: MagicMock())
     monkeypatch.delitem(sys.modules, "src.llms", raising=False)
     monkeypatch.delitem(sys.modules, "langchain_google_genai", raising=False)
     request = SeatModelRequest(
@@ -375,7 +375,7 @@ def test_standard_openai_adapter_does_not_import_google_facade(monkeypatch) -> N
 
 
 def test_anthropic_adapter_preserves_adaptive_writer_construction(monkeypatch) -> None:
-    import langchain_anthropic
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -396,7 +396,7 @@ def test_anthropic_adapter_preserves_adaptive_writer_construction(monkeypatch) -
         captured.update(kwargs)
         return model
 
-    monkeypatch.setattr(langchain_anthropic, "ChatAnthropic", fake_chat_anthropic)
+    monkeypatch.setattr(transports, "new_anthropic_chat", fake_chat_anthropic)
     request = SeatModelRequest(
         plan.bindings[SeatId.ARTICLE_WRITER],
         SEATS[SeatId.ARTICLE_WRITER],
@@ -410,7 +410,7 @@ def test_anthropic_adapter_preserves_adaptive_writer_construction(monkeypatch) -
 
 
 def test_apac_compatible_adapter_honors_reasoning_override(monkeypatch) -> None:
-    import langchain_openai
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -432,7 +432,7 @@ def test_apac_compatible_adapter_honors_reasoning_override(monkeypatch) -> None:
         captured.update(kwargs)
         return model
 
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", fake_chat_openai)
+    monkeypatch.setattr(transports, "new_openai_chat", fake_chat_openai)
     binding = plan.bindings[SeatId.APAC]
     request = SeatModelRequest(
         binding,

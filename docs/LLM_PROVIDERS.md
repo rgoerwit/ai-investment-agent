@@ -1,6 +1,7 @@
 # LLM Provider Qualification and Operations
 
-Last updated: 2026-10-09 (the ticker run deadline caps every enclosing
+Last updated: 2026-10-09 (every OpenAI-family and Anthropic client is sized at
+dispatch for the vendor it names; the ticker run deadline caps every enclosing
 deadline under the pipeline; 2026-10-08: editor review, retrospective lesson and semantic judge
 moved onto the budget policy; seat client timeout and vendor ceiling inside an
 invocation; per-dispatch request budgets and application-owned retries; quick PM
@@ -400,6 +401,38 @@ inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
   provider (`policy_for_provider`). Model failover is same-vendor by validation,
   so a delegate on another vendor is not reachable today; this keeps a future
   cross-vendor delegate from sending the original vendor's ceiling.
+- **Every OpenAI-family and Anthropic client is deadline-aware, and names its
+  vendor.** Until October 2026 only the flex-tier OpenAI client and Gemini went
+  through the dispatch check. The canonical OpenAI adapter without a failover,
+  every OpenAI-compatible client (DeepSeek, z.ai, Moonshot, xAI), the
+  Consultant's alternate transport, the legacy review-plane factories, the APAC
+  factory and both Anthropic writers were plain SDK classes that sent their
+  construction-time timeout inside an invocation. Now every one is built by
+  `new_openai_chat` / `new_anthropic_chat` in
+  `src/llm_runtime/adapters/transports.py`, and the shared sizing lives in the
+  SDK-free `src/llm_runtime/dispatch.py`. Each constructor passes
+  `dispatch_provider` explicitly; a missing or blank one is a construction error.
+  The factory's provider stamp arrives only after construction, and legacy
+  clients never get it, so it cannot serve. The provider was hardcoded to
+  `"openai"` in the one deadline-aware OpenAI class, so a compatible vendor was
+  sized against the 120 s OpenAI request cap, not its
+  `OPENAI_COMPATIBLE_CLIENT_TIMEOUT_SECONDS` ceiling, and keyed into OpenAI's flex
+  health. A non-OpenAI host on the legacy path or the alternate transport is
+  `openai_compatible`. A compatible vendor never carries a service tier: it
+  cannot be built with one, and its failover copy sends none. Anthropic takes the
+  sized `timeout` per request on both its sync and async paths; its retries stay
+  fixed on the client. **Behaviour change:** inside an invocation these clients
+  now send a request sized from the deadline, and the Consultant's alternate
+  transport on a compatible base is built with the compatible ceiling instead of
+  the OpenAI one. Direct callers are unchanged: outside a scope a standard
+  request keeps its built timeout.
+- **Streaming is refused on the deadline-aware classes** (Gemini included). No
+  application code streams, and a stream would bypass the per-dispatch sizing.
+  `disable_streaming` routes `.stream()`/`.astream()` through the sized
+  non-streaming path. `_stream`/`_astream`, a `stream=True` call argument and
+  `streaming=True` at construction all raise. That last one matters because
+  ChatOpenAI puts `stream: true` in its default request parameters, so even its
+  non-streaming `_generate` would open a stream.
 - **`--quick` no longer clamps `LLM_CALL_HARD_TIMEOUT_SECONDS`.** Every quick cap
   comes from the seat's class; the clamp's last readers (retrospective and judge)
   are on the resolver, so the full-mode value is read only in full mode.
@@ -424,7 +457,11 @@ per call to one, with retries owned by the runtime loop.
 request layer on Google (`X-Server-Timeout`, the ceiling of the seconds) and on both
 OpenAI request paths (Responses and Chat Completions `create(timeout=...)`); OpenAI
 has no per-request `max_retries`. `tests/llm_runtime/test_timeouts.py` pins both
-through the SDKs' own request layers.
+through the SDKs' own request layers. With langchain-anthropic 1.7.2 and anthropic
+1.6.0, a per-call `timeout` passes through `_get_request_payload` into
+`messages.create(timeout=...)` on both paths; `create()` rejects `max_retries`.
+`tests/llm_runtime/test_transport_deadlines.py` pins every seat on every vendor
+its binding group allows, read from the real registries, at the request layer.
 
 ## Embedding collections
 
