@@ -95,6 +95,13 @@ DIRECT_CALLER_TRANSPORT_ATTEMPTS = 3
 # in this repository was constructed with; named so the policy owns it.
 OPENAI_REQUEST_CAP_SECONDS = 120.0
 
+# Client ceiling for the APAC regional specialist's OpenAI-compatible client, on
+# both the legacy and the canonical construction path. A ceiling only: the node
+# total (APAC_NODE_TOTAL_TIMEOUT_SECONDS) is the enclosing deadline every APAC
+# request is sized from. Longer than the generic compatible-vendor knob's
+# typical use because the deepest-reasoning re-issue needs it.
+APAC_CLIENT_TIMEOUT_SECONDS = 240.0
+
 
 class BudgetExhausted(TimeoutError):
     """Too little of the invocation allowance remains for a useful request.
@@ -231,16 +238,30 @@ def enclosing_deadline(seconds: float | None) -> Iterator[float | None]:
     Nested scopes can only shorten the deadline: a correction or recovery call
     gets its own invocation allowance but can never renew the node's.
     """
-    outer = _ENCLOSING_DEADLINE.get()
     if seconds is None:
+        with enclosing_deadline_at(None) as outer:
+            yield outer
+        return
+    with enclosing_deadline_at(now() + float(seconds)) as deadline:
+        yield deadline
+
+
+@contextmanager
+def enclosing_deadline_at(deadline: float | None) -> Iterator[float | None]:
+    """``enclosing_deadline`` for an absolute monotonic deadline already computed.
+
+    The ticker run deadline (``src/llm_runtime/run_deadline.py``) arrives as an
+    absolute instant, not a duration; binding it here makes every node scope
+    inside it ``min(node, run)``. ``None`` binds nothing.
+    """
+    outer = _ENCLOSING_DEADLINE.get()
+    if deadline is None:
         yield outer
         return
-    deadline = now() + float(seconds)
-    if outer is not None:
-        deadline = min(deadline, outer)
-    token = _ENCLOSING_DEADLINE.set(deadline)
+    bound = float(deadline) if outer is None else min(float(deadline), outer)
+    token = _ENCLOSING_DEADLINE.set(bound)
     try:
-        yield deadline
+        yield bound
     finally:
         _ENCLOSING_DEADLINE.reset(token)
 

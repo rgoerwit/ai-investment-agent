@@ -37,12 +37,14 @@ SCRATCH="scratch"
 TICKER_LIST="${SCRATCH}/gems_${DATE}.txt"
 BUY_LIST="${SCRATCH}/buys_${DATE}.txt"
 COOLDOWN="${COOLDOWN_SECONDS:-10}"
-# Per-ticker outer watchdog (SIGTERM if a child exceeds it). Stage 1 default
-# raised 360 -> 600 so the gate-critical APEX seats' larger --quick per-call
-# budget (apex_quick_llm_call_hard_timeout_seconds, 180s x 2 seats + the rest of
-# the pipeline) fits comfortably under it: per-call cap < stage watchdog.
-STAGE1_TICKER_TIMEOUT_SECONDS="${STAGE1_TICKER_TIMEOUT_SECONDS:-600}"
-STAGE2_TICKER_TIMEOUT_SECONDS="${STAGE2_TICKER_TIMEOUT_SECONDS:-2400}"
+# Per-ticker outer watchdog (SIGTERM if a child exceeds it). The defaults live in
+# Settings (stage1_ticker_timeout_seconds / stage2_ticker_timeout_seconds in
+# src/config.py) and are read by resolve_stage_timeouts once the Python runtime
+# is known; an exported STAGE1/STAGE2_TICKER_TIMEOUT_SECONDS still wins. Each
+# child is handed the matching absolute deadline (PIPELINE_TICKER_DEADLINE_EPOCH,
+# set by run_tracked_child) so in-process admission stops short of the signal.
+STAGE1_TICKER_TIMEOUT_SECONDS="${STAGE1_TICKER_TIMEOUT_SECONDS:-}"
+STAGE2_TICKER_TIMEOUT_SECONDS="${STAGE2_TICKER_TIMEOUT_SECONDS:-}"
 # Stable id for this pipeline invocation, stamped into the durable failures log.
 PIPELINE_RUN_ID="${DATE}-$$"
 FORCE=false
@@ -251,6 +253,32 @@ write_pipeline_marker() {
 
     printf '{\n  "schema_version": 1,\n  "workflow": "run_pipeline",\n  "screening_date": "%s",\n  "completed_at": "%s",\n  "candidate_count": %s,\n  "buy_count": %s\n}\n' \
         "$DATE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$candidates" "$buys" > "$marker"
+}
+
+# Print one numeric Settings value (src/config_print.py); non-zero on an unknown key.
+config_value() {
+    "${PYTHON_CMD[@]}" -m src.config_print "$1"
+}
+
+# Resolve each stage watchdog: an exported value wins, else the Settings field.
+# Fails loudly rather than falling back to a literal that could drift.
+resolve_stage_timeouts() {
+    local var key value
+    for var in STAGE1_TICKER_TIMEOUT_SECONDS STAGE2_TICKER_TIMEOUT_SECONDS; do
+        value="${!var:-}"
+        if [[ -z "$value" ]]; then
+            key=$(printf '%s' "$var" | tr '[:upper:]' '[:lower:]')
+            if ! value=$(config_value "$key"); then
+                fail "Unable to read ${key} from Settings (python -m src.config_print ${key})"
+                exit 1
+            fi
+        fi
+        if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+            fail "${var} must be a positive whole number of seconds, got '${value}'"
+            exit 1
+        fi
+        printf -v "$var" '%s' "$value"
+    done
 }
 
 resolve_python_cmd() {
@@ -588,6 +616,7 @@ mkdir -p "$SCRATCH"
 # --- Resolve Python runtime ---
 resolve_python_cmd
 info "Python runtime:      $PYTHON_CMD_DISPLAY"
+resolve_stage_timeouts
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null

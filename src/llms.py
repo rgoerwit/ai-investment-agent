@@ -37,6 +37,7 @@ from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.failover import ModelFailoverMixin, in_failover_attempt
 from src.llm_runtime.seats import SEATS, ModelIntent, SeatId
 from src.llm_runtime.timeouts import (
+    APAC_CLIENT_TIMEOUT_SECONDS,
     DIRECT_CALLER_TRANSPORT_ATTEMPTS,
     OPENAI_REQUEST_CAP_SECONDS,
     BudgetExhausted,
@@ -1906,7 +1907,7 @@ deep_thinking_llm = _LazyLLMProxy(create_deep_thinking_llm)
 def create_consultant_llm(
     temperature: float = 0.3,
     model: str | None = None,
-    timeout: int = 120,
+    timeout: float = OPENAI_REQUEST_CAP_SECONDS,
     max_retries: int = 0,
     quick_mode: bool = False,
     callbacks: list[BaseCallbackHandler] | None = None,
@@ -2189,7 +2190,7 @@ def create_apac_specialist_llm(
         "api_key": api_key,
         # A client ceiling only: the node total (APAC_NODE_TOTAL_TIMEOUT_SECONDS)
         # is the enclosing deadline every APAC call is bounded by.
-        "timeout": 240,
+        "timeout": APAC_CLIENT_TIMEOUT_SECONDS,
         # The runtime loop owns retries (was 1 SDK retry with thinking, 0 without).
         "max_retries": sdk_max_retries(
             "openai_compatible",

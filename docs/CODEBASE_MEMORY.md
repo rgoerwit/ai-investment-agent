@@ -136,6 +136,81 @@ Stage 2. The marker's `buy_count` is the Stage-1 list size, not Stage-2
 completion. Verify full-run status from stage output and full reports; quick
 BUYs are screening candidates, not investable signals.
 
+### The watchdog contract (October 2026)
+
+Each Stage-1 and Stage-2 child runs under a per-ticker watchdog
+(`run_tracked_child` in `scripts/pipeline_signals.sh`). Before this, the child
+did not know the watchdog existed. Every in-process budget assumed unlimited
+time, so a retry ladder near the end kept going until SIGTERM discarded the
+whole ticker. In full mode with flex on, one Portfolio Manager call can use
+2 × 1,350 s, which is more than the 2,400 s Stage-2 watchdog on its own.
+
+- **One source of truth.** `STAGE1_TICKER_TIMEOUT_SECONDS` (600) and
+  `STAGE2_TICKER_TIMEOUT_SECONDS` (2400) are `Settings` fields. The script reads
+  them with `python -m src.config_print <key>`, which exits non-zero on an
+  unknown key and refuses any field that is not a number or a boolean. An
+  exported value still wins and skips Python. A value that is not a positive
+  whole number stops the pipeline before Stage 0.
+- **An absolute deadline, not a duration.** `run_tracked_child` sets
+  `PIPELINE_TICKER_DEADLINE_EPOCH = start + timeout` when it starts the child.
+  `PIPELINE_TICKER_TIMEOUT_SECONDS` stays as the watchdog's own input, and the
+  child never reads it. `src/llm_runtime/run_deadline.py` converts the epoch to a
+  monotonic deadline once, minus `PUBLICATION_RESERVE_SECONDS` (30). A missing or
+  malformed epoch means there is no run deadline. It is logged once and never
+  raises, so a manual `src.main` run is unchanged.
+- **Where it binds.** `src/main.py` binds it with `enclosing_deadline_at` around
+  the ticker retrospective and around `_execute_analysis` (pre-graph fetches,
+  macro brief and the graph). It does not cover the report-header lookup, render,
+  persistence, rejection record, article or shutdown. Those run on the reserve.
+  Every node scope inside the bound region becomes `min(node, run)`: the APAC
+  node's 240 s, a caller's `overall_timeout_seconds`, and every operational
+  clamp described under Content-ingress hardening, which had been inert until now. LLM admission refuses a
+  request that cannot fit, and the retry loop stops a retry or backoff that
+  would cross the deadline. If the epoch has already passed at start, the first
+  LLM call is refused before any request is sent. The gate-critical seats then
+  fail, and the child exits with an `ANALYSIS FAILED` report, so the shell
+  records `no_analysis` and does not have to kill the child for a `child_exit_124`.
+- **The gap between the deadline and the kill.** The loop polls every
+  `PIPELINE_TICKER_WATCHDOG_POLL_SECONDS` (5). Its counter adds the poll interval
+  each pass, so it under-counts real time. SIGUSR1, which asks for a
+  pending-task dump and does not stop the child, therefore arrives no earlier
+  than the epoch. `date +%s` floors, so the epoch is never late. SIGTERM comes
+  `PIPELINE_TICKER_DUMP_GRACE_SECONDS` (5) after SIGUSR1, and SIGKILL comes
+  `PIPELINE_TICKER_TERM_GRACE_SECONDS` (10) after SIGTERM. Analysis stops
+  admitting work 30 s before the epoch, so publication has at least
+  reserve + dump grace = 35 s, plus up to one poll interval of slack. A
+  watchdog kill still writes its JSONL line to `PIPELINE_TIMEOUT_RECORD_FILE`
+  and is recorded as `child_exit_124`.
+- **The injection judge gets no carve-out.** Operational scopes deliberately
+  never bind a deadline. A 45 s tool scope would refuse the judge
+  while the agent that reads the content still had time. The judge fails open,
+  so that would turn a fail-closed timeout into uninspected content. The run
+  deadline is different because it is the outermost deadline. When it refuses
+  the judge, `EscalatingInspector` keeps the heuristic decision, and every later
+  LLM consumer is refused by the same deadline. Each class uses the same 5 s
+  minimum useful attempt and 2 s margin once its cap is at least 40 s.
+  `tests/llm_runtime/test_run_deadline.py` pins this.
+- **The startup diagnostic.** `log_deadline_ladder` works out the critical path
+  from each seat's resolved `BudgetPolicy`. It takes the slowest parallel analyst
+  branch (Junior then Senior), then the debate rounds, the Research Manager,
+  the Trader, the slowest risk analyst and the PM. Each step counts at
+  `cap × LLM_ATTEMPTS`. If that total is more than the time left, it logs
+  `deadline_ladder_truncated` once at INFO, with both the single-attempt and
+  the full-retry totals. Tool loops and optional seats are left out, so the
+  total is a lower bound. It shows the ceiling and does not promise the run
+  completes. With shipped defaults, quick mode needs 1,320 s with retries and
+  660 s with one attempt each, against about 570 s, so it always logs. Full
+  mode on the standard tier needs 1,920 s against about 2,370 s and does not
+  log. Full mode with Gemini flex needs 21,600 s.
+- **No literal deadlines.** `tests/test_timeout_literals.py` is an AST guard. It
+  flags a numeric literal that reaches a deadline parameter outside the config
+  owners. The literal can arrive through a constant, a local, `or`, `min` or
+  `+`. Allowlist entries are keyed by enclosing scope and parameter, not by line
+  number, and an entry the scan no longer finds fails the test. The APAC 240 s
+  client ceiling had two copies (`src/llms.py` and the compatible adapter). It
+  is now `APAC_CLIENT_TIMEOUT_SECONDS` in `src/llm_runtime/timeouts.py`. The
+  Consultant factory's 120 s default is now `OPENAI_REQUEST_CAP_SECONDS`.
+
 ## Fast Orientation
 
 Read in this order:
@@ -499,8 +574,10 @@ data layer does not import tooling. A spent caller allowance raises
 site's existing timeout fallback and leaves no un-awaited request. As with the
 tool scopes, the aggregate metrics fetch reads the enclosing deadline but never
 binds one: gap fill runs content inspection, and its LLM judge fails open when
-admission refuses it. Today only the APAC specialist binds an enclosing deadline,
-so in practice the clamp is inert until a run-level deadline is bound. Six
+admission refuses it. Under the pipeline the clamp is live: the ticker run
+deadline is bound around the whole analysis (see the watchdog contract under
+Screening Pipeline Semantics). Manual runs bind none, so there only the APAC
+node's scope applies. Six
 later fields joined the block with the same clamp: the ownership tool's 8 s per
 yfinance section, StockTwits' 10 s request, the retrospective's 15 s fetch, the
 two advisory 10 s fetches in `src/main.py` (market note and price snapshot,

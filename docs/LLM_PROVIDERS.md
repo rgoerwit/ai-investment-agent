@@ -1,6 +1,7 @@
 # LLM Provider Qualification and Operations
 
-Last updated: 2026-10-08 (editor review, retrospective lesson and semantic judge
+Last updated: 2026-10-09 (the ticker run deadline caps every enclosing
+deadline under the pipeline; 2026-10-08: editor review, retrospective lesson and semantic judge
 moved onto the budget policy; seat client timeout and vendor ceiling inside an
 invocation; per-dispatch request budgets and application-owned retries; quick PM
 504 re-attribution; PM standard pin).
@@ -352,7 +353,10 @@ inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
 - **The deadline is absolute and lives in a ContextVar**, never on the model.
   `invoke_with_rate_limit_handling` sets `min(now + cap, enclosing)` per attempt,
   where *enclosing* is `overall_timeout_seconds` or a node scope
-  (`enclosing_deadline`; the APAC node's `APAC_NODE_TOTAL_TIMEOUT_SECONDS` is one).
+  (`enclosing_deadline`; the APAC node's `APAC_NODE_TOTAL_TIMEOUT_SECONDS` is one),
+  itself capped by the pipeline's ticker run deadline when the watchdog supplies
+  one (`enclosing_deadline_at`; see the watchdog contract in
+  `docs/CODEBASE_MEMORY.md`).
   A retry or failover attempt gets a fresh allowance; nothing renews the enclosing
   deadline.
 - **Every dispatch is admitted and sized**: flex, standard re-issue, a call sent at

@@ -46,6 +46,22 @@ attempt remains, and every retry and backoff is re-admitted against the enclosin
 deadline. Do not stretch a ceiling with a floor to make a slow request fit; give
 the work an enclosing deadline (`enclosing_deadline`) and let admission truncate.
 
+**The pipeline watchdog is the outermost deadline.** `scripts/pipeline_signals.sh`
+hands each child `PIPELINE_TICKER_DEADLINE_EPOCH`. `run_deadline()` in
+`src/llm_runtime/run_deadline.py` converts it once, less
+`PUBLICATION_RESERVE_SECONDS`, and `src/main.py` binds it with
+`enclosing_deadline_at` around the retrospective and the graph run. Never bind it
+around render, persistence or shutdown: that work runs on the reserve. The stage
+watchdog values are `Settings` fields, read by the script through
+`python -m src.config_print`. Never put a literal default back in the script.
+Operational scopes still read the enclosing deadline and never bind one.
+
+**No literal deadline at an execution boundary.** A number passed to
+`timeout=`, `*_timeout_seconds=`, `ClientTimeout`, `BlockingCallPolicy` or
+`wait_for` belongs in a `Settings` field, clamped to the caller's deadline.
+`tests/test_timeout_literals.py` scans for this shape. An allowlist entry is
+keyed by scope and parameter, and it must say why a literal is correct there.
+
 **A deadline is not a bound.** A checkpoint bounds nothing that follows it, and a call
 starting just under the deadline can still run a full per-call timeout past it. Wrap
 the whole workflow at one ceiling instead, and prove the node *returns promptly*

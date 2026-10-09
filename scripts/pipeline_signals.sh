@@ -1,5 +1,25 @@
 #!/bin/bash
 
+# Watchdog contract (docs/CODEBASE_MEMORY.md). The child is handed an absolute
+# analysis deadline, PIPELINE_TICKER_DEADLINE_EPOCH = start + timeout, read just
+# before the child starts from the timeout the loop below counts against
+# (PIPELINE_TICKER_TIMEOUT_SECONDS stays the watchdog's own input; the child never
+# reads it). date +%s floors, so the epoch never lands after the signal. The loop only
+# notices the deadline at its next poll, and its elapsed counter adds the poll
+# interval per iteration, so it can only under-count real time: SIGUSR1 (a
+# pending-task dump, not a stop) arrives no earlier than the epoch, SIGTERM at
+# least dump_grace_seconds later, SIGKILL term_grace_seconds after that. The gap
+# between "analysis deadline" and "process kill" is therefore the child's
+# publication reserve (publication_reserve_seconds) + dump grace, plus up to one
+# poll interval of slack.
+ticker_deadline_epoch() {
+    local timeout="$1" started="${2:-}"
+    if [[ -z "$started" ]]; then
+        started=$(date +%s)
+    fi
+    printf '%s' "$((started + timeout))"
+}
+
 run_tracked_child() {
     local logfile="$1"
     shift
@@ -14,7 +34,7 @@ run_tracked_child() {
     local dump_grace_seconds="${PIPELINE_TICKER_DUMP_GRACE_SECONDS:-5}"
     local term_grace_seconds="${PIPELINE_TICKER_TERM_GRACE_SECONDS:-10}"
     local timeout_record_file="${PIPELINE_TIMEOUT_RECORD_FILE:-}"
-    local child_pid elapsed status
+    local child_pid elapsed status deadline_epoch
     local cmd=("$@")
 
     : > "$logfile"
@@ -23,7 +43,9 @@ run_tracked_child() {
         printf '[pipeline_child_command] %s\n' "$*"
     } >> "$logfile"
 
-    "${cmd[@]}" >> "$logfile" 2>&1 &
+    deadline_epoch=$(ticker_deadline_epoch "$timeout")
+    printf '[pipeline_child_deadline] epoch=%s timeout=%ss\n' "$deadline_epoch" "$timeout" >> "$logfile"
+    PIPELINE_TICKER_DEADLINE_EPOCH="$deadline_epoch" "${cmd[@]}" >> "$logfile" 2>&1 &
     child_pid=$!
     elapsed=0
 

@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -1433,6 +1434,97 @@ class TestMainOrchestration:
             "article",
             "final",
         ]
+
+    def test_run_deadline_caps_analysis_but_not_publication(self, monkeypatch):
+        """The watchdog's deadline is bound around the analysis only.
+
+        The ticker retrospective and the graph run see the run deadline as their
+        enclosing deadline; rendering, persistence and the article run after the
+        scope closes, on the publication reserve.
+        """
+        from src.cli import OutputTargets
+        from src.llm_runtime import run_deadline as run_deadline_mod
+        from src.llm_runtime.timeouts import current_enclosing_deadline
+        from src.main import main
+
+        seen: dict[str, float | None] = {}
+        ladder: list[float | None] = []
+        args = SimpleNamespace(
+            retrospective_only=False,
+            ticker="6083.T",
+            quick=True,
+            strict=False,
+            article=False,
+            quiet=True,
+            brief=False,
+            svg=False,
+            transparent=False,
+            imagedir=None,
+        )
+
+        def note(label, value=None):
+            seen[label] = current_enclosing_deadline()
+            return value
+
+        async def anote(label, value=None):
+            return note(label, value)
+
+        monkeypatch.setattr(run_deadline_mod, "_LOGGED", set())
+        monkeypatch.setattr("src.config._cached_env_file_values", lambda: {})
+        monkeypatch.setenv("PIPELINE_TICKER_DEADLINE_EPOCH", str(time.time() + 600))
+        monkeypatch.setattr("src.main.log_deadline_ladder", ladder.append)
+        monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
+        monkeypatch.setattr("src.main.cli._validate_cli_args", lambda a: None)
+        monkeypatch.setattr(
+            "src.main.cli._resolve_output_targets",
+            lambda a: OutputTargets(None, Path("results/images"), True),
+        )
+        monkeypatch.setattr("src.main._setup_runtime", lambda a, t: ({}, object()))
+        monkeypatch.setattr(
+            "src.main._maybe_run_ticker_retrospective",
+            lambda a: anote("retrospective"),
+        )
+        monkeypatch.setattr(
+            "src.main.output._emit_start_banner", lambda a, t, **kw: "banner"
+        )
+        monkeypatch.setattr(
+            "src.main._execute_analysis",
+            lambda a, t, **kw: anote(
+                "execute", {"analysis_validity": {"publishable": True}}
+            ),
+        )
+        monkeypatch.setattr("src.main._attach_run_summary", lambda r, a, p: None)
+        monkeypatch.setattr(
+            "src.main.output._load_company_name_for_output_async",
+            lambda ticker: anote("name_lookup"),
+        )
+        monkeypatch.setattr(
+            "src.main.output._render_primary_output",
+            lambda r, a, t, b, **kw: note("render", (None, None, None)),
+        )
+        monkeypatch.setattr(
+            "src.main.persistence._persist_analysis_outputs",
+            lambda r, a, **kw: note("persist"),
+        )
+        monkeypatch.setattr(
+            "src.main.persistence._maybe_save_rejection_record",
+            lambda r, a, **kw: anote("rejection"),
+        )
+        monkeypatch.setattr(
+            "src.main.output._maybe_generate_article",
+            lambda *a, **kw: anote("article", False),
+        )
+        monkeypatch.setattr("src.main._log_final_summary", lambda r, a, g: None)
+        monkeypatch.setattr(
+            "src.cleanup.cleanup_async_resources", lambda: _async_none()
+        )
+
+        assert asyncio.run(main()) == 0
+        (deadline,) = ladder
+        assert deadline is not None
+        assert seen["retrospective"] == seen["execute"] == deadline
+        for label in ("name_lookup", "render", "persist", "rejection", "article"):
+            assert seen[label] is None, label
 
     def test_main_returns_two_for_cli_usage_error(self, monkeypatch):
         from src.main import main

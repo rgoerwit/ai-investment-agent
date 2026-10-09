@@ -12,6 +12,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The per-ticker pipeline watchdog is now a hard ceiling inside the analysis.
+  `STAGE1_TICKER_TIMEOUT_SECONDS` (600) and `STAGE2_TICKER_TIMEOUT_SECONDS` (2400)
+  are settings that `scripts/run_pipeline.sh` reads through
+  `python -m src.config_print`. An exported value still wins. A value that is not
+  a positive whole number now stops the pipeline. Each child receives an absolute
+  `PIPELINE_TICKER_DEADLINE_EPOCH` and binds it, less the new
+  `PUBLICATION_RESERVE_SECONDS` (30), around the analysis. **Behaviour change
+  under the pipeline:** an LLM request, retry or backoff that cannot finish
+  30 s before the watchdog fires is refused rather than sent. The injection
+  judge is included and falls back to its heuristic decision. Every
+  operational deadline that clamps to its caller now shrinks to the ticker's
+  remaining time, which until now was a no-op outside the APAC node. A ticker
+  that runs out of time now ends as an unpublishable `ANALYSIS FAILED` report
+  (`no_analysis`) rather than a SIGTERM (`child_exit_124`) more often.
+  Report rendering and persistence run outside the cap, on the reserve. A
+  startup `deadline_ladder_truncated` log reports when the configured retry
+  ladder cannot fit, which is always true in `--quick` at the shipped defaults.
+  Manual runs are unchanged. `tests/test_timeout_literals.py` now rejects a
+  numeric literal passed to a deadline parameter outside the configuration
+  owners.
 - Attempt counts now mean total attempts on every vendor. `API_RETRY_ATTEMPTS` is
   renamed `LLM_ATTEMPTS` (the old name is still read; the new one wins) and
   `SeatExecutionPolicy.sdk_max_retries` is renamed `transport_attempts` (the old

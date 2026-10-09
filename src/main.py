@@ -42,7 +42,8 @@ from src.eval import (
     reset_active_capture_manager,
     set_active_capture_manager,
 )
-from src.llm_runtime.timeouts import require_allowance
+from src.llm_runtime.run_deadline import log_deadline_ladder, run_deadline
+from src.llm_runtime.timeouts import enclosing_deadline_at, require_allowance
 from src.runtime_config import (
     bind_runtime_config,
     build_runtime_config,
@@ -1675,7 +1676,12 @@ async def run_with_args(
             images_dir=output_targets.image_dir
         )
         _restore_runtime_config = bind_runtime_config(runtime_config)
+        # The pipeline watchdog's ceiling, converted once to a monotonic analysis
+        # deadline (less the publication reserve). Bound around the analysis
+        # below, never around final publication, which runs on the reserve.
+        analysis_deadline = run_deadline()
         provider_preflight, runtime_services = _setup_runtime(args, output_targets)
+        log_deadline_ladder(analysis_deadline)
         _warn_quick_timeout_config_drift(args)
         baseline_capture = _create_baseline_capture_manager(args)
 
@@ -1712,7 +1718,10 @@ async def run_with_args(
             with use_runtime_services(runtime_services):
                 return await _run_retrospective_only(args)
 
-        with use_runtime_services(runtime_services):
+        with (
+            use_runtime_services(runtime_services),
+            enclosing_deadline_at(analysis_deadline),
+        ):
             await _maybe_run_ticker_retrospective(args)
         welcome_banner = output._emit_start_banner(
             args,
@@ -1746,25 +1755,29 @@ async def run_with_args(
 
         try:
             with use_runtime_services(runtime_services):
-                if baseline_capture is None:
-                    result = await _execute_analysis(
-                        args,
-                        output_targets,
-                        runtime_services=runtime_services,
-                        session_id=session_id,
-                        tracing_callbacks=trace_context.callbacks,
-                        tracing_metadata=trace_context.graph_metadata,
-                    )
-                else:
-                    result = await _execute_analysis(
-                        args,
-                        output_targets,
-                        baseline_capture=baseline_capture,
-                        runtime_services=runtime_services,
-                        session_id=session_id,
-                        tracing_callbacks=trace_context.callbacks,
-                        tracing_metadata=trace_context.graph_metadata,
-                    )
+                # Every LLM admission and operational clamp inside the graph run
+                # is capped by the run deadline; the scope closes before
+                # publication, so rendering and persistence keep the reserve.
+                with enclosing_deadline_at(analysis_deadline):
+                    if baseline_capture is None:
+                        result = await _execute_analysis(
+                            args,
+                            output_targets,
+                            runtime_services=runtime_services,
+                            session_id=session_id,
+                            tracing_callbacks=trace_context.callbacks,
+                            tracing_metadata=trace_context.graph_metadata,
+                        )
+                    else:
+                        result = await _execute_analysis(
+                            args,
+                            output_targets,
+                            baseline_capture=baseline_capture,
+                            runtime_services=runtime_services,
+                            session_id=session_id,
+                            tracing_callbacks=trace_context.callbacks,
+                            tracing_metadata=trace_context.graph_metadata,
+                        )
 
                 if not result:
                     if baseline_capture:

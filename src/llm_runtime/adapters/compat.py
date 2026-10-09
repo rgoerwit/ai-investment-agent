@@ -13,7 +13,11 @@ from src.llm_runtime.provider_policy import (
 )
 from src.llm_runtime.rate_limits import limiter_for_binding
 from src.llm_runtime.seats import SeatId
-from src.llm_runtime.timeouts import construction_transport_attempts, sdk_max_retries
+from src.llm_runtime.timeouts import (
+    APAC_CLIENT_TIMEOUT_SECONDS,
+    construction_transport_attempts,
+    sdk_max_retries,
+)
 
 # Providers whose effort comes from the seat's resolved intent rather than an
 # explicit per-binding override.
@@ -88,7 +92,7 @@ class CompatibleAdapter:
             # its own longer allowance for the deepest-reasoning re-issue.
             "timeout": policy.client_timeout_seconds
             or (
-                240
+                APAC_CLIENT_TIMEOUT_SECONDS
                 if seat_id in self._APAC_SEATS
                 else settings.openai_compatible_client_timeout_seconds
             ),

@@ -40,6 +40,7 @@ from src.llm_runtime.timeouts import (
     construction_transport_attempts,
     current_dispatch_scope,
     enclosing_deadline,
+    enclosing_deadline_at,
     invocation_scope,
     request_timeout,
     resolve_budget_policy,
@@ -682,6 +683,78 @@ class TestRuntimeLoop:
         assert attempt.failure_origin == "budget_exhausted"
         assert attempt.dispatches[0]["outcome"] == "budget_exhausted"
         assert False not in outcomes
+
+
+class TestRunDeadlineCeiling:
+    """The ticker run deadline (src/llm_runtime/run_deadline.py) is a hard ceiling.
+
+    Bound with enclosing_deadline_at around the analysis, it caps every node
+    deadline inside it, so admission truncates the retry ladder near the
+    pipeline watchdog instead of the watchdog killing the process.
+    """
+
+    @pytest.mark.asyncio
+    async def test_spent_run_deadline_refuses_the_first_call_without_a_request(
+        self, clock
+    ):
+        transport = _Transport(clock)
+        with (
+            _quick(),
+            transport.patch_async(),
+            enclosing_deadline_at(clock() - 1.0),
+            pytest.raises(TimeoutError),
+        ):
+            await _invoke(_gemini(service_tier=None), "Portfolio Manager")
+        assert transport.calls == []
+
+    @pytest.mark.asyncio
+    async def test_run_deadline_below_a_useful_attempt_is_refused_by_admission(
+        self, clock
+    ):
+        transport = _Transport(clock)
+        with (
+            _quick(),
+            transport.patch_async(),
+            patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock),
+            enclosing_deadline_at(clock() + MARGIN + MIN_USEFUL - 1.0),
+            pytest.raises(BudgetExhausted),
+        ):
+            await _invoke(_gemini(service_tier=None), "Portfolio Manager")
+        assert transport.calls == []
+
+    @pytest.mark.asyncio
+    async def test_node_deadline_inside_the_run_deadline_takes_the_earlier(self, clock):
+        transport = _Transport(clock)
+        with (
+            _quick(),
+            transport.patch_async(),
+            enclosing_deadline_at(clock() + 100.0),
+            enclosing_deadline(240.0),
+        ):
+            await _invoke(_gemini(service_tier=None), "Portfolio Manager")
+        assert transport.calls[0]["timeout"] == pytest.approx(100.0 - MARGIN)
+
+    @pytest.mark.asyncio
+    async def test_run_deadline_truncates_the_retry_ladder(self, clock):
+        # A 503 at t=156 of a 160 s run allowance: a retry needs a useful
+        # attempt plus margin (7 s) that no longer fits, so the loop stops
+        # rather than sending a request the watchdog would cut off.
+        runnable = AsyncMock()
+
+        async def slow_failure(*_a, **_kw):
+            clock.advance(156.0)
+            raise _server_error(503)
+
+        runnable.ainvoke = AsyncMock(side_effect=slow_failure)
+        with (
+            _quick(),
+            patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock) as sleep,
+            enclosing_deadline_at(clock() + 160.0),
+            pytest.raises(genai_errors.ServerError),
+        ):
+            await _invoke(runnable, "Portfolio Manager")
+        assert runnable.ainvoke.await_count == 1
+        sleep.assert_not_awaited()
 
 
 # ---------------------------------------------------------------- semantics

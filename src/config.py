@@ -1249,6 +1249,39 @@ class Settings(BaseSettings):
             "process shutdown; on timeout the process forces os._exit()."
         ),
     )
+    # The pipeline watchdog contract (scripts/run_pipeline.sh, which reads the two
+    # stage values through `python -m src.config_print`; an exported shell value
+    # still wins). The shell hands each child an absolute deadline,
+    # PIPELINE_TICKER_DEADLINE_EPOCH, set when it starts the child; the child
+    # binds it, less the publication reserve, as the enclosing deadline of the
+    # whole analysis (src/llm_runtime/run_deadline.py). See docs/CODEBASE_MEMORY.md.
+    stage1_ticker_timeout_seconds: int = Field(
+        default=600,
+        gt=0,
+        validation_alias="STAGE1_TICKER_TIMEOUT_SECONDS",
+        description=(
+            "Per-ticker watchdog (seconds) for a Stage-1 quick analysis in "
+            "scripts/run_pipeline.sh; the child is signalled once it is exceeded."
+        ),
+    )
+    stage2_ticker_timeout_seconds: int = Field(
+        default=2400,
+        gt=0,
+        validation_alias="STAGE2_TICKER_TIMEOUT_SECONDS",
+        description=(
+            "Per-ticker watchdog (seconds) for a Stage-2 full analysis in "
+            "scripts/run_pipeline.sh; the child is signalled once it is exceeded."
+        ),
+    )
+    publication_reserve_seconds: float = Field(
+        default=30.0,
+        ge=0.0,
+        validation_alias="PUBLICATION_RESERVE_SECONDS",
+        description=(
+            "Seconds of a watchdog-run ticker's deadline kept back from analysis "
+            "for final publication (report render, persistence, shutdown)."
+        ),
+    )
     # Two nested tool scopes, kept separate on purpose. The execution scope
     # bounds the tool runner inside ToolExecutionService; the graph tool node's
     # wider scope also bounds the after() inspection hooks, which run outside
