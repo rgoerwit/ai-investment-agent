@@ -168,6 +168,9 @@ _SETTINGS_ENV_CASES = [
             "official_document_dns_timeout_seconds",
             "official_document_extract_timeout_seconds",
             "reference_fetch_timeout_seconds",
+            "mcp_http_timeout_seconds",
+            "mcp_initialize_timeout_seconds",
+            "mcp_tool_call_timeout_seconds",
         )
     ],
     ("ddg_http_timeout_seconds", "DDG_HTTP_TIMEOUT_SECONDS", "7", 7),

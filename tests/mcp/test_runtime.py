@@ -17,9 +17,10 @@ class _FakeSession:
     def __init__(self, result: CallToolResult | None = None):
         self._result = result
 
-    async def call_tool(self, name, arguments):
+    async def call_tool(self, name, arguments, read_timeout_seconds=None):
         assert name
         assert isinstance(arguments, dict)
+        assert read_timeout_seconds is not None and read_timeout_seconds > 0
         return self._result
 
     async def list_tools(self):
@@ -249,9 +250,10 @@ async def test_open_session_streamable_http_uses_http_client_for_headers(
     captured: dict[str, object] = {}
 
     class _FakeAsyncClient:
-        def __init__(self, *, headers=None, event_hooks=None):
+        def __init__(self, *, headers=None, event_hooks=None, timeout=None):
             captured["headers"] = headers
             captured["event_hooks"] = event_hooks
+            captured["timeout"] = timeout
 
         async def __aenter__(self):
             captured["http_client"] = self
@@ -267,9 +269,10 @@ async def test_open_session_streamable_http_uses_http_client_for_headers(
         yield "read", "write"
 
     class _FakeClientSession:
-        def __init__(self, read, write):
+        def __init__(self, read, write, read_timeout_seconds=None):
             captured["read"] = read
             captured["write"] = write
+            captured["read_timeout_seconds"] = read_timeout_seconds
 
         async def __aenter__(self):
             return self
@@ -295,6 +298,9 @@ async def test_open_session_streamable_http_uses_http_client_for_headers(
     assert captured["passed_http_client"] is captured["http_client"]
     assert captured["url"] == "https://example.test/mcp"
     assert captured["initialized"] is True
+    # The client and session bounds are set explicitly (tests/mcp/test_mcp_timeouts.py).
+    assert captured["timeout"] is not None
+    assert captured["read_timeout_seconds"] is not None
 
 
 class TestPartialServerAvailability:

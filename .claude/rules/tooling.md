@@ -30,6 +30,13 @@ document timeout is a `Settings` field read at the call, resolved through
 `require_allowance` before the request, coroutine or thread exists. See
 `docs/CODEBASE_MEMORY.md`.
 
+MCP bounds go to the SDK's own parameters in `src/mcp/client.py`, never a wrapper:
+the httpx2 client `timeout=`, `ClientSession(read_timeout_seconds=)` and
+`call_tool(read_timeout_seconds=)`. Pass the call's bound explicitly, or it inherits
+the handshake bound. Raise a spent-allowance `MCPCallError` outside the session
+body: inside it, the SDK's task groups wrap it and `classify_mcp_error` loses its
+category. See `docs/MCP.md`.
+
 ## Treat every external string as hostile
 
 Search results, social feeds, retrieved memory, cached context, filings, and free-text

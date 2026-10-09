@@ -1464,6 +1464,42 @@ class Settings(BaseSettings):
             "article reference URL."
         ),
     )
+    # MCP deadlines: the HTTP client's per-phase timeout, the initialize
+    # handshake and catalog request, and one tool call. Same rules as the blocks
+    # above. Each is handed to the SDK's own parameter (httpx2 client timeout,
+    # ClientSession read timeout, call_tool read timeout); the tool call also
+    # runs inside the tool runner's TOOL_EXECUTION_TIMEOUT_SECONDS.
+    mcp_http_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+        validation_alias="MCP_HTTP_TIMEOUT_SECONDS",
+        description=(
+            "httpx2 timeout (seconds, applied to each of connect, read, write and "
+            "pool) on every HTTP request of a streamable-HTTP MCP session. 5 s is "
+            "httpx2's own default, which the client had implicitly before it was "
+            "a setting."
+        ),
+    )
+    mcp_initialize_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        validation_alias="MCP_INITIALIZE_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the wait for the MCP initialize handshake "
+            "(connecting included) and for a tools/list catalog request; on "
+            "timeout the session fails as a retryable transport error."
+        ),
+    )
+    mcp_tool_call_timeout_seconds: float = Field(
+        default=45.0,
+        gt=0.0,
+        validation_alias="MCP_TOOL_CALL_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the wait for one MCP tool call's result once "
+            "the session is open. Matches the tool runner's default, which "
+            "bounds the whole call (session open included) and so fires first."
+        ),
+    )
     llm_base_output_tokens: int = Field(
         default=32768,
         ge=1024,

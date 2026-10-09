@@ -87,6 +87,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an explicit per-call Tavily timeout and the sync Tavily worker's shared
   deadline; a call whose caller deadline has already passed takes its existing
   timeout fallback without starting.
+- The MCP deadlines are now settings, one per scope, each handed to the SDK's own
+  parameter: the HTTP client's per-phase timeout (`MCP_HTTP_TIMEOUT_SECONDS`, 5 s,
+  unchanged: it is the httpx2 default the client already ran on because it set
+  none), the session read timeout on the initialize handshake and a tools/list
+  catalog request (`MCP_INITIALIZE_TIMEOUT_SECONDS`, 30 s), and the read timeout
+  on one tool call (`MCP_TOOL_CALL_TIMEOUT_SECONDS`, 45 s). Each is read when the
+  session opens or the call is sent and shrinks to a caller's remaining enclosing
+  deadline; a spent allowance opens no session and sends no call, and fails as a
+  non-retryable `transport` error. **Behaviour change:** the handshake, the
+  catalog request and the tool call had no protocol-level bound, so a stdio
+  server that never answered, or an HTTP server trickling bytes, could hold a
+  session for as long as its caller allowed (the Consultant's path is capped by
+  the 45 s tool runner, which still fires first, so its outcome is unchanged; a
+  direct `MCPRuntime.call_tool` or `list_tools_for_scope` caller had no bound). A
+  timed-out request (`REQUEST_TIMEOUT`, -32001) now classifies as a retryable
+  `transport` error rather than `protocol`.
 - The APAC specialist's 240 s is now its node total
   (`APAC_NODE_TOTAL_TIMEOUT_SECONDS`), shared by the first call and the direct
   retry, rather than a fresh 240 s per call.

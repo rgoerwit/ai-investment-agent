@@ -167,7 +167,8 @@ def classify_mcp_error(
     Recognized layers (in order):
       * ``mcp.shared.exceptions.MCPError`` — protocol-level JSON-RPC error. When
         ``http_error`` recorded a 401/403/429/5xx POST, the HTTP status wins:
-        the SDK's JSON-RPC code for it is a stand-in (see ``HTTPErrorRecord``)
+        the SDK's JSON-RPC code for it is a stand-in (see ``HTTPErrorRecord``).
+        ``REQUEST_TIMEOUT`` (a read timeout elapsed) is TRANSPORT, retryable
       * ``httpx2.HTTPStatusError`` — HTTP layer (401/403→AUTH, 429/5xx→TRANSPORT, other 4xx→PROTOCOL)
       * ``httpx2`` connection/timeout errors — TRANSPORT, retryable
       * everything else — TRANSPORT, non-retryable
@@ -180,6 +181,7 @@ def classify_mcp_error(
     """
     import httpx2
     from mcp.shared.exceptions import MCPError
+    from mcp.types import REQUEST_TIMEOUT
 
     exc = _unwrap_exception_group(exc, MCPError | httpx2.HTTPError)
 
@@ -197,6 +199,18 @@ def classify_mcp_error(
             )
         json_rpc_code = exc.error.code
         message = exc.error.message or "MCP protocol error"
+        if json_rpc_code == REQUEST_TIMEOUT:
+            # The SDK raises this when a request's read timeout (the session's
+            # or a call's own) elapses. A timeout is a transport condition,
+            # retryable like an httpx2 timeout, not a protocol error.
+            return MCPCallError(
+                message=_sanitize(str(message)),
+                category=MCPErrorCategory.TRANSPORT,
+                server_id=server_id,
+                tool_name=tool_name,
+                json_rpc_code=json_rpc_code,
+                retryable=True,
+            )
         retryable = json_rpc_code not in _NON_RETRYABLE_JSON_RPC_CODES
         return MCPCallError(
             message=_sanitize(str(message)),

@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-10-08
+Last updated: 2026-10-09
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
@@ -523,6 +523,26 @@ properties (`src/tools/ownership.py`), StockTwits' 10 s HTTP
 (`src/stocktwits_api.py`) and the retrospective's 15 s yfinance fetch are
 market-data reads. The ddgs warm-up `DDGS(timeout=1)` runs at import, with no
 request to bound.
+
+The MCP deadlines follow the same rules, but each goes to an SDK parameter
+rather than a wrapper, because the mcp SDK has one at every scope and tears the
+request down itself when it fires. `src/mcp/` had no timeout of its own before.
+The HTTP client ran on httpx2's implicit 5 s per phase, because the client is
+supplied, and the SDK's 30 s / 300 s defaults apply only to a client it builds.
+That 5 s is now `MCP_HTTP_TIMEOUT_SECONDS`, unchanged. The `ClientSession` read
+timeout was `None`, so initialize, tools/list and tools/call had no protocol
+bound. Now the session bound (30 s, the SDK's general-operation default) covers
+the handshake and the catalog request, and `call_tool` passes its own 45 s
+explicitly; without that it would inherit the handshake bound. The Consultant's
+only MCP path runs inside two 45 s tool-runner scopes: the outer
+`spot_check_metric_mcp_fmp` call and the inner `mcp__<server>__<tool>` call. The
+outer one fires first, so the new bounds do not change its outcome. They matter
+for a direct caller and for stdio, where nothing else bounded a silent server.
+A spent allowance raises a non-retryable TRANSPORT `MCPCallError` before the
+client or subprocess exists. If the session is already open, it is raised after
+the session closes, never inside it. An `MCPCallError` raised inside the session
+body comes back wrapped in the SDK's task groups and would be reclassified as a
+generic error. See `docs/MCP.md`.
 
 ### IBKR path
 

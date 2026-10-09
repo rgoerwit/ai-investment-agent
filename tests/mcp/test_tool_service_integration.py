@@ -81,7 +81,7 @@ async def test_consultant_mcp_call_flows_through_tool_service(
     @asynccontextmanager
     async def fake_open_session(_spec):
         class _Session:
-            async def call_tool(self, name, arguments):
+            async def call_tool(self, name, arguments, read_timeout_seconds=None):
                 return CallToolResult(
                     content=[
                         TextContent(

@@ -13,6 +13,8 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, ListToolsResult
 
+from src.config import config as settings_config
+from src.llm_runtime.timeouts import clamp_to_enclosing_deadline, require_allowance
 from src.mcp.auth import MCPCredentialMissing, MCPResolvedServer, resolve_auth
 from src.mcp.budget import BudgetTracker
 from src.mcp.catalog import ToolCatalog, ToolDescriptor
@@ -33,6 +35,35 @@ _DEFAULT_AUTH_COOLDOWN_SECONDS = 300
 _DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 30
 _MAX_RETRY_ATTEMPTS = 2
 _MAX_BACKOFF_SECONDS = 5.0
+
+
+def _spent_allowance_error(
+    label: str, *, server_id: str, tool_name: str | None = None
+) -> MCPCallError:
+    """The caller's enclosing deadline passed before this MCP step could start.
+
+    A non-retryable TRANSPORT error: the MCP category every other timeout
+    takes, and not worth a retry that would be refused the same way.
+    """
+    return MCPCallError(
+        message=f"MCP {label} for {server_id}: enclosing deadline already passed",
+        category=MCPErrorCategory.TRANSPORT,
+        server_id=server_id,
+        tool_name=tool_name,
+        retryable=False,
+        details={"timeout": "enclosing_deadline_spent", "scope": label},
+    )
+
+
+def _mcp_allowance(default_seconds: float, *, label: str, server_id: str) -> float:
+    """A deadline setting, read now and clamped to the caller's enclosing deadline.
+
+    A spent allowance raises before any client, subprocess or session exists.
+    """
+    try:
+        return require_allowance(default_seconds, label=label)
+    except TimeoutError as exc:
+        raise _spent_allowance_error(label, server_id=server_id) from exc
 
 
 class MCPRuntime:
@@ -179,6 +210,17 @@ class MCPRuntime:
                 server_id=spec.id,
             )
 
+        # Read now and shrunk to a caller's enclosing deadline before the client,
+        # subprocess or session exists, so a spent allowance opens nothing. The
+        # SDK applies each one itself: the session read timeout bounds the
+        # initialize handshake (connecting included) and a tools/list request,
+        # and raises MCPError(REQUEST_TIMEOUT) after tearing down the request;
+        # the httpx2 timeout bounds each phase of each HTTP request.
+        request_timeout = _mcp_allowance(
+            settings_config.mcp_initialize_timeout_seconds,
+            label="mcp_initialize",
+            server_id=spec.id,
+        )
         http_error = HTTPErrorRecord()
 
         async def _record_http_error(response: httpx2.Response) -> None:
@@ -198,16 +240,26 @@ class MCPRuntime:
                 # Must be an httpx2 client: mcp 2.x degrades silently (server-sent
                 # messages stop arriving) when handed a plain httpx one. No
                 # follow_redirects: the SDK ignores it and applies its own
-                # same-origin redirect rule.
+                # same-origin redirect rule. The SDK keeps a supplied client's
+                # timeout (its 30 s / 300 s read defaults apply only to a client
+                # it builds), so this one is set explicitly.
+                http_timeout = _mcp_allowance(
+                    settings_config.mcp_http_timeout_seconds,
+                    label="mcp_http",
+                    server_id=spec.id,
+                )
                 async with httpx2.AsyncClient(
                     headers=resolved.headers or None,
                     event_hooks={"response": [_record_http_error]},
+                    timeout=httpx2.Timeout(http_timeout),
                 ) as http_client:
                     async with streamable_http_client(
                         resolved.url,
                         http_client=http_client,
                     ) as (read, write):
-                        async with ClientSession(read, write) as session:
+                        async with ClientSession(
+                            read, write, read_timeout_seconds=request_timeout
+                        ) as session:
                             await session.initialize()
                             yield session
                 return
@@ -218,8 +270,13 @@ class MCPRuntime:
                 env=resolved.stdio_env or None,
                 cwd=resolved.cwd,
             )
+            # stdio_client's own shutdown (close stdin, wait, kill the process
+            # tree) is shielded and bounded by the SDK, so a timed-out handshake
+            # cannot leak the server process.
             async with stdio_client(params) as (read, write):
-                async with ClientSession(read, write) as session:
+                async with ClientSession(
+                    read, write, read_timeout_seconds=request_timeout
+                ) as session:
                     await session.initialize()
                     yield session
         except MCPCallError:
@@ -249,10 +306,23 @@ class MCPRuntime:
         for attempt in range(_MAX_RETRY_ATTEMPTS):
             try:
                 async with self._open_session(spec) as session:
-                    result: CallToolResult = await session.call_tool(
-                        tool_name, arguments
+                    # Resolved once the session is up, so opening it counts
+                    # against a caller deadline. Explicit, because the call
+                    # would otherwise inherit the session's handshake bound.
+                    call_timeout = clamp_to_enclosing_deadline(
+                        settings_config.mcp_tool_call_timeout_seconds
                     )
-                    return result
+                    if call_timeout > 0:
+                        result: CallToolResult = await session.call_tool(
+                            tool_name, arguments, read_timeout_seconds=call_timeout
+                        )
+                        return result
+                # Spent while the session opened: closed normally above, and
+                # raised out here so the error never crosses the SDK's task
+                # groups. Never sent, so no retry.
+                raise _spent_allowance_error(
+                    "mcp_tool_call", server_id=spec.id, tool_name=tool_name
+                )
             except MCPCallError as err:
                 last_err = err
             except Exception as exc:

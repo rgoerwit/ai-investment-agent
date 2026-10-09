@@ -18,6 +18,7 @@ import httpx
 import httpx2
 import pytest
 from mcp.shared.exceptions import MCPError
+from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT
 
 from src.mcp.client import MCPRuntime
 from src.mcp.config import MCPServerSpec
@@ -109,6 +110,41 @@ class TestClassifyMcpError:
         )
         assert err.category is MCPErrorCategory.TRANSPORT
         assert err.retry_after_seconds == 12
+
+    def test_request_timeout_is_retryable_transport(self):
+        """The SDK's read-timeout error is a timeout, not a protocol error."""
+        err = classify_mcp_error(
+            MCPError(REQUEST_TIMEOUT, "Request 'initialize' timed out"),
+            server_id="s",
+            tool_name="quote",
+        )
+        assert err.category is MCPErrorCategory.TRANSPORT
+        assert err.retryable is True
+        assert err.json_rpc_code == REQUEST_TIMEOUT
+        assert err.tool_name == "quote"
+
+    def test_wrapped_request_timeout_is_transport(self):
+        inner = MCPError(REQUEST_TIMEOUT, "Request 'tools/call' timed out")
+        group = ExceptionGroup("outer", [ExceptionGroup("inner", [inner])])  # noqa: F821
+        err = classify_mcp_error(group, server_id="s")
+        assert err.category is MCPErrorCategory.TRANSPORT
+        assert err.retryable is True
+
+    def test_recorded_5xx_still_wins_over_request_timeout(self):
+        err = classify_mcp_error(
+            MCPError(REQUEST_TIMEOUT, "timed out"),
+            server_id="s",
+            http_error=HTTPErrorRecord(status=503),
+        )
+        assert err.http_status == 503
+        assert err.json_rpc_code is None
+
+    def test_connection_closed_stays_protocol(self):
+        err = classify_mcp_error(
+            MCPError(CONNECTION_CLOSED, "Connection closed"), server_id="s"
+        )
+        assert err.category is MCPErrorCategory.PROTOCOL
+        assert err.retryable is True
 
     def test_recorded_plain_4xx_defers_to_json_rpc_code(self):
         """A 400 carrying a real JSON-RPC error body keeps the server's code."""

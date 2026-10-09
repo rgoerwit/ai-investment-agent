@@ -1,6 +1,6 @@
 # Model Context Protocol (MCP) integration
 
-Last updated: 2026-09-30 (mcp 2.x migration).
+Last updated: 2026-10-09 (timeout model).
 
 The consultant agent can cross-validate analyst claims against vendor MCP
 servers (currently the FMP MCP server). The consultant-facing MCP wrappers
@@ -152,7 +152,8 @@ or failure it emits:
 
 `failure_kind` mirrors `MCPErrorCategory` plus `inspection_blocked` for hook-
 level blocks. Use the value to disambiguate: `config` (allowlist/scope/spec),
-`auth` (401/403, vendor cooldown), `transport` (5xx/429/network),
+`auth` (401/403, vendor cooldown), `transport` (5xx/429/network/timeout, see
+[Debugging a timed-out call](#debugging-a-timed-out-call)),
 `tool_error` (vendor returned `isError=true`), `inspection` /
 `inspection_blocked` (content inspector rejected the payload).
 
@@ -160,6 +161,66 @@ If the inspector sanitizes a payload into plain text instead of blocking it, the
 consultant wrappers return a JSON object with `text_payload` and
 `note="mcp_payload_sanitized_or_textual"` rather than mislabeling the result as
 a protocol failure.
+
+## Timeout model
+
+Three settings, each passed to the SDK's own parameter. Each is read when the
+session opens or the call is sent, and shrinks to a caller's remaining
+enclosing deadline (`src/llm_runtime/timeouts.py`):
+
+| Setting | Default | Applied as | Bounds |
+|---|---|---|---|
+| `MCP_HTTP_TIMEOUT_SECONDS` | 5 s | `httpx2.AsyncClient(timeout=...)` | each phase (connect, read, write, pool) of each HTTP request. It does not bound a whole request |
+| `MCP_INITIALIZE_TIMEOUT_SECONDS` | 30 s | `ClientSession(read_timeout_seconds=...)` | the wait for the initialize response, connecting included, and for a tools/list catalog response |
+| `MCP_TOOL_CALL_TIMEOUT_SECONDS` | 45 s | `call_tool(read_timeout_seconds=...)` | the wait for one tool call's result |
+
+What the qualification found (mcp 2.2.0, httpx2 2.13.0):
+
+- **The HTTP default was already 5 s, by accident.** `streamable_http_client`
+  keeps a supplied client's timeout. The SDK's own 30 s, with a 300 s read
+  (`mcp/shared/_httpx_utils.py`), applies only to a client it creates. Ours passed
+  no timeout, so it ran on httpx2's default of `Timeout(5.0)`. The setting keeps
+  that. A vendor that takes more than 5 s to start a response fails here first,
+  as a retryable `transport` error.
+- **The protocol layer had no bound.** `ClientSession`'s read timeout defaults to
+  `None`. `initialize()` and `list_tools()` take no per-request timeout and use
+  the session's. `call_tool()` accepts its own, and falls back to the session's
+  when it gets none. That is why the call passes its bound explicitly; otherwise
+  it would inherit the 30 s handshake bound. A stdio server that never answered
+  `initialize` hung forever. So did an HTTP server that sent bytes slowly enough
+  to beat the per-phase timeout.
+- **Why 30 s for the handshake.** It is the SDK's own default for general
+  operations. It is also far above a healthy HTTP handshake, which the 5 s
+  per-phase limit already keeps short. It is a new bound, not a re-tuning.
+- **Why 45 s for the call.** The Consultant's only MCP path runs inside two 45 s
+  tool-runner scopes. One is the outer `spot_check_metric_mcp_fmp` call; the other
+  is the inner `mcp__<server>__<tool>` call. Both bound the whole call, session
+  open included, so the runner fires first and the outcome is unchanged. If you
+  raise `TOOL_EXECUTION_TIMEOUT_SECONDS` for a slow vendor, raise this one too.
+- **Cleanup is the SDK's job, and it does it.** When a read timeout fires, the
+  dispatcher raises `MCPError(REQUEST_TIMEOUT)`. For a tool call, it first sends
+  `notifications/cancelled` so the server stops work. Leaving the session then
+  cancels the transport's task group, which cancels the in-flight POST, and closes
+  the httpx2 client. stdio shutdown closes stdin, waits, then kills the process
+  tree; it is shielded and every wait is bounded (`mcp/client/stdio.py`).
+  `tests/mcp/test_mcp_timeouts.py` drives the real SDK over a stalled mock server
+  and checks that the parked request is cancelled, the client is closed, and no
+  task outlives the session.
+
+### Debugging a timed-out call
+
+| What you see | Cause |
+|---|---|
+| `failure_kind: "transport"`, `retryable: true`, message `Request 'initialize' timed out` | The handshake outlived `MCP_INITIALIZE_TIMEOUT_SECONDS`. `tools/list` reads the same |
+| the same with `Request 'tools/call' timed out` | The call outlived `MCP_TOOL_CALL_TIMEOUT_SECONDS`. The server was sent a cancel |
+| `transport`, `retryable: true`, an httpx2 `ReadTimeout` / `ConnectTimeout` message | One HTTP phase outlived `MCP_HTTP_TIMEOUT_SECONDS`; usually a vendor slow to start its response |
+| `transport`, `retryable: false`, `details.timeout == "enclosing_deadline_spent"` | The caller's deadline had already passed. `details.scope` names the step: `mcp_initialize` means no session was opened, and `mcp_tool_call` means one was opened but no call was sent |
+| `TOOL_ERROR: TimeoutError` in the Consultant's tool output, or `tool_call_timeout` in the log | The tool runner's `TOOL_EXECUTION_TIMEOUT_SECONDS` fired first; the MCP bounds never got the chance |
+
+A retryable failure is retried once in `_execute_with_retry`,
+with a fresh session and a re-read allowance. So a stalled call costs two
+bounds plus the backoff, unless the runner fires first. Before October 2026 a
+timed-out request classified as `protocol`.
 
 ## Smoke testing the integration
 
