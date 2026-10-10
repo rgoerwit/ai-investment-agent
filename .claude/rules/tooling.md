@@ -20,10 +20,13 @@ scoped services rather than mutating the globals.
 
 ## Two tool deadlines, both load-bearing
 
-The runner timeout in `src/tooling/runtime.py` does not cover the `after()`
-inspection hooks; the wider scope in `src/graph/tool_nodes.py` is their only bound.
-Keep both. Tool scopes may *read* the caller's enclosing deadline but must never
-*bind* one: the LLM judge fails open when admission refuses it. The clamp lives in
+The runner timeout in `src/tooling/runtime.py` does not cover the hooks; the
+wider combined scope in `ToolExecutionService.execute` is their only bound, for
+every caller. Keep both. The graph wrapper must read the same policy function
+(`tool_execution_with_inspection_timeout_seconds`), never the setting. Tool scopes
+may *read* the caller's enclosing deadline but must never *bind* one: the LLM
+judge fails open when admission refuses it. Nested tool calls clamp through the
+tool-plane `tool_call_deadline` instead, which only the service reads. The clamp lives in
 `src/llm_runtime/timeouts.py` (`clamp_to_enclosing_deadline`, `require_allowance`)
 and is shared with the market-data and research scopes. A web-search, filing or
 document timeout is a `Settings` field read at the call, resolved through

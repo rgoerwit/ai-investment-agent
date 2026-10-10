@@ -1297,10 +1297,11 @@ class Settings(BaseSettings):
         ),
     )
     # Two nested tool scopes, kept separate on purpose. The execution scope
-    # bounds the tool runner inside ToolExecutionService; the graph tool node's
-    # wider scope also bounds the after() inspection hooks, which run outside
-    # the runner's timeout (an LLM judge can take longer than the tool). The
-    # wider scope must be at least the narrower one; see
+    # bounds the tool runner inside ToolExecutionService; the wider scope, also
+    # applied by the service (and read by the graph tool node's wrapper through
+    # the same function), bounds the before()/after() hooks too, which run
+    # outside the runner's timeout (an LLM judge can take longer than the tool).
+    # The wider scope must be at least the narrower one; see
     # _validate_tool_timeout_scopes and docs/CODEBASE_MEMORY.md.
     tool_execution_timeout_seconds: float = Field(
         default=45.0,
@@ -1316,9 +1317,9 @@ class Settings(BaseSettings):
         gt=0.0,
         validation_alias="TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS",
         description=(
-            "Hard wall-clock cap (seconds) on one graph tool call including its "
-            "hook chain and content inspection; a timeout fails closed as "
-            "TOOL_TIMEOUT."
+            "Hard wall-clock cap (seconds) on one tool call through the tool "
+            "service, including its hook chain and content inspection; a "
+            "timeout fails closed (TOOL_TIMEOUT in the graph)."
         ),
     )
     # Market-data deadlines: one field per scope, not per value. Several share a

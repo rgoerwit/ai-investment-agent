@@ -534,15 +534,14 @@ The current trust-boundary model is:
 - inspect financial-API free-text fields before they become prompt-visible
 - keep blocked content out of primary prompt paths rather than storing sentinel text as valid analysis
 
-**Two tool deadlines, on purpose (October 2026).** `ToolExecutionService.execute`
-in `src/tooling/runtime.py` bounds only the tool runner
-(`TOOL_EXECUTION_TIMEOUT_SECONDS`, 45 s). The `after()` hooks — content
+**Two tool deadlines, on purpose (October 2026).** The tool runner has its own
+bound (`TOOL_EXECUTION_TIMEOUT_SECONDS`, 45 s). The `after()` hooks — content
 inspection, including an LLM injection judge — run *after* that bound is
-released, so the graph tool node in `src/graph/tool_nodes.py` wraps the whole
-call, hooks included, in a wider scope
-(`TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS`, 120 s) that fails closed as
-`TOOL_TIMEOUT`. The outer scope looks redundant and is not: it is the only bound
+released, so a wider scope (`TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS`,
+120 s) wraps the whole call, hooks included, and fails it closed (`TOOL_TIMEOUT`
+in the graph). The outer scope looks redundant and is not: it is the only bound
 on inspection. `Settings` rejects an outer scope narrower than the inner one.
+Where the wider scope lives changed in round 2; see below.
 
 The outer scope uses `run_with_hard_timeout`, not `asyncio.wait_for`: `wait_for`
 waits on the cancelled call, so a hook that swallows or outlives cancellation
@@ -550,10 +549,37 @@ held the node past its scope and, on Python 3.12, could still return its late,
 uninspected result through `wait_for`. Both scopes clamp to a caller's enclosing
 deadline (`current_enclosing_deadline`) when one is bound, but tool scopes never
 *bind* it: the judge fails open when admission refuses it, so a bound deadline
-would turn a fail-closed timeout into uninspected content. Only the graph tool
-node has the outer scope; the Consultant, Auditor, Legal Counsel, article editor
-and evidence preflight call the service directly, so their inspection hooks are
-bounded only by whatever deadline their own caller holds.
+would turn a fail-closed timeout into uninspected content.
+
+**The combined scope moved into the service (October 2026, round 2).** Until
+then only the graph tool node had the outer scope, so the Consultant, Auditor,
+Legal Counsel, article editor and evidence preflight, which call the service
+directly, ran their `before()` and `after()` hooks with no bound at all.
+`ToolExecutionService.execute` now wraps hooks and runner in
+`run_with_hard_timeout(tool_execution_with_inspection_timeout_seconds())`, and
+the graph wrapper reads that same function, so neither can be the looser one.
+The graph wrapper stays only for its `TOOL_TIMEOUT` conversion; retiring it is a
+later cleanup. Three details are load-bearing:
+
+- **Nesting cannot renew the allowance.** A Consultant tool
+  (`spot_check_metric_mcp_fmp`) routes its MCP call back through the service, so
+  one `execute` runs inside another's runner. Each call binds its deadline in a
+  tool-plane ContextVar (`tool_call_deadline` in `src/tooling/runtime.py`)
+  before creating its inner task, and the runner binds its own narrower one, so
+  the inner call clamps to what the outer runner has left. That ContextVar is
+  deliberately *not* the LLM enclosing deadline, for the judge reason above:
+  only the tool plane reads it, and a test asserts hooks see no bound LLM
+  deadline.
+- **A late result is never recorded.** A hook that swallows cancellation keeps
+  the orphaned chain running, and `EvidenceRecorder` is the last `after()` hook.
+  The chain therefore re-checks the deadline before every `after()` hook and
+  stops once it is spent, so the ledger never records what the caller was told
+  timed out. The cost: in that same race an `MCPBudgetHook.after` can miss
+  counting a call whose quota the vendor did consume.
+- **`run_with_hard_timeout` returns on time even when a hook ignores
+  cancellation**, because it never awaits the cancelled task. It cannot help a
+  hook that blocks the event loop synchronously, and it does not stop the
+  orphan: it bounds the caller.
 
 **Market-data deadlines are grouped by scope, not by value (October 2026).**
 The fields sit together in `Settings` in `src/config.py`. Equal numbers do not mean
@@ -601,8 +627,13 @@ bound in `src/data/filings/registry.py`, so today the outer one fires first. The
 8 s DuckDuckGo wait in `src/tools/shared.py` wraps the ddgs client's own 5 s HTTP
 timeout. The gap-fill search keeps its narrow 5 s as its own field and passes it
 explicitly. Every Tavily entrypoint clamps an explicit per-call timeout too, not
-just the default. On the sync path the worker's absolute deadline is taken from
-the clamped bound, so a late result is discarded before paid inspection starts.
+just the default. On every path the absolute deadline is taken from the clamped
+bound and covers search *and* inspection: a result that arrives with nothing
+left is discarded before paid inspection starts, and an inspection that overruns
+returns `None`, never the uninspected payload. The async entrypoints gained this
+in October 2026 (round 2); before, their inspection had no bound of its own,
+and the macro-context path, which calls `get_macroeconomic_news` outside the
+tool service, had no bound on it at all.
 Two caveats. httpx applies a timeout to each phase (connect, read, write, pool),
 so the clamp narrows the official-document download and the editor's reference
 fetch per phase but does not cap the whole download. And ddgs takes whole

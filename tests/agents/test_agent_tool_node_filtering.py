@@ -966,10 +966,10 @@ class TestToolCallTimeout:
     @pytest.mark.asyncio
     async def test_tool_timeout_returns_error_message(self, monkeypatch):
         """Tool exceeding timeout returns error ToolMessage instead of hanging."""
-        import src.graph.tool_nodes as tn_mod
+        import src.tooling.runtime as tool_runtime
 
         monkeypatch.setattr(
-            tn_mod.settings_config,
+            tool_runtime.settings_config,
             "tool_execution_with_inspection_timeout_seconds",
             0.2,
         )
@@ -1019,10 +1019,10 @@ class TestToolCallTimeout:
     @pytest.mark.asyncio
     async def test_timeout_does_not_block_other_tools(self, monkeypatch):
         """One slow tool timing out doesn't block fast parallel tools."""
-        import src.graph.tool_nodes as tn_mod
+        import src.tooling.runtime as tool_runtime
 
         monkeypatch.setattr(
-            tn_mod.settings_config,
+            tool_runtime.settings_config,
             "tool_execution_with_inspection_timeout_seconds",
             0.2,
         )
@@ -1086,10 +1086,10 @@ class TestToolCallTimeout:
     @pytest.mark.asyncio
     async def test_timeout_logging(self, monkeypatch, caplog):
         """Timeout produces tool_call_timeout log entry with tool name."""
-        import src.graph.tool_nodes as tn_mod
+        import src.tooling.runtime as tool_runtime
 
         monkeypatch.setattr(
-            tn_mod.settings_config,
+            tool_runtime.settings_config,
             "tool_execution_with_inspection_timeout_seconds",
             0.1,
         )

@@ -11,13 +11,15 @@ from src.agents import AgentState
 from src.agents.junior_relay import build_junior_relay
 from src.async_utils import run_with_hard_timeout
 from src.claim_policy import STRUCTURED_INGRESS_SOURCES
-from src.config import config as settings_config
 from src.error_safety import summarize_exception
 from src.forensic_budget import ResearchBudgetLedger, ResearchBudgetPolicy
-from src.llm_runtime.timeouts import clamp_to_enclosing_deadline
 from src.runtime_services import get_current_tool_service
 from src.ticker_utils import normalize_ticker
-from src.tooling.runtime import ToolInvocation
+from src.tooling.runtime import (
+    ToolInvocation,
+    tool_call_deadline,
+    tool_execution_with_inspection_timeout_seconds,
+)
 from src.tooling.structured_ingress import (
     build_structured_ingress_record,
     merge_structured_inputs,
@@ -27,18 +29,6 @@ from src.utils import format_tool_output_cap
 logger = structlog.get_logger(__name__)
 
 _TOOL_OUTPUT_MAX_CHARS = 20_000
-
-
-def tool_inspection_scope_seconds() -> float:
-    """This call's allowance for execution *plus* the after() inspection hooks.
-
-    Not redundant with the runner timeout inside ``ToolExecutionService``: the
-    hooks, including an LLM injection judge, run after that timeout has been
-    released, so this is the only bound on them.
-    """
-    return clamp_to_enclosing_deadline(
-        settings_config.tool_execution_with_inspection_timeout_seconds
-    )
 
 
 def _cap_tool_output(content: str, tool_name: str) -> str:
@@ -185,7 +175,10 @@ def create_agent_tool_node(
             ticker=tool_args.get("ticker", tool_args.get("symbol", "")),
         )
 
-        scope_seconds = tool_inspection_scope_seconds()
+        # The service bounds the same scope itself; this wrapper reads the same
+        # policy function, so it can never be the looser of the two, and keeps
+        # the TOOL_TIMEOUT conversion for the graph.
+        scope_seconds = tool_execution_with_inspection_timeout_seconds()
         try:
             invocation = ToolInvocation(
                 name=tool_name,
@@ -204,15 +197,17 @@ def create_agent_tool_node(
             # so a hook that swallows or outlives cancellation would hold the
             # node past its scope and could still hand back its late result.
             # Here the caller gets TOOL_TIMEOUT on time and the orphan's result
-            # is discarded.
-            tool_result = await run_with_hard_timeout(
-                get_current_tool_service().execute(
-                    invocation,
-                    runner=_run_tool,
-                ),
-                timeout=scope_seconds,
-                label=f"tool_with_inspection:{tool_name}",
-            )
+            # is discarded. The deadline is bound first so the service's own
+            # scope clamps to this one rather than starting a fresh allowance.
+            with tool_call_deadline(scope_seconds):
+                tool_result = await run_with_hard_timeout(
+                    get_current_tool_service().execute(
+                        invocation,
+                        runner=_run_tool,
+                    ),
+                    timeout=scope_seconds,
+                    label=f"tool_with_inspection:{tool_name}",
+                )
             logger.debug(
                 "tool_call_complete",
                 agent=agent_key,

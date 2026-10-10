@@ -458,7 +458,7 @@ async def test_real_tool_deadline_cancels_worker_and_retains_neighbor(
     chosen = tools()
     chosen[1].ainvoke.side_effect = stalled
     timeout_owner = (
-        "src.graph.tool_nodes.settings_config.tool_execution_with_inspection_timeout_seconds"
+        "src.tooling.runtime.settings_config.tool_execution_with_inspection_timeout_seconds"
         if owner == "node"
         else "src.tooling.runtime.settings_config.tool_execution_timeout_seconds"
     )
@@ -594,6 +594,14 @@ async def test_cancelled_acquisition_cancels_both_pending_tools():
         pending.cancel()
         with pytest.raises(asyncio.CancelledError):
             await pending
+    # Each hard-timeout layer passes the cancellation inward without waiting on
+    # it (node wrapper, the service's combined scope, the runner), so it reaches
+    # the tools a few loop turns after the outer task ends. Bounded turns, not
+    # a sleep: a cancellation that never arrives still fails.
+    for _ in range(10):
+        if cancelled == {METRICS, QUAL}:
+            break
+        await asyncio.sleep(0)
     assert cancelled == {METRICS, QUAL}
 
 

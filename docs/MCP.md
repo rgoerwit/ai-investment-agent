@@ -192,11 +192,15 @@ What the qualification found (mcp 2.2.0, httpx2 2.13.0):
 - **Why 30 s for the handshake.** It is the SDK's own default for general
   operations. It is also far above a healthy HTTP handshake, which the 5 s
   per-phase limit already keeps short. It is a new bound, not a re-tuning.
-- **Why 45 s for the call.** The Consultant's only MCP path runs inside two 45 s
-  tool-runner scopes. One is the outer `spot_check_metric_mcp_fmp` call; the other
-  is the inner `mcp__<server>__<tool>` call. Both bound the whole call, session
-  open included, so the runner fires first and the outcome is unchanged. If you
-  raise `TOOL_EXECUTION_TIMEOUT_SECONDS` for a slow vendor, raise this one too.
+- **Why 45 s for the call.** The Consultant's only MCP path runs inside two
+  tool-runner scopes. One is the outer `spot_check_metric_mcp_fmp` call (45 s);
+  the other is the inner `mcp__<server>__<tool>` call, which since October 2026
+  (round 2) gets only what the outer runner has left, never a fresh 45 s: the
+  service binds each call's deadline for any call nested inside it
+  (`tool_call_deadline` in `src/tooling/runtime.py`). Both bound the whole call,
+  session open included, so the runner fires first and the outcome is
+  unchanged. If you raise `TOOL_EXECUTION_TIMEOUT_SECONDS` for a slow vendor,
+  raise this one too.
 - **Cleanup is the SDK's job, and it does it.** When a read timeout fires, the
   dispatcher raises `MCPError(REQUEST_TIMEOUT)`. For a tool call, it first sends
   `notifications/cancelled` so the server stops work. Leaving the session then
@@ -215,7 +219,7 @@ What the qualification found (mcp 2.2.0, httpx2 2.13.0):
 | the same with `Request 'tools/call' timed out` | The call outlived `MCP_TOOL_CALL_TIMEOUT_SECONDS`. The server was sent a cancel |
 | `transport`, `retryable: true`, an httpx2 `ReadTimeout` / `ConnectTimeout` message | One HTTP phase outlived `MCP_HTTP_TIMEOUT_SECONDS`; usually a vendor slow to start its response |
 | `transport`, `retryable: false`, `details.timeout == "enclosing_deadline_spent"` | The caller's deadline had already passed. `details.scope` names the step: `mcp_initialize` means no session was opened, and `mcp_tool_call` means one was opened but no call was sent |
-| `TOOL_ERROR: TimeoutError` in the Consultant's tool output, or `tool_call_timeout` in the log | The tool runner's `TOOL_EXECUTION_TIMEOUT_SECONDS` fired first; the MCP bounds never got the chance |
+| `TOOL_ERROR: TimeoutError` in the Consultant's tool output, or `tool_call_timeout` in the log | The tool runner's `TOOL_EXECUTION_TIMEOUT_SECONDS` fired first; the MCP bounds never got the chance. With `scope="with_inspection"` in the log, it was the combined hooks-plus-runner scope (`TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS`), usually a slow inspection |
 
 A retryable failure is retried once in `_execute_with_retry`,
 with a fresh session and a re-read allowance. So a stalled call costs two

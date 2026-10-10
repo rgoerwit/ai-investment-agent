@@ -34,6 +34,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The portfolio manager's macro-event classifier invokes through the runtime loop
   (bounded attempts, owned retries, one SDK attempt per request) instead of an
   unbounded synchronous call.
+- `TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS` now bounds every tool call made
+  through the tool service, its `before()`/`after()` hooks included, not only graph
+  tool calls: the Consultant, Auditor, Legal Counsel, article editor and evidence
+  preflight had no bound on their hooks. A tool call made from inside another (the
+  Consultant's FMP MCP spot check) gets only what the outer runner has left. A
+  result whose allowance runs out before or during its `after()` hooks is
+  discarded, never returned or recorded in the evidence ledger, and a call whose
+  allowance is already spent now runs no hook at all (a call a `before()` hook
+  would have blocked times out instead). The async Tavily entrypoints now bound
+  search and inspection with one deadline, as the sync path did: a late search
+  result is discarded before inspection, and an inspection that overruns returns
+  nothing rather than the uninspected payload.
 
 - Enforce reliable financial-health failures through the existing verdict correction, preserving the canonical deep-value/current-ratio exception and active-tender exemption; project the same health assessment into saved policy, PM context and reports.
 - Close every completed Junior acquisition with its named terminal message, including empty or malformed failures, preserving current failure provenance and preventing a redundant blocked tool round.

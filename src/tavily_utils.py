@@ -19,6 +19,7 @@ from src.blocking_io import (
 )
 from src.config import config
 from src.error_safety import summarize_exception
+from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.timeouts import require_allowance
 from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
@@ -116,6 +117,38 @@ async def _inspect_tavily_result(raw: Any, query_text: str) -> Any:
     return await get_current_inspection_service().check(envelope)
 
 
+async def _inspect_before_deadline(
+    raw: Any, query_text: str, *, deadline: float, log_fields: dict[str, Any]
+) -> Any:
+    """Inspect *raw* within what is left of *deadline*, or return ``None``.
+
+    The async counterpart of the sync worker's rule: the entrypoint's bound
+    covers search *and* inspection. A result that arrives with nothing left is
+    discarded before inspection starts (which may be a paid LLM judge call),
+    and an inspection that overruns returns ``None``, never the uninspected
+    payload. Deadline-only, so a judge that ignores cancellation cannot hold
+    the caller; its late verdict is dropped with the orphaned task.
+    """
+    from src.async_utils import run_with_hard_timeout
+
+    if raw is None:
+        return None
+    remaining = deadline - llm_timeouts.now()
+    if remaining <= 0:
+        logger.warning("tavily_search_late_result_discarded", **log_fields)
+        return None
+    try:
+        return await run_with_hard_timeout(
+            _inspect_tavily_result(raw, query_text),
+            timeout=remaining,
+            label=f"tavily:inspect:{query_text[:60]}",
+        )
+    except asyncio.TimeoutError:
+        # Fail closed: an uninspected payload is never returned.
+        logger.warning("tavily_inspection_timeout", **log_fields)
+        return None
+
+
 async def tavily_search_with_timeout(
     query: dict[str, str], timeout: float | None = None
 ) -> Any:
@@ -126,8 +159,9 @@ async def tavily_search_with_timeout(
 
     Args:
         query: Query dict for tavily_tool.ainvoke (e.g., {"query": "search terms"})
-        timeout: Maximum seconds to wait (default: TAVILY_SEARCH_TIMEOUT_SECONDS),
-            shrunk to a caller's enclosing deadline
+        timeout: Maximum seconds to wait for search and inspection together
+            (default: TAVILY_SEARCH_TIMEOUT_SECONDS), shrunk to a caller's
+            enclosing deadline
 
     Returns:
         Tavily search results (inspected), or None if timeout/error occurs
@@ -141,6 +175,8 @@ async def tavily_search_with_timeout(
         # Resolved before ainvoke() creates the request coroutine, so a spent
         # caller deadline leaves nothing un-awaited.
         timeout = require_allowance(timeout, label="tavily.search")
+        # One deadline for search and inspection, as on the sync path.
+        deadline = llm_timeouts.now() + timeout
         raw = await run_with_hard_timeout(
             _tavily_tool.ainvoke(query),
             timeout=timeout,
@@ -163,7 +199,15 @@ async def tavily_search_with_timeout(
 
     # Preserve the original payload shape on allow/fail-open paths so callers
     # that merge structured Tavily results do not regress.
-    return await _inspect_tavily_result(raw, query.get("query", ""))
+    return await _inspect_before_deadline(
+        raw,
+        query.get("query", ""),
+        deadline=deadline,
+        log_fields={
+            "query": query.get("query", "")[:100],
+            "timeout_seconds": timeout,
+        },
+    )
 
 
 async def search_tavily_inspected(
@@ -176,7 +220,7 @@ async def search_tavily_inspected(
     """Run a profile-scoped Tavily search behind inspection boundaries.
 
     *timeout* defaults to ``TAVILY_SEARCH_TIMEOUT_SECONDS`` and is shrunk to a
-    caller's enclosing deadline.
+    caller's enclosing deadline. It covers search and inspection together.
     """
     tool = _build_tavily_tool(profile, include_answer=include_answer)
     if tool is None:
@@ -187,6 +231,7 @@ async def search_tavily_inspected(
     timeout = _search_timeout(timeout)
     try:
         timeout = require_allowance(timeout, label=f"tavily.search:{profile}")
+        deadline = llm_timeouts.now() + timeout
         raw = await run_with_hard_timeout(
             tool.ainvoke({"query": query}),
             timeout=timeout,
@@ -209,7 +254,16 @@ async def search_tavily_inspected(
         )
         return None
 
-    return await _inspect_tavily_result(raw, query)
+    return await _inspect_before_deadline(
+        raw,
+        query,
+        deadline=deadline,
+        log_fields={
+            "query": query[:100],
+            "timeout_seconds": timeout,
+            "profile": profile,
+        },
+    )
 
 
 async def extract_tavily_inspected(
@@ -221,7 +275,7 @@ async def extract_tavily_inspected(
     """Extract query-relevant chunks from a bounded list of discovered URLs.
 
     *timeout* defaults to ``TAVILY_EXTRACT_TIMEOUT_SECONDS`` and is shrunk to a
-    caller's enclosing deadline.
+    caller's enclosing deadline. It covers extraction and inspection together.
     """
     api_key = config.get_tavily_api_key()
     if not api_key or not urls:
@@ -252,6 +306,7 @@ async def extract_tavily_inspected(
         timeout = config.tavily_extract_timeout_seconds
     try:
         timeout = require_allowance(timeout, label="tavily.extract")
+        deadline = llm_timeouts.now() + timeout
         raw = await run_with_hard_timeout(
             tool.ainvoke({"urls": urls[:3]}),
             timeout=timeout,
@@ -272,7 +327,16 @@ async def extract_tavily_inspected(
         )
         return None
 
-    return await _inspect_tavily_result(raw, query)
+    return await _inspect_before_deadline(
+        raw,
+        query,
+        deadline=deadline,
+        log_fields={
+            "query": query[:100],
+            "url_count": len(urls[:3]),
+            "timeout_seconds": timeout,
+        },
+    )
 
 
 def search_tavily_sync_inspected(
