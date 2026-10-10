@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- An official-document download now has a total deadline,
+  `OFFICIAL_DOCUMENT_DOWNLOAD_TOTAL_TIMEOUT_SECONDS` (35 s), around the whole
+  download, redirects and DNS checks included; httpx's timeout bounded only each
+  phase, so a trickling body could run on. The download also leaves PDF extraction
+  its reserve, `PDF_EXTRACTION_RESERVE_SECONDS` (unset means
+  `OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS`, 20 s): it may use what the caller and
+  the 45 s tool runner have left, less the reserve, so under the runner a download
+  gets at most 25 s (was up to 35 s per phase), and with less than the reserve left
+  no download starts. Extraction backends size to the tool runner's remaining time
+  too, and a skipped pdftotext logs `official_document_extraction_skipped`. A
+  pdftotext child cut short by cancellation is now killed and reaped (it was left
+  running); the reap is shielded and bounded by `SUBPROCESS_CLEANUP_TIMEOUT_SECONDS`
+  (5 s).
 - The `--article` workflow now has its own deadline, `ARTICLE_WORKFLOW_TIMEOUT_SECONDS`
   (900 s, about twice the longest measured workflow), around draft, review and
   revisions, and the writer runs asynchronously through the runtime loop instead of a

@@ -635,10 +635,34 @@ in October 2026 (round 2); before, their inspection had no bound of its own,
 and the macro-context path, which calls `get_macroeconomic_news` outside the
 tool service, had no bound on it at all.
 Two caveats. httpx applies a timeout to each phase (connect, read, write, pool),
-so the clamp narrows the official-document download and the editor's reference
-fetch per phase but does not cap the whole download. And ddgs takes whole
-seconds, so its clamped HTTP timeout rounds up; the clamped wait around it is
-the bound that holds. The ownership tool's 8 s yfinance properties
+so for the editor's reference fetch the clamp narrows each phase but does not
+cap the whole download. And ddgs takes whole seconds, so its clamped HTTP
+timeout rounds up; the clamped wait around it is the bound that holds.
+
+**The official-document sequence is allocated, not just bounded (October 2026,
+round 2).** DNS check, download, pypdf and pdftotext run inside one 45 s tool
+runner, but their ceilings (35 + 20 + 20 s, plus 5 s per DNS check) sum to more
+than that. That is intended: the allocation decides what is cut short. The
+download gets at most what is left less `PDF_EXTRACTION_RESERVE_SECONDS` (unset
+means the 20 s extract cap), capped by `OFFICIAL_DOCUMENT_DOWNLOAD_TOTAL_TIMEOUT_SECONDS`
+(35 s) around the whole download, redirects and DNS checks included, so a
+trickling body that keeps every httpx phase alive still stops. Under the runner
+that is 25 s, leaving extraction its 20 s. Each extractor then gets what is
+left, and one that cannot start is skipped with `EXTRACTION_TIMEOUT`. "What is
+left" is the caller's enclosing deadline *and* the tool runner: the tool reads
+the tool-plane deadline (`clamp_to_tool_call_deadline`) but never binds one.
+Without that read, the runner's cancellation, not the allocation, would cut
+extraction short, and the reply would be a bare `TOOL_TIMEOUT`. Cost: with less
+than the reserve left, no download starts, even for an HTML document that
+needs no extraction.
+
+The pdftotext child used to be killed only on its own timeout. The runner's
+cancellation, the supported way the tool is cut short, left it running and
+unreaped. Now every abnormal exit kills it and reaps it from a separate task
+behind `asyncio.shield`, bounded by `SUBPROCESS_CLEANUP_TIMEOUT_SECONDS`; a
+second cancellation interrupts only the wait, and a reap that outlives the
+bound continues detached, held in `_PENDING_REAPS`, its failure logged by a
+done-callback rather than left as "Task exception was never retrieved". The ownership tool's 8 s yfinance properties
 (`src/tools/ownership.py`), StockTwits' 10 s HTTP (`src/stocktwits_api.py`) and
 the retrospective's 15 s yfinance fetch are market-data reads and sit in that
 block. The ddgs warm-up `DDGS(timeout=1)` runs at import, with no

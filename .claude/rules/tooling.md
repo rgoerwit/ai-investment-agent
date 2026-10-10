@@ -26,7 +26,9 @@ every caller. Keep both. The graph wrapper must read the same policy function
 (`tool_execution_with_inspection_timeout_seconds`), never the setting. Tool scopes
 may *read* the caller's enclosing deadline but must never *bind* one: the LLM
 judge fails open when admission refuses it. Nested tool calls clamp through the
-tool-plane `tool_call_deadline` instead, which only the service reads. The clamp lives in
+tool-plane `tool_call_deadline` instead, which only the service binds; a tool may
+read it (`clamp_to_tool_call_deadline`) to size its own phases, as the
+official-document download does to leave PDF extraction its reserve. The clamp lives in
 `src/llm_runtime/timeouts.py` (`clamp_to_enclosing_deadline`, `require_allowance`)
 and is shared with the market-data and research scopes. A web-search, filing or
 document timeout is a `Settings` field read at the call, resolved through

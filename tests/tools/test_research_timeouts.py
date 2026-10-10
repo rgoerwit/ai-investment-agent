@@ -54,6 +54,8 @@ SHIPPED_DEFAULTS = {
     "official_document_download_timeout_seconds": 35.0,
     "official_document_dns_timeout_seconds": 5.0,
     "official_document_extract_timeout_seconds": 20.0,
+    "official_document_download_total_timeout_seconds": 35.0,
+    "subprocess_cleanup_timeout_seconds": 5.0,
     "reference_fetch_timeout_seconds": 10.0,
 }
 
@@ -802,7 +804,8 @@ async def test_document_download_override_reaches_the_client(monkeypatch):
 async def test_document_download_caller_deadline_wins(monkeypatch, fake_clock):
     timeouts = _patch_client(monkeypatch, documents, _Halt())
 
-    with enclosing_deadline(7.0), pytest.raises(_Halt):
+    # The download gets the caller's 27 s less the 20 s extraction reserve.
+    with enclosing_deadline(27.0), pytest.raises(_Halt):
         await documents._download_official(_DOC_URL, 1_000)
 
     assert timeouts == [pytest.approx(7.0)]
@@ -931,24 +934,29 @@ async def test_pdf_extract_caller_deadline_wins(monkeypatch, fake_clock):
 
 
 class _FakeProcess:
-    returncode = 0
+    """A child that runs (``returncode is None``) until it finishes or is killed."""
 
     def __init__(self, stdout: bytes = b"", *, stall: bool = False) -> None:
         self._stdout = stdout
         self._stall = stall
+        self.returncode: int | None = None
         self.killed = False
+        self.reaped = False
 
     async def communicate(self, payload: bytes) -> tuple[bytes, bytes]:
         del payload
         if self._stall:
             await asyncio.sleep(1)
+        self.returncode = 0
         return self._stdout, b""
 
     def kill(self) -> None:
         self.killed = True
+        self.returncode = -9
 
     async def wait(self) -> int:
-        return 0
+        self.reaped = True
+        return self.returncode if self.returncode is not None else 0
 
 
 class _SubprocessAsyncio:
@@ -1018,6 +1026,7 @@ async def test_pdftotext_timeout_kills_and_reports_extraction_timeout(monkeypatc
 
     assert exc_info.value.reason == "EXTRACTION_TIMEOUT"
     assert process.killed
+    assert process.reaped
 
 
 @pytest.mark.asyncio

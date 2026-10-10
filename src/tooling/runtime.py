@@ -31,14 +31,21 @@ logger = structlog.get_logger(__name__)
 # left instead of opening a fresh allowance. Deliberately not the LLM
 # enclosing deadline: binding that would also cap the injection judge in the
 # after() hooks, and the judge fails *open* when admission refuses it, where
-# this scope's own timeout fails closed. Only the tool plane reads this one.
+# this scope's own timeout fails closed. Only the tool plane reads this one:
+# the service, and a tool that sizes its own phases against the runner it runs
+# under (the official-document download and PDF extraction). Only the service
+# binds it.
 _TOOL_CALL_DEADLINE: ContextVar[float | None] = ContextVar(
     "tool_call_deadline", default=None
 )
 
 
-def _clamp_to_tool_call(default_seconds: float) -> float:
-    """``default_seconds`` shrunk to the caller's deadline and any outer tool call's."""
+def clamp_to_tool_call_deadline(default_seconds: float) -> float:
+    """``default_seconds`` shrunk to the caller's deadline and any outer tool call's.
+
+    Read-only: a tool may size its phases with it, but never binds a deadline.
+    A result ``<= 0`` means the allowance is already spent.
+    """
     seconds = clamp_to_enclosing_deadline(default_seconds)
     outer = _TOOL_CALL_DEADLINE.get()
     if outer is None:
@@ -48,7 +55,7 @@ def _clamp_to_tool_call(default_seconds: float) -> float:
 
 def tool_execution_timeout_seconds() -> float:
     """The runner's allowance for this call: the setting, clamped to the caller."""
-    return _clamp_to_tool_call(settings_config.tool_execution_timeout_seconds)
+    return clamp_to_tool_call_deadline(settings_config.tool_execution_timeout_seconds)
 
 
 def tool_execution_with_inspection_timeout_seconds() -> float:
@@ -59,7 +66,7 @@ def tool_execution_with_inspection_timeout_seconds() -> float:
     for its own wrapper so the two cannot drift. A result ``<= 0`` means the
     allowance is already spent and the call must fail as a timeout unstarted.
     """
-    return _clamp_to_tool_call(
+    return clamp_to_tool_call_deadline(
         settings_config.tool_execution_with_inspection_timeout_seconds
     )
 

@@ -6,11 +6,12 @@ import asyncio
 import io
 import ipaddress
 import json
+import math
 import re
 import shutil
 import socket
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urljoin, urlparse, urlunsplit
 
 import httpx
@@ -30,8 +31,14 @@ from src.runtime_services import (
 )
 from src.text_patterns import is_safe_public_host
 from src.tooling.inspector import InspectionEnvelope, SourceKind
+from src.tooling.runtime import clamp_to_tool_call_deadline
 
 logger = structlog.get_logger(__name__)
+
+# Detached reapers of killed extraction subprocesses, held so one that outlives
+# its bounded wait is neither garbage-collected nor left with an unobserved
+# exception (_reap_finished logs it).
+_PENDING_REAPS: set[asyncio.Future[Any]] = set()
 
 SourceAuthority = Literal[
     "PRIMARY_REGISTRY",
@@ -47,8 +54,9 @@ _OFFICIAL_HOST_SUFFIXES = (
 # Each policy's number is only the shipped default of its setting (pinned by a
 # parity test): each call applies OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS or
 # OFFICIAL_DOCUMENT_DNS_TIMEOUT_SECONDS with with_timeout(), read at the call
-# and shrunk to a caller's enclosing deadline. The download timeout is
-# OFFICIAL_DOCUMENT_DOWNLOAD_TIMEOUT_SECONDS.
+# and shrunk to a caller's enclosing deadline and the tool runner. The download
+# has a per-phase OFFICIAL_DOCUMENT_DOWNLOAD_TIMEOUT_SECONDS inside a total
+# OFFICIAL_DOCUMENT_DOWNLOAD_TOTAL_TIMEOUT_SECONDS (see "Allocation" below).
 _PDF_POLICY = BlockingCallPolicy("official_document_pdf_extract", 20.0)
 _DNS_POLICY = BlockingCallPolicy("official_document_dns_check", 5.0)
 _MIN_USEFUL_TEXT_CHARS = 200
@@ -92,6 +100,112 @@ class DocumentExtractionError(RuntimeError):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+# --- Allocation --------------------------------------------------------------
+#
+# The whole sequence (DNS check, download, pypdf, pdftotext) runs inside one
+# tool-runner bound, and its phase ceilings deliberately sum to more than that
+# bound. The rule that decides what is cut short: the download may use at most
+# what is left less the extraction reserve; each extractor then gets what is
+# left, and one that cannot start is skipped with EXTRACTION_TIMEOUT. "What is
+# left" is the caller's enclosing deadline *and* the tool call this runs under
+# (read through the tool plane, never bound here: binding the LLM enclosing
+# deadline would also cap the injection judge, which fails open).
+
+
+def _phase_allowance(default_seconds: float, *, label: str) -> float:
+    """``default_seconds`` clamped to the caller and the tool runner; spent raises.
+
+    ``TimeoutError`` once nothing is left, before any work starts, so each call
+    site's existing timeout handling is the fallback.
+    """
+    return require_allowance(clamp_to_tool_call_deadline(default_seconds), label=label)
+
+
+def pdf_extraction_reserve_seconds() -> float:
+    """The download's reserve for extraction: the setting, else the extract cap."""
+    configured = config.pdf_extraction_reserve_seconds
+    if configured is None:
+        return float(config.official_document_extract_timeout_seconds)
+    return float(configured)
+
+
+def _download_allowance() -> float:
+    """The whole download's bound: total cap, or what is left less the reserve.
+
+    Raises ``TimeoutError`` (no client opens) when less than the reserve is
+    left, so extraction is never starved by a download that ate its time.
+    """
+    left = clamp_to_tool_call_deadline(math.inf)
+    return require_allowance(
+        min(
+            config.official_document_download_total_timeout_seconds,
+            left - pdf_extraction_reserve_seconds(),
+        ),
+        label="official_document_download",
+    )
+
+
+def _reap_finished(reap: asyncio.Future[Any]) -> None:
+    """Done-callback of a reaper: forget it, and log (never leak) its failure."""
+    _PENDING_REAPS.discard(reap)
+    if reap.cancelled():
+        logger.warning("official_document_subprocess_reap_cancelled")
+        return
+    exc = reap.exception()
+    if exc is not None:
+        logger.warning(
+            "official_document_subprocess_reap_failed",
+            **summarize_exception(exc, operation="official_document_subprocess_reap"),
+        )
+
+
+async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
+    """Kill an extraction child and reap it, the wait bounded and shielded.
+
+    Runs from an abnormal exit (timeout, error, cancellation). The reap is a
+    separate task behind ``asyncio.shield``, so a second cancellation of the
+    caller interrupts only the wait: the reap still finishes and its outcome
+    is logged by ``_reap_finished``. Past SUBPROCESS_CLEANUP_TIMEOUT_SECONDS
+    the caller stops waiting and the reap continues detached.
+    """
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass  # It exited between the check and the kill; reap it anyway.
+    reap = asyncio.ensure_future(process.wait())
+    _PENDING_REAPS.add(reap)
+    reap.add_done_callback(_reap_finished)
+    try:
+        async with asyncio.timeout(config.subprocess_cleanup_timeout_seconds):
+            await asyncio.shield(reap)
+    except TimeoutError:
+        logger.warning(
+            "official_document_subprocess_reap_pending",
+            timeout_seconds=config.subprocess_cleanup_timeout_seconds,
+        )
+    except Exception:
+        pass  # The reap failed; _reap_finished has logged it.
+
+
+async def _communicate_bounded(
+    process: asyncio.subprocess.Process, payload: bytes, *, timeout: float
+) -> bytes:
+    """``communicate()`` within ``timeout``; any abnormal exit kills and reaps.
+
+    The original exception (``TimeoutError``, an error, or the caller's
+    cancellation) is re-raised after the cleanup.
+    """
+    try:
+        stdout, _ = await asyncio.wait_for(
+            process.communicate(payload), timeout=timeout
+        )
+    except BaseException:
+        await _kill_and_reap(process)
+        raise
+    return stdout
 
 
 def _rank_same_host_document_paths(
@@ -215,7 +329,7 @@ async def _ensure_public_hostname(url: str) -> None:
         # A spent caller deadline raises TimeoutError here, before any lookup,
         # and fails the document exactly as a DNS timeout does.
         policy = _DNS_POLICY.with_timeout(
-            require_allowance(
+            _phase_allowance(
                 config.official_document_dns_timeout_seconds,
                 label=_DNS_POLICY.label,
             )
@@ -281,14 +395,19 @@ async def _extract_with_pdftotext(
     executable = shutil.which("pdftotext")
     if executable is None:
         raise DocumentExtractionError("PDF_PARSER_UNAVAILABLE")
-    # Read now (pypdf may have used part of a caller's deadline) and resolved
-    # before the subprocess exists, so a spent allowance spawns nothing.
+    # Read now (pypdf may have used part of the allowance) and resolved before
+    # the subprocess exists, so a spent allowance spawns nothing.
     try:
-        timeout = require_allowance(
+        timeout = _phase_allowance(
             config.official_document_extract_timeout_seconds,
             label="official_document_pdftotext",
         )
     except TimeoutError as exc:
+        logger.info(
+            "official_document_extraction_skipped",
+            backend="pdftotext",
+            reason="EXTRACTION_TIMEOUT",
+        )
         raise DocumentExtractionError("EXTRACTION_TIMEOUT") from exc
     process = await asyncio.create_subprocess_exec(
         executable,
@@ -303,12 +422,8 @@ async def _extract_with_pdftotext(
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, _ = await asyncio.wait_for(
-            process.communicate(payload), timeout=timeout
-        )
+        stdout = await _communicate_bounded(process, payload, timeout=timeout)
     except TimeoutError as exc:
-        process.kill()
-        await process.wait()
         raise DocumentExtractionError("EXTRACTION_TIMEOUT") from exc
     if process.returncode != 0:
         raise DocumentExtractionError("PDF_MALFORMED")
@@ -329,10 +444,11 @@ async def extract_pdf_text(
     search_terms = terms or _DEFAULT_KEYWORDS
     primary_reason = "PDF_PARSER_UNAVAILABLE"
     try:
-        # A spent caller deadline raises TimeoutError before the thread starts
-        # and takes the EXTRACTION_TIMEOUT path below, as a pypdf stall does.
+        # A spent allowance (caller or tool runner) raises TimeoutError before
+        # the thread starts and takes the EXTRACTION_TIMEOUT path below, as a
+        # pypdf stall does; pdftotext then re-checks what is left.
         pdf_policy = _PDF_POLICY.with_timeout(
-            require_allowance(
+            _phase_allowance(
                 config.official_document_extract_timeout_seconds,
                 label=_PDF_POLICY.label,
             )
@@ -379,16 +495,19 @@ async def _download_official(
     url: str, max_bytes: int, extra_hosts: tuple[str, ...] = ()
 ) -> tuple[bytes, str, str]:
     current = url
-    # httpx applies this to each phase (connect, read, write, pool), not to the
-    # whole download. Read now and shrunk to a caller's enclosing deadline; a
-    # spent allowance raises TimeoutError before the client opens, which
+    # Two bounds. The whole download (DNS checks and redirects included) gets
+    # what is left less the extraction reserve, capped by its total setting,
+    # so a trickling body stops there; httpx's own timeout applies to each
+    # phase (connect, read, write, pool) within it. Both are read now; a spent
+    # allowance raises TimeoutError before the client opens, which
     # get_official_document reports as DOCUMENT_RETRIEVAL_FAILED, as it does an
-    # httpx timeout.
-    timeout = require_allowance(
-        config.official_document_download_timeout_seconds,
-        label="official_document_download",
-    )
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    # httpx timeout or the total bound firing.
+    total = _download_allowance()
+    per_phase = min(config.official_document_download_timeout_seconds, total)
+    async with (
+        asyncio.timeout(total),
+        httpx.AsyncClient(timeout=per_phase) as client,
+    ):
         for _ in range(4):
             if not _official_url(current, extra_hosts):
                 raise DocumentExtractionError("UNAPPROVED_DOCUMENT_HOST")
