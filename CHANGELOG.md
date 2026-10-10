@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Tests: subdirectory conftest fixtures now survive pytest 9.1 re-collecting a
+  directory. Naming a root-level test file between two files of one subdirectory
+  used to drop that subdirectory's conftest: named fixtures errored and autouse
+  isolation was skipped silently. Unit tests can no longer send embedding requests:
+  the memory startup probe reached Google 57 times in one full run. A new test runs
+  the real CLI flow under an already-spent run deadline and checks that it fails
+  closed. The README macro-context test now asserts the current diagram.
+  No production code changed.
 - An OpenAI, OpenAI-compatible or Anthropic client that its callers invoke directly
   is now built with `LLM_ATTEMPTS` total attempts, like Google already was; it was a
   fixed 3. **Behaviour change:** at the shipped `LLM_ATTEMPTS=2` such a client makes

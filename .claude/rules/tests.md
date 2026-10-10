@@ -13,6 +13,22 @@ the boundary is not to be bypassed. Keep collection off the repository root inst
 `poetry run pytest <paths> -q -p no:cacheprovider --rootdir=tests --confcutdir=tests`.
 No conftest lives above `tests/`, so `tests/conftest.py` and its isolation still load.
 
+**Keep the configured `addopts`; never pass `-o addopts=""`.** It drops
+`--allow-unix-socket`, and every `security`-marked test then errors with
+`SocketBlockedError` when asyncio opens its self-pipe — 156 errors, not a sandbox
+fault.
+
+## Subdirectory conftests and re-collection
+
+**Do not delete the `pytest_make_collect_report` hook imported into
+`tests/conftest.py`, and do not "fix" a `fixture ... not found` by moving the fixture
+up.** pytest 9.1 binds a subdirectory conftest's fixtures to the first `Dir` object
+it builds for that directory. A command that names a root-level test file between two
+files of one subdirectory re-collects `tests/` and builds a second `Dir`. Without the
+hook, tests under it lose that conftest: named fixtures error, and autouse isolation
+is skipped silently. Whether either directory is a package plays no part.
+`tests/test_conftest_recollection.py` guards it. Story: `docs/CODEBASE_MEMORY.md`.
+
 ## Markers and scope
 
 Mark anything over five seconds `slow` and anything needing the network
@@ -50,6 +66,12 @@ appears in an unrelated file.
 
 Pin service tiers and model overrides for the session so an operator's environment
 cannot flip construction paths under mock-based tests.
+
+**Unit tests never reach the embeddings provider.** `_embedding_provider_unreachable`
+in `tests/conftest.py` refuses every embedding-SDK request unless the test is marked
+`integration` or `security`. Do not widen the exemption; patch the client or its
+transport in the test instead. To prove a test sent nothing, use
+`tests/helpers/offline_network.py`: pytest-socket alone misses libcurl (yfinance).
 
 ## Subprocesses
 

@@ -54,6 +54,13 @@ from src.config import _apply_macos_fork_safety_env  # noqa: E402
 _apply_macos_fork_safety_env(enabled=True, platform=sys.platform)
 
 
+# Re-register subdirectory conftest fixtures on a re-collected Directory; see
+# tests/helpers/conftest_recollection.py for the pytest 9.1 mechanism.
+from tests.helpers.conftest_recollection import (  # noqa: E402, F401
+    pytest_make_collect_report,
+)
+
+
 @pytest.fixture(autouse=True)
 def _reset_ibkr_session_manager():
     """Reset the process-wide pooled IBKR session between tests.
@@ -194,6 +201,56 @@ def _block_network_for_security_tests(request, monkeypatch):
         raise RuntimeError("network access blocked for security-marked tests")
 
     monkeypatch.setattr(socket, "getaddrinfo", blocked_name_resolution)
+
+
+class EmbeddingProviderUnreachable(ConnectionError):
+    """What every embedding-SDK request raises in a unit test."""
+
+
+_EMBEDDING_SDK_METHODS = (
+    "embed_query",
+    "embed_documents",
+    "aembed_query",
+    "aembed_documents",
+)
+
+
+@pytest.fixture(autouse=True)
+def _embedding_provider_unreachable(request, monkeypatch):
+    """Refuse every embedding-SDK request a unit test makes, before it is sent.
+
+    The session's dummy ``GOOGLE_API_KEY`` is enough for ``FinancialSituationMemory``
+    to build a real embeddings client and run its startup probe, so any test that
+    constructs a memory without patching the client -- including every graph built
+    with memory disabled, which still creates the five legacy memories -- sent an
+    ``embed_content`` request to Google (57 requests from 19 tests in one full run;
+    offline, each waited out the probe timeout). Refusing at the SDK method keeps
+    the client real for construction assertions, fails the probe exactly as an
+    unreachable provider would, and lets a test's own patch of the client or its
+    transport win. Exempt: ``integration`` tests (they need the provider) and
+    ``security`` tests (they install their own network block and wire fakes).
+    Guarded by ``tests/memory/test_embedding_probe_offline.py``.
+    """
+    if request.node.get_closest_marker("integration") is not None:
+        return
+    if request.node.get_closest_marker("security") is not None:
+        return
+
+    from langchain_google_genai import GoogleGenerativeAIEmbeddings
+    from langchain_openai import OpenAIEmbeddings
+
+    def refuse(self, *args, **kwargs):
+        raise EmbeddingProviderUnreachable(
+            "embedding provider unreachable: unit tests run offline"
+        )
+
+    async def arefuse(self, *args, **kwargs):
+        refuse(self)
+
+    for client_class in (GoogleGenerativeAIEmbeddings, OpenAIEmbeddings):
+        for method in _EMBEDDING_SDK_METHODS:
+            replacement = arefuse if method.startswith("a") else refuse
+            monkeypatch.setattr(client_class, method, replacement)
 
 
 @pytest.fixture(autouse=True)

@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-10-09
+Last updated: 2026-10-10
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
@@ -844,6 +844,80 @@ Strong coverage areas include:
 Patch owning modules in tests, not facades.
 Use facade tests only for real public APIs.
 Prefer patching `src.runtime_services`, `src.tools.*`, or the owning helper used at call time.
+
+### Subdirectory fixtures that vanish under some orderings (October 2026)
+
+`pytest tests/llm_runtime/test_timeouts.py tests/test_llms_flex.py
+tests/llm_runtime/test_factory.py` passed 105 and errored 5 with `fixture
+'restore_runtime_config' not found`. The fixture lives in `tests/llm_runtime/conftest.py`.
+Any order without a root-level file between the two `llm_runtime` files passed.
+
+The cause is in pytest 9.1.1, not in the layout. `--collect-only` shows two
+`<Dir llm_runtime>` nodes:
+
+- `Session.collect` (`_pytest/main.py`, around line 968) re-collects a parent
+  without its duplicate cache when the remaining part is a single file
+  (`handle_dupes=False`). The second argument, `test_llms_flex.py`, sits directly in
+  `tests/`, so the `tests` package is collected again. That builds a new
+  `Dir llm_runtime` with the same nodeid, and the third argument's items hang
+  under it.
+- `FixtureManager` (`_pytest/fixtures.py`, `pytest_plugin_registered` and the
+  `pytest_make_collect_report` wrapper, around lines 1776–1803) defers a
+  conftest until its directory is collected. It then pops it once and binds its
+  fixtures to that `Dir` *object*. `_matchfactories` (around line 2155) matches by
+  node identity. The second `Dir` gets nothing.
+
+Named fixtures fail loudly. Autouse fixtures are worse: they are skipped silently,
+so `tests/ibkr`, `tests/memory`, `tests/prompts`, `tests/tooling` and
+`tests/advanced` can lose their isolation resets without an error. A scratch tree
+reproduced it with all four `__init__.py` combinations. Making the layout
+consistent would not have helped, and moving the fixture up would have hidden the
+symptom while leaving the autouse loss.
+
+The fix is `tests/helpers/conftest_recollection.py`, imported into
+`tests/conftest.py`. When a later `Directory` collector appears for a path already
+seen, it calls `parsefactories(holder=<that conftest>, node=<the new Dir>)`.
+`tests/test_conftest_recollection.py` replays the ordering on the real files and on
+a scratch tree. One of its tests asserts that pytest still drops the conftest
+without the hook; when that one fails, pytest has fixed this upstream and the hook
+can be retired.
+
+### Unit tests reached Google's embeddings endpoint (October 2026)
+
+The session sets a dummy `GOOGLE_API_KEY`, which is enough for
+`FinancialSituationMemory` to build a real embeddings client and run its startup
+probe. pytest-socket guards only `security`-marked tests, so the probe went out.
+One full run recorded 57 `embed_content` requests from 19 tests, answered "API key
+not valid" through the sandbox proxy. Offline, each probe waited out the probe
+timeout instead.
+
+Two kinds of test sent them:
+
+- tests that build a memory directly, mostly `tests/memory/test_memory.py`;
+- tests that build the graph with memory disabled. With memory off,
+  `build_graph_components` still constructs the five legacy memories, and each one
+  probes. **This happens in production too:** a `--no-memory` run sends one
+  embeddings probe at graph build. The probe deliberately ignores the run
+  deadline, so it runs even when that deadline is already spent.
+
+`_embedding_provider_unreachable` in `tests/conftest.py` patches the SDK methods to
+refuse every request. It covers both providers, sync and async. The client stays
+real, the probe fails as it would against an unreachable provider, and a test's own
+patch of the client or its transport still wins. `integration` and `security` tests
+are exempt: the first need the provider, and the second install their own network
+block and wire fakes. `tests/memory/test_embedding_probe_offline.py` guards it.
+
+The same run measured the rest of the unit suite's egress: 147 tests made 1,309
+network attempts. Most are yfinance over libcurl (568 to `fc.yahoo.com` alone),
+then FX-rate fetches, Tavily DNS lookups, and the `find_gems` exchange-scrape
+integration tests. That is a separate, wider boundary and is not yet closed.
+pytest-socket cannot close it alone, because libcurl bypasses Python sockets.
+`tests/helpers/offline_network.py` covers both and is what a test should use to
+prove that it sent nothing.
+
+Keep the configured `addopts`. `-o addopts=""` drops `--allow-unix-socket`, and
+every `security` test then errors with `SocketBlockedError` when asyncio opens its
+self-pipe. That is 156 errors, and none of them comes from the sandbox.
 
 ## Practical Notes
 
