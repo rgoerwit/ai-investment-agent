@@ -699,22 +699,18 @@ def _load_company_name_for_output(ticker: str) -> str | None:
             OUTPUT_COMPANY_NAME_INFO_POLICY,
             run_blocking_call_sync,
         )
-        from src.llm_runtime.timeouts import require_allowance
         from src.ticker_utils import (
             _company_name_lookup_candidates,
             _is_valid_company_name,
         )
 
         for lookup_ticker, _lookup_strategy in _company_name_lookup_candidates(ticker):
-            # Resolved per candidate, before its worker starts; a spent caller
-            # deadline raises TimeoutError and ends the lookup like a stall.
-            timeout_seconds = require_allowance(
-                config.company_name_lookup_timeout_seconds,
-                label=OUTPUT_COMPANY_NAME_INFO_POLICY.label,
-            )
+            # Clamped per candidate by run_blocking_call_sync, before its worker
+            # starts; a spent deadline raises TimeoutError and ends the lookup
+            # like a stall.
             policy = OUTPUT_COMPANY_NAME_INFO_POLICY.with_label(
                 f"{OUTPUT_COMPANY_NAME_INFO_POLICY.label}:{lookup_ticker}"
-            ).with_timeout(timeout_seconds)
+            ).with_timeout(config.company_name_lookup_timeout_seconds)
 
             def _fetch_info(symbol: str = lookup_ticker) -> Any:
                 return yf.Ticker(symbol).info
@@ -744,17 +740,12 @@ async def _load_company_name_for_output_async(ticker: str) -> str | None:
     caller's enclosing deadline before the worker starts.
     """
     from src.blocking_io import OUTPUT_COMPANY_NAME_POLICY, run_blocking_call
-    from src.llm_runtime.timeouts import require_allowance
 
     try:
-        timeout_seconds = require_allowance(
-            config.output_company_name_timeout_seconds,
-            label=OUTPUT_COMPANY_NAME_POLICY.label,
-        )
         return await run_blocking_call(
             OUTPUT_COMPANY_NAME_POLICY.with_label(
                 f"output_company_name:{ticker}"
-            ).with_timeout(timeout_seconds),
+            ).with_timeout(config.output_company_name_timeout_seconds),
             lambda: _load_company_name_for_output(ticker),
         )
     except TimeoutError:

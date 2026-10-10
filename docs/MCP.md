@@ -1,6 +1,6 @@
 # Model Context Protocol (MCP) integration
 
-Last updated: 2026-10-09 (timeout model: catalogue, retry backoff and tool-call deadline).
+Last updated: 2026-10-10 (timeout model: operational deadline reader, margin, timeout scopes).
 
 The consultant agent can cross-validate analyst claims against vendor MCP
 servers (currently the FMP MCP server). The consultant-facing MCP wrappers
@@ -166,8 +166,10 @@ a protocol failure.
 
 Four settings. Each is read when the step starts and shrinks to the time left:
 the caller's enclosing deadline (`src/llm_runtime/timeouts.py`) and, under the
-tool service, the runner's `tool_call_deadline` (`src/tooling/runtime.py`), read
-through `clamp_to_tool_call_deadline`. MCP reads that deadline and never binds it.
+tool service, the runner's `tool_call_deadline` (`src/llm_runtime/timeouts.py`),
+kept back from the runner's cap by `deadline_margin`, read through the
+operational clamp. MCP reads that deadline and never binds it, so with the
+45 s call setting under the 45 s runner the call's own timeout fires first.
 
 | Setting | Default | Applied as | Bounds |
 |---|---|---|---|
@@ -252,7 +254,7 @@ What the qualification found (mcp 2.2.0, httpx2 2.13.0):
 | `transport`, `retryable: false`, `details.timeout == "enclosing_deadline_spent"` | The caller's or the tool runner's deadline had already passed. `details.scope` names the step: `mcp_initialize` means no session was opened, `mcp_list_tools` that one was opened but no listing (and so no call) was sent, and `mcp_tool_call` that the listing was sent but no call |
 | `transport`, `retryable: true`, `details.timeout == "time_left_elapsed"`, `details.scope == "mcp_list_tools"` | The catalogue was sent and outlived what the handshake left. Under `execute_raw` the retry is then usually refused (next row) |
 | any category, `retryable: false`, `details.retry == "refused_deadline"` | The attempt was sent and failed retryably, and the deadline left no room for the backoff plus `MCP_RETRY_MIN_USEFUL_SECONDS`. The rest of the error is that attempt's own |
-| `TOOL_ERROR: TimeoutError` in the Consultant's tool output, or `tool_call_timeout` in the log | The tool runner's `TOOL_EXECUTION_TIMEOUT_SECONDS` fired first; the MCP bounds never got the chance. With `scope="with_inspection"` in the log, it was the combined hooks-plus-runner scope (`TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS`), usually a slow inspection |
+| `TOOL_ERROR: TimeoutError` in the Consultant's tool output, or `tool_call_timeout` in the log | The log's `scope` names what fired: `runner` (`TOOL_EXECUTION_TIMEOUT_SECONDS`; work outside the MCP bounds, since those end a margin earlier), `with_inspection` (the combined runner-plus-`TOOL_HOOKS_TIMEOUT_SECONDS` scope, usually a slow inspection), `before_hooks`/`after_hooks` (a hook's own timeout) or `hooks_allowance_spent` (no time left to inspect the result) |
 
 A retryable failure is retried once in `_execute_with_retry`,
 with a fresh session and a re-read allowance, when the backoff is admitted. So

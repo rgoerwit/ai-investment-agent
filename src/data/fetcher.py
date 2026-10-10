@@ -118,7 +118,7 @@ from src.fx_normalization import (
     normalize_minor_unit_amount,
 )
 from src.llm_runtime.timeouts import (
-    clamp_to_enclosing_deadline,
+    clamp_to_operational_deadline,
     require_allowance,
 )
 from src.runtime_services import get_current_market_data_fetcher
@@ -1667,7 +1667,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         """
         if timeout is None:
             timeout = config.market_data_aggregate_fetch_timeout_seconds
-        timeout = clamp_to_enclosing_deadline(timeout)
+        timeout = clamp_to_operational_deadline(timeout)
         try:
             if timeout <= 0:
                 # The caller's allowance is already spent: never start the fetch.

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Operational work inside a tool call now sizes itself against what the tool
+  runner has left, not only the caller's deadline: Tavily, market data, FX,
+  filings, the editor's reference fetch and every blocking call read one
+  operational deadline (MCP and the official-document tool already did). Before,
+  a second search inside a 45 s runner could be given its full 30 s and be cut off
+  as a bare `TOOL_TIMEOUT`. Every blocking call (`run_blocking_call` and its sync
+  twin) now applies that clamp itself and refuses, before any thread starts, once
+  the deadline has passed. Work inside a hard cap now gets a deadline kept back by
+  a margin, the new `DEADLINE_MARGIN_FRACTION` (5 % of the cap, at most
+  `LLM_DISPATCH_MARGIN_SECONDS`), so its own typed timeout fires before the cap's
+  cancellation instead of racing it. **Behaviour change:** an MCP call or document
+  extraction that runs to the runner's end now returns its own timeout result a
+  margin early rather than `TOOL_TIMEOUT`.
+- The combined tool scope is now derived: `TOOL_EXECUTION_TIMEOUT_SECONDS` plus the
+  new `TOOL_HOOKS_TIMEOUT_SECONDS` (75 s; 120 s in all, unchanged). It replaces
+  `TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS`, added earlier in this release,
+  and its startup check: raising the runner no longer requires raising a second
+  setting. Tool-call timeouts are now logged once with the scope that produced
+  them (`runner`, `before_hooks`, `after_hooks`, `hooks_allowance_spent`,
+  `with_inspection`, `not_started`); a hook's own timeout was reported as the
+  combined scope. The graph tool node no longer wraps the service in a second,
+  identical bound, so cancellation reaches a running tool one loop turn sooner.
+
 - Tests: subdirectory conftest fixtures now survive pytest 9.1 re-collecting a
   directory. Naming a root-level test file between two files of one subdirectory
   used to drop that subdirectory's conftest: named fixtures errored and autouse

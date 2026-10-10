@@ -1,11 +1,12 @@
-"""The two tool deadline scopes: the runner's, and the combined inspection scope.
+"""The two tool deadline scopes: the runner's, and the combined hooks scope.
 
 ``ToolExecutionService`` bounds the tool runner (``TOOL_EXECUTION_TIMEOUT_SECONDS``)
-and, around it, the before()/after() hooks and the runner together
-(``TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS``). The graph tool node wraps
-the same combined scope, read from the same policy function. Both clamp to a
-caller's enclosing deadline when one is bound. The direct-caller side of the
-combined scope is covered in ``test_tool_service_combined_scope.py``.
+and, around it, the before()/after() hooks and the runner together. The combined
+scope is derived -- runner plus ``TOOL_HOOKS_TIMEOUT_SECONDS`` -- so it can never
+be the narrower of the two. The graph tool node adds no bound of its own: the
+service's is the only one. Both scopes clamp to a caller's enclosing deadline
+when one is bound. The direct-caller side of the combined scope is covered in
+``test_tool_service_combined_scope.py``.
 
 Fake clock and tiny timeouts only; nothing here sleeps for real beyond a few
 hundredths of a second.
@@ -21,18 +22,17 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import ValidationError
 
-import src.graph.tool_nodes as tool_nodes
 import src.tooling.runtime as tool_runtime
 from src.config import Settings
 from src.graph.tool_nodes import create_agent_tool_node
 from src.llm_runtime import timeouts as llm_timeouts
-from src.llm_runtime.timeouts import enclosing_deadline
+from src.llm_runtime.timeouts import deadline_margin, enclosing_deadline
 from src.runtime_services import RuntimeServices, use_runtime_services
 from src.tooling.inspection_service import InspectionService
 from src.tooling.runtime import ToolExecutionService, ToolInvocation, ToolResult
 
 EXECUTION_FIELD = "tool_execution_timeout_seconds"
-INSPECTION_FIELD = "tool_execution_with_inspection_timeout_seconds"
+HOOKS_FIELD = "tool_hooks_timeout_seconds"
 
 
 def _state(agent_key: str, tool_name: str) -> dict[str, Any]:
@@ -57,21 +57,20 @@ def _tool(name: str, value: Any = "tool output") -> MagicMock:
     return tool
 
 
-def _spy_hard_timeout(monkeypatch, module) -> list[tuple[str, float]]:
-    """Record the (label kind, timeout) each real ``run_with_hard_timeout`` receives.
+def _spy_hard_timeout(monkeypatch) -> list[tuple[str, float]]:
+    """Record the (label kind, timeout) each service ``run_with_hard_timeout`` gets.
 
     The label kind is the label up to its first colon: ``tool`` for the runner,
-    ``tool_with_hooks`` for the service's combined scope,
-    ``tool_with_inspection`` for the graph node's wrapper.
+    ``tool_with_hooks`` for the service's combined scope.
     """
     seen: list[tuple[str, float]] = []
-    real = module.run_with_hard_timeout
+    real = tool_runtime.run_with_hard_timeout
 
     async def spy(coro, *, timeout, label):
         seen.append((label.split(":", 1)[0], timeout))
         return await real(coro, timeout=timeout, label=label)
 
-    monkeypatch.setattr(module, "run_with_hard_timeout", spy)
+    monkeypatch.setattr(tool_runtime, "run_with_hard_timeout", spy)
     return seen
 
 
@@ -86,23 +85,35 @@ def fake_clock(monkeypatch):
 
 def test_defaults_are_unchanged():
     assert Settings.model_fields[EXECUTION_FIELD].default == 45.0
-    assert Settings.model_fields[INSPECTION_FIELD].default == 120.0
+    assert Settings.model_fields[HOOKS_FIELD].default == 75.0
 
 
-def test_inspection_scope_narrower_than_execution_is_rejected():
-    with pytest.raises(ValidationError, match="must be at least"):
-        Settings(**{EXECUTION_FIELD: 60.0, INSPECTION_FIELD: 30.0})
+def test_combined_scope_is_runner_plus_hooks_at_the_defaults():
+    # 120 s, the combined scope's former default.
+    assert tool_runtime.tool_execution_with_inspection_timeout_seconds() == 120.0
 
 
-def test_equal_scopes_are_accepted():
-    settings = Settings(**{EXECUTION_FIELD: 60.0, INSPECTION_FIELD: 60.0})
-    assert settings.tool_execution_with_inspection_timeout_seconds == 60.0
+@pytest.mark.parametrize(("runner", "hooks"), [(150.0, 1.0), (0.01, 0.01), (45, 1e6)])
+def test_combined_scope_follows_both_settings(monkeypatch, runner, hooks):
+    monkeypatch.setattr(tool_runtime.settings_config, EXECUTION_FIELD, runner)
+    monkeypatch.setattr(tool_runtime.settings_config, HOOKS_FIELD, hooks)
+    assert tool_runtime.tool_execution_with_inspection_timeout_seconds() == (
+        runner + hooks
+    )
 
 
-@pytest.mark.parametrize("field", [EXECUTION_FIELD, INSPECTION_FIELD])
-def test_non_positive_scope_is_rejected(field):
+def test_a_runner_larger_than_the_old_combined_default_is_accepted():
+    # Raising the runner for a slow vendor once failed startup until the
+    # combined scope was raised too; derived, it cannot be the narrower one.
+    settings = Settings(**{EXECUTION_FIELD: 300.0})
+    assert settings.tool_execution_timeout_seconds == 300.0
+
+
+@pytest.mark.parametrize("field", [EXECUTION_FIELD, HOOKS_FIELD])
+@pytest.mark.parametrize("value", [0.0, -1.0])
+def test_non_positive_scope_is_rejected(field, value):
     with pytest.raises(ValidationError):
-        Settings(**{field: 0.0})
+        Settings(**{field: value})
 
 
 # --- Happy path: an override reaches the real call ---------------------------
@@ -111,7 +122,7 @@ def test_non_positive_scope_is_rejected(field):
 @pytest.mark.asyncio
 async def test_execution_override_reaches_runner_timeout(monkeypatch):
     monkeypatch.setattr(tool_runtime.settings_config, EXECUTION_FIELD, 7.5)
-    seen = _spy_hard_timeout(monkeypatch, tool_runtime)
+    seen = _spy_hard_timeout(monkeypatch)
     runner = AsyncMock(return_value="ok")
 
     result = await ToolExecutionService().execute(
@@ -119,25 +130,20 @@ async def test_execution_override_reaches_runner_timeout(monkeypatch):
     )
 
     assert result.value == "ok"
-    assert seen == [("tool_with_hooks", 120.0), ("tool", 7.5)]
+    assert seen == [("tool_with_hooks", 82.5), ("tool", 7.5)]
 
 
 @pytest.mark.asyncio
-async def test_inspection_override_reaches_node_wrapper(monkeypatch):
-    monkeypatch.setattr(tool_runtime.settings_config, INSPECTION_FIELD, 99.0)
-    node_seen = _spy_hard_timeout(monkeypatch, tool_nodes)
-    runner_seen = _spy_hard_timeout(monkeypatch, tool_runtime)
+async def test_hooks_override_reaches_the_service_from_the_graph(monkeypatch):
+    monkeypatch.setattr(tool_runtime.settings_config, HOOKS_FIELD, 54.0)
+    seen = _spy_hard_timeout(monkeypatch)
 
     node = create_agent_tool_node([_tool("fast_tool")], "test_agent")
     result = await node(_state("test_agent", "fast_tool"), {"configurable": {}})
 
     assert result["messages"][0].content == "tool output"
-    assert node_seen == [("tool_with_inspection", 99.0)]
-    # The service's combined scope clamps to the node's (never wider), and the
-    # runner keeps its own, narrower scope inside both.
-    assert [kind for kind, _ in runner_seen] == ["tool_with_hooks", "tool"]
-    assert 0 < runner_seen[0][1] <= 99.0
-    assert runner_seen[1] == ("tool", 45.0)
+    # One combined scope (the service's), the runner's narrower one inside it.
+    assert seen == [("tool_with_hooks", 99.0), ("tool", 45.0)]
 
 
 # --- Edge: a nested caller deadline wins -------------------------------------
@@ -145,29 +151,27 @@ async def test_inspection_override_reaches_node_wrapper(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_caller_deadline_clamps_both_scopes(monkeypatch, fake_clock):
-    node_seen = _spy_hard_timeout(monkeypatch, tool_nodes)
-    runner_seen = _spy_hard_timeout(monkeypatch, tool_runtime)
+    seen = _spy_hard_timeout(monkeypatch)
     node = create_agent_tool_node([_tool("fast_tool")], "test_agent")
 
     with enclosing_deadline(5.0):
         result = await node(_state("test_agent", "fast_tool"), {"configurable": {}})
 
     assert result["messages"][0].content == "tool output"
-    assert node_seen == [("tool_with_inspection", 5.0)]
-    assert runner_seen == [("tool_with_hooks", 5.0), ("tool", 5.0)]
+    # The runner sizes against the combined scope's binding, which is kept
+    # back from the 5 s hard cap by its margin: the runner fires first.
+    assert seen == [("tool_with_hooks", 5.0), ("tool", 5.0 - deadline_margin(5.0))]
 
 
 @pytest.mark.asyncio
 async def test_looser_caller_deadline_leaves_defaults(monkeypatch, fake_clock):
-    node_seen = _spy_hard_timeout(monkeypatch, tool_nodes)
-    runner_seen = _spy_hard_timeout(monkeypatch, tool_runtime)
+    seen = _spy_hard_timeout(monkeypatch)
     node = create_agent_tool_node([_tool("fast_tool")], "test_agent")
 
     with enclosing_deadline(10_000.0):
         await node(_state("test_agent", "fast_tool"), {"configurable": {}})
 
-    assert node_seen == [("tool_with_inspection", 120.0)]
-    assert runner_seen == [("tool_with_hooks", 120.0), ("tool", 45.0)]
+    assert seen == [("tool_with_hooks", 120.0), ("tool", 45.0)]
 
 
 @pytest.mark.asyncio
@@ -204,7 +208,7 @@ async def test_spent_caller_deadline_fails_node_closed(monkeypatch):
     assert message.content == "TOOL_ERROR: TOOL_TIMEOUT"
 
 
-# --- Error: a stalled inspection hook is bounded by the inspection scope ------
+# --- Error: a stalled inspection hook is bounded by the combined scope --------
 
 
 class _StalledInspectionHook:
@@ -237,9 +241,11 @@ class _StalledInspectionHook:
 async def test_stalled_inspection_hook_fails_closed_and_late_result_is_dropped(
     monkeypatch,
 ):
-    # The runner's own scope stays at its default: only the inspection scope
-    # can end this call, which is what proves it bounds the hooks.
-    monkeypatch.setattr(tool_runtime.settings_config, INSPECTION_FIELD, 0.05)
+    # The tool itself returns at once, so only the combined scope (runner plus
+    # hooks, 0.05 s here) can end this call: that is what proves it bounds
+    # the hooks.
+    monkeypatch.setattr(tool_runtime.settings_config, EXECUTION_FIELD, 0.025)
+    monkeypatch.setattr(tool_runtime.settings_config, HOOKS_FIELD, 0.025)
     hook = _StalledInspectionHook()
     node = create_agent_tool_node([_tool("slow_inspect")], "test_agent")
 

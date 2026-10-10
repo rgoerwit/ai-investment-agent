@@ -141,12 +141,8 @@ _SETTINGS_ENV_CASES = [
         "30",
         30.0,
     ),
-    (
-        "tool_execution_with_inspection_timeout_seconds",
-        "TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS",
-        "150",
-        150.0,
-    ),
+    ("tool_hooks_timeout_seconds", "TOOL_HOOKS_TIMEOUT_SECONDS", "90", 90.0),
+    ("deadline_margin_fraction", "DEADLINE_MARGIN_FRACTION", "0.1", 0.1),
     *[
         (field, field.upper(), "7.5", 7.5)
         for field in (

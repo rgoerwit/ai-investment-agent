@@ -28,6 +28,7 @@ invocation sends exactly one SDK attempt.
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -152,6 +153,17 @@ _DISPATCH_SCOPE: ContextVar[DispatchScope | None] = ContextVar(
 _ENCLOSING_DEADLINE: ContextVar[float | None] = ContextVar(
     "llm_enclosing_deadline", default=None
 )
+# The deadline operational work inside the tool call in progress must meet, so
+# a call made from inside a tool -- a web search, a market-data fetch, an MCP
+# spot check routed back through the tool service -- sizes against what the
+# runner has left instead of a fresh allowance. Deliberately separate from the
+# LLM enclosing deadline: binding that around a tool call would also cap the
+# injection judge in the after() hooks, and the judge fails *open* when
+# admission refuses it, where the tool scope's own timeout fails closed. Only
+# ``ToolExecutionService`` binds it (``tool_call_deadline``).
+_TOOL_CALL_DEADLINE: ContextVar[float | None] = ContextVar(
+    "tool_call_deadline", default=None
+)
 
 
 def now() -> float:
@@ -164,39 +176,98 @@ def current_dispatch_scope() -> DispatchScope | None:
 
 
 def current_enclosing_deadline() -> float | None:
+    """The LLM enclosing deadline alone: for LLM admission, never operational work.
+
+    Operational call sites read ``operational_deadline`` (through
+    ``require_allowance`` or ``clamp_to_operational_deadline``), which also
+    sees the tool runner they may run under. An architecture test
+    (``tests/architecture/test_deadline_readers.py``) keeps this reader to the
+    LLM dispatch modules.
+    """
     return _ENCLOSING_DEADLINE.get()
 
 
-def clamp_to_enclosing_deadline(default_seconds: float) -> float:
-    """``min(default_seconds, remaining)`` under the caller's enclosing deadline.
+def deadline_margin(cap: float, cfg: Any = None) -> float:
+    """Seconds an inner deadline is kept back from a hard cap of ``cap`` seconds.
 
-    The enclosing deadline is the absolute node deadline bound by
-    ``enclosing_deadline``; with none bound the default stands. A result
-    ``<= 0`` means the caller's allowance is already spent, and the caller must
-    fail as a timeout without starting work.
-
-    Operational scopes (tool calls, market-data fetches) read this deadline but
-    never bind it: binding it around such a call would also cap any LLM
-    inspection judge inside it, and the judge fails *open* when refused, where
-    the scope's own timeout fails closed.
+    ``DEADLINE_MARGIN_FRACTION`` of the cap, at most
+    ``LLM_DISPATCH_MARGIN_SECONDS``. Work sized inside a hard cap gets its own
+    deadline this much earlier, so its own timeout -- and the typed result it
+    produces -- fires before the cap's cancellation. Equal deadlines race:
+    asyncio orders timers due at the same instant arbitrarily. Always below a
+    positive cap.
     """
-    deadline = current_enclosing_deadline()
-    if deadline is None:
-        return float(default_seconds)
-    return min(float(default_seconds), deadline - now())
+    settings = _settings(cfg)
+    return min(
+        float(settings.llm_dispatch_margin_seconds),
+        float(cap) * float(settings.deadline_margin_fraction),
+    )
+
+
+def operational_deadline() -> float | None:
+    """The absolute deadline operational work must meet, or None.
+
+    The earlier of the caller's enclosing deadline and the tool call this work
+    runs under. Read-only: for a retry loop that needs the instant itself, to
+    gate a backoff with ``wait_allowance``.
+    """
+    bound = [
+        deadline
+        for deadline in (_ENCLOSING_DEADLINE.get(), _TOOL_CALL_DEADLINE.get())
+        if deadline is not None
+    ]
+    return min(bound) if bound else None
+
+
+def operational_time_left() -> float:
+    """Seconds left before ``operational_deadline``; ``inf`` when none is bound."""
+    deadline = operational_deadline()
+    return math.inf if deadline is None else deadline - now()
+
+
+def clamp_to_operational_deadline(default_seconds: float) -> float:
+    """``min(default_seconds, operational_time_left())``.
+
+    With nothing bound the default stands. A result ``<= 0`` means the
+    allowance is already spent, and the caller must fail as a timeout without
+    starting work. Operational scopes read these deadlines but never bind the
+    LLM one (see ``_TOOL_CALL_DEADLINE``).
+    """
+    return min(float(default_seconds), operational_time_left())
 
 
 def require_allowance(default_seconds: float, *, label: str) -> float:
-    """``clamp_to_enclosing_deadline``, raising ``TimeoutError`` once it is spent.
+    """``clamp_to_operational_deadline``, raising ``TimeoutError`` once it is spent.
 
     For a call site whose existing timeout handling is the fallback: a spent
-    caller allowance takes the same path as the call's own timeout, without
-    starting the call (``run_with_hard_timeout`` rejects a non-positive bound).
+    allowance takes the same path as the call's own timeout, without starting
+    the call (``run_with_hard_timeout`` rejects a non-positive bound).
     """
-    seconds = clamp_to_enclosing_deadline(default_seconds)
+    seconds = clamp_to_operational_deadline(default_seconds)
     if seconds <= 0:
-        raise TimeoutError(f"{label!r}: enclosing deadline already passed")
+        raise TimeoutError(f"{label!r}: deadline already passed")
     return seconds
+
+
+@contextmanager
+def tool_call_deadline(seconds: float) -> Iterator[float]:
+    """Bind the operational deadline for a tool scope hard-capped at ``seconds``.
+
+    The bound instant is ``now + seconds - deadline_margin(seconds)``: work
+    inside sizes against it, so its own timeout fires before the scope's hard
+    cap does. Nested bindings can only shorten it. A task created inside the
+    block (the hard-timeout wrapper's inner task) copies the binding, so every
+    tool call it makes sees the outer deadline. Only ``ToolExecutionService``
+    binds it.
+    """
+    deadline = now() + float(seconds) - deadline_margin(seconds)
+    outer = _TOOL_CALL_DEADLINE.get()
+    bound = deadline if outer is None else min(deadline, outer)
+    token = _TOOL_CALL_DEADLINE.set(bound)
+    try:
+        yield bound
+    finally:
+        _TOOL_CALL_DEADLINE.reset(token)
 
 
 @contextmanager

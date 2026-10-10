@@ -1088,6 +1088,20 @@ class Settings(BaseSettings):
         validation_alias="LLM_DISPATCH_MARGIN_SECONDS",
         description="Seconds kept back from each request deadline",
     )
+    # The tool plane's margin (deadline_margin in src/llm_runtime/timeouts.py):
+    # work inside a hard cap gets a deadline this share of the cap earlier, at
+    # most LLM_DISPATCH_MARGIN_SECONDS, so its own typed timeout fires before
+    # the cap cancels it.
+    deadline_margin_fraction: float = Field(
+        default=0.05,
+        gt=0.0,
+        lt=1.0,
+        validation_alias="DEADLINE_MARGIN_FRACTION",
+        description=(
+            "Share of a hard cap kept back from the deadline of the work inside "
+            "it (at most LLM_DISPATCH_MARGIN_SECONDS)"
+        ),
+    )
     # A quick-mode flex request may queue for this share of its invocation cap,
     # leaving the rest for a standard re-issue inside the same allowance.
     flex_quick_attempt_fraction: float = Field(
@@ -1308,13 +1322,13 @@ class Settings(BaseSettings):
             "included. A draft held when it runs out is saved unreviewed."
         ),
     )
-    # Two nested tool scopes, kept separate on purpose. The execution scope
-    # bounds the tool runner inside ToolExecutionService; the wider scope, also
-    # applied by the service (and read by the graph tool node's wrapper through
-    # the same function), bounds the before()/after() hooks too, which run
-    # outside the runner's timeout (an LLM judge can take longer than the tool).
-    # The wider scope must be at least the narrower one; see
-    # _validate_tool_timeout_scopes and docs/CODEBASE_MEMORY.md.
+    # Two nested tool scopes. The execution scope bounds the tool runner inside
+    # ToolExecutionService; the combined scope, also applied by the service,
+    # bounds the before()/after() hooks too, which run outside the runner's
+    # timeout (an LLM judge can take longer than the tool). The combined scope
+    # is derived -- runner plus hooks -- so it can never be the narrower one;
+    # see tool_execution_with_inspection_timeout_seconds() in
+    # src/tooling/runtime.py and docs/CODEBASE_MEMORY.md.
     tool_execution_timeout_seconds: float = Field(
         default=45.0,
         gt=0.0,
@@ -1324,14 +1338,15 @@ class Settings(BaseSettings):
             "the before()/after() hooks."
         ),
     )
-    tool_execution_with_inspection_timeout_seconds: float = Field(
-        default=120.0,
+    tool_hooks_timeout_seconds: float = Field(
+        default=75.0,
         gt=0.0,
-        validation_alias="TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS",
+        validation_alias="TOOL_HOOKS_TIMEOUT_SECONDS",
         description=(
-            "Hard wall-clock cap (seconds) on one tool call through the tool "
-            "service, including its hook chain and content inspection; a "
-            "timeout fails closed (TOOL_TIMEOUT in the graph)."
+            "Seconds a tool call through the tool service may spend in its "
+            "before()/after() hooks (argument policy, content inspection) on "
+            "top of TOOL_EXECUTION_TIMEOUT_SECONDS; the sum is the call's hard "
+            "cap, and a timeout fails closed (TOOL_TIMEOUT in the graph)."
         ),
     )
     # Market-data deadlines: one field per scope, not per value. Several share a
@@ -2089,26 +2104,6 @@ class Settings(BaseSettings):
         # Use validation_alias for env var names
         populate_by_name=True,
     )
-
-    @model_validator(mode="after")
-    def _validate_tool_timeout_scopes(self) -> "Settings":
-        """Reject an inspection scope narrower than the execution scope it encloses.
-
-        Below it, the outer scope fires before the runner's own timeout, so
-        every slow tool is reported as an inspection timeout and inspection is
-        left no time at all.
-        """
-        if (
-            self.tool_execution_with_inspection_timeout_seconds
-            < self.tool_execution_timeout_seconds
-        ):
-            raise ValueError(
-                "TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS "
-                f"({self.tool_execution_with_inspection_timeout_seconds:g}) must be "
-                "at least TOOL_EXECUTION_TIMEOUT_SECONDS "
-                f"({self.tool_execution_timeout_seconds:g})"
-            )
-        return self
 
     @model_validator(mode="after")
     def _validate_embedding_attempt_scopes(self) -> "Settings":

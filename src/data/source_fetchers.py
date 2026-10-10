@@ -305,11 +305,11 @@ async def fetch_all_sources_parallel(
     async def _run_one(name: str) -> tuple[str, dict | None, str]:
         # Imported here, not above, so the to_thread allowlist line numbers in
         # tests/test_to_thread_timeout_consistency.py stay put.
-        from src.llm_runtime.timeouts import clamp_to_enclosing_deadline
+        from src.llm_runtime.timeouts import clamp_to_operational_deadline
 
         # Read per source, so time spent before a source starts counts against
         # a caller's enclosing deadline rather than extending it.
-        timeout = clamp_to_enclosing_deadline(per_source_timeout)
+        timeout = clamp_to_operational_deadline(per_source_timeout)
         try:
             if timeout <= 0:
                 # The caller's allowance is spent: record a timeout without

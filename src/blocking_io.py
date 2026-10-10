@@ -30,6 +30,7 @@ from typing import TypeVar
 import structlog
 
 from src.async_utils import run_with_hard_timeout
+from src.llm_runtime.timeouts import require_allowance
 
 logger = structlog.get_logger(__name__)
 
@@ -45,10 +46,12 @@ class BlockingCallSaturatedError(TimeoutError):
 
 
 class BlockingCallTimeoutError(TimeoutError):
-    """``run_blocking_call_sync``'s own deadline passed; the worker is orphaned.
+    """The call's own deadline passed: before it started, or while it ran.
 
-    Distinct from a ``TimeoutError`` raised *by* the wrapped call, which is
-    re-raised unchanged.
+    Raised before any thread or slot is taken when the operational deadline is
+    already spent (both modes), and by ``run_blocking_call_sync`` when its
+    bound fires, the worker then orphaned. Distinct from a ``TimeoutError``
+    raised *by* the wrapped call, which is re-raised unchanged.
     """
 
 
@@ -108,6 +111,22 @@ def _validate(policy: BlockingCallPolicy) -> None:
         )
 
 
+def _within_deadline(policy: BlockingCallPolicy) -> BlockingCallPolicy:
+    """``policy`` with its bound shrunk to the operational time left.
+
+    Every blocking call is clamped here, centrally, to the caller's enclosing
+    deadline and any tool runner it runs under, so a call site cannot forget
+    to. A spent allowance raises ``BlockingCallTimeoutError`` before any
+    thread starts or slot is taken.
+    """
+    _validate(policy)
+    try:
+        seconds = require_allowance(policy.hard_timeout_seconds, label=policy.label)
+    except TimeoutError as exc:
+        raise BlockingCallTimeoutError(str(exc)) from exc
+    return policy.with_timeout(seconds)
+
+
 def _start_daemon_call(
     policy: BlockingCallPolicy, limit: InFlightLimit, fn: Callable[[], T]
 ) -> Future[T]:
@@ -152,7 +171,7 @@ def _start_daemon_call(
 
 
 async def run_blocking_call(policy: BlockingCallPolicy, fn: Callable[[], T]) -> T:
-    _validate(policy)
+    policy = _within_deadline(policy)
     if policy.in_flight is None:
         return await run_with_hard_timeout(
             asyncio.to_thread(fn),
@@ -177,12 +196,13 @@ def run_blocking_call_sync(policy: BlockingCallPolicy, fn: Callable[[], T]) -> T
     running, holding its slot) and
     ``BlockingCallSaturatedError`` when no slot is free.
     """
-    _validate(policy)
-    if policy.in_flight is None:
+    limit = policy.in_flight
+    if limit is None:
         raise ValueError(
             f"run_blocking_call_sync requires an InFlightLimit on {policy.label!r}"
         )
-    future = _start_daemon_call(policy, policy.in_flight, fn)
+    policy = _within_deadline(policy)
+    future = _start_daemon_call(policy, limit, fn)
     try:
         return future.result(timeout=policy.hard_timeout_seconds)
     except TimeoutError:
@@ -194,7 +214,7 @@ def run_blocking_call_sync(policy: BlockingCallPolicy, fn: Callable[[], T]) -> T
             "hard_timeout_exceeded",
             label=policy.label,
             timeout_seconds=policy.hard_timeout_seconds,
-            in_flight=policy.in_flight.in_flight,
+            in_flight=limit.in_flight,
         )
         raise BlockingCallTimeoutError(
             f"{policy.label!r} exceeded hard timeout of "
@@ -204,8 +224,8 @@ def run_blocking_call_sync(policy: BlockingCallPolicy, fn: Callable[[], T]) -> T
 
 # The yfinance-info, yahooquery, FX and gap-fill policies carry a label and (for
 # gap fill) a shared in-flight cap; their numbers are only the shipped defaults.
-# Each call site applies its Settings field with with_timeout(), clamped to a
-# caller's enclosing deadline: COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS,
+# Each call site applies its Settings field with with_timeout(); the call
+# itself clamps it to the operational deadline: COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS,
 # OUTPUT_COMPANY_NAME_TIMEOUT_SECONDS and FX_RATE_FETCH_TIMEOUT_SECONDS.
 # tests/data/test_market_data_timeouts.py and tests/test_operational_timeouts.py
 # pin these numbers to the Settings defaults.

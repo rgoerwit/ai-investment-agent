@@ -15,7 +15,6 @@ from src.blocking_io import (
 )
 from src.config import config
 from src.data.merge_policy import CRITICAL_ANALYSIS_FIELDS, SOURCE_QUALITY
-from src.llm_runtime.timeouts import require_allowance
 from src.runtime_services import get_current_inspection_service
 from src.tavily_utils import search_tavily_inspected
 from src.ticker_utils import generate_strict_search_query
@@ -82,12 +81,10 @@ async def _fetch_tavily_gaps_impl(
     try:
         if info_policy is None:
             # The shared in-flight cap stays; the bound is the company-name
-            # lookup setting, read now and shrunk to a caller deadline.
+            # lookup setting, read now (run_blocking_call shrinks it to the
+            # operational deadline).
             info_policy = GAP_FILL_YFINANCE_INFO_POLICY.with_timeout(
-                require_allowance(
-                    config.company_name_lookup_timeout_seconds,
-                    label=GAP_FILL_YFINANCE_INFO_POLICY.label,
-                )
+                config.company_name_lookup_timeout_seconds
             )
         ticker_obj = yf_module.Ticker(symbol)
         # Not wait_for(to_thread(...)): wait_for cancels and then waits on a

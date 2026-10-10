@@ -2,9 +2,9 @@
 
 Every caller of the service -- the graph tool node, and the direct callers
 (Consultant, Auditor, Legal Counsel, article editor, evidence preflight) -- gets
-``before()``, the runner and ``after()`` under
-``TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS``, clamped to the caller and
-to any tool call it is nested inside. The bound is deadline-only, so a hook
+``before()``, the runner and ``after()`` under one combined scope
+(``TOOL_EXECUTION_TIMEOUT_SECONDS`` plus ``TOOL_HOOKS_TIMEOUT_SECONDS``),
+clamped to the caller and to any tool call it is nested inside. The bound is deadline-only, so a hook
 that stalls or ignores cancellation cannot hold the caller, and the late
 result is never returned or recorded.
 
@@ -15,6 +15,7 @@ net is itself deadline-only, so a regression fails the test instead of hanging.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 from typing import Any
@@ -28,6 +29,7 @@ import src.tooling.runtime as tool_runtime
 from src.async_utils import run_with_hard_timeout
 from src.graph.tool_nodes import create_agent_tool_node
 from src.llm_runtime import timeouts as llm_timeouts
+from src.llm_runtime.timeouts import deadline_margin, tool_call_deadline
 from src.runtime_services import RuntimeServices, use_runtime_services
 from src.tooling.inspection_service import InspectionService
 from src.tooling.runtime import (
@@ -35,10 +37,9 @@ from src.tooling.runtime import (
     ToolExecutionService,
     ToolInvocation,
     ToolResult,
-    tool_call_deadline,
 )
 
-INSPECTION_FIELD = "tool_execution_with_inspection_timeout_seconds"
+HOOKS_FIELD = "tool_hooks_timeout_seconds"
 EXECUTION_FIELD = "tool_execution_timeout_seconds"
 # Only a safety net: a correct bound returns long before it.
 SAFETY_NET_SECONDS = 2.0
@@ -71,8 +72,9 @@ def fake_clock(monkeypatch) -> list[float]:
 
 @pytest.fixture
 def small_bound(monkeypatch) -> None:
-    """A tiny combined bound; the runner's own bound stays at its default."""
-    monkeypatch.setattr(tool_runtime.settings_config, INSPECTION_FIELD, SMALL_BOUND)
+    """A tiny combined bound: runner and hooks share it equally."""
+    monkeypatch.setattr(tool_runtime.settings_config, EXECUTION_FIELD, SMALL_BOUND / 2)
+    monkeypatch.setattr(tool_runtime.settings_config, HOOKS_FIELD, SMALL_BOUND / 2)
 
 
 def _spy_hard_timeout(monkeypatch) -> list[tuple[str, float]]:
@@ -221,9 +223,10 @@ async def test_allowance_spent_mid_chain_stops_later_hooks(fake_clock):
     service = ToolExecutionService([later, _ClockEater()])
     with tool_call_deadline(120.0), pytest.raises(TimeoutError, match="no allowance"):
         await service._execute_hooked(_call(), runner=AsyncMock(return_value="x"))
-    # Through execute() the same condition surfaces as the combined timeout.
-    with pytest.raises(TimeoutError, match="get_news"):
+    # Through execute() the refusal keeps its own classification.
+    with pytest.raises(TimeoutError, match="no allowance left") as caught:
         await service.execute(_call(), runner=AsyncMock(return_value="x"))
+    assert caught.value.scope == "hooks_allowance_spent"
     assert later.after_values == []
 
 
@@ -371,11 +374,17 @@ async def test_nested_execute_clamps_to_the_outer_runner(monkeypatch, fake_clock
     )
 
     assert result.value == {"metric": 1.0}
+    # The outer runner's binding is kept back from its 45 s cap by the
+    # margin; 30 s later the inner combined scope gets what is left of it.
+    inner_combined = 45.0 - deadline_margin(45.0) - 30.0
     assert seen == [
         ("tool_with_hooks", 120.0),  # outer combined
         ("tool", 45.0),  # outer runner
-        ("tool_with_hooks", 15.0),  # inner combined: what the outer runner has left
-        ("tool", 15.0),  # inner runner
+        ("tool_with_hooks", pytest.approx(inner_combined)),  # inner combined
+        (  # inner runner: kept back from the inner combined scope
+            "tool",
+            pytest.approx(inner_combined - deadline_margin(inner_combined)),
+        ),
     ]
 
 
@@ -395,24 +404,33 @@ async def test_nested_execute_with_spent_outer_allowance_never_starts(fake_clock
 
 @pytest.mark.asyncio
 async def test_tool_call_deadline_only_shortens(fake_clock):
+    left = 10.0 - deadline_margin(10.0)
     with tool_call_deadline(10.0) as outer:
         with tool_call_deadline(500.0) as inner:
-            assert inner == outer == 1_010.0
-            assert tool_runtime.tool_execution_with_inspection_timeout_seconds() == 10.0
-            assert tool_runtime.tool_execution_timeout_seconds() == 10.0
+            assert inner == outer == 1_000.0 + left
+            assert tool_runtime.tool_execution_with_inspection_timeout_seconds() == left
+            assert tool_runtime.tool_execution_timeout_seconds() == left
     assert tool_runtime.tool_execution_with_inspection_timeout_seconds() == 120.0
 
 
-# --- Graph path: one policy function, wrapper kept -------------------------
+# --- Graph path: the service's bound is the only one ------------------------
 
 
-def test_graph_wrapper_reads_the_service_policy_function():
-    assert (
-        tool_nodes.tool_execution_with_inspection_timeout_seconds
-        is tool_runtime.tool_execution_with_inspection_timeout_seconds
-    )
-    # No second resolver of the setting in the graph module to drift from it.
-    assert "settings_config" not in inspect.getsource(tool_nodes)
+def test_graph_node_adds_no_bound_of_its_own():
+    """The node neither wraps the service nor binds a deadline (AST, not text)."""
+    tree = ast.parse(inspect.getsource(tool_nodes))
+    names = {
+        node.id if isinstance(node, ast.Name) else node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name | ast.Attribute)
+    }
+    forbidden = {
+        "run_with_hard_timeout",
+        "tool_call_deadline",
+        "tool_execution_with_inspection_timeout_seconds",
+        "settings_config",
+    }
+    assert names & forbidden == set()
 
 
 def _state(agent_key: str, tool_name: str) -> dict[str, Any]:
@@ -431,17 +449,9 @@ def _state(agent_key: str, tool_name: str) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_graph_wrapper_and_service_share_an_outer_tool_deadline(
+async def test_graph_call_gets_one_combined_scope_inside_an_outer_tool_call(
     monkeypatch, fake_clock
 ):
-    node_seen: list[float] = []
-    real_node_timeout = tool_nodes.run_with_hard_timeout
-
-    async def node_spy(coro, *, timeout, label):
-        node_seen.append(timeout)
-        return await real_node_timeout(coro, timeout=timeout, label=label)
-
-    monkeypatch.setattr(tool_nodes, "run_with_hard_timeout", node_spy)
     service_seen = _spy_hard_timeout(monkeypatch)
     tool = MagicMock()
     tool.name = "fast_tool"
@@ -451,9 +461,12 @@ async def test_graph_wrapper_and_service_share_an_outer_tool_deadline(
     with tool_call_deadline(7.0):
         result = await node(_state("test_agent", "fast_tool"), {"configurable": {}})
 
+    combined = 7.0 - deadline_margin(7.0)
     assert result["messages"][0].content == "tool output"
-    assert node_seen == [7.0]
-    assert service_seen == [("tool_with_hooks", 7.0), ("tool", 7.0)]
+    assert service_seen == [
+        ("tool_with_hooks", pytest.approx(combined)),
+        ("tool", pytest.approx(combined - deadline_margin(combined))),
+    ]
 
 
 @pytest.mark.asyncio
@@ -482,3 +495,158 @@ async def test_graph_stalled_after_hook_still_converts_to_tool_timeout(small_bou
     await asyncio.wait_for(hook.finished.wait(), timeout=SAFETY_NET_SECONDS)
     await _drain_loop()
     assert "LATE_UNINSPECTED_PAYLOAD" not in repr(result)
+
+
+# --- Classification: each timeout keeps the scope that produced it -----------
+
+
+class _RaisingHook:
+    """A hook whose own call raises *error* in one phase (a stalled lookup)."""
+
+    def __init__(self, phase: str, error: BaseException) -> None:
+        self.phase = phase
+        self.error = error
+
+    async def before(self, call: ToolInvocation) -> ToolInvocation:
+        if self.phase == "before":
+            raise self.error
+        return call
+
+    async def after(self, call: ToolInvocation, result: ToolResult) -> ToolResult:
+        if self.phase == "after":
+            raise self.error
+        return result
+
+
+def _timeout_scopes(monkeypatch) -> list[Any]:
+    """The ``scope`` of every ``tool_call_timeout`` the service logs, in order."""
+    scopes: list[Any] = []
+
+    class _Recorder:
+        def __getattr__(self, level: str) -> Any:
+            def record(event: str, **fields: Any) -> None:
+                if event == "tool_call_timeout":
+                    scopes.append(fields.get("scope"))
+
+            return record
+
+    monkeypatch.setattr(tool_runtime, "logger", _Recorder())
+    return scopes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phase", "scope", "detail", "runner_awaits"),
+    [
+        ("before", "before_hooks", "timed out in a before() hook", 0),
+        ("after", "after_hooks", "timed out in an after() hook", 1),
+    ],
+)
+async def test_a_hooks_own_timeout_keeps_its_scope(
+    monkeypatch, phase, scope, detail, runner_awaits
+):
+    scopes = _timeout_scopes(monkeypatch)
+    runner = AsyncMock(return_value="payload")
+    cause = TimeoutError("policy lookup stalled")
+
+    with pytest.raises(TimeoutError) as caught:
+        await _within_safety_net(
+            ToolExecutionService([_RaisingHook(phase, cause)]).execute(
+                _call(), runner=runner
+            )
+        )
+
+    assert caught.value.scope == scope
+    assert str(caught.value) == f"Tool call 'get_news' {detail}"
+    assert caught.value.__cause__ is cause
+    assert scopes == [scope]  # logged once, never relabelled as the combined scope
+    assert runner.await_count == runner_awaits
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["before", "after"])
+async def test_a_hooks_other_error_is_not_a_timeout(monkeypatch, phase):
+    scopes = _timeout_scopes(monkeypatch)
+    error = ValueError("bad policy row")
+
+    with pytest.raises(ValueError) as caught:
+        await ToolExecutionService([_RaisingHook(phase, error)]).execute(
+            _call(), runner=AsyncMock(return_value="payload")
+        )
+
+    assert caught.value is error
+    assert scopes == []
+
+
+@pytest.mark.asyncio
+async def test_the_runner_timeout_is_logged_once_as_the_runner(monkeypatch):
+    monkeypatch.setattr(tool_runtime.settings_config, EXECUTION_FIELD, SMALL_BOUND)
+    scopes = _timeout_scopes(monkeypatch)
+    release = asyncio.Event()
+
+    async def stalled(args: dict[str, Any]) -> None:
+        del args
+        await release.wait()
+
+    with pytest.raises(TimeoutError) as caught:
+        await _within_safety_net(
+            ToolExecutionService().execute(_call(), runner=stalled)
+        )
+
+    assert caught.value.scope == "runner"
+    assert scopes == ["runner"]
+    release.set()
+
+
+@pytest.mark.asyncio
+async def test_the_combined_bound_firing_is_labelled_with_inspection(
+    monkeypatch, small_bound
+):
+    scopes = _timeout_scopes(monkeypatch)
+    hook = _StubbornHook("before")
+
+    with pytest.raises(TimeoutError, match="with its hooks exceeded") as caught:
+        await _within_safety_net(
+            ToolExecutionService([hook]).execute(
+                _call(), runner=AsyncMock(return_value="x")
+            )
+        )
+
+    assert not hasattr(caught.value, "scope")
+    assert scopes == ["with_inspection"]
+    hook.release.set()
+    await asyncio.wait_for(hook.finished.wait(), timeout=SAFETY_NET_SECONDS)
+
+
+@pytest.mark.asyncio
+async def test_a_spent_allowance_is_labelled_not_started(monkeypatch, fake_clock):
+    scopes = _timeout_scopes(monkeypatch)
+    with llm_timeouts.enclosing_deadline(1.0):
+        fake_clock[0] += 1.0  # exactly at the deadline: nothing left
+        with pytest.raises(TimeoutError, match="not started"):
+            await ToolExecutionService().execute(
+                _call(), runner=AsyncMock(return_value="x")
+            )
+    assert scopes == ["not_started"]
+
+
+@pytest.mark.asyncio
+async def test_the_hooks_refusal_is_labelled_as_spent_not_exceeded(
+    monkeypatch, fake_clock
+):
+    scopes = _timeout_scopes(monkeypatch)
+    recorder = _Recorder()
+
+    async def slow_on_the_clock(args: dict[str, Any]) -> str:
+        del args
+        fake_clock[0] += 121.0
+        return "payload"
+
+    with pytest.raises(TimeoutError, match="no allowance left") as caught:
+        await ToolExecutionService([recorder]).execute(
+            _call(), runner=slow_on_the_clock
+        )
+
+    assert caught.value.scope == "hooks_allowance_spent"
+    assert scopes == ["hooks_allowance_spent"]
+    assert recorder.after_values == []

@@ -373,10 +373,13 @@ class TestDeadlineLadderDiagnostic:
 
 
 class TestConfigPrint:
-    def test_prints_the_settings_value(self, capsys):
+    def test_prints_the_live_settings_value(self, capsys, monkeypatch):
+        # Pin the value read rather than echo whatever the process-global
+        # config holds (an operator's environment, or another test's patch):
+        # a distinctive value proves config_print reads the live settings.
+        monkeypatch.setattr(config_module.config, "stage2_ticker_timeout_seconds", 1234)
         assert config_print.main(["stage2_ticker_timeout_seconds"]) == 0
-        out = capsys.readouterr().out
-        assert out == f"{config_module.config.stage2_ticker_timeout_seconds}\n"
+        assert capsys.readouterr().out == "1234\n"
 
     def test_unknown_key_exits_non_zero(self, capsys):
         assert config_print.main(["no_such_setting"]) == 2

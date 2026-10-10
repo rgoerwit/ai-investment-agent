@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from src import blocking_io
 from src.blocking_io import (
     GAP_FILL_YFINANCE_INFO_POLICY,
     YFINANCE_INFO_POLICY,
@@ -22,6 +23,7 @@ from src.blocking_io import (
     run_blocking_call,
     run_blocking_call_sync,
 )
+from src.llm_runtime import timeouts as llm_timeouts
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEADLINE = 0.2
@@ -226,6 +228,106 @@ async def test_async_limited_exception_propagates() -> None:
         await run_blocking_call(_limited("async_error"), _boom)
     # The loop is still healthy afterwards.
     await asyncio.sleep(0)
+
+
+# ---------------------------------------------------------------------------
+# The operational deadline, applied centrally to every blocking call
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    now = [1_000.0]
+    monkeypatch.setattr(llm_timeouts, "now", lambda: now[0])
+    return now
+
+
+def _spy_thread_bound(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record the bound the async worker gets; close it unstarted (no thread)."""
+    seen: list[float] = []
+
+    async def spy(coro, *, timeout, label):
+        del label
+        coro.close()
+        seen.append(timeout)
+        return "ok"
+
+    monkeypatch.setattr(blocking_io, "run_with_hard_timeout", spy)
+    return seen
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("bind", "expected"),
+    [
+        (None, 8.0),  # nothing bound: the policy's own bound
+        (("enclosing", 3.0), 3.0),  # a tighter caller deadline
+        (("enclosing", 30.0), 8.0),  # a looser one leaves the policy alone
+        (("tool", 5.0), 5.0 - llm_timeouts.deadline_margin(5.0)),  # a tool runner
+    ],
+)
+async def test_async_call_is_clamped_to_the_operational_deadline(
+    monkeypatch, frozen_clock, bind, expected
+) -> None:
+    del frozen_clock
+    seen = _spy_thread_bound(monkeypatch)
+    policy = BlockingCallPolicy("clamp_probe", 8.0)
+    if bind is None:
+        await run_blocking_call(policy, lambda: "ok")
+    elif bind[0] == "enclosing":
+        with llm_timeouts.enclosing_deadline(bind[1]):
+            await run_blocking_call(policy, lambda: "ok")
+    else:
+        with llm_timeouts.tool_call_deadline(bind[1]):
+            await run_blocking_call(policy, lambda: "ok")
+    assert seen == [pytest.approx(expected)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limited", [False, True])
+async def test_async_spent_deadline_starts_no_thread_and_takes_no_slot(
+    monkeypatch, frozen_clock, limited
+) -> None:
+    seen = _spy_thread_bound(monkeypatch)
+    policy = _limited("spent_async") if limited else BlockingCallPolicy("spent", 1.0)
+    calls: list[int] = []
+    with llm_timeouts.enclosing_deadline(1.0):
+        frozen_clock[0] += 1.0  # exactly at the deadline
+        with pytest.raises(BlockingCallTimeoutError, match="deadline already passed"):
+            await run_blocking_call(policy, lambda: calls.append(1))
+    assert seen == []
+    assert calls == []
+    if policy.in_flight is not None:
+        assert policy.in_flight.in_flight == 0
+
+
+def test_sync_spent_deadline_starts_no_worker(frozen_clock) -> None:
+    policy = _limited("spent_sync")
+    calls: list[int] = []
+    with llm_timeouts.tool_call_deadline(2.0) as bound:
+        frozen_clock[0] = bound + 5.0
+        with pytest.raises(BlockingCallTimeoutError):
+            run_blocking_call_sync(policy, lambda: calls.append(1))
+    assert calls == []
+    assert policy.in_flight is not None and policy.in_flight.in_flight == 0
+    assert _join_workers("spent_sync") == []
+
+
+def test_sync_call_runs_under_the_clamped_bound(monkeypatch, frozen_clock) -> None:
+    del frozen_clock
+    bounds: list[float] = []
+    real_start = blocking_io._start_daemon_call
+
+    def spy(policy, limit, fn):
+        bounds.append(policy.hard_timeout_seconds)
+        return real_start(policy, limit, fn)
+
+    monkeypatch.setattr(blocking_io, "_start_daemon_call", spy)
+    # A caller deadline tighter than the policy's own bound.
+    with llm_timeouts.enclosing_deadline(DEADLINE / 2):
+        assert run_blocking_call_sync(_limited("clamped_sync"), lambda: 7) == 7
+    assert bounds == [pytest.approx(DEADLINE / 2)]
+    assert _join_workers("clamped_sync") == []
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,6 @@ import asyncio
 import io
 import ipaddress
 import json
-import math
 import re
 import shutil
 import socket
@@ -24,14 +23,13 @@ from src.config import config
 from src.error_safety import summarize_exception
 from src.exchange_metadata import registered_official_document_hosts
 from src.forensic_budget import AuditorBudgetPolicy
-from src.llm_runtime.timeouts import require_allowance
+from src.llm_runtime.timeouts import operational_time_left, require_allowance
 from src.runtime_services import (
     get_current_inspection_service,
     get_current_issuer_hosts,
 )
 from src.text_patterns import is_safe_public_host
 from src.tooling.inspector import InspectionEnvelope, SourceKind
-from src.tooling.runtime import clamp_to_tool_call_deadline
 
 logger = structlog.get_logger(__name__)
 
@@ -109,18 +107,10 @@ class DocumentExtractionError(RuntimeError):
 # bound. The rule that decides what is cut short: the download may use at most
 # what is left less the extraction reserve; each extractor then gets what is
 # left, and one that cannot start is skipped with EXTRACTION_TIMEOUT. "What is
-# left" is the caller's enclosing deadline *and* the tool call this runs under
-# (read through the tool plane, never bound here: binding the LLM enclosing
-# deadline would also cap the injection judge, which fails open).
-
-
-def _phase_allowance(default_seconds: float, *, label: str) -> float:
-    """``default_seconds`` clamped to the caller and the tool runner; spent raises.
-
-    ``TimeoutError`` once nothing is left, before any work starts, so each call
-    site's existing timeout handling is the fallback.
-    """
-    return require_allowance(clamp_to_tool_call_deadline(default_seconds), label=label)
+# left" is the operational deadline: the caller's enclosing deadline *and* the
+# tool call this runs under, kept back from the runner's hard cap by a margin
+# (read, never bound here: binding the LLM enclosing deadline would also cap
+# the injection judge, which fails open).
 
 
 def pdf_extraction_reserve_seconds() -> float:
@@ -137,7 +127,7 @@ def _download_allowance() -> float:
     Raises ``TimeoutError`` (no client opens) when less than the reserve is
     left, so extraction is never starved by a download that ate its time.
     """
-    left = clamp_to_tool_call_deadline(math.inf)
+    left = operational_time_left()
     return require_allowance(
         min(
             config.official_document_download_total_timeout_seconds,
@@ -326,14 +316,9 @@ async def _ensure_public_hostname(url: str) -> None:
         return addresses
 
     try:
-        # A spent caller deadline raises TimeoutError here, before any lookup,
-        # and fails the document exactly as a DNS timeout does.
-        policy = _DNS_POLICY.with_timeout(
-            _phase_allowance(
-                config.official_document_dns_timeout_seconds,
-                label=_DNS_POLICY.label,
-            )
-        )
+        # A spent deadline raises TimeoutError in run_blocking_call, before
+        # any lookup, and fails the document exactly as a DNS timeout does.
+        policy = _DNS_POLICY.with_timeout(config.official_document_dns_timeout_seconds)
         addresses = await run_blocking_call(policy, _resolve)
     except Exception as exc:
         raise DocumentExtractionError("DOCUMENT_DNS_FAILED") from exc
@@ -398,7 +383,7 @@ async def _extract_with_pdftotext(
     # Read now (pypdf may have used part of the allowance) and resolved before
     # the subprocess exists, so a spent allowance spawns nothing.
     try:
-        timeout = _phase_allowance(
+        timeout = require_allowance(
             config.official_document_extract_timeout_seconds,
             label="official_document_pdftotext",
         )
@@ -444,14 +429,12 @@ async def extract_pdf_text(
     search_terms = terms or _DEFAULT_KEYWORDS
     primary_reason = "PDF_PARSER_UNAVAILABLE"
     try:
-        # A spent allowance (caller or tool runner) raises TimeoutError before
-        # the thread starts and takes the EXTRACTION_TIMEOUT path below, as a
-        # pypdf stall does; pdftotext then re-checks what is left.
+        # A spent allowance (caller or tool runner) raises TimeoutError in
+        # run_blocking_call before the thread starts and takes the
+        # EXTRACTION_TIMEOUT path below, as a pypdf stall does; pdftotext then
+        # re-checks what is left.
         pdf_policy = _PDF_POLICY.with_timeout(
-            _phase_allowance(
-                config.official_document_extract_timeout_seconds,
-                label=_PDF_POLICY.label,
-            )
+            config.official_document_extract_timeout_seconds
         )
         extracted = await run_blocking_call(
             pdf_policy,

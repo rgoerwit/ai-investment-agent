@@ -21,19 +21,22 @@ scoped services rather than mutating the globals.
 ## Two tool deadlines, both load-bearing
 
 The runner timeout in `src/tooling/runtime.py` does not cover the hooks; the
-wider combined scope in `ToolExecutionService.execute` is their only bound, for
-every caller. Keep both. The graph wrapper must read the same policy function
-(`tool_execution_with_inspection_timeout_seconds`), never the setting. Tool scopes
-may *read* the caller's enclosing deadline but must never *bind* one: the LLM
-judge fails open when admission refuses it. Nested tool calls clamp through the
-tool-plane `tool_call_deadline` instead, which only the service binds; a tool may
-read it (`clamp_to_tool_call_deadline`) to size its own phases, as the
-official-document download does to leave PDF extraction its reserve. The clamp lives in
-`src/llm_runtime/timeouts.py` (`clamp_to_enclosing_deadline`, `require_allowance`)
-and is shared with the market-data and research scopes. A web-search, filing or
-document timeout is a `Settings` field read at the call, resolved through
-`require_allowance` before the request, coroutine or thread exists. See
-`docs/CODEBASE_MEMORY.md`.
+combined scope in `ToolExecutionService.execute` (runner plus
+`TOOL_HOOKS_TIMEOUT_SECONDS`) is their only bound, for every caller, and the
+only one: the graph node adds no wrapper. Tool scopes may *read* the caller's
+enclosing deadline but must never *bind* one: the LLM judge fails open when
+admission refuses it. Only the service binds the tool-call deadline
+(`tool_call_deadline`, kept back from its cap by `deadline_margin`).
+
+**Size all operational work with one reader.** `require_allowance`,
+`clamp_to_operational_deadline`, `operational_time_left` or
+`operational_deadline` in `src/llm_runtime/timeouts.py` see the caller *and*
+the tool runner; `current_enclosing_deadline` is for LLM admission only.
+`run_blocking_call(_sync)` clamps itself. A web-search, filing or document
+timeout is a `Settings` field read at the call, resolved before the request,
+coroutine or thread exists. Classify a timeout where it happens
+(`_ScopedToolTimeout`), never relabel it. `tests/architecture/test_deadline_readers.py`
+enforces the readers. See `docs/CODEBASE_MEMORY.md`.
 
 MCP bounds go to the SDK's own parameters in `src/mcp/client.py`: the httpx2
 client `timeout=`, `ClientSession(read_timeout_seconds=)` and
@@ -41,8 +44,7 @@ client `timeout=`, `ClientSession(read_timeout_seconds=)` and
 the handshake bound. The one wrapper is `asyncio.timeout(time left)` around the
 public `list_tools()`, which has no per-request bound; never swap it for
 `send_request`, which skips `_absorb_tool_listing`. Size every step and the retry
-backoff with the tool-plane readers, never `clamp_to_enclosing_deadline`, so the
-runner's deadline counts. Return a refusal or timeout from the session body and
+backoff with the operational readers, so the runner's deadline counts. Return a refusal or timeout from the session body and
 raise it outside: inside, the SDK's task groups wrap it and `classify_mcp_error`
 loses its category. See `docs/MCP.md`.
 

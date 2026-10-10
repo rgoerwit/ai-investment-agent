@@ -441,10 +441,7 @@ async def test_relay_respects_real_execution_hook_chain(action):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("owner", ["node", "service"])
-async def test_real_tool_deadline_cancels_worker_and_retains_neighbor(
-    monkeypatch, owner
-):
+async def test_real_tool_deadline_cancels_worker_and_retains_neighbor(monkeypatch):
     cancelled = asyncio.Event()
     started = asyncio.Event()
 
@@ -457,12 +454,12 @@ async def test_real_tool_deadline_cancels_worker_and_retains_neighbor(
 
     chosen = tools()
     chosen[1].ainvoke.side_effect = stalled
-    timeout_owner = (
-        "src.tooling.runtime.settings_config.tool_execution_with_inspection_timeout_seconds"
-        if owner == "node"
-        else "src.tooling.runtime.settings_config.tool_execution_timeout_seconds"
+    # The runner's bound: the combined scope (runner plus hooks) is derived
+    # from it and its binding is kept back by a margin, so the runner always
+    # fires first on a stalled tool.
+    monkeypatch.setattr(
+        "src.tooling.runtime.settings_config.tool_execution_timeout_seconds", 0.02
     )
-    monkeypatch.setattr(timeout_owner, 0.02)
     _, result = await asyncio.wait_for(relay(chosen), timeout=2)
     assert started.is_set() and cancelled.is_set()
     assert not result["artifact_statuses"][FIELD]["ok"]
@@ -594,14 +591,11 @@ async def test_cancelled_acquisition_cancels_both_pending_tools():
         pending.cancel()
         with pytest.raises(asyncio.CancelledError):
             await pending
-    # Each hard-timeout layer passes the cancellation inward without waiting on
-    # it (node wrapper, the service's combined scope, the runner), so it reaches
-    # the tools a few loop turns after the outer task ends. Bounded turns, not
-    # a sleep: a cancellation that never arrives still fails.
-    for _ in range(10):
-        if cancelled == {METRICS, QUAL}:
-            break
-        await asyncio.sleep(0)
+    # Strict: by the time the cancelled node task has ended, both tools have
+    # seen the cancellation. Each deadline-only layer passes cancellation
+    # inward without waiting on it; with the service's two (combined scope,
+    # runner) it still arrives within the outer task's own unwinding. The
+    # graph node's former third wrapper pushed it a loop turn later.
     assert cancelled == {METRICS, QUAL}
 
 

@@ -726,11 +726,16 @@ class TestAdvisoryHistoryFetches:
 
 
 def _spy_blocking_call(monkeypatch, result: Any = None) -> list[Any]:
+    """Replace ``run_blocking_call``; record each policy, never run.
+
+    The real call's own deadline clamp is applied first, so what is recorded
+    is the bound a worker would get, and a spent deadline raises unrecorded.
+    """
     seen: list[Any] = []
 
     async def spy(policy, fn):
         del fn
-        seen.append(policy)
+        seen.append(blocking_io._within_deadline(policy))
         return result
 
     monkeypatch.setattr(blocking_io, "run_blocking_call", spy)
@@ -738,11 +743,12 @@ def _spy_blocking_call(monkeypatch, result: Any = None) -> list[Any]:
 
 
 def _spy_blocking_call_sync(monkeypatch, result: Any = None) -> list[Any]:
+    """The sync twin of ``_spy_blocking_call``."""
     seen: list[Any] = []
 
     def spy(policy, fn):
         del fn
-        seen.append(policy)
+        seen.append(blocking_io._within_deadline(policy))
         return result
 
     monkeypatch.setattr(blocking_io, "run_blocking_call_sync", spy)

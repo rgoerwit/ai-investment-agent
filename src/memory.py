@@ -119,7 +119,7 @@ def _embedding_call_timeout(collection: str) -> float:
     before the enclosing deadline, before any token is taken or request created.
     """
     minimum = _embedding_min_useful_seconds()
-    enclosing = llm_timeouts.current_enclosing_deadline()
+    enclosing = llm_timeouts.operational_deadline()
     # A zero wait is admitted exactly when a useful attempt still fits: the same
     # rule the retry stop applies, so the two cannot disagree.
     if llm_timeouts.wait_allowance(enclosing, 0.0, minimum=minimum) is None:
@@ -127,7 +127,7 @@ def _embedding_call_timeout(collection: str) -> float:
             f"memory_embedding:{collection}: less than {minimum:g}s left "
             "before the enclosing deadline"
         )
-    return llm_timeouts.clamp_to_enclosing_deadline(
+    return llm_timeouts.clamp_to_operational_deadline(
         config_module.config.memory_embedding_call_timeout_seconds
     )
 
@@ -139,7 +139,7 @@ def _embedding_retry_sleep(retry_state: RetryCallState) -> float | None:
     enclosing deadline when it ends; with no deadline bound, unclamped.
     """
     return llm_timeouts.wait_allowance(
-        llm_timeouts.current_enclosing_deadline(),
+        llm_timeouts.operational_deadline(),
         _EMBEDDING_BACKOFF(retry_state),
         minimum=_embedding_min_useful_seconds(),
     )

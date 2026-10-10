@@ -539,18 +539,19 @@ The current trust-boundary model is:
 **Two tool deadlines, on purpose (October 2026).** The tool runner has its own
 bound (`TOOL_EXECUTION_TIMEOUT_SECONDS`, 45 s). The `after()` hooks — content
 inspection, including an LLM injection judge — run *after* that bound is
-released, so a wider scope (`TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS`,
-120 s) wraps the whole call, hooks included, and fails it closed (`TOOL_TIMEOUT`
-in the graph). The outer scope looks redundant and is not: it is the only bound
-on inspection. `Settings` rejects an outer scope narrower than the inner one.
+released, so a wider scope wraps the whole call, hooks included, and fails it
+closed (`TOOL_TIMEOUT` in the graph). The outer scope looks redundant and is
+not: it is the only bound on inspection. Since round 3 it is derived, runner
+plus `TOOL_HOOKS_TIMEOUT_SECONDS` (45 + 75 = 120 s), so it can never be the
+narrower one; it was a separate setting with a startup check, which made an
+operator raising the runner for a slow vendor raise a second value too.
 Where the wider scope lives changed in round 2; see below.
 
 The outer scope uses `run_with_hard_timeout`, not `asyncio.wait_for`: `wait_for`
 waits on the cancelled call, so a hook that swallows or outlives cancellation
 held the node past its scope and, on Python 3.12, could still return its late,
 uninspected result through `wait_for`. Both scopes clamp to a caller's enclosing
-deadline (`current_enclosing_deadline`) when one is bound, but tool scopes never
-*bind* it: the judge fails open when admission refuses it, so a bound deadline
+deadline when one is bound, but tool scopes never *bind* it: the judge fails open when admission refuses it, so a bound deadline
 would turn a fail-closed timeout into uninspected content.
 
 **The combined scope moved into the service (October 2026, round 2).** Until
@@ -559,19 +560,19 @@ Legal Counsel, article editor and evidence preflight, which call the service
 directly, ran their `before()` and `after()` hooks with no bound at all.
 `ToolExecutionService.execute` now wraps hooks and runner in
 `run_with_hard_timeout(tool_execution_with_inspection_timeout_seconds())`, and
-the graph wrapper reads that same function, so neither can be the looser one.
-The graph wrapper stays only for its `TOOL_TIMEOUT` conversion; retiring it is a
-later cleanup. Three details are load-bearing:
+the graph node calls the service directly (round 3 retired its identical
+wrapper, which only delayed cancellation by a loop turn; the node keeps the
+`TOOL_TIMEOUT` conversion). Three details are load-bearing:
 
 - **Nesting cannot renew the allowance.** A Consultant tool
   (`spot_check_metric_mcp_fmp`) routes its MCP call back through the service, so
   one `execute` runs inside another's runner. Each call binds its deadline in a
-  tool-plane ContextVar (`tool_call_deadline` in `src/tooling/runtime.py`)
+  tool-plane ContextVar (`tool_call_deadline` in `src/llm_runtime/timeouts.py`)
   before creating its inner task, and the runner binds its own narrower one, so
   the inner call clamps to what the outer runner has left. That ContextVar is
   deliberately *not* the LLM enclosing deadline, for the judge reason above:
-  only the tool plane reads it, and a test asserts hooks see no bound LLM
-  deadline.
+  operational work reads it, LLM admission never does, and a test asserts
+  hooks see no bound LLM deadline.
 - **A late result is never recorded.** A hook that swallows cancellation keeps
   the orphaned chain running, and `EvidenceRecorder` is the last `after()` hook.
   The chain therefore re-checks the deadline before every `after()` hook and
@@ -582,6 +583,43 @@ later cleanup. Three details are load-bearing:
   cancellation**, because it never awaits the cancelled task. It cannot help a
   hook that blocks the event loop synchronously, and it does not stop the
   orphan: it bounds the caller.
+
+**One operational deadline (October 2026, round 3).** Rounds 1 and 2 left two
+ContextVars, each with its own public clamp, and every call site chose one.
+MCP and the official-document tool were switched to the tool-call clamp one at
+a time; Tavily, market data, FX, filings, the editor's reference fetch and the
+company-name lookups kept reading the LLM enclosing deadline alone. Inside a
+45 s runner a research tool that searched (30 s) and then extracted (30 s) gave
+the second call its full 30 s, and the runner cut it off as a bare
+`TOOL_TIMEOUT` instead of the tool's own partial result. The fix is
+structural, not per site: both ContextVars live in
+`src/llm_runtime/timeouts.py`, `operational_deadline()` is the earlier of the
+two, and `require_allowance` / `clamp_to_operational_deadline` /
+`operational_time_left` are built on it, so every existing operational site
+picked the runner up with no edit. `current_enclosing_deadline` stays the
+LLM-only reader (dispatch, the runtime loop, the article workflow), so the
+injection judge still never sees a tool deadline;
+`tests/architecture/test_deadline_readers.py` keeps it there, keeps the
+ContextVars private, and keeps the tool-call binder in the service.
+`run_blocking_call(_sync)` applies the clamp itself and refuses with
+`BlockingCallTimeoutError` before a thread or slot is taken, so a new blocking
+call site cannot forget it.
+
+Equal deadlines race: when an extractor's clamp equalled the runner's
+remaining time, both timers were due at one instant, asyncio ordered them
+arbitrarily, and the reply could be `TOOL_TIMEOUT` instead of
+`EXTRACTION_TIMEOUT` (the same held for the 45 s MCP call under the 45 s
+runner). `tool_call_deadline(seconds)` therefore binds `now + seconds -
+deadline_margin(seconds)`: `DEADLINE_MARGIN_FRACTION` (5 %) of the cap, at most
+`LLM_DISPATCH_MARGIN_SECONDS` -- the LLM plane's "the request's own deadline
+fires before the hard cap" rule, applied to the tool plane through one helper.
+The runner's hard timeout stays the full allowance. Because the combined scope
+binds with the same margin, the runner always fires before the combined scope,
+which is what keeps each timeout's label honest: a timeout is now classified
+where it happens (`_ScopedToolTimeout`: `runner`, `before_hooks`,
+`after_hooks`, `hooks_allowance_spent`) and only the combined bound's own
+firing is labelled `with_inspection`; before, a hook's own `TimeoutError` was
+relabelled as the combined scope.
 
 **Market-data deadlines are grouped by scope, not by value (October 2026).**
 The fields sit together in `Settings` in `src/config.py`. Equal numbers do not mean
@@ -595,9 +633,10 @@ The `BlockingCallPolicy` constants in `src/blocking_io.py` keep their label and
 in-flight cap, but their number is only the default; each call site applies its
 field with `with_timeout()`.
 
-Every site clamps to `clamp_to_enclosing_deadline` / `require_allowance` in
-`src/llm_runtime/timeouts.py`, moved there from `src/tooling/runtime.py` so the
-data layer does not import tooling. A spent caller allowance raises
+Every site clamps through `require_allowance` (or
+`clamp_to_operational_deadline`) in `src/llm_runtime/timeouts.py`, which holds
+both deadline ContextVars so the data layer does not import tooling; see "One
+operational deadline" below. A spent caller allowance raises
 `TimeoutError` *before* the coroutine or thread is created, so it takes the
 site's existing timeout fallback and leaves no un-awaited request. As with the
 tool scopes, the aggregate metrics fetch reads the enclosing deadline but never
@@ -651,8 +690,8 @@ means the 20 s extract cap), capped by `OFFICIAL_DOCUMENT_DOWNLOAD_TOTAL_TIMEOUT
 trickling body that keeps every httpx phase alive still stops. Under the runner
 that is 25 s, leaving extraction its 20 s. Each extractor then gets what is
 left, and one that cannot start is skipped with `EXTRACTION_TIMEOUT`. "What is
-left" is the caller's enclosing deadline *and* the tool runner: the tool reads
-the tool-plane deadline (`clamp_to_tool_call_deadline`) but never binds one.
+left" is the caller's enclosing deadline *and* the tool runner, read through
+the operational clamp; the tool never binds a deadline.
 Without that read, the runner's cancellation, not the allocation, would cut
 extraction short, and the reply would be a bare `TOOL_TIMEOUT`. Cost: with less
 than the reserve left, no download starts, even for an HTML document that
@@ -699,8 +738,8 @@ skips `_absorb_tool_listing`, which drops invalid `x-mcp-header` tools and cache
 the output schemas. The production call path lists before every call for the same
 reason: the SDK validates a result against the cached schema and, in a fresh
 session, lists *after* the call to fetch it, under the stale session bound. MCP
-reads the tool runner's deadline (`clamp_to_tool_call_deadline`,
-`current_tool_call_deadline`) for every step and the retry backoff, never binds it.
+reads the tool runner's deadline (`clamp_to_operational_deadline`,
+`operational_deadline`) for every step and the retry backoff, never binds it.
 
 The operational deadlines close the category, and most deliberately do **not**
 clamp. The health check's 15 s probe is a top-level entrypoint, so nothing binds

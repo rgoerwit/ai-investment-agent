@@ -1896,7 +1896,7 @@ async def run_with_args(
     finally:
         from src.cleanup import cleanup_async_resources
 
-        shutdown_timeout = float(getattr(config, "shutdown_hard_timeout_seconds", 15.0))
+        shutdown_timeout = float(config.shutdown_hard_timeout_seconds)
         forced_exit_code: int | None = None
         try:
             await run_with_hard_timeout(

@@ -54,7 +54,11 @@ hands each child `PIPELINE_TICKER_DEADLINE_EPOCH`. `run_deadline()` in
 around render, persistence or shutdown: that work runs on the reserve. The stage
 watchdog values are `Settings` fields, read by the script through
 `python -m src.config_print`. Never put a literal default back in the script.
-Operational scopes still read the enclosing deadline and never bind one.
+Operational scopes read it through the operational reader (which also sees a
+tool runner) and never bind one. `run_blocking_call(_sync)` clamps every
+blocking call to it. Work inside a hard cap sizes against a deadline kept back
+by `deadline_margin(cap)`: equal timers race, and the cap's cancellation would
+replace the work's own typed timeout.
 
 **No literal deadline at an execution boundary.** A number passed to
 `timeout=`, `*_timeout_seconds=`, `ClientTimeout`, `BlockingCallPolicy` or

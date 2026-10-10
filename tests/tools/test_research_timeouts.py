@@ -25,6 +25,7 @@ import pytest
 from pydantic import ValidationError
 
 import src.async_utils as async_utils
+import src.blocking_io as blocking_io
 import src.editor_tools as editor_tools
 import src.tavily_utils as tavily_utils
 from src.blocking_io import InFlightLimit
@@ -836,11 +837,16 @@ async def test_document_download_spent_deadline_opens_no_client(
 
 
 def _spy_documents_blocking(monkeypatch, result: Any = None) -> list[Any]:
+    """Replace the module's ``run_blocking_call``; record each policy, never run.
+
+    The real call's own deadline clamp is applied first, so what is recorded
+    is the bound a worker would get, and a spent deadline raises unrecorded.
+    """
     seen: list[Any] = []
 
     async def spy(policy, fn):
         del fn
-        seen.append(policy)
+        seen.append(blocking_io._within_deadline(policy))
         if isinstance(result, BaseException):
             raise result
         return result

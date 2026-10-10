@@ -24,7 +24,6 @@ from src.blocking_io import FX_RATE_POLICY, run_blocking_call
 from src.config import config
 from src.error_safety import summarize_exception
 from src.exchange_metadata import CURRENCY_CODE_ALIASES, CURRENCY_SYMBOL_TO_CODE
-from src.llm_runtime.timeouts import require_allowance
 
 logger = structlog.get_logger(__name__)
 
@@ -75,8 +74,8 @@ async def get_fx_rate_yfinance(
     # yfinance forex ticker format: "JPYUSD=X" (from + to + =X)
     fx_ticker = f"{source_major}{target_major}=X"
 
-    # Read at call time, so an override reaches the call; shrunk to a caller's
-    # remaining enclosing deadline below.
+    # Read at call time, so an override reaches the call; run_blocking_call
+    # shrinks it to the operational deadline (caller and any tool runner).
     timeout_seconds = config.fx_rate_fetch_timeout_seconds
     try:
         import yfinance as yf
@@ -98,7 +97,6 @@ async def get_fx_rate_yfinance(
             info = ticker.info
             return info.get("regularMarketPrice") or info.get("previousClose")
 
-        timeout_seconds = require_allowance(timeout_seconds, label="fx_rate")
         rate = await run_blocking_call(
             FX_RATE_POLICY.with_label(f"fx_rate:{fx_ticker}").with_timeout(
                 timeout_seconds

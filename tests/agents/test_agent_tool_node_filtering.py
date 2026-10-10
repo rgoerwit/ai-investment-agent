@@ -970,7 +970,7 @@ class TestToolCallTimeout:
 
         monkeypatch.setattr(
             tool_runtime.settings_config,
-            "tool_execution_with_inspection_timeout_seconds",
+            "tool_execution_timeout_seconds",
             0.2,
         )
 
@@ -1023,7 +1023,7 @@ class TestToolCallTimeout:
 
         monkeypatch.setattr(
             tool_runtime.settings_config,
-            "tool_execution_with_inspection_timeout_seconds",
+            "tool_execution_timeout_seconds",
             0.2,
         )
 
@@ -1090,7 +1090,7 @@ class TestToolCallTimeout:
 
         monkeypatch.setattr(
             tool_runtime.settings_config,
-            "tool_execution_with_inspection_timeout_seconds",
+            "tool_execution_timeout_seconds",
             0.1,
         )
 

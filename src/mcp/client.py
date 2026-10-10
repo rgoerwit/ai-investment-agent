@@ -15,6 +15,11 @@ from mcp.types import REQUEST_TIMEOUT, CallToolResult, ListToolsResult
 
 from src.config import config as settings_config
 from src.llm_runtime import timeouts as llm_timeouts
+from src.llm_runtime.timeouts import (
+    clamp_to_operational_deadline,
+    operational_deadline,
+    operational_time_left,
+)
 from src.mcp.auth import MCPCredentialMissing, MCPResolvedServer, resolve_auth
 from src.mcp.budget import BudgetTracker
 from src.mcp.catalog import ToolCatalog, ToolDescriptor
@@ -28,10 +33,6 @@ from src.mcp.errors import (
 from src.mcp.normalize import normalize_result
 from src.tooling.inspection_service import INSPECTION_SERVICE
 from src.tooling.inspector import InspectionDecision, InspectionEnvelope, SourceKind
-from src.tooling.runtime import (
-    clamp_to_tool_call_deadline,
-    current_tool_call_deadline,
-)
 
 logger = structlog.get_logger(__name__)
 
@@ -88,12 +89,12 @@ def _retry_refused_error(err: MCPCallError, *, backoff_seconds: float) -> MCPCal
 def _mcp_allowance(default_seconds: float, *, label: str, server_id: str) -> float:
     """A deadline setting, read now and clamped to the caller's and the runner's.
 
-    Read through the tool-plane clamp, so a call made under the tool runner
+    Read through the operational clamp, so a call made under the tool runner
     (``execute_raw``) sizes against what the runner has left as well as any
     enclosing deadline. A spent allowance raises before any client, subprocess
     or session exists.
     """
-    seconds = clamp_to_tool_call_deadline(default_seconds)
+    seconds = clamp_to_operational_deadline(default_seconds)
     if seconds <= 0:
         raise _spent_allowance_error(label, server_id=server_id)
     return seconds
@@ -115,7 +116,7 @@ async def _list_tools_in_time(
     SDK contexts exit normally and raises it outside them, where the SDK's task
     groups cannot wrap it. External cancellation propagates.
     """
-    remaining = clamp_to_tool_call_deadline(
+    remaining = clamp_to_operational_deadline(
         settings_config.mcp_initialize_timeout_seconds
     )
     if remaining <= 0:
@@ -398,7 +399,7 @@ class MCPRuntime:
         # Resolved now, so opening the session and listing count against the
         # deadline. Explicit, because the call would otherwise inherit the
         # session's handshake bound.
-        call_timeout = clamp_to_tool_call_deadline(
+        call_timeout = clamp_to_operational_deadline(
             settings_config.mcp_tool_call_timeout_seconds
         )
         if call_timeout <= 0:
@@ -471,7 +472,7 @@ class MCPRuntime:
             # not, so it is refused instead. Refused means never sent.
             minimum = settings_config.mcp_retry_min_useful_seconds
             wait = llm_timeouts.wait_allowance(
-                current_tool_call_deadline(),
+                operational_deadline(),
                 backoff,
                 minimum=minimum,
                 rate_limited=rate_limited,
@@ -482,8 +483,7 @@ class MCPRuntime:
                 await asyncio.sleep(wait)
             # Re-checked after the sleep: it may overrun, and the next attempt
             # must not open a session it cannot use.
-            deadline = current_tool_call_deadline()
-            if deadline is not None and deadline - llm_timeouts.now() < minimum:
+            if operational_time_left() < minimum:
                 self._refuse_retry(last_err, backoff_seconds=backoff)
 
         if last_err is not None:  # pragma: no cover - safety

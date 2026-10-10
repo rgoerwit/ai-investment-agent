@@ -4,7 +4,7 @@ The session read timeout is fixed when the session opens, so a tools/list sent
 after the handshake used to get a fresh full bound; and the retry loop slept its
 backoff without asking whether another attempt could still fit. Both now read
 the time left -- the caller's enclosing deadline *and* the tool runner's
-``tool_call_deadline`` -- through the tool-plane clamp, which MCP reads and
+``tool_call_deadline`` -- through the operational clamp, which MCP reads and
 never binds.
 
 Everything drives the real mcp ``ClientSession`` over an ``httpx2.MockTransport``
@@ -37,12 +37,11 @@ from pydantic import ValidationError
 import src.mcp.client as mcp_client
 from src.config import Settings, config
 from src.llm_runtime import timeouts as llm_timeouts
-from src.llm_runtime.timeouts import enclosing_deadline
+from src.llm_runtime.timeouts import enclosing_deadline, tool_call_deadline
 from src.mcp.client import MCPRuntime
 from src.mcp.config import MCPServerSpec
 from src.mcp.errors import MCPCallError, MCPErrorCategory
-from src.tooling import runtime as tool_runtime
-from src.tooling.runtime import ToolExecutionService, ToolInvocation, tool_call_deadline
+from src.tooling.runtime import ToolExecutionService, ToolInvocation
 
 _URL = "https://example.test/mcp"
 _NOW = 1_000.0
@@ -54,6 +53,17 @@ _QUOTE_OUTPUT_SCHEMA = {
     "properties": {"price": {"type": "number"}},
     "required": ["price"],
 }
+
+
+@pytest.fixture(autouse=True)
+def _no_deadline_margin(monkeypatch) -> None:
+    """Bind tool deadlines exactly, so the arithmetic here is MCP's alone.
+
+    ``tool_call_deadline`` keeps its binding back from the scope's hard cap
+    by ``deadline_margin``; that margin is tested where it is defined
+    (``tests/llm_runtime/test_operational_deadline.py``).
+    """
+    monkeypatch.setattr(config, "deadline_margin_fraction", 0.0)
 
 
 @pytest.fixture
@@ -218,7 +228,7 @@ class _RecordingSession(ClientSession):
         type(self).call_timeouts.append(read_timeout_seconds)
         type(self).deadlines_at_call.append(
             (
-                tool_runtime._TOOL_CALL_DEADLINE.get(),
+                llm_timeouts._TOOL_CALL_DEADLINE.get(),
                 llm_timeouts.current_enclosing_deadline(),
             )
         )

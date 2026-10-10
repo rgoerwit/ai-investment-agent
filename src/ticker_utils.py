@@ -513,10 +513,12 @@ def _is_valid_company_name(name: str | None, ticker: str) -> bool:
 
 
 def _company_name_lookup_timeout(label: str) -> float:
-    """One source's allowance in the name chain, clamped to a caller deadline.
+    """One HTTP source's allowance in the name chain, clamped to the deadline.
 
-    Raises TimeoutError when the caller's allowance is spent, which each
-    resolver already treats as that source failing.
+    Raises TimeoutError when the allowance is spent, which each resolver
+    already treats as that source failing. The yfinance and yahooquery
+    sources pass the setting straight to ``run_blocking_call``, which clamps
+    it itself.
     """
     return require_allowance(config.company_name_lookup_timeout_seconds, label=label)
 
@@ -528,7 +530,7 @@ async def _try_yfinance(ticker: str) -> tuple[str, str | None] | None:
 
         info = await run_blocking_call(
             YFINANCE_INFO_POLICY.with_label(f"yfinance.info:{ticker}").with_timeout(
-                _company_name_lookup_timeout("yfinance.info")
+                config.company_name_lookup_timeout_seconds
             ),
             lambda: yf.Ticker(ticker).info,
         )
@@ -556,7 +558,7 @@ async def _try_yahooquery(ticker: str) -> tuple[str, str | None] | None:
         result = await run_blocking_call(
             YAHOOQUERY_QUOTE_TYPE_POLICY.with_label(
                 f"yahooquery.quote_type:{ticker}"
-            ).with_timeout(_company_name_lookup_timeout("yahooquery.quote_type")),
+            ).with_timeout(config.company_name_lookup_timeout_seconds),
             lambda: YQTicker(ticker).get_modules("quoteType assetProfile"),
         )
         if isinstance(result, dict) and ticker in result:

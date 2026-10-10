@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pandas as pd
 import pytest
 
+import src.blocking_io as blocking_io
 import src.consultant_tools as consultant_tools
 import src.data.fetcher as fetcher_module
 import src.data.gap_fill as gap_fill
@@ -35,7 +36,7 @@ from src.data.fetcher import SmartMarketDataFetcher
 from src.data.source_fetchers import fetch_all_sources_parallel
 from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.timeouts import (
-    clamp_to_enclosing_deadline,
+    clamp_to_operational_deadline,
     enclosing_deadline,
     require_allowance,
 )
@@ -78,12 +79,16 @@ def _spy_hard_timeout(monkeypatch, module, result: Any = None) -> list[float]:
 
 
 def _spy_blocking_call(monkeypatch, module, result: Any = None) -> list[Any]:
-    """Replace ``module.run_blocking_call``; record each policy, never run."""
+    """Replace ``module.run_blocking_call``; record each policy, never run.
+
+    The real call's own deadline clamp is applied first, so what is recorded
+    is the bound a worker would get, and a spent deadline raises unrecorded.
+    """
     seen: list[Any] = []
 
     async def spy(policy, fn):
         del fn
-        seen.append(policy)
+        seen.append(blocking_io._within_deadline(policy))
         return result
 
     monkeypatch.setattr(module, "run_blocking_call", spy)
@@ -118,21 +123,21 @@ def test_policy_constant_matches_its_setting_default(policy, field):
 
 
 def test_clamp_without_caller_deadline_keeps_default():
-    assert clamp_to_enclosing_deadline(15) == 15.0
+    assert clamp_to_operational_deadline(15) == 15.0
 
 
 def test_clamp_takes_the_tighter_of_default_and_remaining(fake_clock):
     with enclosing_deadline(4.0):
-        assert clamp_to_enclosing_deadline(15.0) == pytest.approx(4.0)
+        assert clamp_to_operational_deadline(15.0) == pytest.approx(4.0)
         # Not inner < outer: a looser caller leaves the inner default alone.
-        assert clamp_to_enclosing_deadline(2.0) == pytest.approx(2.0)
+        assert clamp_to_operational_deadline(2.0) == pytest.approx(2.0)
 
 
 def test_require_allowance_raises_timeout_once_spent(fake_clock):
     with enclosing_deadline(1.0):
         fake_clock[0] += 5.0
-        assert clamp_to_enclosing_deadline(10.0) < 0
-        with pytest.raises(TimeoutError, match="enclosing deadline"):
+        assert clamp_to_operational_deadline(10.0) < 0
+        with pytest.raises(TimeoutError, match="deadline already passed"):
             require_allowance(10.0, label="probe")
 
 

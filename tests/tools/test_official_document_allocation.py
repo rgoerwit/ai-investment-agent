@@ -22,11 +22,15 @@ from typing import Any
 import httpx
 import pytest
 
+from src import blocking_io
 from src.config import Settings, config
 from src.forensic_budget import AuditorBudgetPolicy
 from src.llm_runtime import timeouts as llm_timeouts
-from src.llm_runtime.timeouts import enclosing_deadline
-from src.tooling.runtime import tool_call_deadline
+from src.llm_runtime.timeouts import (
+    deadline_margin,
+    enclosing_deadline,
+    tool_call_deadline,
+)
 from src.tools import official_documents as documents
 
 _NOW = 1_000.0
@@ -91,15 +95,21 @@ def _audit_policy() -> AuditorBudgetPolicy:
 
 
 def _spy_pypdf(monkeypatch, result: Any = _USEFUL) -> list[float]:
-    """Record each pypdf allowance; never start a thread."""
+    """Record each pypdf allowance at the thread boundary; never start a thread.
+
+    Spies below ``run_blocking_call``'s own deadline clamp, so what is recorded
+    is the bound the worker would really get, and a spent allowance records
+    nothing.
+    """
     seen: list[float] = []
 
-    async def spy(policy, fn):
-        del fn
-        seen.append(policy.hard_timeout_seconds)
+    async def spy(coro, *, timeout, label):
+        del label
+        coro.close()  # the to_thread coroutine: closed unstarted, no thread
+        seen.append(timeout)
         return result
 
-    monkeypatch.setattr(documents, "run_blocking_call", spy)
+    monkeypatch.setattr(blocking_io, "run_with_hard_timeout", spy)
     return seen
 
 
@@ -169,7 +179,10 @@ def test_download_gets_caller_deadline_less_reserve(fake_clock):
 def test_download_gets_tool_runner_less_reserve(fake_clock):
     del fake_clock
     with tool_call_deadline(45.0):
-        assert documents._download_allowance() == pytest.approx(25.0)
+        # The runner's deadline is read kept back by its margin.
+        assert documents._download_allowance() == pytest.approx(
+            45.0 - deadline_margin(45.0) - 20.0
+        )
 
 
 @pytest.mark.asyncio
@@ -188,7 +201,8 @@ async def test_less_than_the_reserve_left_opens_no_client(monkeypatch, fake_cloc
 async def test_a_download_using_its_whole_allowance_leaves_extraction_the_reserve(
     monkeypatch, fake_clock
 ):
-    """Under the 45 s runner the download gets 25 s; extraction then gets 20 s."""
+    """Under the 45 s runner the download gets 45 s less the margin and the
+    20 s reserve; extraction then gets the 20 s reserve."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         # The download takes all the time it was given.
@@ -207,7 +221,7 @@ async def test_a_download_using_its_whole_allowance_leaves_extraction_the_reserv
         result = await documents.get_official_document.ainvoke({"url": _DOC_URL})
 
     assert result.startswith("STATUS: EVIDENCE_FOUND")
-    assert timeouts == [pytest.approx(25.0)]
+    assert timeouts == [pytest.approx(45.0 - deadline_margin(45.0) - 20.0)]
     assert seen == [pytest.approx(documents.pdf_extraction_reserve_seconds())]
 
 
