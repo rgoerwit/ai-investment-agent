@@ -7,10 +7,9 @@ import io
 import ipaddress
 import json
 import re
-import shutil
 import socket
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 from urllib.parse import urljoin, urlparse, urlunsplit
 
 import httpx
@@ -29,16 +28,12 @@ from src.runtime_services import (
     get_current_inspection_service,
     get_current_issuer_hosts,
 )
+from src.subprocesses import resolve_program, run_program
 from src.text_patterns import is_safe_public_host
 from src.tooling.inspector import InspectionEnvelope, SourceKind
 from src.tooling.runtime import tool_execution_timeout_seconds
 
 logger = structlog.get_logger(__name__)
-
-# Detached reapers of killed extraction subprocesses, held so one that outlives
-# its bounded wait is neither garbage-collected nor left with an unobserved
-# exception (_reap_finished logs it).
-_PENDING_REAPS: set[asyncio.Future[Any]] = set()
 
 SourceAuthority = Literal[
     "PRIMARY_REGISTRY",
@@ -159,67 +154,6 @@ def _extraction_allowance(allocation: _Allocation, *, label: str) -> float:
         ),
         label=label,
     )
-
-
-def _reap_finished(reap: asyncio.Future[Any]) -> None:
-    """Done-callback of a reaper: forget it, and log (never leak) its failure."""
-    _PENDING_REAPS.discard(reap)
-    if reap.cancelled():
-        logger.warning("official_document_subprocess_reap_cancelled")
-        return
-    exc = reap.exception()
-    if exc is not None:
-        logger.warning(
-            "official_document_subprocess_reap_failed",
-            **summarize_exception(exc, operation="official_document_subprocess_reap"),
-        )
-
-
-async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
-    """Kill an extraction child and reap it, the wait bounded and shielded.
-
-    Runs from an abnormal exit (timeout, error, cancellation). The reap is a
-    separate task behind ``asyncio.shield``, so a second cancellation of the
-    caller interrupts only the wait: the reap still finishes and its outcome
-    is logged by ``_reap_finished``. Past SUBPROCESS_CLEANUP_TIMEOUT_SECONDS
-    the caller stops waiting and the reap continues detached.
-    """
-    if process.returncode is None:
-        try:
-            process.kill()
-        except ProcessLookupError:
-            pass  # It exited between the check and the kill; reap it anyway.
-    reap = asyncio.ensure_future(process.wait())
-    _PENDING_REAPS.add(reap)
-    reap.add_done_callback(_reap_finished)
-    try:
-        async with asyncio.timeout(config.subprocess_cleanup_timeout_seconds):
-            await asyncio.shield(reap)
-    except TimeoutError:
-        logger.warning(
-            "official_document_subprocess_reap_pending",
-            timeout_seconds=config.subprocess_cleanup_timeout_seconds,
-        )
-    except Exception:
-        pass  # The reap failed; _reap_finished has logged it.
-
-
-async def _communicate_bounded(
-    process: asyncio.subprocess.Process, payload: bytes, *, timeout: float
-) -> bytes:
-    """``communicate()`` within ``timeout``; any abnormal exit kills and reaps.
-
-    The original exception (``TimeoutError``, an error, or the caller's
-    cancellation) is re-raised after the cleanup.
-    """
-    try:
-        stdout, _ = await asyncio.wait_for(
-            process.communicate(payload), timeout=timeout
-        )
-    except BaseException:
-        await _kill_and_reap(process)
-        raise
-    return stdout
 
 
 def _rank_same_host_document_paths(
@@ -406,7 +340,7 @@ async def _extract_with_pdftotext(
     keywords: tuple[str, ...],
     allocation: _Allocation | None = None,
 ) -> ExtractedDocument:
-    executable = shutil.which("pdftotext")
+    executable = resolve_program("pdftotext")
     if executable is None:
         raise DocumentExtractionError("PDF_PARSER_UNAVAILABLE")
     # Read now (pypdf may have used part of the allowance) and resolved before
@@ -423,25 +357,18 @@ async def _extract_with_pdftotext(
             reason="EXTRACTION_TIMEOUT",
         )
         raise DocumentExtractionError("EXTRACTION_TIMEOUT") from exc
-    process = await asyncio.create_subprocess_exec(
-        executable,
-        "-f",
-        "1",
-        "-l",
-        str(max_pages),
-        "-",
-        "-",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
     try:
-        stdout = await _communicate_bounded(process, payload, timeout=timeout)
+        output = await run_program(
+            executable,
+            *("-f", "1", "-l", str(max_pages), "-", "-"),
+            input=payload,
+            timeout=timeout,
+        )
     except TimeoutError as exc:
         raise DocumentExtractionError("EXTRACTION_TIMEOUT") from exc
-    if process.returncode != 0:
+    if output.returncode != 0:
         raise DocumentExtractionError("PDF_MALFORMED")
-    page_texts = stdout.decode("utf-8", errors="replace").split("\f")
+    page_texts = output.stdout.decode("utf-8", errors="replace").split("\f")
     if page_texts and not page_texts[-1].strip():
         page_texts.pop()
     selected = _select_pages(page_texts, keywords, selected_pages)

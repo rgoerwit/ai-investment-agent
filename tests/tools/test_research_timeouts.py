@@ -27,6 +27,7 @@ from pydantic import ValidationError
 import src.async_utils as async_utils
 import src.blocking_io as blocking_io
 import src.editor_tools as editor_tools
+import src.subprocesses as subprocesses
 import src.tavily_utils as tavily_utils
 from src.blocking_io import InFlightLimit
 from src.config import Settings, config
@@ -952,6 +953,8 @@ async def test_pdf_extract_caller_deadline_wins(monkeypatch, fake_clock):
 class _FakeProcess:
     """A child that runs (``returncode is None``) until it finishes or is killed."""
 
+    pid = 4242
+
     def __init__(self, stdout: bytes = b"", *, stall: bool = False) -> None:
         self._stdout = stdout
         self._stall = stall
@@ -976,7 +979,7 @@ class _FakeProcess:
 
 
 class _SubprocessAsyncio:
-    """Stands in for ``asyncio`` in ``official_documents`` for the pdftotext path."""
+    """Stands in for ``asyncio`` in ``src.subprocesses`` for the pdftotext path."""
 
     def __init__(self, process: _FakeProcess) -> None:
         self.process = process
@@ -999,8 +1002,8 @@ class _SubprocessAsyncio:
 
 def _pdftotext(monkeypatch, process: _FakeProcess) -> _SubprocessAsyncio:
     fake = _SubprocessAsyncio(process)
-    monkeypatch.setattr(documents, "asyncio", fake)
-    monkeypatch.setattr(documents.shutil, "which", lambda name: "/usr/bin/pdftotext")
+    monkeypatch.setattr(subprocesses, "asyncio", fake)
+    monkeypatch.setattr(documents, "resolve_program", lambda name: "/usr/bin/pdftotext")
     return fake
 
 
@@ -1050,7 +1053,7 @@ async def test_pdftotext_timeout_kills_and_reports_extraction_timeout(monkeypatc
 async def test_pdf_extract_timeout_still_reports_extraction_timeout(monkeypatch):
     # pypdf times out; pdftotext is missing; today's reason is kept.
     _spy_documents_blocking(monkeypatch, result=TimeoutError("pypdf"))
-    monkeypatch.setattr(documents.shutil, "which", lambda name: None)
+    monkeypatch.setattr(documents, "resolve_program", lambda name: None)
 
     with pytest.raises(documents.DocumentExtractionError) as exc_info:
         await documents.extract_pdf_text(b"%PDF", _audit_policy(), "")

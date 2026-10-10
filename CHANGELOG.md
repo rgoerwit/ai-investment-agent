@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- MCP call budgets are now enforced by `MCPRuntime` itself: each attempt is
+  admitted against `daily_call_limit` / `per_run_limit` before a session opens,
+  and each tools/call is counted as it is sent. `MCPBudgetHook` is gone; it
+  counted in `after()`, so a call that timed out, failed, or whose result the
+  tool plane discarded was never counted, and a retry counted once for two
+  sends. **Behaviour change:** a retried call now uses two of `per_run_limit`,
+  and a retry the budget cannot cover is refused (`details.retry ==
+  "refused_budget"`). The dead `MCPRuntime.call_tool`, `list_tools_for_scope` and
+  `src/mcp/catalog.py` were removed.
+- An MCP tool the server does not list is now refused before the call is sent
+  (`failure_kind: "config"`, `details.refused == "tool_not_listed"`), and the
+  listing follows `nextCursor` within its one bound. Before, the call was sent
+  anyway and the SDK re-listed after it under the stale session bound, then
+  skipped output validation. The `x-mcp-header` filter is documented as inert in
+  production, where `initialize()` negotiates only legacy protocol versions.
+- Every child process under `src/` now starts through `src/subprocesses.py`, on
+  CPython's `posix_spawn` path (absolute executable, `close_fds=False`, no
+  `cwd`), with kill-and-reap on every abnormal exit. pdftotext and the run
+  fingerprint's git probe forked before, which in the threaded analysis process
+  risks a crash in Network.framework's atfork handler. The reap log events are
+  now `subprocess_reap_pending/failed/cancelled` (were
+  `official_document_subprocess_reap_*`), with a `pid` field.
+
 - The official-document tool now shares its allowance by fractions instead of
   absolute reserves: the download may use `OFFICIAL_DOCUMENT_DOWNLOAD_FRACTION`
   (0.55) of it, and `OFFICIAL_DOCUMENT_INSPECTION_FRACTION` (0.25) of the rest is

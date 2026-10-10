@@ -861,8 +861,8 @@ class TestRuntimeServiceHookConfig:
         monkeypatch.setattr(
             "src.main.config.untrusted_content_inspection_enabled", False
         )
-        # Pin MCP off so the assertion only inspects the audit/inspection wiring;
-        # MCP_ENABLED in the operator's .env would otherwise add MCPBudgetHook.
+        # Pin MCP off so the assertion only inspects the audit/inspection wiring
+        # whatever MCP_ENABLED says in the operator's .env.
         monkeypatch.setattr("src.main.config.mcp_enabled", False)
 
         services = build_runtime_services_from_config(enable_tool_audit=False)
@@ -933,8 +933,8 @@ class TestRuntimeServiceHookConfig:
 
         assert services.mcp_runtime is not None
         hook_types = [type(h).__name__ for h in services.tool_service.hooks]
-        assert "ContentInspectionHook" not in hook_types
-        assert "MCPBudgetHook" in hook_types
+        # MCP adds no hook: the runtime admits and counts its own budget.
+        assert hook_types == ["EvidenceRecorder"]
 
     def test_build_runtime_services_from_config_degrades_when_mcp_registry_missing(
         self, monkeypatch, tmp_path: Path
@@ -954,8 +954,6 @@ class TestRuntimeServiceHookConfig:
         services = build_runtime_services_from_config(enable_tool_audit=False)
 
         assert services.mcp_runtime is None
-        hook_types = [type(h).__name__ for h in services.tool_service.hooks]
-        assert "MCPBudgetHook" not in hook_types
 
     def test_configure_content_inspection_from_config_installs_tool_hook(
         self, monkeypatch

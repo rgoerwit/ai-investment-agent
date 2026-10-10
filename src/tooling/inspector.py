@@ -33,7 +33,7 @@ class SourceKind(str, Enum):
     memory_retrieval = "memory_retrieval"
     memory_write = "memory_write"
     cached_context = "cached_context"
-    mcp_tool_output = "mcp_tool_output"  # reserved for future MCP integration
+    mcp_tool_output = "mcp_tool_output"
 
 
 @dataclass

@@ -1609,9 +1609,9 @@ class Settings(BaseSettings):
         gt=0.0,
         validation_alias="SUBPROCESS_CLEANUP_TIMEOUT_SECONDS",
         description=(
-            "Hard cap (seconds) on reaping a killed extraction subprocess "
-            "(pdftotext) after a timeout, error or cancellation; past it the "
-            "reap continues detached and the caller is not held."
+            "Hard cap (seconds) on reaping a killed child process (pdftotext, "
+            "src/subprocesses.py) after a timeout, error or cancellation; past "
+            "it the reap continues detached and the caller is not held."
         ),
     )
     reference_fetch_timeout_seconds: float = Field(

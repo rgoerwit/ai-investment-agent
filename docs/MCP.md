@@ -1,15 +1,14 @@
 # Model Context Protocol (MCP) integration
 
-Last updated: 2026-10-10 (timeout model: operational deadline reader, margin, timeout scopes).
+Last updated: 2026-10-10 (budget counted at send, unlisted tools refused, legacy-only header filter).
 
 The consultant agent can cross-validate analyst claims against vendor MCP
 servers (currently the FMP MCP server). The consultant-facing MCP wrappers
 route calls through the normal `ToolExecutionService` hook chain, so audit
-logging, argument policy, content inspection, and per-server budget can all
-observe those calls under the canonical name `mcp__<server>__<tool>`.
-
-`MCPRuntime.call_tool()` still exists as a convenience/testing path, but it is
-not the recommended agent-facing integration surface for this repo.
+logging, argument policy and content inspection observe those calls under the
+canonical name `mcp__<server>__<tool>`. `MCPRuntime.execute_raw()` is the one
+entry point; it runs as the service's runner and enforces the per-server budget
+itself.
 
 ## Vendor surface notes (verified May 2026)
 
@@ -121,14 +120,30 @@ chain; servers without `"consultant"` in `scopes` raise
 
 ## Budget interaction
 
-`MCPBudgetHook` runs as part of the shared hook chain and gates each call:
+`MCPRuntime` owns the budget, beneath the hook chain:
 
-- `before()` blocks the call when `daily_call_limit` or `per_run_limit` is
-  exhausted (raises `ToolCallBlocked`, surfaced as a `TOOL_BLOCKED:` sentinel
-  in the consultant tool's structured failure JSON).
-- `after()` records one upstream consumption for any non-blocked result —
-  including upstream `isError=true` payloads, which still consume vendor
-  quota.
+- **Admission.** Each attempt is admitted with `BudgetTracker.can_call` before
+  a session opens. A spent `daily_call_limit` or `per_run_limit` (0 means
+  unlimited) raises `MCPCallError(category=BUDGET)`, `failure_kind: "budget"`
+  in the consultant JSON, with nothing sent. A retry the budget cannot cover is
+  refused like a deadline refusal: the sent attempt's error, with
+  `details.retry == "refused_budget"`.
+- **Accounting.** Each tools/call is counted as it is handed to the SDK,
+  whatever follows: a timeout, a 429 or 5xx, an `isError=true` payload, a
+  result that fails its output schema, a cancellation, or a result the tool
+  plane discards. A retried call counts twice. `initialize` and `tools/list`
+  are not counted: vendor quotas meter data endpoints, and a request-rate limit
+  on a listing surfaces as a 429 and its cooldown.
+
+**Why not a hook (October 2026, round 3).** The budget used to be an
+`MCPBudgetHook`, counting in `after()`. That hook runs only when the runner
+succeeds and the combined deadline still has room, so a call the vendor
+received and then timed out, failed or had its result discarded (the after()
+chain stops once the deadline is spent) was never counted, and a retry counted
+once for two sends. Counting at the send boundary is the only place that sees
+every request. A call that fails locally inside the SDK before reaching the
+wire is over-counted, which is the safe direction for a quota. Two concurrent
+calls can still overshoot a limit by the number in flight.
 
 Counts persist in the SQLite database at `MCP_USAGE_DB_PATH`. Rows older than
 the retention window are swept on startup.
@@ -151,7 +166,9 @@ or failure it emits:
 ```
 
 `failure_kind` mirrors `MCPErrorCategory` plus `inspection_blocked` for hook-
-level blocks. Use the value to disambiguate: `config` (allowlist/scope/spec),
+level blocks. Use the value to disambiguate: `config` (allowlist/scope/spec, or
+a tool the server does not list: `details.refused == "tool_not_listed"`),
+`budget` (the server's call budget is spent),
 `auth` (401/403, vendor cooldown), `transport` (5xx/429/network/timeout, see
 [Debugging a timed-out call](#debugging-a-timed-out-call)),
 `tool_error` (vendor returned `isError=true`), `inspection` /
@@ -185,9 +202,16 @@ under `asyncio.timeout(time left)` inside the session body (`_list_tools_in_time
 A timeout or a spent allowance is captured there and raised after the SDK contexts
 have exited normally, like every other MCP error. It stays the public
 `list_tools()`: calling `send_request` directly would skip `_absorb_tool_listing`,
-which drops tools with an invalid `x-mcp-header` annotation (2026-07-28 sessions
-only; `initialize()` negotiates a legacy version, where the filter is inert) and
-caches the output schemas and header maps.
+which caches the output schemas the SDK validates a result against. On a
+2026-07-28 session it would also drop tools with an invalid `x-mcp-header`
+annotation, but **that filter does not protect production**: `initialize()`
+negotiates only legacy versions, where it is inert, and only `discover()`
+reaches the modern one. Negotiating it was considered and declined: every
+`execute_raw` opens a fresh session, so a `server/discover` probe (with a
+legacy fallback on `METHOD_NOT_FOUND`) would add one or two round trips per
+call; the SDK bounds that probe by its own fixed 10 s, not our settings; the
+modern session changes header and caching semantics; and neither vendor's
+support can be verified offline. A test pins both behaviours.
 
 **Every call lists first.** The SDK validates a successful result against the
 tool's output schema, and in a fresh session -- every `execute_raw` opens one --
@@ -197,6 +221,16 @@ schema is cached and that post-call listing is never sent. A successful call
 sends the same requests as before, in a different order; a call that fails
 (timeout, error payload) now costs one listing it did not before. A listing that
 fails means the call is never sent.
+
+**A tool the server does not list is refused (round 3).** The SDK also re-lists
+after a call whose tool is missing from its cache, under the same stale bound,
+and then skips validation. That happened for an allowlisted tool the server
+does not offer (a registry error) and for a tool on a later page, because the
+listing read only the first. `_list_tools_in_time` now follows `nextCursor`,
+all pages under its one bound, until the tool appears; it stops at the last
+page or a repeated cursor. A tool still missing is refused unsent and uncounted
+as `MCPCallError(category=CONFIG, details={"refused": "tool_not_listed"})`, with
+no retry and no cooldown.
 
 **The retry backoff is admitted.** `_execute_with_retry` asks
 `wait_allowance` (the same rule as an LLM retry) whether a useful attempt still
@@ -268,7 +302,7 @@ timed-out request classified as `protocol`.
 bytes right now?" without burning tokens or waiting for a full analysis. It
 bypasses the consultant LLM and calls `spot_check_metric_mcp_fmp` directly
 through the full hook chain — same canonical `mcp__<server>__<tool>` name,
-same audit/policy/inspection/budget hooks, real vendor traffic.
+same audit/policy/inspection hooks and the runtime's budget, real vendor traffic.
 
 ```bash
 # Default: 6914.T currentPrice

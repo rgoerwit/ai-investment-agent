@@ -1,7 +1,7 @@
 """MCP deadlines: one ``Settings`` field per scope, applied at the SDK's own knobs.
 
 Three scopes: the httpx2 client's per-phase timeout, the ``ClientSession`` read
-timeout that bounds the initialize handshake and a tools/list catalog request,
+timeout that bounds the initialize handshake,
 and the per-request read timeout on one tool call. Each is checked for its
 shipped default (read from the field definition), an override reaching the real
 SDK object, a caller's enclosing deadline winning over a looser default, and a
@@ -14,16 +14,13 @@ and the transport is torn down. No network, tiny timeouts only.
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
 import anyio
 import httpx2
 import pytest
-from mcp import ClientSession
 from mcp.types import REQUEST_TIMEOUT
 from pydantic import ValidationError
 
@@ -33,8 +30,13 @@ from src.llm_runtime.timeouts import enclosing_deadline
 from src.mcp.client import MCPRuntime
 from src.mcp.config import MCPServerSpec
 from src.mcp.errors import MCPCallError, MCPErrorCategory
+from tests.helpers.mcp_server import (
+    FakeMCPServer,
+    RecordingSession,
+    http_runtime,
+    other_tasks,
+)
 
-_URL = "https://example.test/mcp"
 _NOW = 1_000.0
 # Generous ceiling for a stall test: the bound under test is a fraction of it.
 _STALL_CEILING_SECONDS = 10.0
@@ -54,18 +56,6 @@ def fake_clock(monkeypatch) -> list[float]:
     return clock
 
 
-def _http_runtime(tmp_path: Path) -> MCPRuntime:
-    spec = MCPServerSpec(
-        id="fmp_remote",
-        description="FMP",
-        transport="streamable_http",
-        base_url=_URL,
-        scopes=["consultant"],
-        tool_allowlist=["quote"],
-    )
-    return MCPRuntime([spec], budget_db_path=str(tmp_path / "mcp_usage.db"))
-
-
 def _stdio_runtime(tmp_path: Path) -> MCPRuntime:
     spec = MCPServerSpec(
         id="local_stdio",
@@ -78,95 +68,11 @@ def _stdio_runtime(tmp_path: Path) -> MCPRuntime:
     return MCPRuntime([spec], budget_db_path=str(tmp_path / "mcp_usage.db"))
 
 
-class _FakeServer:
-    """A streamable-HTTP MCP server behind ``httpx2.MockTransport``.
-
-    Answers initialize, tools/list and tools/call, accepts notifications, and
-    parks any method named in ``stall`` on an event that never fires, counting
-    how many parked requests were cancelled by the client's teardown.
-    """
-
-    def __init__(self, *, stall: frozenset[str] = frozenset()) -> None:
-        self.stall = stall
-        self.methods: list[str] = []
-        self.parked = 0
-        self.cancelled = 0
-        self.clients: list[httpx2.AsyncClient] = []
-
-    async def handler(self, request: httpx2.Request) -> httpx2.Response:
-        if request.method != "POST":
-            return httpx2.Response(405)
-        message = json.loads(request.content)
-        method = message.get("method")
-        self.methods.append(method)
-        if "id" not in message:
-            return httpx2.Response(202)
-        if method in self.stall:
-            self.parked += 1
-            try:
-                await asyncio.Event().wait()
-            except BaseException:
-                self.cancelled += 1
-                raise
-        if method == "initialize":
-            result: dict[str, Any] = {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "fake", "version": "1"},
-            }
-        elif method == "tools/list":
-            result = {
-                "tools": [
-                    {"name": "quote", "inputSchema": {"type": "object"}},
-                ]
-            }
-        else:
-            result = {"content": [{"type": "text", "text": "{}"}], "isError": False}
-        return httpx2.Response(
-            200, json={"jsonrpc": "2.0", "id": message["id"], "result": result}
-        )
-
-    def install(self, monkeypatch) -> None:
-        """Route the runtime's own httpx2 client to this server, keeping kwargs."""
-        real_client = httpx2.AsyncClient
-
-        def _client(**kwargs):
-            client = real_client(transport=httpx2.MockTransport(self.handler), **kwargs)
-            self.clients.append(client)
-            return client
-
-        monkeypatch.setattr("src.mcp.client.httpx2.AsyncClient", _client)
-
-
-class _RecordingSession(ClientSession):
-    """The real ClientSession, recording the timeouts it is handed."""
-
-    session_timeouts: list[float | None] = []
-    call_timeouts: list[float | None] = []
-
-    def __init__(self, read, write, read_timeout_seconds=None, **kwargs):
-        type(self).session_timeouts.append(read_timeout_seconds)
-        super().__init__(read, write, read_timeout_seconds, **kwargs)
-
-    async def call_tool(self, name, arguments=None, read_timeout_seconds=None, **kw):
-        type(self).call_timeouts.append(read_timeout_seconds)
-        return await super().call_tool(name, arguments, read_timeout_seconds, **kw)
-
-
 @pytest.fixture
-def recording_session(monkeypatch) -> type[_RecordingSession]:
-    _RecordingSession.session_timeouts = []
-    _RecordingSession.call_timeouts = []
-    monkeypatch.setattr("src.mcp.client.ClientSession", _RecordingSession)
-    return _RecordingSession
-
-
-def _other_tasks(before: set[asyncio.Task]) -> set[asyncio.Task]:
-    return {
-        task
-        for task in asyncio.all_tasks()
-        if task is not asyncio.current_task() and task not in before
-    }
+def recording_session(monkeypatch) -> type[RecordingSession]:
+    RecordingSession.reset()
+    monkeypatch.setattr("src.mcp.client.ClientSession", RecordingSession)
+    return RecordingSession
 
 
 # --- Shipped defaults ------------------------------------------------------
@@ -207,12 +113,12 @@ def test_a_non_positive_override_is_rejected(monkeypatch, field):
 async def test_overrides_reach_the_client_session_and_call(
     tmp_path, monkeypatch, recording_session
 ):
-    server = _FakeServer()
+    server = FakeMCPServer()
     server.install(monkeypatch)
     monkeypatch.setattr(config, "mcp_http_timeout_seconds", 7.0)
     monkeypatch.setattr(config, "mcp_initialize_timeout_seconds", 3.0)
     monkeypatch.setattr(config, "mcp_tool_call_timeout_seconds", 9.0)
-    runtime = _http_runtime(tmp_path)
+    runtime = http_runtime(tmp_path)
 
     payload = await asyncio.wait_for(
         runtime.execute_raw("fmp_remote", "quote", {}, scope="consultant"),
@@ -228,24 +134,6 @@ async def test_overrides_reach_the_client_session_and_call(
     assert recording_session.call_timeouts == [9.0]
 
 
-@pytest.mark.asyncio
-async def test_catalog_request_carries_the_initialize_bound(
-    tmp_path, monkeypatch, recording_session
-):
-    server = _FakeServer()
-    server.install(monkeypatch)
-    monkeypatch.setattr(config, "mcp_initialize_timeout_seconds", 4.0)
-    runtime = _http_runtime(tmp_path)
-
-    tools = await asyncio.wait_for(
-        runtime.list_tools_for_scope("consultant"), timeout=_STALL_CEILING_SECONDS
-    )
-
-    assert [tool.name for tool in tools] == ["quote"]
-    assert recording_session.session_timeouts == [4.0]
-    assert recording_session.call_timeouts == []
-
-
 # --- The caller's enclosing deadline ---------------------------------------
 
 
@@ -253,9 +141,9 @@ async def test_catalog_request_carries_the_initialize_bound(
 async def test_a_nested_caller_deadline_wins_over_every_default(
     tmp_path, monkeypatch, recording_session, fake_clock
 ):
-    server = _FakeServer()
+    server = FakeMCPServer()
     server.install(monkeypatch)
-    runtime = _http_runtime(tmp_path)
+    runtime = http_runtime(tmp_path)
 
     with enclosing_deadline(2.0):
         await asyncio.wait_for(
@@ -273,9 +161,9 @@ async def test_a_nested_caller_deadline_wins_over_every_default(
 async def test_a_looser_caller_deadline_leaves_the_defaults(
     tmp_path, monkeypatch, recording_session, fake_clock
 ):
-    server = _FakeServer()
+    server = FakeMCPServer()
     server.install(monkeypatch)
-    runtime = _http_runtime(tmp_path)
+    runtime = http_runtime(tmp_path)
 
     with enclosing_deadline(600.0):
         await asyncio.wait_for(
@@ -296,7 +184,7 @@ async def test_a_looser_caller_deadline_leaves_the_defaults(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("runtime_factory", [_http_runtime, _stdio_runtime])
+@pytest.mark.parametrize("runtime_factory", [http_runtime, _stdio_runtime])
 async def test_a_spent_allowance_opens_no_session(
     tmp_path, monkeypatch, fake_clock, runtime_factory
 ):
@@ -327,13 +215,13 @@ async def test_a_spent_allowance_opens_no_session(
 async def test_an_allowance_spent_while_opening_sends_no_call(
     tmp_path, monkeypatch, fake_clock
 ):
-    runtime = _http_runtime(tmp_path)
+    runtime = http_runtime(tmp_path)
     opened: list[str] = []
     closed: list[str] = []
     sent: list[str] = []
 
     class _Session:
-        async def list_tools(self):  # pragma: no cover
+        async def list_tools(self, *, params=None):  # pragma: no cover
             sent.append("tools/list")
             raise RuntimeError("the catalogue must not be requested")
 
@@ -379,10 +267,10 @@ async def test_an_allowance_spent_while_opening_sends_no_call(
 async def test_a_stalled_http_initialize_returns_within_its_bound(
     tmp_path, monkeypatch
 ):
-    server = _FakeServer(stall=frozenset({"initialize"}))
+    server = FakeMCPServer(stall=frozenset({"initialize"}))
     server.install(monkeypatch)
     monkeypatch.setattr(config, "mcp_initialize_timeout_seconds", 0.2)
-    runtime = _http_runtime(tmp_path)
+    runtime = http_runtime(tmp_path)
     spec = runtime.specs["fmp_remote"]
     before = set(asyncio.all_tasks())
 
@@ -402,15 +290,15 @@ async def test_a_stalled_http_initialize_returns_within_its_bound(
     assert server.parked == server.cancelled == 1
     (client,) = server.clients
     assert client.is_closed
-    assert _other_tasks(before) == set()
+    assert other_tasks(before) == set()
 
 
 @pytest.mark.asyncio
 async def test_a_stalled_http_tool_call_returns_within_its_bound(tmp_path, monkeypatch):
-    server = _FakeServer(stall=frozenset({"tools/call"}))
+    server = FakeMCPServer(stall=frozenset({"tools/call"}))
     server.install(monkeypatch)
     monkeypatch.setattr(config, "mcp_tool_call_timeout_seconds", 0.2)
-    runtime = _http_runtime(tmp_path)
+    runtime = http_runtime(tmp_path)
     before = set(asyncio.all_tasks())
 
     started = time.monotonic()
@@ -430,28 +318,7 @@ async def test_a_stalled_http_tool_call_returns_within_its_bound(tmp_path, monke
     assert server.parked == server.cancelled == 2
     assert len(server.clients) == 2
     assert all(client.is_closed for client in server.clients)
-    assert _other_tasks(before) == set()
-
-
-@pytest.mark.asyncio
-async def test_a_stalled_catalog_request_returns_within_the_initialize_bound(
-    tmp_path, monkeypatch
-):
-    server = _FakeServer(stall=frozenset({"tools/list"}))
-    server.install(monkeypatch)
-    monkeypatch.setattr(config, "mcp_initialize_timeout_seconds", 0.2)
-    runtime = _http_runtime(tmp_path)
-
-    with pytest.raises(MCPCallError) as exc_info:
-        await asyncio.wait_for(
-            runtime.list_tools_for_scope("consultant"),
-            timeout=_STALL_CEILING_SECONDS,
-        )
-
-    assert exc_info.value.category is MCPErrorCategory.TRANSPORT
-    assert exc_info.value.json_rpc_code == REQUEST_TIMEOUT
-    assert server.parked == server.cancelled == 1
-    assert all(client.is_closed for client in server.clients)
+    assert other_tasks(before) == set()
 
 
 @pytest.mark.asyncio

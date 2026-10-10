@@ -5,22 +5,15 @@ allowance and is shared by fractions of it, so the split holds for any runner
 value: the download may use ``OFFICIAL_DOCUMENT_DOWNLOAD_FRACTION`` (a trickling
 body stops there); of the rest, ``OFFICIAL_DOCUMENT_INSPECTION_FRACTION`` is held
 back from extraction for content inspection, which gets whatever is then left
-and fails the document closed when it cannot finish. A pdftotext child is killed
-and reaped on every abnormal exit -- its own timeout, an error, or the caller's
-cancellation -- with the reap bounded, shielded and its failure logged, never
-leaked. Fake clocks, fake transports and releasable stalls; one real child
-(``/bin/sleep``) for the cancellation path. Nothing touches the network.
+and fails the document closed when it cannot finish. The pdftotext child's own
+cleanup is tested with the spawn helper (``tests/test_subprocesses.py``). Fake
+clocks, fake transports and releasable stalls. Nothing touches the network.
 """
 
 from __future__ import annotations
 
 import asyncio
-import gc
-import os
-import signal
 import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Any
 
 import httpx
@@ -339,12 +332,12 @@ async def test_extraction_that_spends_its_bound_still_leaves_inspection_the_rese
         raise TimeoutError("pypdf stalled")
 
     seen = _spy_pypdf(monkeypatch, spend=spend)
-    monkeypatch.setattr(documents.shutil, "which", lambda name: "/usr/bin/pdftotext")
+    monkeypatch.setattr(documents, "resolve_program", lambda name: "/usr/bin/pdftotext")
 
     async def spawn(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("pdftotext must not start: only the reserve is left")
 
-    monkeypatch.setattr(documents.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(documents, "run_program", spawn)
     logs = _record_logs(monkeypatch)
     allocation = documents._allocate()
     fake_clock[0] += allocation.download_seconds  # the download used its share
@@ -372,8 +365,8 @@ async def test_spent_tool_runner_starts_neither_extractor(monkeypatch, fake_cloc
         spawned.append(args)
         raise AssertionError("pdftotext must not start")
 
-    monkeypatch.setattr(documents.asyncio, "create_subprocess_exec", spawn)
-    monkeypatch.setattr(documents.shutil, "which", lambda name: "/usr/bin/pdftotext")
+    monkeypatch.setattr(documents, "run_program", spawn)
+    monkeypatch.setattr(documents, "resolve_program", lambda name: "/usr/bin/pdftotext")
 
     logs = _record_logs(monkeypatch)
     with tool_call_deadline(10.0):
@@ -440,7 +433,7 @@ async def test_a_stalled_extractor_reports_its_own_timeout_not_the_runners(monke
     monkeypatch.setattr(config, RUNNER, 0.3)
     _mock_client(monkeypatch, _respond(_PDF, "application/pdf"))
     _use_inspection(monkeypatch)
-    monkeypatch.setattr(documents.shutil, "which", lambda name: None)
+    monkeypatch.setattr(documents, "resolve_program", lambda name: None)
     release = threading.Event()
     monkeypatch.setattr(
         documents,
@@ -536,242 +529,3 @@ async def test_redirect_and_size_guards_hold_inside_the_total_bound(monkeypatch)
             _DOC_URL, 10, allocation=documents._allocate()
         )
     assert exc_info.value.reason == "DOCUMENT_SIZE_LIMIT"
-
-
-# --- Subprocess cleanup ------------------------------------------------------
-
-
-class _Child:
-    """A fake pdftotext child with releasable stalls in communicate() and wait()."""
-
-    def __init__(
-        self,
-        *,
-        stdout: bytes = b"page one " * 40 + b"\f",
-        stall: bool = False,
-        stall_reap: bool = False,
-        exits_on_its_own: bool = False,
-        reap_error: BaseException | None = None,
-    ) -> None:
-        self.stdout = stdout
-        self.stall = stall
-        self.returncode: int | None = None
-        self.in_communicate = asyncio.Event()
-        self.reap_started = asyncio.Event()
-        self.release_reap = asyncio.Event()
-        if not stall_reap:
-            self.release_reap.set()
-        self.exits_on_its_own = exits_on_its_own
-        self.reap_error = reap_error
-        self.kill_calls = 0
-        self.reaped = False
-
-    async def communicate(self, payload: bytes) -> tuple[bytes, bytes]:
-        del payload
-        self.in_communicate.set()
-        if self.stall:
-            await asyncio.Event().wait()
-        self.returncode = 0
-        return self.stdout, b""
-
-    def kill(self) -> None:
-        self.kill_calls += 1
-        if self.exits_on_its_own:
-            # Exited between the returncode check and the kill.
-            self.returncode = 0
-            raise ProcessLookupError
-        self.returncode = -9
-
-    async def wait(self) -> int:
-        self.reap_started.set()
-        await self.release_reap.wait()
-        if self.reap_error is not None:
-            raise self.reap_error
-        self.reaped = True
-        assert self.returncode is not None
-        return self.returncode
-
-
-def _install_child(monkeypatch, child: _Child) -> list[Any]:
-    spawned: list[Any] = []
-
-    async def spawn(*args: Any, **kwargs: Any) -> _Child:
-        del kwargs
-        spawned.append(args)
-        return child
-
-    monkeypatch.setattr(documents.asyncio, "create_subprocess_exec", spawn)
-    monkeypatch.setattr(documents.shutil, "which", lambda name: "/usr/bin/pdftotext")
-    return spawned
-
-
-async def _pdftotext() -> documents.ExtractedDocument:
-    return await documents._extract_with_pdftotext(
-        b"%PDF", max_pages=5, selected_pages=2, keywords=()
-    )
-
-
-@contextmanager
-def _loop_errors() -> Iterator[list[dict[str, Any]]]:
-    """Errors the running loop reports, e.g. "Task exception was never retrieved"."""
-    errors: list[dict[str, Any]] = []
-    loop = asyncio.get_running_loop()
-    previous = loop.get_exception_handler()
-    loop.set_exception_handler(lambda _loop, context: errors.append(context))
-    try:
-        yield errors
-    finally:
-        loop.set_exception_handler(previous)
-
-
-@pytest.mark.asyncio
-async def test_normal_completion_neither_kills_nor_leaves_a_reaper(monkeypatch):
-    child = _Child()
-    _install_child(monkeypatch, child)
-
-    extracted = await _pdftotext()
-
-    assert extracted.backend == "pdftotext"
-    assert child.kill_calls == 0
-    assert documents._PENDING_REAPS == set()
-
-
-@pytest.mark.asyncio
-async def test_cancel_during_communicate_kills_and_reaps(monkeypatch):
-    child = _Child(stall=True)
-    _install_child(monkeypatch, child)
-
-    task = asyncio.ensure_future(_pdftotext())
-    await child.in_communicate.wait()
-    task.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert child.kill_calls == 1
-    assert child.reaped
-    assert documents._PENDING_REAPS == set()
-
-
-@pytest.mark.asyncio
-async def test_cancel_again_during_cleanup_still_reaps(monkeypatch):
-    child = _Child(stall=True, stall_reap=True)
-    _install_child(monkeypatch, child)
-
-    with _loop_errors() as loop_errors:
-        task = asyncio.ensure_future(_pdftotext())
-        await child.in_communicate.wait()
-        task.cancel()
-        await child.reap_started.wait()
-        task.cancel()  # Interrupts only the wait: the reap is shielded.
-
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert child.kill_calls == 1
-        assert not child.reaped
-
-        child.release_reap.set()
-        while documents._PENDING_REAPS:
-            await asyncio.sleep(0)
-
-        assert child.reaped
-        assert loop_errors == []
-
-
-@pytest.mark.asyncio
-async def test_child_exiting_concurrently_is_still_reaped(monkeypatch):
-    child = _Child(stall=True, exits_on_its_own=True)
-    _install_child(monkeypatch, child)
-
-    task = asyncio.ensure_future(_pdftotext())
-    await child.in_communicate.wait()
-    task.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert child.kill_calls == 1
-    assert child.reaped
-
-
-@pytest.mark.asyncio
-async def test_local_timeout_kills_reaps_and_reports_extraction_timeout(monkeypatch):
-    child = _Child(stall=True)
-    _install_child(monkeypatch, child)
-    monkeypatch.setattr(config, "official_document_extract_timeout_seconds", 0.01)
-
-    async with asyncio.timeout(_GUARD_SECONDS):
-        with pytest.raises(documents.DocumentExtractionError) as exc_info:
-            await _pdftotext()
-
-    assert exc_info.value.reason == "EXTRACTION_TIMEOUT"
-    assert child.kill_calls == 1
-    assert child.reaped
-
-
-@pytest.mark.asyncio
-async def test_stalled_reap_is_bounded_and_its_late_failure_logged_not_leaked(
-    monkeypatch,
-):
-    child = _Child(stall=True, stall_reap=True, reap_error=OSError("reap failed"))
-    _install_child(monkeypatch, child)
-    monkeypatch.setattr(config, "subprocess_cleanup_timeout_seconds", 0.01)
-
-    task = asyncio.ensure_future(_pdftotext())
-    await child.in_communicate.wait()
-    logs = _record_logs(monkeypatch)
-    with _loop_errors() as loop_errors:
-        task.cancel()
-        async with asyncio.timeout(_GUARD_SECONDS):
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        # The caller was released with the reap still pending.
-        assert len(documents._PENDING_REAPS) == 1
-
-        child.release_reap.set()
-        while documents._PENDING_REAPS:
-            await asyncio.sleep(0)
-        gc.collect()
-        await asyncio.sleep(0)
-
-    events = [event for _, event, _ in logs.events]
-    assert "official_document_subprocess_reap_pending" in events
-    assert "official_document_subprocess_reap_failed" in events
-    assert loop_errors == []
-
-
-@pytest.mark.asyncio
-async def test_real_child_is_killed_and_reaped_on_cancellation():
-    """The same create_subprocess_exec + cleanup path, with a harmless real child.
-
-    ``close_fds=False`` and no ``cwd=`` keep the runtime on ``posix_spawn``
-    (see .claude/rules/tests.md).
-    """
-    process = await asyncio.create_subprocess_exec(
-        "/bin/sleep",
-        "30",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        close_fds=False,
-    )
-    try:
-        task = asyncio.ensure_future(
-            documents._communicate_bounded(
-                process, b"", timeout=config.official_document_extract_timeout_seconds
-            )
-        )
-        await asyncio.sleep(0)  # Let it enter communicate().
-        task.cancel()
-
-        async with asyncio.timeout(_GUARD_SECONDS):
-            with pytest.raises(asyncio.CancelledError):
-                await task
-
-        assert process.returncode == -signal.SIGKILL
-        with pytest.raises(ChildProcessError):
-            os.waitpid(process.pid, os.WNOHANG)
-    finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()

@@ -3,22 +3,16 @@ from __future__ import annotations
 import datetime as dt
 import sqlite3
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-import structlog
 
 from src.mcp.config import MCPServerSpec
-from src.mcp.errors import parse_mcp_tool_name
-from src.tooling.runtime import ToolCallBlocked, ToolInvocation, ToolResult
-
-if TYPE_CHECKING:
-    from src.mcp.client import MCPRuntime
-
-logger = structlog.get_logger(__name__)
 
 
 class BudgetTracker:
-    """Daily and per-run call limits backed by a local SQLite database."""
+    """Daily and per-run call limits backed by a local SQLite database.
+
+    ``MCPRuntime`` is its only client: it admits every attempt with
+    ``can_call`` and records every tools/call as it is sent.
+    """
 
     def __init__(self, db_path: str, *, retention_days: int = 7) -> None:
         self._db_path = Path(db_path)
@@ -79,51 +73,3 @@ class BudgetTracker:
                 (today, server_id),
             )
         self._run_calls[server_id] = self._run_calls.get(server_id, 0) + 1
-
-
-class MCPBudgetHook:
-    """Tool-execution-service hook that enforces MCP budgets uniformly.
-
-    Recognizes invocations whose name matches ``mcp__<server>__<tool>``.
-    ``before()`` blocks the call when the per-run or per-day limit is
-    exhausted; ``after()`` increments the counter for any non-blocked result
-    (including upstream ``isError=true`` payloads, which still consume
-    upstream quota).
-
-    Wire alongside :class:`ContentInspectionHook` on the shared
-    :class:`ToolExecutionService` so audit, argument policy, content
-    inspection, and budget all observe MCP calls from a single chokepoint.
-    """
-
-    def __init__(self, runtime: MCPRuntime) -> None:
-        self._runtime = runtime
-
-    async def before(self, call: ToolInvocation) -> ToolInvocation:
-        parsed = parse_mcp_tool_name(call.name)
-        if parsed is None:
-            return call
-        server_id, _ = parsed
-        spec = self._runtime.specs.get(server_id)
-        if spec is None:
-            return call
-        if not self._runtime.budget.can_call(server_id, spec):
-            logger.warning(
-                "mcp_budget_exhausted",
-                server_id=server_id,
-                tool=call.name,
-                agent_key=call.agent_key,
-            )
-            raise ToolCallBlocked(f"MCP budget exhausted for {server_id}")
-        return call
-
-    async def after(self, call: ToolInvocation, result: ToolResult) -> ToolResult:
-        parsed = parse_mcp_tool_name(call.name)
-        if parsed is None:
-            return result
-        if result.blocked:
-            return result
-        server_id, _ = parsed
-        if server_id not in self._runtime.specs:
-            return result
-        self._runtime.budget.record_upstream_consumption(server_id)
-        return result

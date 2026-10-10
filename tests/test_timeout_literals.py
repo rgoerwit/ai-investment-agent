@@ -106,9 +106,10 @@ ALLOWLIST: dict[str, str] = {
         "(10.0, src/llm_runtime/seats.py), which always sets it; legacy path only"
     ),
     # Not on the analysis path, or not a deadline at all.
-    "src/eval/git_meta.py::_git_output::run(timeout)": (
-        "local git subprocess for eval provenance metadata: no network, not on "
-        "the analysis path; a setting would be dead tuning surface"
+    "src/eval/git_meta.py::_git_output::run_program_sync(timeout)": (
+        "local git subprocess for provenance metadata (the run fingerprint "
+        "reads it once per process): no network; a setting would be dead "
+        "tuning surface"
     ),
     "src/ibkr/analysis_index.py::load_latest_analyses._heartbeat_worker::wait(timeout)": (
         "Event.wait used as a 30 s heartbeat interval (a polling cadence, "

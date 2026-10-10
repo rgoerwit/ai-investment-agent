@@ -258,13 +258,13 @@ def _mcp_wrapper_available(
     )
 
 
-def _classify_mcp_blocked_result(result: ToolResult) -> tuple[str, str]:
-    """Map a blocked hook result onto a stable wrapper-facing failure shape."""
-    message = result.value if isinstance(result.value, str) else "TOOL_BLOCKED"
-    normalized = message.lower()
-    if "budget exhausted" in normalized:
-        return "budget", message
-    return "inspection_blocked", message
+def _mcp_blocked_message(result: ToolResult) -> str:
+    """The wrapper-facing error of a hook-blocked call (policy or inspection).
+
+    Budget exhaustion is not a hook block: the MCP runtime raises it as an
+    ``MCPCallError`` of category ``budget``.
+    """
+    return result.value if isinstance(result.value, str) else "TOOL_BLOCKED"
 
 
 def _build_mcp_text_payload(
@@ -649,14 +649,13 @@ async def spot_check_metric_mcp_fmp(
         )
 
     if result.blocked:
-        failure_kind, error = _classify_mcp_blocked_result(result)
         return _build_mcp_access_failure(
             ticker=ticker,
             key="metric",
             lookup=metric,
             provider="fmp",
-            error=error,
-            failure_kind=failure_kind,
+            error=_mcp_blocked_message(result),
+            failure_kind="inspection_blocked",
             retryable=False,
             source="fmp_mcp",
         )

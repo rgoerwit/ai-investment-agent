@@ -3,8 +3,8 @@
 
 Bypasses the consultant agent's discretion and calls
 ``spot_check_metric_mcp_fmp`` directly through the full hook chain (audit,
-argument-policy, content-inspection, MCPBudgetHook) under the canonical
-``mcp__<server>__<tool>`` name. Use this any time the question is "is the
+argument-policy, content-inspection) and the MCP runtime's call budget,
+under the canonical ``mcp__<server>__<tool>`` name. Use this any time the question is "is the
 MCP integration actually moving bytes?" — the answer arrives in ~5s and is
 deterministic (no LLM in the loop).
 

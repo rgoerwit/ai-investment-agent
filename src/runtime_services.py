@@ -353,7 +353,6 @@ def build_runtime_services_from_config(
     mcp_runtime = None
     if getattr(config, "mcp_enabled", False):
         try:
-            from src.mcp.budget import MCPBudgetHook
             from src.mcp.client import MCPRuntime
             from src.mcp.config import load_registry
 
@@ -365,7 +364,6 @@ def build_runtime_services_from_config(
                 servers=servers,
                 budget_db_path=str(config.mcp_usage_db_path),
             )
-            hooks.append(MCPBudgetHook(mcp_runtime))
             if logger is not None:
                 # Report what is *usable*, not what is merely enabled: a server
                 # whose credential is absent is skipped and offers no tools, and

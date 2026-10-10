@@ -60,6 +60,12 @@ blocking call to it. Work inside a hard cap sizes against a deadline kept back
 by `deadline_margin(cap)`: equal timers race, and the cap's cancellation would
 replace the work's own typed timeout.
 
+**Start every child process through `src/subprocesses.py`.** Anywhere else it
+forks (a bare name, `close_fds=True` or `cwd=` each force it), and `fork()` in this
+threaded process can crash in Network.framework's atfork handler. The helper
+also kills and reaps on every abnormal exit. `tests/architecture/test_subprocess_spawns.py`
+enforces it.
+
 **No literal deadline at an execution boundary.** A number passed to
 `timeout=`, `*_timeout_seconds=`, `ClientTimeout`, `BlockingCallPolicy` or
 `wait_for` belongs in a `Settings` field, clamped to the caller's deadline.

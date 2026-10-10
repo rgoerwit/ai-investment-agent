@@ -577,8 +577,9 @@ wrapper, which only delayed cancellation by a loop turn; the node keeps the
   the orphaned chain running, and `EvidenceRecorder` is the last `after()` hook.
   The chain therefore re-checks the deadline before every `after()` hook and
   stops once it is spent, so the ledger never records what the caller was told
-  timed out. The cost: in that same race an `MCPBudgetHook.after` can miss
-  counting a call whose quota the vendor did consume.
+  timed out. That race is why MCP budget accounting moved out of the hook
+  chain (round 3): `MCPRuntime` now counts each tools/call as it is sent, so a
+  discarded result is still counted (`docs/MCP.md`, Budget interaction).
 - **`run_with_hard_timeout` returns on time even when a hook ignores
   cancellation**, because it never awaits the cancelled task. It cannot help a
   hook that blocks the event loop synchronously, and it does not stop the
@@ -721,7 +722,24 @@ unreaped. Now every abnormal exit kills it and reaps it from a separate task
 behind `asyncio.shield`, bounded by `SUBPROCESS_CLEANUP_TIMEOUT_SECONDS`; a
 second cancellation interrupts only the wait, and a reap that outlives the
 bound continues detached, held in `_PENDING_REAPS`, its failure logged by a
-done-callback rather than left as "Task exception was never retrieved". The ownership tool's 8 s yfinance properties
+done-callback rather than left as "Task exception was never retrieved".
+
+**Every child starts on the posix_spawn path (October 2026, round 3).** CPython
+uses `posix_spawn` only for an absolute executable with `close_fds=False` and
+no `cwd`, `start_new_session` or `preexec_fn`; anything else is
+`fork()` + `exec()`. In the analysis process, threaded and with Apple's
+Network.framework loaded by gRPC, `fork()` runs that framework's atfork
+handler and can crash the child before `exec` (the macOS crash dialogs
+`_apply_macos_fork_safety_env` in `src/config.py` mitigates). Two production
+children forked: pdftotext (`close_fds` defaulted to True) and the run
+fingerprint's git probe (a bare `git` and `cwd=`). Both now start in
+`src/subprocesses.py`, which owns the spawn configuration and the kill-and-reap
+cleanup above; git takes `-C <dir>` instead of `cwd=`.
+`tests/architecture/test_subprocess_spawns.py` fails on any spawn elsewhere in
+`src/`, resolving module aliases and imported names. Left as they are: the
+pre-commit guards in `scripts/` (single-threaded, stdlib-only) and the mcp
+SDK's own stdio-server spawn, which needs `start_new_session` to kill the
+server's process tree (every registry server is streamable HTTP). The ownership tool's 8 s yfinance properties
 (`src/tools/ownership.py`), StockTwits' 10 s HTTP (`src/stocktwits_api.py`) and
 the retrospective's 15 s yfinance fetch are market-data reads and sit in that
 block. The ddgs warm-up `DDGS(timeout=1)` runs at import, with no

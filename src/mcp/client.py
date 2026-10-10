@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-import json
 from contextlib import asynccontextmanager
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 import httpx2
 import structlog
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
-from mcp.types import REQUEST_TIMEOUT, CallToolResult, ListToolsResult
+from mcp.types import REQUEST_TIMEOUT, CallToolResult, PaginatedRequestParams
 
 from src.config import config as settings_config
 from src.llm_runtime import timeouts as llm_timeouts
@@ -22,7 +21,6 @@ from src.llm_runtime.timeouts import (
 )
 from src.mcp.auth import MCPCredentialMissing, MCPResolvedServer, resolve_auth
 from src.mcp.budget import BudgetTracker
-from src.mcp.catalog import ToolCatalog, ToolDescriptor
 from src.mcp.config import MCPServerSpec
 from src.mcp.errors import (
     HTTPErrorRecord,
@@ -31,8 +29,6 @@ from src.mcp.errors import (
     classify_mcp_error,
 )
 from src.mcp.normalize import normalize_result
-from src.tooling.inspection_service import INSPECTION_SERVICE
-from src.tooling.inspector import InspectionDecision, InspectionEnvelope, SourceKind
 
 logger = structlog.get_logger(__name__)
 
@@ -61,8 +57,42 @@ def _spent_allowance_error(
     )
 
 
-def _retry_refused_error(err: MCPCallError, *, backoff_seconds: float) -> MCPCallError:
-    """``err`` (sent, then failed), marked as a retry the deadline refused.
+def _budget_exhausted_error(server_id: str, tool_name: str) -> MCPCallError:
+    """The server's per-run or daily call budget is spent; nothing was sent."""
+    return MCPCallError(
+        message=f"MCP budget exhausted for {server_id}",
+        category=MCPErrorCategory.BUDGET,
+        server_id=server_id,
+        tool_name=tool_name,
+    )
+
+
+def _tool_not_listed_error(server_id: str, tool_name: str) -> MCPCallError:
+    """The server does not offer ``tool_name``: a registry error, so never sent.
+
+    Sent anyway, the SDK would re-list after the call to look for its output
+    schema, under the session's handshake bound, and then skip validation.
+    """
+    return MCPCallError(
+        message=f"MCP tool {tool_name!r} is not offered by {server_id}",
+        category=MCPErrorCategory.CONFIG,
+        server_id=server_id,
+        tool_name=tool_name,
+        details={"refused": "tool_not_listed"},
+    )
+
+
+_RetryRefusal = Literal["deadline", "budget"]
+_RETRY_REFUSAL_REASONS: dict[_RetryRefusal, str] = {
+    "deadline": "deadline leaves no room",
+    "budget": "call budget exhausted",
+}
+
+
+def _retry_refused_error(
+    err: MCPCallError, *, backoff_seconds: float, reason: _RetryRefusal
+) -> MCPCallError:
+    """``err`` (sent, then failed), marked as a retry the deadline or budget refused.
 
     The attempt's own classification is kept -- category, HTTP status, JSON-RPC
     code -- so a 429 still reads as one. ``details.retry`` records that the
@@ -70,7 +100,7 @@ def _retry_refused_error(err: MCPCallError, *, backoff_seconds: float) -> MCPCal
     be refused the same way.
     """
     return MCPCallError(
-        message=f"{err.message} (retry refused: deadline leaves no room)",
+        message=f"{err.message} (retry refused: {_RETRY_REFUSAL_REASONS[reason]})",
         category=err.category,
         server_id=err.server_id,
         tool_name=err.tool_name,
@@ -80,7 +110,7 @@ def _retry_refused_error(err: MCPCallError, *, backoff_seconds: float) -> MCPCal
         retry_after_seconds=err.retry_after_seconds,
         details={
             **err.details,
-            "retry": "refused_deadline",
+            "retry": f"refused_{reason}",
             "backoff_seconds": backoff_seconds,
         },
     )
@@ -100,21 +130,45 @@ def _mcp_allowance(default_seconds: float, *, label: str, server_id: str) -> flo
     return seconds
 
 
+async def _lists_tool(session: ClientSession, tool_name: str) -> bool:
+    """Whether the server lists ``tool_name``, following its cursor until it does.
+
+    Stops at the page that names the tool, at the last page, or at a cursor
+    the server repeats; the caller's time bound covers the rest.
+    """
+    seen: set[str] = set()
+    cursor: str | None = None
+    while True:
+        page = await session.list_tools(
+            params=None if cursor is None else PaginatedRequestParams(cursor=cursor)
+        )
+        if any(tool.name == tool_name for tool in page.tools):
+            return True
+        cursor = page.next_cursor
+        if cursor is None or cursor in seen:
+            return False
+        seen.add(cursor)
+
+
 async def _list_tools_in_time(
-    session: ClientSession, *, server_id: str, tool_name: str | None = None
-) -> ListToolsResult | MCPCallError:
-    """The server's tool listing within the time left, or the error to raise.
+    session: ClientSession, *, server_id: str, tool_name: str
+) -> MCPCallError | None:
+    """List the server's tools until ``tool_name`` appears, within the time left.
 
-    Runs inside the session body. The public ``list_tools()`` is called as is:
-    it is what drops tools with an invalid ``x-mcp-header`` annotation and
-    caches the output schemas and header maps a later ``call_tool`` uses. It
-    takes no per-request timeout, and the session's read timeout was fixed
-    when the session opened, before the handshake spent part of the
-    allowance, so it is bounded here by what is left now.
+    None when the tool is listed; otherwise the error to raise -- the tool is
+    not offered, the allowance is spent, or the bound expired. Runs inside the
+    session body. The public ``list_tools()`` is called as is: it caches the
+    output schema the SDK validates a result against (listed first, the SDK
+    never re-lists after the call) and, on a 2026-07-28 session only, drops
+    tools with an invalid ``x-mcp-header`` annotation. ``initialize()``
+    negotiates a legacy version, where that filter is inert. It takes no
+    per-request timeout, and the session's read timeout was fixed when the
+    session opened, before the handshake spent part of the allowance, so
+    every page is bounded here by what is left now.
 
-    A spent allowance or an expired bound is *returned*: the caller lets the
-    SDK contexts exit normally and raises it outside them, where the SDK's task
-    groups cannot wrap it. External cancellation propagates.
+    The error is *returned*: the caller lets the SDK contexts exit normally
+    and raises it outside them, where the SDK's task groups cannot wrap it.
+    External cancellation propagates.
     """
     remaining = clamp_to_operational_deadline(
         settings_config.mcp_initialize_timeout_seconds
@@ -126,7 +180,8 @@ async def _list_tools_in_time(
     bound = asyncio.timeout(remaining)
     try:
         async with bound:
-            return await session.list_tools()
+            listed = await _lists_tool(session, tool_name)
+        return None if listed else _tool_not_listed_error(server_id, tool_name)
     except TimeoutError:
         if not bound.expired():
             raise
@@ -144,7 +199,12 @@ async def _list_tools_in_time(
 
 
 class MCPRuntime:
-    """Run MCP tool calls against configured servers with inspection and budgeting."""
+    """Run MCP tool calls against configured servers, within their call budgets.
+
+    The runtime admits every attempt against the budget and counts every
+    tools/call it sends, whatever happens after: a request the vendor received
+    costs quota even when it times out, fails, or its result is discarded.
+    """
 
     def __init__(self, servers: list[MCPServerSpec], budget_db_path: str) -> None:
         self._specs = {spec.id: spec for spec in servers}
@@ -168,9 +228,7 @@ class MCPRuntime:
             if resolved is not None:
                 self._resolved[spec.id] = resolved
 
-        self._catalog = ToolCatalog()
         self._budget = BudgetTracker(budget_db_path)
-        self._inspection_service = INSPECTION_SERVICE
         self._cooldowns: dict[str, dt.datetime] = {}
 
     @property
@@ -374,8 +432,8 @@ class MCPRuntime:
             duration = err.retry_after_seconds or _DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
             self._register_cooldown(err.server_id, duration_seconds=duration)
 
-    @staticmethod
     async def _call_in_time(
+        self,
         session: ClientSession,
         spec: MCPServerSpec,
         tool_name: str,
@@ -387,15 +445,16 @@ class MCPRuntime:
         validates a result against the tool's output schema and, in a fresh
         session, lists the tools *after* the call to fetch it, under the
         session's read timeout fixed at open. Listed first, under the time
-        left, the schema is cached and that post-call request is never sent.
-        A refusal or a timed-out listing is returned, never raised, for the
-        caller to raise once the session has closed normally.
+        left, the schema is cached and that post-call request is never sent;
+        a tool the listing lacks is refused unsent. A refusal or a timed-out
+        listing is returned, never raised, for the caller to raise once the
+        session has closed normally.
         """
-        listing = await _list_tools_in_time(
+        refusal = await _list_tools_in_time(
             session, server_id=spec.id, tool_name=tool_name
         )
-        if isinstance(listing, MCPCallError):
-            return listing
+        if refusal is not None:
+            return refusal
         # Resolved now, so opening the session and listing count against the
         # deadline. Explicit, because the call would otherwise inherit the
         # session's handshake bound.
@@ -406,12 +465,23 @@ class MCPRuntime:
             return _spent_allowance_error(
                 "mcp_tool_call", server_id=spec.id, tool_name=tool_name
             )
+        # Counted as it is sent, never on the outcome: a call that then times
+        # out, fails or is discarded by the tool plane still cost quota.
+        self._budget.record_upstream_consumption(spec.id)
         result: CallToolResult = await session.call_tool(
             tool_name, arguments, read_timeout_seconds=call_timeout
         )
         return result
 
-    def _refuse_retry(self, err: MCPCallError, *, backoff_seconds: float) -> NoReturn:
+    def _budget_allows(self, spec: MCPServerSpec, tool_name: str) -> bool:
+        if self._budget.can_call(spec.id, spec):
+            return True
+        logger.warning("mcp_budget_exhausted", server_id=spec.id, tool=tool_name)
+        return False
+
+    def _refuse_retry(
+        self, err: MCPCallError, *, backoff_seconds: float, reason: _RetryRefusal
+    ) -> NoReturn:
         """Raise ``err`` as a refused retry; its own cooldown still registers."""
         self._on_call_failure(err)
         logger.info(
@@ -420,8 +490,11 @@ class MCPRuntime:
             tool_name=err.tool_name,
             category=err.category.value,
             backoff_seconds=backoff_seconds,
+            reason=reason,
         )
-        raise _retry_refused_error(err, backoff_seconds=backoff_seconds) from err
+        raise _retry_refused_error(
+            err, backoff_seconds=backoff_seconds, reason=reason
+        ) from err
 
     async def _execute_with_retry(
         self,
@@ -429,6 +502,9 @@ class MCPRuntime:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> CallToolResult:
+        # Admitted before any session opens; a retry is admitted again below.
+        if not self._budget_allows(spec, tool_name):
+            raise _budget_exhausted_error(spec.id, tool_name)
         last_err: MCPCallError | None = None
         for attempt in range(_MAX_RETRY_ATTEMPTS):
             try:
@@ -457,6 +533,9 @@ class MCPRuntime:
                 self._on_call_failure(last_err)
                 raise last_err
 
+            if not self._budget_allows(spec, tool_name):
+                self._refuse_retry(last_err, backoff_seconds=0.0, reason="budget")
+
             rate_limited = last_err.retry_after_seconds is not None
             backoff = min(
                 float(
@@ -478,72 +557,17 @@ class MCPRuntime:
                 rate_limited=rate_limited,
             )
             if wait is None:
-                self._refuse_retry(last_err, backoff_seconds=backoff)
+                self._refuse_retry(last_err, backoff_seconds=backoff, reason="deadline")
             else:
                 await asyncio.sleep(wait)
             # Re-checked after the sleep: it may overrun, and the next attempt
             # must not open a session it cannot use.
             if operational_time_left() < minimum:
-                self._refuse_retry(last_err, backoff_seconds=backoff)
+                self._refuse_retry(last_err, backoff_seconds=backoff, reason="deadline")
 
         if last_err is not None:  # pragma: no cover - safety
             raise last_err
         raise RuntimeError("unreachable retry exit")
-
-    async def _inspect(
-        self,
-        normalized: dict[str, Any],
-        *,
-        spec: MCPServerSpec,
-        tool_name: str,
-        agent_key: str | None,
-    ) -> tuple[InspectionDecision, Any]:
-        envelope = InspectionEnvelope(
-            content_text=json.dumps(normalized, default=str),
-            raw_content=normalized,
-            source_kind=SourceKind.mcp_tool_output,
-            source_name=spec.id,
-            tool_name=tool_name,
-            agent_key=agent_key,
-            metadata={
-                "transport": spec.transport,
-                "trust_tier": spec.trust_tier,
-                "payload_profile": normalized.get("payload_profile", "free_text"),
-            },
-        )
-        return await self._inspection_service.evaluate(envelope)
-
-    async def list_tools_for_scope(self, scope: str) -> list[ToolDescriptor]:
-        descriptors: list[ToolDescriptor] = []
-        for spec in self._specs.values():
-            if not spec.enabled or not spec.supports_scope(scope):
-                continue
-
-            async with self._open_session(spec) as session:
-                listing = await _list_tools_in_time(session, server_id=spec.id)
-            # Raised outside the session, which has closed normally.
-            if isinstance(listing, MCPCallError):
-                raise listing
-            tool_result: ListToolsResult = listing
-
-            server_tools = [
-                ToolDescriptor(
-                    server_id=spec.id,
-                    name=tool.name,
-                    description=tool.description or "",
-                    input_schema=tool.input_schema,
-                    output_schema=tool.output_schema,
-                )
-                for tool in tool_result.tools
-            ]
-            self._catalog.update(spec.id, server_tools)
-            descriptors.extend(
-                self._catalog.list_for_server(
-                    spec.id,
-                    allowlist=spec.tool_allowlist,
-                )
-            )
-        return descriptors
 
     async def execute_raw(
         self,
@@ -556,88 +580,17 @@ class MCPRuntime:
     ) -> dict[str, Any]:
         """Execute an MCP tool and return the normalized payload.
 
-        Performs config/scope/allowlist/cooldown checks and an N-attempt retry
-        on retryable transport errors. Does **not** record budget consumption
-        or run content inspection — those are the responsibility of the
-        ``ToolExecutionService`` hook chain when MCP calls are routed through
-        it.
+        Performs config/scope/allowlist/cooldown checks, admits each attempt
+        against the call budget, counts each tools/call sent, and retries a
+        retryable transport error. It does **not** inspect content: run it as
+        the runner of a ``ToolExecutionService`` call, whose hooks do.
 
-        ``agent_key`` is accepted for symmetry with :meth:`call_tool` but is
-        not used here; observability metadata travels via the surrounding
-        :class:`ToolInvocation` instead.
+        ``agent_key`` is accepted from callers but not used here; observability
+        metadata travels via the surrounding :class:`ToolInvocation` instead.
         """
-        del agent_key  # future hooks may consume; current path does not need it
+        del agent_key
         spec = self._get_spec(server_id)
         self._require_access(spec, scope=scope)
         self._require_tool_allowed(spec, tool_name)
         result = await self._execute_with_retry(spec, tool_name, arguments)
         return normalize_result(result, server_id=server_id, tool_name=tool_name)
-
-    async def call_tool(
-        self,
-        server_id: str,
-        tool_name: str,
-        arguments: dict[str, Any],
-        *,
-        agent_key: str | None = None,
-        scope: str | None = None,
-    ) -> dict[str, Any]:
-        """Convenience entry point that bundles budget, retry, and inspection.
-
-        Prefer routing through :class:`ToolExecutionService` with
-        :meth:`execute_raw` as the runner so audit/argument-policy/content-
-        inspection hooks observe MCP calls under their canonical
-        ``mcp__<server>__<tool>`` tool names.
-        """
-        spec = self._get_spec(server_id)
-        self._require_access(spec, scope=scope)
-        self._require_tool_allowed(spec, tool_name)
-
-        if not self._budget.can_call(server_id, spec):
-            raise MCPCallError(
-                message=f"MCP budget exhausted for {server_id}",
-                category=MCPErrorCategory.BUDGET,
-                server_id=server_id,
-                tool_name=tool_name,
-            )
-
-        result = await self._execute_with_retry(spec, tool_name, arguments)
-        normalized = normalize_result(result, server_id=server_id, tool_name=tool_name)
-
-        decision, approved_content = await self._inspect(
-            normalized,
-            spec=spec,
-            tool_name=tool_name,
-            agent_key=agent_key,
-        )
-
-        if decision.action in ("block", "degrade"):
-            self._budget.record_upstream_consumption(server_id)
-            raise MCPCallError(
-                message="MCP content blocked by inspection",
-                category=MCPErrorCategory.INSPECTION,
-                server_id=server_id,
-                tool_name=tool_name,
-                details={"decision": decision.action},
-            )
-
-        if normalized.get("is_error"):
-            self._budget.record_upstream_consumption(server_id)
-            raise MCPCallError(
-                message="MCP tool returned an error payload",
-                category=MCPErrorCategory.TOOL_ERROR,
-                server_id=server_id,
-                tool_name=tool_name,
-                details=normalized,
-            )
-
-        self._budget.record_upstream_consumption(server_id)
-        if isinstance(approved_content, dict):
-            return approved_content
-        return {
-            "server": server_id,
-            "tool": tool_name,
-            "payload_profile": "free_text",
-            "text_content": str(approved_content),
-            "is_error": False,
-        }

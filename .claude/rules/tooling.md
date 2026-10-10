@@ -10,10 +10,14 @@ paths:
 ## Everything goes through the hook plane
 
 Tool execution runs through `ToolExecutionService`, which is where audit logging,
-argument policy, content inspection and budget enforcement all attach. A tool that
-bypasses it gets none of them. MCP calls are no exception: they execute under a
-canonical name through the same service, which is what puts them under inspection and
-budget at one chokepoint.
+argument policy and content inspection attach. A tool that bypasses it gets none of
+them. MCP calls are no exception: they execute under a canonical name through the
+same service, which is what puts them under inspection at one chokepoint.
+
+**Count a sent request where it is sent, never in an `after()` hook.** `after()`
+runs only for a runner that succeeded with time left, so quota a vendor consumed
+on a timeout, failure or discarded result went uncounted. `MCPRuntime` admits
+each attempt (`can_call`) and records each tools/call as it is sent.
 
 Services resolve through a ContextVar with module singletons as fallback. Tests bind
 scoped services rather than mutating the globals.
@@ -46,7 +50,10 @@ client `timeout=`, `ClientSession(read_timeout_seconds=)` and
 `call_tool(read_timeout_seconds=)`. Pass the call's bound explicitly, or it inherits
 the handshake bound. The one wrapper is `asyncio.timeout(time left)` around the
 public `list_tools()`, which has no per-request bound; never swap it for
-`send_request`, which skips `_absorb_tool_listing`. Size every step and the retry
+`send_request`, which skips `_absorb_tool_listing` and so the output-schema cache
+(the `x-mcp-header` filter there is inert: `initialize()` negotiates only legacy
+versions). Never send a call for a tool the listing lacks, or the SDK re-lists
+after it under the stale session bound: refuse it (`tool_not_listed`). Size every step and the retry
 backoff with the operational readers, so the runner's deadline counts. Return a refusal or timeout from the session body and
 raise it outside: inside, the SDK's task groups wrap it and `classify_mcp_error`
 loses its category. See `docs/MCP.md`.
