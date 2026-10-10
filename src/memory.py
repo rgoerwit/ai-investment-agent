@@ -12,17 +12,19 @@ This module provides vector-based memory storage for financial debate history,
 allowing agents to learn from past analyses and decisions.
 """
 
+import asyncio
 import re
 import threading
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any, cast
 
 import structlog
 from tenacity import (
+    RetryCallState,
     retry,
     retry_if_exception_type,
     retry_if_not_exception_type,
-    stop_after_attempt,
     wait_exponential,
 )
 
@@ -40,7 +42,7 @@ from src.error_safety import (
     safe_error_payload,
     summarize_exception,
 )
-from src.llm_runtime.timeouts import clamp_to_enclosing_deadline
+from src.llm_runtime import timeouts as llm_timeouts
 from src.runtime_diagnostics import classify_failure
 from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
@@ -79,12 +81,19 @@ def _record_capture_memory_event(payload: dict[str, Any]) -> None:
 
 
 class EmbeddingAllowanceSpent(TimeoutError):
-    """The caller's enclosing deadline passed before an embedding attempt began.
+    """Less than a useful embedding attempt was left before the caller's deadline.
 
-    A ``TimeoutError``, so callers that already treat an embedding timeout as
+    Raised before a rate-limiter token is taken or a request created. A
+    ``TimeoutError``, so callers that already treat an embedding timeout as
     "no memory" handle it unchanged. Excluded from the tenacity retry: a spent
     deadline stays spent, so a retry could only add backoff sleeps.
     """
+
+
+# Total embedding attempts, and the backoff between them before it is clamped
+# to the caller's enclosing deadline (``_embedding_retry_sleep``).
+_EMBEDDING_ATTEMPTS = 3
+_EMBEDDING_BACKOFF = wait_exponential(multiplier=1, min=2, max=10)
 
 
 def _embedding_healthcheck_timeout() -> float:
@@ -98,20 +107,74 @@ def _embedding_healthcheck_timeout() -> float:
     return config_module.config.memory_embedding_healthcheck_timeout_seconds
 
 
-def _embedding_call_timeout(collection: str) -> float:
-    """One embedding attempt's bound, clamped to the caller's enclosing deadline.
+def _embedding_min_useful_seconds() -> float:
+    return config_module.config.memory_embedding_min_useful_seconds
 
-    Raises ``EmbeddingAllowanceSpent`` when the caller's allowance is already
-    spent, before any request is created.
+
+def _embedding_call_timeout(collection: str) -> float:
+    """One embedding attempt's allowance, clamped to the caller's enclosing deadline.
+
+    Covers the rate-limiter wait and the request together. Raises
+    ``EmbeddingAllowanceSpent`` when less than the embedding minimum is left
+    before the enclosing deadline, before any token is taken or request created.
     """
-    seconds = clamp_to_enclosing_deadline(
+    minimum = _embedding_min_useful_seconds()
+    enclosing = llm_timeouts.current_enclosing_deadline()
+    # A zero wait is admitted exactly when a useful attempt still fits: the same
+    # rule the retry stop applies, so the two cannot disagree.
+    if llm_timeouts.wait_allowance(enclosing, 0.0, minimum=minimum) is None:
+        raise EmbeddingAllowanceSpent(
+            f"memory_embedding:{collection}: less than {minimum:g}s left "
+            "before the enclosing deadline"
+        )
+    return llm_timeouts.clamp_to_enclosing_deadline(
         config_module.config.memory_embedding_call_timeout_seconds
     )
-    if seconds <= 0:
-        raise EmbeddingAllowanceSpent(
-            f"memory_embedding:{collection}: enclosing deadline already passed"
-        )
-    return seconds
+
+
+def _embedding_retry_sleep(retry_state: RetryCallState) -> float | None:
+    """The backoff before the next embedding attempt, or None when none fits.
+
+    Clamped so that the embedding minimum is still left before the caller's
+    enclosing deadline when it ends; with no deadline bound, unclamped.
+    """
+    return llm_timeouts.wait_allowance(
+        llm_timeouts.current_enclosing_deadline(),
+        _EMBEDDING_BACKOFF(retry_state),
+        minimum=_embedding_min_useful_seconds(),
+    )
+
+
+def _embedding_retry_wait(retry_state: RetryCallState) -> float:
+    sleep = _embedding_retry_sleep(retry_state)
+    return 0.0 if sleep is None else sleep
+
+
+def _embedding_retry_stop(retry_state: RetryCallState) -> bool:
+    return (
+        retry_state.attempt_number >= _EMBEDDING_ATTEMPTS
+        or _embedding_retry_sleep(retry_state) is None
+    )
+
+
+def _resolve_embedding_rate_limiter() -> Callable[..., Awaitable[Any]]:
+    """The shared limiter's ``aacquire``, resolved before any wait or request.
+
+    Raises when no limiter can be had (import, construction, or a limiter with
+    no async acquire). That is the only case the caller sends unthrottled: a
+    failure of the wait or the request is the attempt's error, never a reason
+    to send again.
+    """
+    from src.llms import GLOBAL_RATE_LIMITER
+
+    limiter: Any = GLOBAL_RATE_LIMITER
+    # Checked on the type: the lazy proxy forwards unknown attributes.
+    if callable(getattr(type(limiter), "resolve", None)):
+        limiter = limiter.resolve()
+    acquire = getattr(limiter, "aacquire", None)
+    if not callable(acquire):
+        raise TypeError(f"{type(limiter).__name__} has no async acquire")
+    return cast(Callable[..., Awaitable[Any]], acquire)
 
 
 def _is_missing_collection_error(exc: Exception) -> bool:
@@ -367,16 +430,22 @@ class FinancialSituationMemory:
             return None
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=_embedding_retry_stop,
+        wait=_embedding_retry_wait,
         retry=(
             retry_if_exception_type(Exception)
             & retry_if_not_exception_type(EmbeddingAllowanceSpent)
         ),
+        reraise=True,
     )
     async def _get_embedding(self, text: str) -> list[float]:
         """
         Get embedding vector for text with retry logic.
+
+        Each attempt has one absolute deadline covering the rate-limiter wait
+        and the request. Retries back off only as far as the caller's enclosing
+        deadline leaves room for another useful attempt; the last attempt's
+        error is re-raised.
 
         Args:
             text: Text to embed (will be truncated to 9000 chars)
@@ -393,37 +462,23 @@ class FinancialSituationMemory:
         # Truncate text to avoid token limits
         truncated_text = text[:9000]
 
-        # A spent caller deadline fails here, before a rate-limiter token is
-        # taken or a request created.
-        _embedding_call_timeout(self.name)
+        # Admission first: a spent caller deadline fails here, before a
+        # rate-limiter token is taken or a request created.
+        attempt_deadline = llm_timeouts.now() + _embedding_call_timeout(self.name)
 
-        # Import rate limiter here to avoid circular dependency
-        # Use rate limiter to share RPM quota with LLM calls
+        # Setup: whether a limiter exists is decided here, before the wait.
+        # Only its absence sends unthrottled; an error from the wait or the
+        # request below is this attempt's error and is never re-sent directly.
+        acquire: Callable[..., Awaitable[Any]] | None
         try:
-            from src.llms import GLOBAL_RATE_LIMITER
-
-            async with GLOBAL_RATE_LIMITER:
-                # Re-resolved after the limiter wait, before the request.
-                timeout = _embedding_call_timeout(self.name)
-                embedding = await run_with_hard_timeout(
-                    self.embeddings.aembed_query(truncated_text),
-                    timeout=timeout,
-                    label=f"memory_embedding:{self.name}",
-                )
-        except EmbeddingAllowanceSpent:
-            raise
+            acquire = _resolve_embedding_rate_limiter()
         except Exception as exc:
-            # Fallback if rate limiter not available or incompatible (e.g., in tests)
-            # Catch all exceptions to handle import errors, attribute errors, type errors, etc.
+            acquire = None
             details = classify_failure(
                 exc,
                 provider=self.embedding_binding.provider,
                 model_name=self.embedding_binding.model,
-                class_name=(
-                    type(self.embeddings).__name__
-                    if self.embeddings is not None
-                    else None
-                ),
+                class_name=type(self.embeddings).__name__,
             )
             logger.warning(
                 "embedding_rate_limiter_fallback",
@@ -438,12 +493,30 @@ class FinancialSituationMemory:
                 error_message=details.message,
                 fallback="direct_embed_query",
             )
-            timeout = _embedding_call_timeout(self.name)
-            embedding = await run_with_hard_timeout(
-                self.embeddings.aembed_query(truncated_text),
-                timeout=timeout,
-                label=f"memory_embedding_fallback:{self.name}",
+
+        if acquire is not None:
+            # The limiter shares the RPM quota with LLM calls. Its wait is
+            # cancellable: a cancelled token-bucket sleep takes no token.
+            try:
+                async with asyncio.timeout(attempt_deadline - llm_timeouts.now()):
+                    await acquire(blocking=True)
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"memory_embedding:{self.name}: rate-limiter wait outlasted "
+                    "the attempt deadline"
+                ) from exc
+
+        remaining = attempt_deadline - llm_timeouts.now()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"memory_embedding:{self.name}: attempt deadline passed before "
+                "the request"
             )
+        embedding = await run_with_hard_timeout(
+            self.embeddings.aembed_query(truncated_text),
+            timeout=remaining,
+            label=f"memory_embedding:{self.name}",
+        )
 
         if not embedding or len(embedding) == 0:
             raise ValueError("Empty embedding returned")

@@ -60,6 +60,7 @@ SHIPPED_DEFAULTS = {
     "health_check_connectivity_timeout_seconds": 15.0,
     "memory_embedding_healthcheck_timeout_seconds": 15.0,
     "memory_embedding_call_timeout_seconds": 30.0,
+    "memory_embedding_min_useful_seconds": 1.0,
     "genai_client_close_timeout_seconds": 2.0,
     "langfuse_flush_timeout_seconds": 2.0,
 }
@@ -187,11 +188,8 @@ def isolated_memory_state():
 
 
 class _InstantLimiter:
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
+    async def aacquire(self, *, blocking: bool = True) -> bool:
+        return True
 
 
 def _bare_memory(monkeypatch, embeddings: Any) -> FinancialSituationMemory:
@@ -215,7 +213,10 @@ def _fast_embeddings() -> Any:
 
 
 @pytest.mark.asyncio
-async def test_embedding_call_override_reaches_the_request_wait(monkeypatch):
+async def test_embedding_call_override_reaches_the_request_wait(
+    monkeypatch, fake_clock
+):
+    # Frozen clock: the request gets what is left of the attempt's deadline.
     memory = _bare_memory(monkeypatch, _fast_embeddings())
     monkeypatch.setattr(config, "memory_embedding_call_timeout_seconds", 12.5)
     seen = _spy_hard_timeout(monkeypatch, memory_module, result=[0.1] * 8)

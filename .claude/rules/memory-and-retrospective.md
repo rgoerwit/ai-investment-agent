@@ -34,6 +34,12 @@ memory tests replace `src.memory.config` with a mock. Clamp only the per-request
 bound to a caller's enclosing deadline. Never clamp the startup probe, whose failure
 is cached for the process. See `docs/CODEBASE_MEMORY.md`.
 
+One deadline per attempt covers the rate-limiter wait and the request. Fall back to
+an unthrottled request **only** when no limiter exists at setup — never after an
+error or timeout from the wait or the request, which would send the request twice.
+Keep the embedding SDKs at one retry layer: OpenAI `max_retries=0`; Google's aiohttp
+path still re-sends once on a connection error, inside the attempt deadline.
+
 ## The retrospective may not adjudicate the thesis
 
 Excess return is price minus benchmark. That says only what the country index does not

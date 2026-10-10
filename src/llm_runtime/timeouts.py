@@ -462,9 +462,34 @@ def retry_wait_allowance(
     rate-limit backoff is not clamped -- sleeping less than the provider asked
     is a wasted request -- so it is refused instead.
     """
+    return wait_allowance(
+        enclosing,
+        wait,
+        minimum=policy.min_useful_attempt,
+        margin=policy.margin,
+        rate_limited=rate_limited,
+        clock=clock,
+    )
+
+
+def wait_allowance(
+    enclosing: float | None,
+    wait: float,
+    *,
+    minimum: float,
+    margin: float = 0.0,
+    rate_limited: bool = False,
+    clock: Any = None,
+) -> float | None:
+    """``retry_wait_allowance`` for a retry loop with no ``BudgetPolicy``.
+
+    The same rule, with the minimum useful attempt and margin passed directly:
+    sleep at most until ``minimum + margin`` is left before ``enclosing``, or
+    return None when even that does not fit. The memory embedding retry uses it.
+    """
     if enclosing is None:
         return wait
-    available = enclosing - (clock or now)() - policy.margin - policy.min_useful_attempt
+    available = enclosing - (clock or now)() - margin - minimum
     if available < 0:
         return None
     if rate_limited and available < wait:

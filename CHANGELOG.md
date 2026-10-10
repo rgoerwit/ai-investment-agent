@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the temperature, timeout and attempts it is given, and the writer's configured
   temperature now also reaches the fallback tiers (the provider-scoped Gemini floor
   wrote at 0.1, not the writer's 0.7). `generate_article` is now a coroutine.
+- A memory embedding attempt now has one deadline covering the rate-limiter wait
+  and the request (the wait had no bound, and the request got a fresh
+  `MEMORY_EMBEDDING_CALL_TIMEOUT_SECONDS` after it). The unthrottled fallback is
+  taken only when no rate limiter exists; it no longer re-sends the request after
+  a provider error or timeout. Retry backoff is clamped to the caller's deadline,
+  retries stop when less than the new `MEMORY_EMBEDDING_MIN_USEFUL_SECONDS` (1 s)
+  is left, and the last attempt's own error is raised instead of a `RetryError`.
+  OpenAI embeddings send one SDK attempt per request (was three).
 - A model invoked outside the runtime loop is admitted and sized against an
   enclosing deadline when one is bound; with none, nothing changes.
 - The portfolio manager's macro-event classifier invokes through the runtime loop

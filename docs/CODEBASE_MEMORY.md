@@ -642,10 +642,35 @@ deadline would turn embeddings off for every later caller. The 2 s GenAI client
 close and the 2 s Langfuse flush run on the shutdown path, after any caller
 deadline and inside `SHUTDOWN_HARD_TIMEOUT_SECONDS` (the cleanup half). They
 keep their defaults because they set how long exit can take. Only the 30 s
-embedding request clamps. A spent allowance raises `EmbeddingAllowanceSpent`
-before a rate-limiter token is taken, and tenacity's retry excludes it. Without
-that exclusion, the three-attempt retry would add about 6 s of backoff to a
-deadline that had already passed. The close keeps `asyncio.wait_for`, which is
+embedding attempt clamps. Each attempt gets one absolute deadline that covers
+the rate-limiter wait (`asyncio.timeout` around `aacquire`) and the request
+together; before October 2026 the limiter wait had no bound and the request got
+a fresh 30 s after it. With less than `MEMORY_EMBEDDING_MIN_USEFUL_SECONDS`
+(1 s, a chosen default, not measured) left before the caller's deadline, the
+attempt raises `EmbeddingAllowanceSpent` before a token is taken, and tenacity's
+retry excludes it. Without that exclusion, the three-attempt retry would add
+about 6 s of backoff to a deadline that had already passed. Tenacity's backoff
+is clamped with `wait_allowance` (the policy-free form of
+`retry_wait_allowance`), stops once a useful attempt no longer fits, and
+re-raises the last attempt's own error rather than a `RetryError`.
+
+The unthrottled "fallback" is decided only at setup, when no limiter can be had
+(import, construction, or no async acquire). It used to catch *every* exception
+from the wait or the request, timeouts and provider errors included, and send
+the request again directly, so one attempt could make two requests. The
+physical requests per attempt are pinned at the HTTP layer
+(`tests/memory/test_embedding_attempt_deadline.py`). OpenAI embeddings are built
+with `max_retries=0` (the SDK default of two tripled every attempt). Google's
+GenAI client, with `retry_options` unset, makes one tenacity attempt
+(`retry_args` returns `stop_after_attempt(1)`) and sends no timeout at all, but
+its async path runs on aiohttp whenever aiohttp is installed, and that path
+re-sends once after a connection-level error (`ClientConnectorError`,
+`ClientOSError`, `ServerDisconnectedError`, ...) following a 1-10 s sleep,
+outside `retry_options`. That second send is left in place: the attempt
+deadline cancels it, and enforcing one send would mean replacing the SDK's
+transport. Note the patch point when testing: the OpenAI SDK uses the `httpx2`
+fork, not `httpx`, and Google's async path uses aiohttp, not its httpx client,
+so a fake `httpx` transport sees neither. The close keeps `asyncio.wait_for`, which is
 safe there because `aclose()` is native async I/O, not a parked thread. The
 memory timeouts read the live `src.config.config` rather than `src.memory.config`,
 which about 28 memory tests replace with a `MagicMock`; a mock attribute would

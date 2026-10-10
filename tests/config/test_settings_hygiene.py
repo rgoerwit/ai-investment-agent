@@ -180,6 +180,7 @@ _SETTINGS_ENV_CASES = [
             "health_check_connectivity_timeout_seconds",
             "memory_embedding_healthcheck_timeout_seconds",
             "memory_embedding_call_timeout_seconds",
+            "memory_embedding_min_useful_seconds",
             "genai_client_close_timeout_seconds",
             "langfuse_flush_timeout_seconds",
             "article_workflow_timeout_seconds",

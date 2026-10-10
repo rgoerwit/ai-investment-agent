@@ -74,6 +74,9 @@ def build_embeddings(
         kwargs: dict[str, Any] = {
             "model": binding.model,
             "api_key": settings.openai_api_key,
+            # One SDK attempt per request: the memory embedding retry owns
+            # retries, so the SDK's default two would multiply its attempts.
+            "max_retries": 0,
         }
         if binding.dimension is not None:
             kwargs["dimensions"] = binding.dimension

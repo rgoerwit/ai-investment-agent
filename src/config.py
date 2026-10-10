@@ -1639,6 +1639,17 @@ class Settings(BaseSettings):
             "write, per attempt; shrinks to a caller's enclosing deadline."
         ),
     )
+    memory_embedding_min_useful_seconds: float = Field(
+        default=1.0,
+        gt=0.0,
+        validation_alias="MEMORY_EMBEDDING_MIN_USEFUL_SECONDS",
+        description=(
+            "Least time (seconds) left before a caller's enclosing deadline for "
+            "which an embedding attempt or retry is still made; below it the "
+            "attempt is refused and the retry stops. A chosen default, not a "
+            "measured one. Must be below MEMORY_EMBEDDING_CALL_TIMEOUT_SECONDS."
+        ),
+    )
     genai_client_close_timeout_seconds: float = Field(
         default=2.0,
         gt=0.0,
@@ -2031,6 +2042,26 @@ class Settings(BaseSettings):
                 f"({self.tool_execution_with_inspection_timeout_seconds:g}) must be "
                 "at least TOOL_EXECUTION_TIMEOUT_SECONDS "
                 f"({self.tool_execution_timeout_seconds:g})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_embedding_attempt_scopes(self) -> "Settings":
+        """Reject an embedding minimum at or above the per-attempt allowance.
+
+        The minimum is the floor below which a clamped attempt is not worth
+        making. At or above the allowance it would refuse an attempt that a
+        caller's deadline still leaves room to make in full.
+        """
+        if (
+            self.memory_embedding_min_useful_seconds
+            >= self.memory_embedding_call_timeout_seconds
+        ):
+            raise ValueError(
+                "MEMORY_EMBEDDING_MIN_USEFUL_SECONDS "
+                f"({self.memory_embedding_min_useful_seconds:g}) must be below "
+                "MEMORY_EMBEDDING_CALL_TIMEOUT_SECONDS "
+                f"({self.memory_embedding_call_timeout_seconds:g})"
             )
         return self
 

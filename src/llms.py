@@ -421,6 +421,15 @@ class _LazyRateLimiterProxy(BaseRateLimiter):
             self._instance = self._factory()
         return self._instance
 
+    def resolve(self) -> BaseRateLimiter:
+        """The limiter this proxy delegates to now, built on first use.
+
+        Lets a caller decide once, before it waits, whether a limiter exists
+        (the memory embedding path), so a failure to build one is never confused
+        with a failure of the wait or of the request that follows it.
+        """
+        return self._get_instance()
+
     def acquire(self, *, blocking: bool = True) -> bool:
         return self._get_instance().acquire(blocking=blocking)
 

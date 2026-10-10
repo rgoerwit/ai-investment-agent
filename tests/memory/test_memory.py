@@ -303,14 +303,15 @@ class TestSituationStorage:
 
     @pytest.mark.asyncio
     async def test_get_embedding_logs_rate_limiter_fallback(self):
-        """Rate-limiter failures should be visible before direct embedding fallback."""
+        """A limiter unavailable at setup is logged before the direct request.
+
+        Only setup decides the fallback: a limiter with no async acquire is
+        unavailable. A limiter whose wait fails is not (see
+        ``tests/memory/test_embedding_attempt_deadline.py``).
+        """
 
         class BrokenLimiter:
-            async def __aenter__(self):
-                raise RuntimeError("limiter unavailable")
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
+            pass
 
         memory = FinancialSituationMemory("test_memory")
         memory.available = True
@@ -331,8 +332,9 @@ class TestSituationStorage:
             "timeout",
             "unknown_provider_error",
         }
-        assert kwargs["error_type"] == "RuntimeError"
+        assert kwargs["error_type"] == "TypeError"
         assert "exc_info" not in kwargs
+        memory.embeddings.aembed_query.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_get_embedding_hard_timeout_bounds_stalled_call(self):
