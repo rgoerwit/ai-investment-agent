@@ -8,6 +8,7 @@ Tests cover:
 - Editorial loop with mock LLMs
 """
 
+import asyncio
 import json
 import warnings
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -335,7 +336,7 @@ class TestArticleRevision:
         mock_llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = "# Revised Article\n\nFixed content here."
-        mock_llm.invoke = MagicMock(return_value=mock_response)
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         mock_create.return_value = mock_llm
 
         writer = ArticleWriter()
@@ -349,16 +350,18 @@ class TestArticleRevision:
             "style_issues": ["Avoid 'might' in intro"],
         }
 
-        result = writer.revise(
-            original_draft="# Original\n\nSome content.",
-            editor_feedback=feedback,
-            ticker="TEST",
-            company_name="Test Corp",
+        result = asyncio.run(
+            writer.revise(
+                original_draft="# Original\n\nSome content.",
+                editor_feedback=feedback,
+                ticker="TEST",
+                company_name="Test Corp",
+            )
         )
 
         assert result == "# Revised Article\n\nFixed content here."
         # Verify LLM was called
-        assert mock_llm.invoke.called
+        assert mock_llm.ainvoke.called
 
 
 # =============================================================================
@@ -696,7 +699,7 @@ class TestEditorialLoopIntegration:
         editor.llm = MagicMock()
 
         # Mock writer revise
-        writer.revise = MagicMock(return_value="# Revised Article\n\nFixed.")
+        writer.revise = AsyncMock(return_value="# Revised Article\n\nFixed.")
 
         draft = "# Original\n\nWith errors."
         result, feedback = await editor.edit(
@@ -745,7 +748,7 @@ class TestEditorialLoopIntegration:
         editor.review = mock_review
         editor.llm = MagicMock()
 
-        writer.revise = MagicMock(
+        writer.revise = AsyncMock(
             side_effect=RuntimeError(
                 "Writer LLM hit the output token limit before finishing"
             )
@@ -790,7 +793,7 @@ class TestEditorialLoopIntegration:
         editor.review = mock_review_always_revise
         editor.llm = MagicMock()
 
-        writer.revise = MagicMock(return_value="# Still has issues")
+        writer.revise = AsyncMock(return_value="# Still has issues")
 
         draft = "# Problematic Article"
         result, feedback = await editor.edit(
@@ -814,6 +817,7 @@ class TestEditorialLoopIntegration:
         )
 
         writer = MagicMock()
+        writer.revise = AsyncMock()
         writer.revise.return_value = "# Revised\n\nLeverage `(NET_DEBT_EBITDA: 1.95)`."
         data_block = (
             "### --- START DATA_BLOCK ---\n"
@@ -849,6 +853,7 @@ class TestEditorialLoopIntegration:
         )
 
         writer = MagicMock()
+        writer.revise = AsyncMock()
         writer.revise.return_value = (
             "# Still Wrong\n\nLeverage `(NET_DEBT_EBITDA: -0.01)`."
         )
@@ -929,6 +934,7 @@ class TestMainPyIntegration:
 
         # Mock the writer and editor
         mock_writer_instance = MagicMock()
+        mock_writer_instance.write = AsyncMock()
         mock_writer_instance.write.return_value = "# Draft Article\n\nContent here."
 
         mock_editor_instance = MagicMock()
@@ -1007,6 +1013,7 @@ class TestMainPyIntegration:
         args.brief = True
 
         mock_writer_instance = MagicMock()
+        mock_writer_instance.write = AsyncMock()
         mock_writer_instance.write.return_value = "# Draft Article"
 
         mock_editor_instance = MagicMock()
@@ -1068,6 +1075,7 @@ class TestMainPyIntegration:
         args.brief = False
 
         mock_writer_instance = MagicMock()
+        mock_writer_instance.write = AsyncMock()
         mock_writer_instance.write.return_value = (
             "# Original Draft\n\nThis is the draft."
         )
@@ -1125,6 +1133,7 @@ class TestMainPyIntegration:
         args.brief = False
 
         mock_writer_instance = MagicMock()
+        mock_writer_instance.write = AsyncMock()
         mock_writer_instance.write.return_value = "# Draft"
         mock_writer_instance.current_model_name = "gemini-3.5-flash"
         mock_writer_instance.writer_fell_back = True
@@ -1181,6 +1190,7 @@ class TestMainPyIntegration:
         args.brief = False
 
         mock_writer_instance = MagicMock()
+        mock_writer_instance.write = AsyncMock()
         mock_writer_instance.write.return_value = "# Draft"
         mock_writer_instance.current_model_name = "gemini-3.5-flash"
         mock_writer_instance.writer_fell_back = True
@@ -1239,6 +1249,7 @@ class TestMainPyIntegration:
         args.brief = False
 
         mock_writer_instance = MagicMock()
+        mock_writer_instance.write = AsyncMock()
         mock_writer_instance.write.return_value = "# Draft"
         mock_writer_instance.current_model_name = "claude-opus-4-8"
         mock_writer_instance.writer_fell_back = False
@@ -1554,7 +1565,8 @@ class TestInvokeWriter:
         from src.article_writer import ArticleWriter
 
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
+        mock_llm.ainvoke = AsyncMock()
+        mock_llm.ainvoke.return_value = MagicMock(
             content="I cannot provide financial advice about specific stocks."
         )
         mock_create.return_value = mock_llm
@@ -1562,7 +1574,7 @@ class TestInvokeWriter:
         writer = ArticleWriter()
 
         with pytest.raises(RuntimeError, match="refused"):
-            writer._invoke_writer([])
+            asyncio.run(writer._invoke_writer([]))
 
     @patch("src.article_writer.create_writer_llm")
     def test_passes_clean_article(self, mock_create):
@@ -1570,13 +1582,14 @@ class TestInvokeWriter:
         from src.article_writer import ArticleWriter
 
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
+        mock_llm.ainvoke = AsyncMock()
+        mock_llm.ainvoke.return_value = MagicMock(
             content="# Toyota: Value in Motion\n\nContent here."
         )
         mock_create.return_value = mock_llm
 
         writer = ArticleWriter()
-        result = writer._invoke_writer([])
+        result = asyncio.run(writer._invoke_writer([]))
         assert result.startswith("# Toyota")
 
     @patch("src.article_writer.create_writer_llm")
@@ -1585,13 +1598,14 @@ class TestInvokeWriter:
         from src.article_writer import ArticleWriter
 
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
+        mock_llm.ainvoke = AsyncMock()
+        mock_llm.ainvoke.return_value = MagicMock(
             content="Certainly! Here is the article:\n\n# The Real Title\n\nContent."
         )
         mock_create.return_value = mock_llm
 
         writer = ArticleWriter()
-        result = writer._invoke_writer([])
+        result = asyncio.run(writer._invoke_writer([]))
         assert result.startswith("# The Real Title")
 
     @patch("src.article_writer.create_writer_llm")
@@ -1605,11 +1619,11 @@ class TestInvokeWriter:
             {"type": "thinking", "thinking": "Planning the article structure..."},
             {"type": "text", "text": "# Great Article\n\nSolid content."},
         ]
-        mock_llm.invoke.return_value = mock_response
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         mock_create.return_value = mock_llm
 
         writer = ArticleWriter()
-        result = writer._invoke_writer([])
+        result = asyncio.run(writer._invoke_writer([]))
         assert result == "# Great Article\n\nSolid content."
 
 
@@ -2690,6 +2704,7 @@ class TestStripEditorNotes:
 
         editor.review = mock_review
         writer = MagicMock()
+        writer.revise = AsyncMock()
         writer.revise.return_value = "# Revised\n\nClean."
 
         result, feedback = await editor.edit(

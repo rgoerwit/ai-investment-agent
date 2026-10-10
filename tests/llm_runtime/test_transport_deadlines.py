@@ -715,10 +715,9 @@ class TestAnthropic:
         [call] = layer.calls
         assert call["vendor"] == "anthropic"
         assert call["timeout"] == pytest.approx(31.0)
-        # Retries stay fixed on the client (the writer is still a direct
-        # caller): the seat policy on the canonical path, the legacy
-        # constructor's own default on the legacy one (Step 2 aligns them).
-        assert call["client_max_retries"] == (2 if path == "canonical" else 3)
+        # The runtime loop owns the writer's retries, so both construction
+        # paths build the client from the seat policy: one SDK attempt.
+        assert call["client_max_retries"] == 0
 
     @pytest.mark.parametrize("path", ["canonical", "legacy"])
     def test_sync_request_is_sized_from_the_deadline(self, clock, path):

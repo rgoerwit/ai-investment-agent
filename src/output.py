@@ -87,6 +87,10 @@ def _article_is_publishable(
     require_decision_trace: bool = False,
     require_provenance: bool = False,
 ) -> bool:
+    # A review that errored or ran out of the workflow allowance never
+    # approves, whatever verdict a partial result carried.
+    if feedback.get("review_error") or feedback.get("workflow_deadline_exceeded"):
+        return False
     base_ok = (
         feedback.get("verdict") == "APPROVED"
         and str(feedback.get("citation_audit_status") or "NOT_RUN").upper() == "PASSED"
@@ -424,7 +428,13 @@ async def handle_article_generation(
 
     try:
         from src.agents.evidence_constraints import downstream_evidence_constraints
-        from src.article_writer import ArticleEditor, ArticleWriter
+        from src.article_writer import (
+            ArticleEditor,
+            ArticleWorkflowExpired,
+            ArticleWriter,
+            article_workflow_deadline,
+            run_article_workflow_step,
+        )
         from src.error_safety import summarize_exception
 
         if not args.quiet and not args.brief:
@@ -448,78 +458,97 @@ async def handle_article_generation(
             report_text,
             analysis_result,
         )
-        draft_article = writer.write(
-            ticker=ticker,
-            company_name=company_name,
-            report_text=article_source_context,
-            trade_date=trade_date,
-            output_path=None,
-            valuation_context=valuation_context,
-            governance_card=governance_card,
-            chart_paths=chart_paths if isinstance(chart_paths, dict) else None,
-            article_dir=article_path.parent,
-            evidence_constraints=evidence_constraints,
-        )
-
-        editor = ArticleEditor(
-            callbacks=tracing_callbacks,
-            tracing_metadata=tracing_metadata,
-        )
-        final_article = draft_article
         feedback: dict[str, Any] = {
             "verdict": "REVISE",
             "confidence": 0.0,
             "skipped": True,
             "citation_audit_status": "NOT_RUN",
         }
-
-        if editor.is_available():
-            if not args.quiet and not args.brief:
-                console_obj.print("[cyan]Running Editor-in-Chief review...[/cyan]")
-
-            data_block = ""
-            pm_block = ""
-            valuation_params = ""
-            consultant_review = ""
-            if analysis_result:
-                data_block = analysis_result.get("fundamentals_report", "")
-                pm_block = analysis_result.get("final_trade_decision", "")
-                valuation_params = analysis_result.get("valuation_params", "")
-                consultant_review = analysis_result.get("consultant_review", "")
-
-            try:
-                final_article, feedback = await editor.edit(
-                    writer=writer,
-                    article_draft=draft_article,
+        # The workflow's own allowance: draft, review and revisions, and every
+        # writer fallback tier share one deadline. It is bound here because the
+        # analysis deadline's scope has already closed (src/main.py), so the
+        # writer cannot inherit a spent one. Each step is also hard-bounded at
+        # it, and a step that overruns is discarded rather than awaited, so no
+        # late draft can reach the writes below.
+        with article_workflow_deadline():
+            draft_article = await run_article_workflow_step(
+                writer.write(
                     ticker=ticker,
                     company_name=company_name,
-                    data_block=data_block,
-                    pm_block=pm_block,
-                    valuation_params=valuation_params,
-                    consultant_review=consultant_review,
-                    voice_samples=writer.load_voice_samples(max_chars=5000),
+                    report_text=article_source_context,
+                    trade_date=trade_date,
+                    output_path=None,
                     valuation_context=valuation_context,
-                    governance_card=governance_card
-                    if isinstance(governance_card, dict)
-                    else None,
+                    governance_card=governance_card,
+                    chart_paths=chart_paths if isinstance(chart_paths, dict) else None,
+                    article_dir=article_path.parent,
                     evidence_constraints=evidence_constraints,
-                )
-            except Exception as exc:
-                final_article = draft_article
-                feedback = {
-                    "verdict": "REVISE",
-                    "confidence": 0.0,
-                    "review_error": True,
-                    "citation_audit_status": "NOT_RUN",
-                }
-                logger_obj.warning(
-                    "article_editor_failed",
-                    **summarize_exception(exc, operation="article editorial review"),
-                )
+                ),
+                label=f"article_workflow:write:{ticker}",
+            )
+
+            editor = ArticleEditor(
+                callbacks=tracing_callbacks,
+                tracing_metadata=tracing_metadata,
+            )
+            final_article = draft_article
+
+            if editor.is_available():
                 if not args.quiet and not args.brief:
-                    console_obj.print(
-                        "[yellow]Editor review failed; draft retained for review.[/yellow]"
+                    console_obj.print("[cyan]Running Editor-in-Chief review...[/cyan]")
+
+                data_block = ""
+                pm_block = ""
+                valuation_params = ""
+                consultant_review = ""
+                if analysis_result:
+                    data_block = analysis_result.get("fundamentals_report", "")
+                    pm_block = analysis_result.get("final_trade_decision", "")
+                    valuation_params = analysis_result.get("valuation_params", "")
+                    consultant_review = analysis_result.get("consultant_review", "")
+
+                try:
+                    final_article, feedback = await run_article_workflow_step(
+                        editor.edit(
+                            writer=writer,
+                            article_draft=draft_article,
+                            ticker=ticker,
+                            company_name=company_name,
+                            data_block=data_block,
+                            pm_block=pm_block,
+                            valuation_params=valuation_params,
+                            consultant_review=consultant_review,
+                            voice_samples=writer.load_voice_samples(max_chars=5000),
+                            valuation_context=valuation_context,
+                            governance_card=governance_card
+                            if isinstance(governance_card, dict)
+                            else None,
+                            evidence_constraints=evidence_constraints,
+                        ),
+                        label=f"article_workflow:edit:{ticker}",
                     )
+                except Exception as exc:
+                    # The draft already held is kept, never presented as
+                    # reviewed: the editor did not finish with it.
+                    final_article = draft_article
+                    feedback = {
+                        "verdict": "REVISE",
+                        "confidence": 0.0,
+                        "review_error": True,
+                        "citation_audit_status": "NOT_RUN",
+                    }
+                    if isinstance(exc, ArticleWorkflowExpired):
+                        feedback["workflow_deadline_exceeded"] = True
+                    logger_obj.warning(
+                        "article_editor_failed",
+                        **summarize_exception(
+                            exc, operation="article editorial review"
+                        ),
+                    )
+                    if not args.quiet and not args.brief:
+                        console_obj.print(
+                            "[yellow]Editor review failed; draft retained for review.[/yellow]"
+                        )
 
         citation_audit_status = str(
             feedback.get("citation_audit_status") or "NOT_RUN"
@@ -591,6 +620,9 @@ async def handle_article_generation(
                 "editor_revisions": feedback.get("revisions", 0),
                 "editor_skipped": bool(feedback.get("skipped")),
                 "editor_review_error": bool(feedback.get("review_error")),
+                "workflow_deadline_exceeded": bool(
+                    feedback.get("workflow_deadline_exceeded")
+                ),
                 "citation_audit_status": citation_audit_status,
                 "canonical_claim_audit_status": (
                     "FAILED" if claim_audit_errors else "PASSED"

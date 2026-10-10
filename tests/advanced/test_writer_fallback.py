@@ -11,10 +11,11 @@ and any residual ``MAX_TOKENS`` truncation must be logged loudly.
 from __future__ import annotations
 
 import ast
+import asyncio
 import re
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -139,7 +140,7 @@ def _make_writer(mock_create_writer, response):
     from src.article_writer import ArticleWriter
 
     mock_llm = MagicMock()
-    mock_llm.invoke.return_value = response
+    mock_llm.ainvoke = AsyncMock(return_value=response)
     mock_create_writer.return_value = mock_llm
     return ArticleWriter(
         samples_dir=Path("writing_samples")
@@ -218,7 +219,7 @@ class TestTruncationGuard:
         recorder = _RecordingLogger()
         monkeypatch.setattr(aw, "logger", recorder)
         with pytest.raises(RuntimeError, match="output token limit"):
-            writer._invoke_writer([MagicMock()])
+            asyncio.run(writer._invoke_writer([MagicMock()]))
 
         truncations = [
             kwargs
@@ -239,7 +240,7 @@ class TestTruncationGuard:
 
         recorder = _RecordingLogger()
         monkeypatch.setattr(aw, "logger", recorder)
-        writer._invoke_writer([MagicMock()])
+        asyncio.run(writer._invoke_writer([MagicMock()]))
 
         assert not [e for e, _ in recorder.events if e == "writer_output_truncated"]
 
@@ -253,7 +254,7 @@ class TestTruncationGuard:
 
         recorder = _RecordingLogger()
         monkeypatch.setattr(aw, "logger", recorder)
-        article = writer._invoke_writer([MagicMock()])
+        article = asyncio.run(writer._invoke_writer([MagicMock()]))
 
         assert "Complete body." in article
         assert not [e for e, _ in recorder.events if e == "writer_output_truncated"]

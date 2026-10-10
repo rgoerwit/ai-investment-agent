@@ -20,22 +20,33 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from src.agents.message_utils import validate_tool_history
-from src.agents.runtime import invoke_with_rate_limit_handling
+from src.agents.runtime import (
+    invoke_with_rate_limit_handling,
+    resolve_invocation_budget,
+)
 from src.article_audit import (
     audit_article_citations,
     extract_source_confidence_context,
     prepend_verification_caveats,
 )
+from src.async_utils import run_with_hard_timeout
 from src.config import config, get_env_value
 from src.data_block_utils import extract_last_data_block
 from src.error_safety import redact_sensitive_text, summarize_exception
+from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.bindings import resolve_binding_plan
 from src.llm_runtime.construction import (
     build_model_for_seat,
     build_required_model_for_seat,
+    seat_policy_with,
     writer_seat_fallback_chain,
 )
 from src.llm_runtime.seats import SEATS, SeatId
+from src.llm_runtime.timeouts import (
+    BudgetExhausted,
+    current_enclosing_deadline,
+    enclosing_deadline,
+)
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import (
     classify_failure,
@@ -43,7 +54,7 @@ from src.runtime_diagnostics import (
     get_runtime_provider,
 )
 from src.runtime_services import get_current_tool_service
-from src.tavily_utils import search_tavily_sync_inspected
+from src.tavily_utils import search_tavily_inspected
 from src.token_tracker import TokenTrackingCallback, get_tracker
 from src.tooling.runtime import ToolInvocation
 
@@ -58,17 +69,56 @@ RAW_SAMPLES_WHEN_PROFILE_PRESENT = 3
 
 logger = structlog.get_logger(__name__)
 
+# Display names the runtime loop keys the writer's budget and accounting by.
+_WRITER_SEAT = SEATS[SeatId.ARTICLE_WRITER].callback_name
+_WRITER_FALLBACK_SEAT = SEATS[SeatId.ARTICLE_WRITER_REVIEW_FALLBACK].callback_name
 
-def create_writer_llm(**kwargs: Any):
-    """Compatibility patch seam backed by the canonical writer seat."""
 
-    callbacks = kwargs.get("callbacks") or []
+def _policy_overrides(
+    *,
+    temperature: float | None,
+    timeout: float | None,
+    transport_attempts: int | None,
+) -> dict[str, Any]:
+    """A caller's explicit writer settings, as ``SeatExecutionPolicy`` fields."""
+    return {
+        "sampling_temperature": temperature,
+        "client_timeout_seconds": timeout,
+        "transport_attempts": transport_attempts,
+    }
+
+
+def create_writer_llm(
+    *,
+    callbacks: list[BaseCallbackHandler] | None = None,
+    temperature: float | None = None,
+    timeout: float | None = None,
+    transport_attempts: int | None = None,
+):
+    """Patch seam backed by the canonical writer seat.
+
+    Every setting passed is honoured, as a per-construction replacement of
+    the seat's policy: ``temperature`` (sampling temperature; ignored by a
+    Claude model with thinking, which Anthropic requires at 1.0), ``timeout``
+    (the client's request ceiling) and ``transport_attempts`` (total SDK
+    attempts). Omitted, the seat policy stands: the runtime loop owns the
+    writer's retries, so its clients send one attempt per request, and inside
+    an invocation every request is sized from the invocation deadline.
+    """
+
+    callbacks = callbacks or []
+    overrides = _policy_overrides(
+        temperature=temperature,
+        timeout=timeout,
+        transport_attempts=transport_attempts,
+    )
     plan = resolve_binding_plan(config)
     if plan.schema == "new" and not plan.statuses[SeatId.ARTICLE_WRITER].enabled:
         tiers = writer_seat_fallback_chain(
             settings=config,
             callbacks=callbacks,
             plan=plan,
+            policy_overrides=overrides,
         )
         if not tiers:
             raise RuntimeError("no configured article-writer tier is available")
@@ -79,13 +129,87 @@ def create_writer_llm(**kwargs: Any):
         plan=plan,
         callbacks=callbacks,
         output_tokens=16_384,
+        execution_policy=seat_policy_with(SeatId.ARTICLE_WRITER, **overrides),
     )
 
 
-def writer_fallback_chain(**kwargs: Any):
-    """Compatibility patch seam returning lazy configured fallback seats."""
+def writer_fallback_chain(
+    *,
+    callbacks: list[BaseCallbackHandler] | None = None,
+    temperature: float | None = None,
+):
+    """Patch seam returning the lazy configured fallback tiers.
 
-    return writer_seat_fallback_chain(callbacks=kwargs.get("callbacks") or [])
+    ``temperature`` reaches every tier, so a fallback writes at the writer's
+    configured temperature, not at its factory default.
+    """
+
+    return writer_seat_fallback_chain(
+        callbacks=callbacks or [],
+        policy_overrides={"sampling_temperature": temperature},
+    )
+
+
+class ArticleWorkflowExpired(TimeoutError):
+    """The article workflow's allowance ran out before a step could start or end.
+
+    A ``TimeoutError`` so existing timeout handling treats it as one.
+    """
+
+
+def article_workflow_deadline():
+    """Bind the article workflow's own deadline (``enclosing_deadline``).
+
+    The workflow runs after the analysis deadline's scope has closed, so it
+    never inherits that deadline; an outer deadline, if one is ever bound
+    around it, can still only shorten this one.
+    """
+    return enclosing_deadline(float(config.article_workflow_timeout_seconds))
+
+
+def workflow_budget_refusal(seat_name: str) -> BudgetExhausted | None:
+    """A refusal when the bound workflow deadline cannot fit one more call.
+
+    The same admission rule the runtime loop applies to a request (remaining
+    less margin below the minimum useful attempt), read from the seat's own
+    policy. None when no deadline is bound or a useful call still fits.
+    """
+    deadline = current_enclosing_deadline()
+    if deadline is None:
+        return None
+    policy = resolve_invocation_budget(seat_name)
+    remaining = deadline - llm_timeouts.now() - policy.margin
+    if remaining < policy.min_useful_attempt:
+        return BudgetExhausted(remaining, policy.min_useful_attempt)
+    return None
+
+
+async def run_article_workflow_step(coro: Any, *, label: str) -> Any:
+    """Await one workflow step under a hard bound at the workflow deadline.
+
+    Admission inside the step already refuses LLM work the allowance cannot
+    fit; this is the wall-clock bound around everything else (tool hooks,
+    inspection, a call that ignores its own deadline). On expiry the step is
+    cancelled and orphaned, and its eventual result is discarded: nothing a
+    late step produces is returned, so nothing late can be written.
+    """
+    deadline = current_enclosing_deadline()
+    if deadline is None:
+        return await coro
+    remaining = deadline - llm_timeouts.now()
+    if remaining <= 0:
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
+        raise ArticleWorkflowExpired(f"{label!r}: article workflow deadline passed")
+    try:
+        return await run_with_hard_timeout(coro, timeout=remaining, label=label)
+    except TimeoutError as exc:
+        if llm_timeouts.now() >= deadline:
+            raise ArticleWorkflowExpired(
+                f"{label!r}: article workflow deadline passed"
+            ) from exc
+        raise
 
 
 # Default fallback prompt config if prompts/writer.json is missing
@@ -324,6 +448,9 @@ class ArticleWriter:
 
         self.prompt_config = self._load_prompt_config()
         self.llm = self._create_llm()
+        # The seat whose budget and accounting the current ``self.llm`` runs
+        # under; a fallback tier that succeeded is cached under its own.
+        self._llm_seat_name = _WRITER_SEAT
         # "Fell back" = not backed by the configured Claude writer, whether
         # that happened at construction (no CLAUDE_KEY → fallback chain) or
         # later at runtime — this stamp feeds run_summary.article_writer_fell_back,
@@ -390,16 +517,12 @@ class ArticleWriter:
         is --quick-invariant. To use a cheaper Claude model, set
         WRITER_MODEL=claude-haiku-4-5.
         """
-        metadata = self.prompt_config.get("metadata", {})
-        model_config = metadata.get("model_config", {})
-        temperature = model_config.get("temperature", 0.7)
-
+        # The client's ceiling and attempts are the seat's policy: the runtime
+        # loop owns the writer's retries (one SDK attempt per request) and
+        # sizes every request from the workflow deadline. Passing the run's
+        # llm_attempts here (as before October 2026) would have multiplied them.
         llm = create_writer_llm(
-            temperature=temperature,
-            timeout=config.api_timeout,
-            # Total attempts (the writer is invoked directly, so its SDK
-            # attempts are its whole retry budget).
-            transport_attempts=get_runtime_config(config).llm_attempts,
+            temperature=self._configured_temperature(),
             callbacks=[
                 TokenTrackingCallback("Article Writer", get_tracker()),
                 *self._callbacks,
@@ -414,6 +537,14 @@ class ArticleWriter:
             model=model_name,
         )
         return llm
+
+    def _configured_temperature(self) -> float:
+        """The writer's sampling temperature from ``writer.json`` (default 0.7)."""
+        metadata = self.prompt_config.get("metadata", {})
+        model_config = (
+            metadata.get("model_config", {}) if isinstance(metadata, dict) else {}
+        )
+        return float(model_config.get("temperature", 0.7))
 
     @property
     def current_model_name(self) -> str:
@@ -653,7 +784,7 @@ class ArticleWriter:
         logger.info("formatted_image_manifest", chart_count=len(found_images))
         return "\n".join(manifest_lines)
 
-    def _fetch_fact_check_context(
+    async def _fetch_fact_check_context(
         self, ticker: str, company_name: str, max_chars: int = MAX_FACT_CHECK_CHARS
     ) -> str:
         """
@@ -676,7 +807,10 @@ class ArticleWriter:
 
             logger.info("fetching_fact_check_context", ticker=ticker, query=query[:50])
 
-            response = search_tavily_sync_inspected(
+            # The async entrypoint: the sync one parks the event loop for the
+            # whole search, and its timeout is shrunk to the workflow deadline
+            # either way.
+            response = await search_tavily_inspected(
                 query,
                 profile="news_basic",
                 include_answer=True,
@@ -725,38 +859,53 @@ class ArticleWriter:
             )
             return ""
 
-    def _invoke_with_fallback(self, messages: list):
+    async def _invoke_seat(
+        self, llm: Any, messages: list, *, seat_name: str, workflow: str
+    ) -> Any:
+        """One writer call, owned by the runtime loop like every other seat.
+
+        The loop sizes each request from the remaining workflow allowance,
+        refuses one that cannot fit, owns the retries (the client sends one
+        SDK attempt per request) and records every attempt, so this module
+        records none itself.
+        """
+        return await invoke_with_rate_limit_handling(
+            llm,
+            messages,
+            context=seat_name,
+            canonical_agent=seat_name,
+            provider=get_runtime_provider(llm),
+            model_name=get_model_name(llm),
+            config=cast(Any, self._invoke_config(workflow=workflow)),
+        )
+
+    @staticmethod
+    def _fallback_budget_refusal() -> BudgetExhausted | None:
+        """A refusal when the workflow allowance cannot fit a fallback tier.
+
+        Checked before each tier is *built*, so a spent allowance constructs
+        no client and sends nothing. None when no workflow deadline is bound.
+        """
+        return workflow_budget_refusal(_WRITER_FALLBACK_SEAT)
+
+    async def _invoke_with_fallback(self, messages: list):
         """Invoke the writer LLM, walking the fallback chain on Claude API errors.
 
         New-schema order is Review group then Base group. The first tier to
         succeed is cached on ``self.llm``; if every tier fails, the final
         exception is raised. Old-only configuration retains its legacy rule
-        that only Anthropic primary failures enter the fallback chain.
+        that only Anthropic primary failures enter the fallback chain. A tier
+        is never built once the workflow allowance cannot fit it.
         """
         primary_model = get_model_name(self.llm)
         primary_provider = get_runtime_provider(self.llm)
         try:
-            logger.info(
-                "llm_call_start",
-                context="article_writer_primary",
-                provider=primary_provider,
-                model=primary_model,
-                runnable_class=type(self.llm).__name__,
-                max_attempts=1,
-            )
-            response = self.llm.invoke(
+            return await self._invoke_seat(
+                self.llm,
                 messages,
-                config=self._invoke_config(workflow="article_primary"),
+                seat_name=self._llm_seat_name,
+                workflow="article_primary",
             )
-            logger.info(
-                "llm_call_success",
-                context="article_writer_primary",
-                provider=primary_provider,
-                model=primary_model,
-                runnable_class=type(self.llm).__name__,
-                attempt=1,
-            )
-            return response
         except Exception as e:
             error_str = str(e)
             primary_failure = classify_failure(
@@ -764,12 +913,6 @@ class ArticleWriter:
                 provider=primary_provider,
                 model_name=primary_model,
                 class_name=type(self.llm).__name__,
-            )
-            get_tracker().record_failure(
-                agent_name="Article Writer",
-                provider=primary_failure.provider,
-                failure_kind=primary_failure.kind,
-                model_name=primary_model or "",
             )
             # Only fall back for Claude-specific API errors, not all exceptions
             is_anthropic_error = any(
@@ -783,22 +926,9 @@ class ArticleWriter:
 
             new_binding_schema = resolve_binding_plan(config).schema == "new"
             if not is_anthropic_error and not new_binding_schema:
-                logger.error(
-                    "llm_call_failed",
-                    context="article_writer_primary",
-                    provider=primary_failure.provider,
-                    model=primary_model,
-                    runnable_class=type(self.llm).__name__,
-                    attempt=1,
-                    max_attempts=1,
-                    failure_kind=primary_failure.kind,
-                    host=primary_failure.host,
-                    retryable=primary_failure.retryable,
-                    error_type=primary_failure.error_type,
-                    root_cause_type=primary_failure.root_cause_type,
-                    error_message=primary_failure.message,
-                )
-                raise  # Not a Claude error — propagate
+                # Not a Claude error: propagate. The runtime loop has already
+                # logged and recorded every attempt.
+                raise
 
             logger.warning(
                 (
@@ -814,10 +944,25 @@ class ArticleWriter:
                 reason=primary_failure.message,
             )
             last_exc: Exception = e
-            for tier in writer_fallback_chain(callbacks=self._fallback_callbacks()):
+            for tier in writer_fallback_chain(
+                callbacks=self._fallback_callbacks(),
+                temperature=self._configured_temperature(),
+            ):
+                refusal = self._fallback_budget_refusal()
+                if refusal is not None:
+                    # Out of allowance: build nothing and send nothing. The
+                    # refusal carries the last real failure as its cause.
+                    logger.warning(
+                        "writer_fallback_refused_budget",
+                        tier=tier.label,
+                        remaining_seconds=round(refusal.remaining, 3),
+                        min_useful_attempt_seconds=round(refusal.minimum, 3),
+                    )
+                    raise refusal from last_exc
                 fallback_model = ""
                 fallback_provider = "unknown"
                 fallback_class = ""
+                invoked = False
                 try:
                     tier_llm = tier.build()  # lazy: construct only when attempted
                     fallback_model = get_model_name(tier_llm) or ""
@@ -830,13 +975,15 @@ class ArticleWriter:
                         fallback_provider=fallback_provider,
                         runnable_class=fallback_class,
                     )
-                    response = tier_llm.invoke(
+                    invoked = True
+                    response = await self._invoke_seat(
+                        tier_llm,
                         messages,
-                        config=cast(
-                            Any, self._invoke_config(workflow="article_fallback")
-                        ),
+                        seat_name=_WRITER_FALLBACK_SEAT,
+                        workflow="article_fallback",
                     )
                     self.llm = tier_llm  # Cache for subsequent calls (e.g., retry)
+                    self._llm_seat_name = _WRITER_FALLBACK_SEAT
                     self.writer_fell_back = True
                     logger.info(
                         "writer_fallback_succeeded",
@@ -854,12 +1001,15 @@ class ArticleWriter:
                         model_name=fallback_model,
                         class_name=fallback_class,
                     )
-                    get_tracker().record_failure(
-                        agent_name="Article Writer Fallback",
-                        provider=fallback_failure.provider,
-                        failure_kind=fallback_failure.kind,
-                        model_name=fallback_model or "",
-                    )
+                    if not invoked:
+                        # A tier that failed to build sent nothing, so the
+                        # runtime loop recorded no attempt for it.
+                        get_tracker().record_failure(
+                            agent_name=_WRITER_FALLBACK_SEAT,
+                            provider=fallback_failure.provider,
+                            failure_kind=fallback_failure.kind,
+                            model_name=fallback_model or "",
+                        )
                     logger.error(
                         "writer_fallback_attempt_failed",
                         tier=tier.label,
@@ -876,7 +1026,7 @@ class ArticleWriter:
                     )
             raise last_exc from e
 
-    def _invoke_writer(self, messages: list) -> str:
+    async def _invoke_writer(self, messages: list) -> str:
         """
         Invoke the writer LLM with provider-aware post-processing.
 
@@ -896,7 +1046,7 @@ class ArticleWriter:
         Raises:
             RuntimeError: If the model refuses to generate the article
         """
-        response = self._invoke_with_fallback(messages)
+        response = await self._invoke_with_fallback(messages)
 
         # 0. Truncation guard: a MAX_TOKENS/LENGTH finish means the model ran out
         # of output budget mid-generation (e.g. Gemini hidden reasoning eating the
@@ -949,7 +1099,7 @@ class ArticleWriter:
 
         return article
 
-    def write(
+    async def write(
         self,
         ticker: str,
         company_name: str,
@@ -999,7 +1149,7 @@ class ArticleWriter:
         )
 
         # Fetch fact-check context (single Tavily search, controlled size)
-        fact_check_context = self._fetch_fact_check_context(ticker, company_name)
+        fact_check_context = await self._fetch_fact_check_context(ticker, company_name)
 
         # Get prompt templates
         system_message = self.prompt_config.get(
@@ -1104,7 +1254,7 @@ class ArticleWriter:
         ]
 
         try:
-            article = self._invoke_writer(messages)
+            article = await self._invoke_writer(messages)
 
             logger.info(
                 "article_generated",
@@ -1130,7 +1280,7 @@ class ArticleWriter:
             )
             raise
 
-    def revise(
+    async def revise(
         self,
         original_draft: str,
         editor_feedback: dict,
@@ -1222,7 +1372,7 @@ class ArticleWriter:
         ]
 
         try:
-            article = self._invoke_writer(messages)
+            article = await self._invoke_writer(messages)
 
             # Re-inject any charts that were lost during revision
             if original_charts:
@@ -1824,11 +1974,17 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                 "editor_review_failed",
                 **summarize_exception(e, operation="article_editor:review"),
             )
-            return {
+            feedback: dict[str, Any] = {
                 "verdict": "REVISE",
                 "confidence": 0.0,
                 "review_error": True,
             }
+            # Say why, when the workflow allowance is what ended the review.
+            if isinstance(e, TimeoutError) and (
+                workflow_budget_refusal(SEATS[SeatId.EDITOR].callback_name) is not None
+            ):
+                feedback["workflow_deadline_exceeded"] = True
+            return feedback
 
     async def _invoke_final_review(self, messages: list) -> dict:
         """Run the final strict review pass without tool calls."""
@@ -2088,7 +2244,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
                 )
 
                 try:
-                    current_draft = writer.revise(
+                    current_draft = await writer.revise(
                         original_draft=current_draft,
                         editor_feedback=feedback,
                         ticker=ticker,
@@ -2146,7 +2302,7 @@ If there are no issues, use verdict "APPROVED" with empty arrays and high confid
             self._failed_urls = set()
 
 
-def generate_article(
+async def generate_article(
     ticker: str,
     company_name: str,
     report_text: str,
@@ -2156,7 +2312,11 @@ def generate_article(
     valuation_context: str | None = None,
 ) -> str:
     """
-    Convenience function to generate an article.
+    Convenience coroutine to generate an article (draft only, no review).
+
+    Owns the article workflow deadline like ``handle_article_generation``:
+    the draft is written within ``article_workflow_timeout_seconds``, and a
+    draft that arrives after it is discarded, never saved.
 
     Args:
         ticker: Stock ticker symbol
@@ -2198,14 +2358,21 @@ def generate_article(
                 "workflow": "article_only",
             },
         )
-        return writer.write(
-            ticker=ticker,
-            company_name=company_name,
-            report_text=report_text,
-            trade_date=trade_date,
-            output_path=Path(output_path) if output_path else None,
-            valuation_context=valuation_context,
-        )
+        with article_workflow_deadline():
+            return cast(
+                str,
+                await run_article_workflow_step(
+                    writer.write(
+                        ticker=ticker,
+                        company_name=company_name,
+                        report_text=report_text,
+                        trade_date=trade_date,
+                        output_path=Path(output_path) if output_path else None,
+                        valuation_context=valuation_context,
+                    ),
+                    label=f"article_workflow:write:{ticker}",
+                ),
+            )
     finally:
         trace_context.close()
         flush_traces()

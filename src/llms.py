@@ -1379,6 +1379,9 @@ def create_writer_fallback_llm(
     service_tier: str | None = None,
     api_key: str | None = None,
     settings: Any | None = None,
+    *,
+    timeout: float | None = None,
+    max_retries: int | None = None,
 ) -> BaseChatModel:
     """
     Create the Gemini fallback used when the Claude article writer is
@@ -1394,6 +1397,10 @@ def create_writer_fallback_llm(
     pin an explicit 16384-token visible budget (matching the Claude writer's
     ``max_tokens``); the budget machinery adds only the small "default" reserve
     on top, so the 16384 visible tokens can never be cannibalized by reasoning.
+
+    ``timeout`` (the client's standard ceiling) and ``max_retries`` (Google's
+    total attempts) default to ``api_timeout`` and the run's ``llm_attempts``;
+    under the runtime loop every request is sized and sent once at dispatch.
     """
     settings = _settings_or_default(settings)
     runtime_config = get_runtime_config(settings)
@@ -1404,8 +1411,8 @@ def create_writer_fallback_llm(
     return create_gemini_model(
         model_name,
         temperature,
-        settings.api_timeout,
-        runtime_config.llm_attempts,
+        int(timeout) if timeout is not None else settings.api_timeout,
+        max_retries if max_retries is not None else runtime_config.llm_attempts,
         callbacks=callbacks,
         thinking_level=thinking_level,
         max_output_tokens=16384,
@@ -1451,6 +1458,8 @@ def create_writer_openai_fallback_llm(
     *,
     model: str | None = None,
     settings: Any | None = None,
+    request_timeout_seconds: float | None = None,
+    transport_attempts: int | None = None,
 ) -> BaseChatModel | None:
     """EDITOR_MODEL (OpenAI) as the preferred article-writer fallback.
 
@@ -1458,7 +1467,8 @@ def create_writer_openai_fallback_llm(
     the Claude writer's ``max_tokens`` — the editor's 8192 cap would truncate
     articles) and low reasoning effort (prose needs output budget, not
     reasoning depth). Returns None when the tier is unavailable (missing
-    lib/key or ``ENABLE_CONSULTANT=false``).
+    lib/key or ``ENABLE_CONSULTANT=false``). Attempts default to the seat's
+    policy: one, since the runtime loop owns the writer's retries.
     """
     settings = _settings_or_default(settings)
     if not _writer_openai_tier_available(settings=settings):
@@ -1476,6 +1486,17 @@ def create_writer_openai_fallback_llm(
         effort_preference=_EFFORT_PREFERENCE_PROSE,
         intent=ModelIntent.PROSE,
         settings=settings,
+        request_timeout_seconds=request_timeout_seconds,
+        transport_attempts=(
+            transport_attempts
+            if transport_attempts is not None
+            else construction_transport_attempts(
+                SEATS[SeatId.ARTICLE_WRITER_REVIEW_FALLBACK],
+                vendor="openai",
+                cfg=settings,
+            )
+        ),
+        timeout_class=SEATS[SeatId.ARTICLE_WRITER_REVIEW_FALLBACK].timeout_class,
     )
 
 
@@ -1874,8 +1895,8 @@ def _is_claude_opus_adaptive_thinking_model(model_name: str) -> bool:
 
 def create_writer_llm(
     temperature: float = 0.7,
-    timeout: int | None = None,
-    max_retries: int = 3,
+    timeout: float | None = None,
+    max_retries: int | None = None,
     callbacks: list[BaseCallbackHandler] | None = None,
     model: str | None = None,
     allow_fallback: bool = True,
@@ -1895,7 +1916,9 @@ def create_writer_llm(
                      when Claude adaptive thinking is active (API constraint).
         timeout: Request timeout in seconds (default from config)
         max_retries: SDK retries after the first request (Anthropic's meaning)
-        transport_attempts: Total attempts; when given, wins over max_retries
+        transport_attempts: Total attempts; when given, wins over max_retries.
+            With neither, the writer seat's policy applies: one attempt, since
+            the runtime loop owns the writer's retries.
         callbacks: Optional callback handlers
 
     Returns:
@@ -1938,6 +1961,13 @@ def create_writer_llm(
     final_timeout = float(timeout if timeout is not None else settings.api_timeout)
     if transport_attempts is not None:
         max_retries = sdk_max_retries("anthropic", transport_attempts)
+    elif max_retries is None:
+        max_retries = sdk_max_retries(
+            "anthropic",
+            construction_transport_attempts(
+                SEATS[SeatId.ARTICLE_WRITER], vendor="anthropic", cfg=settings
+            ),
+        )
 
     # Build kwargs — base configuration
     kwargs: dict = {

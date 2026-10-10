@@ -182,6 +182,7 @@ _SETTINGS_ENV_CASES = [
             "memory_embedding_call_timeout_seconds",
             "genai_client_close_timeout_seconds",
             "langfuse_flush_timeout_seconds",
+            "article_workflow_timeout_seconds",
         )
     ],
     ("ddg_http_timeout_seconds", "DDG_HTTP_TIMEOUT_SECONDS", "7", 7),

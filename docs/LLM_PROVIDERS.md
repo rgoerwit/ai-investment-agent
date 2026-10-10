@@ -1,6 +1,8 @@
 # LLM Provider Qualification and Operations
 
-Last updated: 2026-10-09 (every OpenAI-family and Anthropic client is sized at
+Last updated: 2026-10-09 (the article workflow owns a deadline and the writer
+runs on the runtime loop; a direct caller is sized from an enclosing deadline;
+every OpenAI-family and Anthropic client is sized at
 dispatch for the vendor it names; the ticker run deadline caps every enclosing
 deadline under the pipeline; 2026-10-08: editor review, retrospective lesson and semantic judge
 moved onto the budget policy; seat client timeout and vendor ceiling inside an
@@ -388,9 +390,40 @@ inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
   refusal). The editor was uncapped; it now has the review-plane (`CROSS_CHECK`)
   budget, since it is bound to the same group as the Consultant and Auditor. The
   analyst structural retry reads its overall budget from the same resolver
-  (`resolve_invocation_budget`) instead of recomputing it. Still direct: the
-  writer and its fallbacks, and the health check; for them only a flex request
-  is sized.
+  (`resolve_invocation_budget`) instead of recomputing it. Still direct: only
+  the health check, which is bounded on its own (15 s overall, a 10 s client, one
+  attempt) and runs at startup, outside every deadline.
+- **The article workflow owns a deadline, and the writer runs on the loop.**
+  `--article` runs after the analysis deadline's scope has closed, so the writer
+  called its model with a synchronous `invoke` on the event loop, under no
+  deadline, with SDK retries fixed on each client (three Anthropic requests of
+  `API_TIMEOUT` each) and every fallback tier built and sent after any primary
+  failure. Now `handle_article_generation` binds
+  `ARTICLE_WORKFLOW_TIMEOUT_SECONDS` (900 s) around draft, review and
+  revisions, and hard-bounds each step at it (`run_article_workflow_step`), so a
+  step that overruns is cancelled and its result discarded, never written. The
+  default is about twice the longest measured workflow: 333 to 444 s across 15
+  June 2026 article runs (analysis save to article write). `write`, `revise` and
+  the edit loop are async; each tier invokes through the runtime loop keyed by
+  its seat (`Article Writer`, `Article Writer Fallback`). `TimeoutClass.EDITORIAL`
+  is now runtime-owned (writer clients send one SDK attempt; the loop retries up
+  to `LLM_ATTEMPTS`) and quick-invariant, with `API_TIMEOUT` per attempt; it was
+  used only by the writer seats, so no other seat's policy moved. A fallback
+  tier is not built once the allowance cannot fit a useful attempt. When the
+  allowance runs out after a draft exists, the draft is saved as `.draft` with
+  `editor_review_error` and `workflow_deadline_exceeded` set, and
+  `writer_fell_back` kept; a review error never publishes. The workflow
+  deadline is not a promise that an article finishes, and the pipeline never
+  passes `--article`.
+- **A direct caller under an enclosing deadline is sized from it.** With no
+  invocation scope, a dispatch now admits and sizes its request against
+  `current_enclosing_deadline()` under the model's class policy; it keeps the
+  client's constructed SDK attempts, so an OpenAI or Anthropic client built
+  with retries can still run past the deadline by them. With neither a scope
+  nor an enclosing deadline nothing changes.
+- **The portfolio macro classifier** (`scripts/portfolio_manager.py`) invokes
+  through the runtime loop (its own `asyncio.run`, since the script's `main` is
+  synchronous) and its seat sends one SDK attempt per request.
 - **The seat, not just its class, resolves the policy.** Inside an invocation the
   runtime looks up the registered seat (`seat_for_agent`) and resolves through
   `policy_for_seat`, so a seat's explicit `client_timeout_seconds` (the Health
@@ -447,8 +480,8 @@ unchanged because Google, its main consumer, already counted totals) and
 still works, translated: it meant total on Google and *retries* elsewhere;
 `transport_attempts` wins). Consequence on OpenAI and Anthropic: at the same
 configured value a direct-caller client now makes one request fewer (the writer
-literal of 3 now means three requests, not four; the editor has since moved onto
-the loop and sends one SDK attempt per request), and the runtime-owned
+literal of 3 meant three requests, not four; the editor and then the writer have
+since moved onto the loop and send one SDK attempt per request), and the runtime-owned
 Auditor, APAC and Consultant transport-fallback clients went from 2-4 SDK requests
 per call to one, with retries owned by the runtime loop.
 

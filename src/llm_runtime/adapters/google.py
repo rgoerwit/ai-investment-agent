@@ -1,5 +1,7 @@
 """Google-native chat adapter."""
 
+from typing import Any
+
 from langchain_core.language_models import BaseChatModel
 
 from src.llm_runtime.adapters.base import SeatModelRequest
@@ -55,12 +57,20 @@ class GoogleAdapter:
             return llm
 
         if request.seat.seat_id is SeatId.ARTICLE_WRITER_BASE_FALLBACK:
+            # The seat policy reaches the writer floor too: its temperature,
+            # client ceiling and attempts, when the policy sets them.
+            writer_kwargs: dict[str, Any] = {"max_retries": built_retries}
+            if policy.sampling_temperature is not None:
+                writer_kwargs["temperature"] = policy.sampling_temperature
+            if policy.client_timeout_seconds is not None:
+                writer_kwargs["timeout"] = policy.client_timeout_seconds
             return llms.create_writer_fallback_llm(
                 callbacks=list(request.callbacks),
                 model=request.binding.model,
                 service_tier=request.service_tier,
                 api_key=settings.get_google_api_key(),
                 settings=settings,
+                **writer_kwargs,
             )
         if request.binding.intent in {
             ModelIntent.FAST,

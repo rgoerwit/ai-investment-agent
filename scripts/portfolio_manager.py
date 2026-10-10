@@ -813,6 +813,41 @@ _EXPIRY_DAYS: dict[str, int] = {
 }
 
 
+def _invoke_macro_classifier(llm: Any, messages: list[Any]) -> Any:
+    """One macro-classifier call through the runtime loop, from sync code.
+
+    The loop bounds each attempt (``run_with_hard_timeout``), sizes every
+    request at dispatch and owns the retries, so the client sends one SDK
+    attempt per request. This script's ``main`` is synchronous and reaches
+    here with no event loop running (each async service call it makes is its
+    own ``asyncio.run``), so the call gets its own loop too. Called from a
+    running loop it raises instead, before creating the coroutine, and the
+    caller's keyword fallback takes over.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("macro classifier must be invoked from synchronous code")
+
+    from src.agents.runtime import invoke_with_rate_limit_handling
+    from src.llm_runtime.seats import SEATS, SeatId
+    from src.runtime_diagnostics import get_model_name, get_runtime_provider
+
+    seat_name = SEATS[SeatId.PORTFOLIO_MACRO_CLASSIFIER].callback_name
+    return asyncio.run(
+        invoke_with_rate_limit_handling(
+            llm,
+            messages,
+            context=seat_name,
+            canonical_agent=seat_name,
+            provider=get_runtime_provider(llm),
+            model_name=get_model_name(llm),
+        )
+    )
+
+
 def _characterize_macro_event(
     event_date: str,
     sell_items: list,
@@ -906,7 +941,7 @@ def _characterize_macro_event(
                 f'"opportunity_prior": "HIGH|MEDIUM|LOW|NEGATIVE|UNCERTAIN", '
                 f'"reasoning": "one sentence max"}}'
             )
-            _resp = _llm.invoke([_HM(content=_prompt)])
+            _resp = _invoke_macro_classifier(_llm, [_HM(content=_prompt)])
             _text = extract_string_content(
                 _resp.content if hasattr(_resp, "content") else str(_resp)
             )

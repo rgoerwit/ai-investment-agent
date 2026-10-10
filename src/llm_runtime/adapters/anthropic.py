@@ -23,6 +23,7 @@ class AnthropicAdapter:
         from src.config import config
 
         settings = request.settings or config
+        policy = request.seat.execution_policy
         api_key = settings.get_claude_api_key()
         if not api_key:
             raise ValueError("Anthropic writer binding requires ANTHROPIC_API_KEY")
@@ -37,15 +38,20 @@ class AnthropicAdapter:
             "model": request.binding.model,
             "max_tokens": request.output_tokens or _DEFAULT_ANTHROPIC_OUTPUT_TOKENS,
             # Total attempts translated to Anthropic's retries-after-first. The
-            # writer is invoked directly, so this is its whole retry budget
-            # (was max_retries=3, i.e. four requests; now three).
+            # runtime loop owns the writer's retries, so the seat policy gives
+            # one attempt per dispatch (was three, then four, before Oct 2026).
             "max_retries": sdk_max_retries(
                 "anthropic",
                 construction_transport_attempts(
                     request.seat, vendor="anthropic", cfg=settings
                 ),
             ),
-            "timeout": float(settings.api_timeout),
+            # The seat's explicit client ceiling when it has one.
+            "timeout": float(
+                policy.client_timeout_seconds
+                if policy.client_timeout_seconds is not None
+                else settings.api_timeout
+            ),
             "callbacks": list(request.callbacks),
             "anthropic_api_key": api_key,
             # The binding's provider, explicitly: it sizes every request.
@@ -59,7 +65,13 @@ class AnthropicAdapter:
         elif reasoning_mode is ReasoningApiMode.MANUAL:
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8192}
         else:
-            kwargs["temperature"] = 0.7
+            # Anthropic rejects a temperature other than 1.0 with thinking, so
+            # the seat's temperature applies only to a model without it.
+            kwargs["temperature"] = (
+                policy.sampling_temperature
+                if policy.sampling_temperature is not None
+                else 0.7
+            )
         model = transports.new_anthropic_chat(**kwargs)
         thinking = kwargs.get("thinking")
         reserve = (

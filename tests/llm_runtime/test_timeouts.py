@@ -776,13 +776,19 @@ class TestAttemptSemantics:
             SeatId.EDITOR,
             SeatId.RETROSPECTIVE,
             SeatId.SEMANTIC_JUDGE,
+            # The writer chain and the macro classifier joined the loop in
+            # round 2 (EDITORIAL became a runtime-owned class).
+            SeatId.ARTICLE_WRITER,
+            SeatId.ARTICLE_WRITER_REVIEW_FALLBACK,
+            SeatId.ARTICLE_WRITER_BASE_FALLBACK,
+            SeatId.PORTFOLIO_MACRO_CLASSIFIER,
         ):
             for vendor in ("openai", "anthropic"):
                 assert construction_transport_attempts(SEATS[seat], vendor=vendor) == 1
-        # The writer is still invoked directly: it keeps a small SDK budget.
+        # A direct-caller (mixed-class) seat keeps a small SDK budget.
         assert (
             construction_transport_attempts(
-                SEATS[SeatId.ARTICLE_WRITER], vendor="openai"
+                SEATS[SeatId.MACRO_CONTEXT], vendor="openai"
             )
             == 3
         )

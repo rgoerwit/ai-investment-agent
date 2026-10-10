@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The `--article` workflow now has its own deadline, `ARTICLE_WORKFLOW_TIMEOUT_SECONDS`
+  (900 s, about twice the longest measured workflow), around draft, review and
+  revisions, and the writer runs asynchronously through the runtime loop instead of a
+  synchronous call that blocked the event loop. Writer clients send one SDK attempt
+  per request (was three Anthropic requests of `API_TIMEOUT` each, per tier); the loop
+  retries up to `LLM_ATTEMPTS`, each attempt capped at `API_TIMEOUT` in both run modes.
+  A writer fallback tier is no longer built once the allowance cannot fit it. When the
+  allowance runs out after a draft exists, the draft is saved for review with
+  `editor_review_error` and the new `workflow_deadline_exceeded` flag, never as an
+  approved article; a step that overruns is discarded, never written. The writer's
+  fact-check search now uses the async Tavily entrypoint. `create_writer_llm` honours
+  the temperature, timeout and attempts it is given, and the writer's configured
+  temperature now also reaches the fallback tiers (the provider-scoped Gemini floor
+  wrote at 0.1, not the writer's 0.7). `generate_article` is now a coroutine.
+- A model invoked outside the runtime loop is admitted and sized against an
+  enclosing deadline when one is bound; with none, nothing changes.
+- The portfolio manager's macro-event classifier invokes through the runtime loop
+  (bounded attempts, owned retries, one SDK attempt per request) instead of an
+  unbounded synchronous call.
+
 - Enforce reliable financial-health failures through the existing verdict correction, preserving the canonical deep-value/current-ratio exception and active-tender exemption; project the same health assessment into saved policy, PM context and reports.
 - Close every completed Junior acquisition with its named terminal message, including empty or malformed failures, preserving current failure provenance and preventing a redundant blocked tool round.
 

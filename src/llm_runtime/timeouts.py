@@ -54,7 +54,9 @@ class TimeoutClass(StrEnum):
     CROSS_CHECK = "cross_check"
     # The APAC regional specialist, whose node total is its enclosing deadline.
     REGIONAL = "regional"
-    # The writer and its fallbacks: still invoked outside the runtime loop.
+    # The writer and its fallbacks. Invoked through the runtime loop (which owns
+    # their retries) inside the article workflow's own deadline; quick-invariant,
+    # like the writer's model selection, with ``api_timeout`` per attempt.
     EDITORIAL = "editorial"
     # Operational helpers (macro context, inspectors, retrospective, health check,
     # semantic judge). Mixed: some run under the runtime loop, some directly, so
@@ -81,11 +83,12 @@ _RUNTIME_OWNED_CLASSES = frozenset(
         TimeoutClass.APEX,
         TimeoutClass.CROSS_CHECK,
         TimeoutClass.REGIONAL,
+        TimeoutClass.EDITORIAL,
     }
 )
 
 # Total SDK attempts for a client whose callers still invoke it directly
-# (EDITORIAL / OPERATIONAL seats on a vendor without per-request retry control).
+# (OPERATIONAL seats on a vendor without per-request retry control).
 # Before October 2026 this was the literal ``max_retries=3`` (retries) on the
 # OpenAI and Anthropic paths; it now means total attempts, so those clients make
 # one fewer attempt at the same configured value.
@@ -282,9 +285,23 @@ def _runtime(settings: Any, runtime_config: RuntimeConfig | None) -> Any:
     return get_runtime_config(settings)
 
 
+def _editorial_invocation_cap(settings: Any) -> float:
+    """The writer's per-attempt cap, in both run modes.
+
+    The writer is quick-invariant (its model ignores ``--quick``) and writes a
+    long article in one request, so neither the flat quick cap nor the graph's
+    per-call cap fits it; ``api_timeout`` is the per-request ceiling its clients
+    have always been built with. The article workflow's own deadline
+    (``article_workflow_timeout_seconds``) bounds the whole chain.
+    """
+    return float(getattr(settings, "api_timeout", 300))
+
+
 def quick_invocation_cap(timeout_class: TimeoutClass, cfg: Any = None) -> float:
     """The ``--quick`` per-attempt cap for a class, before any flex floor."""
     settings = _settings(cfg)
+    if timeout_class is TimeoutClass.EDITORIAL:
+        return _editorial_invocation_cap(settings)
     if timeout_class is TimeoutClass.APEX:
         return float(
             getattr(settings, "apex_quick_llm_call_hard_timeout_seconds", 180.0)
@@ -307,7 +324,7 @@ def _standard_request_cap(
     if family == "anthropic":
         return api_timeout
     if family in ("", "google", "gemini"):
-        if quick and timeout_class is not TimeoutClass.APEX:
+        if quick and timeout_class not in (TimeoutClass.APEX, TimeoutClass.EDITORIAL):
             return min(
                 api_timeout,
                 float(getattr(settings, "quick_llm_api_timeout_seconds", 120)),
@@ -333,7 +350,9 @@ def resolve_budget_policy(
     settings = _settings(cfg)
     runtime = _runtime(settings, runtime_config)
     quick = bool(getattr(runtime, "quick_mode_active", False))
-    if quick:
+    if timeout_class is TimeoutClass.EDITORIAL:
+        cap = _editorial_invocation_cap(settings)
+    elif quick:
         cap = quick_invocation_cap(timeout_class, settings)
     else:
         cap = float(runtime.llm_call_hard_timeout_seconds)

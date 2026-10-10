@@ -1282,6 +1282,20 @@ class Settings(BaseSettings):
             "for final publication (report render, persistence, shutdown)."
         ),
     )
+    # The article workflow (--article) runs after the analysis deadline's scope
+    # closes, so it binds its own. 900 s is about twice the longest measured
+    # article workflow (333-444 s across 15 June 2026 runs, analysis save to
+    # article write). See docs/LLM_PROVIDERS.md.
+    article_workflow_timeout_seconds: float = Field(
+        default=900.0,
+        gt=0.0,
+        validation_alias="ARTICLE_WORKFLOW_TIMEOUT_SECONDS",
+        description=(
+            "Wall-clock allowance (seconds) for the whole article workflow: "
+            "draft, editorial review and revisions, every writer fallback tier "
+            "included. A draft held when it runs out is saved unreviewed."
+        ),
+    )
     # Two nested tool scopes, kept separate on purpose. The execution scope
     # bounds the tool runner inside ToolExecutionService; the graph tool node's
     # wider scope also bounds the after() inspection hooks, which run outside

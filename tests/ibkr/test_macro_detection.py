@@ -1,7 +1,7 @@
 """Tests for macro event detection helpers in scripts/portfolio_manager.py."""
 
 from datetime import date, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -95,17 +95,22 @@ class TestCharacterizeMacroEventScope:
 
 class TestCharacterizeMacroEventLLM:
     def test_llm_classification_used_when_available(self):
-        """Valid LLM JSON response → event_type and impact from LLM."""
+        """Valid LLM JSON response → event_type and impact from LLM.
+
+        The LLM's answer (GEOPOLITICAL) differs from what the keyword fallback
+        would derive from the tariff headline, so this cannot pass by falling
+        back; the call goes through the runtime loop's ``ainvoke``, once.
+        """
         llm_response = MagicMock()
         llm_response.content = (
-            '{"event_type": "TARIFF_TRADE", "impact": "TRANSIENT", '
+            '{"event_type": "GEOPOLITICAL", "impact": "STRUCTURAL", '
             '"opportunity_prior": "HIGH", "reasoning": "Trade policy"}'
         )
         items = [_make_sell_item("7203.T")]
         # Patch at source module (local import inside function)
         with patch("src.llms.create_deep_thinking_llm") as mock_create:
             mock_llm = MagicMock()
-            mock_llm.invoke.return_value = llm_response
+            mock_llm.ainvoke = AsyncMock(return_value=llm_response)
             mock_create.return_value = mock_llm
             with patch(
                 "scripts.portfolio_manager.search_tavily_sync_inspected"
@@ -118,8 +123,62 @@ class TestCharacterizeMacroEventLLM:
                 scope, region, sector, impact, event_type, headline, detail = (
                     _characterize_macro_event("2026-03-05", items, 0.30, peak_count=6)
                 )
-        assert event_type == "TARIFF_TRADE"
-        assert impact == "TRANSIENT"
+        assert event_type == "GEOPOLITICAL"
+        assert impact == "STRUCTURAL"
+        mock_llm.ainvoke.assert_awaited_once()
+        mock_llm.invoke.assert_not_called()
+
+    def test_classifier_call_is_bounded_by_the_runtime_loop(self):
+        """The classifier goes through invoke_with_rate_limit_handling, keyed by
+        its seat, so the runtime's hard bound and owned retries apply."""
+        from src.llm_runtime.seats import SEATS, SeatId
+
+        llm_response = MagicMock()
+        llm_response.content = (
+            '{"event_type": "GEOPOLITICAL", "impact": "STRUCTURAL", '
+            '"opportunity_prior": "HIGH", "reasoning": "x"}'
+        )
+        calls: list[dict] = []
+
+        async def _fake_invoke(runnable, input_data, **kwargs):
+            calls.append(kwargs)
+            return llm_response
+
+        items = [_make_sell_item("7203.T")]
+        with (
+            patch("src.llms.create_deep_thinking_llm", return_value=MagicMock()),
+            patch(
+                "src.agents.runtime.invoke_with_rate_limit_handling",
+                side_effect=_fake_invoke,
+            ),
+            patch(
+                "scripts.portfolio_manager.search_tavily_sync_inspected",
+                return_value={"results": [{"title": "Tariffs", "content": "x"}]},
+            ),
+        ):
+            *_, impact, event_type, _, _ = _characterize_macro_event(
+                "2026-03-05", items, 0.30, peak_count=6
+            )
+        seat = SEATS[SeatId.PORTFOLIO_MACRO_CLASSIFIER].callback_name
+        assert [c["context"] for c in calls] == [seat]
+        assert calls[0]["canonical_agent"] == seat
+        assert event_type == "GEOPOLITICAL"
+
+    def test_classifier_refuses_a_running_event_loop(self):
+        """Called from async code it raises before creating the coroutine."""
+        import asyncio
+
+        from scripts.portfolio_manager import _invoke_macro_classifier
+
+        llm = MagicMock()
+        llm.ainvoke = AsyncMock()
+
+        async def _inside_loop():
+            with pytest.raises(RuntimeError, match="synchronous code"):
+                _invoke_macro_classifier(llm, [])
+
+        asyncio.run(_inside_loop())
+        llm.ainvoke.assert_not_called()
 
     def test_no_tavily_key_returns_uncertain_unknown(self):
         """Unavailable search results → headline='unknown', impact=UNCERTAIN, type=UNKNOWN."""
@@ -196,7 +255,7 @@ class TestCharacterizeMacroEventLLM:
         items = [_make_sell_item("7203.T")]
         with patch("src.llms.create_deep_thinking_llm") as mock_create:
             mock_llm = MagicMock()
-            mock_llm.invoke.return_value = llm_response
+            mock_llm.ainvoke = AsyncMock(return_value=llm_response)
             mock_create.return_value = mock_llm
             with patch(
                 "scripts.portfolio_manager.search_tavily_sync_inspected"
@@ -234,7 +293,7 @@ class TestCharacterizeMacroEventLLM:
         items = [_make_sell_item("7203.T")]
         with patch("src.llms.create_deep_thinking_llm") as mock_create:
             mock_llm = MagicMock()
-            mock_llm.invoke.return_value = llm_response
+            mock_llm.ainvoke = AsyncMock(return_value=llm_response)
             mock_create.return_value = mock_llm
             with patch(
                 "scripts.portfolio_manager.search_tavily_sync_inspected"
@@ -262,7 +321,7 @@ class TestCharacterizeMacroEventLLM:
         items = [_make_sell_item("7203.T")]
         with patch("src.llms.create_deep_thinking_llm") as mock_create:
             mock_llm = MagicMock()
-            mock_llm.invoke.return_value = llm_response
+            mock_llm.ainvoke = AsyncMock(return_value=llm_response)
             mock_create.return_value = mock_llm
             with patch(
                 "scripts.portfolio_manager.search_tavily_sync_inspected"

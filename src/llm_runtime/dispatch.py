@@ -4,9 +4,11 @@ Every request -- flex, the standard re-issue, a call sent at standard because
 flex is degraded or skipped, and the failover copy -- is sized here from the
 invocation's absolute deadline (a ContextVar set by the runtime loop), never
 from a timeout fixed on the instance at construction. Outside an application
-invocation (a direct caller), only a flex request is sized (to the flex
-ceiling); a standard request keeps the client's constructed timeout and SDK
-attempts, which those callers still rely on.
+invocation (a direct caller), a request is admitted and sized against the
+enclosing deadline when one is bound (``enclosing_deadline``), under the
+model's class policy; with none bound, only a flex request is sized (to the
+flex ceiling) and a standard request keeps the client's constructed timeout.
+A direct caller always keeps the client's constructed SDK attempts.
 
 Provider-neutral and SDK-free on purpose: the Google transport in
 ``src/llms.py`` and the OpenAI and Anthropic transports in
@@ -31,6 +33,7 @@ from src.llm_runtime.timeouts import (
     DispatchScope,
     TimeoutClass,
     current_dispatch_scope,
+    current_enclosing_deadline,
     policy_for_provider,
     request_timeout,
     resolve_budget_policy,
@@ -192,13 +195,20 @@ def _dispatch_budget(
         # The deadline is the invocation's; the request ceiling is the vendor's
         # that actually receives this request (a delegate could be another one).
         return policy_for_provider(scope.policy, provider), scope.deadline, scope
+    # A direct caller (no invocation scope). Its requests are still admitted
+    # and sized against an enclosing deadline when one is bound, under the
+    # model's own class policy; with none bound, nothing changes.
     raw_class = getattr(model, "budget_timeout_class", None)
     timeout_class = (
         TimeoutClass(raw_class)
         if isinstance(raw_class, str)
         else TimeoutClass.AUXILIARY
     )
-    return resolve_budget_policy(timeout_class, provider=provider), None, None
+    return (
+        resolve_budget_policy(timeout_class, provider=provider),
+        current_enclosing_deadline(),
+        None,
+    )
 
 
 def _plan_dispatch(
@@ -281,7 +291,10 @@ def _plan_dispatch(
             record["configured_attempts"] = _construction_attempts(model, google=False)
         record["timeout_s"] = round(timeout, 3)
     else:
-        if tier == "flex":
+        # Outside an invocation the SDK keeps the client's constructed
+        # attempts (its whole retry budget), but a request under an enclosing
+        # deadline is sized from it like a flex request is from its ceiling.
+        if tier == "flex" or deadline is not None:
             call_kwargs["timeout"] = timeout
             record["timeout_s"] = round(timeout, 3)
         else:

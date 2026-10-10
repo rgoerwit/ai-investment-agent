@@ -1,7 +1,7 @@
 """Application-owned seat construction shared by graph and auxiliary workflows."""
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -16,8 +16,11 @@ from src.llm_runtime.seats import (
     SEATS,
     ModelIntent,
     ReasoningAdjustment,
+    SeatExecutionPolicy,
     SeatId,
+    SeatSpec,
 )
+from src.llm_runtime.timeouts import construction_transport_attempts
 from src.service_tiers import resolve_google_service_tier
 
 
@@ -31,6 +34,8 @@ class LegacySeatRequest:
     model_override: str | None
     resolved_model: str
     include_reasoning_output: bool = False
+    # A per-construction replacement for the seat's registered policy, or None.
+    execution_policy: SeatExecutionPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -62,7 +67,8 @@ def build_legacy_model(
     from src import llms
 
     seat_id = request.seat_id
-    policy = SEATS[seat_id].execution_policy
+    spec = _spec_with_policy(seat_id, request.execution_policy)
+    policy = spec.execution_policy
     settings = request.settings
     quick_mode = request.quick_mode
     pinned_tier = (
@@ -95,24 +101,51 @@ def build_legacy_model(
     )
 
     if seat_id is SeatId.ARTICLE_WRITER:
+        # The seat policy is the whole construction contract: the runtime
+        # loop owns the writer's retries, so the client gets its policy
+        # attempts, not the legacy constructor's own default.
+        writer_kwargs: dict[str, Any] = {
+            "transport_attempts": construction_transport_attempts(
+                spec, vendor="anthropic", cfg=settings
+            ),
+        }
+        if policy.sampling_temperature is not None:
+            writer_kwargs["temperature"] = policy.sampling_temperature
+        if policy.client_timeout_seconds is not None:
+            writer_kwargs["timeout"] = policy.client_timeout_seconds
         return llms.create_writer_llm(
             callbacks=callbacks,
             model=request.resolved_model,
             api_key_override=settings.get_claude_api_key(),
             settings=settings,
+            **writer_kwargs,
         )
     if seat_id is SeatId.ARTICLE_WRITER_REVIEW_FALLBACK:
         return llms.create_writer_openai_fallback_llm(
             callbacks=callbacks,
             model=request.resolved_model,
             settings=settings,
+            request_timeout_seconds=policy.client_timeout_seconds,
+            transport_attempts=construction_transport_attempts(
+                spec, vendor="openai", cfg=settings
+            ),
         )
     if seat_id is SeatId.ARTICLE_WRITER_BASE_FALLBACK:
+        fallback_kwargs: dict[str, Any] = {
+            "max_retries": construction_transport_attempts(
+                spec, vendor="google", cfg=settings
+            ),
+        }
+        if policy.sampling_temperature is not None:
+            fallback_kwargs["temperature"] = policy.sampling_temperature
+        if policy.client_timeout_seconds is not None:
+            fallback_kwargs["timeout"] = policy.client_timeout_seconds
         return llms.create_writer_fallback_llm(
             callbacks=callbacks,
             model=request.resolved_model,
             api_key=settings.get_google_api_key(),
             settings=settings,
+            **fallback_kwargs,
         )
     if seat_id is SeatId.EDITOR:
         return llms.create_editor_llm(
@@ -181,6 +214,7 @@ def build_legacy_model(
         factory = quick_factory if quick_mode else deep_factory
         return factory(
             model=request.resolved_model,
+            max_retries=policy.resolved_transport_attempts("google"),
             callbacks=callbacks,
             max_output_tokens=output_tokens,
             settings=settings,
@@ -246,6 +280,27 @@ def build_legacy_model(
     )
 
 
+def _spec_with_policy(
+    seat_id: SeatId, execution_policy: SeatExecutionPolicy | None
+) -> SeatSpec:
+    """The registered seat, with its policy replaced for one construction."""
+    spec = SEATS[seat_id]
+    if execution_policy is None:
+        return spec
+    return replace(spec, execution_policy=execution_policy)
+
+
+def seat_policy_with(seat_id: SeatId, **overrides: Any) -> SeatExecutionPolicy | None:
+    """The seat's registered policy with the non-None ``overrides`` applied.
+
+    Returns None when nothing is overridden, so the registered policy stands.
+    """
+    fields = {key: value for key, value in overrides.items() if value is not None}
+    if not fields:
+        return None
+    return replace(SEATS[seat_id].execution_policy, **fields)
+
+
 def _default_legacy_builder(request: LegacySeatRequest) -> BaseChatModel | None:
     return build_legacy_model(request)
 
@@ -263,8 +318,14 @@ def build_model_for_seat(
     model_override: str | None = None,
     legacy_builder: LegacyBuilder | None = None,
     include_reasoning_output: bool = False,
+    execution_policy: SeatExecutionPolicy | None = None,
 ) -> BaseChatModel | None:
-    """Construct one fresh client from a canonical seat binding."""
+    """Construct one fresh client from a canonical seat binding.
+
+    ``execution_policy`` replaces the seat's registered policy for this one
+    construction (a caller's explicit temperature, client timeout or SDK
+    attempts); every adapter and the legacy builder read it from the request.
+    """
 
     resolved_plan = plan or resolve_binding_plan(settings)
     callback_list = list(callbacks)
@@ -289,6 +350,7 @@ def build_model_for_seat(
                 model_override=model_override,
                 resolved_model=binding.model,
                 include_reasoning_output=include_reasoning_output,
+                execution_policy=execution_policy,
             )
         )
 
@@ -298,7 +360,7 @@ def build_model_for_seat(
             f"{seat_id.value} model override {model_override!r} differs from the "
             f"resolved binding {binding.model!r}; pin it in environment settings"
         )
-    spec = SEATS[seat_id]
+    spec = _spec_with_policy(seat_id, execution_policy)
     if spec.execution_policy.standard_tier_only or (
         quick_mode and spec.execution_policy.standard_tier_in_quick_mode
     ):
@@ -370,16 +432,29 @@ def writer_seat_fallback_chain(
     callbacks: Sequence[BaseCallbackHandler] = (),
     plan: BindingPlan | None = None,
     factory: SeatModelFactory | None = None,
+    policy_overrides: Mapping[str, Any] | None = None,
 ) -> list[WriterSeatTier]:
-    """Return lazy, provider-neutral editorial fallback tiers."""
+    """Return lazy, provider-neutral editorial fallback tiers.
+
+    ``policy_overrides`` (``SeatExecutionPolicy`` field values) apply to every
+    tier's construction, so a caller's explicit settings reach the tier that
+    actually writes. The legacy chain honours ``sampling_temperature`` only;
+    its tiers take their attempts and ceilings from the seat policy.
+    """
 
     resolved_plan = plan or resolve_binding_plan(settings)
+    overrides = dict(policy_overrides or {})
     if resolved_plan.schema == "legacy":
         from src.llms import writer_fallback_chain
 
+        legacy_kwargs: dict[str, Any] = {}
+        if overrides.get("sampling_temperature") is not None:
+            legacy_kwargs["temperature"] = overrides["sampling_temperature"]
         return [
             WriterSeatTier(tier.label, tier.build)
-            for tier in writer_fallback_chain(callbacks=list(callbacks))
+            for tier in writer_fallback_chain(
+                callbacks=list(callbacks), **legacy_kwargs
+            )
         ]
 
     model_factory = factory or SeatModelFactory()
@@ -400,6 +475,7 @@ def writer_seat_fallback_chain(
                 factory=model_factory,
                 callbacks=callbacks,
                 output_tokens=16_384,
+                execution_policy=seat_policy_with(seat, **overrides),
             )
 
         tiers.append(WriterSeatTier(label, build))

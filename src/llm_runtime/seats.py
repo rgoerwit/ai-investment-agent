@@ -571,6 +571,9 @@ SEATS: dict[SeatId, SeatSpec] = {
         stage=AuthorityStage.OPERATIONAL,
         normal=ModelIntent.REASONING,
         quick=ModelIntent.CLASSIFIER,
+        # Invoked through the runtime loop (scripts/portfolio_manager.py),
+        # which owns its retries: one SDK attempt per request on every vendor.
+        execution_policy=SeatExecutionPolicy(transport_attempts=1),
         timeout_class=TimeoutClass.OPERATIONAL,
     ),
     SeatId.SIGNAL_PROCESSOR: _seat(

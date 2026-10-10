@@ -103,7 +103,12 @@ owns but whose class is mixed declares `transport_attempts=1`. Read a cap from
 `resolve_invocation_budget` in `src/agents/runtime.py`, which resolves the seat (so
 its `client_timeout_seconds` holds inside the scope); a dispatch keeps the scope's
 deadline but takes the ceiling of the vendor it sends to (`policy_for_provider`).
-Still direct: the writer chain and the health check.
+The writer chain and the portfolio macro classifier are on the loop too.
+Still direct, on purpose: only the health check, bounded on its own (15 s
+overall, a 10 s client, one attempt) and run at startup outside every deadline.
+The article workflow binds `article_workflow_timeout_seconds` in
+`handle_article_generation`, hard-bounds each step at it, and never builds a
+writer fallback tier the remaining allowance cannot fit.
 
 Attempt telemetry must use the transport tier actually reached, including an in-call
 flex-to-standard retry or model failover. A quick-mode timeout after a flex latency

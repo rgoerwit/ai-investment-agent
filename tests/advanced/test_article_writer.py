@@ -594,14 +594,16 @@ class TestArticleGeneration:
         callbacks = mock_create_llm.call_args.kwargs["callbacks"]
         assert tracing_callback in callbacks
 
+    @pytest.mark.asyncio
     @patch("src.article_writer.create_writer_llm")
-    def test_generates_article_with_all_components(self, mock_create_llm):
+    async def test_generates_article_with_all_components(self, mock_create_llm):
         """Test that article generation includes voice samples and images."""
         from src.article_writer import ArticleWriter
 
         # Mock LLM response
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
+        mock_llm.ainvoke = AsyncMock()
+        mock_llm.ainvoke.return_value = MagicMock(
             content="# Test Article\n\nThis is a test article."
         )
         mock_create_llm.return_value = mock_llm
@@ -626,7 +628,7 @@ class TestArticleGeneration:
                 use_github_urls=False,
             )
 
-            article = writer.write(
+            article = await writer.write(
                 ticker="TEST",
                 company_name="Test Company",
                 report_text="This is the source report.",
@@ -635,10 +637,10 @@ class TestArticleGeneration:
             )
 
             # Verify LLM was called
-            assert mock_llm.invoke.called
+            assert mock_llm.ainvoke.called
 
             # Verify the user message contained voice samples
-            call_args = mock_llm.invoke.call_args[0][0]
+            call_args = mock_llm.ainvoke.call_args[0][0]
             user_msg = call_args[1].content
             assert "Sample voice content" in user_msg
             assert "URL: images/TEST_radar.png" in user_msg
@@ -647,12 +649,14 @@ class TestArticleGeneration:
             assert "Test Article" in article
             assert output_path.read_text() == article
 
+    @pytest.mark.asyncio
     @patch("src.article_writer.create_writer_llm")
-    def test_writer_injects_governance_card(self, mock_create_llm):
+    async def test_writer_injects_governance_card(self, mock_create_llm):
         from src.article_writer import ArticleWriter
 
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content="# Test Article\n\nBody.")
+        mock_llm.ainvoke = AsyncMock()
+        mock_llm.ainvoke.return_value = MagicMock(content="# Test Article\n\nBody.")
         mock_create_llm.return_value = mock_llm
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -662,7 +666,7 @@ class TestArticleGeneration:
                 use_github_urls=False,
             )
 
-            writer.write(
+            await writer.write(
                 ticker="009970.KS",
                 company_name="Youngone Holdings Co., Ltd.",
                 report_text="Report",
@@ -676,19 +680,21 @@ class TestArticleGeneration:
                 },
             )
 
-            user_msg = mock_llm.invoke.call_args[0][0][1].content
+            user_msg = mock_llm.ainvoke.call_args[0][0][1].content
             assert "ENTITY GOVERNANCE CARD" in user_msg
             assert "111770.KS" in user_msg
             assert "MANDATORY OPENING DISCLOSURE" in user_msg
 
+    @pytest.mark.asyncio
     @patch("src.article_writer.create_writer_llm")
-    def test_writer_disclosure_directive_requires_nonstandard_structure(
+    async def test_writer_disclosure_directive_requires_nonstandard_structure(
         self, mock_create_llm
     ):
         from src.article_writer import ArticleWriter
 
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content="# Test Article\n\nBody.")
+        mock_llm.ainvoke = AsyncMock()
+        mock_llm.ainvoke.return_value = MagicMock(content="# Test Article\n\nBody.")
         mock_create_llm.return_value = mock_llm
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -698,7 +704,7 @@ class TestArticleGeneration:
                 use_github_urls=False,
             )
 
-            writer.write(
+            await writer.write(
                 ticker="7203.T",
                 company_name="Toyota Motor Corporation",
                 report_text="Report",
@@ -712,17 +718,19 @@ class TestArticleGeneration:
                 },
             )
 
-            user_msg = mock_llm.invoke.call_args[0][0][1].content
+            user_msg = mock_llm.ainvoke.call_args[0][0][1].content
             assert "ENTITY GOVERNANCE CARD" in user_msg
             assert "MANDATORY OPENING DISCLOSURE" not in user_msg
 
+    @pytest.mark.asyncio
     @patch("src.article_writer.create_writer_llm")
-    def test_saves_article_to_file(self, mock_create_llm):
+    async def test_saves_article_to_file(self, mock_create_llm):
         """Test that article is saved to specified output path."""
         from src.article_writer import ArticleWriter
 
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
+        mock_llm.ainvoke = AsyncMock()
+        mock_llm.ainvoke.return_value = MagicMock(
             content="# Saved Article\n\nContent here."
         )
         mock_create_llm.return_value = mock_llm
@@ -736,7 +744,7 @@ class TestArticleGeneration:
                 use_github_urls=False,
             )
 
-            writer.write(
+            await writer.write(
                 ticker="TEST",
                 company_name="Test Co",
                 report_text="Report",
@@ -801,10 +809,14 @@ class TestFactCheckContext:
 
         from src.article_writer import ArticleWriter
 
-        with patch("src.article_writer.search_tavily_sync_inspected") as mock_search:
+        with patch(
+            "src.article_writer.search_tavily_inspected", new_callable=AsyncMock
+        ) as mock_search:
             mock_search.return_value = None
             writer = ArticleWriter.__new__(ArticleWriter)
-            context = writer._fetch_fact_check_context("AAPL", "Apple Inc.")
+            context = asyncio.run(
+                writer._fetch_fact_check_context("AAPL", "Apple Inc.")
+            )
             assert context == ""
 
     def test_returns_empty_on_exception(self):
@@ -814,11 +826,14 @@ class TestFactCheckContext:
         from src.article_writer import ArticleWriter
 
         with patch(
-            "src.article_writer.search_tavily_sync_inspected",
+            "src.article_writer.search_tavily_inspected",
+            new_callable=AsyncMock,
             side_effect=Exception("boom"),
         ):
             writer = ArticleWriter.__new__(ArticleWriter)
-            context = writer._fetch_fact_check_context("AAPL", "Apple Inc.")
+            context = asyncio.run(
+                writer._fetch_fact_check_context("AAPL", "Apple Inc.")
+            )
             assert context == ""
 
     def test_respects_max_chars_limit(self):
@@ -832,11 +847,13 @@ class TestFactCheckContext:
             "results": [],
         }
 
-        with patch("src.article_writer.search_tavily_sync_inspected") as mock_search:
+        with patch(
+            "src.article_writer.search_tavily_inspected", new_callable=AsyncMock
+        ) as mock_search:
             mock_search.return_value = response
             writer = ArticleWriter.__new__(ArticleWriter)
-            context = writer._fetch_fact_check_context(
-                "AAPL", "Apple Inc.", max_chars=100
+            context = asyncio.run(
+                writer._fetch_fact_check_context("AAPL", "Apple Inc.", max_chars=100)
             )
             assert len(context) <= 120  # 100 + "[...truncated]"
             assert "[...truncated]" in context
@@ -848,11 +865,14 @@ class TestFactCheckContext:
         from src.article_writer import ArticleWriter
 
         with patch(
-            "src.article_writer.search_tavily_sync_inspected",
+            "src.article_writer.search_tavily_inspected",
+            new_callable=AsyncMock,
             side_effect=Exception("API error"),
         ):
             writer = ArticleWriter.__new__(ArticleWriter)
-            context = writer._fetch_fact_check_context("AAPL", "Apple Inc.")
+            context = asyncio.run(
+                writer._fetch_fact_check_context("AAPL", "Apple Inc.")
+            )
             assert context == ""
 
 
@@ -956,10 +976,11 @@ def _mock_llm(model: str, response_text: str | None = None, error=None):
     """LLM mock with a real model-name string so provider inference works."""
     llm = MagicMock()
     llm.model = model
+    llm.ainvoke = AsyncMock()
     if error is not None:
-        llm.invoke.side_effect = error
+        llm.ainvoke.side_effect = error
     else:
-        llm.invoke.return_value = MagicMock(content=response_text)
+        llm.ainvoke.return_value = MagicMock(content=response_text)
     return llm
 
 
@@ -1011,12 +1032,12 @@ class TestWriterFallbackChainRuntime:
                 _tier("gemini_last_resort", gemini),
             ],
         ):
-            article = writer._invoke_writer([MagicMock()])
+            article = asyncio.run(writer._invoke_writer([MagicMock()]))
 
         assert "Fallback Article" in article
         assert writer.writer_fell_back is True
         assert writer.current_model_name == "gpt-5.4"
-        gemini.invoke.assert_not_called()
+        gemini.ainvoke.assert_not_called()
 
     @patch("src.article_writer.create_writer_llm")
     def test_first_tier_failure_recovers_on_gemini_floor(self, mock_create_writer):
@@ -1033,12 +1054,12 @@ class TestWriterFallbackChainRuntime:
                 _tier("gemini_last_resort", gemini),
             ],
         ):
-            article = writer._invoke_writer([MagicMock()])
+            article = asyncio.run(writer._invoke_writer([MagicMock()]))
 
         assert "Floor Article" in article
         assert writer.writer_fell_back is True
         assert writer.current_model_name == "gemini-3.5-flash"
-        assert gpt.invoke.call_count == 1
+        assert gpt.ainvoke.call_count == 1
 
     @patch("src.article_writer.create_writer_llm")
     def test_all_tiers_fail_raises_last_exception(self, mock_create_writer):
@@ -1058,7 +1079,7 @@ class TestWriterFallbackChainRuntime:
             ),
             pytest.raises(Exception, match="gemini floor down"),
         ):
-            writer._invoke_writer([MagicMock()])
+            asyncio.run(writer._invoke_writer([MagicMock()]))
 
     @patch("src.article_writer.create_writer_llm")
     def test_non_anthropic_errors_propagate_without_chain(self, mock_create_writer):
@@ -1068,7 +1089,7 @@ class TestWriterFallbackChainRuntime:
 
         with patch("src.article_writer.writer_fallback_chain") as mock_chain:
             with pytest.raises(ValueError, match="Some unrelated error"):
-                writer._invoke_writer([MagicMock()])
+                asyncio.run(writer._invoke_writer([MagicMock()]))
         mock_chain.assert_not_called()
         assert writer.writer_fell_back is False
 
@@ -1088,7 +1109,7 @@ class TestWriterFallbackChainRuntime:
                 return_value=[_tier("base_group", fallback)],
             ),
         ):
-            result = writer._invoke_writer([MagicMock()])
+            result = asyncio.run(writer._invoke_writer([MagicMock()]))
 
         assert result == "# Article\n\nContent."
         assert writer.llm is fallback
@@ -1105,11 +1126,11 @@ class TestWriterFallbackChainRuntime:
             "src.article_writer.writer_fallback_chain",
             return_value=[_tier("editor_model", gpt)],
         ) as mock_chain:
-            writer._invoke_writer([MagicMock()])
-            writer._invoke_writer([MagicMock()])
+            asyncio.run(writer._invoke_writer([MagicMock()]))
+            asyncio.run(writer._invoke_writer([MagicMock()]))
 
-        assert primary.invoke.call_count == 1
-        assert gpt.invoke.call_count == 2
+        assert primary.ainvoke.call_count == 1
+        assert gpt.ainvoke.call_count == 2
         mock_chain.assert_called_once()
 
     @patch("src.article_writer.create_writer_llm")
@@ -1129,9 +1150,9 @@ class TestWriterFallbackChainRuntime:
             "src.article_writer.writer_fallback_chain",
             return_value=[_tier("editor_model", gpt)],
         ):
-            writer._invoke_writer(messages)
+            asyncio.run(writer._invoke_writer(messages))
 
-        assert gpt.invoke.call_args.args[0] is messages
+        assert gpt.ainvoke.call_args.args[0] is messages
 
     @patch("src.article_writer.create_writer_llm")
     def test_fallback_tiers_receive_tracking_callbacks(self, mock_create_writer):
@@ -1147,7 +1168,7 @@ class TestWriterFallbackChainRuntime:
             "src.article_writer.writer_fallback_chain",
             return_value=[_tier("editor_model", gpt)],
         ) as mock_chain:
-            writer._invoke_writer([MagicMock()])
+            asyncio.run(writer._invoke_writer([MagicMock()]))
 
         callbacks = mock_chain.call_args.kwargs["callbacks"]
         assert isinstance(callbacks[0], TokenTrackingCallback)
@@ -1172,7 +1193,7 @@ class TestWriterFallbackChainRuntime:
             "src.article_writer.writer_fallback_chain",
             return_value=[_tier("editor_model", gpt)],
         ):
-            writer._invoke_writer([MagicMock()])
+            asyncio.run(writer._invoke_writer([MagicMock()]))
 
         assert len(recorder.named("claude_writer_primary_failed")) == 1
         attempts = recorder.named("writer_fallback_attempt")
@@ -1207,7 +1228,7 @@ class TestWriterFallbackChainRuntime:
                 _tier("gemini_last_resort", gemini),
             ],
         ):
-            writer._invoke_writer([MagicMock()])
+            asyncio.run(writer._invoke_writer([MagicMock()]))
 
         failed = recorder.named("writer_fallback_attempt_failed")
         assert [f["tier"] for f in failed] == ["editor_model"]
@@ -1241,7 +1262,7 @@ class TestWriterFallbackChainRuntime:
                 _tier("gemini_last_resort", gemini),
             ],
         ):
-            article = writer._invoke_writer([MagicMock()])
+            article = asyncio.run(writer._invoke_writer([MagicMock()]))
 
         assert "Content." in article
         failed = recorder.named("writer_fallback_attempt_failed")
@@ -1256,7 +1277,7 @@ class TestWriterFallbackChainRuntime:
         writer = self._writer(mock_create_writer, primary)
 
         with patch("src.article_writer.writer_fallback_chain") as mock_chain:
-            writer._invoke_writer([MagicMock()])
+            asyncio.run(writer._invoke_writer([MagicMock()]))
 
         assert writer.writer_fell_back is False
         mock_chain.assert_not_called()
@@ -1265,20 +1286,20 @@ class TestWriterFallbackChainRuntime:
     def test_truncated_output_raises_error(self, mock_create_writer):
         """MAX_TOKENS/LENGTH finish_reason raises RuntimeError, not silent skip."""
         primary = _mock_llm("claude-opus-4-8", "# Article\n\n[truncated]")
-        primary.invoke.return_value.response_metadata = {"finish_reason": "MAX_TOKENS"}
+        primary.ainvoke.return_value.response_metadata = {"finish_reason": "MAX_TOKENS"}
         writer = self._writer(mock_create_writer, primary)
 
         with pytest.raises(RuntimeError, match="output token limit"):
-            writer._invoke_writer([MagicMock()])
+            asyncio.run(writer._invoke_writer([MagicMock()]))
 
     @patch("src.article_writer.create_writer_llm")
     def test_normal_finish_reason_does_not_raise(self, mock_create_writer):
         """STOP/END_TURN finish_reason succeeds normally."""
         primary = _mock_llm("claude-opus-4-8", "# Article\n\nComplete.")
-        primary.invoke.return_value.response_metadata = {"finish_reason": "STOP"}
+        primary.ainvoke.return_value.response_metadata = {"finish_reason": "STOP"}
         writer = self._writer(mock_create_writer, primary)
 
-        article = writer._invoke_writer([MagicMock()])
+        article = asyncio.run(writer._invoke_writer([MagicMock()]))
         assert "Article" in article
 
 
@@ -1338,7 +1359,7 @@ class TestArticleEditorTracing:
         from src.article_writer import ArticleWriter
 
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content="ok")
+        mock_llm.ainvoke = AsyncMock(return_value=MagicMock(content="ok"))
         mock_create_writer.return_value = mock_llm
 
         writer = ArticleWriter(
@@ -1348,10 +1369,10 @@ class TestArticleEditorTracing:
             tracing_metadata={"source_trace_id": "trace-123"},
         )
 
-        writer._invoke_with_fallback([MagicMock()])
+        asyncio.run(writer._invoke_with_fallback([MagicMock()]))
 
-        mock_llm.invoke.assert_called_once()
-        assert mock_llm.invoke.call_args.kwargs["config"] == {
+        mock_llm.ainvoke.assert_called_once()
+        assert mock_llm.ainvoke.call_args.kwargs["config"] == {
             "metadata": {
                 "source_trace_id": "trace-123",
                 "workflow": "article_primary",
