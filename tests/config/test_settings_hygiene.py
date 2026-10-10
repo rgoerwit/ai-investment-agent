@@ -134,6 +134,7 @@ _SETTINGS_ENV_CASES = [
         "200",
         200.0,
     ),
+    ("openai_request_cap_seconds", "OPENAI_REQUEST_CAP_SECONDS", "90", 90.0),
     (
         "tool_execution_timeout_seconds",
         "TOOL_EXECUTION_TIMEOUT_SECONDS",

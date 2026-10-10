@@ -1,6 +1,8 @@
 # LLM Provider Qualification and Operations
 
-Last updated: 2026-10-09 (the article workflow owns a deadline and the writer
+Last updated: 2026-10-09 (direct-caller attempts follow `LLM_ATTEMPTS`, the
+OpenAI request cap is a setting, and the APAC ceiling is its node total; the
+article workflow owns a deadline and the writer
 runs on the runtime loop; a direct caller is sized from an enclosing deadline;
 every OpenAI-family and Anthropic client is sized at
 dispatch for the vendor it names; the ticker run deadline caps every enclosing
@@ -459,6 +461,22 @@ inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
   transport on a compatible base is built with the compatible ceiling instead of
   the OpenAI one. Direct callers are unchanged: outside a scope a standard
   request keeps its built timeout.
+- **The last three policy constants are settings or derived (round 2, Step 7).**
+  A client whose callers invoke it directly (no seat pin, not a runtime-owned
+  class) is built with `LLM_ATTEMPTS` total attempts on every vendor
+  (`direct_caller_transport_attempts`). It was a fixed 3 on the OpenAI-family and
+  Anthropic paths, so at the shipped `LLM_ATTEMPTS=2` those clients now make two
+  requests, not three, in both construction schemas; a seat's explicit
+  `transport_attempts` (the health check's one, the writer's and classifier's
+  one) still wins. The OpenAI standard request ceiling is
+  `OPENAI_REQUEST_CAP_SECONDS` (120 s), read at the call. The APAC ceiling is the
+  APAC node total, `APAC_NODE_TOTAL_TIMEOUT_SECONDS` (240 s), on the client (both
+  schemas) and inside an invocation (`REGIONAL` on a compatible vendor): the
+  client had a separate 240 s constant while the in-scope ceiling was the generic
+  300 s compatible one. No request can usefully outlive the node's enclosing
+  deadline, so the node total is the natural ceiling; changing it moves both.
+  At shipped defaults no timeout value changes; inside the APAC node the 300 s
+  in-scope ceiling never bound, because the 240 s node deadline was tighter.
 - **Streaming is refused on the deadline-aware classes** (Gemini included). No
   application code streams, and a stream would bypass the per-dispatch sizing.
   `disable_streaming` routes `.stream()`/`.astream()` through the sized

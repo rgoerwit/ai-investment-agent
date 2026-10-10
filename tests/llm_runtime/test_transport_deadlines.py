@@ -61,7 +61,8 @@ from src.service_tiers import (
 MARGIN = 2.0
 MIN_USEFUL = 5.0
 COMPATIBLE_CAP = 300.0
-OPENAI_CAP = llm_timeouts.OPENAI_REQUEST_CAP_SECONDS
+OPENAI_CAP = 120.0
+APAC_NODE_TOTAL = 240.0
 
 
 class FakeClock:
@@ -93,6 +94,8 @@ def budget_config(monkeypatch):
         "api_timeout": 300,
         "quick_llm_api_timeout_seconds": 120,
         "openai_compatible_client_timeout_seconds": int(COMPATIBLE_CAP),
+        "openai_request_cap_seconds": OPENAI_CAP,
+        "apac_node_total_timeout_seconds": APAC_NODE_TOTAL,
         "flex_llm_timeout_seconds": 900,
         "flex_degrade_threshold": 2,
         "llm_attempts": 2,

@@ -207,9 +207,11 @@ whole ticker. In full mode with flex on, one Portfolio Manager call can use
   owners. The literal can arrive through a constant, a local, `or`, `min` or
   `+`. Allowlist entries are keyed by enclosing scope and parameter, not by line
   number, and an entry the scan no longer finds fails the test. The APAC 240 s
-  client ceiling had two copies (`src/llms.py` and the compatible adapter). It
-  is now `APAC_CLIENT_TIMEOUT_SECONDS` in `src/llm_runtime/timeouts.py`. The
-  Consultant factory's 120 s default is now `OPENAI_REQUEST_CAP_SECONDS`.
+  client ceiling had two copies (`src/llms.py` and the compatible adapter); it
+  became a named constant and is now derived from
+  `APAC_NODE_TOTAL_TIMEOUT_SECONDS` (`apac_client_timeout_seconds`). The
+  Consultant factory's 120 s default became a constant and is now the
+  `OPENAI_REQUEST_CAP_SECONDS` setting, read at the call.
 
 ## Fast Orientation
 

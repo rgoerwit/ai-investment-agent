@@ -87,24 +87,6 @@ _RUNTIME_OWNED_CLASSES = frozenset(
     }
 )
 
-# Total SDK attempts for a client whose callers still invoke it directly
-# (OPERATIONAL seats on a vendor without per-request retry control).
-# Before October 2026 this was the literal ``max_retries=3`` (retries) on the
-# OpenAI and Anthropic paths; it now means total attempts, so those clients make
-# one fewer attempt at the same configured value.
-DIRECT_CALLER_TRANSPORT_ATTEMPTS = 3
-
-# Standard per-request ceiling on the OpenAI plane. The value every OpenAI client
-# in this repository was constructed with; named so the policy owns it.
-OPENAI_REQUEST_CAP_SECONDS = 120.0
-
-# Client ceiling for the APAC regional specialist's OpenAI-compatible client, on
-# both the legacy and the canonical construction path. A ceiling only: the node
-# total (APAC_NODE_TOTAL_TIMEOUT_SECONDS) is the enclosing deadline every APAC
-# request is sized from. Longer than the generic compatible-vendor knob's
-# typical use because the deepest-reasoning re-issue needs it.
-APAC_CLIENT_TIMEOUT_SECONDS = 240.0
-
 
 class BudgetExhausted(TimeoutError):
     """Too little of the invocation allowance remains for a useful request.
@@ -285,6 +267,39 @@ def _runtime(settings: Any, runtime_config: RuntimeConfig | None) -> Any:
     return get_runtime_config(settings)
 
 
+def openai_request_cap_seconds(cfg: Any = None) -> float:
+    """The standard per-request ceiling on the OpenAI plane, read at the call.
+
+    ``OPENAI_REQUEST_CAP_SECONDS`` (a ``Settings`` field). Was the module
+    constant of the same name, which no override could reach.
+    """
+    return float(_settings(cfg).openai_request_cap_seconds)
+
+
+def apac_client_timeout_seconds(cfg: Any = None) -> float:
+    """The APAC specialist's request ceiling: its node total.
+
+    ``apac_node_total_timeout_seconds`` is the enclosing deadline every APAC
+    request is sized from, so no single request can usefully run longer. The
+    client is built with it and the in-scope ceiling (``REGIONAL`` class on a
+    compatible vendor) is the same value, on the legacy and canonical paths.
+    Before October 2026 the client used a separate 240 s constant while the
+    in-scope ceiling was the generic compatible-vendor 300 s.
+    """
+    return float(_settings(cfg).apac_node_total_timeout_seconds)
+
+
+def direct_caller_transport_attempts(cfg: Any = None) -> int:
+    """Total SDK attempts for a client whose callers still invoke it directly.
+
+    The run-scoped ``llm_attempts`` (``LLM_ATTEMPTS``; 0 behaves as 1), on every
+    vendor. Was a fixed 3 on the OpenAI-family and Anthropic paths, so those
+    clients made one more attempt than the configured default of 2.
+    """
+    settings = _settings(cfg)
+    return max(1, int(_runtime(settings, None).llm_attempts))
+
+
 def _editorial_invocation_cap(settings: Any) -> float:
     """The writer's per-attempt cap, in both run modes.
 
@@ -320,7 +335,7 @@ def _standard_request_cap(
     family = (provider or "").strip().lower()
     api_timeout = float(getattr(settings, "api_timeout", 300))
     if family == "openai":
-        return OPENAI_REQUEST_CAP_SECONDS
+        return openai_request_cap_seconds(settings)
     if family == "anthropic":
         return api_timeout
     if family in ("", "google", "gemini"):
@@ -330,6 +345,8 @@ def _standard_request_cap(
                 float(getattr(settings, "quick_llm_api_timeout_seconds", 120)),
             )
         return api_timeout
+    if timeout_class is TimeoutClass.REGIONAL:
+        return apac_client_timeout_seconds(settings)
     return float(getattr(settings, "openai_compatible_client_timeout_seconds", 300))
 
 
@@ -569,21 +586,24 @@ def construction_transport_attempts(
 ) -> int:
     """Total SDK attempts a client is *built* with (direct callers rely on it).
 
-    Google sends per-request attempts under an application invocation, so its
-    built value only serves direct callers and stays the run-scoped
-    ``llm_attempts``. OpenAI-family SDKs fix retries on the client, so a seat
-    whose retries the runtime owns is built with one attempt.
+    A seat's explicit ``transport_attempts`` (or its deprecated alias,
+    translated) always wins. Google sends per-request attempts under an
+    application invocation, so its built value only serves direct callers.
+    OpenAI-family and Anthropic SDKs fix retries on the client, so a seat whose
+    retries the runtime owns is built with one attempt. Every other client gets
+    the run-scoped ``llm_attempts`` (``direct_caller_transport_attempts``).
     """
     if seat is not None:
         explicit = seat.execution_policy.resolved_transport_attempts(vendor)
         if explicit is not None:
             return explicit
-    if vendor == "google":
-        settings = _settings(cfg)
-        return max(1, int(_runtime(settings, None).llm_attempts))
-    if seat is not None and seat.timeout_class.retries_owned_by_runtime:
+    if (
+        vendor != "google"
+        and seat is not None
+        and seat.timeout_class.retries_owned_by_runtime
+    ):
         return 1
-    return DIRECT_CALLER_TRANSPORT_ATTEMPTS
+    return direct_caller_transport_attempts(cfg)
 
 
 def sdk_max_retries(vendor: str, attempts: int) -> int:

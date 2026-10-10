@@ -63,6 +63,10 @@ SHIPPED_DEFAULTS = {
     "memory_embedding_min_useful_seconds": 1.0,
     "genai_client_close_timeout_seconds": 2.0,
     "langfuse_flush_timeout_seconds": 2.0,
+    # LLM request ceilings (round 2, Step 7)
+    "openai_request_cap_seconds": 120.0,
+    "apac_node_total_timeout_seconds": 240.0,
+    "llm_attempts": 2,
 }
 
 

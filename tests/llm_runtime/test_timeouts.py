@@ -785,13 +785,11 @@ class TestAttemptSemantics:
         ):
             for vendor in ("openai", "anthropic"):
                 assert construction_transport_attempts(SEATS[seat], vendor=vendor) == 1
-        # A direct-caller (mixed-class) seat keeps a small SDK budget.
-        assert (
-            construction_transport_attempts(
-                SEATS[SeatId.MACRO_CONTEXT], vendor="openai"
-            )
-            == 3
-        )
+        # A direct-caller (mixed-class) seat gets the run-scoped llm_attempts
+        # (tests/llm_runtime/test_policy_settings.py covers the derivation).
+        assert construction_transport_attempts(
+            SEATS[SeatId.MACRO_CONTEXT], vendor="openai"
+        ) == max(1, config_module.config.llm_attempts)
 
     def test_google_built_attempts_stay_the_run_scoped_llm_attempts(self):
         with _quick():

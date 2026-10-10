@@ -47,7 +47,6 @@ CONFIG_OWNERS: dict[str, str] = {
     "src/ibkr_config.py": "broker settings with their own env overrides",
     "src/ibkr/portfolio_defaults.py": "canonical portfolio knob defaults",
     "src/llm_runtime/seats.py": "SeatExecutionPolicy: per-seat client timeouts are seat data",
-    "src/llm_runtime/timeouts.py": "the LLM budget policy and its named ceilings",
     "src/web/ibkr_dashboard/settings.py": "the dashboard's own settings model",
 }
 
@@ -406,8 +405,8 @@ def test_planted_literal_deadline_is_flagged(source):
         "c, timeout=settings_config.tool_execution_timeout_seconds, label='x')",
         "def f(cfg):\n    t = require_allowance(cfg.vendor_timeout_seconds, label='v')\n"
         "    return aiohttp.ClientTimeout(total=t)",
-        "from src.llm_runtime.timeouts import APAC_CLIENT_TIMEOUT_SECONDS\n"
-        "def f():\n    return {'timeout': APAC_CLIENT_TIMEOUT_SECONDS}",
+        "from src.llm_runtime.timeouts import apac_client_timeout_seconds\n"
+        "def f(s):\n    return {'timeout': apac_client_timeout_seconds(s)}",
         # Not deadlines: a positivity floor, a scale, a log field, None, retries.
         "def f(r):\n    return run(timeout=max(0.1, r))",
         "def f(cfg):\n    return run(timeout=cfg.floor * 1.5)",

@@ -81,7 +81,9 @@ ContextVar set by `invoke_with_rate_limit_handling`, not on the model; the polic
 `TimeoutClass` and admission live in `src/llm_runtime/timeouts.py`. Attempt counts
 are **total** attempts everywhere; translate to a vendor's `max_retries` only via
 `sdk_max_retries`. A seat's budget class is data on its `SeatSpec`, never a
-display-name set.
+display-name set. Policy numbers are settings read at the call, never module
+constants: direct-caller attempts are `LLM_ATTEMPTS`, the OpenAI ceiling is
+`OPENAI_REQUEST_CAP_SECONDS`, the APAC ceiling is its node total.
 
 **No plain OpenAI-family or Anthropic client.** Build every one with
 `new_openai_chat` / `new_anthropic_chat` in

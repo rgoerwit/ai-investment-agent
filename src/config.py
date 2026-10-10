@@ -836,7 +836,9 @@ class Settings(BaseSettings):
         description="API key for the optional APAC Regional Specialist",
     )
     # A node total, not a request timeout: it is the APAC node's enclosing
-    # deadline, so its first call and the direct retry share one allowance.
+    # deadline, so its first call and the direct retry share one allowance. It
+    # is also the APAC client's request ceiling, in and out of an invocation
+    # scope (apac_client_timeout_seconds in src/llm_runtime/timeouts.py).
     apac_node_total_timeout_seconds: float = Field(
         default=240.0,
         gt=0.0,
@@ -1035,6 +1037,16 @@ class Settings(BaseSettings):
             "SDK client timeout for OpenAI-compatible (non-api.openai.com) "
             "endpoints on the review plane"
         ),
+    )
+    # The standard per-request ceiling on the OpenAI plane (api.openai.com):
+    # every OpenAI client is built with it and every in-scope OpenAI request is
+    # capped at it; the invocation deadline still sizes each request below it.
+    # Read at the call (src/llm_runtime/timeouts.py), never at import.
+    openai_request_cap_seconds: float = Field(
+        default=120.0,
+        gt=0.0,
+        validation_alias="OPENAI_REQUEST_CAP_SECONDS",
+        description="Standard per-request ceiling in seconds for OpenAI requests",
     )
     # Quick-mode screening should not inherit a 5-minute SDK socket/read
     # timeout. The outer runtime helper still enforces the hard wall-clock cap;

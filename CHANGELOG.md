@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- An OpenAI, OpenAI-compatible or Anthropic client that its callers invoke directly
+  is now built with `LLM_ATTEMPTS` total attempts, like Google already was; it was a
+  fixed 3. **Behaviour change:** at the shipped `LLM_ATTEMPTS=2` such a client makes
+  two requests instead of three (both construction schemas). Seats that pin their
+  attempts keep them (health check, writer, macro classifier: one). The OpenAI
+  request ceiling is the new `OPENAI_REQUEST_CAP_SECONDS` setting (120 s, unchanged).
+  The APAC client ceiling is now `APAC_NODE_TOTAL_TIMEOUT_SECONDS` (240 s, unchanged)
+  and the same value applies inside an invocation, where it was 300 s; lowering or
+  raising the node total now moves both.
 - MCP steps now stay inside the time left, and read the tool runner's deadline as
   well as the caller's (a nested MCP call no longer sizes its handshake and call
   against the full settings while the runner has less). The tools/list catalogue

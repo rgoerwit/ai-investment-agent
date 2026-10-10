@@ -51,12 +51,12 @@ from src.llm_runtime.dispatch import (  # noqa: F401 - re-exported for callers
 from src.llm_runtime.failover import ModelFailoverMixin
 from src.llm_runtime.seats import SEATS, ModelIntent, SeatId
 from src.llm_runtime.timeouts import (
-    APAC_CLIENT_TIMEOUT_SECONDS,
-    DIRECT_CALLER_TRANSPORT_ATTEMPTS,
-    OPENAI_REQUEST_CAP_SECONDS,
     BudgetExhausted,
     TimeoutClass,
+    apac_client_timeout_seconds,
     construction_transport_attempts,
+    direct_caller_transport_attempts,
+    openai_request_cap_seconds,
     sdk_max_retries,
 )
 from src.runtime_config import get_runtime_config
@@ -1561,7 +1561,7 @@ deep_thinking_llm = _LazyLLMProxy(create_deep_thinking_llm)
 def create_consultant_llm(
     temperature: float = 0.3,
     model: str | None = None,
-    timeout: float = OPENAI_REQUEST_CAP_SECONDS,
+    timeout: float | None = None,
     max_retries: int = 0,
     quick_mode: bool = False,
     callbacks: list[BaseCallbackHandler] | None = None,
@@ -1578,7 +1578,8 @@ def create_consultant_llm(
     Args:
         temperature: Deprecated, ignored. Kept for API compatibility.
         model: Model name (overrides env vars if provided)
-        timeout: Request timeout in seconds
+        timeout: Request timeout in seconds (default: OPENAI_REQUEST_CAP_SECONDS,
+            read at the call)
         max_retries: Max retry attempts for failed requests
         quick_mode: If True, use CONSULTANT_QUICK_MODEL env var (default False)
         callbacks: Optional callback handlers for token tracking
@@ -1630,6 +1631,9 @@ def create_consultant_llm(
         model_name = settings.consultant_quick_model or settings.consultant_model
     else:
         model_name = settings.consultant_model
+
+    if timeout is None:
+        timeout = openai_request_cap_seconds(settings)
 
     logger.info(
         "consultant_llm_init", model=model_name, timeout=timeout, retries=max_retries
@@ -1745,7 +1749,7 @@ def create_auditor_llm(
 
     kwargs: dict[str, Any] = {
         "model": model_name,
-        "timeout": OPENAI_REQUEST_CAP_SECONDS,
+        "timeout": openai_request_cap_seconds(settings),
         # The runtime loop owns the auditor's retries: one SDK attempt per
         # request (was max_retries=3, i.e. four requests inside one call).
         "max_retries": sdk_max_retries(
@@ -1833,9 +1837,9 @@ def create_apac_specialist_llm(
         "model": model_name,
         "base_url": settings.apac_specialist_base_url,
         "api_key": api_key,
-        # A client ceiling only: the node total (APAC_NODE_TOTAL_TIMEOUT_SECONDS)
-        # is the enclosing deadline every APAC call is bounded by.
-        "timeout": APAC_CLIENT_TIMEOUT_SECONDS,
+        # The node total (APAC_NODE_TOTAL_TIMEOUT_SECONDS) is both the client
+        # ceiling and the enclosing deadline every APAC call is bounded by.
+        "timeout": apac_client_timeout_seconds(settings),
         # The runtime loop owns retries (was 1 SDK retry with thinking, 0 without).
         "max_retries": sdk_max_retries(
             "openai_compatible",
@@ -2061,14 +2065,14 @@ def _build_openai_chat(
     attempts = (
         transport_attempts
         if transport_attempts is not None
-        else DIRECT_CALLER_TRANSPORT_ATTEMPTS
+        else direct_caller_transport_attempts(settings)
     )
     kwargs: dict[str, Any] = {
         "model": model_name,
         "timeout": (
             request_timeout_seconds
             if request_timeout_seconds is not None
-            else OPENAI_REQUEST_CAP_SECONDS
+            else openai_request_cap_seconds(settings)
         ),
         "max_retries": sdk_max_retries("openai", attempts),
         "budget_timeout_class": timeout_class.value,

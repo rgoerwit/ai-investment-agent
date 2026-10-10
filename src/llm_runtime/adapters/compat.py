@@ -15,7 +15,7 @@ from src.llm_runtime.provider_policy import (
 from src.llm_runtime.rate_limits import limiter_for_binding
 from src.llm_runtime.seats import SeatId
 from src.llm_runtime.timeouts import (
-    APAC_CLIENT_TIMEOUT_SECONDS,
+    apac_client_timeout_seconds,
     construction_transport_attempts,
     sdk_max_retries,
 )
@@ -87,11 +87,12 @@ class CompatibleAdapter:
             "base_url": base_url,
             "api_key": api_key.get_secret_value(),
             # One knob for "how long may a compatible vendor's client wait",
-            # shared with the legacy path's _apply_openai_api_base. APAC keeps
-            # its own longer allowance for the deepest-reasoning re-issue.
+            # shared with the legacy path's _apply_openai_api_base. APAC's
+            # ceiling is its node total, the deadline every APAC request is
+            # sized from, and the same value it gets inside a scope.
             "timeout": policy.client_timeout_seconds
             or (
-                APAC_CLIENT_TIMEOUT_SECONDS
+                apac_client_timeout_seconds(settings)
                 if seat_id in self._APAC_SEATS
                 else settings.openai_compatible_client_timeout_seconds
             ),
