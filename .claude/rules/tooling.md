@@ -35,7 +35,10 @@ the tool runner; `current_enclosing_deadline` is for LLM admission only.
 `run_blocking_call(_sync)` clamps itself. A web-search, filing or document
 timeout is a `Settings` field read at the call, resolved before the request,
 coroutine or thread exists. Classify a timeout where it happens
-(`_ScopedToolTimeout`), never relabel it. `tests/architecture/test_deadline_readers.py`
+(`_ScopedToolTimeout`), never relabel it. Share a multi-phase tool's allowance
+by fractions of it, never absolute reserves (the official-document
+`_allocate`), and inspect inside a bound through
+`InspectionService.check_within`, which fails closed and binds nothing. `tests/architecture/test_deadline_readers.py`
 enforces the readers. See `docs/CODEBASE_MEMORY.md`.
 
 MCP bounds go to the SDK's own parameters in `src/mcp/client.py`: the httpx2

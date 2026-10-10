@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The official-document tool now shares its allowance by fractions instead of
+  absolute reserves: the download may use `OFFICIAL_DOCUMENT_DOWNLOAD_FRACTION`
+  (0.55) of it, and `OFFICIAL_DOCUMENT_INSPECTION_FRACTION` (0.25) of the rest is
+  held back from PDF extraction for the content inspection of the evidence. These
+  replace `OFFICIAL_DOCUMENT_DOWNLOAD_TIMEOUT_SECONDS`,
+  `OFFICIAL_DOCUMENT_DOWNLOAD_TOTAL_TIMEOUT_SECONDS` and
+  `PDF_EXTRACTION_RESERVE_SECONDS`, added earlier in this release. A runner at or
+  below the old 20 s reserve fetched no document at all; any runner value now
+  works. **Behaviour change:** under the 45 s runner the download gets about 23.6 s
+  (was 25 s) and extraction about 14.5 s (was 20 s); inspection, which had no
+  share, gets the rest, and evidence it cannot finish inspecting is reported as
+  `INSPECTION_TIMEOUT` instead of the runner's bare `TOOL_TIMEOUT`. Both defaults
+  are chosen, not measured. Tavily and the document tool now inspect through one
+  bounded `InspectionService.check_within`.
+
 - Operational work inside a tool call now sizes itself against what the tool
   runner has left, not only the caller's deadline: Tavily, market data, FX,
   filings, the editor's reference fetch and every blocking call read one

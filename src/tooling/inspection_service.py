@@ -24,6 +24,7 @@ from typing import Any, Literal
 
 import structlog
 
+from src.async_utils import run_with_hard_timeout
 from src.error_safety import summarize_exception
 from src.tooling.inspector import (
     ContentInspector,
@@ -268,6 +269,30 @@ class InspectionService:
         """
         _, approved = await self.evaluate(envelope)
         return approved
+
+    async def check_within(
+        self, envelope: InspectionEnvelope, *, seconds: float, label: str
+    ) -> Any | None:
+        """``check`` bounded deadline-only by ``seconds``; ``None`` when it cannot finish.
+
+        For inspection that must fit inside a caller's allowance (a tool body,
+        a search entrypoint). ``seconds <= 0`` starts nothing; an inspection
+        that overruns is orphaned, never awaited. Either way the result is
+        ``None`` -- fail closed: the uninspected payload is never returned.
+
+        It binds no deadline. An LLM judge inside sizes itself from the LLM
+        enclosing deadline alone, never from the tool deadline the caller may
+        run under: refused by admission, the judge fails *open*, where this
+        bound fails closed.
+        """
+        if seconds <= 0:
+            return None
+        try:
+            return await run_with_hard_timeout(
+                self.check(envelope), timeout=seconds, label=label
+            )
+        except TimeoutError:
+            return None
 
 
 # ---------------------------------------------------------------------------

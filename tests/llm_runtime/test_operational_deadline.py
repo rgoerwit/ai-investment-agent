@@ -37,6 +37,7 @@ from src.llm_runtime.timeouts import (
     tool_call_deadline,
 )
 from src.tooling.runtime import ToolExecutionService, ToolInvocation
+from tests.helpers.tavily_inspection import inspect_tavily_with
 
 _NOW = 1_000.0
 
@@ -184,7 +185,7 @@ def search(monkeypatch) -> _RecordingSearch:
         del query_text
         return raw
 
-    monkeypatch.setattr(tavily_utils, "_inspect_tavily_result", _passthrough)
+    inspect_tavily_with(monkeypatch, _passthrough)
     return tool
 
 

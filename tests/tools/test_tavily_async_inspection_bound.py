@@ -25,9 +25,11 @@ import pytest
 
 import src.async_utils as async_utils
 import src.tavily_utils as tavily_utils
+import src.tooling.inspection_service as inspection_service
 from src.config import config
 from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.timeouts import enclosing_deadline
+from tests.helpers.tavily_inspection import inspect_tavily_with
 
 PAYLOAD = {"results": [{"content": "RAW_UNINSPECTED_PAYLOAD"}]}
 SAFETY_NET_SECONDS = 2.0
@@ -109,7 +111,7 @@ def _count_inspections(monkeypatch) -> list[Any]:
         inspected.append(raw)
         return {"inspected": True}
 
-    monkeypatch.setattr(tavily_utils, "_inspect_tavily_result", _record)
+    inspect_tavily_with(monkeypatch, _record)
     return inspected
 
 
@@ -127,6 +129,8 @@ async def test_inspection_gets_only_the_time_the_search_left(
         return await real(coro, timeout=timeout, label=label)
 
     monkeypatch.setattr(async_utils, "run_with_hard_timeout", spy)
+    # Inspection is bounded inside InspectionService.check_within.
+    monkeypatch.setattr(inspection_service, "run_with_hard_timeout", spy)
 
     def _spend_three_seconds() -> None:
         fake_clock[0] += 3.0
@@ -176,7 +180,7 @@ async def test_stalled_inspection_returns_none_within_the_bound(
         finished.set()
         return raw
 
-    monkeypatch.setattr(tavily_utils, "_inspect_tavily_result", _stubborn_inspection)
+    inspect_tavily_with(monkeypatch, _stubborn_inspection)
     install(_Search())
     bound = 0.05
 
@@ -198,7 +202,7 @@ async def test_inspection_failure_still_propagates(monkeypatch, install):
     async def _broken(raw: Any, query_text: str) -> Any:
         raise RuntimeError("inspector misconfigured")
 
-    monkeypatch.setattr(tavily_utils, "_inspect_tavily_result", _broken)
+    inspect_tavily_with(monkeypatch, _broken)
     install(_Search())
 
     with pytest.raises(RuntimeError, match="inspector misconfigured"):

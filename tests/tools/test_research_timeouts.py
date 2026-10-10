@@ -37,6 +37,7 @@ from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.timeouts import enclosing_deadline
 from src.tools import official_documents as documents
 from src.tools import research, shared
+from tests.helpers.tavily_inspection import inspect_tavily_with
 
 # ``src.data.filings`` re-exports its singleton as ``registry``, shadowing the
 # submodule attribute; import_module returns the module itself.
@@ -52,10 +53,10 @@ SHIPPED_DEFAULTS = {
     "ddg_http_timeout_seconds": 5,
     "official_filings_lookup_timeout_seconds": 20.0,
     "filing_fetch_timeout_seconds": 30.0,
-    "official_document_download_timeout_seconds": 35.0,
     "official_document_dns_timeout_seconds": 5.0,
     "official_document_extract_timeout_seconds": 20.0,
-    "official_document_download_total_timeout_seconds": 35.0,
+    "official_document_download_fraction": 0.55,
+    "official_document_inspection_fraction": 0.25,
     "subprocess_cleanup_timeout_seconds": 5.0,
     "reference_fetch_timeout_seconds": 10.0,
 }
@@ -130,7 +131,7 @@ def passthrough_inspection(monkeypatch) -> list[Any]:
         inspected.append(raw)
         return raw
 
-    monkeypatch.setattr(tavily_utils, "_inspect_tavily_result", _record)
+    inspect_tavily_with(monkeypatch, _record)
     return inspected
 
 
@@ -791,25 +792,30 @@ def _patch_client(monkeypatch, module, error: BaseException) -> list[Any]:
 
 
 @pytest.mark.asyncio
-async def test_document_download_override_reaches_the_client(monkeypatch):
+async def test_document_download_share_reaches_the_client(monkeypatch, fake_clock):
     timeouts = _patch_client(monkeypatch, documents, _Halt())
-    monkeypatch.setattr(config, "official_document_download_timeout_seconds", 12.0)
+    monkeypatch.setattr(config, "tool_execution_timeout_seconds", 40.0)
+    monkeypatch.setattr(config, "official_document_download_fraction", 0.3)
 
     with pytest.raises(_Halt):
-        await documents._download_official(_DOC_URL, 1_000)
+        await documents._download_official(
+            _DOC_URL, 1_000, allocation=documents._allocate()
+        )
 
-    assert timeouts == [12.0]
+    assert timeouts == [pytest.approx(12.0)]
 
 
 @pytest.mark.asyncio
 async def test_document_download_caller_deadline_wins(monkeypatch, fake_clock):
     timeouts = _patch_client(monkeypatch, documents, _Halt())
 
-    # The download gets the caller's 27 s less the 20 s extraction reserve.
+    # The download gets its share of the caller's 27 s.
     with enclosing_deadline(27.0), pytest.raises(_Halt):
-        await documents._download_official(_DOC_URL, 1_000)
+        await documents._download_official(
+            _DOC_URL, 1_000, allocation=documents._allocate()
+        )
 
-    assert timeouts == [pytest.approx(7.0)]
+    assert timeouts == [pytest.approx(27.0 * 0.55)]
 
 
 @pytest.mark.asyncio
@@ -936,7 +942,11 @@ async def test_pdf_extract_caller_deadline_wins(monkeypatch, fake_clock):
     with enclosing_deadline(3.0):
         await documents.extract_pdf_text(b"%PDF", _audit_policy(), "")
 
-    assert [policy.hard_timeout_seconds for policy in seen] == [pytest.approx(3.0)]
+    # The caller's 3 s, less what extraction leaves for inspection.
+    reserve = (3.0 - 3.0 * 0.55) * 0.25
+    assert [policy.hard_timeout_seconds for policy in seen] == [
+        pytest.approx(3.0 - reserve)
+    ]
 
 
 class _FakeProcess:
@@ -1018,7 +1028,8 @@ async def test_pdftotext_caller_deadline_wins(monkeypatch, fake_clock):
     with enclosing_deadline(1.5):
         await _run_pdftotext()
 
-    assert fake.timeouts == [pytest.approx(1.5)]
+    # The caller's 1.5 s, less what extraction leaves for inspection.
+    assert fake.timeouts == [pytest.approx(1.5 - (1.5 - 1.5 * 0.55) * 0.25)]
 
 
 @pytest.mark.asyncio

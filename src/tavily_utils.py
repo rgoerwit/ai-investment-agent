@@ -5,7 +5,6 @@ This module exists to avoid circular imports between toolkit.py and enhanced_sen
 """
 
 import asyncio
-import time
 from typing import Any, Literal
 
 import structlog
@@ -102,51 +101,38 @@ def _build_tavily_tool(
     return tool
 
 
-async def _inspect_tavily_result(raw: Any, query_text: str) -> Any:
-    if raw is None:
-        return None
-
-    content_text = raw if isinstance(raw, str) else str(raw)
-    envelope = InspectionEnvelope(
-        content_text=content_text,
-        raw_content=raw,
-        source_kind=SourceKind.web_search,
-        source_name="tavily",
-        metadata={"query": query_text[:200]},
-    )
-    return await get_current_inspection_service().check(envelope)
-
-
 async def _inspect_before_deadline(
     raw: Any, query_text: str, *, deadline: float, log_fields: dict[str, Any]
 ) -> Any:
     """Inspect *raw* within what is left of *deadline*, or return ``None``.
 
-    The async counterpart of the sync worker's rule: the entrypoint's bound
-    covers search *and* inspection. A result that arrives with nothing left is
-    discarded before inspection starts (which may be a paid LLM judge call),
-    and an inspection that overruns returns ``None``, never the uninspected
-    payload. Deadline-only, so a judge that ignores cancellation cannot hold
-    the caller; its late verdict is dropped with the orphaned task.
+    The entrypoint's bound covers search *and* inspection, on both the async
+    and the sync path. A result that arrives with nothing left is discarded
+    before inspection starts (which may be a paid LLM judge call), and an
+    inspection that overruns returns ``None``, never the uninspected payload
+    (``InspectionService.check_within``: deadline-only, so a judge that
+    ignores cancellation cannot hold the caller).
     """
-    from src.async_utils import run_with_hard_timeout
-
     if raw is None:
         return None
     remaining = deadline - llm_timeouts.now()
     if remaining <= 0:
         logger.warning("tavily_search_late_result_discarded", **log_fields)
         return None
-    try:
-        return await run_with_hard_timeout(
-            _inspect_tavily_result(raw, query_text),
-            timeout=remaining,
-            label=f"tavily:inspect:{query_text[:60]}",
-        )
-    except asyncio.TimeoutError:
-        # Fail closed: an uninspected payload is never returned.
+    inspected = await get_current_inspection_service().check_within(
+        InspectionEnvelope(
+            content_text=raw if isinstance(raw, str) else str(raw),
+            raw_content=raw,
+            source_kind=SourceKind.web_search,
+            source_name="tavily",
+            metadata={"query": query_text[:200]},
+        ),
+        seconds=remaining,
+        label=f"tavily:inspect:{query_text[:60]}",
+    )
+    if inspected is None:
         logger.warning("tavily_inspection_timeout", **log_fields)
-        return None
+    return inspected
 
 
 async def tavily_search_with_timeout(
@@ -385,7 +371,7 @@ def search_tavily_sync_inspected(
     # bound. Without it, a search that finishes after the caller gave up would
     # still start inspection — possibly a paid LLM call — for a result nobody
     # will read, and hold its slot for as long as that takes.
-    deadline = time.monotonic() + timeout
+    deadline = llm_timeouts.now() + timeout
 
     def _search_then_inspect() -> Any:
         try:
@@ -398,31 +384,20 @@ def search_tavily_sync_inspected(
                 profile=profile,
             )
             return None
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            logger.warning(
-                "tavily_search_late_result_discarded",
-                query=query[:100],
-                timeout_seconds=timeout,
-                profile=profile,
-            )
-            return None
         # Own event loop: this runs on a worker thread, so it is safe even
-        # when the sync caller sits inside a running loop. wait_for is safe
-        # here: inspection is pure async code that honours cancellation.
-        try:
-            return asyncio.run(
-                asyncio.wait_for(_inspect_tavily_result(raw, query), remaining)
+        # when the sync caller sits inside a running loop.
+        return asyncio.run(
+            _inspect_before_deadline(
+                raw,
+                query,
+                deadline=deadline,
+                log_fields={
+                    "query": query[:100],
+                    "timeout_seconds": timeout,
+                    "profile": profile,
+                },
             )
-        except TimeoutError:
-            # Fail closed: an uninspected payload is never returned.
-            logger.warning(
-                "tavily_inspection_timeout",
-                query=query[:100],
-                timeout_seconds=timeout,
-                profile=profile,
-            )
-            return None
+        )
 
     policy = _TAVILY_SYNC_POLICY.with_timeout(timeout).with_label(
         f"{_TAVILY_SYNC_POLICY.label}:{profile}:{query[:60]}"

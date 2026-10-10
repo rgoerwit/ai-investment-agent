@@ -23,13 +23,15 @@ from src.config import config
 from src.error_safety import summarize_exception
 from src.exchange_metadata import registered_official_document_hosts
 from src.forensic_budget import AuditorBudgetPolicy
-from src.llm_runtime.timeouts import operational_time_left, require_allowance
+from src.llm_runtime import timeouts as llm_timeouts
+from src.llm_runtime.timeouts import require_allowance
 from src.runtime_services import (
     get_current_inspection_service,
     get_current_issuer_hosts,
 )
 from src.text_patterns import is_safe_public_host
 from src.tooling.inspector import InspectionEnvelope, SourceKind
+from src.tooling.runtime import tool_execution_timeout_seconds
 
 logger = structlog.get_logger(__name__)
 
@@ -52,9 +54,7 @@ _OFFICIAL_HOST_SUFFIXES = (
 # Each policy's number is only the shipped default of its setting (pinned by a
 # parity test): each call applies OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS or
 # OFFICIAL_DOCUMENT_DNS_TIMEOUT_SECONDS with with_timeout(), read at the call
-# and shrunk to a caller's enclosing deadline and the tool runner. The download
-# has a per-phase OFFICIAL_DOCUMENT_DOWNLOAD_TIMEOUT_SECONDS inside a total
-# OFFICIAL_DOCUMENT_DOWNLOAD_TOTAL_TIMEOUT_SECONDS (see "Allocation" below).
+# and shrunk to what is left (see "Allocation" below).
 _PDF_POLICY = BlockingCallPolicy("official_document_pdf_extract", 20.0)
 _DNS_POLICY = BlockingCallPolicy("official_document_dns_check", 5.0)
 _MIN_USEFUL_TEXT_CHARS = 200
@@ -102,38 +102,62 @@ class DocumentExtractionError(RuntimeError):
 
 # --- Allocation --------------------------------------------------------------
 #
-# The whole sequence (DNS check, download, pypdf, pdftotext) runs inside one
-# tool-runner bound, and its phase ceilings deliberately sum to more than that
-# bound. The rule that decides what is cut short: the download may use at most
-# what is left less the extraction reserve; each extractor then gets what is
-# left, and one that cannot start is skipped with EXTRACTION_TIMEOUT. "What is
-# left" is the operational deadline: the caller's enclosing deadline *and* the
-# tool call this runs under, kept back from the runner's hard cap by a margin
-# (read, never bound here: binding the LLM enclosing deadline would also cap
-# the injection judge, which fails open).
+# The whole sequence (DNS check, download, pypdf, pdftotext, inspection) runs
+# inside the tool's allowance: the runner's setting, clamped to the operational
+# deadline (the caller's enclosing deadline and the tool runner, kept back from
+# the runner's hard cap by a margin). It is shared by fractions of that
+# allowance, so the split holds for any runner value:
+#
+# - the download (DNS checks and redirects included) may use
+#   OFFICIAL_DOCUMENT_DOWNLOAD_FRACTION of it;
+# - of the rest, OFFICIAL_DOCUMENT_INSPECTION_FRACTION is held back for the
+#   content inspection of the evidence; extraction gets the remainder, each
+#   backend at most OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS, and one that
+#   cannot start is skipped with EXTRACTION_TIMEOUT;
+# - inspection gets whatever is then left, and one that cannot finish fails the
+#   document closed with INSPECTION_TIMEOUT.
+#
+# Read, never bound here: binding the LLM enclosing deadline would also cap
+# the injection judge, which fails open.
 
 
-def pdf_extraction_reserve_seconds() -> float:
-    """The download's reserve for extraction: the setting, else the extract cap."""
-    configured = config.pdf_extraction_reserve_seconds
-    if configured is None:
-        return float(config.official_document_extract_timeout_seconds)
-    return float(configured)
+@dataclass(frozen=True)
+class _Allocation:
+    """One document's time budget: an absolute deadline and how it is shared."""
+
+    deadline: float
+    download_seconds: float
+    inspection_reserve: float
+
+    def left(self) -> float:
+        return self.deadline - llm_timeouts.now()
 
 
-def _download_allowance() -> float:
-    """The whole download's bound: total cap, or what is left less the reserve.
+def _allocate() -> _Allocation:
+    """Share the tool's allowance between download, extraction and inspection.
 
-    Raises ``TimeoutError`` (no client opens) when less than the reserve is
-    left, so extraction is never starved by a download that ate its time.
+    The allowance is read once, when the tool starts. A spent one leaves every
+    share at or below zero, so the download refuses before a client opens.
     """
-    left = operational_time_left()
+    allowance = tool_execution_timeout_seconds()
+    download = allowance * config.official_document_download_fraction
+    return _Allocation(
+        deadline=llm_timeouts.now() + allowance,
+        download_seconds=download,
+        inspection_reserve=(allowance - download)
+        * config.official_document_inspection_fraction,
+    )
+
+
+def _extraction_allowance(allocation: _Allocation, *, label: str) -> float:
+    """One extractor's bound: its cap, within what is left less the inspection
+    reserve. Raises ``TimeoutError`` before any work once nothing is left."""
     return require_allowance(
         min(
-            config.official_document_download_total_timeout_seconds,
-            left - pdf_extraction_reserve_seconds(),
+            config.official_document_extract_timeout_seconds,
+            allocation.left() - allocation.inspection_reserve,
         ),
-        label="official_document_download",
+        label=label,
     )
 
 
@@ -375,17 +399,22 @@ def _extract_with_pypdf(
 
 
 async def _extract_with_pdftotext(
-    payload: bytes, *, max_pages: int, selected_pages: int, keywords: tuple[str, ...]
+    payload: bytes,
+    *,
+    max_pages: int,
+    selected_pages: int,
+    keywords: tuple[str, ...],
+    allocation: _Allocation | None = None,
 ) -> ExtractedDocument:
     executable = shutil.which("pdftotext")
     if executable is None:
         raise DocumentExtractionError("PDF_PARSER_UNAVAILABLE")
     # Read now (pypdf may have used part of the allowance) and resolved before
-    # the subprocess exists, so a spent allowance spawns nothing.
+    # the subprocess exists, so a spent allowance spawns nothing. With no
+    # allocation (a direct caller) the tool's own is taken now.
     try:
-        timeout = require_allowance(
-            config.official_document_extract_timeout_seconds,
-            label="official_document_pdftotext",
+        timeout = _extraction_allowance(
+            allocation or _allocate(), label="official_document_pdftotext"
         )
     except TimeoutError as exc:
         logger.info(
@@ -423,18 +452,25 @@ async def _extract_with_pdftotext(
 
 
 async def extract_pdf_text(
-    payload: bytes, policy: AuditorBudgetPolicy, keywords: str
+    payload: bytes,
+    policy: AuditorBudgetPolicy,
+    keywords: str,
+    allocation: _Allocation | None = None,
 ) -> ExtractedDocument:
+    """Extract evidence text: pypdf, then pdftotext, inside *allocation*.
+
+    With no allocation (a direct caller) the tool's own is taken now.
+    """
+    allocation = allocation or _allocate()
     terms = tuple(filter(None, (part.strip() for part in keywords.split(","))))
     search_terms = terms or _DEFAULT_KEYWORDS
     primary_reason = "PDF_PARSER_UNAVAILABLE"
     try:
-        # A spent allowance (caller or tool runner) raises TimeoutError in
-        # run_blocking_call before the thread starts and takes the
-        # EXTRACTION_TIMEOUT path below, as a pypdf stall does; pdftotext then
-        # re-checks what is left.
+        # A spent allowance raises TimeoutError before the thread starts and
+        # takes the EXTRACTION_TIMEOUT path below, as a pypdf stall does;
+        # pdftotext then re-checks what is left.
         pdf_policy = _PDF_POLICY.with_timeout(
-            config.official_document_extract_timeout_seconds
+            _extraction_allowance(allocation, label=_PDF_POLICY.label)
         )
         extracted = await run_blocking_call(
             pdf_policy,
@@ -463,6 +499,7 @@ async def extract_pdf_text(
             max_pages=policy.max_document_pages,
             selected_pages=policy.max_selected_pages,
             keywords=search_terms,
+            allocation=allocation,
         )
         if len(fallback.text) >= _MIN_USEFUL_TEXT_CHARS:
             return fallback
@@ -475,21 +512,25 @@ async def extract_pdf_text(
 
 
 async def _download_official(
-    url: str, max_bytes: int, extra_hosts: tuple[str, ...] = ()
+    url: str,
+    max_bytes: int,
+    extra_hosts: tuple[str, ...] = (),
+    *,
+    allocation: _Allocation,
 ) -> tuple[bytes, str, str]:
     current = url
-    # Two bounds. The whole download (DNS checks and redirects included) gets
-    # what is left less the extraction reserve, capped by its total setting,
-    # so a trickling body stops there; httpx's own timeout applies to each
-    # phase (connect, read, write, pool) within it. Both are read now; a spent
-    # allowance raises TimeoutError before the client opens, which
-    # get_official_document reports as DOCUMENT_RETRIEVAL_FAILED, as it does an
-    # httpx timeout or the total bound firing.
-    total = _download_allowance()
-    per_phase = min(config.official_document_download_timeout_seconds, total)
+    # One bound for the whole download (DNS checks and redirects included):
+    # its share of the allocation, so a trickling body stops there. httpx gets
+    # the same value per phase; a tighter per-phase bound would only fail a
+    # stall sooner with nothing to spend the time on. A spent share raises
+    # TimeoutError before the client opens, which get_official_document
+    # reports as DOCUMENT_RETRIEVAL_FAILED, as it does an httpx timeout.
+    total = require_allowance(
+        allocation.download_seconds, label="official_document_download"
+    )
     async with (
         asyncio.timeout(total),
-        httpx.AsyncClient(timeout=per_phase) as client,
+        httpx.AsyncClient(timeout=total) as client,
     ):
         for _ in range(4):
             if not _official_url(current, extra_hosts):
@@ -549,13 +590,16 @@ async def get_official_document(
             f"REJECTED_HOST: {rejected_host}\n"
             f"APPROVED_HOSTS: {', '.join(approved) if approved else 'none'}"
         )
+    allocation = _allocate()
     try:
         payload, content_type, final_url = await _download_official(
-            url, policy.max_document_bytes, extra_hosts
+            url, policy.max_document_bytes, extra_hosts, allocation=allocation
         )
         is_pdf = payload.startswith(b"%PDF") or "application/pdf" in content_type
         if is_pdf:
-            extracted = await extract_pdf_text(payload, policy, keywords)
+            extracted = await extract_pdf_text(
+                payload, policy, keywords, allocation=allocation
+            )
             candidate_paths: tuple[str, ...] = ()
         elif "html" in content_type or payload.lstrip().startswith(b"<"):
             soup = BeautifulSoup(payload, "html.parser")
@@ -582,15 +626,25 @@ async def get_official_document(
         reason = extracted.reason or (
             "EVIDENCE_CHAR_LIMIT" if len(extracted.text) > len(evidence) else None
         )
-        inspected = await get_current_inspection_service().check(
+        # Whatever is left, at least the reserve held back from extraction.
+        # Fails closed: evidence that could not be inspected in time is
+        # never returned.
+        inspected = await get_current_inspection_service().check_within(
             InspectionEnvelope(
                 content_text=evidence,
                 raw_content=evidence,
                 source_kind=SourceKind.official_filing,
                 source_name="official_document",
                 metadata={"url": final_url, "backend": extracted.backend},
-            )
+            ),
+            seconds=allocation.left(),
+            label="official_document_inspection",
         )
+        if inspected is None:
+            logger.warning(
+                "official_document_inspection_timeout", backend=extracted.backend
+            )
+            raise DocumentExtractionError("INSPECTION_TIMEOUT")
         metadata = {
             "status": "PARTIAL_DATA" if reason else "EXTRACTED",
             "authority": resolve_source_authority(final_url),

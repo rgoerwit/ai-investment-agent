@@ -143,6 +143,18 @@ _SETTINGS_ENV_CASES = [
     ),
     ("tool_hooks_timeout_seconds", "TOOL_HOOKS_TIMEOUT_SECONDS", "90", 90.0),
     ("deadline_margin_fraction", "DEADLINE_MARGIN_FRACTION", "0.1", 0.1),
+    (
+        "official_document_download_fraction",
+        "OFFICIAL_DOCUMENT_DOWNLOAD_FRACTION",
+        "0.6",
+        0.6,
+    ),
+    (
+        "official_document_inspection_fraction",
+        "OFFICIAL_DOCUMENT_INSPECTION_FRACTION",
+        "0.3",
+        0.3,
+    ),
     *[
         (field, field.upper(), "7.5", 7.5)
         for field in (
@@ -161,11 +173,8 @@ _SETTINGS_ENV_CASES = [
             "ddg_search_timeout_seconds",
             "official_filings_lookup_timeout_seconds",
             "filing_fetch_timeout_seconds",
-            "official_document_download_timeout_seconds",
             "official_document_dns_timeout_seconds",
             "official_document_extract_timeout_seconds",
-            "official_document_download_total_timeout_seconds",
-            "pdf_extraction_reserve_seconds",
             "subprocess_cleanup_timeout_seconds",
             "reference_fetch_timeout_seconds",
             "mcp_http_timeout_seconds",

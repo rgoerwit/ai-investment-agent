@@ -1560,15 +1560,6 @@ class Settings(BaseSettings):
             "inside the filing registry; on timeout the registry returns None."
         ),
     )
-    official_document_download_timeout_seconds: float = Field(
-        default=35.0,
-        gt=0.0,
-        validation_alias="OFFICIAL_DOCUMENT_DOWNLOAD_TIMEOUT_SECONDS",
-        description=(
-            "httpx timeout (seconds, applied to each of connect, read, write and "
-            "pool) on an official-document download."
-        ),
-    )
     official_document_dns_timeout_seconds: float = Field(
         default=5.0,
         gt=0.0,
@@ -1587,34 +1578,30 @@ class Settings(BaseSettings):
             "pdftotext) for one official document."
         ),
     )
-    # The official-document sequence (DNS check, download, pypdf, pdftotext)
-    # runs inside one tool-runner bound (TOOL_EXECUTION_TIMEOUT_SECONDS). Its
-    # phase ceilings deliberately sum to more than that bound: the allocation
-    # cuts work short rather than letting every phase run to its ceiling. The
-    # download may use at most what is left less the extraction reserve; each
-    # extractor then gets what is left, and one that cannot start is skipped
-    # with EXTRACTION_TIMEOUT.
-    official_document_download_total_timeout_seconds: float = Field(
-        default=35.0,
+    # The official-document sequence (DNS check, download, pypdf, pdftotext,
+    # inspection) runs inside the tool's allowance (TOOL_EXECUTION_TIMEOUT_SECONDS,
+    # clamped to what is left) and is shared by fractions of it, so the split
+    # holds for any runner value; see "Allocation" in
+    # src/tools/official_documents.py. Both defaults are chosen, not measured:
+    # saved analyses record no per-phase durations.
+    official_document_download_fraction: float = Field(
+        default=0.55,
         gt=0.0,
-        validation_alias="OFFICIAL_DOCUMENT_DOWNLOAD_TOTAL_TIMEOUT_SECONDS",
+        lt=1.0,
+        validation_alias="OFFICIAL_DOCUMENT_DOWNLOAD_FRACTION",
         description=(
-            "Hard cap (seconds) on one whole official-document download, DNS "
-            "checks and redirects included, alongside httpx's per-phase "
-            "timeout; a trickling download stops here. Also shrunk to what the "
-            "caller and the tool runner have left, less the PDF extraction "
-            "reserve."
+            "Share of the official-document tool's allowance its download (DNS "
+            "checks and redirects included) may use; a trickling body stops there."
         ),
     )
-    pdf_extraction_reserve_seconds: float | None = Field(
-        default=None,
-        ge=0.0,
-        validation_alias="PDF_EXTRACTION_RESERVE_SECONDS",
+    official_document_inspection_fraction: float = Field(
+        default=0.25,
+        gt=0.0,
+        lt=1.0,
+        validation_alias="OFFICIAL_DOCUMENT_INSPECTION_FRACTION",
         description=(
-            "Seconds of the caller's (or tool runner's) remaining allowance "
-            "withheld from an official-document download so PDF extraction can "
-            "still run. Unset means OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS. "
-            "With less than this left, no download starts."
+            "Share of what the official-document download leaves that PDF "
+            "extraction must leave for content inspection of the evidence."
         ),
     )
     subprocess_cleanup_timeout_seconds: float = Field(

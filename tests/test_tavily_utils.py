@@ -21,6 +21,7 @@ import pytest
 
 import src.tavily_utils as tavily_utils
 from src.blocking_io import BlockingCallPolicy, InFlightLimit
+from tests.helpers.tavily_inspection import inspect_tavily_with
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEADLINE = 0.2
@@ -178,7 +179,7 @@ def test_inspection_error_still_propagates(
         raise RuntimeError("inspector exploded")
 
     _use_tool(monkeypatch, _FakeTool(lambda _q: {"results": []}))
-    monkeypatch.setattr(tavily_utils, "_inspect_tavily_result", _inspect_fails)
+    inspect_tavily_with(monkeypatch, _inspect_fails)
 
     with pytest.raises(RuntimeError, match="inspector exploded"):
         tavily_utils.search_tavily_sync_inspected("q", profile="news_basic")
@@ -200,7 +201,7 @@ def test_late_search_result_is_discarded_before_inspection(
         return raw
 
     _use_tool(monkeypatch, _FakeTool(lambda _q: (release.wait(), {"r": 1})[1]))
-    monkeypatch.setattr(tavily_utils, "_inspect_tavily_result", _record)
+    inspect_tavily_with(monkeypatch, _record)
 
     assert (
         tavily_utils.search_tavily_sync_inspected(
@@ -231,7 +232,7 @@ def test_stalled_inspection_is_bounded_by_the_remaining_allowance(
         return raw
 
     _use_tool(monkeypatch, _FakeTool(lambda _q: {"results": []}))
-    monkeypatch.setattr(tavily_utils, "_inspect_tavily_result", _stall)
+    inspect_tavily_with(monkeypatch, _stall)
 
     started = time.monotonic()
     result = tavily_utils.search_tavily_sync_inspected(

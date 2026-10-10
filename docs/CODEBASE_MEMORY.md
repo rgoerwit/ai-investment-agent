@@ -681,21 +681,39 @@ cap the whole download. And ddgs takes whole seconds, so its clamped HTTP
 timeout rounds up; the clamped wait around it is the bound that holds.
 
 **The official-document sequence is allocated, not just bounded (October 2026,
-round 2).** DNS check, download, pypdf and pdftotext run inside one 45 s tool
-runner, but their ceilings (35 + 20 + 20 s, plus 5 s per DNS check) sum to more
-than that. That is intended: the allocation decides what is cut short. The
-download gets at most what is left less `PDF_EXTRACTION_RESERVE_SECONDS` (unset
-means the 20 s extract cap), capped by `OFFICIAL_DOCUMENT_DOWNLOAD_TOTAL_TIMEOUT_SECONDS`
-(35 s) around the whole download, redirects and DNS checks included, so a
-trickling body that keeps every httpx phase alive still stops. Under the runner
-that is 25 s, leaving extraction its 20 s. Each extractor then gets what is
-left, and one that cannot start is skipped with `EXTRACTION_TIMEOUT`. "What is
-left" is the caller's enclosing deadline *and* the tool runner, read through
-the operational clamp; the tool never binds a deadline.
-Without that read, the runner's cancellation, not the allocation, would cut
-extraction short, and the reply would be a bare `TOOL_TIMEOUT`. Cost: with less
-than the reserve left, no download starts, even for an HTML document that
-needs no extraction.
+rounds 2 and 3).** DNS check, download, pypdf, pdftotext and the content
+inspection of the evidence run inside one 45 s tool runner; their ceilings sum
+to more than that on purpose, and the allocation decides what is cut short.
+Round 2 reserved absolute seconds: the download got what was left less
+`PDF_EXTRACTION_RESERVE_SECONDS` (default the 20 s extract cap), within a 35 s
+total. Two defects followed. A runner at or below the reserve (say
+`TOOL_EXECUTION_TIMEOUT_SECONDS=20`) left the download nothing, so no document
+was ever fetched, and nothing rejected that configuration. And inspection --
+which may be a paid LLM judge -- ran after extraction with no share at all, so a
+slow download plus extraction left the runner to cancel it into a bare
+`TOOL_TIMEOUT`. Round 3 shares the tool's allowance (`_allocate`, read once
+when the tool starts) by nested fractions, so the split holds for any runner by
+construction: the download (DNS and redirects included, and httpx per phase,
+since a tighter per-phase bound bought nothing) may use
+`OFFICIAL_DOCUMENT_DOWNLOAD_FRACTION`; of the rest,
+`OFFICIAL_DOCUMENT_INSPECTION_FRACTION` is held back from extraction; each
+extractor gets its cap within what is left less that reserve, and one that
+cannot start is skipped with `EXTRACTION_TIMEOUT`; inspection gets whatever is
+then left through `InspectionService.check_within`, and evidence it cannot
+finish inspecting fails the document with `INSPECTION_TIMEOUT`, never
+returned uninspected. The defaults (0.55, 0.25) are chosen, not measured: saved
+analyses record backends and failure reasons but no per-phase durations. In
+the saved artifacts at the time, about 2,000 analyses carried document calls;
+pypdf extracted in 283, pdftotext in none, and `EXTRACTION_TIMEOUT` appeared
+in one -- so extraction is rarely the binding phase, and the download share
+is the one to revisit when durations are logged.
+
+`check_within` (also behind both Tavily entrypoints) binds no deadline: the
+injection judge inside still sizes itself from the LLM enclosing deadline
+alone, never the tool's, because refused by admission it fails *open*. Its
+own bound fails closed. A test runs the real judge inside a tool deadline
+with half a second left and checks its request is still admitted and sized
+from its own policy.
 
 The pdftotext child used to be killed only on its own timeout. The runner's
 cancellation, the supported way the tool is cut short, left it running and

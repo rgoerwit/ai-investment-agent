@@ -423,11 +423,10 @@ async def test_document_tool_uses_html_fallback_and_inspects_text(monkeypatch) -
             )
         ),
     )
-    inspection = type(
-        "Inspection",
-        (),
-        {"check": AsyncMock(side_effect=lambda envelope: envelope.content_text)},
-    )()
+    inspection = InspectionService()
+    inspection.check = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda envelope: envelope.content_text
+    )
     monkeypatch.setattr(documents, "get_current_inspection_service", lambda: inspection)
 
     result = await documents.get_official_document.ainvoke(
