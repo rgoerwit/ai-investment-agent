@@ -33,11 +33,29 @@ logger = structlog.get_logger(__name__)
 # after() hooks, and the judge fails *open* when admission refuses it, where
 # this scope's own timeout fails closed. Only the tool plane reads this one:
 # the service, and a tool that sizes its own phases against the runner it runs
-# under (the official-document download and PDF extraction). Only the service
+# under (the official-document download and PDF extraction, and the MCP
+# client's handshake, catalogue, call and retry backoff). Only the service
 # binds it.
 _TOOL_CALL_DEADLINE: ContextVar[float | None] = ContextVar(
     "tool_call_deadline", default=None
 )
+
+
+def current_tool_call_deadline() -> float | None:
+    """The absolute deadline (on ``llm_timeouts.now``) a tool must finish by.
+
+    The earlier of the caller's enclosing deadline and any outer tool call's,
+    or None when neither is bound. Read-only, like ``clamp_to_tool_call_deadline``:
+    for a tool whose retry loop needs the instant itself, to gate a backoff
+    with ``llm_timeouts.wait_allowance``.
+    """
+    enclosing = llm_timeouts.current_enclosing_deadline()
+    outer = _TOOL_CALL_DEADLINE.get()
+    if enclosing is None:
+        return outer
+    if outer is None:
+        return enclosing
+    return min(enclosing, outer)
 
 
 def clamp_to_tool_call_deadline(default_seconds: float) -> float:

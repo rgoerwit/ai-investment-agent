@@ -333,6 +333,10 @@ async def test_an_allowance_spent_while_opening_sends_no_call(
     sent: list[str] = []
 
     class _Session:
+        async def list_tools(self):  # pragma: no cover
+            sent.append("tools/list")
+            raise RuntimeError("the catalogue must not be requested")
+
         async def call_tool(self, name, *args, **kwargs):  # pragma: no cover
             # Recorded, not asserted here: the runtime would reclassify an
             # AssertionError raised inside the session into an MCPCallError.
@@ -359,7 +363,11 @@ async def test_an_allowance_spent_while_opening_sends_no_call(
     assert err.category is MCPErrorCategory.TRANSPORT
     assert err.retryable is False
     assert err.tool_name == "quote"
-    assert err.details["scope"] == "mcp_tool_call"
+    # The catalogue, listed before the call, is the first step refused.
+    assert err.details == {
+        "timeout": "enclosing_deadline_spent",
+        "scope": "mcp_list_tools",
+    }
     # One session, closed normally, and no retry of a call that was never sent.
     assert opened == closed == ["fmp_remote"]
 

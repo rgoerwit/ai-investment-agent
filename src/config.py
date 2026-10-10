@@ -1645,6 +1645,18 @@ class Settings(BaseSettings):
             "bounds the whole call (session open included) and so fires first."
         ),
     )
+    mcp_retry_min_useful_seconds: float = Field(
+        default=1.0,
+        gt=0.0,
+        validation_alias="MCP_RETRY_MIN_USEFUL_SECONDS",
+        description=(
+            "Least time (seconds) that must still be left before the caller's or "
+            "the tool runner's deadline after the backoff for an MCP tool call to "
+            "be retried; below it the retry is refused and never sent. A chosen "
+            "default, not a measured one. Must be below "
+            "MCP_TOOL_CALL_TIMEOUT_SECONDS."
+        ),
+    )
     # Operational deadlines: health-check probe, embeddings, and the two
     # shutdown paths. Same one-field-per-scope rule (15 s health probe vs 15 s
     # embeddings probe; 2 s client close vs 2 s trace flush stay separate). Only
@@ -2103,6 +2115,22 @@ class Settings(BaseSettings):
                 f"({self.memory_embedding_min_useful_seconds:g}) must be below "
                 "MEMORY_EMBEDDING_CALL_TIMEOUT_SECONDS "
                 f"({self.memory_embedding_call_timeout_seconds:g})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_mcp_retry_minimum(self) -> "Settings":
+        """Reject an MCP retry minimum at or above the tool call's own bound.
+
+        At or above it the minimum would refuse a retry that the caller's
+        deadline still leaves room to make in full.
+        """
+        if self.mcp_retry_min_useful_seconds >= self.mcp_tool_call_timeout_seconds:
+            raise ValueError(
+                "MCP_RETRY_MIN_USEFUL_SECONDS "
+                f"({self.mcp_retry_min_useful_seconds:g}) must be below "
+                "MCP_TOOL_CALL_TIMEOUT_SECONDS "
+                f"({self.mcp_tool_call_timeout_seconds:g})"
             )
         return self
 

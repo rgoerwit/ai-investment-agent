@@ -485,7 +485,8 @@ def wait_allowance(
 
     The same rule, with the minimum useful attempt and margin passed directly:
     sleep at most until ``minimum + margin`` is left before ``enclosing``, or
-    return None when even that does not fit. The memory embedding retry uses it.
+    return None when even that does not fit. The memory embedding retry and the
+    MCP tool-call retry (against the tool-plane deadline) use it.
     """
     if enclosing is None:
         return wait

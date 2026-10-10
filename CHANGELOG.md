@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- MCP steps now stay inside the time left, and read the tool runner's deadline as
+  well as the caller's (a nested MCP call no longer sizes its handshake and call
+  against the full settings while the runner has less). The tools/list catalogue
+  is bounded by what the handshake left (it got the session's full bound again).
+  Every tool call now lists first, inside that bound, so the SDK validates the
+  result against a cached schema instead of listing *after* the call under the
+  stale bound; a successful call sends the same requests in a different order, and
+  a failed one costs one extra listing. The retry backoff is admitted like an LLM
+  retry: shortened to fit, refused when less than the new
+  `MCP_RETRY_MIN_USEFUL_SECONDS` (1 s) would be left, and re-checked after the
+  sleep. A refused retry raises the last attempt's error with `retryable: false`
+  and `details.retry == "refused_deadline"`; a 429 still registers its cooldown.
 - An official-document download now has a total deadline,
   `OFFICIAL_DOCUMENT_DOWNLOAD_TOTAL_TIMEOUT_SECONDS` (35 s), around the whole
   download, redirects and DNS checks included; httpx's timeout bounded only each

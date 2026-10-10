@@ -174,6 +174,7 @@ _SETTINGS_ENV_CASES = [
             "mcp_http_timeout_seconds",
             "mcp_initialize_timeout_seconds",
             "mcp_tool_call_timeout_seconds",
+            "mcp_retry_min_useful_seconds",
             "ownership_section_timeout_seconds",
             "stocktwits_http_timeout_seconds",
             "retrospective_price_fetch_timeout_seconds",

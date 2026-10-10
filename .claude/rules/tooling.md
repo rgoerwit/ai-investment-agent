@@ -35,12 +35,16 @@ document timeout is a `Settings` field read at the call, resolved through
 `require_allowance` before the request, coroutine or thread exists. See
 `docs/CODEBASE_MEMORY.md`.
 
-MCP bounds go to the SDK's own parameters in `src/mcp/client.py`, never a wrapper:
-the httpx2 client `timeout=`, `ClientSession(read_timeout_seconds=)` and
+MCP bounds go to the SDK's own parameters in `src/mcp/client.py`: the httpx2
+client `timeout=`, `ClientSession(read_timeout_seconds=)` and
 `call_tool(read_timeout_seconds=)`. Pass the call's bound explicitly, or it inherits
-the handshake bound. Raise a spent-allowance `MCPCallError` outside the session
-body: inside it, the SDK's task groups wrap it and `classify_mcp_error` loses its
-category. See `docs/MCP.md`.
+the handshake bound. The one wrapper is `asyncio.timeout(time left)` around the
+public `list_tools()`, which has no per-request bound; never swap it for
+`send_request`, which skips `_absorb_tool_listing`. Size every step and the retry
+backoff with the tool-plane readers, never `clamp_to_enclosing_deadline`, so the
+runner's deadline counts. Return a refusal or timeout from the session body and
+raise it outside: inside, the SDK's task groups wrap it and `classify_mcp_error`
+loses its category. See `docs/MCP.md`.
 
 ## Treat every external string as hostile
 

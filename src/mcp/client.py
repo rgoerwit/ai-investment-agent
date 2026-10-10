@@ -4,17 +4,17 @@ import asyncio
 import datetime as dt
 import json
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx2
 import structlog
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
-from mcp.types import CallToolResult, ListToolsResult
+from mcp.types import REQUEST_TIMEOUT, CallToolResult, ListToolsResult
 
 from src.config import config as settings_config
-from src.llm_runtime.timeouts import clamp_to_enclosing_deadline, require_allowance
+from src.llm_runtime import timeouts as llm_timeouts
 from src.mcp.auth import MCPCredentialMissing, MCPResolvedServer, resolve_auth
 from src.mcp.budget import BudgetTracker
 from src.mcp.catalog import ToolCatalog, ToolDescriptor
@@ -28,6 +28,10 @@ from src.mcp.errors import (
 from src.mcp.normalize import normalize_result
 from src.tooling.inspection_service import INSPECTION_SERVICE
 from src.tooling.inspector import InspectionDecision, InspectionEnvelope, SourceKind
+from src.tooling.runtime import (
+    clamp_to_tool_call_deadline,
+    current_tool_call_deadline,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -40,10 +44,11 @@ _MAX_BACKOFF_SECONDS = 5.0
 def _spent_allowance_error(
     label: str, *, server_id: str, tool_name: str | None = None
 ) -> MCPCallError:
-    """The caller's enclosing deadline passed before this MCP step could start.
+    """The caller's or the tool runner's deadline passed before this step could start.
 
     A non-retryable TRANSPORT error: the MCP category every other timeout
-    takes, and not worth a retry that would be refused the same way.
+    takes, and not worth a retry that would be refused the same way. Nothing
+    was sent for this step.
     """
     return MCPCallError(
         message=f"MCP {label} for {server_id}: enclosing deadline already passed",
@@ -55,15 +60,86 @@ def _spent_allowance_error(
     )
 
 
-def _mcp_allowance(default_seconds: float, *, label: str, server_id: str) -> float:
-    """A deadline setting, read now and clamped to the caller's enclosing deadline.
+def _retry_refused_error(err: MCPCallError, *, backoff_seconds: float) -> MCPCallError:
+    """``err`` (sent, then failed), marked as a retry the deadline refused.
 
-    A spent allowance raises before any client, subprocess or session exists.
+    The attempt's own classification is kept -- category, HTTP status, JSON-RPC
+    code -- so a 429 still reads as one. ``details.retry`` records that the
+    retry was never sent, and it is no longer retryable: a caller retry would
+    be refused the same way.
     """
+    return MCPCallError(
+        message=f"{err.message} (retry refused: deadline leaves no room)",
+        category=err.category,
+        server_id=err.server_id,
+        tool_name=err.tool_name,
+        retryable=False,
+        http_status=err.http_status,
+        json_rpc_code=err.json_rpc_code,
+        retry_after_seconds=err.retry_after_seconds,
+        details={
+            **err.details,
+            "retry": "refused_deadline",
+            "backoff_seconds": backoff_seconds,
+        },
+    )
+
+
+def _mcp_allowance(default_seconds: float, *, label: str, server_id: str) -> float:
+    """A deadline setting, read now and clamped to the caller's and the runner's.
+
+    Read through the tool-plane clamp, so a call made under the tool runner
+    (``execute_raw``) sizes against what the runner has left as well as any
+    enclosing deadline. A spent allowance raises before any client, subprocess
+    or session exists.
+    """
+    seconds = clamp_to_tool_call_deadline(default_seconds)
+    if seconds <= 0:
+        raise _spent_allowance_error(label, server_id=server_id)
+    return seconds
+
+
+async def _list_tools_in_time(
+    session: ClientSession, *, server_id: str, tool_name: str | None = None
+) -> ListToolsResult | MCPCallError:
+    """The server's tool listing within the time left, or the error to raise.
+
+    Runs inside the session body. The public ``list_tools()`` is called as is:
+    it is what drops tools with an invalid ``x-mcp-header`` annotation and
+    caches the output schemas and header maps a later ``call_tool`` uses. It
+    takes no per-request timeout, and the session's read timeout was fixed
+    when the session opened, before the handshake spent part of the
+    allowance, so it is bounded here by what is left now.
+
+    A spent allowance or an expired bound is *returned*: the caller lets the
+    SDK contexts exit normally and raises it outside them, where the SDK's task
+    groups cannot wrap it. External cancellation propagates.
+    """
+    remaining = clamp_to_tool_call_deadline(
+        settings_config.mcp_initialize_timeout_seconds
+    )
+    if remaining <= 0:
+        return _spent_allowance_error(
+            "mcp_list_tools", server_id=server_id, tool_name=tool_name
+        )
+    bound = asyncio.timeout(remaining)
     try:
-        return require_allowance(default_seconds, label=label)
-    except TimeoutError as exc:
-        raise _spent_allowance_error(label, server_id=server_id) from exc
+        async with bound:
+            return await session.list_tools()
+    except TimeoutError:
+        if not bound.expired():
+            raise
+        # Sent, then timed out: the same retryable transport timeout the SDK's
+        # own read timeout raises, marked with the bound that fired.
+        return MCPCallError(
+            message=f"MCP tools/list for {server_id} timed out after {remaining:.2f}s",
+            category=MCPErrorCategory.TRANSPORT,
+            server_id=server_id,
+            tool_name=tool_name,
+            retryable=True,
+            json_rpc_code=REQUEST_TIMEOUT,
+            details={"timeout": "time_left_elapsed", "scope": "mcp_list_tools"},
+        )
 
 
 class MCPRuntime:
@@ -210,12 +286,13 @@ class MCPRuntime:
                 server_id=spec.id,
             )
 
-        # Read now and shrunk to a caller's enclosing deadline before the client,
-        # subprocess or session exists, so a spent allowance opens nothing. The
-        # SDK applies each one itself: the session read timeout bounds the
-        # initialize handshake (connecting included) and a tools/list request,
-        # and raises MCPError(REQUEST_TIMEOUT) after tearing down the request;
-        # the httpx2 timeout bounds each phase of each HTTP request.
+        # Read now and shrunk to the caller's and the tool runner's deadline
+        # before the client, subprocess or session exists, so a spent allowance
+        # opens nothing. The SDK applies each one itself: the session read
+        # timeout bounds the initialize handshake (connecting included) and
+        # raises MCPError(REQUEST_TIMEOUT) after tearing down the request; the
+        # httpx2 timeout bounds each phase of each HTTP request. A tools/list
+        # request is re-bounded by the time left (``_list_tools_in_time``).
         request_timeout = _mcp_allowance(
             settings_config.mcp_initialize_timeout_seconds,
             label="mcp_initialize",
@@ -296,6 +373,55 @@ class MCPRuntime:
             duration = err.retry_after_seconds or _DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
             self._register_cooldown(err.server_id, duration_seconds=duration)
 
+    @staticmethod
+    async def _call_in_time(
+        session: ClientSession,
+        spec: MCPServerSpec,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> CallToolResult | MCPCallError:
+        """List, then call, inside the session body, each within the time left.
+
+        Listing first is what keeps the catalogue inside the deadline: the SDK
+        validates a result against the tool's output schema and, in a fresh
+        session, lists the tools *after* the call to fetch it, under the
+        session's read timeout fixed at open. Listed first, under the time
+        left, the schema is cached and that post-call request is never sent.
+        A refusal or a timed-out listing is returned, never raised, for the
+        caller to raise once the session has closed normally.
+        """
+        listing = await _list_tools_in_time(
+            session, server_id=spec.id, tool_name=tool_name
+        )
+        if isinstance(listing, MCPCallError):
+            return listing
+        # Resolved now, so opening the session and listing count against the
+        # deadline. Explicit, because the call would otherwise inherit the
+        # session's handshake bound.
+        call_timeout = clamp_to_tool_call_deadline(
+            settings_config.mcp_tool_call_timeout_seconds
+        )
+        if call_timeout <= 0:
+            return _spent_allowance_error(
+                "mcp_tool_call", server_id=spec.id, tool_name=tool_name
+            )
+        result: CallToolResult = await session.call_tool(
+            tool_name, arguments, read_timeout_seconds=call_timeout
+        )
+        return result
+
+    def _refuse_retry(self, err: MCPCallError, *, backoff_seconds: float) -> NoReturn:
+        """Raise ``err`` as a refused retry; its own cooldown still registers."""
+        self._on_call_failure(err)
+        logger.info(
+            "mcp_retry_refused",
+            server_id=err.server_id,
+            tool_name=err.tool_name,
+            category=err.category.value,
+            backoff_seconds=backoff_seconds,
+        )
+        raise _retry_refused_error(err, backoff_seconds=backoff_seconds) from err
+
     async def _execute_with_retry(
         self,
         spec: MCPServerSpec,
@@ -306,23 +432,15 @@ class MCPRuntime:
         for attempt in range(_MAX_RETRY_ATTEMPTS):
             try:
                 async with self._open_session(spec) as session:
-                    # Resolved once the session is up, so opening it counts
-                    # against a caller deadline. Explicit, because the call
-                    # would otherwise inherit the session's handshake bound.
-                    call_timeout = clamp_to_enclosing_deadline(
-                        settings_config.mcp_tool_call_timeout_seconds
+                    outcome = await self._call_in_time(
+                        session, spec, tool_name, arguments
                     )
-                    if call_timeout > 0:
-                        result: CallToolResult = await session.call_tool(
-                            tool_name, arguments, read_timeout_seconds=call_timeout
-                        )
-                        return result
-                # Spent while the session opened: closed normally above, and
-                # raised out here so the error never crosses the SDK's task
-                # groups. Never sent, so no retry.
-                raise _spent_allowance_error(
-                    "mcp_tool_call", server_id=spec.id, tool_name=tool_name
-                )
+                # A refusal or a timed-out listing: the session closed normally
+                # above, and it is raised out here so the error never crosses
+                # the SDK's task groups. A spent allowance is not retryable.
+                if isinstance(outcome, MCPCallError):
+                    raise outcome
+                return outcome
             except MCPCallError as err:
                 last_err = err
             except Exception as exc:
@@ -338,12 +456,35 @@ class MCPRuntime:
                 self._on_call_failure(last_err)
                 raise last_err
 
-            backoff = (
-                last_err.retry_after_seconds
-                if last_err.retry_after_seconds is not None
-                else 0.5 * (2**attempt)
+            rate_limited = last_err.retry_after_seconds is not None
+            backoff = min(
+                float(
+                    last_err.retry_after_seconds
+                    if last_err.retry_after_seconds is not None
+                    else 0.5 * (2**attempt)
+                ),
+                _MAX_BACKOFF_SECONDS,
             )
-            await asyncio.sleep(min(float(backoff), _MAX_BACKOFF_SECONDS))
+            # The retry is admitted like an LLM retry: sleep only while a useful
+            # attempt still fits before the caller's or the runner's deadline. A
+            # transient backoff is shortened to fit; a server-requested wait is
+            # not, so it is refused instead. Refused means never sent.
+            minimum = settings_config.mcp_retry_min_useful_seconds
+            wait = llm_timeouts.wait_allowance(
+                current_tool_call_deadline(),
+                backoff,
+                minimum=minimum,
+                rate_limited=rate_limited,
+            )
+            if wait is None:
+                self._refuse_retry(last_err, backoff_seconds=backoff)
+            else:
+                await asyncio.sleep(wait)
+            # Re-checked after the sleep: it may overrun, and the next attempt
+            # must not open a session it cannot use.
+            deadline = current_tool_call_deadline()
+            if deadline is not None and deadline - llm_timeouts.now() < minimum:
+                self._refuse_retry(last_err, backoff_seconds=backoff)
 
         if last_err is not None:  # pragma: no cover - safety
             raise last_err
@@ -379,7 +520,11 @@ class MCPRuntime:
                 continue
 
             async with self._open_session(spec) as session:
-                tool_result: ListToolsResult = await session.list_tools()
+                listing = await _list_tools_in_time(session, server_id=spec.id)
+            # Raised outside the session, which has closed normally.
+            if isinstance(listing, MCPCallError):
+                raise listing
+            tool_result: ListToolsResult = listing
 
             server_tools = [
                 ToolDescriptor(

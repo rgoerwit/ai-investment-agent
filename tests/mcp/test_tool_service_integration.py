@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
 from src.consultant_tools import spot_check_metric_mcp_fmp
 from src.mcp.budget import MCPBudgetHook
@@ -81,6 +81,13 @@ async def test_consultant_mcp_call_flows_through_tool_service(
     @asynccontextmanager
     async def fake_open_session(_spec):
         class _Session:
+            async def list_tools(self):
+                # Listed before every call, so the output schema is cached
+                # within the time left (src/mcp/client.py::_call_in_time).
+                return ListToolsResult(
+                    tools=[Tool(name="statements", inputSchema={"type": "object"})]
+                )
+
             async def call_tool(self, name, arguments, read_timeout_seconds=None):
                 return CallToolResult(
                     content=[

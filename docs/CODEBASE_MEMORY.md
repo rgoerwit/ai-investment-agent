@@ -688,6 +688,18 @@ the session closes, never inside it. An `MCPCallError` raised inside the session
 body comes back wrapped in the SDK's task groups and would be reclassified as a
 generic error. See `docs/MCP.md`.
 
+The one exception to "SDK parameter, never a wrapper" is the catalogue.
+`list_tools()` takes no per-request timeout, and the session's was fixed at open,
+before the handshake spent part of the allowance, so the listing runs under
+`asyncio.timeout(time left)` and its timeout is captured inside the session body
+and raised outside it. It must stay the public `list_tools()`: `send_request`
+skips `_absorb_tool_listing`, which drops invalid `x-mcp-header` tools and caches
+the output schemas. The production call path lists before every call for the same
+reason: the SDK validates a result against the cached schema and, in a fresh
+session, lists *after* the call to fetch it, under the stale session bound. MCP
+reads the tool runner's deadline (`clamp_to_tool_call_deadline`,
+`current_tool_call_deadline`) for every step and the retry backoff, never binds it.
+
 The operational deadlines close the category, and most deliberately do **not**
 clamp. The health check's 15 s probe is a top-level entrypoint, so nothing binds
 a deadline around it. Its HEALTH_CHECK seat's 10 s client timeout sits inside

@@ -1,6 +1,6 @@
 # Model Context Protocol (MCP) integration
 
-Last updated: 2026-10-09 (timeout model).
+Last updated: 2026-10-09 (timeout model: catalogue, retry backoff and tool-call deadline).
 
 The consultant agent can cross-validate analyst claims against vendor MCP
 servers (currently the FMP MCP server). The consultant-facing MCP wrappers
@@ -164,15 +164,46 @@ a protocol failure.
 
 ## Timeout model
 
-Three settings, each passed to the SDK's own parameter. Each is read when the
-session opens or the call is sent, and shrinks to a caller's remaining
-enclosing deadline (`src/llm_runtime/timeouts.py`):
+Four settings. Each is read when the step starts and shrinks to the time left:
+the caller's enclosing deadline (`src/llm_runtime/timeouts.py`) and, under the
+tool service, the runner's `tool_call_deadline` (`src/tooling/runtime.py`), read
+through `clamp_to_tool_call_deadline`. MCP reads that deadline and never binds it.
 
 | Setting | Default | Applied as | Bounds |
 |---|---|---|---|
 | `MCP_HTTP_TIMEOUT_SECONDS` | 5 s | `httpx2.AsyncClient(timeout=...)` | each phase (connect, read, write, pool) of each HTTP request. It does not bound a whole request |
-| `MCP_INITIALIZE_TIMEOUT_SECONDS` | 30 s | `ClientSession(read_timeout_seconds=...)` | the wait for the initialize response, connecting included, and for a tools/list catalog response |
+| `MCP_INITIALIZE_TIMEOUT_SECONDS` | 30 s | `ClientSession(read_timeout_seconds=...)`, and `asyncio.timeout(...)` around `list_tools()` | the wait for the initialize response, connecting included; then, re-read after the handshake, the tools/list catalogue response |
 | `MCP_TOOL_CALL_TIMEOUT_SECONDS` | 45 s | `call_tool(read_timeout_seconds=...)` | the wait for one tool call's result |
+| `MCP_RETRY_MIN_USEFUL_SECONDS` | 1 s | `wait_allowance(minimum=...)` before the retry backoff | the least time that must be left after the backoff for the one retry to be sent |
+
+**The catalogue (October 2026, round 2).** `list_tools()` takes no per-request
+timeout, and the session's read timeout is fixed when the session opens, so a
+listing sent after a slow handshake used to get a fresh full bound. It now runs
+under `asyncio.timeout(time left)` inside the session body (`_list_tools_in_time`).
+A timeout or a spent allowance is captured there and raised after the SDK contexts
+have exited normally, like every other MCP error. It stays the public
+`list_tools()`: calling `send_request` directly would skip `_absorb_tool_listing`,
+which drops tools with an invalid `x-mcp-header` annotation (2026-07-28 sessions
+only; `initialize()` negotiates a legacy version, where the filter is inert) and
+caches the output schemas and header maps.
+
+**Every call lists first.** The SDK validates a successful result against the
+tool's output schema, and in a fresh session -- every `execute_raw` opens one --
+it fetched that schema with a tools/list sent *after* the call, under the stale
+session bound. `_call_in_time` now lists first, within the time left, so the
+schema is cached and that post-call listing is never sent. A successful call
+sends the same requests as before, in a different order; a call that fails
+(timeout, error payload) now costs one listing it did not before. A listing that
+fails means the call is never sent.
+
+**The retry backoff is admitted.** `_execute_with_retry` asks
+`wait_allowance` (the same rule as an LLM retry) whether a useful attempt still
+fits after the backoff. A transient backoff is shortened to fit; a server's
+`Retry-After` is not, so it is refused. It re-checks after the sleep. A refused
+retry raises the last attempt's error (its category, HTTP status and JSON-RPC
+code kept, and its 429 or AUTH cooldown still registered) with
+`retryable: false` and `details.retry == "refused_deadline"`: sent, then failed,
+and the retry never sent.
 
 What the qualification found (mcp 2.2.0, httpx2 2.13.0):
 
@@ -218,12 +249,15 @@ What the qualification found (mcp 2.2.0, httpx2 2.13.0):
 | `failure_kind: "transport"`, `retryable: true`, message `Request 'initialize' timed out` | The handshake outlived `MCP_INITIALIZE_TIMEOUT_SECONDS`. `tools/list` reads the same |
 | the same with `Request 'tools/call' timed out` | The call outlived `MCP_TOOL_CALL_TIMEOUT_SECONDS`. The server was sent a cancel |
 | `transport`, `retryable: true`, an httpx2 `ReadTimeout` / `ConnectTimeout` message | One HTTP phase outlived `MCP_HTTP_TIMEOUT_SECONDS`; usually a vendor slow to start its response |
-| `transport`, `retryable: false`, `details.timeout == "enclosing_deadline_spent"` | The caller's deadline had already passed. `details.scope` names the step: `mcp_initialize` means no session was opened, and `mcp_tool_call` means one was opened but no call was sent |
+| `transport`, `retryable: false`, `details.timeout == "enclosing_deadline_spent"` | The caller's or the tool runner's deadline had already passed. `details.scope` names the step: `mcp_initialize` means no session was opened, `mcp_list_tools` that one was opened but no listing (and so no call) was sent, and `mcp_tool_call` that the listing was sent but no call |
+| `transport`, `retryable: true`, `details.timeout == "time_left_elapsed"`, `details.scope == "mcp_list_tools"` | The catalogue was sent and outlived what the handshake left. Under `execute_raw` the retry is then usually refused (next row) |
+| any category, `retryable: false`, `details.retry == "refused_deadline"` | The attempt was sent and failed retryably, and the deadline left no room for the backoff plus `MCP_RETRY_MIN_USEFUL_SECONDS`. The rest of the error is that attempt's own |
 | `TOOL_ERROR: TimeoutError` in the Consultant's tool output, or `tool_call_timeout` in the log | The tool runner's `TOOL_EXECUTION_TIMEOUT_SECONDS` fired first; the MCP bounds never got the chance. With `scope="with_inspection"` in the log, it was the combined hooks-plus-runner scope (`TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS`), usually a slow inspection |
 
 A retryable failure is retried once in `_execute_with_retry`,
-with a fresh session and a re-read allowance. So a stalled call costs two
-bounds plus the backoff, unless the runner fires first. Before October 2026 a
+with a fresh session and a re-read allowance, when the backoff is admitted. So
+a stalled call costs at most two bounds plus the backoff, and never more than
+the time left. Before October 2026 a
 timed-out request classified as `protocol`.
 
 ## Smoke testing the integration
