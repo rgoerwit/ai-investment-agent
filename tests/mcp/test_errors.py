@@ -11,6 +11,8 @@ they also catch the SDK changing how it surfaces HTTP failures.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
+import email.utils
 import json
 from pathlib import Path
 
@@ -26,6 +28,7 @@ from src.mcp.errors import (
     HTTPErrorRecord,
     MCPCallError,
     MCPErrorCategory,
+    _parse_retry_after,
     classify_mcp_error,
 )
 
@@ -182,6 +185,51 @@ class TestClassifyMcpError:
         )
         assert err.category is MCPErrorCategory.PROTOCOL
         assert err.json_rpc_code == -32601
+
+
+# ---------------------------------------------------------------------------
+# Retry-After: delta-seconds or an HTTP-date (RFC 9110 section 10.2.3)
+# ---------------------------------------------------------------------------
+
+_RETRY_AFTER_NOW = dt.datetime(2026, 10, 11, 12, 0, 0, tzinfo=dt.UTC)
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("7", 7),
+        ("0", 0),
+        (" 7 ", 7),
+        ("Sun, 11 Oct 2026 12:02:00 GMT", 120),
+        ("Sun, 11 Oct 2026 12:00:00 GMT", 0),
+        ("Sun, 11 Oct 2026 11:59:00 GMT", 0),  # already past: no wait left
+        ("-1", None),
+        ("+5", None),
+        ("1_000", None),
+        ("9" * 20, None),  # no calendar date that far ahead
+        ("1.5", None),
+        ("soon", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_retry_after_parses_both_forms_and_drops_junk(header, expected):
+    assert _parse_retry_after(header, now=_RETRY_AFTER_NOW) == expected
+
+
+def test_a_partial_second_until_the_date_rounds_up():
+    now = _RETRY_AFTER_NOW + dt.timedelta(milliseconds=250)
+    assert _parse_retry_after("Sun, 11 Oct 2026 12:02:00 GMT", now=now) == 120
+
+
+def test_an_http_date_reaches_the_classified_error():
+    when = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)
+    header = email.utils.format_datetime(when, usegmt=True)
+
+    err = classify_mcp_error(_status_error(429, {"retry-after": header}), server_id="s")
+
+    assert err.retry_after_seconds is not None
+    assert 58 <= err.retry_after_seconds <= 60
 
 
 # ---------------------------------------------------------------------------

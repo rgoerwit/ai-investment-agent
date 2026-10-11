@@ -579,7 +579,16 @@ wrapper, which only delayed cancellation by a loop turn; the node keeps the
   stops once it is spent, so the ledger never records what the caller was told
   timed out. That race is why MCP budget accounting moved out of the hook
   chain (round 3): `MCPRuntime` now counts each tools/call as it is sent, so a
-  discarded result is still counted (`docs/MCP.md`, Budget interaction).
+  discarded result is still counted (`docs/MCP.md`, Budget interaction). Round
+  4 made that count atomic: check (`can_call`) and record were separate SQLite
+  transactions on the event loop with the handshake between them, so five
+  concurrent callers at a daily limit of 1 all sent. `BudgetTracker.try_reserve`
+  now checks and increments both limits in one `BEGIN IMMEDIATE` transaction
+  immediately before the send, on a bounded worker thread; the count is admitted
+  reservations (a timed-out worker's late commit counts, never refunded), and a
+  locked or broken store refuses the call unsent. The 5 s backoff cap that cut a
+  server's `Retry-After: 120` to 5 s is gone: a server wait is honoured in full
+  or the retry refused.
 - **`run_with_hard_timeout` returns on time even when a hook ignores
   cancellation**, because it never awaits the cancelled task. It cannot help a
   hook that blocks the event loop synchronously, and it does not stop the

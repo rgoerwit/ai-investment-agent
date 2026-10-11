@@ -205,7 +205,39 @@ async def test_a_spent_allowance_opens_no_session(
     err = exc_info.value
     assert err.category is MCPErrorCategory.TRANSPORT
     assert err.retryable is False
+    # The budget check, off the loop before any session, is the first step refused.
     assert err.details == {
+        "timeout": "enclosing_deadline_spent",
+        "scope": "mcp_budget",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime_factory", [http_runtime, _stdio_runtime])
+async def test_an_allowance_spent_after_the_budget_check_opens_no_session(
+    tmp_path, monkeypatch, fake_clock, runtime_factory
+):
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("no transport may be created once the deadline passed")
+
+    monkeypatch.setattr("src.mcp.client.httpx2.AsyncClient", _forbidden)
+    monkeypatch.setattr("src.mcp.client.stdio_client", _forbidden)
+    monkeypatch.setattr("src.mcp.client.ClientSession", _forbidden)
+    runtime = runtime_factory(tmp_path)
+    (server_id,) = runtime.specs
+
+    async def admitted_as_the_deadline_passes(*args) -> bool:
+        fake_clock[0] += 5.0
+        return True
+
+    monkeypatch.setattr(runtime.budget, "has_room", admitted_as_the_deadline_passes)
+
+    with enclosing_deadline(5.0):
+        with pytest.raises(MCPCallError) as exc_info:
+            await runtime.execute_raw(server_id, "quote", {}, scope="consultant")
+
+    assert exc_info.value.retryable is False
+    assert exc_info.value.details == {
         "timeout": "enclosing_deadline_spent",
         "scope": "mcp_initialize",
     }

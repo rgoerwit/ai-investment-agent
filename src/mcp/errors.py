@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import datetime as dt
+import math
 from dataclasses import dataclass, field
+from email.utils import parsedate_to_datetime
 from enum import Enum
 from typing import Any
 
@@ -42,16 +45,36 @@ def _sanitize(text: str, *, max_chars: int = 512) -> str:
     return redact_sensitive_text(text, max_chars=max_chars)
 
 
-def _parse_retry_after(value: str | None) -> int | None:
-    if not value:
-        return None
+def _parse_retry_after(
+    value: str | None, *, now: dt.datetime | None = None
+) -> int | None:
+    """Seconds a ``Retry-After`` header asks to wait, in either RFC 9110 form.
+
+    Delta-seconds as given; an HTTP-date as the whole seconds until it, rounded
+    up and measured on the UTC wall clock the client's cooldowns use, with a
+    date already past meaning no wait. Junk, a negative delay, or one too
+    large to end on a calendar date is absent.
+    """
+    text = (value or "").strip()
+    if not (text.isascii() and text.isdigit()):
+        return _seconds_until_http_date(text, now=now) if text else None
+    seconds = int(text)
     try:
-        seconds = int(value)
-    except (TypeError, ValueError):
-        return None
-    if seconds < 0:
+        (now or dt.datetime.now(dt.UTC)) + dt.timedelta(seconds=seconds)
+    except OverflowError:
         return None
     return seconds
+
+
+def _seconds_until_http_date(text: str, *, now: dt.datetime | None) -> int | None:
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:  # "-0000": the date is UTC with no stated source
+        when = when.replace(tzinfo=dt.UTC)
+    remaining = (when - (now or dt.datetime.now(dt.UTC))).total_seconds()
+    return max(0, math.ceil(remaining))
 
 
 @dataclass

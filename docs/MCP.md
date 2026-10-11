@@ -1,6 +1,6 @@
 # Model Context Protocol (MCP) integration
 
-Last updated: 2026-10-11 (retry minimum derived from the call timeout; budget counted at send, unlisted tools refused, legacy-only header filter).
+Last updated: 2026-10-11 (atomic budget reservation off the event loop; server waits honoured or refused, never shortened; retry minimum derived from the call timeout; unlisted tools refused, legacy-only header filter).
 
 The consultant agent can cross-validate analyst claims against vendor MCP
 servers (currently the FMP MCP server). The consultant-facing MCP wrappers
@@ -122,18 +122,39 @@ chain; servers without `"consultant"` in `scopes` raise
 
 `MCPRuntime` owns the budget, beneath the hook chain:
 
-- **Admission.** Each attempt is admitted with `BudgetTracker.can_call` before
-  a session opens. A spent `daily_call_limit` or `per_run_limit` (0 means
-  unlimited) raises `MCPCallError(category=BUDGET)`, `failure_kind: "budget"`
-  in the consultant JSON, with nothing sent. A retry the budget cannot cover is
-  refused like a deadline refusal: the sent attempt's error, with
+- **Reservation.** Immediately before each tools/call, `BudgetTracker.reserve`
+  checks both limits and takes one call from each in a single SQLite
+  `BEGIN IMMEDIATE` transaction, so concurrent callers (in this process or
+  another sharing the file) cannot both take the last call. A spent
+  `daily_call_limit` or `per_run_limit` (0 means unlimited) returns
+  `MCPCallError(category=BUDGET)`, `failure_kind: "budget"` in the consultant
+  JSON, with nothing sent. A retry that loses the budget is refused like a
+  deadline refusal: the sent attempt's error, with
   `details.retry == "refused_budget"`.
-- **Accounting.** Each tools/call is counted as it is handed to the SDK,
+- **Advisory check.** `BudgetTracker.has_room` runs before a session opens and
+  before a retry's backoff, so a spent budget opens nothing and sleeps nothing.
+  It reserves nothing; the reservation is the authority.
+- **What counts: admitted reservations, never refunded.** A reservation counts
   whatever follows: a timeout, a 429 or 5xx, an `isError=true` payload, a
-  result that fails its output schema, a cancellation, or a result the tool
-  plane discards. A retried call counts twice. `initialize` and `tools/list`
-  are not counted: vendor quotas meter data endpoints, and a request-rate limit
-  on a listing surfaces as a 429 and its cooldown.
+  result that fails its output schema, a result the tool plane discards, and
+  also a call never sent because it was cancelled, the deadline ran out while
+  the store admitted it, or the worker committed after its caller gave up. A
+  retried call counts twice. `initialize` and `tools/list` are not counted:
+  vendor quotas meter data endpoints, and a request-rate limit on a listing
+  surfaces as a 429 and its cooldown.
+- **Off the event loop, failing closed.** Every transaction runs on a daemon
+  worker through `run_blocking_call` under one shared `InFlightLimit`. Its hard
+  bound is `MCP_HTTP_TIMEOUT_SECONDS` clamped to the time left (an admission
+  step must fit inside one MCP request's allowance), and SQLite's busy
+  timeout stops `deadline_margin` short of it, so a locked store gives up
+  before the worker is abandoned. A store that is locked past that, saturated
+  or broken refuses the call unsent:
+  `MCPCallError(category=BUDGET, details={"refused": "budget_store_unavailable", "reason": <exception type>})`.
+  A spent allowance at the check is the usual
+  `details={"timeout": "enclosing_deadline_spent", "scope": "mcp_budget"}`.
+- **Two trackers.** Trackers on one database share the daily limit; each keeps
+  its own per-run count. Constructing one does no database I/O: the first
+  transaction creates the table and sweeps expired days.
 
 **Why not a hook (October 2026, round 3).** The budget used to be an
 `MCPBudgetHook`, counting in `after()`. That hook runs only when the runner
@@ -142,11 +163,18 @@ received and then timed out, failed or had its result discarded (the after()
 chain stops once the deadline is spent) was never counted, and a retry counted
 once for two sends. Counting at the send boundary is the only place that sees
 every request. A call that fails locally inside the SDK before reaching the
-wire is over-counted, which is the safe direction for a quota. Two concurrent
-calls can still overshoot a limit by the number in flight.
+wire is over-counted, which is the safe direction for a quota.
+
+**Why one reservation (October 2026, round 4).** Round 3 checked
+(`can_call`) before the session opened and recorded at the send, in two
+transactions, synchronously on the event loop. Between them came the
+handshake and the listing, so five concurrent callers against a daily limit of
+1 all passed the check and all five were sent; and a locked database stalled
+the loop for SQLite's default 5 s. One atomic transaction at the send closes
+the race; running it on a worker keeps the loop free.
 
 Counts persist in the SQLite database at `MCP_USAGE_DB_PATH`. Rows older than
-the retention window are swept on startup.
+the retention window are swept by each tracker's first transaction.
 
 ## Diagnosing a blocked call
 
@@ -168,7 +196,8 @@ or failure it emits:
 `failure_kind` mirrors `MCPErrorCategory` plus `inspection_blocked` for hook-
 level blocks. Use the value to disambiguate: `config` (allowlist/scope/spec, or
 a tool the server does not list: `details.refused == "tool_not_listed"`),
-`budget` (the server's call budget is spent),
+`budget` (the server's call budget is spent, or its store could not admit the
+call: `details.refused == "budget_store_unavailable"`),
 `auth` (401/403, vendor cooldown), `transport` (5xx/429/network/timeout, see
 [Debugging a timed-out call](#debugging-a-timed-out-call)),
 `tool_error` (vendor returned `isError=true`), `inspection` /
@@ -232,14 +261,22 @@ page or a repeated cursor. A tool still missing is refused unsent and uncounted
 as `MCPCallError(category=CONFIG, details={"refused": "tool_not_listed"})`, with
 no retry and no cooldown.
 
-**The retry backoff is admitted.** `_execute_with_retry` asks
-`wait_allowance` (the same rule as an LLM retry) whether a useful attempt still
-fits after the backoff. A transient backoff is shortened to fit; a server's
-`Retry-After` is not, so it is refused. It re-checks after the sleep. A refused
-retry raises the last attempt's error (its category, HTTP status and JSON-RPC
-code kept, and its 429 or AUTH cooldown still registered) with
-`retryable: false` and `details.retry == "refused_deadline"`: sent, then failed,
-and the retry never sent.
+**The retry backoff is admitted.** `_retry_backoff` asks `wait_allowance`
+(the same rule as an LLM retry) whether a useful attempt still fits after the
+backoff. A transient backoff (0.5 s before the one retry) is shortened to fit.
+A wait the server asked for is honoured in full or refused, never shortened:
+its `Retry-After` (delta-seconds, or an HTTP-date measured against the UTC
+clock the cooldowns use), or, for a 429 without a usable one, the default
+rate-limit cooldown (30 s). That one value is both the retry's wait and the
+cooldown every fresh call sees, and the cooldown is registered before the
+retry decision, so a fresh call during the wait is held off. Junk, negative
+or unrepresentable `Retry-After` values are treated as absent. It re-checks
+after the sleep. A refused retry raises the last attempt's error (its
+category, HTTP status and JSON-RPC code kept, and its 429 or AUTH cooldown
+still registered) with `retryable: false` and
+`details.retry == "refused_deadline"`: sent, then failed, and the retry never
+sent. Until round 4 a server wait was capped at 5 s, so a `Retry-After: 120`
+was retried 115 s early.
 
 What the qualification found (mcp 2.2.0, httpx2 2.13.0):
 

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import datetime as dt
+import email.utils
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -751,6 +753,179 @@ async def test_a_rate_limit_wait_that_does_not_fit_is_refused_and_still_cools_do
     assert err.retryable is False
     assert err.details["retry"] == "refused_deadline"
     assert "fmp_remote" in runtime._cooldowns
+
+
+# --- A server-requested wait: honoured in full or refused, never shortened ------
+
+
+@pytest.fixture
+def skipped_sleeps(monkeypatch) -> list[float]:
+    """The client's backoff sleeps, recorded and not slept: a server may ask for minutes."""
+    recorded: list[float] = []
+
+    class _NoSleep:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(asyncio, name)
+
+        @staticmethod
+        async def sleep(delay: float) -> None:
+            recorded.append(delay)
+
+    monkeypatch.setattr(mcp_client, "asyncio", _NoSleep())
+    return recorded
+
+
+def _cooldown_left(runtime: MCPRuntime) -> float:
+    until = runtime._cooldowns["fmp_remote"]
+    return (until - dt.datetime.now(dt.UTC)).total_seconds()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [429, 503])
+async def test_a_server_wait_that_fits_is_honoured_in_full(
+    tmp_path, monkeypatch, fake_clock, skipped_sleeps, status
+):
+    """120 s asked, 200 s left: the old 5 s backoff cap no longer shortens it."""
+    server = FakeMCPServer(
+        status={"tools/call": [(status, {"retry-after": "120"}), None]}
+    )
+    server.install(monkeypatch)
+    runtime = http_runtime(tmp_path)
+
+    with tool_call_deadline(200.0):
+        payload = await runtime.execute_raw(
+            "fmp_remote", "quote", {}, scope="consultant"
+        )
+
+    assert payload["is_error"] is False
+    assert skipped_sleeps == [120.0]
+    assert server.calls_sent == 2
+
+
+@pytest.mark.asyncio
+async def test_a_server_wait_that_does_not_fit_is_refused_and_cools_down_in_full(
+    tmp_path, monkeypatch, fake_clock, skipped_sleeps
+):
+    server = FakeMCPServer(status={"tools/call": (429, {"retry-after": "120"})})
+    server.install(monkeypatch)
+    runtime = http_runtime(tmp_path)
+
+    with tool_call_deadline(100.0):
+        with pytest.raises(MCPCallError) as exc_info:
+            await runtime.execute_raw("fmp_remote", "quote", {}, scope="consultant")
+
+    err = exc_info.value
+    assert skipped_sleeps == []
+    assert server.calls_sent == 1
+    assert err.http_status == 429
+    assert err.details["retry"] == "refused_deadline"
+    assert err.details["backoff_seconds"] == 120.0
+    assert 110.0 < _cooldown_left(runtime) <= 120.0
+
+
+_INVALID_RETRY_AFTER = ["abc", "-5", "1.5", ""]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", [None, *_INVALID_RETRY_AFTER])
+async def test_a_429_without_a_usable_retry_after_waits_the_default_cooldown(
+    tmp_path, monkeypatch, skipped_sleeps, header
+):
+    """One value for both: the rate-limited retry and every fresh call wait it."""
+    headers = {} if header is None else {"retry-after": header}
+    server = FakeMCPServer(status={"tools/call": [(429, headers), None]})
+    server.install(monkeypatch)
+    runtime = http_runtime(tmp_path)
+
+    await runtime.execute_raw("fmp_remote", "quote", {}, scope="consultant")
+
+    default = float(mcp_client._DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS)
+    assert skipped_sleeps == [default]
+    assert default - 5.0 < _cooldown_left(runtime) <= default
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", _INVALID_RETRY_AFTER)
+async def test_a_5xx_with_an_unusable_retry_after_keeps_the_transient_backoff(
+    tmp_path, monkeypatch, skipped_sleeps, header
+):
+    server = FakeMCPServer(
+        status={"tools/call": [(503, {"retry-after": header}), None]}
+    )
+    server.install(monkeypatch)
+    runtime = http_runtime(tmp_path)
+
+    await runtime.execute_raw("fmp_remote", "quote", {}, scope="consultant")
+
+    assert skipped_sleeps == [0.5]
+    assert runtime._cooldowns == {}
+
+
+@pytest.mark.asyncio
+async def test_an_http_date_retry_after_is_honoured(
+    tmp_path, monkeypatch, skipped_sleeps
+):
+    when = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=120)
+    header = email.utils.format_datetime(when, usegmt=True)
+    server = FakeMCPServer(
+        status={"tools/call": [(429, {"retry-after": header}), None]}
+    )
+    server.install(monkeypatch)
+    runtime = http_runtime(tmp_path)
+
+    await runtime.execute_raw("fmp_remote", "quote", {}, scope="consultant")
+
+    (wait,) = skipped_sleeps
+    assert 118.0 <= wait <= 120.0
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_call_during_a_rate_limited_retry_wait_is_held_off(
+    tmp_path, monkeypatch
+):
+    """The cooldown is recorded before the retry decision, not after the retry."""
+    server = FakeMCPServer(status={"tools/call": [(429, {"retry-after": "2"}), None]})
+    server.install(monkeypatch)
+    runtime = http_runtime(tmp_path)
+    fresh: list[MCPCallError] = []
+
+    class _FreshCallDuringBackoff:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(asyncio, name)
+
+        @staticmethod
+        async def sleep(delay: float) -> None:
+            with pytest.raises(MCPCallError) as exc_info:
+                await runtime.execute_raw("fmp_remote", "quote", {}, scope="consultant")
+            fresh.append(exc_info.value)
+
+    monkeypatch.setattr(mcp_client, "asyncio", _FreshCallDuringBackoff())
+
+    payload = await runtime.execute_raw("fmp_remote", "quote", {}, scope="consultant")
+
+    assert payload["is_error"] is False
+    (held_off,) = fresh
+    assert held_off.category is MCPErrorCategory.TRANSPORT
+    assert held_off.retryable is True
+    assert held_off.retry_after_seconds in (1, 2)
+    assert server.calls_sent == 2
+
+
+@pytest.mark.asyncio
+async def test_a_zero_retry_after_retries_at_once_and_sets_no_cooldown(
+    tmp_path, monkeypatch, skipped_sleeps
+):
+    server = FakeMCPServer(status={"tools/call": (429, {"retry-after": "0"})})
+    server.install(monkeypatch)
+    runtime = http_runtime(tmp_path)
+
+    with pytest.raises(MCPCallError) as exc_info:
+        await runtime.execute_raw("fmp_remote", "quote", {}, scope="consultant")
+
+    assert exc_info.value.retry_after_seconds == 0
+    assert skipped_sleeps == [0.0]
+    assert server.calls_sent == 2
+    assert runtime._cooldowns == {}
 
 
 @pytest.mark.asyncio

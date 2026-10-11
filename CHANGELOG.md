@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- MCP: each tools/call takes one atomic budget reservation (daily and per-run, one
+  SQLite `BEGIN IMMEDIATE` transaction on a bounded worker thread) immediately
+  before it is sent, so concurrent callers can no longer exceed a limit, and a
+  locked or broken budget store refuses the call unsent instead of stalling the
+  event loop or escaping as a raw sqlite error. The count is admitted reservations,
+  so it can exceed actual sends. A server's `Retry-After`, now also parsed as an
+  HTTP-date, is honoured in full or the retry refused (it was capped at 5 s); a 429
+  without one waits the 30 s default cooldown for its own retry as well as for
+  fresh calls, and the cooldown is registered before the retry, so a fresh caller
+  cannot send during it.
+
 - The embeddings startup probe has one owner per binding. Concurrent sync and async
   callers each built a client and sent a probe; now they share one client and one
   probe, each waiting under its own deadline. A cancelled owner no longer forces a

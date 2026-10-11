@@ -125,10 +125,6 @@ ALLOWLIST: dict[str, str] = {
         "a minimum age for listing orphaned tasks in a shutdown diagnostic, "
         "a filter on a snapshot and not a deadline on any work"
     ),
-    "src/mcp/client.py::MCPRuntime._execute_with_retry::_refuse_retry(backoff_seconds)": (
-        "0.0 is the backoff recorded on a refused retry; the refusal raises "
-        "at once, so no wait is sized by it"
-    ),
     "src/mcp/client.py::MCPRuntime._on_call_failure::_register_cooldown(duration_seconds)": (
         "a named auth/rate-limit cooldown constant: a circuit cool-off window "
         "after a failure (cooldowns are out of scope), not a deadline on a call"

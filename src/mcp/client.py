@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import sqlite3
+from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from typing import Any, Literal, NoReturn
 
@@ -13,6 +15,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.types import REQUEST_TIMEOUT, CallToolResult, PaginatedRequestParams
 
 from src.config import config as settings_config
+from src.error_safety import summarize_exception
 from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.timeouts import (
     clamp_to_operational_deadline,
@@ -35,7 +38,6 @@ logger = structlog.get_logger(__name__)
 _DEFAULT_AUTH_COOLDOWN_SECONDS = 300
 _DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 30
 _MAX_RETRY_ATTEMPTS = 2
-_MAX_BACKOFF_SECONDS = 5.0
 
 
 def _spent_allowance_error(
@@ -65,6 +67,42 @@ def _budget_exhausted_error(server_id: str, tool_name: str) -> MCPCallError:
         server_id=server_id,
         tool_name=tool_name,
     )
+
+
+def _budget_store_error(
+    server_id: str, tool_name: str, exc: BaseException
+) -> MCPCallError:
+    """The budget store could not admit the call in time, or failed; nothing was sent."""
+    return MCPCallError(
+        message=f"MCP budget store unavailable for {server_id}",
+        category=MCPErrorCategory.BUDGET,
+        server_id=server_id,
+        tool_name=tool_name,
+        details={"refused": "budget_store_unavailable", "reason": type(exc).__name__},
+    )
+
+
+def _is_rate_limited(err: MCPCallError) -> bool:
+    return err.category is MCPErrorCategory.TRANSPORT and err.http_status == 429
+
+
+def _server_wait_seconds(err: MCPCallError) -> int | None:
+    """The wait the server asked for before another call, or None.
+
+    Its ``Retry-After`` when it sent a usable one; for a rate limit without
+    one, the default rate-limit cooldown. One value, so the rate-limited
+    retry and every fresh call (through the cooldown) wait the same.
+    """
+    if err.retry_after_seconds is not None:
+        return err.retry_after_seconds
+    if _is_rate_limited(err):
+        return _DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
+    return None
+
+
+def _tool_call_allowance() -> float:
+    """The tool call's configured allowance, clamped to the time left now."""
+    return clamp_to_operational_deadline(settings_config.mcp_tool_call_timeout_seconds)
 
 
 def _tool_not_listed_error(server_id: str, tool_name: str) -> MCPCallError:
@@ -201,9 +239,10 @@ async def _list_tools_in_time(
 class MCPRuntime:
     """Run MCP tool calls against configured servers, within their call budgets.
 
-    The runtime admits every attempt against the budget and counts every
-    tools/call it sends, whatever happens after: a request the vendor received
-    costs quota even when it times out, fails, or its result is discarded.
+    Each tools/call takes one atomic budget reservation immediately before it
+    is sent, and the reservation counts whatever happens after: a request the
+    vendor received costs quota even when it times out, fails, or its result
+    is discarded (see ``BudgetTracker``).
     """
 
     def __init__(self, servers: list[MCPServerSpec], budget_db_path: str) -> None:
@@ -428,9 +467,40 @@ class MCPRuntime:
                 err.server_id,
                 duration_seconds=_DEFAULT_AUTH_COOLDOWN_SECONDS,
             )
-        elif err.category is MCPErrorCategory.TRANSPORT and err.http_status == 429:
-            duration = err.retry_after_seconds or _DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
-            self._register_cooldown(err.server_id, duration_seconds=duration)
+        elif _is_rate_limited(err):
+            wait = _server_wait_seconds(err)
+            if wait is not None:
+                self._register_cooldown(err.server_id, duration_seconds=wait)
+
+    async def _admission(
+        self,
+        admitted: Awaitable[bool],
+        spec: MCPServerSpec,
+        tool_name: str,
+    ) -> MCPCallError | None:
+        """None when the budget admits the call; otherwise the refusal, never sent.
+
+        Fails closed: a store that is locked past its bound, saturated, or
+        broken refuses the call. The refusal is returned, for a caller inside
+        the session body to raise once the session has closed.
+        """
+        try:
+            if await admitted:
+                return None
+        except (TimeoutError, sqlite3.Error) as exc:
+            if operational_time_left() <= 0:
+                return _spent_allowance_error(
+                    "mcp_budget", server_id=spec.id, tool_name=tool_name
+                )
+            logger.warning(
+                "mcp_budget_store_unavailable",
+                server_id=spec.id,
+                tool=tool_name,
+                **summarize_exception(exc, operation="mcp_budget_admission"),
+            )
+            return _budget_store_error(spec.id, tool_name, exc)
+        logger.warning("mcp_budget_exhausted", server_id=spec.id, tool=tool_name)
+        return _budget_exhausted_error(spec.id, tool_name)
 
     async def _call_in_time(
         self,
@@ -439,7 +509,7 @@ class MCPRuntime:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> CallToolResult | MCPCallError:
-        """List, then call, inside the session body, each within the time left.
+        """List, reserve, then call, inside the session body, each within the time left.
 
         Listing first is what keeps the catalogue inside the deadline: the SDK
         validates a result against the tool's output schema and, in a fresh
@@ -455,35 +525,47 @@ class MCPRuntime:
         )
         if refusal is not None:
             return refusal
-        # Resolved now, so opening the session and listing count against the
-        # deadline. Explicit, because the call would otherwise inherit the
-        # session's handshake bound.
-        call_timeout = clamp_to_operational_deadline(
-            settings_config.mcp_tool_call_timeout_seconds
+        if _tool_call_allowance() <= 0:
+            return _spent_allowance_error(
+                "mcp_tool_call", server_id=spec.id, tool_name=tool_name
+            )
+        # Reserved immediately before the send. An admitted reservation is
+        # counted whatever follows -- the call times out, fails, is discarded
+        # by the tool plane, or is never sent -- and is never refunded.
+        refusal = await self._admission(
+            self._budget.reserve(spec.id, spec), spec, tool_name
         )
+        if refusal is not None:
+            return refusal
+        # Recomputed after admission: time spent waiting on the store comes out
+        # of the call's allowance. Explicit, because the call would otherwise
+        # inherit the session's handshake bound.
+        call_timeout = _tool_call_allowance()
         if call_timeout <= 0:
             return _spent_allowance_error(
                 "mcp_tool_call", server_id=spec.id, tool_name=tool_name
             )
-        # Counted as it is sent, never on the outcome: a call that then times
-        # out, fails or is discarded by the tool plane still cost quota.
-        self._budget.record_upstream_consumption(spec.id)
         result: CallToolResult = await session.call_tool(
             tool_name, arguments, read_timeout_seconds=call_timeout
         )
         return result
 
-    def _budget_allows(self, spec: MCPServerSpec, tool_name: str) -> bool:
-        if self._budget.can_call(spec.id, spec):
-            return True
-        logger.warning("mcp_budget_exhausted", server_id=spec.id, tool=tool_name)
-        return False
+    async def _attempt(
+        self, spec: MCPServerSpec, tool_name: str, arguments: dict[str, Any]
+    ) -> CallToolResult | MCPCallError:
+        """One session: the result, or the classified error. External cancellation propagates."""
+        try:
+            async with self._open_session(spec) as session:
+                return await self._call_in_time(session, spec, tool_name, arguments)
+        except MCPCallError as err:
+            return err
+        except Exception as exc:
+            return classify_mcp_error(exc, server_id=spec.id, tool_name=tool_name)
 
     def _refuse_retry(
         self, err: MCPCallError, *, backoff_seconds: float, reason: _RetryRefusal
     ) -> NoReturn:
-        """Raise ``err`` as a refused retry; its own cooldown still registers."""
-        self._on_call_failure(err)
+        """Raise ``err`` as a refused retry; its cooldown was registered already."""
         logger.info(
             "mcp_retry_refused",
             server_id=err.server_id,
@@ -502,74 +584,71 @@ class MCPRuntime:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> CallToolResult:
-        # Admitted before any session opens; a retry is admitted again below.
-        if not self._budget_allows(spec, tool_name):
-            raise _budget_exhausted_error(spec.id, tool_name)
-        last_err: MCPCallError | None = None
+        # Advisory, before any session opens: a spent budget opens nothing.
+        # The reservation made just before the send is the authority.
+        refusal = await self._admission(
+            self._budget.has_room(spec.id, spec), spec, tool_name
+        )
+        if refusal is not None:
+            raise refusal
+        # The failed attempt being retried, and the backoff slept before it.
+        retrying: tuple[MCPCallError, float] | None = None
         for attempt in range(_MAX_RETRY_ATTEMPTS):
-            try:
-                async with self._open_session(spec) as session:
-                    outcome = await self._call_in_time(
-                        session, spec, tool_name, arguments
-                    )
-                # A refusal or a timed-out listing: the session closed normally
-                # above, and it is raised out here so the error never crosses
-                # the SDK's task groups. A spent allowance is not retryable.
-                if isinstance(outcome, MCPCallError):
-                    raise outcome
+            outcome = await self._attempt(spec, tool_name, arguments)
+            if not isinstance(outcome, MCPCallError):
                 return outcome
-            except MCPCallError as err:
-                last_err = err
-            except Exception as exc:
-                last_err = classify_mcp_error(
-                    exc, server_id=spec.id, tool_name=tool_name
-                )
+            if retrying is not None and outcome.category is MCPErrorCategory.BUDGET:
+                # The retry lost the budget at its reservation: report the
+                # attempt that was sent, marked as a retry never sent.
+                sent_err, backoff = retrying
+                self._refuse_retry(sent_err, backoff_seconds=backoff, reason="budget")
+            # Before the retry decision, so fresh calls see a rate limit at once.
+            self._on_call_failure(outcome)
+            if not outcome.retryable or attempt + 1 >= _MAX_RETRY_ATTEMPTS:
+                raise outcome
+            backoff = await self._retry_backoff(outcome, spec, tool_name, attempt)
+            retrying = (outcome, backoff)
+        raise RuntimeError("unreachable retry exit")  # pragma: no cover
 
-            if last_err is None:  # pragma: no cover - belt-and-braces
-                raise RuntimeError("unreachable retry state")
+    async def _retry_backoff(
+        self, err: MCPCallError, spec: MCPServerSpec, tool_name: str, attempt: int
+    ) -> float:
+        """Sleep before a retry of ``err`` and return the backoff, or refuse the retry.
 
-            is_last_attempt = attempt + 1 >= _MAX_RETRY_ATTEMPTS
-            if not last_err.retryable or is_last_attempt:
-                self._on_call_failure(last_err)
-                raise last_err
-
-            if not self._budget_allows(spec, tool_name):
-                self._refuse_retry(last_err, backoff_seconds=0.0, reason="budget")
-
-            rate_limited = last_err.retry_after_seconds is not None
-            backoff = min(
-                float(
-                    last_err.retry_after_seconds
-                    if last_err.retry_after_seconds is not None
-                    else 0.5 * (2**attempt)
-                ),
-                _MAX_BACKOFF_SECONDS,
+        The retry is admitted like an LLM retry: sleep only while a useful
+        attempt still fits before the caller's or the runner's deadline. A
+        transient backoff is shortened to fit; a wait the server asked for is
+        honoured in full or refused, never shortened. Refused means never sent.
+        """
+        server_wait = _server_wait_seconds(err)
+        # Exponential, with no cap of its own: wait_allowance below already
+        # shortens a transient backoff to the time left.
+        backoff = float(server_wait) if server_wait is not None else 0.5 * 2**attempt
+        refusal = await self._admission(
+            self._budget.has_room(spec.id, spec), spec, tool_name
+        )
+        if refusal is not None:
+            reason: _RetryRefusal = (
+                "budget" if refusal.category is MCPErrorCategory.BUDGET else "deadline"
             )
-            # The retry is admitted like an LLM retry: sleep only while a useful
-            # attempt still fits before the caller's or the runner's deadline. A
-            # transient backoff is shortened to fit; a server-requested wait is
-            # not, so it is refused instead. Refused means never sent.
-            minimum = llm_timeouts.min_useful_seconds(
-                settings_config.mcp_tool_call_timeout_seconds, settings_config
-            )
-            wait = llm_timeouts.wait_allowance(
-                operational_deadline(),
-                backoff,
-                minimum=minimum,
-                rate_limited=rate_limited,
-            )
-            if wait is None:
-                self._refuse_retry(last_err, backoff_seconds=backoff, reason="deadline")
-            else:
-                await asyncio.sleep(wait)
-            # Re-checked after the sleep: it may overrun, and the next attempt
-            # must not open a session it cannot use.
-            if operational_time_left() < minimum:
-                self._refuse_retry(last_err, backoff_seconds=backoff, reason="deadline")
-
-        if last_err is not None:  # pragma: no cover - safety
-            raise last_err
-        raise RuntimeError("unreachable retry exit")
+            self._refuse_retry(err, backoff_seconds=backoff, reason=reason)
+        minimum = llm_timeouts.min_useful_seconds(
+            settings_config.mcp_tool_call_timeout_seconds, settings_config
+        )
+        wait = llm_timeouts.wait_allowance(
+            operational_deadline(),
+            backoff,
+            minimum=minimum,
+            rate_limited=server_wait is not None,
+        )
+        if wait is None:
+            self._refuse_retry(err, backoff_seconds=backoff, reason="deadline")
+        await asyncio.sleep(wait)
+        # Re-checked after the sleep: it may overrun, and the next attempt
+        # must not open a session it cannot use.
+        if operational_time_left() < minimum:
+            self._refuse_retry(err, backoff_seconds=backoff, reason="deadline")
+        return backoff
 
     async def execute_raw(
         self,
@@ -582,9 +661,9 @@ class MCPRuntime:
     ) -> dict[str, Any]:
         """Execute an MCP tool and return the normalized payload.
 
-        Performs config/scope/allowlist/cooldown checks, admits each attempt
-        against the call budget, counts each tools/call sent, and retries a
-        retryable transport error. It does **not** inspect content: run it as
+        Performs config/scope/allowlist/cooldown checks, reserves the call budget
+        immediately before each tools/call, and retries a retryable transport
+        error. It does **not** inspect content: run it as
         the runner of a ``ToolExecutionService`` call, whose hooks do.
 
         ``agent_key`` is accepted from callers but not used here; observability
