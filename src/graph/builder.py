@@ -14,7 +14,7 @@ from src.error_safety import redact_sensitive_text
 from src.eval import BaselineCaptureManager
 from src.runtime_config import get_runtime_config
 
-from .components import build_graph_components
+from .components import TradingContext, build_graph_components
 from .routing import (
     CONSULTANT_SKIP_SENTINEL,
     FUNDAMENTALS_BARRIER,
@@ -505,7 +505,9 @@ BEAR RESEARCHER:
     ) -> Literal["Debate Sync Final"] | list[str]:
         """Route after Round 1: to Round 2 or directly to final sync (quick mode)."""
         context = config.get("configurable", {}).get("context")
-        max_rounds = getattr(context, "max_debate_rounds", 2) if context else 2
+        max_rounds = (
+            context.max_debate_rounds if context else TradingContext.max_debate_rounds
+        )
 
         if max_rounds <= 1:
             logger.debug("debate_r1_router", decision="skip_r2_quick_mode")

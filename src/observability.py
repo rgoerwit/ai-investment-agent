@@ -6,17 +6,14 @@ import threading
 from contextlib import AbstractContextManager, nullcontext
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import Any, Protocol, cast
 
 import structlog
 from langchain_core.callbacks import BaseCallbackHandler
 
-import src.config as config_module
+from src.config import Settings, resolve_settings
 from src.error_safety import safe_metadata, safe_trace_input, summarize_exception
 from src.runtime_config import get_runtime_config
-
-if TYPE_CHECKING:
-    from src.config import Settings
 
 logger = structlog.get_logger(__name__)
 
@@ -29,11 +26,6 @@ _REQUIRED_TRACE_METHODS = (
 _ACTIVE_TRACE_CONTEXT: ContextVar[TraceContext | None] = ContextVar(
     "active_trace_context", default=None
 )
-
-
-def _current_settings() -> Settings:
-    """Read the live config singleton instead of capturing patched test state."""
-    return config_module.config
 
 
 def _validate_client_methods(client: object, required: tuple[str, ...]) -> None:
@@ -581,7 +573,7 @@ class LangfuseObservabilityRuntime:
 
 def get_observability_runtime(settings: Settings | None = None) -> ObservabilityRuntime:
     """Return the enabled observability runtime or a no-op runtime."""
-    settings = settings or _current_settings()
+    settings = settings or resolve_settings()
     if not _runtime_langfuse_enabled(settings):
         return NoopObservabilityRuntime()
     if not _langfuse_keys_present(settings):
@@ -623,7 +615,7 @@ def start_tool_observation(
     active trace context.
     """
     active = get_current_trace_context()
-    settings = _current_settings()
+    settings = resolve_settings()
     if not active or not active.enabled or not _runtime_langfuse_enabled(settings):
         return nullcontext()
 
@@ -661,7 +653,7 @@ def create_deferred_score(
     metadata: dict[str, Any] | None = None,
 ) -> None:
     """Create a score against a previously recorded trace."""
-    settings = _current_settings()
+    settings = resolve_settings()
     if not _runtime_langfuse_enabled(settings) or not _langfuse_keys_present(settings):
         return
     try:
@@ -700,7 +692,7 @@ def flush_traces(timeout_seconds: float | None = None) -> None:
     ``LANGFUSE_FLUSH_TIMEOUT_SECONDS`` read now. It is a shutdown path, run
     after any caller deadline, so it is not clamped to one.
     """
-    settings = _current_settings()
+    settings = resolve_settings()
     if not _runtime_langfuse_enabled(settings) or not _langfuse_keys_present(settings):
         return
     if timeout_seconds is None:

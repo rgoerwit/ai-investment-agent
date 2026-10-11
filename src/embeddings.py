@@ -32,19 +32,11 @@ class EmbeddingBinding:
 
 
 def resolve_embedding_binding(settings: Settings = config) -> EmbeddingBinding:
-    provider_value = getattr(settings, "embedding_provider", "google")
-    model_value = getattr(settings, "embedding_model", "gemini-embedding-001")
-    dimension_value = getattr(settings, "embedding_dimension", 768)
-    schema_value = getattr(settings, "embedding_schema_version", 1)
-    provider = provider_value if isinstance(provider_value, str) else "google"
-    model = model_value if isinstance(model_value, str) else "gemini-embedding-001"
-    dimension = dimension_value if isinstance(dimension_value, int) else 768
-    schema_version = schema_value if isinstance(schema_value, int) else 1
     return EmbeddingBinding(
-        provider=provider.strip().lower(),
-        model=model.strip(),
-        dimension=dimension,
-        schema_version=schema_version,
+        provider=settings.embedding_provider.strip().lower(),
+        model=settings.embedding_model.strip(),
+        dimension=settings.embedding_dimension,
+        schema_version=settings.embedding_schema_version,
     )
 
 

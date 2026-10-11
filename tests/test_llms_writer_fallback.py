@@ -89,7 +89,7 @@ def test_claude_writer_model_quick_mode_invariant():
     mock_config.writer_model = "claude-sentinel-writer"
     mock_config.api_timeout = 300
 
-    with use_runtime_config(runtime), patch("src.llms.config", mock_config):
+    with use_runtime_config(runtime), patch("src.config.config", mock_config):
         llm = create_writer_llm()
 
     assert llm.model == "claude-sentinel-writer"
@@ -104,7 +104,7 @@ class TestWriterOpenAITierAvailability:
         mock_config.get_openai_api_key.return_value = key
         with (
             patch("src.llms._langchain_openai_available", return_value=lib),
-            patch("src.llms.config", mock_config),
+            patch("src.config.config", mock_config),
         ):
             return llms_mod._writer_openai_tier_available()
 
@@ -199,7 +199,7 @@ class TestWriterOpenAIFallbackFactory:
 
         with (
             patch("src.llms._langchain_openai_available", return_value=True),
-            patch("src.llms.config", mock_config),
+            patch("src.config.config", mock_config),
             patch("src.llms._construct_chat_openai", side_effect=_capture),
         ):
             llm = create_writer_openai_fallback_llm()
@@ -228,6 +228,6 @@ class TestWriterOpenAIFallbackFactory:
         mock_config.get_openai_api_key.return_value = "sk-test"
         with (
             patch("src.llms._langchain_openai_available", return_value=True),
-            patch("src.llms.config", mock_config),
+            patch("src.config.config", mock_config),
         ):
             assert create_writer_openai_fallback_llm() is None

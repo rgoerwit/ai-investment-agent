@@ -345,7 +345,7 @@ def build_runtime_services_from_config(
 
     # Build MCP runtime if enabled
     mcp_runtime = None
-    if getattr(config, "mcp_enabled", False):
+    if config.mcp_enabled:
         try:
             from src.mcp.client import MCPRuntime
             from src.mcp.config import load_registry

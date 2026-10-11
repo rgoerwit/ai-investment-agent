@@ -101,7 +101,7 @@ def budget_config(monkeypatch):
         "llm_attempts": 2,
     }
     targets = {id(config_module.config): config_module.config}
-    targets[id(llms_mod.config)] = llms_mod.config
+    targets[id(llms_mod.resolve_settings())] = llms_mod.resolve_settings()
     for target in targets.values():
         for key, value in values.items():
             monkeypatch.setattr(target, key, value, raising=False)
@@ -488,15 +488,15 @@ class TestCompatibleVendors:
         self, clock, monkeypatch
     ):
         monkeypatch.setattr(
-            type(llms_mod.config),
+            type(llms_mod.resolve_settings()),
             "get_openai_api_base",
             lambda self: "https://api.moonshot.ai/v1",
         )
-        monkeypatch.setattr(llms_mod.config, "enable_consultant", True)
+        monkeypatch.setattr(llms_mod.resolve_settings(), "enable_consultant", True)
         monkeypatch.setattr(
-            type(llms_mod.config), "get_openai_api_key", lambda self: "o"
+            type(llms_mod.resolve_settings()), "get_openai_api_key", lambda self: "o"
         )
-        monkeypatch.setattr(llms_mod.config, "openai_service_tier", "flex")
+        monkeypatch.setattr(llms_mod.resolve_settings(), "openai_service_tier", "flex")
         llm = llms_mod.create_consultant_llm(model="kimi-k3")
         assert isinstance(llm, transports.deadline_aware_openai_cls())
         assert llm.dispatch_provider == transports.OPENAI_COMPATIBLE_PROVIDER
@@ -515,12 +515,16 @@ class TestCompatibleVendors:
     async def test_legacy_apac_factory_is_sized_at_the_compatible_ceiling(
         self, clock, monkeypatch
     ):
-        monkeypatch.setattr(llms_mod.config, "enable_apac_specialist", True)
+        monkeypatch.setattr(llms_mod.resolve_settings(), "enable_apac_specialist", True)
         monkeypatch.setattr(
-            type(llms_mod.config), "get_apac_specialist_api_key", lambda self: "d"
+            type(llms_mod.resolve_settings()),
+            "get_apac_specialist_api_key",
+            lambda self: "d",
         )
         monkeypatch.setattr(
-            llms_mod.config, "apac_specialist_base_url", "https://api.deepseek.com"
+            llms_mod.resolve_settings(),
+            "apac_specialist_base_url",
+            "https://api.deepseek.com",
         )
         llm = llms_mod.create_apac_specialist_llm()
         assert isinstance(llm, transports.deadline_aware_openai_cls())

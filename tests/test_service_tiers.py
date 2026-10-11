@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.config import Settings
 from src.config import config as global_config
 from src.runtime_config import RuntimeConfig, use_runtime_config
 from src.service_tiers import (
@@ -26,7 +27,8 @@ from src.service_tiers import (
 
 
 def _cfg(gemini="standard", openai="auto", floor=900, quick_hard_cap=60):
-    return SimpleNamespace(
+    return Settings(
+        _env_file=None,
         gemini_service_tier=gemini,
         openai_service_tier=openai,
         flex_llm_timeout_seconds=floor,
@@ -402,8 +404,8 @@ class TestGoogleServiceTierResolution:
         assert resolve_google_service_tier(cfg) == "standard"
         assert not gemini_flex_active(cfg)
 
-    def test_missing_fields_default_to_standard(self):
-        assert resolve_google_service_tier(SimpleNamespace()) == "standard"
+    def test_default_settings_resolve_to_standard(self):
+        assert resolve_google_service_tier(Settings(_env_file=None)) == "standard"
 
     def test_seat_construction_does_not_read_the_raw_field(self):
         """Construction must go through the resolver, not the Settings field.

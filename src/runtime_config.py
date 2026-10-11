@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from src.config import Settings
 from src.llm_runtime.rate_limits import configured_google_rpm
 
 
@@ -41,7 +42,7 @@ class RuntimeConfig:
         return self.llm_attempts
 
     @classmethod
-    def from_config(cls, base_config: Any) -> RuntimeConfig:
+    def from_config(cls, base_config: Settings) -> RuntimeConfig:
         return cls(
             quick_think_llm=base_config.quick_think_llm,
             deep_think_llm=base_config.deep_think_llm,
@@ -50,9 +51,9 @@ class RuntimeConfig:
             llm_attempts=base_config.llm_attempts,
             google_rpm_limit=configured_google_rpm(base_config),
             llm_call_hard_timeout_seconds=base_config.llm_call_hard_timeout_seconds,
-            quick_mode_active=getattr(base_config, "quick_mode_active", False),
+            quick_mode_active=False,
             images_dir=Path(base_config.images_dir),
-            quiet_mode=getattr(base_config, "quiet_mode", False),
+            quiet_mode=base_config.quiet_mode,
             debate_reasoning_handoffs=False,
             developer_debug_active=False,
         )

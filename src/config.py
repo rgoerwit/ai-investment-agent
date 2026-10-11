@@ -86,7 +86,7 @@ def configure_langsmith_tracing(settings: "Settings") -> None:
     """
     has_api_key = bool(settings.get_langsmith_api_key())
     project_name = settings.langsmith_project
-    tracing_enabled = bool(getattr(settings, "langsmith_tracing_enabled", False))
+    tracing_enabled = settings.langsmith_tracing_enabled
 
     if has_api_key and tracing_enabled:
         # LangSmith SDK auto-detects from Pydantic Settings - just log for visibility
@@ -2298,3 +2298,15 @@ Config = Settings
 # --- Module-level Singleton Instance ---
 # Instantiated at import time, triggers validation
 config = Settings()
+
+
+def resolve_settings(cfg: Settings | None = None) -> Settings:
+    """``cfg``, or the live ``src.config.config`` singleton when ``cfg`` is None.
+
+    The one "explicit settings or the process settings" resolver. It reads the
+    module global at call time, so a test that patches ``src.config.config``
+    is seen by every caller; a module that bound ``config`` at import (``from
+    src.config import config``) keeps its own stale reference and must not be
+    the fallback.
+    """
+    return cfg if cfg is not None else config

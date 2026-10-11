@@ -19,6 +19,7 @@ from src.memory import (
     get_all_memory_stats,
     sanitize_ticker_for_collection,
 )
+from tests.helpers.memory_config import pin_embedding_identity
 
 
 class TestSanitizeTicker:
@@ -138,6 +139,7 @@ class TestMemoryIsolation:
             # Create memories for both tickers
             # Note: Mock config getter instead of os.environ (Pydantic Settings)
             with patch("src.memory.config") as mock_config:
+                pin_embedding_identity(mock_config)
                 mock_config.get_google_api_key.return_value = "test-key"
                 with patch(
                     "src.embeddings.GoogleGenerativeAIEmbeddings"
@@ -220,6 +222,7 @@ class TestMemoryContaminationPrevention:
 
             # Mock config getter instead of patching os.environ (Pydantic Settings pattern)
             with patch("src.memory.config") as mock_config:
+                pin_embedding_identity(mock_config)
                 mock_config.get_google_api_key.return_value = "test-key"
                 with patch(
                     "src.embeddings.GoogleGenerativeAIEmbeddings"
@@ -371,6 +374,7 @@ class TestMemoryStats:
 
             # Note: Mock config getter instead of os.environ (Pydantic Settings)
             with patch("src.memory.config") as mock_config:
+                pin_embedding_identity(mock_config)
                 mock_config.get_google_api_key.return_value = "test-key"
                 with patch(
                     "src.embeddings.GoogleGenerativeAIEmbeddings"
@@ -390,6 +394,7 @@ class TestMemoryStats:
         """Test that unavailable memories report correct stats."""
         # Mock config to simulate missing API key
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = ""
 
             memory = FinancialSituationMemory("test_unavailable")

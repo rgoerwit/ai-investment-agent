@@ -20,6 +20,7 @@ the existing coverage:
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from dataclasses import fields as dataclass_fields
@@ -379,6 +380,91 @@ def test_no_duplicate_literal_default_for_portfolio_knob(param):
         f"{param} has a re-literalized numeric default; reference the "
         f"src.ibkr.portfolio_defaults constant instead. Offenders: {offenders}"
     )
+
+
+# --- No literal fallback for a Settings field read ---------------------------
+#
+# ``getattr(cfg, "api_timeout", 300)`` re-literalizes a default the field already
+# owns, and the two drift: ``getattr(config, "buy_stability_enabled", False)``
+# shipped a gate that was default-ON in Settings but silently OFF for any other
+# config object. Read the field; a config that lacks it is a bug to surface.
+
+_SETTINGS_FIELD_NAMES = frozenset(Settings.model_fields)
+
+
+def _is_literal_fallback(node: ast.expr) -> bool:
+    """A non-None constant, a negated number, or a CONSTANT_NAME reference."""
+    if isinstance(node, ast.Constant):
+        return node.value is not None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.operand, ast.Constant):
+        return True
+    return isinstance(node, ast.Name) and node.id.isupper()
+
+
+def _literal_settings_getattrs(source: str) -> list[tuple[int, str]]:
+    """``(line, source)`` of every 3-argument getattr naming a Settings field
+    whose default is a literal."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) == 3
+            and not node.keywords
+        ):
+            continue
+        _, name, default = node.args
+        if (
+            isinstance(name, ast.Constant)
+            and name.value in _SETTINGS_FIELD_NAMES
+            and _is_literal_fallback(default)
+        ):
+            found.append((node.lineno, ast.unparse(node)))
+    return found
+
+
+def test_no_literal_getattr_fallback_for_a_settings_field():
+    offenders = [
+        f"{path.relative_to(_SRC.parent)}:{line}: {text}"
+        for path in sorted(_SRC.rglob("*.py"))
+        for line, text in _literal_settings_getattrs(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        "read the Settings field directly; a literal fallback duplicates its "
+        "default and goes stale (or fails open): " + "; ".join(offenders)
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'getattr(s, "api_timeout", 300)',
+        'getattr(s, "buy_stability_enabled", False)',
+        'getattr(s, "quick_llm_call_hard_timeout_seconds", 60.0)',
+        'getattr(s, "results_dir", "results")',
+        'getattr(s, "flex_degrade_threshold", -1)',
+        'getattr(s, "retrospective_max_evaluations_per_run", MAX_PER_RUN)',
+    ],
+)
+def test_the_literal_getattr_guard_flags_a_planted_defect(line):
+    assert len(_literal_settings_getattrs(f"x = {line}\n")) == 1
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'getattr(s, "api_timeout")',
+        'getattr(s, "api_timeout", None)',
+        'getattr(s, "not_a_settings_field", 300)',
+        "getattr(s, name, 300)",
+        'getattr(s, "api_timeout", default_value)',
+        'getattr(s, "api_timeout", default=3)',
+        "s.api_timeout",
+    ],
+)
+def test_the_literal_getattr_guard_passes_sanctioned_shapes(line):
+    assert _literal_settings_getattrs(f"x = {line}\n") == []
 
 
 # --- Override precedence: CLI flag > shell env > .env > hardcoded default -----

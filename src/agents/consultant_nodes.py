@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -22,6 +21,7 @@ from src.error_safety import (
     summarize_failure_details,
 )
 from src.forensic_budget import AuditorBudgetLedger, AuditorBudgetPolicy
+from src.llm_runtime import timeouts as llm_timeouts
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import (
     ArtifactStatus,
@@ -208,15 +208,19 @@ async def _invoke_consultant_with_deadline(
     )
     timeout_s = min(per_call_cap, remaining)
     try:
-        return await agent_runtime.invoke_with_rate_limit_handling(
-            runnable,
-            messages,
-            context=context,
-            provider=provider,
-            model_name=model_name,
-            max_transient_attempts=1,
-            overall_timeout_seconds=timeout_s,
-        )
+        # Bound for the LLM request alone: the tool fan-out between requests
+        # runs outside it, so the injection judge in the tool hooks never sees
+        # the Consultant's LLM deadline (it fails open when admission refuses it).
+        with llm_timeouts.enclosing_deadline_at(deadline):
+            return await agent_runtime.invoke_with_rate_limit_handling(
+                runnable,
+                messages,
+                context=context,
+                provider=provider,
+                model_name=model_name,
+                max_transient_attempts=1,
+                overall_timeout_seconds=timeout_s,
+            )
     except TimeoutError as exc:
         raise TimeoutError(
             f"Consultant call exceeded {timeout_s:.1f}s wall-clock timeout for {ticker}"
@@ -555,7 +559,7 @@ Provide your independent consultant review."""
             messages = [HumanMessage(content=prompt)]
             active_llm = llm_with_tools or llm
             total_timeout = _consultant_total_budget()
-            consultant_deadline = time.monotonic() + total_timeout
+            consultant_deadline = llm_timeouts.now() + total_timeout
 
             async def _invoke_loop_llm(runnable, loop_messages: list) -> object:
                 return await _invoke_consultant_with_deadline(

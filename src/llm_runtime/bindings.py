@@ -171,13 +171,13 @@ class BindingPlan:
         return {
             "review": row(
                 SeatId.CONSULTANT,
-                bool(getattr(settings, "llm_require_review_independence", False)),
-                str(getattr(settings, "llm_review_independence_waiver_reason", "")),
+                bool(settings.llm_require_review_independence),
+                str(settings.llm_review_independence_waiver_reason),
             ),
             "regional": row(
                 SeatId.APAC,
-                bool(getattr(settings, "llm_require_regional_independence", False)),
-                str(getattr(settings, "llm_regional_independence_waiver_reason", "")),
+                bool(settings.llm_require_regional_independence),
+                str(settings.llm_regional_independence_waiver_reason),
             ),
         }
 

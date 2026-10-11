@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -12,6 +11,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 
 from src.config import Settings, config
 from src.error_safety import summarize_exception
+from src.llm_runtime import timeouts as llm_timeouts
 from src.runtime_services import get_current_tool_service
 from src.tooling.runtime import ToolInvocation
 
@@ -88,7 +88,10 @@ InvokeWithDeadline = Callable[
 
 
 def remaining_consultant_budget(deadline: float) -> float:
-    return max(0.0, deadline - time.monotonic())
+    """Seconds left to the node's deadline or the run's, whichever is sooner."""
+    return max(
+        0.0, min(deadline - llm_timeouts.now(), llm_timeouts.operational_time_left())
+    )
 
 
 def _build_consultant_fmp_skip_payload(

@@ -230,12 +230,6 @@ OUTCOME_LESSON_TYPES = LESSON_TYPES - {"prior_rejection"}
 # holding period has moved materially.
 RETROSPECTIVE_REEVALUATION_INTERVAL_DAYS = 30
 
-# Hard ceiling on yfinance round-trips per run. Without it, every non-triggering
-# snapshot is re-fetched on every run forever: 7,690 snapshots are >= 30 days old
-# across the live and archived corpora, each costing a stock fetch plus a
-# benchmark fetch, sequentially, at a 15 s timeout apiece.
-RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN = 400
-
 # Centre of the 1.0-weight TEMPORAL_WEIGHTS band (91-270 days). Budgeted
 # evaluation spends its allowance on the highest-confidence window first.
 _EVALUATION_BAND_CENTRE_DAYS = 180
@@ -3678,13 +3672,7 @@ async def run_retrospective(
                 )
 
     if max_evaluations is None:
-        max_evaluations = int(
-            getattr(
-                config,
-                "retrospective_max_evaluations_per_run",
-                RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN,
-            )
-        )
+        max_evaluations = int(config.retrospective_max_evaluations_per_run)
 
     # Create lessons memory if not provided
     if lessons_memory is None:

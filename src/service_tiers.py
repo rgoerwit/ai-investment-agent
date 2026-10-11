@@ -31,7 +31,7 @@ from typing import Any
 
 import structlog
 
-import src.config as config_module
+from src.config import resolve_settings
 
 logger = structlog.get_logger(__name__)
 
@@ -151,10 +151,6 @@ def runnable_attempt_tier(runnable: Any, provider: str | None) -> str | None:
     return "standard" if provider == "google" else None
 
 
-def _cfg(cfg: Any = None) -> Any:
-    return cfg if cfg is not None else config_module.config
-
-
 def normalize_model_name(model_name: str) -> str:
     """Strip vendor path prefixes (e.g. "models/gemini-...") for cache keys."""
     return model_name.rsplit("/", 1)[-1]
@@ -222,7 +218,7 @@ def flex_degraded(
     there is no background state to leak.
     """
     key = _normalize_provider(provider)
-    if not key or not bool(getattr(_cfg(cfg), "flex_degrade_enabled", True)):
+    if not key or not bool(resolve_settings(cfg).flex_degrade_enabled):
         return False
     ts = time.monotonic() if now is None else now
     with _flex_health_lock:
@@ -255,12 +251,12 @@ def note_flex_fallback(
     ``mark_flex_unsupported`` and are not congestion.
     """
     key = _normalize_provider(provider)
-    settings = _cfg(cfg)
-    if not key or not bool(getattr(settings, "flex_degrade_enabled", True)):
+    settings = resolve_settings(cfg)
+    if not key or not bool(settings.flex_degrade_enabled):
         return
-    threshold = int(getattr(settings, "flex_degrade_threshold", 2))
-    window = float(getattr(settings, "flex_degrade_window_seconds", 900.0))
-    cool_off = float(getattr(settings, "flex_degrade_cool_off_seconds", 1800.0))
+    threshold = int(settings.flex_degrade_threshold)
+    window = float(settings.flex_degrade_window_seconds)
+    cool_off = float(settings.flex_degrade_cool_off_seconds)
     ts = time.monotonic() if now is None else now
 
     with _flex_health_lock:
@@ -341,10 +337,10 @@ def resolve_google_service_tier(cfg: Any = None) -> str:
     ``RuntimeConfig.from_config`` already resolves for RPM, and it is resolved
     the same way here: one function, consulted by every reader.
     """
-    settings = _cfg(cfg)
-    if getattr(settings, "llm_base_provider", None) is not None:
-        return getattr(settings, "google_service_tier", "standard")
-    return getattr(settings, "gemini_service_tier", "standard")
+    settings = resolve_settings(cfg)
+    if settings.llm_base_provider is not None:
+        return settings.google_service_tier
+    return settings.gemini_service_tier
 
 
 def gemini_flex_active(cfg: Any = None) -> bool:
@@ -352,7 +348,7 @@ def gemini_flex_active(cfg: Any = None) -> bool:
 
 
 def openai_flex_active(cfg: Any = None) -> bool:
-    return getattr(_cfg(cfg), "openai_service_tier", "auto") == "flex"
+    return resolve_settings(cfg).openai_service_tier == "flex"
 
 
 def provider_flex_active(provider: str | None, cfg: Any = None) -> bool:
@@ -365,7 +361,7 @@ def provider_flex_active(provider: str | None, cfg: Any = None) -> bool:
 
 
 def flex_floor_seconds(cfg: Any = None) -> float:
-    return float(getattr(_cfg(cfg), "flex_llm_timeout_seconds", 900))
+    return float(resolve_settings(cfg).flex_llm_timeout_seconds)
 
 
 def _quick_mode_active(cfg: Any = None) -> bool:
@@ -386,7 +382,7 @@ def _quick_mode_active(cfg: Any = None) -> bool:
     """
     from src.runtime_config import get_runtime_config
 
-    return bool(get_runtime_config(config_module.config).quick_mode_active)
+    return bool(get_runtime_config(resolve_settings()).quick_mode_active)
 
 
 def _log_floor_once(label: str, base: float, floored: float, kind: str) -> None:

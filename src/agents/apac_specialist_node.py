@@ -150,9 +150,7 @@ def create_apac_specialist_node(llm, *, fallback_llm=None) -> Callable:
         active_llm = llm
         # The node total is this node's enclosing deadline, not a per-call
         # timeout: the first call and the direct retry share it.
-        with enclosing_deadline(
-            float(getattr(settings_config, "apac_node_total_timeout_seconds", 240.0))
-        ):
+        with enclosing_deadline(float(settings_config.apac_node_total_timeout_seconds)):
             try:
                 try:
                     response = await agent_runtime.invoke_with_rate_limit_handling(

@@ -29,7 +29,7 @@ def google_rpm_field(settings: Any) -> str:
     The multi-provider schema (``LLM_BASE_PROVIDER`` set) reads
     ``GOOGLE_RPM_LIMIT``; the legacy schema keeps ``GEMINI_RPM_LIMIT``.
     """
-    if getattr(settings, "llm_base_provider", None) is not None:
+    if settings.llm_base_provider is not None:
         return "google_rpm_limit"
     return "gemini_rpm_limit"
 

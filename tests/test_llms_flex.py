@@ -36,14 +36,14 @@ def _set_cfg(monkeypatch, **attrs):
     """Patch config attributes on every live binding.
 
     Other suites reload ``src.config``/``src.llms``, which can leave
-    ``llms_mod.config`` pointing at a different Settings object than
+    ``llms_mod.resolve_settings()`` pointing at a different Settings object than
     ``src.config.config``. Patch both so these tests are order-independent.
     """
     import src.config as config_module
 
     targets = {
         id(config_module.config): config_module.config,
-        id(llms_mod.config): llms_mod.config,
+        id(llms_mod.resolve_settings()): llms_mod.resolve_settings(),
         id(config): config,
     }
     for target in targets.values():

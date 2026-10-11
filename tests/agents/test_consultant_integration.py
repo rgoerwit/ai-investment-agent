@@ -23,14 +23,14 @@ class TestConsultantNodeCreation:
 
     def test_consultant_llm_disabled_env_var(self):
         """Test that consultant is disabled when ENABLE_CONSULTANT=false."""
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = False
             llm = get_consultant_llm()
             assert llm is None
 
     def test_consultant_llm_missing_api_key(self):
         """Test that consultant returns None when OPENAI_API_KEY missing."""
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = True
             mock_config.get_openai_api_key.return_value = ""
             llm = get_consultant_llm()
@@ -50,7 +50,7 @@ class TestConsultantNodeCreation:
             mock_llm = Mock()
             mock_chatgpt.return_value = mock_llm
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_model = "gpt-4o"
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -1545,7 +1545,7 @@ class TestConsultantQuickMode:
         ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_quick_model = "gpt-4o-mini"
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -1575,7 +1575,7 @@ class TestConsultantQuickMode:
         ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_model = "gpt-4o"
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -1604,7 +1604,7 @@ class TestConsultantQuickMode:
         ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_quick_model = "gpt-4o-mini"  # Default value
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -1632,7 +1632,7 @@ class TestConsultantQuickMode:
         ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_model = "gpt-5.4"
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -1663,7 +1663,7 @@ class TestConsultantQuickMode:
         ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_quick_model = "gpt-5.4-mini"
                 mock_config.consultant_model = "gpt-5.4"
@@ -1697,7 +1697,7 @@ class TestConsultantQuickMode:
         ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_quick_model = model
                 mock_config.consultant_model = "gpt-5.4"
@@ -1723,7 +1723,7 @@ class TestConsultantQuickMode:
         ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_quick_model = ""
                 mock_config.consultant_model = "gpt-5.4"
@@ -1740,7 +1740,7 @@ class TestConsultantQuickMode:
         """Quick mode should still build the consultant with quick settings."""
         mock_llm = Mock(name="quick-consultant")
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = True
             mock_config.get_openai_api_key.return_value = "test-key"
             with patch(
@@ -1763,7 +1763,7 @@ class TestConsultantQuickMode:
         quick_llm = Mock(name="quick-consultant")
         full_llm = Mock(name="full-consultant")
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = True
             mock_config.get_openai_api_key.return_value = "test-key"
             with patch(
@@ -1786,7 +1786,7 @@ class TestConsultantQuickMode:
         quick_callbacks = [Mock(name="quick-callback")]
         full_callbacks = [Mock(name="full-callback")]
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = True
             mock_config.get_openai_api_key.return_value = "test-key"
             with patch(

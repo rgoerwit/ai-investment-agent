@@ -361,7 +361,7 @@ def _validate_cli_args(args: argparse.Namespace, *, settings=config) -> None:
                 "--debate-reasoning-handoffs requires the second debate round and "
                 "cannot be combined with --quick."
             )
-        if int(getattr(settings, "max_debate_rounds", 2)) <= 1:
+        if int(settings.max_debate_rounds) <= 1:
             _cli_error("--debate-reasoning-handoffs requires MAX_DEBATE_ROUNDS=2.")
         if getattr(args, "retrospective_only", False):
             _cli_error(

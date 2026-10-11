@@ -578,13 +578,9 @@ async def invoke_with_rate_limit_handling(
     if max_transient_attempts is None:
         max_transient_attempts = budget_policy.attempts
 
-    breaker_enabled = bool(
-        getattr(settings_config, "llm_circuit_breaker_enabled", True)
-    )
+    breaker_enabled = bool(settings_config.llm_circuit_breaker_enabled)
     breaker = get_circuit_breaker() if breaker_enabled else None
-    network_breaker_enabled = bool(
-        getattr(settings_config, "network_breaker_enabled", True)
-    )
+    network_breaker_enabled = bool(settings_config.network_breaker_enabled)
     network_breaker = get_network_breaker() if network_breaker_enabled else None
     # Same-vendor model to spend the transient retry on, if the binding has one.
     failover_model = failover_target(runnable)

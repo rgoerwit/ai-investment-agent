@@ -263,12 +263,18 @@ def test_consultant_legacy_and_new_construction_contracts_match(
     )
     monkeypatch.setattr(llms, "_get_openai_rate_limiter", lambda: None)
     monkeypatch.setattr(transports, "new_openai_chat", _FakeOpenAITransport)
-    monkeypatch.setattr(llms.config, "enable_consultant", True)
-    monkeypatch.setattr(llms.config, "openai_service_tier", "auto")
-    monkeypatch.setattr(llms.config, "consultant_model", "gpt-5.4")
-    monkeypatch.setattr(llms.config, "llm_default_reasoning_reserve_tokens", 2048)
-    monkeypatch.setattr(llms.config, "llm_deep_reasoning_reserve_tokens", 8192)
-    monkeypatch.setattr(type(llms.config), "get_openai_api_key", lambda self: "o")
+    monkeypatch.setattr(llms.resolve_settings(), "enable_consultant", True)
+    monkeypatch.setattr(llms.resolve_settings(), "openai_service_tier", "auto")
+    monkeypatch.setattr(llms.resolve_settings(), "consultant_model", "gpt-5.4")
+    monkeypatch.setattr(
+        llms.resolve_settings(), "llm_default_reasoning_reserve_tokens", 2048
+    )
+    monkeypatch.setattr(
+        llms.resolve_settings(), "llm_deep_reasoning_reserve_tokens", 8192
+    )
+    monkeypatch.setattr(
+        type(llms.resolve_settings()), "get_openai_api_key", lambda self: "o"
+    )
 
     legacy = llms.create_consultant_llm(
         model="gpt-5.4", callbacks=[], max_completion_tokens=4096

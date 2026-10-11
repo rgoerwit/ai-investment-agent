@@ -299,7 +299,7 @@ async def fetch_all_sources_parallel(
     # identity probe resolves VERIFIED with at least one usable field.
     from src.config import config as _runtime_config
 
-    if getattr(_runtime_config, "ibkr_data_source_enabled", False):
+    if _runtime_config.ibkr_data_source_enabled:
         builders["ibkr"] = lambda: fetcher._fetch_ibkr_fallback(symbol)
 
     async def _run_one(name: str) -> tuple[str, dict | None, str]:

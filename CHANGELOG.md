@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Settings are read, never defaulted at the call site. Every `getattr(settings, "<field>", <literal>)`
+  is now a plain attribute read, one `resolve_settings` in `src/config.py` replaces four private
+  "explicit settings or the live singleton" helpers, and a hygiene test scans `src/` for the shape.
+  **Behaviour change:** the BUY stability gate (`buy_stability_enabled`) and the review/regional
+  independence requirements defaulted OFF for any config object lacking the field while `Settings`
+  ships them ON; such an object now raises `AttributeError` instead of silently disabling the gate.
+  `RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN` has one default (the setting; the duplicate module constant
+  is gone). The Consultant's node deadline is measured on the shared deadline clock, shortened by the
+  run deadline, and bound as the LLM enclosing deadline for each request (never across tools).
 - LLM retries have one owner, the runtime loop. Every client sends exactly one SDK
   attempt per request on every vendor; the transport classes enforce it, and no
   constructor or factory takes an attempt count any more

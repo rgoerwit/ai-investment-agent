@@ -521,7 +521,7 @@ class TestCreateEditorLLM:
         from src.llms import create_editor_llm
 
         # Mock config to have no API key
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = True
             mock_config.get_openai_api_key.return_value = ""
 
@@ -532,7 +532,7 @@ class TestCreateEditorLLM:
         """create_editor_llm should return None if consultant disabled."""
         from src.llms import create_editor_llm
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = False
 
             result = create_editor_llm()
@@ -546,7 +546,7 @@ class TestCreateEditorLLM:
             "src.llm_runtime.adapters.transports.new_openai_chat"
         ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.get_openai_api_key.return_value = "test-key"
                 mock_config.editor_model = "gpt-4o"
@@ -570,7 +570,7 @@ class TestCreateEditorLLM:
         ) as mock_chatgpt:
             llm = MagicMock()
             mock_chatgpt.return_value = llm
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.get_openai_api_key.return_value = "test-key"
                 mock_config.editor_model = "gpt-5"
@@ -1647,7 +1647,7 @@ class TestCreateWriterLLM:
 
         mock_llm = MagicMock()
         with (
-            patch("src.llms.config") as mock_config,
+            patch("src.config.config") as mock_config,
             # Prevent ChatGoogleGenerativeAI from probing network/proxy at construction time
             patch("src.llms.ChatGoogleGenerativeAI", return_value=mock_llm),
         ):
@@ -1673,7 +1673,7 @@ class TestCreateWriterLLM:
         """
         from src.llms import create_writer_llm
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.get_claude_api_key.return_value = "fake-key"
             mock_config.writer_model = "claude-opus-4-6"
             mock_config.api_timeout = 300
@@ -1702,7 +1702,7 @@ class TestCreateWriterLLM:
     def test_opus_4_6_plus_uses_adaptive_thinking(self, model_name):
         from src.llms import create_writer_llm
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.get_claude_api_key.return_value = "fake-key"
             mock_config.writer_model = model_name
             mock_config.api_timeout = 300
@@ -1717,7 +1717,7 @@ class TestCreateWriterLLM:
     def test_opus_4_5_keeps_manual_thinking(self):
         from src.llms import create_writer_llm
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.get_claude_api_key.return_value = "fake-key"
             mock_config.writer_model = "claude-opus-4-5"
             mock_config.api_timeout = 300
@@ -1741,7 +1741,7 @@ class TestCreateWriterLLM:
 
         from src.llms import create_writer_llm
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.get_claude_api_key.return_value = "fake-key"
             mock_config.writer_model = "claude-opus-4-6"
             mock_config.api_timeout = 300
@@ -1790,7 +1790,7 @@ class TestCreateWriterLLM:
             "claude-sonnet-4-5-20250929",
             "claude-haiku-4-5-20251001",
         ]:
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.get_claude_api_key.return_value = "fake-key"
                 mock_config.writer_model = model_name
                 mock_config.api_timeout = 300

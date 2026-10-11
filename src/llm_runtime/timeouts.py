@@ -39,6 +39,8 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from src.config import resolve_settings
+
 if TYPE_CHECKING:
     from src.llm_runtime.seats import SeatSpec
     from src.runtime_config import RuntimeConfig
@@ -175,7 +177,7 @@ def deadline_margin(cap: float, cfg: Any = None) -> float:
     asyncio orders timers due at the same instant arbitrarily. Always below a
     positive cap.
     """
-    settings = _settings(cfg)
+    settings = resolve_settings(cfg)
     return min(
         float(settings.llm_dispatch_margin_seconds),
         float(cap) * float(settings.deadline_margin_fraction),
@@ -300,14 +302,6 @@ def enclosing_deadline_at(deadline: float | None) -> Iterator[float | None]:
         _ENCLOSING_DEADLINE.reset(token)
 
 
-def _settings(cfg: Any) -> Any:
-    if cfg is not None:
-        return cfg
-    import src.config as config_module
-
-    return config_module.config
-
-
 def _runtime(settings: Any, runtime_config: RuntimeConfig | None) -> Any:
     if runtime_config is not None:
         return runtime_config
@@ -322,7 +316,7 @@ def openai_request_cap_seconds(cfg: Any = None) -> float:
     ``OPENAI_REQUEST_CAP_SECONDS`` (a ``Settings`` field). Was the module
     constant of the same name, which no override could reach.
     """
-    return float(_settings(cfg).openai_request_cap_seconds)
+    return float(resolve_settings(cfg).openai_request_cap_seconds)
 
 
 def apac_client_timeout_seconds(cfg: Any = None) -> float:
@@ -335,7 +329,7 @@ def apac_client_timeout_seconds(cfg: Any = None) -> float:
     Before October 2026 the client used a separate 240 s constant while the
     in-scope ceiling was the generic compatible-vendor 300 s.
     """
-    return float(_settings(cfg).apac_node_total_timeout_seconds)
+    return float(resolve_settings(cfg).apac_node_total_timeout_seconds)
 
 
 def _editorial_invocation_cap(settings: Any) -> float:
@@ -347,23 +341,19 @@ def _editorial_invocation_cap(settings: Any) -> float:
     have always been built with. The article workflow's own deadline
     (``article_workflow_timeout_seconds``) bounds the whole chain.
     """
-    return float(getattr(settings, "api_timeout", 300))
+    return float(settings.api_timeout)
 
 
 def quick_invocation_cap(timeout_class: TimeoutClass, cfg: Any = None) -> float:
     """The ``--quick`` per-attempt cap for a class, before any flex floor."""
-    settings = _settings(cfg)
+    settings = resolve_settings(cfg)
     if timeout_class is TimeoutClass.EDITORIAL:
         return _editorial_invocation_cap(settings)
     if timeout_class is TimeoutClass.APEX:
-        return float(
-            getattr(settings, "apex_quick_llm_call_hard_timeout_seconds", 180.0)
-        )
+        return float(settings.apex_quick_llm_call_hard_timeout_seconds)
     if timeout_class is TimeoutClass.CROSS_CHECK:
-        return float(
-            getattr(settings, "cross_check_quick_llm_call_hard_timeout_seconds", 180.0)
-        )
-    return float(getattr(settings, "quick_llm_call_hard_timeout_seconds", 60.0))
+        return float(settings.cross_check_quick_llm_call_hard_timeout_seconds)
+    return float(settings.quick_llm_call_hard_timeout_seconds)
 
 
 def _standard_request_cap(
@@ -371,7 +361,7 @@ def _standard_request_cap(
 ) -> float:
     """The provider's standard per-request ceiling: the value clients were built with."""
     family = (provider or "").strip().lower()
-    api_timeout = float(getattr(settings, "api_timeout", 300))
+    api_timeout = float(settings.api_timeout)
     if family == "openai":
         return openai_request_cap_seconds(settings)
     if family == "anthropic":
@@ -380,12 +370,12 @@ def _standard_request_cap(
         if quick and timeout_class not in (TimeoutClass.APEX, TimeoutClass.EDITORIAL):
             return min(
                 api_timeout,
-                float(getattr(settings, "quick_llm_api_timeout_seconds", 120)),
+                float(settings.quick_llm_api_timeout_seconds),
             )
         return api_timeout
     if timeout_class is TimeoutClass.REGIONAL:
         return apac_client_timeout_seconds(settings)
-    return float(getattr(settings, "openai_compatible_client_timeout_seconds", 300))
+    return float(settings.openai_compatible_client_timeout_seconds)
 
 
 def resolve_budget_policy(
@@ -402,9 +392,9 @@ def resolve_budget_policy(
     """
     from src.service_tiers import flex_floor_seconds, floor_llm_hard_timeout
 
-    settings = _settings(cfg)
+    settings = resolve_settings(cfg)
     runtime = _runtime(settings, runtime_config)
-    quick = bool(getattr(runtime, "quick_mode_active", False))
+    quick = bool(runtime.quick_mode_active)
     if timeout_class is TimeoutClass.EDITORIAL:
         cap = _editorial_invocation_cap(settings)
     elif quick:
@@ -419,7 +409,7 @@ def resolve_budget_policy(
         cfg=settings,
         label=f"invoke_hard_timeout:{provider}",
     )
-    fraction = float(getattr(settings, "flex_quick_attempt_fraction", 0.4))
+    fraction = float(settings.flex_quick_attempt_fraction)
     flex_request_cap = cap * fraction if quick else float(flex_floor_seconds(settings))
     request_cap = (
         float(request_cap_override)
@@ -427,13 +417,9 @@ def resolve_budget_policy(
         else _standard_request_cap(timeout_class, provider, settings, quick)
     )
     # Scale the floors for a deliberately tiny cap so it stays admissible.
-    min_useful = min(
-        float(getattr(settings, "llm_min_useful_attempt_seconds", 5.0)), cap / 2.0
-    )
-    margin = min(
-        float(getattr(settings, "llm_dispatch_margin_seconds", 2.0)), cap * 0.05
-    )
-    attempts = max(1, int(getattr(runtime, "llm_attempts", 2)))
+    min_useful = min(float(settings.llm_min_useful_attempt_seconds), cap / 2.0)
+    margin = min(float(settings.llm_dispatch_margin_seconds), cap * 0.05)
+    attempts = max(1, int(runtime.llm_attempts))
     return BudgetPolicy(
         timeout_class=timeout_class,
         quick_mode=quick,
@@ -474,7 +460,7 @@ def policy_for_provider(
         request_cap = policy.request_cap_override
     else:
         request_cap = _standard_request_cap(
-            policy.timeout_class, provider, _settings(cfg), policy.quick_mode
+            policy.timeout_class, provider, resolve_settings(cfg), policy.quick_mode
         )
     return replace(policy, provider=provider, request_cap=request_cap)
 

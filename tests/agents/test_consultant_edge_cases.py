@@ -750,7 +750,7 @@ class TestConfigurationEdgeCases:
             mock_llm = Mock()
             mock_chatgpt.return_value = mock_llm
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_model = "invalid-model-name-12345"
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -765,7 +765,7 @@ class TestConfigurationEdgeCases:
         """Test consultant with empty string API key (not missing)."""
         from src.llms import get_consultant_llm
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = True
             mock_config.get_openai_api_key.return_value = ""
             llm = get_consultant_llm()
@@ -777,7 +777,7 @@ class TestConfigurationEdgeCases:
         """Test that consultant is disabled when enable_consultant=False."""
         from src.llms import get_consultant_llm
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = False
             llm = get_consultant_llm()
             assert llm is None, "Should be disabled when enable_consultant=False"

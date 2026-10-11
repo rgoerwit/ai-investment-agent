@@ -501,6 +501,7 @@ class TestRetryLoop:
                     {
                         "quiet_mode": True,
                         "quick_mode_active": True,
+                        "llm_attempts": 2,
                         "llm_call_hard_timeout_seconds": 60.0,
                     },
                 )(),

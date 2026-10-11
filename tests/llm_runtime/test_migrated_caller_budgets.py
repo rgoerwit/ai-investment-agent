@@ -99,7 +99,7 @@ def budget_config(monkeypatch):
         "llm_attempts": 2,
     }
     targets = {id(config_module.config): config_module.config}
-    targets[id(llms_mod.config)] = llms_mod.config
+    targets[id(llms_mod.resolve_settings())] = llms_mod.resolve_settings()
     for target in targets.values():
         for key, value in values.items():
             monkeypatch.setattr(target, key, value, raising=False)

@@ -19,7 +19,7 @@ def _set_base(monkeypatch, value):
 
     targets = {
         id(config_module.config): config_module.config,
-        id(llms_mod.config): llms_mod.config,
+        id(llms_mod.resolve_settings()): llms_mod.resolve_settings(),
         id(config): config,
     }
     for target in targets.values():
@@ -74,9 +74,9 @@ def test_official_openai_base_preserves_responses_api(monkeypatch):
 def test_apply_base_noop_for_bare_mock_config():
     """A bare-MagicMock ``config`` (get_openai_api_base returns a MagicMock, not
     a string) must not corrupt the default path — the guard acts only on a real
-    URL string. Mirrors the wholesale ``@patch('src.llms.config')`` seat tests.
+    URL string. Mirrors the wholesale ``@patch('src.config.config')`` seat tests.
     """
-    with patch("src.llms.config", MagicMock()):
+    with patch("src.config.config", MagicMock()):
         kwargs = {
             "model": "gpt-5.4",
             "use_responses_api": True,
@@ -149,7 +149,7 @@ class TestCompatibleTimeoutIsIndependentOfServiceTier:
     def test_compatible_base_takes_its_own_timeout(self, monkeypatch):
         _set_base(monkeypatch, "https://api.moonshot.ai/v1")
         monkeypatch.setattr(
-            llms_mod.config, "openai_compatible_client_timeout_seconds", 275
+            llms_mod.resolve_settings(), "openai_compatible_client_timeout_seconds", 275
         )
         kwargs = {"model": "kimi-k3", "timeout": 120}
 
@@ -160,7 +160,7 @@ class TestCompatibleTimeoutIsIndependentOfServiceTier:
     def test_openai_proper_keeps_its_seat_timeout(self, monkeypatch):
         _set_base(monkeypatch, "")
         monkeypatch.setattr(
-            llms_mod.config, "openai_compatible_client_timeout_seconds", 275
+            llms_mod.resolve_settings(), "openai_compatible_client_timeout_seconds", 275
         )
         kwargs = {"model": "gpt-5.4", "timeout": 120}
 
@@ -170,7 +170,7 @@ class TestCompatibleTimeoutIsIndependentOfServiceTier:
 
     def test_service_tier_is_not_sent_to_a_compatible_vendor(self, monkeypatch):
         _set_base(monkeypatch, "https://api.moonshot.ai/v1")
-        monkeypatch.setattr(llms_mod.config, "openai_service_tier", "flex")
+        monkeypatch.setattr(llms_mod.resolve_settings(), "openai_service_tier", "flex")
         kwargs = {"model": "kimi-k3", "timeout": 120}
 
         llms_mod._apply_openai_service_tier(kwargs, label="test")
@@ -184,7 +184,7 @@ class TestCompatibleTimeoutIsIndependentOfServiceTier:
         self, monkeypatch
     ):
         _set_base(monkeypatch, "")
-        monkeypatch.setattr(llms_mod.config, "openai_service_tier", "flex")
+        monkeypatch.setattr(llms_mod.resolve_settings(), "openai_service_tier", "flex")
         kwargs = {"model": "gpt-5.4", "timeout": 120}
 
         llms_mod._apply_openai_service_tier(kwargs, label="test")

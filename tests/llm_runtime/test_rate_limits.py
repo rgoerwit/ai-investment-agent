@@ -59,8 +59,9 @@ def test_configured_google_rpm_follows_the_schema(base_provider, field, rpm) -> 
     assert rate_limits.provider_rpm(settings, "google") == rpm
 
 
-def test_a_settings_object_without_the_schema_selector_is_legacy() -> None:
-    settings = SimpleNamespace(gemini_rpm_limit=12, google_rpm_limit=99)
+def test_settings_without_the_schema_selector_read_the_legacy_gemini_ceiling() -> None:
+    settings = Settings(_env_file=None, gemini_rpm_limit=12, google_rpm_limit=99)
+    assert settings.llm_base_provider is None
     assert rate_limits.configured_google_rpm(settings) == 12
 
 

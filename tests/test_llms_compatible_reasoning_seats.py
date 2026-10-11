@@ -49,7 +49,7 @@ def _build(factory, cfg, **kwargs):
     fake_cls.return_value = MagicMock()
     with (
         patch("src.llm_runtime.adapters.transports.new_openai_chat", fake_cls),
-        patch("src.llms.config", cfg),
+        patch("src.config.config", cfg),
     ):
         llm = factory(**kwargs)
     assert fake_cls.call_args is not None, "factory did not construct a client"

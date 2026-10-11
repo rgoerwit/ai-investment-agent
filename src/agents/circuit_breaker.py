@@ -284,13 +284,9 @@ def get_circuit_breaker() -> LLMCircuitBreaker:
             from src.config import config
 
             _global_breaker = LLMCircuitBreaker(
-                threshold=int(getattr(config, "llm_circuit_breaker_threshold", 3)),
-                window_seconds=float(
-                    getattr(config, "llm_circuit_breaker_window_seconds", 300.0)
-                ),
-                cool_off_seconds=float(
-                    getattr(config, "llm_circuit_breaker_cool_off_seconds", 60.0)
-                ),
+                threshold=int(config.llm_circuit_breaker_threshold),
+                window_seconds=float(config.llm_circuit_breaker_window_seconds),
+                cool_off_seconds=float(config.llm_circuit_breaker_cool_off_seconds),
             )
         return _global_breaker
 

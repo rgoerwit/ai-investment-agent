@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from src.config import config
 from src.ibkr.reconciler import reconcile
@@ -112,3 +113,20 @@ class TestBuyStabilityGateSeam:
         )
         items = reconcile([], {"7203.T": analysis}, _make_portfolio(cash=15000))
         assert self._buy_count(items) == 1
+
+
+def test_a_config_without_the_stability_field_raises_instead_of_skipping_the_gate(
+    monkeypatch,
+):
+    """The finder read getattr(config, 'buy_stability_enabled', False): fail-open."""
+    import pytest
+
+    from src.ibkr import opportunity_finder
+
+    monkeypatch.setattr(opportunity_finder, "config", SimpleNamespace(results_dir="."))
+    with pytest.raises(AttributeError):
+        reconcile(
+            [],
+            {"7203.T": _make_analysis(verdict="BUY", age_days=3)},
+            _make_portfolio(cash=15000),
+        )

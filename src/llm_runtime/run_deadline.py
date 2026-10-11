@@ -37,6 +37,7 @@ from typing import Any
 
 import structlog
 
+from src.config import resolve_settings
 from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.seats import SEATS, SeatId
 
@@ -45,14 +46,6 @@ logger = structlog.get_logger(__name__)
 RUN_DEADLINE_EPOCH_ENV = "PIPELINE_TICKER_DEADLINE_EPOCH"
 
 _LOGGED: set[str] = set()
-
-
-def _settings(cfg: Any) -> Any:
-    if cfg is not None:
-        return cfg
-    import src.config as config_module
-
-    return config_module.config
 
 
 def _log_once(key: str, method: str, event: str, **fields: Any) -> None:
@@ -96,7 +89,7 @@ def run_deadline(
             action="running without a run deadline",
         )
         return None
-    reserve = max(0.0, float(_settings(cfg).publication_reserve_seconds))
+    reserve = max(0.0, float(resolve_settings(cfg).publication_reserve_seconds))
     remaining = epoch - wall_clock()
     deadline = (clock or llm_timeouts.now)() + remaining - reserve
     _log_once(
@@ -198,9 +191,9 @@ def _stage_cost(
 
 def critical_path(cfg: Any = None, runtime_config: Any = None) -> CriticalPath:
     """Analyst branches as their max, then the debate, the tail seats and the PM."""
-    settings = _settings(cfg)
+    settings = resolve_settings(cfg)
     runtime = llm_timeouts._runtime(settings, runtime_config)
-    quick = bool(getattr(runtime, "quick_mode_active", False))
+    quick = bool(runtime.quick_mode_active)
     # Mirrors run_analysis: quick mode runs one debate round.
     rounds = 1 if quick else int(settings.max_debate_rounds)
     costs = _seat_costs(settings, runtime, quick)
@@ -238,7 +231,7 @@ def log_deadline_ladder(
     if deadline is None:
         return None
     try:
-        settings = _settings(cfg)
+        settings = resolve_settings(cfg)
         path = critical_path(settings, runtime_config)
         available = deadline - (clock or llm_timeouts.now)()
         if path.with_retries_seconds > available:

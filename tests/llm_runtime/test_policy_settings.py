@@ -99,7 +99,7 @@ def pin(monkeypatch):
 
     def apply(settings: Settings) -> Settings:
         for target in {
-            id(t): t for t in (config_module.config, llms_mod.config)
+            id(t): t for t in (config_module.config, llms_mod.resolve_settings())
         }.values():
             for name in (
                 "llm_attempts",
@@ -600,12 +600,12 @@ class TestOpenAIRequestCapOverride:
 
     def test_override_reaches_the_legacy_factories(self, pin, monkeypatch):
         settings = pin(_settings(openai_request_cap_seconds=45.0))
-        monkeypatch.setattr(llms_mod.config, "enable_consultant", True)
+        monkeypatch.setattr(llms_mod.resolve_settings(), "enable_consultant", True)
         monkeypatch.setattr(
-            type(llms_mod.config), "get_openai_api_key", lambda self: "o"
+            type(llms_mod.resolve_settings()), "get_openai_api_key", lambda self: "o"
         )
         monkeypatch.setattr(
-            type(llms_mod.config), "get_openai_api_base", lambda self: None
+            type(llms_mod.resolve_settings()), "get_openai_api_base", lambda self: None
         )
         consultant = llms_mod.create_consultant_llm(model="gpt-5.4")
         auditor = llms_mod.create_auditor_llm(settings=settings)

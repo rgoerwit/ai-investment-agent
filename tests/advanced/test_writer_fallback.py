@@ -80,7 +80,9 @@ class TestWriterFallbackFactory:
         # config is a pydantic Settings singleton — patch the method on the
         # class, not the instance (pydantic blocks instance-attr assignment).
         with (
-            patch.object(type(llms.config), "get_claude_api_key", return_value=""),
+            patch.object(
+                type(llms.resolve_settings()), "get_claude_api_key", return_value=""
+            ),
             patch("src.llms._writer_openai_tier_available", return_value=False),
         ):
             result = llms.create_writer_llm()
@@ -96,7 +98,9 @@ class TestWriterFallbackFactory:
         sentinel = MagicMock()
         mock_openai_fallback.return_value = sentinel
         with (
-            patch.object(type(llms.config), "get_claude_api_key", return_value=""),
+            patch.object(
+                type(llms.resolve_settings()), "get_claude_api_key", return_value=""
+            ),
             patch("src.llms._writer_openai_tier_available", return_value=True),
         ):
             result = llms.create_writer_llm()
@@ -111,7 +115,9 @@ class TestWriterFallbackFactory:
         sentinel = MagicMock()
         chain = [llms.WriterTier("editor_model", lambda: sentinel)]
         with (
-            patch.object(type(llms.config), "get_claude_api_key", return_value=""),
+            patch.object(
+                type(llms.resolve_settings()), "get_claude_api_key", return_value=""
+            ),
             patch("src.llms.writer_fallback_chain", return_value=chain) as mock_chain,
         ):
             result = llms.create_writer_llm()

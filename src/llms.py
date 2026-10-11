@@ -26,8 +26,7 @@ from langchain_google_genai import (
 )
 from pydantic import Field, model_validator
 
-import src.config as config_module
-from src.config import config
+from src.config import resolve_settings
 from src.error_safety import summarize_exception
 from src.llm_budgets import (
     GenerationBudget,
@@ -74,10 +73,6 @@ from src.service_tiers import (
 )
 
 logger = structlog.get_logger(__name__)
-
-
-def _settings_or_default(settings: Any | None) -> Any:
-    return config if settings is None else settings
 
 
 _logged_model_init_configs: set[tuple[str, str, int, str | None]] = set()
@@ -231,7 +226,7 @@ def _centralized_output_budget(agent_name: str) -> int:
     """
     return get_agent_output_budget(
         agent_name,
-        _coerce_int_setting(getattr(config, "llm_base_output_tokens", None), 32768),
+        _coerce_int_setting(resolve_settings().llm_base_output_tokens, 32768),
     )
 
 
@@ -432,7 +427,7 @@ class _LazyRateLimiterProxy(BaseRateLimiter):
 GLOBAL_RATE_LIMITER = _LazyRateLimiterProxy(
     # Legacy fallback for unscoped callers; CLI-scoped runs bind a
     # ProviderRuntime with an explicit rate limiter built from RuntimeConfig.
-    lambda: _create_rate_limiter_from_rpm(configured_google_rpm(config_module.config))
+    lambda: _create_rate_limiter_from_rpm(configured_google_rpm(resolve_settings()))
 )
 
 # Lazily-constructed OpenAI rate limiter.  None when OPENAI_RPM_LIMIT is unset
@@ -444,8 +439,8 @@ _warned_openai_unthrottled: set[str] = set()
 
 def _get_openai_rate_limiter(*, settings: Any | None = None) -> BaseRateLimiter | None:
     """Return the shared OpenAI rate limiter, initializing it on first call."""
-    settings = _settings_or_default(settings)
-    if settings is not config:
+    settings = resolve_settings(settings)
+    if settings is not resolve_settings():
         from src.llm_runtime.identities import sanitize_endpoint_host
         from src.llm_runtime.rate_limits import limiter_for_binding
 
@@ -457,7 +452,7 @@ def _get_openai_rate_limiter(*, settings: Any | None = None) -> BaseRateLimiter 
     global _openai_rate_limiter, _openai_rate_limiter_initialized
     if not _openai_rate_limiter_initialized:
         _openai_rate_limiter_initialized = True
-        rpm = config_module.config.openai_rpm_limit
+        rpm = resolve_settings().openai_rpm_limit
         if rpm is not None:
             _openai_rate_limiter = _create_rate_limiter_from_rpm(rpm)
     return _openai_rate_limiter
@@ -466,7 +461,7 @@ def _get_openai_rate_limiter(*, settings: Any | None = None) -> BaseRateLimiter 
 def _get_openai_rate_limiter_for_settings(
     settings: Any,
 ) -> BaseRateLimiter | None:
-    if settings is config:
+    if settings is resolve_settings():
         return _get_openai_rate_limiter()
     return _get_openai_rate_limiter(settings=settings)
 
@@ -532,7 +527,7 @@ def _resolve_generation_budget(
     reserve_enabled: bool,
     settings: Any | None = None,
 ) -> GenerationBudget:
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     return get_generation_budget(
         intent_tokens=intent_tokens,
         reserve_class=reserve_class,
@@ -792,7 +787,7 @@ def _apply_openai_service_tier(
     ``OPENAI_COMPATIBLE_CLIENT_TIMEOUT_SECONDS``, applied by
     ``_apply_openai_api_base``, and the two concerns are independent.
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     if _openai_compatible_host(settings=settings) is not None:
         return
     if service_tier is None:
@@ -816,7 +811,7 @@ def _openai_compatible_host(*, settings: Any | None = None) -> str | None:
     ``None`` means "the default OpenAI endpoint", so every OpenAI-only behavior
     (service tiers, the Responses API) stays byte-identical.
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     base_url = settings.get_openai_api_base()
     if not isinstance(base_url, str) or not base_url:
         return None
@@ -840,7 +835,7 @@ def _apply_openai_api_base(
     per-seat default. No-op when unset, so the default OpenAI path is
     byte-identical.
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     base_url = settings.get_openai_api_base()
     # Act only on a real, non-empty URL string. The accessor returns
     # ``str | None`` in production, so this guard is a no-op there — but it also
@@ -858,7 +853,7 @@ def _apply_openai_api_base(
 
 def _openai_base_url_override(*, settings: Any | None = None) -> str | None:
     """Return the configured OpenAI-compatible base URL, or None when unset."""
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     base_url = settings.get_openai_api_base()
     if not isinstance(base_url, str) or not base_url:
         return None
@@ -928,7 +923,7 @@ def _apply_openai_generation_budget(
     settings: Any | None = None,
 ) -> GenerationBudget:
     """Convert an intent budget into an API cap with a reasoning reserve."""
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     from src.llm_runtime.budgets import resolve_generation_budget
 
     budget = resolve_generation_budget(
@@ -962,7 +957,7 @@ def _construct_chat_openai(
     """
     from src.llm_runtime.adapters import transports
 
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     _apply_openai_api_base(kwargs, settings=settings)
     provider = (
         transports.OPENAI_COMPATIBLE_PROVIDER
@@ -975,7 +970,7 @@ def _construct_chat_openai(
 def _construct_chat_openai_for_settings(
     kwargs: dict[str, Any], settings: Any
 ) -> BaseChatModel:
-    if settings is config:
+    if settings is resolve_settings():
         return _construct_chat_openai(kwargs)
     return _construct_chat_openai(kwargs, settings=settings)
 
@@ -1022,7 +1017,7 @@ def _resolve_gemini_service_tier(
     explicit ``"standard"`` pins the instance to the standard tier (e.g. the
     LLM-judge content inspector, an inline security path that must not queue).
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     if service_tier is not None:
         return service_tier if service_tier == "flex" else None
     if (
@@ -1066,7 +1061,7 @@ def create_gemini_model(
     .env loading for our config, but third-party libs like LangChain still
     expect explicit api_key or os.environ values).
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     global _llm_instance_counter
 
     resolved_tier = _resolve_gemini_service_tier(
@@ -1169,7 +1164,7 @@ def create_quick_thinking_llm(
     Trap Detector distinguishing "announced" from "executed" corporate
     actions). No-op on models that do not support ``thinking_level``.
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     runtime_config = get_runtime_config(settings)
     model_name = model or runtime_config.quick_think_llm
     final_timeout = (
@@ -1222,7 +1217,7 @@ def create_deep_thinking_llm(
     Create a deep thinking LLM.
     If the DEEP_MODEL is Gemini 3+ or Gemini 2.5, this will set high reasoning.
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     runtime_config = get_runtime_config(settings)
     model_name = model or runtime_config.deep_think_llm
     final_timeout = timeout if timeout is not None else settings.api_timeout
@@ -1274,7 +1269,7 @@ def create_apex_llm(
     accepted trade-off.
     """
     explicit_settings = settings is not None
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     if seat not in APEX_SEATS:
         raise ValueError(f"unknown apex seat: {seat!r} (expected one of {APEX_SEATS})")
     seat_id = (
@@ -1363,7 +1358,7 @@ def create_writer_fallback_llm(
     ``timeout`` (the client's standard ceiling) defaults to ``api_timeout``;
     under the runtime loop every request is sized and sent once at dispatch.
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     runtime_config = get_runtime_config(settings)
     model_name = model or runtime_config.deep_think_llm
     thinking_level: Literal["low"] | None = None
@@ -1405,7 +1400,7 @@ def _writer_openai_tier_available(*, settings: Any | None = None) -> bool:
     auditor, and editor all gate on it) — the writer tier honors it too, so a
     deployment that disabled every other OpenAI agent never gets a GPT writer.
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     return (
         _langchain_openai_available()
         and settings.enable_consultant
@@ -1428,7 +1423,7 @@ def create_writer_openai_fallback_llm(
     reasoning depth). Returns None when the tier is unavailable (missing
     lib/key or ``ENABLE_CONSULTANT=false``).
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     if not _writer_openai_tier_available(settings=settings):
         return None
 
@@ -1464,7 +1459,7 @@ def writer_fallback_chain(
     it defaults to the writer's 0.7 prose setting.
     """
 
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
 
     def _build_openai_tier() -> BaseChatModel:
         llm = create_writer_openai_fallback_llm(
@@ -1540,7 +1535,7 @@ def create_consultant_llm(
         >>> result = consultant_llm.invoke("Review this analysis...")
         >>> quick_llm = create_consultant_llm(quick_mode=True)
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     if not _langchain_openai_available():
         raise ImportError(
             "langchain-openai package not found. Install with: "
@@ -1653,7 +1648,7 @@ def create_auditor_llm(
     normal mode uses ``medium``.  This includes GPT-5.6 Sol/Terra/Luna, which
     do not support the legacy ``minimal`` setting.
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     if not _langchain_openai_available():
         logger.warning("langchain_openai_missing")
         return None
@@ -1742,7 +1737,7 @@ def create_apac_specialist_llm(
     settings: Any | None = None,
 ) -> BaseChatModel | None:
     """Create the optional APAC Regional Specialist LLM."""
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     if quick_mode:
         return None
     if not settings.enable_apac_specialist:
@@ -1852,7 +1847,7 @@ def create_writer_llm(
     Returns:
         ChatAnthropic or ChatGoogleGenerativeAI instance
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     api_key = (
         api_key_override
         if api_key_override is not None
@@ -1961,7 +1956,7 @@ def _build_openai_chat(
     against whatever the configured model family actually documents, so these
     seats behave correctly on an OpenAI-compatible endpoint too.
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     kwargs: dict[str, Any] = {
         "model": model_name,
         "timeout": (
@@ -2035,7 +2030,7 @@ def create_editor_llm(
     Returns:
         ChatOpenAI instance or None if editor unavailable
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     if not _langchain_openai_available():
         logger.warning("langchain_openai_missing")
         return None
@@ -2096,7 +2091,7 @@ def get_consultant_llm(
         ChatOpenAI instance or None if consultant disabled/unavailable
 
     """
-    settings = _settings_or_default(settings)
+    settings = resolve_settings(settings)
     # Check if consultant is enabled (via config, not os.environ)
     if not settings.enable_consultant:
         logger.info("consultant_disabled")

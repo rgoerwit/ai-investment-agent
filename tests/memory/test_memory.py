@@ -32,6 +32,7 @@ from src.memory import (
     get_all_memory_stats,
     get_ticker_memory_stats,
 )
+from tests.helpers.memory_config import pin_embedding_identity
 
 
 @pytest.fixture(autouse=True)
@@ -99,6 +100,7 @@ class TestFinancialSituationMemoryInitialization:
         FinancialSituationMemory._reset_shared_state_for_tests()
         # Mock config getter directly (os.environ patching no longer works due to SecretStr)
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-key"
 
             with patch(
@@ -127,6 +129,7 @@ class TestFinancialSituationMemoryInitialization:
         """Multiple memory instances should share heavy embedding/client resources."""
         FinancialSituationMemory._reset_shared_state_for_tests()
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-key"
             mock_config.chroma_persist_directory = "test-chroma"
 
@@ -162,6 +165,7 @@ class TestFinancialSituationMemoryInitialization:
     def test_init_with_embedding_healthcheck_failure_is_degraded(self):
         """Memory should not report available when embedding healthcheck fails."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-key"
 
             with patch(

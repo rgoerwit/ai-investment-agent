@@ -408,7 +408,7 @@ class TestAuditorLLMConfiguration:
     Tests are model-agnostic — the user configures models via .env.
     """
 
-    @patch("src.llms.config")
+    @patch("src.config.config")
     def test_auditor_llm_never_sets_temperature(self, mock_config):
         """Auditor LLM should never set temperature (any model can reject it)."""
         from src.llms import create_auditor_llm
@@ -425,7 +425,7 @@ class TestAuditorLLMConfiguration:
         # — NOT 0.0 which breaks many model families.
         assert llm.temperature != 0.0
 
-    @patch("src.llms.config")
+    @patch("src.config.config")
     def test_auditor_llm_disabled_without_consultant(self, mock_config):
         """Should return None when ENABLE_CONSULTANT is false."""
         from src.llms import create_auditor_llm
@@ -435,7 +435,7 @@ class TestAuditorLLMConfiguration:
         llm = create_auditor_llm()
         assert llm is None
 
-    @patch("src.llms.config")
+    @patch("src.config.config")
     def test_auditor_llm_disabled_without_api_key(self, mock_config):
         """Should return None when OPENAI_API_KEY is missing."""
         from src.llms import create_auditor_llm
@@ -446,7 +446,7 @@ class TestAuditorLLMConfiguration:
         llm = create_auditor_llm()
         assert llm is None
 
-    @patch("src.llms.config")
+    @patch("src.config.config")
     def test_auditor_llm_falls_back_to_consultant_model(self, mock_config):
         """Should use consultant_model when auditor_model is not set."""
         from src.llms import create_auditor_llm
@@ -459,7 +459,7 @@ class TestAuditorLLMConfiguration:
         llm = create_auditor_llm()
         assert llm is not None
 
-    @patch("src.llms.config")
+    @patch("src.config.config")
     def test_auditor_llm_prefers_auditor_model(self, mock_config):
         """Should use auditor_model over consultant_model when set."""
         from src.llms import create_auditor_llm
@@ -474,7 +474,7 @@ class TestAuditorLLMConfiguration:
         # The model set should be the auditor-specific one
         assert "auditor" in llm.model_name
 
-    @patch("src.llms.config")
+    @patch("src.config.config")
     def test_consultant_llm_never_sets_temperature(self, mock_config):
         """Consultant LLM should never set temperature (model-agnostic)."""
         from src.llms import get_consultant_llm
@@ -506,7 +506,7 @@ class TestAuditorLLMConfiguration:
             "src.llm_runtime.adapters.transports.new_openai_chat"
         ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
-            with _patch("src.llms.config") as cfg:
+            with _patch("src.config.config") as cfg:
                 cfg.enable_consultant = True
                 cfg.get_openai_api_key.return_value = "k"
                 cfg.auditor_model = None
@@ -536,7 +536,7 @@ class TestAuditorLLMConfiguration:
             "src.llm_runtime.adapters.transports.new_openai_chat"
         ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
-            with _patch("src.llms.config") as cfg:
+            with _patch("src.config.config") as cfg:
                 cfg.enable_consultant = True
                 cfg.get_openai_api_key.return_value = "k"
                 cfg.auditor_model = None
@@ -563,12 +563,12 @@ class TestAuditorLLMReasoning:
                 self.model_name = kwargs["model"]
 
         monkeypatch.setattr(transports, "new_openai_chat", StubChatOpenAI)
-        monkeypatch.setattr(llms.config, "enable_consultant", True)
+        monkeypatch.setattr(llms.resolve_settings(), "enable_consultant", True)
         monkeypatch.setattr(
-            type(llms.config), "get_openai_api_key", lambda self: "fake-key"
+            type(llms.resolve_settings()), "get_openai_api_key", lambda self: "fake-key"
         )
-        monkeypatch.setattr(llms.config, "auditor_model", "gpt-5-mini")
-        monkeypatch.setattr(llms.config, "consultant_model", "gpt-5")
+        monkeypatch.setattr(llms.resolve_settings(), "auditor_model", "gpt-5-mini")
+        monkeypatch.setattr(llms.resolve_settings(), "consultant_model", "gpt-5")
 
         llm = llms.create_auditor_llm()
 
