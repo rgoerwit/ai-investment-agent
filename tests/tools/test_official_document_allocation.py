@@ -295,7 +295,7 @@ async def test_a_spent_allowance_opens_no_client(monkeypatch, fake_clock):
         fake_clock[0] += 1.0  # exactly at the deadline
         result = await documents.get_official_document.ainvoke({"url": _DOC_URL})
 
-    assert result == "STATUS: INSUFFICIENT_DATA\nREASON: DOCUMENT_RETRIEVAL_FAILED"
+    assert result == "STATUS: INSUFFICIENT_DATA\nREASON: DOCUMENT_ALLOWANCE_SPENT"
     assert timeouts == []
     assert inspection.calls == 0
 
@@ -490,7 +490,7 @@ async def test_trickling_download_stops_at_its_share(monkeypatch):
 
     result = await _guarded(documents.get_official_document.ainvoke({"url": _DOC_URL}))
 
-    assert result == "STATUS: INSUFFICIENT_DATA\nREASON: DOCUMENT_RETRIEVAL_FAILED"
+    assert result == "STATUS: INSUFFICIENT_DATA\nREASON: DOCUMENT_DOWNLOAD_TIMEOUT"
     assert body.started
     assert not body.release.is_set()
     assert not body.finished

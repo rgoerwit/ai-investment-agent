@@ -35,7 +35,7 @@ from src.runtime_diagnostics import (
 )
 from src.runtime_services import get_current_tool_service
 from src.service_tiers import floor_llm_hard_timeout, floor_llm_total_timeout
-from src.tooling.runtime import ToolInvocation
+from src.tooling.runtime import ToolInvocation, tool_error_text
 from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
@@ -967,7 +967,7 @@ then return the complete required JSON assessment. Query terms alone are not fin
                                     tool_err, operation="legal_counsel_tool_failed"
                                 ),
                             )
-                            tool_output = f"TOOL_ERROR: {type(tool_err).__name__}"
+                            tool_output = tool_error_text(tool_err)
                     else:
                         tool_output = f"Unknown tool: {tool_call['name']}"
                     messages.append(
@@ -1426,7 +1426,7 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                                     tool_err, operation="auditor_tool_failed"
                                 ),
                             )
-                            tool_output = f"TOOL_ERROR: {type(tool_err).__name__}"
+                            tool_output = tool_error_text(tool_err)
                     else:
                         ledger.record_tool_failure(tool_call["name"])
                         tool_output = f"Unknown tool: {tool_call['name']}"

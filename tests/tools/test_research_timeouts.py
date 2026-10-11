@@ -820,12 +820,12 @@ async def test_document_download_caller_deadline_wins(monkeypatch, fake_clock):
 
 
 @pytest.mark.asyncio
-async def test_document_download_timeout_is_retrieval_failed(monkeypatch):
+async def test_document_download_timeout_is_download_timeout(monkeypatch):
     _patch_client(monkeypatch, documents, httpx.ReadTimeout("slow"))
 
     result = await documents.get_official_document.ainvoke({"url": _DOC_URL})
 
-    assert result == "STATUS: INSUFFICIENT_DATA\nREASON: DOCUMENT_RETRIEVAL_FAILED"
+    assert result == "STATUS: INSUFFICIENT_DATA\nREASON: DOCUMENT_DOWNLOAD_TIMEOUT"
 
 
 @pytest.mark.asyncio
@@ -838,8 +838,7 @@ async def test_document_download_spent_deadline_opens_no_client(
         fake_clock[0] += 5.0
         result = await documents.get_official_document.ainvoke({"url": _DOC_URL})
 
-    # The same reply an httpx timeout gets.
-    assert result == "STATUS: INSUFFICIENT_DATA\nREASON: DOCUMENT_RETRIEVAL_FAILED"
+    assert result == "STATUS: INSUFFICIENT_DATA\nREASON: DOCUMENT_ALLOWANCE_SPENT"
     assert timeouts == []
 
 

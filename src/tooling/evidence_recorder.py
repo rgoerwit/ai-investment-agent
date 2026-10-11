@@ -379,6 +379,23 @@ class EvidenceRecorder:
             )
         )
 
+    def _admit(
+        self, dedupe_key: tuple[str | None, str, str, tuple[str, ...]], chars: int
+    ) -> bool:
+        """Whether a record with this identity and size may be appended; if so,
+        its identity is remembered. A duplicate is dropped, a full ledger marks
+        its overflow once."""
+        if dedupe_key in self._dedupe_keys:
+            return False
+        if (
+            len(self._records) >= _MAX_RECORDS
+            or self._content_chars + chars > _MAX_TOTAL_CONTENT_CHARS
+        ):
+            self._record_overflow()
+            return False
+        self._dedupe_keys.add(dedupe_key)
+        return True
+
     async def before(self, call: ToolInvocation) -> ToolInvocation:
         return call
 
@@ -395,15 +412,8 @@ class EvidenceRecorder:
         # content fetched from two DIFFERENT source URLs is two corroborating
         # sources, not a duplicate, and must keep both identities.
         dedupe_key = (call.agent_key, call.name, digest, requested_urls)
-        if dedupe_key in self._dedupe_keys:
+        if not self._admit(dedupe_key, len(content)):
             return result
-        if (
-            len(self._records) >= _MAX_RECORDS
-            or self._content_chars + len(content) > _MAX_TOTAL_CONTENT_CHARS
-        ):
-            self._record_overflow()
-            return result
-        self._dedupe_keys.add(dedupe_key)
         urls = tuple(
             dict.fromkeys(
                 normalized
@@ -446,6 +456,43 @@ class EvidenceRecorder:
         )
         self._content_chars += len(content)
         return result
+
+    def failed(self, call: ToolInvocation, reason: str, scope: str | None) -> None:
+        """Keep the attempt of a call that produced no result.
+
+        ``after()`` never runs for it, so without this the requested URL (and
+        that the call timed out, and where) is lost and the model is left to
+        guess the cause from prose. Same record, ``FAILED`` and ``UNAVAILABLE``.
+        """
+        content = f"TOOL_ERROR: {reason}" + (
+            f"\nTIMEOUT_SCOPE: {scope}" if scope else ""
+        )
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        requested_urls = _requested_urls(call.args)
+        if not self._admit(
+            (call.agent_key, call.name, digest, requested_urls), len(content)
+        ):
+            return
+        self._records.append(
+            EvidenceRecord(
+                sequence=len(self._records) + 1,
+                agent_key=call.agent_key,
+                tool_name=call.name,
+                source=call.source,
+                content=content,
+                content_sha256=digest,
+                requested_urls=requested_urls,
+                urls=(),
+                blocked=False,
+                findings=(f"TIMEOUT_SCOPE:{scope}",) if scope else (),
+                execution_status="FAILED",
+                evidence_status="UNAVAILABLE",
+                reason=reason,
+                original_content_chars=len(content),
+                retained_content_chars=len(content),
+            )
+        )
+        self._content_chars += len(content)
 
     def snapshot(self, *, agent_key: str | None = None) -> list[EvidenceRecord]:
         if agent_key is None:

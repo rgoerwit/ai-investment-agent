@@ -367,9 +367,18 @@ class TestAuditorNodeWithPreload:
         assert service.execute.await_count == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("failure", "expected_content"),
+        [
+            (RuntimeError("third pass failure"), "TOOL_ERROR: RuntimeError"),
+            # A tool timeout is the typed code the graph tool node uses, not
+            # the class name the model relabelled as EXTRACTION_TIMEOUT.
+            (TimeoutError("exceeded 45.0s"), "TOOL_ERROR: TOOL_TIMEOUT"),
+        ],
+    )
     @patch("src.prompts.get_prompt")
     async def test_third_tool_round_failure_reaches_forced_synthesis(
-        self, mock_get_prompt
+        self, mock_get_prompt, failure, expected_content
     ):
         """A failed final permitted tool round remains synthesis evidence.
 
@@ -412,7 +421,7 @@ class TestAuditorNodeWithPreload:
                 side_effect=[
                     SimpleNamespace(value="ROUND_ONE", blocked=False),
                     SimpleNamespace(value="ROUND_TWO", blocked=False),
-                    RuntimeError("third pass failure"),
+                    failure,
                 ]
             )
         )
@@ -462,7 +471,7 @@ class TestAuditorNodeWithPreload:
         assert invoke_mock.await_args_list[3].args[0] is mock_llm
         final_input = invoke_mock.await_args_list[3].args[1]
         tool_messages = [m for m in final_input if isinstance(m, ToolMessage)]
-        assert tool_messages[-1].content == "TOOL_ERROR: RuntimeError"
+        assert tool_messages[-1].content == expected_content
         status = result["artifact_statuses"]["auditor_report"]
         assert status["ok"] is True
         telemetry = result["auditor_budget"]

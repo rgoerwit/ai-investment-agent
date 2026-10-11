@@ -13,7 +13,7 @@ from src.config import Settings, config
 from src.error_safety import summarize_exception
 from src.llm_runtime import timeouts as llm_timeouts
 from src.runtime_services import get_current_tool_service
-from src.tooling.runtime import ToolInvocation
+from src.tooling.runtime import ToolInvocation, tool_error_text
 
 from . import message_utils
 from . import runtime as agent_runtime
@@ -169,7 +169,7 @@ async def _execute_tool_call(
                     tool=tool_call["name"],
                     **summarize_exception(tool_err, operation="consultant_tool_failed"),
                 )
-                result = f"TOOL_ERROR: {type(tool_err).__name__}"
+                result = tool_error_text(tool_err)
     else:
         result_failed = True
         result = f"Unknown tool: {tool_call['name']}"

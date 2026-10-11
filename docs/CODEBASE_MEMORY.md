@@ -709,6 +709,35 @@ pypdf extracted in 283, pdftotext in none, and `EXTRACTION_TIMEOUT` appeared
 in one -- so extraction is rarely the binding phase, and the download share
 is the one to revisit when durations are logged.
 
+**A failed document fetch carries its cause, and the client says who it is
+(October 2026, round 3).** In saved runs `get_official_document` returned
+`DOCUMENT_RETRIEVAL_FAILED` 11 times in about 1,619 network attempts (under 1%,
+so a reliability nuisance, not a defect in the happy path). The causes lived only
+in logs: six TLS certificate failures (certifi trust stays; the failure is now just
+visible as `DOCUMENT_TLS_FAILED`), a server disconnect, a read timeout, and a few
+others. One catch-all hid them, `DOCUMENT_HTTP_ERROR` dropped the status, and the
+`official_document_failed` warning logged no host. The mapping now classifies by
+exception class over the whole `__cause__`/`__context__` chain (the transport wraps
+the ssl or OS error), applies only while the download is running (an ssl error
+raised during extraction is not the network's), and is a tuple table so a new
+reason is a row (`_TRANSPORT_REASONS`). The larger finding is the client sent no
+User-Agent at all: `www.sec.gov` returned 0 successes in 262 calls, because EDGAR
+refuses an anonymous or contactless client. `HTTP_USER_AGENT` is now the one string
+(the document, editor and StockTwits clients), and sec.gov hosts
+(`_CONTACT_REQUIRED_HOSTS`, matched on the registrable suffix, so `sec.gov.evil.com`
+and `notsec.gov` are not SEC) get `<product token> <SEC_CONTACT_EMAIL>`, chosen per
+redirect hop; with no contact the request is refused before DNS, never sent. Two
+more traps: httpx validates the `Location` itself even with `follow_redirects=False`
+(an unparseable one surfaces as `RemoteProtocolError`, `DOCUMENT_PROTOCOL_ERROR`), and
+an https-to-http redirect to an approved host is reported as
+`DOCUMENT_INSECURE_REDIRECT`, not as an unapproved host. A tool timeout used to
+leave the ledger nothing (`after()` hooks run only for a result), so the URL was
+lost and the model called it `EXTRACTION_TIMEOUT`; `ToolExecutionService` now tells
+hooks that implement `failed()` (the `EvidenceRecorder`) of any failure, with the
+timeout scope, as a `FAILED`/`UNAVAILABLE` record. Not changed: the vendor JSON
+clients (aiohttp: FMP, EODHD, Alpha Vantage) and `scripts/find_gems.py`'s rotating
+agents send their own headers.
+
 `check_within` (also behind both Tavily entrypoints) binds no deadline: the
 injection judge inside still sizes itself from the LLM enclosing deadline
 alone, never the tool's, because refused by admission it fails *open*. Its

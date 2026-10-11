@@ -58,6 +58,17 @@ backoff with the operational readers, so the runner's deadline counts. Return a 
 raise it outside: inside, the SDK's task groups wrap it and `classify_mcp_error`
 loses its category. See `docs/MCP.md`.
 
+## Outbound page fetches say who they are, and failures say why
+
+**Never collapse transport failures into one reason.** The official-document tool
+maps an exception to its reason by class over the whole cause chain
+(`_TRANSPORT_REASONS`: TLS, timeout, connect, protocol); add a row, not a branch.
+**Every client that fetches third-party pages sends `config.http_user_agent`**
+(`HTTP_USER_AGENT`); never write a UA literal. sec.gov additionally needs
+`SEC_CONTACT_EMAIL` (refuse before connecting without it; never send it elsewhere).
+A tool failure is recorded where the service sees it (`EvidenceRecorder.failed`),
+not in each caller. Story: `docs/CODEBASE_MEMORY.md`.
+
 ## Treat every external string as hostile
 
 Search results, social feeds, retrieved memory, cached context, filings, and free-text

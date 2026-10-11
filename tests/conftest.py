@@ -139,6 +139,9 @@ def setup_test_env(test_chroma_persist_dir: Path):
         "GOOGLE_API_KEY": "test-key",  # Default to dummy key
         "TAVILY_API_KEY": "test-key",
         "FINNHUB_API_KEY": "test-key",
+        # EDGAR URLs are refused without a contact address; the suite's sec.gov
+        # fixtures need one, and an operator's real address must not leak in.
+        "SEC_CONTACT_EMAIL": "tests@example.invalid",
         # Service tiers must be pinned to defaults: an operator .env with
         # GEMINI/OPENAI_SERVICE_TIER=flex flips llms.py construction paths
         # (the flex path goes through _build_openai_chat, and Gemini's flex

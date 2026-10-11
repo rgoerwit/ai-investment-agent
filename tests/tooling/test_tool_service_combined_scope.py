@@ -612,7 +612,8 @@ async def test_the_combined_bound_firing_is_labelled_with_inspection(
             )
         )
 
-    assert not hasattr(caught.value, "scope")
+    # The service's own bound carries its scope out, like every other timeout.
+    assert caught.value.scope == "with_inspection"
     assert scopes == ["with_inspection"]
     hook.release.set()
     await asyncio.wait_for(hook.finished.wait(), timeout=SAFETY_NET_SECONDS)

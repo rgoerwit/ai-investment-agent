@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A failed official-document retrieval now says why. The catch-all that collapsed
+  every transport failure into `DOCUMENT_RETRIEVAL_FAILED` (11 of ~1,619 network
+  attempts in saved runs: six TLS certificate failures, a server disconnect, a read
+  timeout, ...) is replaced by one data-driven mapping, by exception class over the
+  whole cause chain: `DOCUMENT_TLS_FAILED` (an `ssl.SSLError` anywhere in the chain),
+  `DOCUMENT_DOWNLOAD_TIMEOUT` (`TimeoutError`, `httpx.TimeoutException`),
+  `DOCUMENT_CONNECT_FAILED`, `DOCUMENT_PROTOCOL_ERROR` (`RemoteProtocolError`,
+  `LocalProtocolError`, `ReadError`, `DecodingError`), `DOCUMENT_ALLOWANCE_SPENT`
+  (refused before any client opens); the residual keeps the old name and now means a
+  fault outside the network. `DOCUMENT_HTTP_ERROR` adds `HTTP_STATUS: <code>`. An
+  https-to-http redirect is `DOCUMENT_INSECURE_REDIRECT` (still refused), not
+  `UNAPPROVED_DOCUMENT_HOST`. `official_document_failed` is now logged for every
+  failed retrieval with `reason`, `phase` (dns, connect, redirect, body, extract,
+  inspect), `document_scheme`, `document_host` and `http_status`, never the path or
+  query. The auditor prompt (v2.16) lists the new codes.
+- One `HTTP_USER_AGENT` setting (default: the editor's former string) is sent by the
+  official-document client, the editor's reference fetch and StockTwits; the
+  document client sent none before, and `www.sec.gov` returned 0 successes in 262
+  saved calls. EDGAR requires a declared contact: new optional `SEC_CONTACT_EMAIL`
+  (no default; empty is unset) makes every sec.gov request carry
+  `<product token> <address>`; unset, sec.gov URLs are refused before connecting with
+  `DOCUMENT_SEC_CONTACT_REQUIRED` naming the setting. The address goes to no other
+  host. **Behaviour change:** StockTwits sends the shared string, not
+  `TradingBot/1.0`.
+- A tool call that times out or raises now leaves an evidence record
+  (`execution_status="FAILED"`, `reason` `TOOL_TIMEOUT` / `TOOL_EXECUTION_FAILED`,
+  requested URL, classified timeout scope) through a `failed()` observer the service
+  calls at its one chokepoint, so the graph tool node, consultant, auditor and
+  preflight all leave it; before, the URL was lost and the model relabelled the
+  timeout `EXTRACTION_TIMEOUT` in prose. The consultant, legal-counsel and
+  consultant-loop paths now return `TOOL_ERROR: TOOL_TIMEOUT` (as the graph node did)
+  instead of `TOOL_ERROR: TimeoutError`. Every timeout leaves `ToolExecutionService`
+  as a `_ScopedToolTimeout` (adds `not_started` and `with_inspection` scopes).
+
 - The literal-deadline guard (`tests/test_timeout_literals.py`) follows a numeric
   constant through an import (`from m import T [as U]`, `m.T`, one re-export hop; a
   config owner's constant counts once imported elsewhere), a 3-argument

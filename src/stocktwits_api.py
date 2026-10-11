@@ -35,7 +35,7 @@ class StockTwitsAPI:
         clean_ticker = ticker.split(".")[0] if "." in ticker else ticker
         url = f"{self.BASE_URL}/streams/symbol/{clean_ticker}.json"
 
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)"}
+        headers = {"User-Agent": config.http_user_agent}
 
         # STOCKTWITS_HTTP_TIMEOUT_SECONDS, read at the call and shrunk to a
         # caller's enclosing deadline before the session is opened; a spent

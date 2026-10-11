@@ -32,9 +32,6 @@ MAX_REFERENCE_CHARS = 5000
 # The request timeout is REFERENCE_FETCH_TIMEOUT_SECONDS, read per fetch.
 MAX_REFERENCE_REDIRECTS = 3
 
-# User agent for requests
-USER_AGENT = "Mozilla/5.0 (compatible; InvestorAgent/1.0; +https://github.com/rgoerwit/ai-investment-agent)"
-
 _REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
 
 
@@ -115,7 +112,7 @@ async def fetch_reference_content(url: str) -> str:
         return _reference_fetch_timed_out(url, timeout)
 
     try:
-        headers = {"User-Agent": USER_AGENT}
+        headers = {"User-Agent": config.http_user_agent}
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await _fetch_reference_response(client, url, headers)
             resp.raise_for_status()

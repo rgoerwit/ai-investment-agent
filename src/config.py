@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Literal
 
 import structlog
-from pydantic import AliasChoices, Field, SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Note: Pydantic Settings handles .env loading natively via env_file in SettingsConfigDict.
@@ -1632,6 +1632,54 @@ class Settings(BaseSettings):
             "article reference URL."
         ),
     )
+    http_user_agent: str = Field(
+        default=(
+            "Mozilla/5.0 (compatible; InvestorAgent/1.0; "
+            "+https://github.com/rgoerwit/ai-investment-agent)"
+        ),
+        validation_alias="HTTP_USER_AGENT",
+        description=(
+            "User-Agent every client that fetches third-party pages sends (the "
+            "official-document tool, the editor's reference fetch, StockTwits). "
+            "Its product token also names the application to SEC EDGAR."
+        ),
+    )
+    sec_contact_email: str | None = Field(
+        default=None,
+        validation_alias="SEC_CONTACT_EMAIL",
+        description=(
+            "Contact address EDGAR requires in the User-Agent of every request "
+            "to a sec.gov host. Unset, the official-document tool refuses sec.gov "
+            "URLs before connecting (DOCUMENT_SEC_CONTACT_REQUIRED). No default: "
+            "it is the operator's own address."
+        ),
+    )
+
+    @field_validator("http_user_agent", mode="before")
+    @classmethod
+    def _http_user_agent_is_a_header_value(cls, value: object) -> object:
+        if isinstance(value, str) and (
+            not value.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        ):
+            raise ValueError(
+                "HTTP_USER_AGENT must be non-empty, without control characters"
+            )
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("sec_contact_email", mode="before")
+    @classmethod
+    def _sec_contact_email_is_an_address(cls, value: object) -> object:
+        """An empty setting is unset; anything else must look like an address."""
+        if not isinstance(value, str) or not value.strip():
+            return None
+        address = value.strip()
+        if "@" not in address or any(
+            char.isspace() or ord(char) < 32 for char in address
+        ):
+            raise ValueError("SEC_CONTACT_EMAIL must be an email address")
+        return address
+
     # MCP deadlines: the HTTP client's per-phase timeout, the initialize
     # handshake and catalog request, and one tool call. Same rules as the blocks
     # above. Each is handed to the SDK's own parameter (httpx2 client timeout,

@@ -8,6 +8,7 @@ import ipaddress
 import json
 import re
 import socket
+import ssl
 from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import urljoin, urlparse, urlunsplit
@@ -42,10 +43,15 @@ SourceAuthority = Literal[
     "UNSUPPORTED",
 ]
 
+_SEC_HOST = "sec.gov"
 _OFFICIAL_HOST_SUFFIXES = (
-    "sec.gov",
+    _SEC_HOST,
     *registered_official_document_hosts(),
 )
+# Hosts that refuse an anonymous client and require a contact address in the
+# User-Agent (EDGAR's fair-access rule). The one place the rule is written.
+_CONTACT_REQUIRED_HOSTS = (_SEC_HOST,)
+_PRODUCT_TOKEN_RE = re.compile(r"[A-Za-z][\w.-]*/[\w.]+")
 # Each policy's number is only the shipped default of its setting (pinned by a
 # parity test): each call applies OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS or
 # OFFICIAL_DOCUMENT_DNS_TIMEOUT_SECONDS with with_timeout(), read at the call
@@ -90,9 +96,115 @@ class ExtractedDocument:
 
 
 class DocumentExtractionError(RuntimeError):
-    def __init__(self, reason: str):
+    def __init__(
+        self, reason: str, *, status: int | None = None, detail: str | None = None
+    ):
         super().__init__(reason)
         self.reason = reason
+        self.status = status
+        self.detail = detail
+
+    def reply(self) -> str:
+        """The typed tool output: reason, then the HTTP status or detail if any."""
+        lines = ["STATUS: INSUFFICIENT_DATA", f"REASON: {self.reason}"]
+        if self.status is not None:
+            lines.append(f"HTTP_STATUS: {self.status}")
+        if self.detail:
+            lines.append(f"DETAIL: {self.detail}")
+        return "\n".join(lines)
+
+
+# --- Transport failures ------------------------------------------------------
+#
+# One reason per kind of network failure, never a shared one: a certificate
+# fault, a refused connection and a stalled read call for different action.
+# Rows are tried in order against every exception in the cause chain (the
+# transport wraps the OS or ssl error), so the TLS row precedes the generic
+# connect row that the same ``ConnectError`` would also match.
+_TRANSPORT_REASONS: tuple[tuple[str, tuple[type[BaseException], ...]], ...] = (
+    ("DOCUMENT_TLS_FAILED", (ssl.SSLError,)),
+    ("DOCUMENT_DOWNLOAD_TIMEOUT", (TimeoutError, httpx.TimeoutException)),
+    ("DOCUMENT_CONNECT_FAILED", (httpx.ConnectError,)),
+    (
+        "DOCUMENT_PROTOCOL_ERROR",
+        (
+            httpx.RemoteProtocolError,
+            httpx.LocalProtocolError,
+            httpx.ReadError,
+            httpx.DecodingError,
+        ),
+    ),
+)
+_RESIDUAL_RETRIEVAL_REASON = "DOCUMENT_RETRIEVAL_FAILED"
+
+
+def _exception_chain(exc: BaseException) -> tuple[BaseException, ...]:
+    """*exc* and everything it was raised from or while handling, once each."""
+    seen: dict[int, BaseException] = {}
+    pending: list[BaseException] = [exc]
+    while pending:
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen[id(current)] = current
+        pending.extend(
+            link for link in (current.__cause__, current.__context__) if link
+        )
+    return tuple(seen.values())
+
+
+def transport_failure_reason(exc: BaseException) -> str:
+    """The typed reason for a failure of the download, by exception class."""
+    chain = _exception_chain(exc)
+    for reason, kinds in _TRANSPORT_REASONS:
+        if any(isinstance(link, kinds) for link in chain):
+            return reason
+    return _RESIDUAL_RETRIEVAL_REASON
+
+
+@dataclass
+class _Progress:
+    """Where a retrieval had got to, for the failure log: the URL being worked
+    on (the redirect hop, not the requested one) and the phase."""
+
+    url: str
+    phase: Literal["dns", "connect", "redirect", "body", "extract", "inspect"] = "dns"
+
+
+def _host_matches(host: str, suffix: str) -> bool:
+    return host == suffix or host.endswith(f".{suffix}")
+
+
+def _product_token(user_agent: str) -> str:
+    """The application's own ``Name/version`` token of a User-Agent string
+    (``Mozilla/5.0`` is the compatibility prefix, not the application)."""
+    for match in _PRODUCT_TOKEN_RE.finditer(user_agent):
+        if not match.group(0).casefold().startswith("mozilla/"):
+            return match.group(0)
+    return user_agent
+
+
+def _user_agent_for(url: str) -> str:
+    """The User-Agent to send to *url*'s host.
+
+    ``HTTP_USER_AGENT`` everywhere except a host that requires a contact
+    address, which gets ``<product token> <SEC_CONTACT_EMAIL>``. Without the
+    contact the request is refused here, before anything connects: sending it
+    would only be refused by the host. The address goes to no other host.
+    """
+    host = (urlparse(url).hostname or "").rstrip(".").lower()
+    if not any(_host_matches(host, suffix) for suffix in _CONTACT_REQUIRED_HOSTS):
+        return config.http_user_agent
+    contact = config.sec_contact_email
+    if not contact:
+        raise DocumentExtractionError(
+            "DOCUMENT_SEC_CONTACT_REQUIRED",
+            detail=(
+                f"{host} requires a contact address in the User-Agent; "
+                "set SEC_CONTACT_EMAIL"
+            ),
+        )
+    return f"{_product_token(config.http_user_agent)} {contact}"
 
 
 # --- Allocation --------------------------------------------------------------
@@ -232,7 +344,26 @@ def _official_url(url: str, extra_hosts: tuple[str, ...] = ()) -> bool:
         return False
     host = parsed.hostname.rstrip(".").lower()
     approved = (*_OFFICIAL_HOST_SUFFIXES, *extra_hosts)
-    return any(host == suffix or host.endswith(f".{suffix}") for suffix in approved)
+    return any(_host_matches(host, suffix) for suffix in approved)
+
+
+def _refusal_reason(url: str, extra_hosts: tuple[str, ...]) -> str:
+    """Why a redirect target is refused: an approved host reached over plain
+    http is an insecure redirect, anything else an unapproved host."""
+    parsed = urlparse(url)
+    if parsed.scheme == "http" and parsed.hostname:
+        try:
+            port = parsed.port
+        except ValueError:
+            return "UNAPPROVED_DOCUMENT_HOST"
+        # The https twin of the same address: http's own default port drops.
+        netloc = parsed.netloc.rpartition("@")[2]
+        if port == 80:
+            netloc = netloc.rpartition(":")[0]
+        twin = urlunsplit(("https", netloc, parsed.path, parsed.query, ""))
+        if _official_url(twin, extra_hosts):
+            return "DOCUMENT_INSECURE_REDIRECT"
+    return "UNAPPROVED_DOCUMENT_HOST"
 
 
 def is_official_document_url(url: str) -> bool:
@@ -444,36 +575,55 @@ async def _download_official(
     extra_hosts: tuple[str, ...] = (),
     *,
     allocation: _Allocation,
+    progress: _Progress | None = None,
 ) -> tuple[bytes, str, str]:
     current = url
+    progress = progress or _Progress(url)
     # One bound for the whole download (DNS checks and redirects included):
     # its share of the allocation, so a trickling body stops there. httpx gets
     # the same value per phase; a tighter per-phase bound would only fail a
-    # stall sooner with nothing to spend the time on. A spent share raises
-    # TimeoutError before the client opens, which get_official_document
-    # reports as DOCUMENT_RETRIEVAL_FAILED, as it does an httpx timeout.
-    total = require_allowance(
-        allocation.download_seconds, label="official_document_download"
-    )
+    # stall sooner with nothing to spend the time on. A spent share is refused
+    # before the client opens, as DOCUMENT_ALLOWANCE_SPENT.
+    try:
+        total = require_allowance(
+            allocation.download_seconds, label="official_document_download"
+        )
+    except TimeoutError as exc:
+        raise DocumentExtractionError("DOCUMENT_ALLOWANCE_SPENT") from exc
     async with (
         asyncio.timeout(total),
         httpx.AsyncClient(timeout=total) as client,
     ):
-        for _ in range(4):
+        for hop in range(4):
+            progress.url = current
+            progress.phase = "dns"
             if not _official_url(current, extra_hosts):
-                raise DocumentExtractionError("UNAPPROVED_DOCUMENT_HOST")
+                raise DocumentExtractionError(
+                    _refusal_reason(current, extra_hosts)
+                    if hop
+                    else "UNAPPROVED_DOCUMENT_HOST"
+                )
+            user_agent = _user_agent_for(current)
             await _ensure_public_hostname(current)
+            progress.phase = "connect"
             async with client.stream(
-                "GET", current, follow_redirects=False
+                "GET",
+                current,
+                headers={"User-Agent": user_agent},
+                follow_redirects=False,
             ) as response:
                 if response.is_redirect:
+                    progress.phase = "redirect"
                     location = response.headers.get("location")
                     if not location:
                         raise DocumentExtractionError("DOCUMENT_REDIRECT_INVALID")
                     current = urljoin(current, location)
                     continue
+                progress.phase = "body"
                 if response.status_code >= 400:
-                    raise DocumentExtractionError("DOCUMENT_HTTP_ERROR")
+                    raise DocumentExtractionError(
+                        "DOCUMENT_HTTP_ERROR", status=response.status_code
+                    )
                 declared = response.headers.get("content-length")
                 if declared and declared.isdigit() and int(declared) > max_bytes:
                     raise DocumentExtractionError("DOCUMENT_SIZE_LIMIT")
@@ -497,6 +647,36 @@ def _html_document_text(soup: BeautifulSoup) -> str:
     return soup.get_text("\n", strip=True)
 
 
+_DOWNLOAD_PHASES = frozenset({"dns", "connect", "redirect", "body"})
+
+
+def _typed_failure(exc: Exception, progress: _Progress) -> DocumentExtractionError:
+    """*exc* as a typed failure: already one, a transport failure of the
+    download (classified by exception class), or the residual reason."""
+    if isinstance(exc, DocumentExtractionError):
+        return exc
+    if progress.phase in _DOWNLOAD_PHASES:
+        return DocumentExtractionError(transport_failure_reason(exc))
+    return DocumentExtractionError(_RESIDUAL_RETRIEVAL_REASON)
+
+
+def _log_failure(
+    failure: DocumentExtractionError, exc: Exception, progress: _Progress
+) -> None:
+    """One warning per failed retrieval: where it stopped, never the full URL
+    (a path or query can carry a token)."""
+    target = urlparse(progress.url)
+    logger.warning(
+        "official_document_failed",
+        reason=failure.reason,
+        phase=progress.phase,
+        document_scheme=target.scheme,
+        document_host=target.hostname,
+        http_status=failure.status,
+        **summarize_exception(exc, operation="official_document_failed"),
+    )
+
+
 @tool
 async def get_official_document(
     url: str,
@@ -518,10 +698,16 @@ async def get_official_document(
             f"APPROVED_HOSTS: {', '.join(approved) if approved else 'none'}"
         )
     allocation = _allocate()
+    progress = _Progress(url)
     try:
         payload, content_type, final_url = await _download_official(
-            url, policy.max_document_bytes, extra_hosts, allocation=allocation
+            url,
+            policy.max_document_bytes,
+            extra_hosts,
+            allocation=allocation,
+            progress=progress,
         )
+        progress.phase = "extract"
         is_pdf = payload.startswith(b"%PDF") or "application/pdf" in content_type
         if is_pdf:
             extracted = await extract_pdf_text(
@@ -553,6 +739,7 @@ async def get_official_document(
         reason = extracted.reason or (
             "EVIDENCE_CHAR_LIMIT" if len(extracted.text) > len(evidence) else None
         )
+        progress.phase = "inspect"
         # Whatever is left, at least the reserve held back from extraction.
         # Fails closed: evidence that could not be inspected in time is
         # never returned.
@@ -588,11 +775,7 @@ async def get_official_document(
             "STATUS: EVIDENCE_FOUND\n"
             f"DOCUMENT_METADATA: {json.dumps(metadata, sort_keys=True)}\n\n{inspected}"
         )
-    except DocumentExtractionError as exc:
-        return f"STATUS: INSUFFICIENT_DATA\nREASON: {exc.reason}"
     except Exception as exc:
-        logger.warning(
-            "official_document_failed",
-            **summarize_exception(exc, operation="official_document_failed"),
-        )
-        return "STATUS: INSUFFICIENT_DATA\nREASON: DOCUMENT_RETRIEVAL_FAILED"
+        failure = _typed_failure(exc, progress)
+        _log_failure(failure, exc, progress)
+        return failure.reply()
