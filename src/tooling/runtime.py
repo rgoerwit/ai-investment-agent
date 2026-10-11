@@ -258,7 +258,12 @@ class ToolExecutionService:
     ) -> ToolResult:
         try:
             for hook in self._hooks:
+                _require_hook_admission(call)
                 call = await hook.before(call)
+            # A last hook that outlived the allowance must not start the runner.
+            _require_hook_admission(call)
+        except _ScopedToolTimeout:
+            raise
         except TimeoutError as exc:
             # The hook's own timeout (a stalled policy lookup), not this
             # scope's: the combined bound cancels, it does not raise in here.
@@ -331,20 +336,16 @@ class ToolExecutionService:
             raise
 
         for hook in reversed(self._hooks):
-            if operational_time_left() <= 0:
-                # Spent before this hook could start: discard the result rather
-                # than return it uninspected, start a judge nobody will wait
-                # for, or -- in an orphan whose hook outlived cancellation --
-                # let a later hook record a result the caller never received.
-                raise _scoped_timeout(
-                    call, "hooks_allowance_spent", "no allowance left for its hooks"
-                )
+            _require_hook_admission(call)
             try:
                 result = await hook.after(call, result)
             except TimeoutError as exc:
                 raise _scoped_timeout(
                     call, "after_hooks", "timed out in an after() hook"
                 ) from exc
+        # The last hook may itself have spent the allowance: the caller has
+        # already been told it timed out, so the result is not returned.
+        _require_hook_admission(call)
         return result
 
 
@@ -383,6 +384,22 @@ def _log_timeout(
         timeout_seconds=timeout_seconds,
         scope=scope,
     )
+
+
+def _require_hook_admission(call: ToolInvocation) -> None:
+    """Refuse to start (or to continue past) a hook once the allowance is spent.
+
+    Checked before every ``before()`` and ``after()`` hook and after the last
+    of each, so a hook that overruns -- including one that swallowed the
+    combined bound's cancellation and finished in an orphaned task -- never
+    lets a later hook, the runner or a recorded result follow it. Admission
+    cannot undo what a hook already did: a hook that finished its side effect
+    (a ledger write, an audit record) before the check keeps it.
+    """
+    if operational_time_left() <= 0:
+        raise _scoped_timeout(
+            call, "hooks_allowance_spent", "no allowance left for its hooks"
+        )
 
 
 def _scoped_timeout(

@@ -461,8 +461,14 @@ inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
   failure. Now `handle_article_generation` binds
   `ARTICLE_WORKFLOW_TIMEOUT_SECONDS` (900 s) around draft, review and
   revisions, and hard-bounds each step at it (`run_article_workflow_step`), so a
-  step that overruns is cancelled and its result discarded, never written. The
-  default is about twice the longest measured workflow: 333 to 444 s across 15
+  step that overruns is cancelled and its result discarded, never written.
+  Writing is a separate step after the bounded one (round 4): `ArticleWriter.draft`
+  touches no file, and `publish_article` writes through
+  `src/atomic_files.py::atomic_write_text` only once the draft has returned and
+  the workflow deadline still holds. Before, `write(output_path=...)` and
+  `generate_article` wrote from inside the bounded step, so a writer that
+  swallowed cancellation could publish after its caller was told it timed out.
+  The default is about twice the longest measured workflow: 333 to 444 s across 15
   June 2026 article runs (analysis save to article write). `write`, `revise` and
   the edit loop are async; each tier invokes through the runtime loop keyed by
   its seat (`Article Writer`, `Article Writer Fallback`). `TimeoutClass.EDITORIAL`

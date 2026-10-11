@@ -30,6 +30,7 @@ from src.article_audit import (
     prepend_verification_caveats,
 )
 from src.async_utils import run_with_hard_timeout
+from src.atomic_files import atomic_write_text
 from src.config import config, get_env_value
 from src.data_block_utils import extract_last_data_block
 from src.error_safety import redact_sensitive_text, summarize_exception
@@ -189,6 +190,21 @@ async def run_article_workflow_step(coro: Any, *, label: str) -> Any:
                 f"{label!r}: article workflow deadline passed"
             ) from exc
         raise
+
+
+def publish_article(article: str, output_path: Path) -> None:
+    """The one publication step: write the draft if the workflow deadline holds.
+
+    Called by the caller after the bounded draft step returned, never from
+    inside it. An expired deadline means the caller was already told the
+    workflow timed out, so a late completion publishes nothing; an existing
+    file at ``output_path`` is replaced atomically or left untouched.
+    """
+    deadline = current_enclosing_deadline()
+    if deadline is not None and llm_timeouts.now() >= deadline:
+        raise ArticleWorkflowExpired("article publication: workflow deadline passed")
+    atomic_write_text(output_path, article)
+    logger.info("article_saved", path=str(output_path))
 
 
 # Default fallback prompt config if prompts/writer.json is missing
@@ -1094,6 +1110,11 @@ class ArticleWriter:
         """
         Generate an article from the analysis report.
 
+        Production (``draft``) never touches the filesystem; the draft is
+        published only once it has returned and any bound workflow deadline
+        still holds (``publish_article``), so an invocation that outlived its
+        caller cannot write.
+
         Args:
             ticker: Stock ticker symbol
             company_name: Full company name
@@ -1109,6 +1130,35 @@ class ArticleWriter:
         Returns:
             Generated article as Markdown string
         """
+        article = await self.draft(
+            ticker=ticker,
+            company_name=company_name,
+            report_text=report_text,
+            trade_date=trade_date,
+            valuation_context=valuation_context,
+            governance_card=governance_card,
+            chart_paths=chart_paths,
+            article_dir=article_dir
+            or (Path(output_path).parent if output_path else None),
+            evidence_constraints=evidence_constraints,
+        )
+        if output_path:
+            publish_article(article, Path(output_path))
+        return article
+
+    async def draft(
+        self,
+        ticker: str,
+        company_name: str,
+        report_text: str,
+        trade_date: str,
+        valuation_context: str | None = None,
+        governance_card: dict[str, Any] | None = None,
+        chart_paths: dict[str, str] | None = None,
+        article_dir: Path | None = None,
+        evidence_constraints: str | None = None,
+    ) -> str:
+        """Produce the article draft as Markdown, writing nothing to disk."""
         logger.info("generating_article", ticker=ticker, company=company_name)
 
         # Load voice samples
@@ -1123,8 +1173,7 @@ class ArticleWriter:
             ticker,
             trade_date,
             chart_paths=chart_paths,
-            article_dir=article_dir
-            or (Path(output_path).parent if output_path else None),
+            article_dir=article_dir,
         )
 
         # Fetch fact-check context (single Tavily search, controlled size)
@@ -1241,13 +1290,6 @@ class ArticleWriter:
                 length=len(article),
                 word_count=len(article.split()),
             )
-
-            # Save if output path provided
-            if output_path:
-                output_path = Path(output_path)
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                output_path.write_text(article, encoding="utf-8")
-                logger.info("article_saved", path=str(output_path))
 
             return article
 
@@ -2337,21 +2379,25 @@ async def generate_article(
                 "workflow": "article_only",
             },
         )
+        target = Path(output_path) if output_path else None
         with article_workflow_deadline():
-            return cast(
+            article = cast(
                 str,
                 await run_article_workflow_step(
-                    writer.write(
+                    writer.draft(
                         ticker=ticker,
                         company_name=company_name,
                         report_text=report_text,
                         trade_date=trade_date,
-                        output_path=Path(output_path) if output_path else None,
                         valuation_context=valuation_context,
+                        article_dir=target.parent if target else None,
                     ),
                     label=f"article_workflow:write:{ticker}",
                 ),
             )
+            if target:
+                publish_article(article, target)
+            return article
     finally:
         trace_context.close()
         flush_traces()

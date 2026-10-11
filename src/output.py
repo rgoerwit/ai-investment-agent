@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,6 +14,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from src.atomic_files import atomic_write_text
 from src.cli import OutputTargets, resolve_article_path
 from src.config import config
 from src.report_generator import QuietModeReporter
@@ -24,26 +23,6 @@ from src.runtime_diagnostics import has_provenance_contract, is_publishable_anal
 
 logger = structlog.get_logger(__name__)
 console = Console()
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Publish a complete text artifact with one filesystem replacement."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            delete=False,
-        ) as handle:
-            handle.write(content)
-            temp_path = Path(handle.name)
-        os.replace(temp_path, path)
-    finally:
-        if temp_path and temp_path.exists():
-            temp_path.unlink()
 
 
 def _bounded_review_findings(feedback: dict[str, Any]) -> dict[str, Any]:
@@ -602,7 +581,7 @@ async def handle_article_generation(
                 f"{article_path.stem}.draft{article_path.suffix or '.md'}"
             )
         )
-        _atomic_write_text(saved_article_path, final_article)
+        atomic_write_text(saved_article_path, final_article)
         article_hash = hashlib.sha256(final_article.encode("utf-8")).hexdigest()
 
         writer_model = getattr(writer, "current_model_name", "")
@@ -856,10 +835,7 @@ def _render_primary_output(
 
     if output_targets.output_file:
         try:
-            if output_targets.output_file.parent != Path("."):
-                output_targets.output_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_targets.output_file, "w", encoding="utf-8") as f:
-                f.write(report)
+            atomic_write_text(output_targets.output_file, report)
             if not args.quiet and not args.brief:
                 console_obj.print(
                     f"[green]Report saved to:[/green] [cyan]{output_targets.output_file}[/cyan]{cost_suffix_fn()}"

@@ -575,9 +575,11 @@ wrapper, which only delayed cancellation by a loop turn; the node keeps the
   hooks see no bound LLM deadline.
 - **A late result is never recorded.** A hook that swallows cancellation keeps
   the orphaned chain running, and `EvidenceRecorder` is the last `after()` hook.
-  The chain therefore re-checks the deadline before every `after()` hook and
-  stops once it is spent, so the ledger never records what the caller was told
-  timed out. That race is why MCP budget accounting moved out of the hook
+  The chain therefore checks the deadline before every `before()` and `after()`
+  hook and after the last of each (`_require_hook_admission`, round 4; until then
+  only before each `after()` hook) and stops once it is spent, so no later hook,
+  runner or returned result follows a hook that overran. Admission cannot undo a
+  side effect a hook already performed. That race is why MCP budget accounting moved out of the hook
   chain (round 3): `MCPRuntime` now counts each tools/call as it is sent, so a
   discarded result is still counted (`docs/MCP.md`, Budget interaction). Round
   4 made that count atomic: check (`can_call`) and record were separate SQLite

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- No new work after the deadline. `ToolExecutionService` checks the operational
+  deadline before every `before()` and `after()` hook and after the last of each, so
+  a hook that overran, including one that swallowed cancellation, is never followed
+  by a later hook, the runner or a returned result (it used to check only before each
+  `after()` hook). Articles are written only after the bounded draft step returns
+  while the workflow deadline holds: `generate_article` and
+  `ArticleWriter.write(output_path=...)` no longer write from inside the bounded
+  work, so a late or cancellation-resistant writer writes nothing and an existing
+  file is kept. Articles and the analysis report are written through one atomic
+  writer, `src/atomic_files.py::atomic_write_text`; the report was a plain
+  `open(..., "w")` that a failure could leave half-written.
+
 - An official document's HTML parse, link ranking and text extraction now run as one
   worker call under the extraction allowance and an in-flight limit instead of on
   the event loop, where an 80 ms parse overran a 20 ms runner bound and stalled
