@@ -218,7 +218,7 @@ async def _invoke_consultant_with_deadline(
                 context=context,
                 provider=provider,
                 model_name=model_name,
-                max_transient_attempts=1,
+                max_attempts=1,
                 overall_timeout_seconds=timeout_s,
             )
     except TimeoutError as exc:

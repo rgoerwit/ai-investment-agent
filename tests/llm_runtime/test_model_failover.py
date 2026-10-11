@@ -467,9 +467,7 @@ class TestRetryLoop:
         )
         with transport.patch():
             try:
-                await _invoke(
-                    _gemini(), "PM failover retried", max_transient_attempts=3
-                )
+                await _invoke(_gemini(), "PM failover retried", max_attempts=3)
             except genai_errors.ServerError:
                 pass
         after_failover = transport.calls[

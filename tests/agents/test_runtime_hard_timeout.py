@@ -486,12 +486,78 @@ class TestHardTimeoutWrap:
                     await invoke_with_rate_limit_handling(
                         runnable,
                         {"input": "x"},
-                        max_attempts=3,
-                        max_transient_attempts=2,
+                        max_attempts=2,
                         context="TransientBudgetTest",
                     )
 
         assert runnable.ainvoke.call_count == 2
+
+
+class TestAttemptSizing:
+    """The hard timeout is the time remaining, never padded past it.
+
+    The clock is frozen, so the remaining time is exactly the deadline passed
+    in. Refusing a request below the minimum useful attempt is dispatch
+    admission (``request_timeout``), pinned in tests/llm_runtime/test_timeouts.py.
+    """
+
+    @pytest.fixture
+    def sized(self, monkeypatch):
+        from src.agents import runtime as runtime_module
+        from src.llm_runtime import timeouts as llm_timeouts
+
+        monkeypatch.setattr(llm_timeouts, "now", lambda: 1000.0)
+        monkeypatch.setattr(runtime_module.asyncio, "sleep", AsyncMock())
+        timeouts: list[float] = []
+
+        async def spy(coro, *, timeout, label):
+            timeouts.append(timeout)
+            return await coro
+
+        monkeypatch.setattr(runtime_module, "run_with_hard_timeout", spy)
+        return timeouts
+
+    async def _invoke(self, overall):
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(return_value=AIMessage(content="ok"))
+        with patch.object(settings_config, "llm_call_hard_timeout_seconds", 60.0):
+            await invoke_with_rate_limit_handling(
+                runnable,
+                {"input": "x"},
+                max_attempts=1,
+                context="SizingTest",
+                overall_timeout_seconds=overall,
+            )
+        return runnable
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("remaining", [0.05, 0.1, 1.0, 59.0])
+    async def test_remaining_time_sizes_the_hard_timeout_unpadded(
+        self, sized, remaining
+    ):
+        runnable = await self._invoke(remaining)
+        assert sized == [pytest.approx(remaining, abs=1e-9)]  # 0.05 was 0.1
+        assert runnable.ainvoke.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_the_invocation_cap_still_bounds_a_long_deadline(self, sized):
+        await self._invoke(10_000.0)
+        assert len(sized) == 1
+        assert sized[0] < 10_000.0
+
+    @pytest.mark.asyncio
+    async def test_a_spent_deadline_still_reports_the_overall_deadline(self, sized):
+        with pytest.raises(TimeoutError, match="overall LLM deadline"):
+            await self._invoke(0.0)
+        assert sized == []
+
+    @pytest.mark.asyncio
+    async def test_an_enclosing_deadline_sizes_the_hard_timeout_unpadded(self, sized):
+        from src.llm_runtime.timeouts import enclosing_deadline
+
+        with enclosing_deadline(0.05):
+            await self._invoke(None)
+        assert sized == [pytest.approx(0.05, abs=1e-9)]
 
 
 def test_no_external_asyncio_timeout_wrapping_shared_llm_helper():
@@ -598,7 +664,6 @@ class TestQuickModeFlexLatencyGuard:
                 runnable,
                 {"input": "x"},
                 max_attempts=2,
-                max_transient_attempts=2,
                 context="QuickStandardTimeout",
                 provider="google",
                 model_name="gemini-3.5-flash",
@@ -657,7 +722,6 @@ class TestQuickModeFlexLatencyGuard:
                 runnable,
                 {"input": "x"},
                 max_attempts=2,
-                max_transient_attempts=2,
                 context="QuickLatencyFallbackTimeout",
                 provider="google",
                 model_name="gemini-3.5-flash",
@@ -715,8 +779,7 @@ class TestQuickModeFlexLatencyGuard:
                 await invoke_with_rate_limit_handling(
                     runnable,
                     {"input": "x"},
-                    max_attempts=3,
-                    max_transient_attempts=2,
+                    max_attempts=2,
                     context="QuickFlexGuard",
                     provider="google",
                     model_name="gemini-3.5-flash",
@@ -757,8 +820,7 @@ class TestQuickModeFlexLatencyGuard:
                 await invoke_with_rate_limit_handling(
                     runnable,
                     {"input": "x"},
-                    max_attempts=3,
-                    max_transient_attempts=2,
+                    max_attempts=2,
                     context="FullFlexRetry",
                     provider="google",
                     model_name="gemini-3.5-flash",
@@ -957,7 +1019,6 @@ class TestProviderPartialResponseRetry:
                 runnable,
                 {"input": "x"},
                 max_attempts=2,
-                max_transient_attempts=2,
                 context="ClassifierRetryAuthority",
             )
 
@@ -1035,8 +1096,7 @@ class TestProviderPartialResponseRetry:
         result = await invoke_with_rate_limit_handling(
             runnable,
             {"input": "x"},
-            max_attempts=3,
-            max_transient_attempts=2,
+            max_attempts=2,
             context="OutputCapNoRetry",
             provider="openai",
             model_name="gpt-test",

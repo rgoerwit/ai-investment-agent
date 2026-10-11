@@ -357,7 +357,7 @@ async def run_bounded_consultant_loop(
     # answer instead of on reasoning it already did.
     #
     # Cost is bounded to exactly one extra call: this runs once, after the
-    # loop, and the consultant invokes with ``max_transient_attempts=1``, so
+    # loop, and the consultant invokes with ``max_attempts=1``, so
     # the runtime does not separately retry a partial before we get here. The
     # re-ask is strictly additive — any failure (deadline exhausted, provider
     # error) leaves whatever content we already had, so widening the trigger

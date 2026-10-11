@@ -638,20 +638,103 @@ class TestRuntimeLoop:
         sleep.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_transient_budget_defaults_to_llm_attempts(self):
+    @pytest.mark.parametrize("allowance", [0, 1, 2, 3, 5])
+    @pytest.mark.parametrize("kind", ["rate_limit", "transient", "mixed"])
+    async def test_every_retry_counts_against_llm_attempts(self, allowance, kind):
+        """One total: whatever the disposition, calls == max(1, llm_attempts)."""
+        rate_limit = genai_errors.ClientError(
+            429,
+            {
+                "error": {
+                    "code": 429,
+                    "message": "RESOURCE_EXHAUSTED",
+                    "status": "RESOURCE_EXHAUSTED",
+                }
+            },
+        )
+        errors = {
+            "rate_limit": [rate_limit],
+            "transient": [_server_error(503)],
+            "mixed": [rate_limit, _server_error(503)],
+        }[kind]
+        calls = {"n": 0}
+
+        async def failing(*_a, **_kw):
+            calls["n"] += 1
+            raise errors[(calls["n"] - 1) % len(errors)]
+
         runnable = AsyncMock()
-        runnable.ainvoke = AsyncMock(side_effect=_server_error(503))
+        runnable.ainvoke = AsyncMock(side_effect=failing)
         with (
             use_runtime_config(
                 RuntimeConfig.from_config(config_module.config).with_overrides(
-                    llm_attempts=3
+                    llm_attempts=allowance
                 )
             ),
             patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock),
-            pytest.raises(genai_errors.ServerError),
+            pytest.raises((genai_errors.ServerError, genai_errors.ClientError)),
         ):
-            await _invoke(runnable, "AttemptsDefault")
-        assert runnable.ainvoke.await_count == 3
+            await _invoke(runnable, "AttemptsTotal")
+        assert runnable.ainvoke.await_count == max(1, allowance)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_is_never_retried(self):
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(side_effect=asyncio.CancelledError())
+        with (
+            use_runtime_config(
+                RuntimeConfig.from_config(config_module.config).with_overrides(
+                    llm_attempts=5
+                )
+            ),
+            patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock) as sleep,
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await _invoke(runnable, "AttemptsCancelled")
+        assert runnable.ainvoke.await_count == 1
+        sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["rate_limit", "transient"])
+    async def test_backoff_that_does_not_fit_stops_the_allowance(self, clock, kind):
+        """A large allowance never overrides deadline admission of the backoff."""
+        error = (
+            genai_errors.ClientError(
+                429,
+                {
+                    "error": {
+                        "code": 429,
+                        "message": "RESOURCE_EXHAUSTED",
+                        "status": "RESOURCE_EXHAUSTED",
+                    }
+                },
+            )
+            if kind == "rate_limit"
+            else _server_error(503)
+        )
+
+        async def failing(*_a, **_kw):
+            clock.advance(10.0)
+            raise error
+
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(side_effect=failing)
+        with (
+            use_runtime_config(
+                RuntimeConfig.from_config(config_module.config).with_overrides(
+                    llm_attempts=5
+                )
+            ),
+            patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock) as sleep,
+            patch("src.agents.runtime.random.uniform", return_value=1.0),
+            pytest.raises((genai_errors.ServerError, genai_errors.ClientError)),
+        ):
+            await _invoke(runnable, "AttemptsBackoff", overall_timeout_seconds=22.0)
+        # 12 s remain after the first failure: the 60 s provider window never
+        # fits (refused, not shortened); the transient backoff is clamped to the
+        # room left and admits exactly one more attempt before none fits.
+        assert runnable.ainvoke.await_count == {"rate_limit": 1, "transient": 2}[kind]
+        assert sleep.await_count == runnable.ainvoke.await_count - 1
 
     @pytest.mark.asyncio
     async def test_flex_then_standard_records_two_dispatches(self, clock):
@@ -669,8 +752,9 @@ class TestRuntimeLoop:
         assert not any(isinstance(v, dict | list) for v in flex.values())
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("overall", [3.0, 0.05])
     async def test_budget_refusal_is_recorded_and_spares_the_breaker(
-        self, clock, monkeypatch
+        self, clock, monkeypatch, overall
     ):
         from src.agents.circuit_breaker import get_circuit_breaker
 
@@ -687,7 +771,7 @@ class TestRuntimeLoop:
             patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock),
             pytest.raises(BudgetExhausted),
         ):
-            await _invoke(_gemini(), "Refused", overall_timeout_seconds=3.0)
+            await _invoke(_gemini(), "Refused", overall_timeout_seconds=overall)
         assert transport.calls == []
         (attempt,) = _attempts("Refused")
         assert attempt.failure_origin == "budget_exhausted"

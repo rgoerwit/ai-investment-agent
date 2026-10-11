@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `invoke_with_rate_limit_handling` has one attempt count. `max_attempts` (default
+  `LLM_ATTEMPTS`) caps every retry, rate-limit and transient alike; a hidden
+  `max_attempts=3` beside `max_transient_attempts` let `LLM_ATTEMPTS=5` stop at
+  three calls on repeated 503s and `LLM_ATTEMPTS=1` make three calls on repeated
+  429s. Under the default `LLM_ATTEMPTS=2` a 429 now gets one retry instead of two.
+  The Consultant, PM verdict recovery and APAC direct retry pass `max_attempts=1`,
+  so Consultant 429s are no longer retried. The hard timeout is now
+  `min(cap, remaining)`: a fixed 0.1 s floor padded a spent deadline, and dispatch
+  admission already refuses an attempt below the minimum useful allowance.
+
 - MCP: each tools/call takes one atomic budget reservation (daily and per-run, one
   SQLite `BEGIN IMMEDIATE` transaction on a bounded worker thread) immediately
   before it is sent, so concurrent callers can no longer exceed a limit, and a

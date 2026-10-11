@@ -245,7 +245,6 @@ async def _recover_pm_verdict_metadata(
             provider=support.infer_provider_name(llm),
             model_name=support.get_model_name(llm),
             max_attempts=1,
-            max_transient_attempts=1,
         )
     except Exception as exc:
         logger.warning(

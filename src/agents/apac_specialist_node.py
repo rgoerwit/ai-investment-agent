@@ -192,7 +192,6 @@ def create_apac_specialist_node(llm, *, fallback_llm=None) -> Callable:
                         provider=support.infer_provider_name(active_llm),
                         model_name=support.get_model_name(active_llm),
                         max_attempts=1,
-                        max_transient_attempts=1,
                     )
                 text = message_utils.extract_string_content(response.content).strip()
                 if text != APAC_NO_MATERIAL_SENTINEL:

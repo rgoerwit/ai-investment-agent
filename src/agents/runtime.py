@@ -505,8 +505,7 @@ def _timeout_failure_origin(exc: BaseException) -> str | None:
 async def invoke_with_rate_limit_handling(
     runnable,
     input_data: dict[str, Any] | list[Any],
-    max_attempts: int = 3,
-    max_transient_attempts: int | None = None,
+    max_attempts: int | None = None,
     context: str = "LLM",
     provider: str | None = None,
     model_name: str | None = None,
@@ -529,9 +528,11 @@ async def invoke_with_rate_limit_handling(
     ``overall_timeout_seconds`` and any node deadline bound by
     ``enclosing_deadline``. The deadline is bound in a ContextVar for the
     attempt's dispatches, which size every request from it and send one SDK
-    attempt each. Retries are owned here: ``max_transient_attempts`` defaults to
-    the run's ``llm_attempts`` (total), and each retry and backoff is re-admitted
-    against the enclosing deadline.
+    attempt each. Retries are owned here: ``max_attempts`` is the one total for
+    every retry, rate-limit or transient, and defaults to the run's
+    ``llm_attempts``; only a caller that must not retry (decision, APAC,
+    consultant) passes a smaller explicit value. Each retry and backoff is
+    re-admitted against the enclosing deadline.
     """
     _validate_llm_input_tool_history(
         input_data,
@@ -551,7 +552,6 @@ async def invoke_with_rate_limit_handling(
             model=resolved_model,
             runnable_class=class_name,
             max_attempts=max_attempts,
-            max_transient_attempts=max_transient_attempts,
             overall_timeout_seconds=overall_timeout_seconds,
         )
 
@@ -575,8 +575,9 @@ async def invoke_with_rate_limit_handling(
     node_deadline = current_enclosing_deadline()
     if node_deadline is not None:
         deadline = node_deadline if deadline is None else min(deadline, node_deadline)
-    if max_transient_attempts is None:
-        max_transient_attempts = budget_policy.attempts
+    if max_attempts is None:
+        max_attempts = budget_policy.attempts
+    max_attempts = max(1, max_attempts)
 
     breaker_enabled = bool(settings_config.llm_circuit_breaker_enabled)
     breaker = get_circuit_breaker() if breaker_enabled else None
@@ -615,7 +616,9 @@ async def invoke_with_rate_limit_handling(
                             else ""
                         )
                     )
-                effective_timeout = min(hard_timeout, max(0.1, remaining))
+                # No floor: request_timeout admission at dispatch refuses (and
+                # records) a request below the minimum useful attempt.
+                effective_timeout = min(hard_timeout, remaining)
             # The absolute deadline every dispatch in this attempt is sized from.
             # A retry gets a fresh allowance, capped by the enclosing deadline.
             attempt_deadline = llm_timeouts.now() + effective_timeout
@@ -684,7 +687,6 @@ async def invoke_with_rate_limit_handling(
             # finish metadata and other partials remain transient-retry candidates.
             partial_reason = _detect_provider_partial_response(result)
             output_cap_exhausted = response_hit_output_cap(result)
-            transient_max_attempts = max(1, min(max_attempts, max_transient_attempts))
             provider_call_completed = partial_reason is None or output_cap_exhausted
             if provider_call_completed and breaker is not None:
                 breaker.record_outcome(
@@ -699,7 +701,7 @@ async def invoke_with_rate_limit_handling(
             if (
                 partial_reason is not None
                 and not output_cap_exhausted
-                and attempt < transient_max_attempts - 1
+                and attempt < max_attempts - 1
             ):
                 raise ProviderPartialResponseError(
                     f"provider_partial_response: {partial_reason} "
@@ -1064,7 +1066,6 @@ async def invoke_with_rate_limit_handling(
                 await asyncio.sleep(wait_time)
                 continue
 
-            transient_max_attempts = max(1, min(max_attempts, max_transient_attempts))
             # A struggling model spends its retry on the failover model. That
             # includes a quick-mode flex queue timeout, which is otherwise not
             # retried because it must not re-queue at flex: the failover attempt
@@ -1077,7 +1078,7 @@ async def invoke_with_rate_limit_handling(
             if (
                 (retry_class is RetryDisposition.TRANSIENT or fail_over)
                 and (not flex_latency_timeout_quick or fail_over)
-                and attempt < transient_max_attempts - 1
+                and attempt < max_attempts - 1
             ):
                 # Admission before the retry (and before its backoff): the
                 # retry needs a useful attempt's worth of the enclosing
@@ -1127,7 +1128,7 @@ async def invoke_with_rate_limit_handling(
                     provider=resolved_provider,
                     model=resolved_model,
                     attempt=attempt + 1,
-                    max_attempts=transient_max_attempts,
+                    max_attempts=max_attempts,
                     failure_kind=details.kind,
                     host=details.host,
                     retryable=details.retryable,

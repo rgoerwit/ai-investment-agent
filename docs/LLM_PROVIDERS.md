@@ -398,8 +398,9 @@ inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
   (langchain-google-genai maps it to `HttpRetryOptions(attempts=1)`; `0` would
   mean the SDK's default), the OpenAI-family and Anthropic transports zero
   retries, and any other value fails construction. A per-call `max_retries` is
-  refused at dispatch. The loop's transient budget defaults to `LLM_ATTEMPTS`,
-  and every retry and backoff is re-admitted against the enclosing deadline: a
+  refused at dispatch. The loop's one attempt count defaults to `LLM_ATTEMPTS`
+  and covers every retry, rate-limit and transient alike (a caller that must not
+  retry passes `max_attempts=1`), and every retry and backoff is re-admitted against the enclosing deadline: a
   transient backoff is clamped to fit, a rate-limit wait that leaves no useful
   attempt refuses the retry. The loop's backoffs (5 s × attempt plus 1-3 s jitter
   for a transient error, 60 s × attempt plus 1-10 s for a rate limit, the

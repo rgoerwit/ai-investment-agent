@@ -214,7 +214,6 @@ class TestNonRateLimitErrors:
                 runnable,
                 {"input": "test"},
                 max_attempts=3,
-                max_transient_attempts=3,
             )
 
         assert result == "success"
@@ -251,7 +250,6 @@ class TestNonRateLimitErrors:
                         runnable,
                         {"input": "test"},
                         max_attempts=2,
-                        max_transient_attempts=2,
                         context="Fundamentals Analyst",
                         provider="google",
                         model_name="gemini-3.5-flash",
