@@ -7,7 +7,12 @@ from contextlib import closing
 from pathlib import Path
 from typing import TypeVar
 
-from src.blocking_io import BlockingCallPolicy, InFlightLimit, run_blocking_call
+from src.blocking_io import (
+    DEFAULT_WORKER_SLOTS,
+    BlockingCallPolicy,
+    InFlightLimit,
+    run_blocking_call,
+)
 from src.config import config as settings_config
 from src.llm_runtime.timeouts import deadline_margin, require_allowance
 from src.mcp.config import MCPServerSpec
@@ -15,9 +20,9 @@ from src.mcp.config import MCPServerSpec
 T = TypeVar("T")
 
 # A budget transaction touches one row of a local file; more unfinished workers
-# than this means the store is stuck, and further admissions fail fast.
-_MAX_BUDGET_DB_WORKERS = 4
-_BUDGET_DB_IN_FLIGHT = InFlightLimit(_MAX_BUDGET_DB_WORKERS)
+# than the default slots means the store is stuck, and further admissions fail
+# fast. Its own pool, so a stuck store never starves document extraction.
+_BUDGET_DB_IN_FLIGHT = InFlightLimit(DEFAULT_WORKER_SLOTS)
 
 
 def admission_bounds() -> tuple[float, float]:

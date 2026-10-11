@@ -18,7 +18,12 @@ import structlog
 from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
-from src.blocking_io import BlockingCallPolicy, InFlightLimit, run_blocking_call
+from src.blocking_io import (
+    DEFAULT_WORKER_SLOTS,
+    BlockingCallPolicy,
+    InFlightLimit,
+    run_blocking_call,
+)
 from src.config import config
 from src.error_safety import summarize_exception
 from src.exchange_metadata import registered_official_document_hosts
@@ -61,16 +66,16 @@ _PRODUCT_TOKEN_RE = re.compile(r"[A-Za-z][\w.-]*/[\w.]+")
 # parity test): each call applies OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS or
 # OFFICIAL_DOCUMENT_DNS_TIMEOUT_SECONDS with with_timeout(), read at the call
 # and shrunk to what is left (see "Allocation" below).
-_PDF_POLICY = BlockingCallPolicy("official_document_pdf_extract", 20.0)
-# Parsing a hostile page is CPU-bound and cannot be interrupted: past this many
-# unfinished HTML workers further extractions are refused rather than adding
-# threads behind the stalled ones.
-_MAX_HTML_WORKERS = 4
-_HTML_POLICY = replace(
-    _PDF_POLICY,
-    label="official_document_html_extract",
-    in_flight=InFlightLimit(_MAX_HTML_WORKERS),
+# pypdf and the HTML parse are CPU-bound and cannot be interrupted, so one
+# document-extraction pool bounds both: past its unfinished workers further
+# extractions are refused rather than adding threads behind the stalled ones.
+# pdftotext is a subprocess bounded by its own timeout and kill, not a worker.
+_PDF_POLICY = BlockingCallPolicy(
+    "official_document_pdf_extract",
+    20.0,
+    in_flight=InFlightLimit(DEFAULT_WORKER_SLOTS),
 )
+_HTML_POLICY = replace(_PDF_POLICY, label="official_document_html_extract")
 _DNS_POLICY = BlockingCallPolicy("official_document_dns_check", 5.0)
 _MIN_USEFUL_TEXT_CHARS = 200
 _DEFAULT_KEYWORDS = (

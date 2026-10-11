@@ -45,6 +45,7 @@ from src.embeddings import resolve_embedding_binding
 from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.timeouts import enclosing_deadline
 from src.memory import EmbeddingAllowanceSpent, FinancialSituationMemory
+from tests.helpers.stalled_workers import stalled_worker
 
 _NOW = 1_000.0
 
@@ -309,14 +310,11 @@ def _probe_memory(monkeypatch, embed_query) -> FinancialSituationMemory:
 def test_embedding_probe_override_bounds_the_constructor(
     monkeypatch, isolated_memory_state
 ):
-    release = threading.Event()
     monkeypatch.setattr(config, "memory_embedding_healthcheck_timeout_seconds", 0.05)
 
     start = time.monotonic()
-    try:
+    with stalled_worker("memory_embedding_healthcheck") as release:
         memory = _probe_memory(monkeypatch, lambda *_a: release.wait(5) or [0.1])
-    finally:
-        release.set()
     assert time.monotonic() - start < 2.0
     assert memory.embeddings_available is False
 
@@ -483,19 +481,16 @@ def test_flush_is_not_clamped_to_a_caller_deadline(monkeypatch, fake_clock):
 
 
 def test_stalled_flush_is_abandoned_at_its_bound(monkeypatch):
-    release = threading.Event()
     client = MagicMock()
-    client.shutdown.side_effect = lambda: release.wait(5)
     _bind_langfuse(monkeypatch, client)
     monkeypatch.setattr(config, "langfuse_flush_timeout_seconds", 0.05)
     mock_logger = MagicMock()
     monkeypatch.setattr(observability, "logger", mock_logger)
 
     start = time.monotonic()
-    try:
+    with stalled_worker("shutdown", prefix="observability-") as release:
+        client.shutdown.side_effect = lambda: release.wait(5)
         observability.flush_traces()
-    finally:
-        release.set()
     assert time.monotonic() - start < 2.0
     mock_logger.warning.assert_any_call(
         "langfuse_flush_timeout", operation="shutdown", timeout_seconds=0.05
@@ -857,7 +852,6 @@ async def test_stalled_name_lookup_returns_by_the_deadline_via_async_path(
     monkeypatch,
 ):
     """End to end: the async caller returns at its bound; the worker is a daemon."""
-    release = threading.Event()
     workers: list[threading.Thread] = []
 
     class _StalledTicker:
@@ -877,9 +871,7 @@ async def test_stalled_name_lookup_returns_by_the_deadline_via_async_path(
     monkeypatch.setattr(config, "company_name_lookup_timeout_seconds", 0.05)
 
     start = time.monotonic()
-    try:
+    with stalled_worker(OUTPUT_COMPANY_NAME_INFO_POLICY.label) as release:
         assert await output._load_company_name_for_output_async("7203.T") is None
-    finally:
-        release.set()
     assert time.monotonic() - start < 1.0
     assert workers and all(w.daemon for w in workers)

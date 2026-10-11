@@ -39,6 +39,7 @@ from src.mcp.client import MCPRuntime
 from src.mcp.errors import MCPCallError, MCPErrorCategory
 from src.tooling.runtime import ToolExecutionService, ToolInvocation, ToolResult
 from tests.helpers.mcp_server import FakeMCPServer, http_runtime
+from tests.helpers.stalled_workers import stalled_worker
 
 _NOW = 1_000.0
 _STALL_CEILING_SECONDS = 10.0
@@ -379,21 +380,18 @@ async def test_external_cancellation_counts_only_a_sent_call(
 # --- Atomic reservation -----------------------------------------------------------
 
 
-async def _join_budget_workers() -> None:
-    """Wait until every budget worker thread has finished, so none outlives a test."""
-
-    async def drained() -> None:
-        while budget_module._BUDGET_DB_IN_FLIGHT.in_flight:
-            await asyncio.sleep(0.005)
-
-    await asyncio.wait_for(drained(), timeout=_STALL_CEILING_SECONDS)
+_BUDGET_WORKERS = "mcp_budget."
 
 
 def _stall_reservations(
-    runtime: MCPRuntime, monkeypatch, *, on_entry: Any = None
-) -> tuple[threading.Event, threading.Event]:
-    """Park each reservation's worker until released; then reserve for real."""
-    entered, release = threading.Event(), threading.Event()
+    runtime: MCPRuntime, monkeypatch, release: threading.Event, *, on_entry: Any = None
+) -> threading.Event:
+    """Park each reservation's worker on *release*; then reserve for real.
+
+    Returns the event set when a worker has entered. The caller owns *release*
+    through ``stalled_worker``, which joins the workers on every path.
+    """
+    entered = threading.Event()
     real = runtime.budget.try_reserve
 
     def stalled(*args: Any, **kwargs: Any) -> bool:
@@ -404,7 +402,7 @@ def _stall_reservations(
         return real(*args, **kwargs)
 
     monkeypatch.setattr(runtime.budget, "try_reserve", stalled)
-    return entered, release
+    return entered
 
 
 def _store_refusal(err: MCPCallError) -> None:
@@ -480,18 +478,14 @@ async def test_cancellation_during_admission_sends_nothing_and_the_late_commit_c
     server = FakeMCPServer()
     server.install(monkeypatch)
     runtime = http_runtime(tmp_path)
-    entered, release = _stall_reservations(runtime, monkeypatch)
-
-    task = asyncio.create_task(_execute(runtime))
-    try:
+    with stalled_worker(_BUDGET_WORKERS) as release:
+        entered = _stall_reservations(runtime, monkeypatch, release)
+        task = asyncio.create_task(_execute(runtime))
         # A bounded wait in the thread, so the helper thread always ends.
         assert await asyncio.to_thread(entered.wait, _STALL_CEILING_SECONDS)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=_STALL_CEILING_SECONDS)
-    finally:
-        release.set()
-        await _join_budget_workers()
 
     assert server.calls_sent == 0
     # Admitted reservations are counted, never refunded.
@@ -506,14 +500,10 @@ async def test_a_reservation_that_outlives_its_bound_is_refused_unsent_and_count
     server.install(monkeypatch)
     monkeypatch.setattr(config, "mcp_http_timeout_seconds", 0.2)
     runtime = http_runtime(tmp_path)
-    _, release = _stall_reservations(runtime, monkeypatch)
-
-    try:
+    with stalled_worker(_BUDGET_WORKERS) as release:
+        _stall_reservations(runtime, monkeypatch, release)
         with pytest.raises(MCPCallError) as exc_info:
             await _execute(runtime)
-    finally:
-        release.set()
-        await _join_budget_workers()
 
     _store_refusal(exc_info.value)
     assert server.calls_sent == 0
@@ -533,12 +523,12 @@ async def test_a_deadline_spent_during_admission_sends_nothing_and_counts(
     def spend_the_deadline() -> None:
         fake_clock[0] += 5.0
 
-    _, release = _stall_reservations(runtime, monkeypatch, on_entry=spend_the_deadline)
-    release.set()
-
-    with enclosing_deadline(5.0):
-        with pytest.raises(MCPCallError) as exc_info:
-            await _execute(runtime)
+    with stalled_worker(_BUDGET_WORKERS) as release:
+        _stall_reservations(runtime, monkeypatch, release, on_entry=spend_the_deadline)
+        release.set()
+        with enclosing_deadline(5.0):
+            with pytest.raises(MCPCallError) as exc_info:
+                await _execute(runtime)
 
     assert exc_info.value.details == {
         "timeout": "enclosing_deadline_spent",
@@ -588,13 +578,13 @@ async def test_a_store_locked_past_its_busy_timeout_fails_closed_unsent(
     runtime = http_runtime(tmp_path)
     holder = sqlite3.connect(runtime.budget._db_path, isolation_level=None)
     holder.execute("BEGIN IMMEDIATE")
-    try:
-        with pytest.raises(MCPCallError) as exc_info:
-            await _execute(runtime)
-    finally:
-        holder.execute("ROLLBACK")
-        holder.close()
-        await _join_budget_workers()
+    with stalled_worker(_BUDGET_WORKERS):
+        try:
+            with pytest.raises(MCPCallError) as exc_info:
+                await _execute(runtime)
+        finally:
+            holder.execute("ROLLBACK")
+            holder.close()
 
     _store_refusal(exc_info.value)
     assert exc_info.value.details["reason"] == "OperationalError"

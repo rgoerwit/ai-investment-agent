@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextvars
 import json
@@ -14,6 +15,7 @@ import pytest
 
 from src import blocking_io
 from src.blocking_io import (
+    DEFAULT_WORKER_SLOTS,
     GAP_FILL_YFINANCE_INFO_POLICY,
     YFINANCE_INFO_POLICY,
     BlockingCallPolicy,
@@ -25,6 +27,7 @@ from src.blocking_io import (
     start_blocking_call,
 )
 from src.llm_runtime import timeouts as llm_timeouts
+from tests.helpers.stalled_workers import join_workers, stalled_worker
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEADLINE = 0.2
@@ -34,14 +37,6 @@ TOLERANCE = 0.5
 
 def _limited(label: str, max_in_flight: int = 2) -> BlockingCallPolicy:
     return BlockingCallPolicy(label, DEADLINE, in_flight=InFlightLimit(max_in_flight))
-
-
-def _join_workers(label: str, timeout: float = 2.0) -> list[threading.Thread]:
-    """Join every worker thread for *label*; return any still alive."""
-    workers = [t for t in threading.enumerate() if t.name == f"blocking:{label}"]
-    for worker in workers:
-        worker.join(timeout)
-    return [t for t in workers if t.is_alive()]
 
 
 @pytest.mark.asyncio
@@ -102,6 +97,40 @@ def test_gap_fill_policy_keeps_the_five_second_budget() -> None:
     assert GAP_FILL_YFINANCE_INFO_POLICY.in_flight is not None
 
 
+def test_default_pools_are_sized_by_the_one_named_constant() -> None:
+    from src.mcp import budget
+    from src.tools import official_documents
+
+    pools = {
+        "gap_fill": GAP_FILL_YFINANCE_INFO_POLICY.in_flight,
+        "document_extraction": official_documents._PDF_POLICY.in_flight,
+        "mcp_budget_db": budget._BUDGET_DB_IN_FLIGHT,
+    }
+    assert all(pool is not None for pool in pools.values())
+    assert [pool.max_in_flight for pool in pools.values() if pool] == [
+        DEFAULT_WORKER_SLOTS
+    ] * len(pools)
+    # Independent instances: a stall in one pool must not starve another.
+    assert len({id(pool) for pool in pools.values()}) == len(pools)
+
+
+def test_no_source_pool_re_hardcodes_the_default_slot_count() -> None:
+    """A literal equal to DEFAULT_WORKER_SLOTS passed to InFlightLimit is a copy."""
+    offenders: list[str] = []
+    for path in (REPO_ROOT / "src").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and getattr(node.func, "id", getattr(node.func, "attr", ""))
+                == "InFlightLimit"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == DEFAULT_WORKER_SLOTS
+            ):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
+    assert offenders == []
+
+
 # ---------------------------------------------------------------------------
 # run_blocking_call_sync
 # ---------------------------------------------------------------------------
@@ -109,7 +138,7 @@ def test_gap_fill_policy_keeps_the_five_second_budget() -> None:
 
 def test_sync_fast_worker_returns_value() -> None:
     assert run_blocking_call_sync(_limited("sync_fast"), lambda: 42) == 42
-    assert _join_workers("sync_fast") == []
+    assert join_workers("sync_fast") == []
 
 
 def test_sync_requires_an_in_flight_limit() -> None:
@@ -124,27 +153,23 @@ def test_sync_requires_an_in_flight_limit() -> None:
 def test_sync_stalled_worker_caller_returns_by_deadline_then_releases() -> None:
     """(a) the caller returns at the deadline; releasing the stall leaves no thread."""
     policy = _limited("sync_stall")
-    release = threading.Event()
-    started = time.monotonic()
-    with pytest.raises(BlockingCallTimeoutError):
-        run_blocking_call_sync(policy, release.wait)
-    elapsed = time.monotonic() - started
-
-    assert DEADLINE <= elapsed < DEADLINE + TOLERANCE
     assert policy.in_flight is not None
-    assert policy.in_flight.in_flight == 1  # the orphan still holds its slot
+    with stalled_worker("sync_stall") as release:
+        started = time.monotonic()
+        with pytest.raises(BlockingCallTimeoutError):
+            run_blocking_call_sync(policy, release.wait)
+        elapsed = time.monotonic() - started
 
-    release.set()
-    assert _join_workers("sync_stall") == []
+        assert DEADLINE <= elapsed < DEADLINE + TOLERANCE
+        assert policy.in_flight.in_flight == 1  # the orphan still holds its slot
     assert policy.in_flight.in_flight == 0
 
 
 def test_sync_repeated_stalls_stay_within_the_bound() -> None:
     """(b) stalls past the limit fail fast instead of spawning more threads."""
     policy = _limited("sync_repeat", max_in_flight=2)
-    release = threading.Event()
     before = threading.active_count()
-    try:
+    with stalled_worker("sync_repeat") as release:
         for _ in range(2):
             with pytest.raises(BlockingCallTimeoutError):
                 run_blocking_call_sync(policy, release.wait)
@@ -156,9 +181,6 @@ def test_sync_repeated_stalls_stay_within_the_bound() -> None:
         assert policy.in_flight is not None
         assert policy.in_flight.in_flight == 2
         assert threading.active_count() - before <= 2
-    finally:
-        release.set()
-    assert _join_workers("sync_repeat") == []
     # Slots come back once the stalls clear.
     assert run_blocking_call_sync(policy, lambda: "recovered") == "recovered"
 
@@ -197,17 +219,15 @@ def test_sync_worker_sees_the_callers_context() -> None:
 
 def test_start_returns_the_running_future_without_waiting() -> None:
     policy = _limited("start_shared", max_in_flight=1)
-    release = threading.Event()
-    future = start_blocking_call(policy, lambda: release.wait(5) and "done")
-    try:
+    assert policy.in_flight is not None
+    with stalled_worker("start_shared") as release:
+        future = start_blocking_call(policy, lambda: release.wait(5) and "done")
         assert not future.done()
         # Running: no waiter can cancel the work others are waiting on.
         assert future.cancel() is False
-        assert policy.in_flight is not None and policy.in_flight.in_flight == 1
-    finally:
+        assert policy.in_flight.in_flight == 1
         release.set()
-    assert future.result(timeout=5) == "done"
-    assert _join_workers("start_shared") == []
+        assert future.result(timeout=5) == "done"
     assert policy.in_flight.in_flight == 0
 
 
@@ -218,15 +238,12 @@ def test_start_requires_an_in_flight_limit() -> None:
 
 def test_start_with_its_slot_held_fails_fast() -> None:
     policy = _limited("start_saturated", max_in_flight=1)
-    release = threading.Event()
-    held = start_blocking_call(policy, release.wait)
-    try:
+    with stalled_worker("start_saturated") as release:
+        held = start_blocking_call(policy, release.wait)
         with pytest.raises(BlockingCallSaturatedError):
             start_blocking_call(policy, lambda: 1)
-    finally:
         release.set()
-    held.result(timeout=5)
-    assert _join_workers("start_saturated") == []
+        held.result(timeout=5)
 
 
 def test_start_under_a_spent_deadline_starts_no_worker(frozen_clock) -> None:
@@ -238,7 +255,7 @@ def test_start_under_a_spent_deadline_starts_no_worker(frozen_clock) -> None:
             start_blocking_call(policy, lambda: calls.append(1))
     assert calls == []
     assert policy.in_flight is not None and policy.in_flight.in_flight == 0
-    assert _join_workers("start_spent") == []
+    assert join_workers("start_spent") == []
 
 
 # ---------------------------------------------------------------------------
@@ -254,8 +271,8 @@ async def test_async_limited_fast_worker_returns_value() -> None:
 @pytest.mark.asyncio
 async def test_async_limited_stall_returns_by_deadline_and_bounds_orphans() -> None:
     policy = _limited("async_stall", max_in_flight=2)
-    release = threading.Event()
-    try:
+    assert policy.in_flight is not None
+    with stalled_worker("async_stall") as release:
         for _ in range(2):
             started = time.monotonic()
             with pytest.raises(TimeoutError):
@@ -263,11 +280,7 @@ async def test_async_limited_stall_returns_by_deadline_and_bounds_orphans() -> N
             assert time.monotonic() - started < DEADLINE + TOLERANCE
         with pytest.raises(BlockingCallSaturatedError):
             await run_blocking_call(policy, release.wait)
-        assert policy.in_flight is not None
         assert policy.in_flight.in_flight == 2
-    finally:
-        release.set()
-    assert _join_workers("async_stall") == []
     assert policy.in_flight.in_flight == 0
 
 
@@ -362,7 +375,7 @@ def test_sync_spent_deadline_starts_no_worker(frozen_clock) -> None:
             run_blocking_call_sync(policy, lambda: calls.append(1))
     assert calls == []
     assert policy.in_flight is not None and policy.in_flight.in_flight == 0
-    assert _join_workers("spent_sync") == []
+    assert join_workers("spent_sync") == []
 
 
 def test_sync_call_runs_under_the_clamped_bound(monkeypatch, frozen_clock) -> None:
@@ -379,7 +392,7 @@ def test_sync_call_runs_under_the_clamped_bound(monkeypatch, frozen_clock) -> No
     with llm_timeouts.enclosing_deadline(DEADLINE / 2):
         assert run_blocking_call_sync(_limited("clamped_sync"), lambda: 7) == 7
     assert bounds == [pytest.approx(DEADLINE / 2)]
-    assert _join_workers("clamped_sync") == []
+    assert join_workers("clamped_sync") == []
 
 
 # ---------------------------------------------------------------------------

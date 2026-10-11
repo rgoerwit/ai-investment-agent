@@ -13,7 +13,7 @@ clocks, fake transports and releasable stalls. Nothing touches the network.
 from __future__ import annotations
 
 import asyncio
-import threading
+from concurrent.futures import Future
 from typing import Any
 
 import httpx
@@ -34,6 +34,7 @@ from src.tooling.inspection_service import InspectionService
 from src.tooling.inspector import InspectionDecision
 from src.tooling.runtime import ToolCallFailed, ToolExecutionService, ToolInvocation
 from src.tools import official_documents as documents
+from tests.helpers.stalled_workers import stalled_worker
 
 _NOW = 1_000.0
 _DOC_URL = "https://www.sec.gov/Archives/report.pdf"
@@ -102,23 +103,29 @@ def _audit_policy() -> AuditorBudgetPolicy:
 
 
 def _spy_pypdf(monkeypatch, result: Any = _USEFUL, *, spend: Any = None) -> list[float]:
-    """Record each pypdf allowance at the thread boundary; never start a thread.
+    """Record each pypdf allowance at the worker boundary; never start a thread.
 
-    Spies below ``run_blocking_call``'s own deadline clamp, so what is recorded
-    is the bound the worker would really get, and a spent allowance records
-    nothing. ``spend(timeout)``, when given, runs as if pypdf used that time.
+    Replaces only ``_start_daemon_call``, so the real ``run_blocking_call`` runs
+    on the limited path: its deadline clamp, in-flight limit and hard timeout
+    all apply, what is recorded is the bound the worker would really get, and a
+    spent allowance records nothing. ``spend(timeout)``, when given, runs as if
+    pypdf used that time; what it raises is the worker's failure.
     """
     seen: list[float] = []
 
-    async def spy(coro, *, timeout, label):
-        del label
-        coro.close()  # the to_thread coroutine: closed unstarted, no thread
-        seen.append(timeout)
-        if spend is not None:
-            return spend(timeout)
-        return result
+    def start(policy, limit, fn):
+        del limit, fn  # the pypdf call itself is never run
+        seen.append(policy.hard_timeout_seconds)
+        future: Future[Any] = Future()
+        try:
+            outcome = result if spend is None else spend(policy.hard_timeout_seconds)
+        except BaseException as exc:  # noqa: BLE001 - delivered as the worker's
+            future.set_exception(exc)
+        else:
+            future.set_result(outcome)
+        return future
 
-    monkeypatch.setattr(blocking_io, "run_with_hard_timeout", spy)
+    monkeypatch.setattr(blocking_io, "_start_daemon_call", start)
     return seen
 
 
@@ -443,17 +450,16 @@ async def test_a_stalled_extractor_reports_its_own_timeout_not_the_runners(monke
     _mock_client(monkeypatch, _respond(_PDF, "application/pdf"))
     _use_inspection(monkeypatch)
     monkeypatch.setattr(documents, "resolve_program", lambda name: None)
-    release = threading.Event()
-    monkeypatch.setattr(
-        documents,
-        "_extract_with_pypdf",
-        lambda payload, **kwargs: (release.wait(_GUARD_SECONDS), _USEFUL)[1],
-    )
 
     async def runner(args: dict[str, Any]) -> Any:
         return await documents.get_official_document.ainvoke(args)
 
-    try:
+    with stalled_worker(documents._PDF_POLICY.label) as release:
+        monkeypatch.setattr(
+            documents,
+            "_extract_with_pypdf",
+            lambda payload, **kwargs: (release.wait(_GUARD_SECONDS), _USEFUL)[1],
+        )
         result = await _guarded(
             ToolExecutionService().execute(
                 ToolInvocation(
@@ -464,8 +470,6 @@ async def test_a_stalled_extractor_reports_its_own_timeout_not_the_runners(monke
                 runner=runner,
             )
         )
-    finally:
-        release.set()
 
     assert result.value == "STATUS: INSUFFICIENT_DATA\nREASON: EXTRACTION_TIMEOUT"
 

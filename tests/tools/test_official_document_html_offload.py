@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.blocking_io import BlockingCallPolicy, InFlightLimit
+from src.blocking_io import DEFAULT_WORKER_SLOTS, BlockingCallPolicy, InFlightLimit
 from src.config import config
 from src.tooling.inspector import InspectionDecision
 from src.tools import official_documents as documents
@@ -193,12 +193,46 @@ async def test_a_late_result_is_never_inspected(monkeypatch, _stubbed):
     _stubbed.check_within.assert_not_awaited()
 
 
-def test_the_html_limit_is_its_own_and_sized_by_the_named_constant():
+def test_pdf_and_html_extraction_share_one_limit_sized_by_the_named_constant():
     limit = documents._HTML_POLICY.in_flight
     assert limit is not None
-    assert limit.max_in_flight == documents._MAX_HTML_WORKERS
-    assert documents._PDF_POLICY.in_flight is None
+    assert limit.max_in_flight == DEFAULT_WORKER_SLOTS
+    assert documents._PDF_POLICY.in_flight is limit
     assert documents._HTML_POLICY.label != documents._PDF_POLICY.label
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_pypdf_worker_keeps_its_slot_and_saturation_is_refused(
+    monkeypatch,
+):
+    """PDF extraction is bounded like HTML: a stalled worker holds a slot."""
+    limit = InFlightLimit(1)
+    monkeypatch.setattr(
+        documents,
+        "_PDF_POLICY",
+        BlockingCallPolicy("official_document_pdf_extract", 0.05, in_flight=limit),
+    )
+    started = threading.Event()
+    with stalled_worker("official_document_pdf_extract") as release:
+
+        def stall(*args, **kwargs):
+            started.set()
+            release.wait()
+            raise AssertionError("released stall must not be inspected")
+
+        monkeypatch.setattr(documents, "_extract_with_pypdf", stall)
+        monkeypatch.setattr(documents, "resolve_program", lambda name: None)
+        for _ in range(2):
+            with pytest.raises(documents.DocumentExtractionError) as raised:
+                await documents.extract_pdf_text(
+                    b"%PDF",
+                    MagicMock(max_document_pages=10, max_selected_pages=2),
+                    "",
+                )
+            assert raised.value.reason == "EXTRACTION_TIMEOUT"
+        assert limit.in_flight == 1
+        assert started.is_set()
+    assert limit.in_flight == 0
 
 
 @pytest.mark.asyncio

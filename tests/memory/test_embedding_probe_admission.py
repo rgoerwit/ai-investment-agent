@@ -34,9 +34,11 @@ from src.embeddings import resolve_embedding_binding
 from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.timeouts import enclosing_deadline
 from src.memory import FinancialSituationMemory
+from tests.helpers.stalled_workers import join_workers, stalled_worker
 
 _NOW = 1_000.0
 _PROBE_BOUND = 15.0
+_PROBE_LABEL = "memory_embedding_healthcheck"
 
 
 class Probe:
@@ -180,15 +182,12 @@ def test_an_empty_probe_vector_is_a_failure(probe):
 
 
 def test_a_stalled_probe_returns_at_its_bound(probe, monkeypatch):
-    release = threading.Event()
-    probe.behaviour = lambda: release.wait(5)
     monkeypatch.setattr(config, "memory_embedding_healthcheck_timeout_seconds", 0.05)
 
     start = time.monotonic()
-    try:
+    with stalled_worker(_PROBE_LABEL) as release:
+        probe.behaviour = lambda: release.wait(5)
         memory = FinancialSituationMemory("TEST_stalled")
-    finally:
-        release.set()
     assert time.monotonic() - start < 1.0
     assert memory.embeddings_available is False
 
@@ -219,20 +218,20 @@ def test_a_client_that_cannot_be_built_is_not_cached(probe, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_prepare_runs_the_probe_off_the_loop(probe):
-    release = threading.Event()
-    probe.behaviour = lambda: release.wait(5) and None
     ticks = 0
+    with stalled_worker(_PROBE_LABEL) as release:
+        probe.behaviour = lambda: release.wait(5) and None
 
-    async def ticker() -> None:
-        nonlocal ticks
-        while not release.is_set():
-            ticks += 1
-            await asyncio.sleep(0.005)
+        async def ticker() -> None:
+            nonlocal ticks
+            while not release.is_set():
+                ticks += 1
+                await asyncio.sleep(0.005)
 
-    ticking = asyncio.create_task(ticker())
-    asyncio.get_running_loop().call_later(0.1, release.set)
-    assert await FinancialSituationMemory.prepare_shared_embeddings() is True
-    await ticking
+        ticking = asyncio.create_task(ticker())
+        asyncio.get_running_loop().call_later(0.1, release.set)
+        assert await FinancialSituationMemory.prepare_shared_embeddings() is True
+        await ticking
 
     # The loop kept running while the probe waited: a blocking join would
     # have left the ticker at zero.
@@ -270,15 +269,12 @@ async def test_prepare_caches_a_failure(probe):
 
 @pytest.mark.asyncio
 async def test_a_stalled_prepare_returns_at_its_bound(probe, monkeypatch):
-    release = threading.Event()
-    probe.behaviour = lambda: release.wait(5) and None
     monkeypatch.setattr(config, "memory_embedding_healthcheck_timeout_seconds", 0.05)
 
     start = time.monotonic()
-    try:
+    with stalled_worker(_PROBE_LABEL) as release:
+        probe.behaviour = lambda: release.wait(5) and None
         assert await FinancialSituationMemory.prepare_shared_embeddings() is False
-    finally:
-        release.set()
     assert time.monotonic() - start < 1.0
 
 
@@ -301,9 +297,7 @@ class Stall:
 
 
 def _join_probe_workers() -> None:
-    for worker in threading.enumerate():
-        if worker.name == "blocking:memory_embedding_healthcheck":
-            worker.join(5)
+    assert join_workers(_PROBE_LABEL) == []
 
 
 @pytest.fixture

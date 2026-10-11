@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- One `DEFAULT_WORKER_SLOTS` in `src/blocking_io.py` sizes the gap-fill, MCP
+  budget-store and document-extraction worker pools (each still its own pool, so a
+  stall in one never starves another), and a guard rejects the number written
+  inline. pypdf extraction now shares the HTML parse's pool: it had no in-flight
+  limit, so repeated stalls could pile up threads; `pdftotext` stays a bounded
+  subprocess. `atomic_write_text` flushes and fsyncs before the replacement, and the
+  three IBKR JSON writers (analysis index, refresh scheduler state, conid cache)
+  use it instead of each repeating the temp-file pattern. Stalled-worker tests
+  across the suite release and join through `tests/helpers/stalled_workers.py`.
+
 - No new work after the deadline. `ToolExecutionService` checks the operational
   deadline before every `before()` and `after()` hook and after the last of each, so
   a hook that overran, including one that swallowed cancellation, is never followed

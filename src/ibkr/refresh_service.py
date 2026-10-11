@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -11,6 +9,7 @@ from typing import Literal, cast
 
 import structlog
 
+from src.atomic_files import atomic_write_text
 from src.error_safety import summarize_exception
 from src.ibkr.models import AnalysisRecord, ReconciliationItem
 from src.ibkr.portfolio_defaults import (
@@ -863,46 +862,26 @@ class AnalysisRefreshService:
     def _save_state(path: Path | None, state: _SchedulerState) -> None:
         if path is None:
             return
-        temp_name: str | None = None
+        payload = {
+            "version": 3,
+            "next_slot": state.next_slot,
+            "retry_not_before": state.retry_not_before,
+            "unrepaired_refresh": {
+                ticker: {
+                    "basis": entry.basis,
+                    "retry_after": entry.retry_after,
+                }
+                for ticker, entry in state.unrepaired_refresh.items()
+            },
+        }
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd, temp_name = tempfile.mkstemp(
-                prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
-            )
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(
-                    {
-                        "version": 3,
-                        "next_slot": state.next_slot,
-                        "retry_not_before": state.retry_not_before,
-                        "unrepaired_refresh": {
-                            ticker: {
-                                "basis": entry.basis,
-                                "retry_after": entry.retry_after,
-                            }
-                            for ticker, entry in state.unrepaired_refresh.items()
-                        },
-                    },
-                    handle,
-                    indent=2,
-                    sort_keys=True,
-                )
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_name, path)
-            temp_name = None
+            atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True))
         except OSError as exc:
             logger.warning(
                 "refresh_scheduler_state_save_failed",
                 path=str(path),
                 **summarize_exception(exc, operation="save_refresh_scheduler_state"),
             )
-        finally:
-            if temp_name:
-                try:
-                    os.unlink(temp_name)
-                except OSError:
-                    pass
 
     @staticmethod
     def _analysis_expiry_details(

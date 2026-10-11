@@ -88,6 +88,15 @@ class InFlightLimit:
             self._in_flight -= 1
 
 
+# Default worker slots for a pool whose stalled workers cannot be interrupted:
+# a few concurrent callers fit, and more unfinished workers than this means the
+# resource is stuck, so further calls fail fast. Each pool still builds its own
+# InFlightLimit so a stall in one never starves another; a pool sized
+# differently on purpose (the single probe slot, the one-or-two-lookup report
+# header and Tavily pools) names its own reason.
+DEFAULT_WORKER_SLOTS = 4
+
+
 @dataclass(frozen=True)
 class BlockingCallPolicy:
     label: str
@@ -264,5 +273,5 @@ FX_RATE_POLICY = BlockingCallPolicy("fx_rate", 8.0)
 # bounded so a stalled Yahoo endpoint cannot accumulate one orphan per ticker
 # across a batch. On saturation the caller falls back to the bare symbol.
 GAP_FILL_YFINANCE_INFO_POLICY = BlockingCallPolicy(
-    "gap_fill.yfinance.info", 5.0, in_flight=InFlightLimit(4)
+    "gap_fill.yfinance.info", 5.0, in_flight=InFlightLimit(DEFAULT_WORKER_SLOTS)
 )
