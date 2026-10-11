@@ -361,9 +361,11 @@ per-ticker estimate is not a current performance guarantee.
 
 Flex requests can fall back to standard, and repeated fallbacks temporarily degrade
 that provider to standard for the process. A new ticker process starts with fresh
-health state. Junior and Senior Fundamentals use standard tier in quick mode;
-Portfolio Manager follows its configured tier. See the seat execution policy in
-`src/llm_runtime/seats.py` and the `FLEX_DEGRADE_*` settings in `.env.example`.
+health state. Under `--quick`, the seats whose execution policy sets
+`standard_tier_in_quick_mode` (Junior Fundamentals, Senior Fundamentals, Portfolio
+Manager and Analyst Retry) run at standard tier; full mode keeps the configured tier.
+See the seat execution policy in `src/llm_runtime/seats.py` and the `FLEX_DEGRADE_*`
+settings in `.env.example`.
 Changing tier changes queueing and billing behavior, but does not guarantee identical
 model output or eliminate provider failures. Saved `token_usage.by_tier` and
 `run_summary.service_tier_downgrades` expose effective usage and degradation.
@@ -704,8 +706,11 @@ make check-all
 # Deterministic credential-free suite (excludes slow/integration/LLM/API tests)
 make test-ci
 
-# Complete suite; may need credentials, external services, and incur API costs
+# Whole suite, still offline: tests marked `integration` are skipped
 poetry run pytest tests/ -v
+
+# Live integration tests: opt in explicitly; they use real providers and may incur cost
+poetry run pytest tests/ -v --run-integration
 
 # IBKR-focused changes
 poetry run pytest tests/ibkr -v
@@ -715,8 +720,14 @@ poetry run pytest tests/web -v
 ```
 
 Run focused regression tests for the owning modules first, then the relevant static
-and deterministic gates. Use credentialed or paid integration tests deliberately;
-passing offline tests does not establish live provider quality.
+and deterministic gates. Non-integration tests are strictly offline: they refuse
+network access and run with dummy provider keys. Integration tests are skipped
+unless `--run-integration` is passed. Because the test environment overwrites the
+ordinary provider key variables with dummies, an integration test reads your real key
+from the same name prefixed with `INTEGRATION_` (for example `INTEGRATION_` plus the
+provider key variable) and skips, naming that prerequisite, when it is absent
+(`tests/helpers/integration_prerequisites.py`). Passing offline tests does not
+establish live provider quality.
 
 ### Prompt-drift harness
 

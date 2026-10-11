@@ -1650,8 +1650,9 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="SEC_CONTACT_EMAIL",
         description=(
-            "Contact address EDGAR requires in the User-Agent of every request "
-            "to a sec.gov host. Unset, the official-document tool refuses sec.gov "
+            "Contact address the official-document tool puts in the User-Agent "
+            "of its sec.gov requests, as EDGAR asks of automated clients. Unset, "
+            "the official-document tool refuses sec.gov "
             "URLs before connecting (DOCUMENT_SEC_CONTACT_REQUIRED). No default: "
             "it is the operator's own address."
         ),

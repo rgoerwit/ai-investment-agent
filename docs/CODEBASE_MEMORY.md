@@ -187,8 +187,12 @@ whole ticker. In full mode with flex on, one Portfolio Manager call can use
   so that would turn a fail-closed timeout into uninspected content. The run
   deadline is different because it is the outermost deadline. When it refuses
   the judge, `EscalatingInspector` keeps the heuristic decision, and every later
-  LLM consumer is refused by the same deadline. Each class uses the same 5 s
-  minimum useful attempt and 2 s margin once its cap is at least 40 s.
+  LLM consumer is refused by the same deadline. Each class derives its minimum
+  useful attempt as `MIN_USEFUL_ATTEMPT_FRACTION` of its configured allowance
+  (`min_useful_seconds`), and its margin as the lesser of
+  `LLM_DISPATCH_MARGIN_SECONDS` and `DEADLINE_MARGIN_FRACTION` of its cap
+  (`deadline_margin`), so the margin is the full 2 s default only once a cap is at
+  least 40 s.
   `tests/llm_runtime/test_run_deadline.py` pins this.
 - **The startup diagnostic.** `log_deadline_ladder` works out the critical path
   from each seat's resolved `BudgetPolicy`. It takes the slowest parallel analyst

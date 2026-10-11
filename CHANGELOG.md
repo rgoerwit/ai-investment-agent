@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Documentation matches the code. The README names the seats pinned to standard tier
+  under `--quick` (Portfolio Manager included) and states that integration tests need
+  `--run-integration` and an `INTEGRATION_`-prefixed key; the agentic-AI primer
+  describes the current routing (Sync Check, fast-fail, one or two debate rounds,
+  optional review seats), the BUY / HOLD / DO NOT INITIATE verdicts and the owners of
+  thresholds and seats instead of copying their numbers; the `.env.example` timeout
+  notes distinguish the request ceiling, invocation cap and flex floors; and the
+  codebase note derives the minimum useful attempt from `MIN_USEFUL_ATTEMPT_FRACTION`.
+
 - One `DEFAULT_WORKER_SLOTS` in `src/blocking_io.py` sizes the gap-fill, MCP
   budget-store and document-extraction worker pools (each still its own pool, so a
   stall in one never starves another), and a guard rejects the number written
@@ -157,10 +166,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   official-document client, the editor's reference fetch and StockTwits; the
   document client sent none before, and `www.sec.gov` returned 0 successes in 262
   saved calls. EDGAR requires a declared contact: new optional `SEC_CONTACT_EMAIL`
-  (no default; empty is unset) makes every sec.gov request carry
-  `<product token> <address>`; unset, sec.gov URLs are refused before connecting with
-  `DOCUMENT_SEC_CONTACT_REQUIRED` naming the setting. The address goes to no other
-  host. **Behaviour change:** StockTwits sends the shared string, not
+  (no default; empty is unset) is required for sec.gov hosts in the official-document
+  client only: its requests there carry `<product token> <address>`, and unset, it
+  refuses sec.gov URLs before connecting with `DOCUMENT_SEC_CONTACT_REQUIRED` naming
+  the setting. The address goes to no other host, and no other code path adds it
+  (the editor's reference fetch and StockTwits send the shared string alone). Setting
+  it makes sec.gov retrievals possible; it does not by itself establish that EDGAR
+  accepts them. **Behaviour change:** StockTwits sends the shared string, not
   `TradingBot/1.0`.
 - A tool call that times out or raises now leaves an evidence record
   (`execution_status="FAILED"`, `reason` `TOOL_TIMEOUT` / `TOOL_EXECUTION_FAILED`,
