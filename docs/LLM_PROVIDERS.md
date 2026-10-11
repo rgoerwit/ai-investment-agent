@@ -406,6 +406,20 @@ inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
   for a transient error, 60 s × attempt plus 1-10 s for a rate limit, the
   providers' per-minute quota window) stay literals: admission already clamps
   them, so a setting would add surface without adding a bound.
+- **What "one SDK attempt" does not mean.** It means no SDK-level retry policy,
+  not one physical request. google-genai's aiohttp path
+  (`_api_client.py`, `_async_request_once`, installed 2.24.0) catches
+  `aiohttp.ServerDisconnectedError`, connector, DNS and OS errors, sleeps 1-10 s
+  and sends the same request again, outside `HttpRetryOptions`. One Gemini
+  dispatch can therefore make two physical sends (never more: the resend is not
+  repeated and no policy retry follows). The resend reuses the request's timeout,
+  so it is bounded only by the caller's hard deadline, not re-sized against the
+  remaining budget; the pre-resend sleep is cancellable.
+  `tests/llm_runtime/test_google_disconnect_resend.py` pins both facts through
+  the real chat transport with a fake at `aiohttp.ClientSession._request`; the
+  embedding path has the same behaviour
+  (`tests/memory/test_embedding_attempt_deadline.py`). Read request counts from
+  the wire, not from the attempt count.
 - **Why one owner (October 2026).** Until then a client's SDK attempts were
   decided by its seat's class: runtime-owned classes were built with one, the
   rest with `LLM_ATTEMPTS`, on the assumption that their callers invoked the

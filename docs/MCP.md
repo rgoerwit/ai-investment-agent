@@ -382,3 +382,24 @@ can still be listed under `env_vars`.
 
 The runtime validates all of the above eagerly; a bad entry raises
 `ValueError` at startup rather than at first call.
+
+## Known boundary: stdio servers are not spawned by `src/subprocesses.py`
+
+A `stdio` server starts through the mcp SDK's own launcher. `src/mcp/client.py`
+builds `StdioServerParameters(command, args, env, cwd)` and enters
+`stdio_client(params)`; the installed mcp 2.2.0 then calls
+`anyio.open_process([command, *args], env=..., stderr=..., cwd=cwd,
+start_new_session=True)` (`mcp/client/stdio.py`, `_create_platform_compatible_process`).
+It does not use the `posix_spawn` configuration of `src/subprocesses.py` (absolute
+executable, `close_fds=False`, no `cwd`), and `cwd` is passed whenever a server
+sets one, so on macOS the launch can take the fork path that helper exists to avoid.
+The SDK owns shutdown too (close stdin, wait, kill the process group), shielded and
+bounded by the SDK.
+
+`tests/architecture/test_subprocess_spawns.py` does not cover it, by accident, not
+by design: the AST scan lists `anyio.open_process` but walks only `src/`, and
+`src/mcp/client.py` names only `stdio_client`, which is not a spawning API. The
+scan has no exemption entry for MCP and would not notice the launcher changing.
+Treat any stdio server as an unguarded spawn: prefer HTTP servers where a vendor
+offers one, keep `cwd` unset in the registry, and do not assume the `posix_spawn`
+rule or its guard applies here.

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The "one SDK attempt" guarantee is qualified: it means no SDK retry policy, not one
+  physical request. google-genai's aiohttp path resends once after a disconnect or
+  connector error inside the attempt, without re-sizing the timeout, so one Gemini
+  dispatch can make two sends bounded only by the hard deadline; a request-layer
+  test pins it. MCP stdio servers launch through the mcp SDK's own launcher
+  (`anyio.open_process`, `cwd` honoured), outside `src/subprocesses.py` and its
+  spawn guard; `docs/MCP.md` records the boundary.
+
 - The literal-deadline guard resolves deadline callees through the name they are
   bound to (a local def, an import alias such as `enclosing_deadline as ed`, or
   `module.function`), follows constant chains across one import, flags a fixed
