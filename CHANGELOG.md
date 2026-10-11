@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- An official document's HTML parse, link ranking and text extraction now run as one
+  worker call under the extraction allowance and an in-flight limit instead of on
+  the event loop, where an 80 ms parse overran a 20 ms runner bound and stalled
+  every other task. A stall, a saturated limit or a spent allowance returns
+  `EXTRACTION_TIMEOUT`, a late result is discarded before inspection, and a stalled
+  worker keeps its slot until it ends. `OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS`
+  now bounds the HTML parse as well as pypdf and pdftotext.
+
 - Test infrastructure: the pytest re-collection workaround applies only where the
   fixture manager has the deferred-conftest mechanism and the keyword
   `parsefactories` signature it patches, so other supported pytest versions are

@@ -395,10 +395,14 @@ async def test_spent_tool_runner_starts_neither_extractor(monkeypatch, fake_cloc
 async def test_inspection_with_nothing_left_never_starts_and_fails_closed(
     monkeypatch, fake_clock
 ):
-    # An HTML page needs no extraction; the download spends the whole allowance.
+    # Plain text needs no extraction worker; the download spends the whole allowance.
     def handler(request: httpx.Request) -> httpx.Response:
         fake_clock[0] += 100.0
-        return httpx.Response(200, headers={"content-type": "text/html"}, content=_HTML)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/plain"},
+            content=b"annual report figures " * 20,
+        )
 
     _mock_client(monkeypatch, handler)
     inspection = _use_inspection(monkeypatch)

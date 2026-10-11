@@ -708,7 +708,12 @@ since a tighter per-phase bound bought nothing) may use
 `OFFICIAL_DOCUMENT_DOWNLOAD_FRACTION`; of the rest,
 `OFFICIAL_DOCUMENT_INSPECTION_FRACTION` is held back from extraction; each
 extractor gets its cap within what is left less that reserve, and one that
-cannot start is skipped with `EXTRACTION_TIMEOUT`; inspection gets whatever is
+cannot start is skipped with `EXTRACTION_TIMEOUT`. HTML is an extractor too
+(round 4): parse, link ranking and text flattening used to run on the event
+loop, so an 80 ms parse overran a 20 ms runner bound; `extract_html_text` now
+runs the pure `_extract_html` through `run_blocking_call` under the same
+allowance and its own in-flight limit, and a stall, saturation or spent
+allowance is `EXTRACTION_TIMEOUT`. Inspection gets whatever is
 then left through `InspectionService.check_within`, and evidence it cannot
 finish inspecting fails the call with `INSPECTION_TIMEOUT` (a `FAILED` ledger
 record since round 4), never returned uninspected. The defaults (0.55, 0.25) are chosen, not measured: saved

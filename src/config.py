@@ -1585,8 +1585,8 @@ class Settings(BaseSettings):
         gt=0.0,
         validation_alias="OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS",
         description=(
-            "Hard cap (seconds) on each PDF text-extraction backend (pypdf, then "
-            "pdftotext) for one official document."
+            "Hard cap (seconds) on each text-extraction backend for one official "
+            "document: the HTML parse, or pypdf then pdftotext for a PDF."
         ),
     )
     # The official-document sequence (DNS check, download, pypdf, pdftotext,

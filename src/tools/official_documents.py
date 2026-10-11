@@ -9,7 +9,7 @@ import json
 import re
 import socket
 import ssl
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 from urllib.parse import urljoin, urlparse, urlunsplit
 
@@ -18,7 +18,7 @@ import structlog
 from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
-from src.blocking_io import BlockingCallPolicy, run_blocking_call
+from src.blocking_io import BlockingCallPolicy, InFlightLimit, run_blocking_call
 from src.config import config
 from src.error_safety import summarize_exception
 from src.exchange_metadata import registered_official_document_hosts
@@ -62,6 +62,15 @@ _PRODUCT_TOKEN_RE = re.compile(r"[A-Za-z][\w.-]*/[\w.]+")
 # OFFICIAL_DOCUMENT_DNS_TIMEOUT_SECONDS with with_timeout(), read at the call
 # and shrunk to what is left (see "Allocation" below).
 _PDF_POLICY = BlockingCallPolicy("official_document_pdf_extract", 20.0)
+# Parsing a hostile page is CPU-bound and cannot be interrupted: past this many
+# unfinished HTML workers further extractions are refused rather than adding
+# threads behind the stalled ones.
+_MAX_HTML_WORKERS = 4
+_HTML_POLICY = replace(
+    _PDF_POLICY,
+    label="official_document_html_extract",
+    in_flight=InFlightLimit(_MAX_HTML_WORKERS),
+)
 _DNS_POLICY = BlockingCallPolicy("official_document_dns_check", 5.0)
 _MIN_USEFUL_TEXT_CHARS = 200
 _DEFAULT_KEYWORDS = (
@@ -652,6 +661,43 @@ def _html_document_text(soup: BeautifulSoup) -> str:
     return soup.get_text("\n", strip=True)
 
 
+def _extract_html(
+    payload: bytes, base_url: str, keywords: str
+) -> tuple[str, tuple[str, ...]]:
+    """Parse, rank and flatten one HTML document: the whole CPU-bound part, so
+    it runs as one worker call."""
+    soup = BeautifulSoup(payload, "html.parser")
+    return (
+        _html_document_text(soup),
+        _rank_same_host_document_paths(soup, base_url, keywords),
+    )
+
+
+async def extract_html_text(
+    payload: bytes,
+    base_url: str,
+    keywords: str,
+    allocation: _Allocation,
+) -> tuple[ExtractedDocument, tuple[str, ...]]:
+    """Extract an HTML document's evidence text and ranked candidate paths off
+    the event loop, inside *allocation*'s extraction allowance.
+
+    A stall, a saturated worker limit or a spent allowance is
+    EXTRACTION_TIMEOUT; a result that arrives late is discarded by
+    ``run_blocking_call`` and never reaches inspection.
+    """
+    try:
+        html_policy = _HTML_POLICY.with_timeout(
+            _extraction_allowance(allocation, label=_HTML_POLICY.label)
+        )
+        text, candidate_paths = await run_blocking_call(
+            html_policy, lambda: _extract_html(payload, base_url, keywords)
+        )
+    except TimeoutError as exc:
+        raise DocumentExtractionError("EXTRACTION_TIMEOUT") from exc
+    return ExtractedDocument(text, "html", 1, (0,)), candidate_paths
+
+
 _DOWNLOAD_PHASES = frozenset({"dns", "connect", "redirect", "body"})
 
 
@@ -720,14 +766,9 @@ async def get_official_document(
             )
             candidate_paths: tuple[str, ...] = ()
         elif "html" in content_type or payload.lstrip().startswith(b"<"):
-            soup = BeautifulSoup(payload, "html.parser")
-            candidate_paths = _rank_same_host_document_paths(
-                soup,
-                final_url,
-                keywords,
+            extracted, candidate_paths = await extract_html_text(
+                payload, final_url, keywords, allocation
             )
-            text = _html_document_text(soup)
-            extracted = ExtractedDocument(text, "html", 1, (0,))
         elif content_type.startswith("text/"):
             candidate_paths = ()
             extracted = ExtractedDocument(
