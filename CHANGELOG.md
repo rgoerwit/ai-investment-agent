@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The literal-deadline guard (`tests/test_timeout_literals.py`) follows a numeric
+  constant through an import (`from m import T [as U]`, `m.T`, one re-export hop; a
+  config owner's constant counts once imported elsewhere), a 3-argument
+  `getattr(obj, "x", 30)` fallback, and every `src/` function whose positional or
+  keyword-only parameter is deadline-shaped (`enclosing_deadline`, `require_allowance`,
+  `run_program`, `check_within`, ...), derived from the signatures. It found six
+  non-deadline literals in `src/` (breaker cool-off report fields, a refused-retry
+  backoff record, an orphan-age filter, an auth cooldown, a consultant placeholder),
+  all allowlisted with reasons; no real deadline literal remained. Test-only change.
+  Residual hole: a function that returns a literal is not followed.
+
 - One minimum-useful-attempt rule and one margin, both derived. A minimum is
   `MIN_USEFUL_ATTEMPT_FRACTION` (new, 0.04, at most 0.5, chosen not measured) of the
   plane's configured allowance for one attempt: the LLM per-request ceiling (or the

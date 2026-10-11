@@ -70,7 +70,10 @@ enforces it.
 `timeout=`, `*_timeout_seconds=`, `ClientTimeout`, `BlockingCallPolicy` or
 `wait_for` belongs in a `Settings` field, clamped to the caller's deadline.
 `tests/test_timeout_literals.py` scans for this shape. An allowlist entry is
-keyed by scope and parameter, and it must say why a literal is correct there.
+keyed by scope and parameter, and it must say why a literal is correct there. The
+guard follows imported names and `module.NAME` constants (config owners included),
+3-argument `getattr` fallbacks, and any `src/` function with a deadline-shaped
+parameter (`enclosing_deadline`, `require_allowance`, `run_program`, ...).
 
 **A deadline is not a bound.** A checkpoint bounds nothing that follows it, and a call
 starting just under the deadline can still run a full per-call timeout past it. Wrap
