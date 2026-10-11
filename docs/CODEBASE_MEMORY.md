@@ -701,8 +701,8 @@ since a tighter per-phase bound bought nothing) may use
 extractor gets its cap within what is left less that reserve, and one that
 cannot start is skipped with `EXTRACTION_TIMEOUT`; inspection gets whatever is
 then left through `InspectionService.check_within`, and evidence it cannot
-finish inspecting fails the document with `INSPECTION_TIMEOUT`, never
-returned uninspected. The defaults (0.55, 0.25) are chosen, not measured: saved
+finish inspecting fails the call with `INSPECTION_TIMEOUT` (a `FAILED` ledger
+record since round 4), never returned uninspected. The defaults (0.55, 0.25) are chosen, not measured: saved
 analyses record backends and failure reasons but no per-phase durations. In
 the saved artifacts at the time, about 2,000 analyses carried document calls;
 pypdf extracted in 283, pdftotext in none, and `EXTRACTION_TIMEOUT` appeared
@@ -744,6 +744,30 @@ alone, never the tool's, because refused by admission it fails *open*. Its
 own bound fails closed. A test runs the real judge inside a tool deadline
 with half a second left and checks its request is still admitted and sized
 from its own policy.
+
+**An inspection block is never evidence (October 2026, round 4).**
+`check_within` used to return only the approved value, so a `TOOL_BLOCKED:`
+placeholder came back to `get_official_document` as if it were the text; the
+tool wrapped it in `STATUS: EVIDENCE_FOUND` with primary authority, the outer
+inspection hook allowed that explanation, and the ledger bound a blocked
+document as primary evidence. The raw `action` could not decide either: in warn
+mode a `block` returns the original text. `InspectionService.evaluate` now sets
+one enforced disposition on the decision it returns (`InspectionDecision.enforced`:
+allowed, sanitized, blocked, inspection_failed), derived once from the decision,
+the configured mode and the fail policy; a backend's raw decision carries `None`.
+`check_within` returns that `(decision, approved)` pair, or `None` on timeout.
+Callers branch on `enforced`, never on the approved text: the official-document
+tool raises `ToolCallBlocked` for `blocked`, which `ToolExecutionService` turns
+into the same blocked `ToolResult` a `before()` hook produces, so the ledger
+records `BLOCKED`; it raises `ToolCallFailed` (a typed reason code) for
+`inspection_failed` and a timeout, which reaches `EvidenceRecorder.failed` as
+`FAILED` with that code and the model as `TOOL_ERROR: <code>`. The content hook
+does the same for every tool, and Tavily returns `None` for an inspection that
+failed, as for a timeout. Approved text under the useful-text minimum is
+`DOCUMENT_TEXT_UNAVAILABLE`, and an empty replacement counts as a replacement.
+A fail-closed backend error carries the code `INSPECTION_BACKEND_ERROR`, never the
+exception text, which reaches only the log through `summarize_exception`.
+Official documents get no stricter treatment than the configured mode.
 
 The pdftotext child used to be killed only on its own timeout. The runner's
 cancellation, the supported way the tool is cut short, left it running and

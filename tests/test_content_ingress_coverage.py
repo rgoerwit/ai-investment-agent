@@ -474,7 +474,7 @@ def test_mcp_tool_output_is_inspected_by_the_tool_plane_hook():
         "inspection_hook.py: MCP ingress must use SourceKind.mcp_tool_output."
     )
     assert "parse_mcp_tool_name(call.name)" in src
-    assert "service.check(envelope)" in src, (
+    assert "service.evaluate(envelope)" in src, (
         "inspection_hook.py: MCP tool output must be inspected before prompt reuse."
     )
 

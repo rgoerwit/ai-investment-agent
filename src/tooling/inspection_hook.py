@@ -4,11 +4,11 @@ ContentInspectionHook plugs into the ToolExecutionService hook chain and
 inspects every tool output via an InspectionService before the result reaches
 an LLM context.
 
-The hook operates exclusively in after() — it never raises ToolCallBlocked
-because after() is called outside the before()-try/catch block in
-ToolExecutionService.execute(). Instead, blocked content is returned as
-a modified ToolResult with the legacy ``TOOL_BLOCKED:`` sentinel and
-blocked=True.
+The hook operates exclusively in after() and branches on the enforced
+disposition of ``InspectionService.evaluate``, never on the approved text: a
+``blocked`` outcome is returned as a ToolResult with the ``TOOL_BLOCKED:``
+placeholder and blocked=True; an ``inspection_failed`` one raises
+``ToolCallFailed`` so the call fails and the ledger records it FAILED.
 """
 
 from __future__ import annotations
@@ -24,9 +24,9 @@ from src.runtime_services import (
     get_current_inspection_service,
     get_current_runtime_services,
 )
-from src.tooling.inspection_service import InspectionService
+from src.tooling.inspection_service import INSPECTION_FAILED, InspectionService
 from src.tooling.inspector import InspectionEnvelope, SourceKind
-from src.tooling.runtime import ToolInvocation, ToolResult
+from src.tooling.runtime import ToolCallFailed, ToolInvocation, ToolResult
 
 logger = structlog.get_logger(__name__)
 
@@ -189,7 +189,17 @@ class ContentInspectionHook:
         )
 
         service = self._inspection_service or get_current_inspection_service()
-        approved = await service.check(envelope)
+        decision, approved = await service.evaluate(envelope)
+
+        if decision.enforced == "inspection_failed":
+            logger.warning(
+                "tool_output_inspection_failed",
+                tool=call.name,
+                source=call.source,
+                agent_key=call.agent_key,
+                reason=INSPECTION_FAILED,
+            )
+            raise ToolCallFailed(INSPECTION_FAILED)
 
         if approved is result.value:
             if metadata.get("shape_retention_safe") is False:
@@ -209,7 +219,7 @@ class ContentInspectionHook:
             return result
 
         # Content was sanitized or blocked.
-        blocked = isinstance(approved, str) and approved.startswith("TOOL_BLOCKED:")
+        blocked = decision.enforced == "blocked"
         findings = result.findings or []
         if blocked:
             logger.warning(
@@ -217,7 +227,9 @@ class ContentInspectionHook:
                 tool=call.name,
                 source=call.source,
                 agent_key=call.agent_key,
-                reason=approved,
+                disposition=decision.enforced,
+                threat_level=decision.threat_level,
+                threat_types=decision.threat_types,
             )
             findings = findings + [approved]
 

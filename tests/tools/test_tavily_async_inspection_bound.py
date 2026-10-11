@@ -210,6 +210,26 @@ async def test_inspection_failure_still_propagates(monkeypatch, install):
 
 
 @pytest.mark.asyncio
+async def test_an_enforced_inspection_failure_returns_none_like_a_timeout(
+    monkeypatch, install
+):
+    """A fail-closed backend error is "could not inspect": no result, never
+    the placeholder or the raw payload."""
+    inspected: list[Any] = []
+
+    async def _failed(raw: Any, query_text: str) -> Any:
+        del query_text
+        inspected.append(raw)
+        return "TOOL_BLOCKED: INSPECTION_BACKEND_ERROR"
+
+    inspect_tavily_with(monkeypatch, _failed, enforced="inspection_failed")
+    install(_Search())
+
+    assert await tavily_utils.search_tavily_inspected("q", profile="news_basic") is None
+    assert len(inspected) == 1
+
+
+@pytest.mark.asyncio
 async def test_empty_search_result_skips_inspection(monkeypatch, install):
     inspected = _count_inspections(monkeypatch)
 

@@ -31,7 +31,8 @@ from src.llm_runtime.timeouts import (
     tool_call_deadline,
 )
 from src.tooling.inspection_service import InspectionService
-from src.tooling.runtime import ToolExecutionService, ToolInvocation
+from src.tooling.inspector import InspectionDecision
+from src.tooling.runtime import ToolCallFailed, ToolExecutionService, ToolInvocation
 from src.tools import official_documents as documents
 
 _NOW = 1_000.0
@@ -150,7 +151,7 @@ def _respond(content: bytes, content_type: str, clock: list[float] | None = None
 
 
 class _Inspection(InspectionService):
-    """The real ``check_within`` bound around a stand-in ``check``."""
+    """The real ``check_within`` bound around a stand-in ``evaluate``."""
 
     def __init__(self, *, stall: bool = False) -> None:
         super().__init__()
@@ -164,12 +165,15 @@ class _Inspection(InspectionService):
         self.bounds.append(seconds)
         return await super().check_within(envelope, seconds=seconds, label=label)
 
-    async def check(self, envelope: Any) -> Any:
+    async def evaluate(self, envelope: Any) -> tuple[InspectionDecision, Any]:
         self.calls += 1
         self.entered.set()
         if self.stall:
             await self.release.wait()
-        return envelope.content_text
+        decision = InspectionDecision(
+            action="allow", threat_level="safe", enforced="allowed"
+        )
+        return decision, envelope.content_text
 
 
 def _use_inspection(monkeypatch, inspection: _Inspection | None = None) -> _Inspection:
@@ -400,11 +404,11 @@ async def test_inspection_with_nothing_left_never_starts_and_fails_closed(
     inspection = _use_inspection(monkeypatch)
     logs = _record_logs(monkeypatch)
 
-    result = await documents.get_official_document.ainvoke({"url": _DOC_URL})
+    with pytest.raises(ToolCallFailed) as raised:
+        await documents.get_official_document.ainvoke({"url": _DOC_URL})
 
-    assert result == "STATUS: INSUFFICIENT_DATA\nREASON: INSPECTION_TIMEOUT"
+    assert raised.value.reason == "INSPECTION_TIMEOUT"
     assert inspection.calls == 0
-    assert "annual report figures" not in result
     assert ("warning", "official_document_inspection_timeout") in {
         (level, event) for level, event, _ in logs.events
     }
@@ -416,9 +420,10 @@ async def test_a_stalled_inspection_fails_closed_within_the_allowance(monkeypatc
     _mock_client(monkeypatch, _respond(_HTML, "text/html"))
     inspection = _use_inspection(monkeypatch, _Inspection(stall=True))
 
-    result = await _guarded(documents.get_official_document.ainvoke({"url": _DOC_URL}))
+    with pytest.raises(ToolCallFailed) as raised:
+        await _guarded(documents.get_official_document.ainvoke({"url": _DOC_URL}))
 
-    assert result == "STATUS: INSUFFICIENT_DATA\nREASON: INSPECTION_TIMEOUT"
+    assert raised.value.reason == "INSPECTION_TIMEOUT"
     assert inspection.entered.is_set()
     assert inspection.bounds[0] <= 0.2
     inspection.release.set()

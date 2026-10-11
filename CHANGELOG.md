@@ -19,6 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `article_writer.create_writer_llm` seam no longer takes `timeout`, and the legacy
   writer fallback chain refuses any override other than temperature.
 
+- An official document that content inspection blocked is no longer recorded as
+  primary evidence. The block placeholder used to come back as the document text,
+  wrapped in `STATUS: EVIDENCE_FOUND` with primary authority. Inspection now returns
+  one enforced disposition (allowed, sanitized, blocked, inspection_failed) from
+  the decision, the configured mode and the fail policy, so a warn-mode `block` is
+  still allowed. A blocked document is a `BLOCKED` ledger record. An inspection that
+  failed or timed out is a `FAILED` tool call: the model sees
+  `TOOL_ERROR: INSPECTION_FAILED` or `TOOL_ERROR: INSPECTION_TIMEOUT` (previously
+  `STATUS: INSUFFICIENT_DATA`, `REASON: INSPECTION_TIMEOUT`). Like any tool failure,
+  it counts against the forensic budget and the graph tool circuit. The same rule
+  applies to every tool output under fail-closed inspection, and a Tavily search
+  whose inspection failed returns no result. The fail-closed placeholder carries
+  the code `INSPECTION_BACKEND_ERROR` in place of the backend's exception text.
+
 - Unit tests are offline by rule, and integration tests are opt-in. One autouse
   `_offline_boundary` fixture refuses sockets, DNS, libcurl and the embedding SDKs for
   every non-`integration` test and fails any test that tried, naming targets and

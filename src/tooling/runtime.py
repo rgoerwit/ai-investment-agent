@@ -75,7 +75,24 @@ ToolSource: TypeAlias = Literal[
 
 
 class ToolCallBlocked(RuntimeError):
-    """Raised by a hook to block tool execution before the runner is invoked."""
+    """Raised to block a tool call: by a ``before()`` hook, or by the tool
+    itself when its own content inspection enforced a block.
+
+    Either way the service returns a ``blocked`` ``ToolResult`` and the
+    after-hooks see it, so the evidence ledger records ``BLOCKED``.
+    """
+
+
+class ToolCallFailed(RuntimeError):
+    """Raised by a tool or hook for a typed failure that produced no result.
+
+    ``reason`` is a secret-free code (``INSPECTION_FAILED``): it is what
+    failure observers record and what the model is told, never exception prose.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass
@@ -184,6 +201,8 @@ class ToolExecutionService:
             reason, scope = "TOOL_TIMEOUT", exc.scope
         elif isinstance(exc, TimeoutError):
             reason, scope = "TOOL_TIMEOUT", None
+        elif isinstance(exc, ToolCallFailed):
+            reason, scope = exc.reason, None
         else:
             reason, scope = "TOOL_EXECUTION_FAILED", None
         for hook in self._hooks:
@@ -247,18 +266,7 @@ class ToolExecutionService:
                 call, "before_hooks", "timed out in a before() hook"
             ) from exc
         except ToolCallBlocked as exc:
-            logger.warning(
-                "tool_call_blocked",
-                tool=call.name,
-                source=call.source,
-                agent_key=call.agent_key,
-                reason=redact_sensitive_text(str(exc)),
-            )
-            return ToolResult(
-                value=f"TOOL_BLOCKED: {exc}",
-                blocked=True,
-                findings=[redact_sensitive_text(str(exc))],
-            )
+            return _blocked_result(call, exc)
 
         # Read after the before() hooks, so time they spent counts against a
         # caller deadline rather than extending it.
@@ -299,6 +307,10 @@ class ToolExecutionService:
                 f"exceeded {max(timeout_seconds, 0.0):.1f}s",
                 timeout_seconds=timeout_seconds,
             ) from exc
+        except ToolCallBlocked as exc:
+            # The tool enforced a block on its own content: the same blocked
+            # result a before() hook produces, so after-hooks record it.
+            result = _blocked_result(call, exc)
         except Exception as exc:
             # after() hooks only run for successfully produced tool outputs.
             # Failed executions propagate immediately so callers keep the original
@@ -338,11 +350,26 @@ class ToolExecutionService:
 
 def tool_error_text(exc: Exception) -> str:
     """What a model is told of a tool call that raised: a timeout is the typed
-    ``TOOL_TIMEOUT`` (the code the graph tool node uses), any other failure
-    its class name, never exception prose."""
+    ``TOOL_TIMEOUT`` (the code the graph tool node uses), a ``ToolCallFailed``
+    its reason code, any other failure its class name, never exception prose."""
     if isinstance(exc, TimeoutError):
         return "TOOL_ERROR: TOOL_TIMEOUT"
+    if isinstance(exc, ToolCallFailed):
+        return f"TOOL_ERROR: {exc.reason}"
     return f"TOOL_ERROR: {type(exc).__name__}"
+
+
+def _blocked_result(call: ToolInvocation, exc: ToolCallBlocked) -> ToolResult:
+    """The one result shape of a blocked call, wherever the block was raised."""
+    reason = redact_sensitive_text(str(exc))
+    logger.warning(
+        "tool_call_blocked",
+        tool=call.name,
+        source=call.source,
+        agent_key=call.agent_key,
+        reason=reason,
+    )
+    return ToolResult(value=f"TOOL_BLOCKED: {reason}", blocked=True, findings=[reason])
 
 
 def _log_timeout(

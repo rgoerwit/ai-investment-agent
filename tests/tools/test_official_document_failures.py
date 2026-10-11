@@ -26,6 +26,7 @@ from src import editor_tools
 from src.config import Settings, config
 from src.exchange_metadata import registered_official_document_hosts
 from src.stocktwits_api import StockTwitsAPI
+from src.tooling.runtime import ToolCallFailed
 from src.tools import official_documents as documents
 
 _SEC_URL = "https://www.sec.gov/Archives/edgar/data/1/report.pdf"
@@ -457,8 +458,15 @@ async def test_phase_inspect(monkeypatch, logs):
     service.check_within = AsyncMock(return_value=None)
     monkeypatch.setattr(documents, "get_current_inspection_service", lambda: service)
 
-    assert await _fetch() == _reply("INSPECTION_TIMEOUT")
-    assert logs.failures()[0]["phase"] == "inspect"
+    # Not a retrieval failure: the call fails as such, for the ledger to
+    # record FAILED (tests/tools/test_official_document_inspection_outcome.py).
+    with pytest.raises(ToolCallFailed) as raised:
+        await _fetch()
+    assert raised.value.reason == "INSPECTION_TIMEOUT"
+    assert logs.failures() == []
+    assert ("warning", "official_document_inspection_timeout") in {
+        (level, event) for level, event, _ in logs.events
+    }
 
 
 @pytest.mark.asyncio

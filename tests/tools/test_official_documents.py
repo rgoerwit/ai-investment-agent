@@ -12,6 +12,7 @@ from src.runtime_services import (
     use_runtime_services,
 )
 from src.tooling.inspection_service import InspectionService
+from src.tooling.inspector import InspectionDecision
 from src.tooling.runtime import ToolExecutionService
 from src.tools import official_documents as documents
 
@@ -424,8 +425,11 @@ async def test_document_tool_uses_html_fallback_and_inspects_text(monkeypatch) -
         ),
     )
     inspection = InspectionService()
-    inspection.check = AsyncMock(  # type: ignore[method-assign]
-        side_effect=lambda envelope: envelope.content_text
+    inspection.evaluate = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda envelope: (
+            InspectionDecision(action="allow", threat_level="safe", enforced="allowed"),
+            envelope.content_text,
+        )
     )
     monkeypatch.setattr(documents, "get_current_inspection_service", lambda: inspection)
 
@@ -437,7 +441,7 @@ async def test_document_tool_uses_html_fallback_and_inspects_text(monkeypatch) -
     assert '"candidate_paths": ["/results/fy-2026.pdf"]' in result
     assert "evil.example" not in result
     assert "Annual report" in result
-    inspection.check.assert_awaited_once()
+    inspection.evaluate.assert_awaited_once()
 
 
 @pytest.mark.parametrize("placement", ["before", "after"])

@@ -29,6 +29,8 @@ from src.runtime_services import RuntimeServices, use_runtime_services
 from src.tooling.evidence_recorder import EvidenceRecorder
 from src.tooling.inspection_service import InspectionService
 from src.tooling.runtime import (
+    ToolCallBlocked,
+    ToolCallFailed,
     ToolExecutionService,
     ToolFailureObserver,
     ToolInvocation,
@@ -179,6 +181,61 @@ async def test_a_runner_exception_is_recorded_as_an_execution_failure():
 
 
 @pytest.mark.asyncio
+async def test_a_typed_runner_failure_is_recorded_with_its_reason_code():
+    recorder = EvidenceRecorder()
+    runner = AsyncMock(side_effect=ToolCallFailed("INSPECTION_FAILED"))
+
+    with pytest.raises(ToolCallFailed):
+        await ToolExecutionService([recorder]).execute(_call(), runner=runner)
+
+    (record,) = recorder.snapshot()
+    assert (record.execution_status, record.evidence_status) == (
+        "FAILED",
+        "UNAVAILABLE",
+    )
+    assert record.reason == "INSPECTION_FAILED"
+    assert record.content == "TOOL_ERROR: INSPECTION_FAILED"
+    assert record.requested_urls == (_URL,)
+
+
+class _SeesAfter:
+    def __init__(self) -> None:
+        self.seen: list[ToolResult] = []
+
+    async def before(self, call: ToolInvocation) -> ToolInvocation:
+        return call
+
+    async def after(self, call: ToolInvocation, result: ToolResult) -> ToolResult:
+        self.seen.append(result)
+        return result
+
+
+@pytest.mark.asyncio
+async def test_a_runner_block_is_a_blocked_result_the_after_hooks_record():
+    """One shape for a block, wherever it was raised: the ledger records it."""
+    recorder = EvidenceRecorder()
+    observer = _SeesAfter()
+    runner = AsyncMock(side_effect=ToolCallBlocked("OFFICIAL_DOCUMENT_BLOCKED"))
+
+    result = await ToolExecutionService([recorder, observer]).execute(
+        _call(), runner=runner
+    )
+
+    assert result.value == "TOOL_BLOCKED: OFFICIAL_DOCUMENT_BLOCKED"
+    assert result.blocked is True
+    assert result.findings == ["OFFICIAL_DOCUMENT_BLOCKED"]
+    assert observer.seen == [result]
+    (record,) = recorder.snapshot()
+    assert (record.execution_status, record.evidence_status) == (
+        "BLOCKED",
+        "UNAVAILABLE",
+    )
+    assert record.blocked is True
+    assert record.authority_by_url == ()
+    assert record.requested_urls == (_URL,)
+
+
+@pytest.mark.asyncio
 async def test_a_success_leaves_only_its_own_record():
     recorder = EvidenceRecorder()
 
@@ -299,6 +356,7 @@ def test_a_hook_without_failed_is_not_an_observer_and_is_skipped():
         ),
         (asyncio.TimeoutError(), "TOOL_ERROR: TOOL_TIMEOUT"),
         (RuntimeError("secret https://x?token=1"), "TOOL_ERROR: RuntimeError"),
+        (ToolCallFailed("INSPECTION_FAILED"), "TOOL_ERROR: INSPECTION_FAILED"),
         (ValueError(), "TOOL_ERROR: ValueError"),
     ],
 )
@@ -330,6 +388,32 @@ async def test_the_consultant_loop_gets_the_typed_timeout_and_the_ledger_the_url
     (record,) = recorder.snapshot()
     assert record.requested_urls == (_URL,)
     assert record.findings == ("TIMEOUT_SCOPE:runner",)
+
+
+@pytest.mark.asyncio
+async def test_the_consultant_loop_gets_a_typed_failure_reason():
+    recorder = EvidenceRecorder()
+    service = ToolExecutionService([recorder])
+    tool = SimpleNamespace(
+        name="get_official_document",
+        ainvoke=AsyncMock(side_effect=ToolCallFailed("INSPECTION_TIMEOUT")),
+    )
+
+    message, outcome = await _guarded(
+        _execute_tool_call(
+            {"name": "get_official_document", "args": {"url": _URL}, "id": "t1"},
+            tools_by_name={"get_official_document": tool},
+            fmp_alt_disabled_kind=None,
+            tool_service_getter=lambda: service,
+            agent_key="consultant",
+            ticker="7203.T",
+        )
+    )
+
+    assert message.content == "TOOL_ERROR: INSPECTION_TIMEOUT"
+    assert outcome.result_failed is True
+    (record,) = recorder.snapshot()
+    assert record.reason == "INSPECTION_TIMEOUT"
 
 
 @pytest.mark.asyncio

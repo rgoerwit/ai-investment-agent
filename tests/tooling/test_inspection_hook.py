@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from src.mcp.client import MCPRuntime
 from src.mcp.config import MCPServerSpec
 from src.runtime_services import RuntimeServices, use_runtime_services
+from src.tooling.evidence_recorder import EvidenceRecorder
 from src.tooling.inspection_hook import ContentInspectionHook
 from src.tooling.inspection_service import INSPECTION_SERVICE, InspectionService
 from src.tooling.inspector import (
@@ -15,7 +18,13 @@ from src.tooling.inspector import (
     NullInspector,
     SourceKind,
 )
-from src.tooling.runtime import ToolExecutionService, ToolInvocation, ToolResult
+from src.tooling.runtime import (
+    ToolCallFailed,
+    ToolExecutionService,
+    ToolInvocation,
+    ToolResult,
+    tool_error_text,
+)
 
 
 def _invocation(name: str = "test_tool", source: str = "toolnode") -> ToolInvocation:
@@ -315,3 +324,90 @@ async def test_after_truncates_large_content_before_inspection():
         assert len(env.content_text) < 60_000
     finally:
         INSPECTION_SERVICE.configure(original_inspector, mode=original_mode)
+
+
+# ---------------------------------------------------------------------------
+# after() branches on the enforced disposition, never on the approved text
+# ---------------------------------------------------------------------------
+
+
+class _Decides:
+    def __init__(self, decision: InspectionDecision) -> None:
+        self.decision = decision
+
+    async def inspect(self, envelope: InspectionEnvelope) -> InspectionDecision:
+        del envelope
+        return self.decision
+
+
+class _Raises:
+    async def inspect(self, envelope: InspectionEnvelope) -> InspectionDecision:
+        raise RuntimeError("judge down sk-secret-token-in-exception")
+
+
+@pytest.mark.asyncio
+async def test_a_tool_output_that_merely_looks_blocked_is_not_blocked():
+    """Allowed content whose own text starts with the placeholder stays data."""
+    service = InspectionService(
+        _Decides(InspectionDecision(action="block", threat_level="high")), mode="warn"
+    )
+    value = "TOOL_BLOCKED: quoted from a filing"
+
+    result = await ContentInspectionHook(service).after(_invocation(), _result(value))
+
+    assert result.blocked is False
+    assert result.value == value
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_disposition_is_logged_by_code_without_reason_prose():
+    service = InspectionService(
+        _Decides(
+            InspectionDecision(
+                action="block", threat_level="high", reason="judge prose: evil text"
+            )
+        ),
+        mode="block",
+    )
+
+    with patch("src.tooling.inspection_hook.logger") as log:
+        result = await ContentInspectionHook(service).after(
+            _invocation(), _result("evil")
+        )
+
+    assert result.blocked is True
+    (call,) = log.warning.call_args_list
+    assert call.args == ("tool_call_blocked",)
+    assert call.kwargs["disposition"] == "blocked"
+    assert "judge prose" not in repr(call.kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["warn", "sanitize", "block"])
+async def test_a_failed_inspection_fails_the_call_and_the_ledger_records_failed(mode):
+    service = InspectionService(_Raises(), mode=mode, fail_policy="fail_closed")
+    recorder = EvidenceRecorder()
+    tools = ToolExecutionService([recorder, ContentInspectionHook(service)])
+
+    async def runner(args):
+        del args
+        return "tool output"
+
+    with pytest.raises(ToolCallFailed) as raised:
+        await tools.execute(_invocation(), runner=runner)
+
+    assert tool_error_text(raised.value) == "TOOL_ERROR: INSPECTION_FAILED"
+    (record,) = recorder.snapshot()
+    assert (record.execution_status, record.reason) == ("FAILED", "INSPECTION_FAILED")
+    assert "sk-secret" not in record.content
+
+
+@pytest.mark.asyncio
+async def test_a_fail_open_backend_error_returns_the_tool_output():
+    service = InspectionService(_Raises(), mode="block", fail_policy="fail_open")
+
+    result = await ContentInspectionHook(service).after(
+        _invocation(), _result("tool output")
+    )
+
+    assert (result.value, result.blocked) == ("tool output", False)

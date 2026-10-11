@@ -50,9 +50,18 @@ class InspectionEnvelope:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+InspectionDisposition = Literal["allowed", "sanitized", "blocked", "inspection_failed"]
+
+
 @dataclass
 class InspectionDecision:
-    """Result returned by a ContentInspector backend."""
+    """Result returned by a ContentInspector backend.
+
+    ``enforced`` is ``None`` on a backend's raw decision. Only
+    ``InspectionService.evaluate`` sets it: the outcome actually applied under
+    the configured mode and fail policy. A raw ``block`` in warn mode is
+    enforced as ``allowed``; callers branch on ``enforced``, never ``action``.
+    """
 
     action: Literal["allow", "sanitize", "block", "degrade"]
     threat_level: Literal["safe", "low", "medium", "high", "critical"]
@@ -62,6 +71,7 @@ class InspectionDecision:
     findings: list[str] = field(default_factory=list)
     reason: str | None = None
     expected_wrapper_cleanup: bool = False
+    enforced: InspectionDisposition | None = None
 
 
 @runtime_checkable

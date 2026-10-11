@@ -111,7 +111,9 @@ async def _inspect_before_deadline(
     before inspection starts (which may be a paid LLM judge call), and an
     inspection that overruns returns ``None``, never the uninspected payload
     (``InspectionService.check_within``: deadline-only, so a judge that
-    ignores cancellation cannot hold the caller).
+    ignores cancellation cannot hold the caller). An enforced
+    ``inspection_failed`` (a fail-closed backend error) returns ``None`` too:
+    one meaning for "could not inspect".
     """
     if raw is None:
         return None
@@ -119,7 +121,7 @@ async def _inspect_before_deadline(
     if remaining <= 0:
         logger.warning("tavily_search_late_result_discarded", **log_fields)
         return None
-    inspected = await get_current_inspection_service().check_within(
+    outcome = await get_current_inspection_service().check_within(
         InspectionEnvelope(
             content_text=raw if isinstance(raw, str) else str(raw),
             raw_content=raw,
@@ -130,8 +132,14 @@ async def _inspect_before_deadline(
         seconds=remaining,
         label=f"tavily:inspect:{query_text[:60]}",
     )
-    if inspected is None:
+    if outcome is None:
         logger.warning("tavily_inspection_timeout", **log_fields)
+        return None
+    decision, inspected = outcome
+    if decision.enforced == "inspection_failed":
+        # Could not inspect: the same fail-closed result as a timeout.
+        logger.warning("tavily_inspection_failed", **log_fields)
+        return None
     return inspected
 
 

@@ -78,7 +78,9 @@ async def test_finished_in_time_returns_the_approved_content():
     result = await _service(inspector).check_within(
         _envelope(), seconds=1.0, label="probe"
     )
-    assert result == "[scrubbed]"
+    assert result is not None
+    decision, approved = result
+    assert (decision.enforced, approved) == ("sanitized", "[scrubbed]")
     assert inspector.calls == 1
 
 
@@ -121,13 +123,13 @@ async def test_an_overrun_returns_none_at_the_bound_and_drops_the_late_verdict(
 
 
 @pytest.mark.asyncio
-async def test_an_error_in_check_propagates():
+async def test_an_error_in_evaluate_propagates():
     service = InspectionService()
 
     async def boom(envelope: InspectionEnvelope) -> Any:
         raise RuntimeError("inspection plane down")
 
-    service.check = boom  # type: ignore[method-assign]
+    service.evaluate = boom  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="inspection plane down"):
         await service.check_within(_envelope(), seconds=1.0, label="probe")
 
@@ -179,4 +181,7 @@ async def test_the_judge_inside_never_sizes_against_the_tool_deadline(monkeypatc
     assert scope_deadline - clock[0] > tool_left
     # The judge ran and its verdict was applied, not failed open.
     assert len(admitted) == 1
-    assert str(result).startswith("TOOL_BLOCKED:")
+    assert result is not None
+    decision, approved = result
+    assert decision.enforced == "blocked"
+    assert str(approved).startswith("TOOL_BLOCKED:")

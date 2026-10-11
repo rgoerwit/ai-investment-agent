@@ -14,7 +14,7 @@ from src.tooling.evidence_recorder import (
     ExecutionStatus,
     classify_evidence_value,
 )
-from src.tooling.runtime import ToolInvocation, ToolSource
+from src.tooling.runtime import ToolCallFailed, ToolInvocation, ToolSource
 
 PreflightCall = tuple[str, Any, dict[str, Any]]
 
@@ -138,7 +138,11 @@ async def run_preflight_calls(
                 label=label,
                 execution_status="FAILED",
                 evidence_status="UNAVAILABLE",
-                reason=type(exc).__name__.upper(),
+                reason=(
+                    exc.reason
+                    if isinstance(exc, ToolCallFailed)
+                    else type(exc).__name__.upper()
+                ),
             )
         finally:
             durations_ms[label] = round((time.monotonic() - started_at) * 1000)

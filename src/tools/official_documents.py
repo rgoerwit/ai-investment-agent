@@ -31,8 +31,13 @@ from src.runtime_services import (
 )
 from src.subprocesses import resolve_program, run_program
 from src.text_patterns import is_safe_public_host
+from src.tooling.inspection_service import INSPECTION_FAILED
 from src.tooling.inspector import InspectionEnvelope, SourceKind
-from src.tooling.runtime import tool_execution_timeout_seconds
+from src.tooling.runtime import (
+    ToolCallBlocked,
+    ToolCallFailed,
+    tool_execution_timeout_seconds,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -743,7 +748,7 @@ async def get_official_document(
         # Whatever is left, at least the reserve held back from extraction.
         # Fails closed: evidence that could not be inspected in time is
         # never returned.
-        inspected = await get_current_inspection_service().check_within(
+        outcome = await get_current_inspection_service().check_within(
             InspectionEnvelope(
                 content_text=evidence,
                 raw_content=evidence,
@@ -754,11 +759,21 @@ async def get_official_document(
             seconds=allocation.left(),
             label="official_document_inspection",
         )
-        if inspected is None:
+        if outcome is None:
             logger.warning(
                 "official_document_inspection_timeout", backend=extracted.backend
             )
-            raise DocumentExtractionError("INSPECTION_TIMEOUT")
+            raise ToolCallFailed("INSPECTION_TIMEOUT")
+        decision, inspected = outcome
+        # The enforced disposition alone decides: a block or a failed
+        # inspection leaves the tool as such, never as evidence wrapping a
+        # placeholder, so the ledger records BLOCKED or FAILED.
+        if decision.enforced == "blocked":
+            raise ToolCallBlocked("OFFICIAL_DOCUMENT_BLOCKED")
+        if decision.enforced not in ("allowed", "sanitized"):
+            raise ToolCallFailed(INSPECTION_FAILED)
+        if len(str(inspected)) < _MIN_USEFUL_TEXT_CHARS:
+            raise DocumentExtractionError("DOCUMENT_TEXT_UNAVAILABLE")
         metadata = {
             "status": "PARTIAL_DATA" if reason else "EXTRACTED",
             "authority": resolve_source_authority(final_url),
@@ -775,6 +790,8 @@ async def get_official_document(
             "STATUS: EVIDENCE_FOUND\n"
             f"DOCUMENT_METADATA: {json.dumps(metadata, sort_keys=True)}\n\n{inspected}"
         )
+    except (ToolCallBlocked, ToolCallFailed):
+        raise
     except Exception as exc:
         failure = _typed_failure(exc, progress)
         _log_failure(failure, exc, progress)

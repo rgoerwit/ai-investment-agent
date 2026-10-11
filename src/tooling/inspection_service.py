@@ -11,7 +11,9 @@ Every external-content callsite should call::
 
     approved = await INSPECTION_SERVICE.check(InspectionEnvelope(...))
 
-and use the returned approved value in place of the raw content. This is the
+and use the returned approved value in place of the raw content; a callsite
+that records or labels the outcome calls ``evaluate`` (or ``check_within``)
+and branches on the decision's ``enforced`` disposition. This is the
 single trust boundary for untrusted prompt-bound content. When the inspector
 allows the content, the original ``raw_content`` value is preserved when
 available so structured payload shapes are not lost.
@@ -20,6 +22,7 @@ available so structured payload shapes are not lost.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from typing import Any, Literal
 
 import structlog
@@ -36,6 +39,10 @@ from src.tooling.inspector import (
 logger = structlog.get_logger(__name__)
 
 _BLOCKED_PLACEHOLDER = "TOOL_BLOCKED: {reason}"
+# The reason code of a fail-closed backend error: never the exception text.
+INSPECTION_BACKEND_ERROR = "INSPECTION_BACKEND_ERROR"
+# The tool-failure code when an enforced ``inspection_failed`` ends a call.
+INSPECTION_FAILED = "INSPECTION_FAILED"
 _SUPPRESSED_DUPLICATE_MILESTONES = frozenset({1, 5, 10, 25, 50, 100})
 
 
@@ -45,11 +52,12 @@ class InspectionService:
     Modes:
         warn      — log findings, return original content unchanged
         sanitize  — replace with sanitized_content when provided, else warn
-        block     — return a CONTENT_BLOCKED placeholder string
+        block     — return a TOOL_BLOCKED placeholder string
 
     Fail policies:
         fail_open   — if the backend raises, allow the content through
-        fail_closed — if the backend raises, treat as blocked
+        fail_closed — if the backend raises, enforce ``inspection_failed``
+                      with a TOOL_BLOCKED placeholder carrying a reason code
     """
 
     def __init__(
@@ -187,14 +195,77 @@ class InspectionService:
 
         logger.debug("content_inspection_finding", **payload)
 
+    def _enforce(
+        self, decision: InspectionDecision, original_value: Any
+    ) -> tuple[InspectionDecision, Any]:
+        """Apply the configured mode to a raw *decision*, once.
+
+        Returns the decision with ``enforced`` set and the approved value:
+        a ``block``/``degrade`` is enforced only in block mode (sanitize mode
+        uses the replacement when the backend supplied one), a ``sanitize``
+        only in sanitize or block mode with a replacement. An empty
+        replacement is still a replacement: scrubbing everything is never
+        read as "nothing to scrub".
+        """
+        replacement = decision.sanitized_content
+        if decision.action in ("block", "degrade"):
+            if self._mode == "block":
+                reason = decision.reason or "; ".join(decision.findings) or "policy"
+                return (
+                    replace(decision, enforced="blocked"),
+                    _BLOCKED_PLACEHOLDER.format(reason=reason),
+                )
+            if self._mode == "sanitize" and replacement is not None:
+                return replace(decision, enforced="sanitized"), replacement
+        elif decision.action == "sanitize":
+            if self._mode in ("sanitize", "block") and replacement is not None:
+                return replace(decision, enforced="sanitized"), replacement
+        return replace(decision, enforced="allowed"), original_value
+
+    def _backend_failed(
+        self, envelope: InspectionEnvelope, exc: Exception, original_value: Any
+    ) -> tuple[InspectionDecision, Any]:
+        """The fail policy's outcome when the backend raised.
+
+        The exception reaches the log only through ``summarize_exception``;
+        the decision and placeholder carry the secret-free reason code.
+        """
+        fail_closed = self._fail_policy == "fail_closed"
+        (logger.error if fail_closed else logger.warning)(
+            "content_inspection_backend_error",
+            source_kind=envelope.source_kind.value,
+            source_name=envelope.source_name,
+            **summarize_exception(exc, operation="content_inspection_backend_error"),
+            fail_policy=self._fail_policy,
+        )
+        if not fail_closed:
+            return (
+                InspectionDecision(
+                    action="allow", threat_level="safe", enforced="allowed"
+                ),
+                original_value,
+            )
+        return (
+            InspectionDecision(
+                action="block",
+                threat_level="high",
+                findings=[INSPECTION_BACKEND_ERROR],
+                reason=INSPECTION_BACKEND_ERROR,
+                enforced="inspection_failed",
+            ),
+            _BLOCKED_PLACEHOLDER.format(reason=INSPECTION_BACKEND_ERROR),
+        )
+
     async def evaluate(
         self,
         envelope: InspectionEnvelope,
     ) -> tuple[InspectionDecision, Any]:
-        """Inspect *envelope* and return both decision and approved content.
+        """Inspect *envelope*; return the enforced decision and approved content.
 
-        This is the richer variant used by callsites that need the underlying
-        inspection decision for control-flow, not just the approved content.
+        The decision's ``enforced`` disposition (allowed, sanitized, blocked,
+        inspection_failed) is the one machine-readable outcome: callers that
+        must tell a block from evidence branch on it, never on the raw
+        ``action`` or on the approved text.
         """
         original_value = (
             envelope.raw_content
@@ -204,76 +275,30 @@ class InspectionService:
         try:
             decision: InspectionDecision = await self._inspector.inspect(envelope)
         except Exception as exc:
-            if self._fail_policy == "fail_closed":
-                reason = f"inspector error: {exc}"
-                logger.error(
-                    "content_inspection_backend_error",
-                    source_kind=envelope.source_kind.value,
-                    source_name=envelope.source_name,
-                    **summarize_exception(
-                        exc, operation="content_inspection_backend_error"
-                    ),
-                    fail_policy=self._fail_policy,
-                )
-                blocked = _BLOCKED_PLACEHOLDER.format(reason=reason)
-                return (
-                    InspectionDecision(
-                        action="block",
-                        threat_level="high",
-                        findings=["inspection backend error"],
-                        reason=reason,
-                    ),
-                    blocked,
-                )
-            logger.warning(
-                "content_inspection_backend_error",
-                source_kind=envelope.source_kind.value,
-                source_name=envelope.source_name,
-                **summarize_exception(
-                    exc, operation="content_inspection_backend_error"
-                ),
-                fail_policy=self._fail_policy,
-            )
-            return (
-                InspectionDecision(action="allow", threat_level="safe"),
-                original_value,
-            )
+            return self._backend_failed(envelope, exc, original_value)
 
         if decision.action == "allow" and decision.threat_level == "safe":
-            return decision, original_value
+            return replace(decision, enforced="allowed"), original_value
 
         # Log findings for non-trivial decisions regardless of mode.
         if decision.findings or decision.threat_types:
             self._log_inspection_finding(envelope, decision)
-
-        if decision.action in ("block", "degrade"):
-            if self._mode == "block":
-                reason = decision.reason or "; ".join(decision.findings) or "policy"
-                return decision, _BLOCKED_PLACEHOLDER.format(reason=reason)
-            if self._mode == "sanitize" and decision.sanitized_content is not None:
-                return decision, decision.sanitized_content
-            return decision, original_value
-
-        if decision.action == "sanitize":
-            if self._mode in ("sanitize", "block") and decision.sanitized_content:
-                return decision, decision.sanitized_content
-            return decision, original_value
-
-        return decision, original_value
+        return self._enforce(decision, original_value)
 
     async def check(self, envelope: InspectionEnvelope) -> Any:
-        """Inspect *envelope* and return the approved content string.
+        """Inspect *envelope* and return the approved content only.
 
-        Returns the original value, a sanitized replacement string, or a
-        blocked-placeholder string depending on the decision and configured mode.
+        For callers that use the content and nothing else: the original
+        value, a sanitized replacement, or a blocked placeholder string.
+        A caller that records or labels the outcome uses ``evaluate``.
         """
         _, approved = await self.evaluate(envelope)
         return approved
 
     async def check_within(
         self, envelope: InspectionEnvelope, *, seconds: float, label: str
-    ) -> Any | None:
-        """``check`` bounded deadline-only by ``seconds``; ``None`` when it cannot finish.
+    ) -> tuple[InspectionDecision, Any] | None:
+        """``evaluate`` bounded deadline-only by ``seconds``; ``None`` when it cannot finish.
 
         For inspection that must fit inside a caller's allowance (a tool body,
         a search entrypoint). ``seconds <= 0`` starts nothing; an inspection
@@ -289,7 +314,7 @@ class InspectionService:
             return None
         try:
             return await run_with_hard_timeout(
-                self.check(envelope), timeout=seconds, label=label
+                self.evaluate(envelope), timeout=seconds, label=label
             )
         except TimeoutError:
             return None
