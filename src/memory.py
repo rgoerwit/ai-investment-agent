@@ -13,8 +13,12 @@ allowing agents to learn from past analyses and decisions.
 """
 
 import asyncio
+import contextlib
 import re
-from dataclasses import dataclass
+import threading
+import time
+from concurrent.futures import Future, InvalidStateError
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, cast
 
@@ -32,9 +36,9 @@ import src.config as config_module
 from src.async_utils import run_with_hard_timeout
 from src.blocking_io import (
     BlockingCallPolicy,
+    BlockingCallTimeoutError,
     InFlightLimit,
-    run_blocking_call,
-    run_blocking_call_sync,
+    start_blocking_call,
 )
 from src.config import config
 from src.embeddings import (
@@ -113,15 +117,25 @@ def _embedding_healthcheck_timeout() -> float:
 def _probe_policy() -> BlockingCallPolicy:
     """The probe runs on a daemon thread, so a stalled one never holds exit.
 
-    Its slot is per probe, not shared: the probe runs once per binding per
-    process, so the cache already bounds the orphans, and a shared slot would
-    let one stalled probe fail the next binding's without sending it.
+    Every probe takes the one shared slot, so at most one probe request is in
+    flight per process. A probe still stalled past its bound defers the next
+    binding's probe (nothing cached, a later caller retries) instead of
+    stacking another orphan.
     """
     return BlockingCallPolicy(
         "memory_embedding_healthcheck",
         _embedding_healthcheck_timeout(),
-        in_flight=InFlightLimit(1),
+        in_flight=FinancialSituationMemory._probe_in_flight,
     )
+
+
+def _probe_wait_allowance() -> float:
+    """How long one caller waits on a probe in flight: its own deadline, at most the bound.
+
+    The probe settles at its own bound whatever its callers do, so a caller
+    with no deadline never waits longer than that.
+    """
+    return llm_timeouts.clamp_to_operational_deadline(_embedding_healthcheck_timeout())
 
 
 def _fits_before_operational_deadline(seconds: float) -> bool:
@@ -202,13 +216,43 @@ def _probe_embeddings(embeddings: Any) -> list[float]:
     return vector
 
 
+# What a probe settles to: the published (client, available), or None when the
+# waiter gets no client (the client could not be built or the probe could not
+# start, or a newer binding superseded it).
+_ProbeOutcome = tuple[Any, bool] | None
+
+
+def _running_future() -> Future[_ProbeOutcome]:
+    """A future already running: ``cancel()`` is refused, so no waiter can cancel it."""
+    future: Future[_ProbeOutcome] = Future()
+    future.set_running_or_notify_cancel()
+    return future
+
+
 @dataclass(frozen=True)
 class _PendingProbe:
-    """A built client whose startup probe is yet to run, and what it is for."""
+    """One binding's startup probe, from its owner's claim until it settles.
+
+    Sync callers wait on ``outcome`` directly and async callers through an
+    ``asyncio.wrap_future`` adapter on their own loop, each under its own
+    deadline. ``generation`` is the binding generation it was claimed in.
+    """
 
     binding: EmbeddingBinding
-    embeddings: Any
     collection: str
+    generation: int
+    outcome: Future[_ProbeOutcome] = field(
+        default_factory=_running_future, compare=False
+    )
+
+    def settle(self, outcome: _ProbeOutcome) -> None:
+        """Resolve the waiters; the first settlement wins."""
+        with contextlib.suppress(InvalidStateError):
+            self.outcome.set_result(outcome)
+
+
+def _available(outcome: _ProbeOutcome) -> tuple[Any | None, bool]:
+    return (None, False) if outcome is None else outcome
 
 
 def _is_missing_collection_error(exc: Exception) -> bool:
@@ -243,6 +287,13 @@ class FinancialSituationMemory:
     _shared_embeddings_key: tuple[str, str, int | None, str] | None = None
     _shared_chroma_client: Any | None = None
     _shared_chroma_key: str | None = None
+    # One owner per binding probes; every other caller waits on its outcome.
+    # The generation advances whenever the binding's cache is dropped, so a
+    # probe claimed before cannot publish into it.
+    _probe_lock = threading.Lock()
+    _probe_generation: int = 0
+    _probe_run: _PendingProbe | None = None
+    _probe_in_flight = InFlightLimit(1)
 
     def __init__(self, name: str):
         """
@@ -273,8 +324,7 @@ class FinancialSituationMemory:
             )
             return
 
-        self.embeddings = self._get_shared_embeddings(name)
-        self.embeddings_available = self._shared_embeddings_available
+        self.embeddings, self.embeddings_available = self._shared_embeddings_for(name)
         if self.embeddings is None:
             return
 
@@ -330,31 +380,41 @@ class FinancialSituationMemory:
     @classmethod
     def _reset_shared_state_for_tests(cls) -> None:
         """Reset shared resources to keep tests isolated."""
-        cls._shared_embeddings = None
-        cls._shared_embeddings_available = False
-        cls._shared_embeddings_key = None
+        with cls._probe_lock:
+            cls._forget_probe_locked()
+            cls._shared_embeddings_key = None
+            # A stalled worker keeps the slot it took until it ends; a fresh
+            # slot keeps it from deferring the next test's probe.
+            cls._probe_in_flight = InFlightLimit(1)
         cls._shared_chroma_client = None
         cls._shared_chroma_key = None
 
     @classmethod
-    def _get_shared_embeddings(cls, collection_name: str) -> Any | None:
-        """The process-wide embeddings client, probed once per binding.
+    def _forget_probe_locked(cls) -> None:
+        """Drop the cached probe result and any claim on it (caller holds the lock)."""
+        cls._probe_generation += 1
+        cls._probe_run = None
+        cls._shared_embeddings = None
+        cls._shared_embeddings_available = False
 
-        Synchronous: a constructor blocks for up to the probe bound when the
-        probe has not run yet. ``prepare_shared_embeddings`` runs it off the
-        event loop first, so the async entry points never reach this wait.
+    @classmethod
+    def _shared_embeddings_for(cls, collection_name: str) -> tuple[Any | None, bool]:
+        """The process-wide client and whether its probe passed, probed once per binding.
+
+        Synchronous: while a probe runs, a constructor blocks for up to the
+        probe bound or its own deadline. ``prepare_shared_embeddings`` runs it
+        off the event loop first, so the async entry points never reach this wait.
         """
-        pending = cls._pending_probe(collection_name)
-        if pending is not None:
-            try:
-                run_blocking_call_sync(
-                    _probe_policy(), lambda: _probe_embeddings(pending.embeddings)
-                )
-            except Exception as exc:
-                cls._record_probe(pending, exc)
-            else:
-                cls._record_probe(pending, None)
-        return cls._shared_embeddings
+        run = cls._join_probe(collection_name)
+        if run is None:
+            return cls._cached_probe()
+        wait = _probe_wait_allowance()
+        if wait <= 0:
+            return None, False
+        try:
+            return _available(run.outcome.result(timeout=wait))
+        except TimeoutError:
+            return None, False
 
     @classmethod
     async def prepare_shared_embeddings(cls) -> bool:
@@ -362,28 +422,53 @@ class FinancialSituationMemory:
 
         Called by the async entry points before any memory is constructed, so
         the constructors find the probe's result cached instead of blocking the
-        loop. Shares the constructor's cache, admission and probe policy.
+        loop. Shares the constructor's cache, owner, admission and probe policy.
         """
-        pending = cls._pending_probe("startup")
-        if pending is not None:
-            try:
-                await run_blocking_call(
-                    _probe_policy(), lambda: _probe_embeddings(pending.embeddings)
-                )
-            except Exception as exc:
-                cls._record_probe(pending, exc)
-            else:
-                cls._record_probe(pending, None)
-        return cls._shared_embeddings_available
+        run = cls._join_probe("startup")
+        if run is None:
+            return cls._cached_probe()[1]
+        wait = _probe_wait_allowance()
+        if wait <= 0:
+            return False
+        try:
+            outcome = await run_with_hard_timeout(
+                asyncio.wrap_future(run.outcome),
+                timeout=wait,
+                label="memory_embedding_healthcheck_wait",
+            )
+        except TimeoutError:
+            return False
+        return _available(outcome)[1]
 
     @classmethod
-    def _pending_probe(cls, collection_name: str) -> _PendingProbe | None:
-        """The client still to probe, or None when the shared state answers.
+    def _cached_probe(cls) -> tuple[Any | None, bool]:
+        with cls._probe_lock:
+            return cls._shared_embeddings, cls._shared_embeddings_available
 
-        None when the binding's probe already ran (its result is cached), when
-        the probe's full bound does not fit before the operational deadline
-        (deferred, nothing cached, so the next caller with time probes), or when
-        the client cannot be built.
+    @classmethod
+    def _join_probe(cls, collection_name: str) -> _PendingProbe | None:
+        """The probe this caller waits on, started here when no one owns it yet.
+
+        None when the shared state answers: the binding's probe already
+        settled, memory is disabled, or the probe was deferred.
+        """
+        claim = cls._claim_probe(collection_name)
+        if claim is None:
+            return None
+        run, owner = claim
+        if owner:
+            cls._start_probe(run)
+        return run
+
+    @classmethod
+    def _claim_probe(cls, collection_name: str) -> tuple[_PendingProbe, bool] | None:
+        """The binding's probe in flight and whether this caller now owns it.
+
+        Ownership is taken before the client is built, so one client and one
+        probe exist per binding. None when the probe already ran (its result is
+        cached), when memory is disabled, or when the probe's full bound does
+        not fit before the operational deadline (deferred, nothing cached, so
+        the next caller with time probes).
         """
         binding = resolve_embedding_binding(config)
         api_key = embedding_credential(config, binding.provider)
@@ -391,48 +476,133 @@ class FinancialSituationMemory:
             # Memory is disabled without a credential (see the constructor).
             return None
         cache_key = (binding.provider, binding.model, binding.dimension, api_key)
-        if cls._shared_embeddings_key != cache_key:
-            cls._shared_embeddings = None
-            cls._shared_embeddings_available = False
-            cls._shared_embeddings_key = cache_key
-
-        if cls._shared_embeddings is not None or cls._shared_embeddings_available:
-            return None
-
         probe_timeout = _embedding_healthcheck_timeout()
-        if not _fits_before_operational_deadline(probe_timeout):
-            logger.info(
-                "embeddings_healthcheck_deferred",
-                collection=collection_name,
-                provider=binding.provider,
-                probe_timeout_seconds=probe_timeout,
-                reason="the probe's full bound does not fit before the deadline",
-            )
-            return None
+        with cls._probe_lock:
+            if cls._shared_embeddings_key != cache_key:
+                cls._forget_probe_locked()
+                cls._shared_embeddings_key = cache_key
+            if cls._shared_embeddings is not None or cls._shared_embeddings_available:
+                return None
+            if cls._probe_run is not None:
+                return cls._probe_run, False
+            if _fits_before_operational_deadline(probe_timeout):
+                cls._probe_run = _PendingProbe(
+                    binding, collection_name, cls._probe_generation
+                )
+                return cls._probe_run, True
+        logger.info(
+            "embeddings_healthcheck_deferred",
+            collection=collection_name,
+            provider=binding.provider,
+            probe_timeout_seconds=probe_timeout,
+            reason="the probe's full bound does not fit before the deadline",
+        )
+        return None
 
+    @classmethod
+    def _start_probe(cls, run: _PendingProbe) -> None:
+        """Build the owner's client and start its probe; abandon the claim on failure.
+
+        Nothing from the claim to the worker's start awaits, so an async owner
+        cannot be cancelled in between; once started, the worker and its
+        expiry publish whatever becomes of the owner.
+        """
+        started = False
         try:
-            embeddings = build_embeddings(binding, config)
+            embeddings = build_embeddings(run.binding, config)
         except Exception as e:
             logger.warning(
                 "embeddings_init_failed",
-                collection=collection_name,
+                collection=run.collection,
                 **summarize_exception(e, operation="memory embeddings init"),
             )
-            return None
-        return _PendingProbe(binding, embeddings, collection_name)
+        else:
+            started = cls._start_probe_worker(run, embeddings)
+        finally:
+            if not started:
+                with cls._probe_lock:
+                    if cls._probe_run is run:
+                        cls._probe_run = None
+                run.settle(None)
 
     @classmethod
-    def _record_probe(cls, pending: _PendingProbe, error: Exception | None) -> None:
-        """Cache the probe's outcome for the process, success or failure."""
-        binding = pending.binding
-        cls._shared_embeddings = pending.embeddings
-        cls._shared_embeddings_available = error is None
+    def _start_probe_worker(cls, run: _PendingProbe, embeddings: Any) -> bool:
+        """Start the probe and its expiry at the bound; False when it cannot start."""
+        policy = _probe_policy()
+        try:
+            worker = start_blocking_call(policy, lambda: _probe_embeddings(embeddings))
+        except TimeoutError as e:
+            # Saturated by a probe still stalled, or the deadline spent since
+            # admission: deferred like an unadmitted probe, nothing cached.
+            logger.warning(
+                "embeddings_healthcheck_deferred",
+                collection=run.collection,
+                provider=run.binding.provider,
+                **summarize_exception(e, operation="memory embeddings probe start"),
+            )
+            return False
+        expires_at = time.monotonic() + policy.hard_timeout_seconds
+        timed_out = BlockingCallTimeoutError(
+            f"{policy.label!r} exceeded hard timeout of "
+            f"{policy.hard_timeout_seconds:.1f}s"
+        )
+        expiry = threading.Timer(
+            policy.hard_timeout_seconds,
+            cls._publish_probe,
+            args=(run, embeddings, timed_out),
+        )
+        expiry.daemon = True
+        expiry.start()
+
+        def publish(done: Future[list[float]]) -> None:
+            expiry.cancel()
+            # A result at or after the bound is late, even if it beat the
+            # expiry thread here: the bound decides, not thread scheduling.
+            late = time.monotonic() >= expires_at
+            cls._publish_probe(run, embeddings, timed_out if late else done.exception())
+
+        worker.add_done_callback(publish)
+        return True
+
+    @classmethod
+    def _publish_probe(
+        cls, run: _PendingProbe, embeddings: Any, error: BaseException | None
+    ) -> None:
+        """Cache the probe's outcome for the process, success or failure, once.
+
+        Called by the worker as it finishes and by the expiry at the bound;
+        the first wins. A probe whose generation was superseded (a new
+        binding, or a test reset) publishes nothing, nor does the loser.
+        Runs on the worker or expiry thread, never needing the owner's loop.
+        """
+        with cls._probe_lock:
+            current = cls._probe_run is run and run.generation == cls._probe_generation
+            if current:
+                cls._probe_run = None
+                cls._shared_embeddings = embeddings
+                cls._shared_embeddings_available = error is None
+        if not current:
+            logger.debug(
+                "embeddings_healthcheck_discarded",
+                collection=run.collection,
+                generation=run.generation,
+            )
+            run.settle(None)
+            return
+        cls._log_probe(run, embeddings, error)
+        run.settle((embeddings, error is None))
+
+    @staticmethod
+    def _log_probe(
+        run: _PendingProbe, embeddings: Any, error: BaseException | None
+    ) -> None:
+        binding = run.binding
         if error is None:
             logger.debug(
                 "embeddings_initialized",
                 model=binding.model,
                 provider=binding.provider,
-                collection=pending.collection,
+                collection=run.collection,
                 shared=True,
             )
             return
@@ -440,11 +610,11 @@ class FinancialSituationMemory:
             error,
             provider=binding.provider,
             model_name=binding.model,
-            class_name=type(pending.embeddings).__name__,
+            class_name=type(embeddings).__name__,
         )
         logger.warning(
             "embeddings_healthcheck_failed",
-            collection=pending.collection,
+            collection=run.collection,
             provider=details.provider,
             model=binding.model,
             failure_kind=details.kind,

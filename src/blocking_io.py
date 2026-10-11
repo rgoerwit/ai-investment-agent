@@ -186,6 +186,31 @@ async def run_blocking_call(policy: BlockingCallPolicy, fn: Callable[[], T]) -> 
     )
 
 
+def _start_limited(
+    policy: BlockingCallPolicy, fn: Callable[[], T], *, caller: str
+) -> tuple[BlockingCallPolicy, InFlightLimit, Future[T]]:
+    """Clamp *policy* to the deadline and start *fn* on a slot of its limit."""
+    limit = policy.in_flight
+    if limit is None:
+        raise ValueError(f"{caller} requires an InFlightLimit on {policy.label!r}")
+    policy = _within_deadline(policy)
+    return policy, limit, _start_daemon_call(policy, limit, fn)
+
+
+def start_blocking_call(policy: BlockingCallPolicy, fn: Callable[[], T]) -> Future[T]:
+    """Start *fn* on a daemon worker and return its future without waiting.
+
+    For work whose result several callers share: each waits on the future
+    under its own deadline (``asyncio.wrap_future`` on a loop). The future is
+    already running, so no waiter can cancel it. Requires an
+    ``InFlightLimit``; raises ``BlockingCallTimeoutError`` before any thread
+    starts when the deadline is spent and ``BlockingCallSaturatedError`` when
+    no slot is free. *policy*'s bound is admitted, not enforced: enforcing it
+    is the caller's.
+    """
+    return _start_limited(policy, fn, caller="start_blocking_call")[2]
+
+
 def run_blocking_call_sync(policy: BlockingCallPolicy, fn: Callable[[], T]) -> T:
     """Synchronous twin of ``run_blocking_call`` for non-async call sites.
 
@@ -196,13 +221,7 @@ def run_blocking_call_sync(policy: BlockingCallPolicy, fn: Callable[[], T]) -> T
     running, holding its slot) and
     ``BlockingCallSaturatedError`` when no slot is free.
     """
-    limit = policy.in_flight
-    if limit is None:
-        raise ValueError(
-            f"run_blocking_call_sync requires an InFlightLimit on {policy.label!r}"
-        )
-    policy = _within_deadline(policy)
-    future = _start_daemon_call(policy, limit, fn)
+    policy, limit, future = _start_limited(policy, fn, caller="run_blocking_call_sync")
     try:
         return future.result(timeout=policy.hard_timeout_seconds)
     except TimeoutError:

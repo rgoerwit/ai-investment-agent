@@ -7,8 +7,14 @@ before the operational deadline, and a deferral caches nothing. The async entry
 points run it through ``prepare_shared_embeddings`` on a daemon thread, so the
 synchronous constructors that follow find it cached and never block the loop.
 
+One caller owns each binding's probe, from before the client is built until
+the worker publishes. Every other caller, sync or async, on any thread or loop,
+waits on the same completion under its own deadline, and cannot cancel it. A
+probe from an older binding (or from before a test reset) cannot publish.
+
 Every test counts probe requests and client constructions. Sizing uses a frozen
 deadline clock; elapsed time is measured only against a stall the test releases.
+Each stalled worker is released and joined before the test's patches unwind.
 """
 
 from __future__ import annotations
@@ -81,9 +87,8 @@ def probe(monkeypatch) -> Probe:
     )
     counter = Probe()
     monkeypatch.setattr(memory_module, "build_embeddings", counter.build)
-    FinancialSituationMemory._reset_shared_state_for_tests()
-    yield counter
-    FinancialSituationMemory._reset_shared_state_for_tests()
+    # The root _reset_shared_memory_state fixture clears the class state.
+    return counter
 
 
 @pytest.fixture
@@ -142,13 +147,13 @@ def test_a_probe_that_fits_runs_at_its_full_bound_unclamped(
     probe, fake_clock, monkeypatch
 ):
     seen: list[float] = []
-    real = memory_module.run_blocking_call_sync
+    real = memory_module.start_blocking_call
 
     def spy(policy, fn):
         seen.append(policy.hard_timeout_seconds)
         return real(policy, fn)
 
-    monkeypatch.setattr(memory_module, "run_blocking_call_sync", spy)
+    monkeypatch.setattr(memory_module, "start_blocking_call", spy)
     with enclosing_deadline(_PROBE_BOUND + 30.0):
         FinancialSituationMemory("TEST_unclamped")
     assert seen == [_PROBE_BOUND]
@@ -245,13 +250,6 @@ async def test_constructors_after_prepare_reuse_its_result(probe):
 
 
 @pytest.mark.asyncio
-async def test_prepare_twice_probes_once(probe):
-    assert await FinancialSituationMemory.prepare_shared_embeddings() is True
-    assert await FinancialSituationMemory.prepare_shared_embeddings() is True
-    assert probe.sends == 1
-
-
-@pytest.mark.asyncio
 async def test_prepare_under_a_spent_deadline_defers(probe, fake_clock):
     with enclosing_deadline(-1.0):
         assert await FinancialSituationMemory.prepare_shared_embeddings() is False
@@ -284,28 +282,285 @@ async def test_a_stalled_prepare_returns_at_its_bound(probe, monkeypatch):
     assert time.monotonic() - start < 1.0
 
 
-@pytest.mark.asyncio
-async def test_a_cancelled_prepare_caches_nothing(probe):
-    release = threading.Event()
-    started = threading.Event()
+# --- One owner per binding, any thread or loop ------------------------------------
 
-    def stall() -> None:
-        started.set()
-        release.wait(5)
 
-    probe.behaviour = stall
-    task = asyncio.ensure_future(FinancialSituationMemory.prepare_shared_embeddings())
-    while not started.is_set():
+class Stall:
+    """The first probe send waits for the test's release; later sends do not."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.outcome: BaseException | None = None
+
+    def __call__(self) -> BaseException | None:
+        if not self.started.is_set():
+            self.started.set()
+            self.release.wait(5)
+        return self.outcome
+
+
+def _join_probe_workers() -> None:
+    for worker in threading.enumerate():
+        if worker.name == "blocking:memory_embedding_healthcheck":
+            worker.join(5)
+
+
+@pytest.fixture
+def stall(probe):
+    stalled = Stall()
+    probe.behaviour = stalled
+    try:
+        yield stalled
+    finally:
+        stalled.release.set()
+        _join_probe_workers()
+
+
+async def _until(event: threading.Event) -> None:
+    for _ in range(5000):
+        if event.is_set():
+            return
         await asyncio.sleep(0.001)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    release.set()
+    raise AssertionError("the probe never started")
 
-    # The cancelled probe recorded nothing, so the next caller probes again.
-    probe.behaviour = None
-    assert await FinancialSituationMemory.prepare_shared_embeddings() is True
-    assert probe.sends == 2
+
+def _prepare() -> Any:
+    return FinancialSituationMemory.prepare_shared_embeddings()
+
+
+def test_every_probe_takes_the_same_slot():
+    assert memory_module._probe_policy().in_flight is not None
+    assert memory_module._probe_policy().in_flight is (
+        memory_module._probe_policy().in_flight
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_prepares_build_and_probe_once(probe, stall):
+    first = asyncio.ensure_future(_prepare())
+    await _until(stall.started)
+    second = asyncio.ensure_future(_prepare())
+    await asyncio.sleep(0)  # the second caller arrives while the probe runs
+    stall.release.set()
+
+    assert await asyncio.gather(first, second) == [True, True]
+    assert probe.builds == probe.sends == 1
+
+
+@pytest.mark.asyncio
+async def test_a_sync_constructor_joins_an_async_owner(probe, stall):
+    owner = asyncio.ensure_future(_prepare())
+    await _until(stall.started)
+    joined: list[FinancialSituationMemory] = []
+    joiner = threading.Thread(
+        target=lambda: joined.append(FinancialSituationMemory("TEST_sync_joiner"))
+    )
+    joiner.start()
+    await asyncio.sleep(0.05)  # ordering only: the joiner arrives mid-probe
+    stall.release.set()
+
+    assert await owner is True
+    await asyncio.to_thread(joiner.join, 5)
+    assert joined[0].embeddings_available is True
+    assert probe.builds == probe.sends == 1
+
+
+def test_two_event_loops_share_one_probe(probe, stall):
+    results: list[bool] = []
+
+    def run_loop() -> None:
+        results.append(asyncio.run(_prepare()))
+
+    first = threading.Thread(target=run_loop)
+    first.start()
+    assert stall.started.wait(5)
+    second = threading.Thread(target=run_loop)
+    second.start()
+    time.sleep(0.05)  # ordering only: the second loop arrives mid-probe
+    stall.release.set()
+    first.join(5)
+    second.join(5)
+
+    assert results == [True, True]
+    assert probe.builds == probe.sends == 1
+
+
+def test_a_loop_shut_down_mid_probe_still_publishes_for_the_next_run(probe, stall):
+    async def start_and_leave() -> None:
+        asyncio.ensure_future(_prepare())
+        await _until(stall.started)
+
+    # asyncio.run cancels the owner's pending task as its loop shuts down.
+    asyncio.run(start_and_leave())
+    stall.release.set()
+    _join_probe_workers()
+
+    assert asyncio.run(_prepare()) is True
+    assert probe.builds == probe.sends == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_owner_cannot_cancel_the_probe(probe, stall):
+    owner = asyncio.ensure_future(_prepare())
+    await _until(stall.started)
+    waiter = asyncio.ensure_future(_prepare())
+    await asyncio.sleep(0)
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    stall.release.set()
+
+    # The other waiter still gets the probe's result, and the worker published
+    # although its owner was gone: nothing is resent.
+    assert await waiter is True
+    await asyncio.to_thread(_join_probe_workers)
+    assert await _prepare() is True
+    assert probe.builds == probe.sends == 1
+
+
+def test_a_success_after_the_bound_is_discarded(probe, stall, monkeypatch):
+    monkeypatch.setattr(config, "memory_embedding_healthcheck_timeout_seconds", 0.05)
+
+    first = FinancialSituationMemory("TEST_late_1")
+    assert first.embeddings_available is False
+    stall.release.set()
+    _join_probe_workers()
+
+    # The timeout failure stays cached; the late vector changed nothing.
+    second = FinancialSituationMemory("TEST_late_2")
+    assert second.embeddings_available is False
+    assert probe.builds == probe.sends == 1
+
+
+def test_a_probe_still_stalled_settles_as_failed_at_its_bound(
+    probe, stall, monkeypatch
+):
+    monkeypatch.setattr(config, "memory_embedding_healthcheck_timeout_seconds", 0.05)
+
+    assert FinancialSituationMemory("TEST_stalled_owner").available is False
+    for _ in range(1000):  # the expiry fires at the bound, worker still stalled
+        if FinancialSituationMemory._probe_run is None:
+            break
+        time.sleep(0.001)
+
+    assert not stall.release.is_set()
+    assert FinancialSituationMemory._probe_run is None
+    # The timeout failure is cached with its client, as a failed probe is.
+    assert FinancialSituationMemory._shared_embeddings is not None
+    assert FinancialSituationMemory._shared_embeddings_available is False
+
+
+@pytest.mark.asyncio
+async def test_an_old_bindings_late_probe_cannot_publish_into_the_new_one(
+    probe, stall, monkeypatch
+):
+    owner = asyncio.ensure_future(_prepare())
+    await _until(stall.started)
+    monkeypatch.setattr(
+        memory_module, "embedding_credential", lambda *_a, **_k: "rotated-key"
+    )
+
+    # The old probe still holds the one probe slot: the new binding's probe is
+    # not sent, and nothing is cached for it.
+    blocked = FinancialSituationMemory("TEST_new_binding_blocked")
+    assert blocked.embeddings is None
+    assert probe.sends == 1
+
+    stall.release.set()
+    assert await owner is False
+    await asyncio.to_thread(_join_probe_workers)
+    assert FinancialSituationMemory._shared_embeddings is None
+
+    fresh = FinancialSituationMemory("TEST_new_binding")
+    assert fresh.embeddings_available is True
+    assert FinancialSituationMemory._shared_embeddings is fresh.embeddings
+    assert (probe.builds, probe.sends) == (3, 2)
+
+
+@pytest.mark.asyncio
+async def test_a_reset_during_a_probe_discards_its_late_result(probe, stall):
+    owner = asyncio.ensure_future(_prepare())
+    await _until(stall.started)
+    FinancialSituationMemory._reset_shared_state_for_tests()
+    stall.release.set()
+
+    assert await owner is False
+    await asyncio.to_thread(_join_probe_workers)
+    assert FinancialSituationMemory._shared_embeddings is None
+    assert FinancialSituationMemory._shared_embeddings_available is False
+
+
+@pytest.mark.asyncio
+async def test_waiters_on_a_failed_probe_share_its_one_failure(probe, stall):
+    stall.outcome = ConnectionError("unreachable")
+    first = asyncio.ensure_future(_prepare())
+    await _until(stall.started)
+    second = asyncio.ensure_future(_prepare())
+    await asyncio.sleep(0)
+    stall.release.set()
+
+    assert await asyncio.gather(first, second) == [False, False]
+    assert FinancialSituationMemory("TEST_after_failure").embeddings_available is False
+    assert probe.builds == probe.sends == 1
+
+
+def test_a_failed_build_releases_ownership_to_the_next_caller(probe, monkeypatch):
+    building = threading.Event()
+    fail = threading.Event()
+    attempts: list[int] = []
+
+    def slow_broken(*_a: Any, **_k: Any) -> Any:
+        attempts.append(1)
+        building.set()
+        fail.wait(5)
+        raise RuntimeError("bad client")
+
+    monkeypatch.setattr(memory_module, "build_embeddings", slow_broken)
+    built: list[FinancialSituationMemory] = []
+
+    def construct(name: str) -> threading.Thread:
+        thread = threading.Thread(
+            target=lambda: built.append(FinancialSituationMemory(name))
+        )
+        thread.start()
+        return thread
+
+    owner = construct("TEST_build_owner")
+    assert building.wait(5)
+    joiner = construct("TEST_build_joiner")
+    time.sleep(0.05)  # ordering only: the joiner arrives mid-build
+    fail.set()
+    owner.join(5)
+    joiner.join(5)
+
+    assert [m.embeddings for m in built] == [None, None]
+    assert attempts == [1]
+    # Nothing was cached: the next caller owns a fresh attempt.
+    monkeypatch.setattr(memory_module, "build_embeddings", probe.build)
+    assert FinancialSituationMemory("TEST_build_retry").embeddings_available is True
+    assert probe.builds == probe.sends == 1
+
+
+@pytest.mark.asyncio
+async def test_a_waiter_keeps_its_own_deadline(probe, stall):
+    owner = asyncio.ensure_future(_prepare())
+    await _until(stall.started)
+
+    with enclosing_deadline(-1.0):
+        spent = FinancialSituationMemory("TEST_spent_waiter")
+    start = time.monotonic()
+    with enclosing_deadline(0.05):
+        short = await _prepare()
+    elapsed = time.monotonic() - start
+
+    assert spent.embeddings is None
+    assert short is False
+    assert elapsed < 1.0
+    # Neither waiter cached anything or touched the owner's probe.
+    stall.release.set()
+    assert await owner is True
+    assert probe.builds == probe.sends == 1
 
 
 # --- The CLI entry points prepare before building any memory --------------------

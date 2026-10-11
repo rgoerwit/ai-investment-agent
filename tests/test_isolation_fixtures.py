@@ -89,6 +89,9 @@ def test_a_test_may_populate_the_shared_memory_clients_a():
     FinancialSituationMemory._shared_embeddings_key = ("p", "m", 1, "k")
     FinancialSituationMemory._shared_chroma_client = SENTINEL
     FinancialSituationMemory._shared_chroma_key = "somewhere"
+    # A probe left in flight, still holding the one probe slot.
+    FinancialSituationMemory._probe_run = SENTINEL
+    assert FinancialSituationMemory._probe_in_flight.try_acquire()
 
 
 def test_the_next_test_finds_the_shared_memory_clients_reset_b():
@@ -97,3 +100,5 @@ def test_the_next_test_finds_the_shared_memory_clients_reset_b():
     assert FinancialSituationMemory._shared_embeddings_key is None
     assert FinancialSituationMemory._shared_chroma_client is None
     assert FinancialSituationMemory._shared_chroma_key is None
+    assert FinancialSituationMemory._probe_run is None
+    assert FinancialSituationMemory._probe_in_flight.in_flight == 0

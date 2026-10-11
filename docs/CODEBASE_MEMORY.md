@@ -845,11 +845,29 @@ after success and after failure alike; it never ran once per memory instance.
 The async entry points (`src/main.py`, before the retrospective and the graph,
 and the retrospective-only mode) run it through
 `FinancialSituationMemory.prepare_shared_embeddings` on a daemon thread
-(`run_blocking_call` with a per-probe `InFlightLimit`), so the synchronous
+(`start_blocking_call` with one shared `InFlightLimit`), so the synchronous
 constructors that follow find it cached. Before, a constructor ran it on the
 event loop with a thread join, blocking the loop for up to the probe bound at
 graph build. Sync callers (scripts, tests) still probe from the constructor,
-through `run_blocking_call_sync` and the same policy. The 2 s GenAI client
+through the same policy.
+
+**One probe owner (October 2026, round 4).** Concurrent callers each built a
+client and sent a probe (two `prepare_shared_embeddings` calls, or an async
+prepare plus a sync constructor); a cancelled owner cached nothing, so the next
+caller probed again; and an old binding's late probe could overwrite a newer
+binding's cache. `_claim_probe` now takes ownership under `_probe_lock` before
+`build_embeddings`. The worker publishes from its own thread through
+`_publish_probe`, only while its run is current and its generation matches; a
+daemon timer at the bound caches the timeout failure, and a result after the
+bound is discarded. Waiters share the run's already-running
+`concurrent.futures.Future`: sync callers block on `result(timeout)`, async
+callers await an `asyncio.wrap_future` adapter on their own loop, each under its
+own deadline, and none can cancel the owner. A waiter whose deadline expires gets
+no memory and caches nothing. A probe still stalled past its bound holds the
+shared slot until its worker ends, so the next binding's probe defers rather than
+stacking threads.
+
+The 2 s GenAI client
 close and the 2 s Langfuse flush run on the shutdown path, after any caller
 deadline and inside `SHUTDOWN_HARD_TIMEOUT_SECONDS` (the cleanup half). They
 keep their defaults because they set how long exit can take. Only the 30 s

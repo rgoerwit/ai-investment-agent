@@ -327,13 +327,13 @@ def test_embedding_probe_runs_at_its_full_bound_when_it_fits(
     # Never clamped: its result is cached for the process, so a probe cut
     # short by one caller would turn embeddings off for every caller.
     seen: list[float] = []
-    real_sync = memory_module.run_blocking_call_sync
+    real_start = memory_module.start_blocking_call
 
     def spy(policy, fn):
         seen.append(policy.hard_timeout_seconds)
-        return real_sync(policy, fn)
+        return real_start(policy, fn)
 
-    monkeypatch.setattr(memory_module, "run_blocking_call_sync", spy)
+    monkeypatch.setattr(memory_module, "start_blocking_call", spy)
     monkeypatch.setattr(config, "memory_embedding_healthcheck_timeout_seconds", 15.0)
     with enclosing_deadline(20.0):
         memory = _probe_memory(monkeypatch, lambda *_a: [0.1] * 8)

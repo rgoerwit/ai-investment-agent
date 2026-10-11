@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The embeddings startup probe has one owner per binding. Concurrent sync and async
+  callers each built a client and sent a probe; now they share one client and one
+  probe, each waiting under its own deadline. A cancelled owner no longer forces a
+  re-probe, a superseded binding's late probe can no longer publish, and a success
+  after the probe bound is discarded. `start_blocking_call` is added to
+  `src/blocking_io.py`, and probes share one in-flight slot.
+
 - An explicit seat client timeout now reaches every request. A writer built with a
   111 s `client_timeout_seconds` sent about 298 s, because dispatch took the
   registered seat's policy from the invocation scope and never saw the model's own

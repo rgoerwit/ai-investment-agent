@@ -22,6 +22,7 @@ from src.blocking_io import (
     InFlightLimit,
     run_blocking_call,
     run_blocking_call_sync,
+    start_blocking_call,
 )
 from src.llm_runtime import timeouts as llm_timeouts
 
@@ -187,6 +188,57 @@ def test_sync_worker_sees_the_callers_context() -> None:
         )
     finally:
         var.reset(token)
+
+
+# ---------------------------------------------------------------------------
+# start_blocking_call: the worker future, for a caller that shares it
+# ---------------------------------------------------------------------------
+
+
+def test_start_returns_the_running_future_without_waiting() -> None:
+    policy = _limited("start_shared", max_in_flight=1)
+    release = threading.Event()
+    future = start_blocking_call(policy, lambda: release.wait(5) and "done")
+    try:
+        assert not future.done()
+        # Running: no waiter can cancel the work others are waiting on.
+        assert future.cancel() is False
+        assert policy.in_flight is not None and policy.in_flight.in_flight == 1
+    finally:
+        release.set()
+    assert future.result(timeout=5) == "done"
+    assert _join_workers("start_shared") == []
+    assert policy.in_flight.in_flight == 0
+
+
+def test_start_requires_an_in_flight_limit() -> None:
+    with pytest.raises(ValueError):
+        start_blocking_call(BlockingCallPolicy("start_unlimited", 1.0), lambda: 1)
+
+
+def test_start_with_its_slot_held_fails_fast() -> None:
+    policy = _limited("start_saturated", max_in_flight=1)
+    release = threading.Event()
+    held = start_blocking_call(policy, release.wait)
+    try:
+        with pytest.raises(BlockingCallSaturatedError):
+            start_blocking_call(policy, lambda: 1)
+    finally:
+        release.set()
+    held.result(timeout=5)
+    assert _join_workers("start_saturated") == []
+
+
+def test_start_under_a_spent_deadline_starts_no_worker(frozen_clock) -> None:
+    policy = _limited("start_spent")
+    calls: list[int] = []
+    with llm_timeouts.tool_call_deadline(2.0) as bound:
+        frozen_clock[0] = bound + 5.0
+        with pytest.raises(BlockingCallTimeoutError):
+            start_blocking_call(policy, lambda: calls.append(1))
+    assert calls == []
+    assert policy.in_flight is not None and policy.in_flight.in_flight == 0
+    assert _join_workers("start_spent") == []
 
 
 # ---------------------------------------------------------------------------
