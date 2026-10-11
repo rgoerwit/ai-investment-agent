@@ -397,5 +397,6 @@ def test_apac_direct_retry_factory_disables_thinking_and_sdk_retries(monkeypatch
     llms.create_apac_specialist_llm(thinking_enabled=False)
 
     assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
-    assert captured["max_retries"] == 0
+    # One SDK attempt is the transport class's own; no factory passes a count.
+    assert "max_retries" not in captured
     assert "reasoning_effort" not in captured

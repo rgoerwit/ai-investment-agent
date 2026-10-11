@@ -8,7 +8,6 @@ from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.budgets import reserve_class_for_request
 from src.llm_runtime.rate_limits import limiter_for_binding
 from src.llm_runtime.seats import ModelIntent
-from src.llm_runtime.timeouts import construction_transport_attempts, sdk_max_retries
 
 
 class GoogleAdapter:
@@ -25,23 +24,12 @@ class GoogleAdapter:
         settings = request.settings or config
         policy = request.seat.execution_policy
         timeout_class = request.seat.timeout_class
-        # Total attempts the client is built with. Run-scoped, so the --quick
-        # clamp applies; a seat's explicit transport_attempts (or its deprecated
-        # sdk_max_retries, translated) wins. Only direct callers use this value:
-        # under the runtime loop each dispatch sends one attempt per request.
-        built_retries = sdk_max_retries(
-            "google",
-            construction_transport_attempts(
-                request.seat, vendor="google", cfg=settings
-            ),
-        )
 
         if not policy.reasoning_control_enabled:
             llm = llms.create_gemini_model(
                 request.binding.model,
                 temperature=policy.sampling_temperature or 0.0,
                 timeout=int(policy.client_timeout_seconds or settings.api_timeout),
-                max_retries=built_retries,
                 callbacks=list(request.callbacks),
                 max_output_tokens=request.output_tokens,
                 service_tier=request.service_tier,
@@ -57,9 +45,9 @@ class GoogleAdapter:
             return llm
 
         if request.seat.seat_id is SeatId.ARTICLE_WRITER_BASE_FALLBACK:
-            # The seat policy reaches the writer floor too: its temperature,
-            # client ceiling and attempts, when the policy sets them.
-            writer_kwargs: dict[str, Any] = {"max_retries": built_retries}
+            # The seat policy reaches the writer floor too: its temperature
+            # and client ceiling, when the policy sets them.
+            writer_kwargs: dict[str, Any] = {}
             if policy.sampling_temperature is not None:
                 writer_kwargs["temperature"] = policy.sampling_temperature
             if policy.client_timeout_seconds is not None:
@@ -88,7 +76,6 @@ class GoogleAdapter:
                     if policy.client_timeout_seconds is not None
                     else None
                 ),
-                max_retries=policy.resolved_transport_attempts("google"),
                 callbacks=list(request.callbacks),
                 max_output_tokens=request.output_tokens,
                 service_tier=request.service_tier,
@@ -120,7 +107,6 @@ class GoogleAdapter:
                 else 0.3
             ),
             timeout=int(policy.client_timeout_seconds or settings.api_timeout),
-            max_retries=built_retries,
             callbacks=list(request.callbacks),
             thinking_level=reasoning,
             max_output_tokens=request.output_tokens,

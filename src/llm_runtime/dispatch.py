@@ -8,7 +8,8 @@ invocation (a direct caller), a request is admitted and sized against the
 enclosing deadline when one is bound (``enclosing_deadline``), under the
 model's class policy; with none bound, only a flex request is sized (to the
 flex ceiling) and a standard request keeps the client's constructed timeout.
-A direct caller always keeps the client's constructed SDK attempts.
+Every request is one SDK attempt (``require_single_sdk_attempt``): the runtime
+loop is the only retry owner.
 
 Provider-neutral and SDK-free on purpose: the Google transport in
 ``src/llms.py`` and the OpenAI and Anthropic transports in
@@ -170,11 +171,24 @@ def _dispatch_outcome(exc: BaseException | None) -> str:
     return "error"
 
 
-def _construction_attempts(model: Any, *, google: bool) -> int | None:
-    raw = getattr(model, "max_retries", None)
-    if not isinstance(raw, int):
-        return None
-    return max(1, raw) if google else raw + 1
+def require_single_sdk_attempt(model: Any, single_attempt: int) -> None:
+    """Refuse a transport built to retry inside the SDK.
+
+    Retries have one owner, the runtime loop (``invoke_with_rate_limit_handling``),
+    which re-admits each one against the enclosing deadline. An SDK retry would
+    re-send a request with the timeout sized for the first one, running past
+    the deadline it was sized from, and multiply the loop's attempts.
+    ``single_attempt`` is the vendor's spelling of one request: google-genai
+    counts total attempts (where ``0`` means its own default), OpenAI and
+    Anthropic count retries after the first request.
+    """
+    configured = getattr(model, "max_retries", None)
+    if configured != single_attempt:
+        raise ValueError(
+            f"{type(model).__name__} sends one SDK attempt per request "
+            f"(max_retries={single_attempt}), not max_retries={configured!r}: "
+            "retries belong to the runtime loop"
+        )
 
 
 def _construction_timeout(model: Any) -> float | None:
@@ -219,17 +233,14 @@ def _plan_dispatch(
     standard_tier: str | None,
     model_name: str,
     phase: str,
-    per_request_attempts: bool,
 ) -> _Dispatch:
     """Size one request from the deadline, or refuse it with ``BudgetExhausted``.
 
     ``provider`` is the vendor that receives the request, passed explicitly by
     the transport that owns it (never inferred): it selects the request ceiling.
     ``standard_tier`` is the vendor's name for "not flex", or ``None`` for a
-    vendor with no service tiers. ``per_request_attempts`` is True where the
-    SDK accepts a per-request attempt count (google-genai, via ``max_retries``
-    -> ``HttpRetryOptions``); OpenAI and Anthropic fix retries on the client,
-    which the adapter builds from the policy.
+    vendor with no service tiers. A per-call ``max_retries`` is refused: the
+    transport sends one SDK attempt and the runtime loop owns retries.
     """
     if not isinstance(provider, str) or not provider.strip():
         raise ValueError("a dispatch needs the receiving provider, explicitly")
@@ -238,6 +249,10 @@ def _plan_dispatch(
         # ``_stream``; sending it on would open a streaming request that the
         # non-streaming result parser cannot read.
         refuse_streaming(model)
+    if "max_retries" in kwargs:
+        raise ValueError(
+            "a dispatch sends one SDK attempt; retries belong to the runtime loop"
+        )
     policy, deadline, scope = _dispatch_budget(model, provider)
     tier = model._effective_tier(kwargs)
     record: dict[str, Any] = {
@@ -248,7 +263,6 @@ def _plan_dispatch(
         "remaining_s": (
             round(deadline - llm_timeouts.now(), 3) if deadline is not None else None
         ),
-        "configured_attempts": None,
         "outcome": "in_flight",
         "elapsed_s": None,
     }
@@ -282,27 +296,14 @@ def _plan_dispatch(
             min_useful_attempt_seconds=round(policy.min_useful_attempt, 3),
         )
         raise
-    if scope is not None:
+    if scope is not None or tier == "flex" or deadline is not None:
+        # Outside an invocation, a request under an enclosing deadline is sized
+        # from it, as a flex request is from its ceiling.
         call_kwargs["timeout"] = timeout
-        if per_request_attempts:
-            call_kwargs["max_retries"] = policy.transport_attempts
-            record["configured_attempts"] = policy.transport_attempts
-        else:
-            record["configured_attempts"] = _construction_attempts(model, google=False)
         record["timeout_s"] = round(timeout, 3)
     else:
-        # Outside an invocation the SDK keeps the client's constructed
-        # attempts (its whole retry budget), but a request under an enclosing
-        # deadline is sized from it like a flex request is from its ceiling.
-        if tier == "flex" or deadline is not None:
-            call_kwargs["timeout"] = timeout
-            record["timeout_s"] = round(timeout, 3)
-        else:
-            constructed = _construction_timeout(model)
-            record["timeout_s"] = round(constructed, 3) if constructed else None
-        record["configured_attempts"] = _construction_attempts(
-            model, google=per_request_attempts
-        )
+        constructed = _construction_timeout(model)
+        record["timeout_s"] = round(constructed, 3) if constructed else None
     return _Dispatch(tier=tier, kwargs=call_kwargs, record=record, scope=scope)
 
 

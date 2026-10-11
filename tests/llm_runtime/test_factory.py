@@ -170,7 +170,8 @@ def test_moonshot_review_adapter_honors_reasoning_override(monkeypatch) -> None:
     assert captured["reasoning_effort"] == "low"
     assert captured["base_url"] == "https://api.moonshot.ai/v1"
     assert captured["max_completion_tokens"] == 4096 + 8192
-    assert captured["max_retries"] == 0
+    # The transport class owns its single SDK attempt; no adapter passes one.
+    assert "max_retries" not in captured
     assert captured["timeout"] == settings.api_timeout
     assert "service_tier" not in captured
     assert "flex_fallback_to_standard" not in captured
@@ -179,11 +180,11 @@ def test_moonshot_review_adapter_honors_reasoning_override(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("seat_id", "expected_temperature", "expected_timeout", "expected_retries"),
+    ("seat_id", "expected_temperature", "expected_timeout"),
     [
-        (SeatId.CONTENT_INSPECTOR, 0.0, None, None),
-        (SeatId.MACRO_CONTEXT, 0.1, None, None),
-        (SeatId.HEALTH_CHECK, 0.0, 10.0, 1),
+        (SeatId.CONTENT_INSPECTOR, 0.0, None),
+        (SeatId.MACRO_CONTEXT, 0.1, None),
+        (SeatId.HEALTH_CHECK, 0.0, 10.0),
     ],
 )
 def test_google_adapter_honors_specialized_seat_execution_policy(
@@ -191,7 +192,6 @@ def test_google_adapter_honors_specialized_seat_execution_policy(
     seat_id,
     expected_temperature,
     expected_timeout,
-    expected_retries,
 ) -> None:
     from src import llms
 
@@ -203,12 +203,8 @@ def test_google_adapter_honors_specialized_seat_execution_policy(
         captured.update(kwargs)
         return model
 
-    def fake_gemini(_model, temperature, timeout, max_retries, **_kwargs):
-        captured.update(
-            temperature=temperature,
-            timeout=timeout,
-            max_retries=max_retries,
-        )
+    def fake_gemini(_model, temperature, timeout, **kwargs):
+        captured.update(kwargs, temperature=temperature, timeout=timeout)
         return model
 
     monkeypatch.setattr(llms, "create_quick_thinking_llm", fake_quick)
@@ -229,7 +225,8 @@ def test_google_adapter_honors_specialized_seat_execution_policy(
     assert SeatModelFactory().build(request) is model
     assert captured["temperature"] == expected_temperature
     assert captured["timeout"] == expected_timeout
-    assert captured["max_retries"] == expected_retries
+    # One SDK attempt is a property of the Gemini transport class.
+    assert "max_retries" not in captured
     if SEATS[seat_id].execution_policy.standard_tier_only:
         assert request.service_tier is None
 
@@ -264,10 +261,8 @@ def test_openai_adapter_omits_temperature_but_keeps_health_bounds(monkeypatch) -
 
     assert SeatModelFactory().build(request) is model
     assert captured["timeout"] == 10.0
-    # transport_attempts=1 is total attempts on every vendor: exactly one
-    # request, i.e. zero OpenAI retries. (The old sdk_max_retries=1 meant total
-    # on Google but one *retry* here -- two requests for a health probe.)
-    assert captured["max_retries"] == 0
+    # One request for the probe: the transport class's zero retries.
+    assert "max_retries" not in captured
     assert "temperature" not in captured
 
 
@@ -496,53 +491,24 @@ def _build_google_seat(seat_id: SeatId, settings: Settings, *, quick_mode: bool)
         )
 
 
-@pytest.mark.parametrize(
-    "seat_id", [SeatId.PORTFOLIO_MANAGER, SeatId.SENIOR_FUNDAMENTALS]
-)
-def test_google_adapter_quick_mode_clamps_sdk_retries(
-    seat_id, restore_runtime_config, _reset_flex_state
-) -> None:
-    llm = _build_google_seat(
-        seat_id, _google_settings(api_retry_attempts=3), quick_mode=True
-    )
-
-    assert llm.max_retries == 2
-
-
-@pytest.mark.parametrize(
-    "seat_id", [SeatId.PORTFOLIO_MANAGER, SeatId.SENIOR_FUNDAMENTALS]
-)
-def test_google_adapter_full_mode_keeps_configured_retries(
-    seat_id, restore_runtime_config, _reset_flex_state
-) -> None:
-    llm = _build_google_seat(
-        seat_id, _google_settings(api_retry_attempts=3), quick_mode=False
-    )
-
-    assert llm.max_retries == 3
-
-
+@pytest.mark.parametrize("api_retry_attempts", [1, 3])
 @pytest.mark.parametrize("quick_mode", [True, False])
-def test_google_adapter_explicit_sdk_retries_win_in_both_modes(
-    quick_mode, restore_runtime_config, _reset_flex_state
+@pytest.mark.parametrize(
+    "seat_id",
+    [SeatId.PORTFOLIO_MANAGER, SeatId.SENIOR_FUNDAMENTALS, SeatId.HEALTH_CHECK],
+)
+def test_google_adapter_builds_one_sdk_attempt_in_every_mode(
+    seat_id, quick_mode, api_retry_attempts, restore_runtime_config, _reset_flex_state
 ) -> None:
-    assert SEATS[SeatId.HEALTH_CHECK].execution_policy.transport_attempts == 1
+    """The run's attempt budget is the runtime loop's, never the client's.
+
+    Was the run-scoped ``llm_attempts`` (clamped under ``--quick``), used only
+    by direct callers -- of which none remain but the one-attempt health check.
+    """
     llm = _build_google_seat(
-        SeatId.HEALTH_CHECK,
-        _google_settings(api_retry_attempts=3),
+        seat_id,
+        _google_settings(api_retry_attempts=api_retry_attempts),
         quick_mode=quick_mode,
-    )
-
-    assert llm.max_retries == 1
-
-
-def test_google_adapter_quick_clamp_never_raises_retries(
-    restore_runtime_config, _reset_flex_state
-) -> None:
-    llm = _build_google_seat(
-        SeatId.PORTFOLIO_MANAGER,
-        _google_settings(api_retry_attempts=1),
-        quick_mode=True,
     )
 
     assert llm.max_retries == 1

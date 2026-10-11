@@ -14,6 +14,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 import src.llms as llms_mod
 from src.config import config
+from src.llm_runtime.adapters import transports
 from src.service_tiers import (
     _reset_flex_capability_cache_for_tests,
     _reset_floor_log_cache_for_tests,
@@ -211,7 +212,7 @@ class TestCreateGeminiModelWiring:
     ):
         _set_cfg(monkeypatch, gemini_service_tier="flex")
         _set_cfg(monkeypatch, flex_llm_timeout_seconds=900)
-        llm = llms_mod.create_gemini_model("gemini-3.5-flash", 0.3, 60, 2)
+        llm = llms_mod.create_gemini_model("gemini-3.5-flash", 0.3, 60)
         assert isinstance(llm, llms_mod._TieredChatGoogleGenerativeAI)
         assert llm.service_tier == "flex"
         # The constructed timeout is only a standard ceiling: the flex request
@@ -220,7 +221,7 @@ class TestCreateGeminiModelWiring:
 
     def test_standard_config_leaves_timeout_and_tier_alone(self, monkeypatch):
         _set_cfg(monkeypatch, gemini_service_tier="standard")
-        llm = llms_mod.create_gemini_model("gemini-3.5-flash", 0.3, 60, 2)
+        llm = llms_mod.create_gemini_model("gemini-3.5-flash", 0.3, 60)
         assert llm.service_tier is None
         assert llm.timeout == 60
 
@@ -228,7 +229,7 @@ class TestCreateGeminiModelWiring:
         # The LLM-judge inspector path: must not queue on flex
         _set_cfg(monkeypatch, gemini_service_tier="flex")
         llm = llms_mod.create_gemini_model(
-            "gemini-3.5-flash", 0.0, 60, 2, service_tier="standard"
+            "gemini-3.5-flash", 0.0, 60, service_tier="standard"
         )
         assert llm.service_tier is None
         assert llm.timeout == 60
@@ -265,7 +266,7 @@ class TestOpenAIFlexWiring:
     def test_construct_chat_openai_is_deadline_aware_with_or_without_flex(self):
         # No plain-client branch: a standard-tier client must pass the dispatch
         # check too, or it sends its construction-time timeout in a scope.
-        flex_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        flex_cls = transports.deadline_aware_openai_cls()
         llm = llms_mod._construct_chat_openai(
             {"model": "gpt-5.4", "api_key": "k", "service_tier": "flex"}
         )
@@ -281,14 +282,14 @@ class TestOpenAIFlexWiring:
         monkeypatch.setattr(type(config), "get_openai_api_key", lambda self: "test-key")
         llm = llms_mod.create_consultant_llm(model="gpt-5.4")
         assert llm.service_tier == "flex"
-        flex_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        flex_cls = transports.deadline_aware_openai_cls()
         assert isinstance(llm, flex_cls)
 
     @pytest.mark.asyncio
     async def test_openai_capacity_fallback_retries_on_auto(self):
         from langchain_openai import ChatOpenAI
 
-        flex_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        flex_cls = transports.deadline_aware_openai_cls()
         llm = flex_cls(
             model="gpt-5.4",
             api_key="test-key",
@@ -314,7 +315,7 @@ class TestOpenAIFlexWiring:
     async def test_openai_capability_error_caches_downgrade(self):
         from langchain_openai import ChatOpenAI
 
-        flex_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        flex_cls = transports.deadline_aware_openai_cls()
         llm = flex_cls(
             model="gpt-4o-mini-retired",
             api_key="test-key",
@@ -485,7 +486,7 @@ class TestOpenAIFlexLatencyFallback:
     async def test_latency_timeout_falls_back_to_auto(self):
         from langchain_openai import ChatOpenAI
 
-        flex_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        flex_cls = transports.deadline_aware_openai_cls()
         llm = flex_cls(
             model="gpt-5.4",
             api_key="test-key",
@@ -517,7 +518,7 @@ class TestOpenAIFlexLatencyFallback:
     async def test_latency_timeout_propagates_when_fallback_disabled(self):
         from langchain_openai import ChatOpenAI
 
-        flex_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        flex_cls = transports.deadline_aware_openai_cls()
         llm = flex_cls(
             model="gpt-5.4",
             api_key="test-key",
@@ -570,7 +571,7 @@ class TestFlexHealthGatesTheTransports:
         assert model._flex_ineligible() is True
 
     def test_openai_falls_back_to_auto_once_degraded(self):
-        cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        cls = transports.deadline_aware_openai_cls()
         model = cls(
             model="gpt-5.4",
             api_key="k",
@@ -589,7 +590,7 @@ class TestFlexHealthGatesTheTransports:
         gemini = llms_mod._TieredChatGoogleGenerativeAI(
             model="gemini-3.6-flash", google_api_key="k", service_tier="flex"
         )
-        openai_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        openai_cls = transports.deadline_aware_openai_cls()
         openai = openai_cls(
             model="gpt-5.4",
             api_key="k",

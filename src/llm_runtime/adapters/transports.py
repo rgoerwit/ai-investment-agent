@@ -19,6 +19,11 @@ A compatible vendor (any ``dispatch_provider`` other than ``"openai"``) has no
 service tiers: it may not be built with one, its failover copy carries none,
 and a dispatch never adds one.
 
+**One SDK attempt per request is a property of the class.** ``max_retries``
+defaults to zero retries and any other value is refused at construction
+(``require_single_sdk_attempt``): the runtime loop owns every retry, so no
+constructor passes an attempt count.
+
 The classes are defined lazily (``langchain_openai``/``langchain_anthropic``
 are optional) from the vendor package's defining module, and a base that is
 not a real chat model is refused rather than cached, so a test that patches
@@ -44,6 +49,7 @@ from src.llm_runtime.dispatch import (
     _run_dispatch_async,
     _run_dispatch_sync,
     refuse_streaming,
+    require_single_sdk_attempt,
 )
 from src.llm_runtime.failover import ModelFailoverMixin
 from src.llm_runtime.timeouts import BudgetExhausted
@@ -136,8 +142,8 @@ def _define_openai_cls() -> type[BaseChatModel]:
         re-calling with ``service_tier="auto"`` overrides the constructor's
         ``"flex"`` for the fallback attempt. Per OpenAI docs, flex-capacity
         429s are not billed. The per-request ``timeout`` reaches both the
-        Responses and Chat Completions ``create()`` calls; retries are fixed
-        on the client.
+        Responses and Chat Completions ``create()`` calls; the client is built
+        for one attempt (the SDK has no per-request retry count).
         """
 
         _failover_model_field: ClassVar[str] = "model_name"
@@ -145,6 +151,8 @@ def _define_openai_cls() -> type[BaseChatModel]:
 
         # Required, no default: see the module docstring.
         dispatch_provider: str
+        # Zero SDK retries; the parent's None would mean the SDK default of 2.
+        max_retries: int | None = 0
         flex_fallback_to_standard: bool = True
         failover_model: str | None = None
         # The seat's TimeoutClass value, used to size a direct caller's flex request.
@@ -157,6 +165,7 @@ def _define_openai_cls() -> type[BaseChatModel]:
         def _validate_dispatch_provider(self) -> "_FlexFallbackChatOpenAI":
             self.dispatch_provider = _normalized_provider(self.dispatch_provider)
             _refuse_streaming_field(self)
+            require_single_sdk_attempt(self, 0)
             if not self._native() and self.service_tier is not None:
                 raise ValueError(
                     "service_tier is an OpenAI product; the OpenAI-compatible "
@@ -250,7 +259,6 @@ def _define_openai_cls() -> type[BaseChatModel]:
                 standard_tier=self._standard_tier(),
                 model_name=self.model_name,
                 phase=phase,
-                per_request_attempts=False,
             )
 
         def _generate(self, *args: Any, **kwargs: Any) -> Any:
@@ -303,13 +311,14 @@ def _define_anthropic_cls() -> type[BaseChatModel]:
 
         langchain-anthropic forwards a per-call ``timeout`` through
         ``_get_request_payload`` into ``messages.create(timeout=...)`` on both
-        the sync and async paths. ``max_retries`` is fixed on the client
-        (``create()`` rejects it), so a dispatch carries no attempt count. No
-        service tiers and no model failover: Anthropic serves only the writer
-        group.
+        the sync and async paths. ``create()`` takes no retry count, so the
+        client is built for one attempt. No service tiers and no model
+        failover: Anthropic serves only the writer group.
         """
 
         dispatch_provider: str
+        # Zero SDK retries; the parent's default is 2.
+        max_retries: int = 0
         budget_timeout_class: str | None = None
         disable_streaming: bool | Literal["tool_calling"] = True
 
@@ -317,6 +326,7 @@ def _define_anthropic_cls() -> type[BaseChatModel]:
         def _validate_dispatch_provider(self) -> "_BudgetedChatAnthropic":
             self.dispatch_provider = _normalized_provider(self.dispatch_provider)
             _refuse_streaming_field(self)
+            require_single_sdk_attempt(self, 0)
             return self
 
         def _effective_tier(self, kwargs: dict[str, Any]) -> str | None:
@@ -330,7 +340,6 @@ def _define_anthropic_cls() -> type[BaseChatModel]:
                 standard_tier=None,
                 model_name=self.model,
                 phase="initial",
-                per_request_attempts=False,
             )
 
         def _generate(self, *args: Any, **kwargs: Any) -> Any:

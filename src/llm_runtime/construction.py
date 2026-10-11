@@ -20,7 +20,6 @@ from src.llm_runtime.seats import (
     SeatId,
     SeatSpec,
 )
-from src.llm_runtime.timeouts import construction_transport_attempts
 from src.service_tiers import resolve_google_service_tier
 
 
@@ -101,14 +100,8 @@ def build_legacy_model(
     )
 
     if seat_id is SeatId.ARTICLE_WRITER:
-        # The seat policy is the whole construction contract: the runtime
-        # loop owns the writer's retries, so the client gets its policy
-        # attempts, not the legacy constructor's own default.
-        writer_kwargs: dict[str, Any] = {
-            "transport_attempts": construction_transport_attempts(
-                spec, vendor="anthropic", cfg=settings
-            ),
-        }
+        # The seat policy is the whole construction contract.
+        writer_kwargs: dict[str, Any] = {}
         if policy.sampling_temperature is not None:
             writer_kwargs["temperature"] = policy.sampling_temperature
         if policy.client_timeout_seconds is not None:
@@ -126,16 +119,9 @@ def build_legacy_model(
             model=request.resolved_model,
             settings=settings,
             request_timeout_seconds=policy.client_timeout_seconds,
-            transport_attempts=construction_transport_attempts(
-                spec, vendor="openai", cfg=settings
-            ),
         )
     if seat_id is SeatId.ARTICLE_WRITER_BASE_FALLBACK:
-        fallback_kwargs: dict[str, Any] = {
-            "max_retries": construction_transport_attempts(
-                spec, vendor="google", cfg=settings
-            ),
-        }
+        fallback_kwargs: dict[str, Any] = {}
         if policy.sampling_temperature is not None:
             fallback_kwargs["temperature"] = policy.sampling_temperature
         if policy.client_timeout_seconds is not None:
@@ -204,8 +190,6 @@ def build_legacy_model(
             request.resolved_model or runtime.quick_think_llm,
             temperature=0.0,
             timeout=int(policy.client_timeout_seconds or 10),
-            # Google's max_retries is total attempts: exactly one request.
-            max_retries=policy.resolved_transport_attempts("google") or 1,
             service_tier="standard",
             api_key=settings.get_google_api_key(),
             settings=settings,
@@ -214,7 +198,6 @@ def build_legacy_model(
         factory = quick_factory if quick_mode else deep_factory
         return factory(
             model=request.resolved_model,
-            max_retries=policy.resolved_transport_attempts("google"),
             callbacks=callbacks,
             max_output_tokens=output_tokens,
             settings=settings,
@@ -254,7 +237,6 @@ def build_legacy_model(
                 if policy.client_timeout_seconds is not None
                 else None
             ),
-            max_retries=policy.resolved_transport_attempts("google"),
             callbacks=callbacks,
             max_output_tokens=output_tokens,
             service_tier=pinned_tier,
@@ -270,7 +252,6 @@ def build_legacy_model(
             if policy.client_timeout_seconds is not None
             else None
         ),
-        max_retries=policy.resolved_transport_attempts("google"),
         callbacks=callbacks,
         max_output_tokens=output_tokens,
         service_tier=pinned_tier,

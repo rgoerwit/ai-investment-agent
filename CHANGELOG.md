@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- LLM retries have one owner, the runtime loop. Every client sends exactly one SDK
+  attempt per request on every vendor; the transport classes enforce it, and no
+  constructor or factory takes an attempt count any more
+  (`SeatExecutionPolicy.transport_attempts` and its deprecated alias
+  `sdk_max_retries` are removed). **Behaviour change:** the macro-context,
+  injection-judge and signal-processor seats on OpenAI, compatible vendors or
+  Anthropic were built with `LLM_ATTEMPTS` SDK attempts while also retried by the
+  loop, so a failing call sent up to `LLM_ATTEMPTS²` requests (4 at the shipped
+  2), each SDK re-send past the deadline it was sized from; it now sends at most
+  `LLM_ATTEMPTS`. Google calls, the health check and every runtime-owned seat are
+  unchanged. The injection judge's seat is renamed "Prompt Injection Judge" (the
+  label its token accounting already used), and it and the signal processor now
+  resolve their seat's budget instead of the generic one. Dispatch records no
+  longer carry `configured_attempts`.
 - Memory: `--no-memory`, and a graph built without a ticker, construct no memory
   object (the five shared `legacy_*` memories are gone, and with them a Chroma
   client, a startup probe and a cross-ticker read). The embeddings startup probe

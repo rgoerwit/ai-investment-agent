@@ -23,7 +23,7 @@ from src.data_block_utils import (
 )
 from src.error_safety import summarize_exception
 from src.llm_runtime.construction import build_required_model_for_seat
-from src.llm_runtime.seats import SeatId
+from src.llm_runtime.seats import SEATS, SeatId
 
 logger = structlog.get_logger(__name__)
 
@@ -290,8 +290,8 @@ class SignalProcessor:
             result = await invoke_with_rate_limit_handling(
                 self.llm,
                 messages,
-                max_attempts=2,
-                context="SignalProcessor",
+                # The seat display name, so the loop resolves this seat's budget.
+                context=SEATS[SeatId.SIGNAL_PROCESSOR].callback_name,
             )
             # CRITICAL FIX: Normalize response.content to string (Gemini may return dict)
             content = extract_string_content(result.content).strip().upper()

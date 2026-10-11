@@ -24,6 +24,7 @@ from langchain_google_genai import (
     HarmBlockThreshold,
     HarmCategory,
 )
+from pydantic import Field, model_validator
 
 import src.config as config_module
 from src.config import config
@@ -34,7 +35,6 @@ from src.llm_budgets import (
     get_generation_budget,
 )
 from src.llm_runtime.dispatch import (  # noqa: F401 - re-exported for callers
-    _construction_attempts,
     _construction_timeout,
     _Dispatch,
     _dispatch_budget,
@@ -47,6 +47,7 @@ from src.llm_runtime.dispatch import (  # noqa: F401 - re-exported for callers
     _run_dispatch_sync,
     _stamp_service_tier,
     refuse_streaming,
+    require_single_sdk_attempt,
 )
 from src.llm_runtime.failover import ModelFailoverMixin
 from src.llm_runtime.rate_limits import configured_google_rpm
@@ -55,10 +56,7 @@ from src.llm_runtime.timeouts import (
     BudgetExhausted,
     TimeoutClass,
     apac_client_timeout_seconds,
-    construction_transport_attempts,
-    direct_caller_transport_attempts,
     openai_request_cap_seconds,
-    sdk_max_retries,
 )
 from src.runtime_config import get_runtime_config
 from src.runtime_services import get_current_provider_runtime
@@ -82,7 +80,7 @@ def _settings_or_default(settings: Any | None) -> Any:
     return config if settings is None else settings
 
 
-_logged_model_init_configs: set[tuple[str, str, int, int, str | None]] = set()
+_logged_model_init_configs: set[tuple[str, str, int, str | None]] = set()
 
 
 def _langchain_openai_available() -> bool:
@@ -374,10 +372,9 @@ def _log_model_init_once(
     kind: str,
     model_name: str,
     timeout: int,
-    retries: int,
     thinking_level: str | None,
 ) -> None:
-    key = (kind, model_name, timeout, retries, thinking_level)
+    key = (kind, model_name, timeout, thinking_level)
     if key in _logged_model_init_configs:
         return
     _logged_model_init_configs.add(key)
@@ -386,7 +383,6 @@ def _log_model_init_once(
         kind=kind,
         model=model_name,
         timeout=timeout,
-        retries=retries,
         thinking_level=thinking_level,
     )
 
@@ -598,17 +594,26 @@ class _TieredChatGoogleGenerativeAI(ModelFailoverMixin, ChatGoogleGenerativeAI):
 
     Every dispatch is sized by ``_plan_dispatch`` from the invocation deadline;
     the instance's own ``timeout`` is only a conservative ceiling for direct
-    callers. Under an application invocation each request carries one SDK
-    attempt (``max_retries=1``: langchain-google-genai maps it to
-    ``HttpRetryOptions(attempts=1)``, total attempts).
+    callers. Every request is one SDK attempt, a property of this class:
+    ``max_retries=1`` (langchain-google-genai maps it to
+    ``HttpRetryOptions(attempts=1)``, total attempts; ``0`` would mean the
+    SDK's own default), and any other value is refused at construction. The
+    runtime loop owns every retry.
     """
 
+    # One total attempt; the parent's default is 6.
+    max_retries: int = Field(default=1, alias="retries")
     service_tier: str | None = None
     flex_fallback_to_standard: bool = True
     failover_model: str | None = None
     # The seat's TimeoutClass value, used to size a direct caller's flex request.
     budget_timeout_class: str | None = None
     disable_streaming: bool | Literal["tool_calling"] = True
+
+    @model_validator(mode="after")
+    def _one_sdk_attempt(self) -> "_TieredChatGoogleGenerativeAI":
+        require_single_sdk_attempt(self, 1)
+        return self
 
     def _stream(self, *args: Any, **kwargs: Any) -> Any:
         refuse_streaming(self)
@@ -717,7 +722,6 @@ class _TieredChatGoogleGenerativeAI(ModelFailoverMixin, ChatGoogleGenerativeAI):
             standard_tier="standard",
             model_name=self.model,
             phase=phase,
-            per_request_attempts=True,
         )
 
     def _generate(self, *args: Any, **kwargs: Any) -> Any:
@@ -759,17 +763,6 @@ class _TieredChatGoogleGenerativeAI(ModelFailoverMixin, ChatGoogleGenerativeAI):
         if dispatch.tier is not None:
             _stamp_service_tier(result, dispatch.tier)
         return result
-
-
-def _get_flex_fallback_chat_openai_cls() -> type[BaseChatModel]:
-    """The deadline-aware OpenAI transport class (compatibility alias).
-
-    Defined in ``src/llm_runtime/adapters/transports.py``; construct through
-    ``new_openai_chat`` with an explicit ``dispatch_provider``.
-    """
-    from src.llm_runtime.adapters import transports
-
-    return transports.deadline_aware_openai_cls()
 
 
 def _apply_openai_service_tier(
@@ -1045,7 +1038,7 @@ def create_gemini_model(
     model_name: str,
     temperature: float,
     timeout: int,
-    max_retries: int,
+    *,
     streaming: bool = False,
     callbacks: list[BaseCallbackHandler] | None = None,
     thinking_level: str | None = None,
@@ -1066,8 +1059,7 @@ def create_gemini_model(
     to the standard tier regardless of config. ``timeout`` is a conservative
     standard ceiling only: it is never rewritten for flex, because the tier is
     chosen per call and every request is sized at dispatch from the invocation
-    deadline (``_plan_dispatch``). ``max_retries`` is total attempts, used as-is
-    only by callers that invoke the model directly.
+    deadline (``_plan_dispatch``). Every request is one SDK attempt.
 
     Note: API key is explicitly passed from config to avoid dependency on
     os.environ being populated by load_dotenv() (Pydantic Settings handles
@@ -1102,7 +1094,6 @@ def create_gemini_model(
         "model": model_name,
         "temperature": temperature,
         "timeout": timeout,
-        "max_retries": max_retries,
         "safety_settings": SAFETY_SETTINGS,
         "streaming": streaming,
         "rate_limiter": GLOBAL_RATE_LIMITER,
@@ -1155,7 +1146,6 @@ def create_quick_thinking_llm(
     temperature: float = 0.3,
     model: str | None = None,
     timeout: int | None = None,
-    max_retries: int | None = None,
     callbacks: list[BaseCallbackHandler] | None = None,
     max_output_tokens: int | None = None,
     service_tier: str | None = None,
@@ -1187,9 +1177,6 @@ def create_quick_thinking_llm(
         if timeout is not None
         else min(settings.api_timeout, settings.quick_llm_api_timeout_seconds)
     )
-    final_retries = (
-        max_retries if max_retries is not None else runtime_config.llm_attempts
-    )
 
     thinking_level: Literal["low", "medium", "high"] | None = None
     if _is_gemini_v3_or_greater(model_name) or _is_gemini_v2_5(model_name):
@@ -1200,9 +1187,7 @@ def create_quick_thinking_llm(
         # Gemini model but NOT 3+ (likely 2.x)
         logger.warning("quick_model_gemini_2x_warning", model=model_name)
 
-    _log_model_init_once(
-        "quick", model_name, final_timeout, final_retries, thinking_level
-    )
+    _log_model_init_once("quick", model_name, final_timeout, thinking_level)
     class_kwargs: dict[str, Any] = (
         {"timeout_class": timeout_class} if timeout_class is not None else {}
     )
@@ -1210,7 +1195,6 @@ def create_quick_thinking_llm(
         model_name,
         temperature,
         final_timeout,
-        final_retries,
         callbacks=callbacks,
         thinking_level=thinking_level,
         max_output_tokens=max_output_tokens,
@@ -1227,7 +1211,6 @@ def create_deep_thinking_llm(
     temperature: float = 0.1,
     model: str | None = None,
     timeout: int | None = None,
-    max_retries: int | None = None,
     callbacks: list[BaseCallbackHandler] | None = None,
     max_output_tokens: int | None = None,
     api_key: str | None = None,
@@ -1243,22 +1226,16 @@ def create_deep_thinking_llm(
     runtime_config = get_runtime_config(settings)
     model_name = model or runtime_config.deep_think_llm
     final_timeout = timeout if timeout is not None else settings.api_timeout
-    final_retries = (
-        max_retries if max_retries is not None else runtime_config.llm_attempts
-    )
 
     thinking_level: Literal["low", "medium", "high"] | None = None
     if _is_gemini_v3_or_greater(model_name) or _is_gemini_v2_5(model_name):
         thinking_level = "high"
 
-    _log_model_init_once(
-        "deep", model_name, final_timeout, final_retries, thinking_level
-    )
+    _log_model_init_once("deep", model_name, final_timeout, thinking_level)
     return create_gemini_model(
         model_name,
         temperature,
         final_timeout,
-        final_retries,
         callbacks=callbacks,
         thinking_level=thinking_level,
         max_output_tokens=max_output_tokens,
@@ -1341,17 +1318,12 @@ def create_apex_llm(
         logger.warning("apex_model_no_thinking_support", seat=seat, model=model_name)
         thinking_level = None
 
-    runtime_config = get_runtime_config(settings)
     final_timeout = settings.api_timeout
-    final_retries = runtime_config.llm_attempts
-    _log_model_init_once(
-        f"apex:{seat}", model_name, final_timeout, final_retries, thinking_level
-    )
+    _log_model_init_once(f"apex:{seat}", model_name, final_timeout, thinking_level)
     return create_gemini_model(
         model_name,
         temperature=0.1,
         timeout=final_timeout,
-        max_retries=final_retries,
         callbacks=callbacks,
         thinking_level=thinking_level,
         max_output_tokens=max_output_tokens,
@@ -1372,7 +1344,6 @@ def create_writer_fallback_llm(
     settings: Any | None = None,
     *,
     timeout: float | None = None,
-    max_retries: int | None = None,
 ) -> BaseChatModel:
     """
     Create the Gemini fallback used when the Claude article writer is
@@ -1389,8 +1360,7 @@ def create_writer_fallback_llm(
     ``max_tokens``); the budget machinery adds only the small "default" reserve
     on top, so the 16384 visible tokens can never be cannibalized by reasoning.
 
-    ``timeout`` (the client's standard ceiling) and ``max_retries`` (Google's
-    total attempts) default to ``api_timeout`` and the run's ``llm_attempts``;
+    ``timeout`` (the client's standard ceiling) defaults to ``api_timeout``;
     under the runtime loop every request is sized and sent once at dispatch.
     """
     settings = _settings_or_default(settings)
@@ -1403,7 +1373,6 @@ def create_writer_fallback_llm(
         model_name,
         temperature,
         int(timeout) if timeout is not None else settings.api_timeout,
-        max_retries if max_retries is not None else runtime_config.llm_attempts,
         callbacks=callbacks,
         thinking_level=thinking_level,
         max_output_tokens=16384,
@@ -1450,7 +1419,6 @@ def create_writer_openai_fallback_llm(
     model: str | None = None,
     settings: Any | None = None,
     request_timeout_seconds: float | None = None,
-    transport_attempts: int | None = None,
 ) -> BaseChatModel | None:
     """EDITOR_MODEL (OpenAI) as the preferred article-writer fallback.
 
@@ -1458,8 +1426,7 @@ def create_writer_openai_fallback_llm(
     the Claude writer's ``max_tokens`` — the editor's 8192 cap would truncate
     articles) and low reasoning effort (prose needs output budget, not
     reasoning depth). Returns None when the tier is unavailable (missing
-    lib/key or ``ENABLE_CONSULTANT=false``). Attempts default to the seat's
-    policy: one, since the runtime loop owns the writer's retries.
+    lib/key or ``ENABLE_CONSULTANT=false``).
     """
     settings = _settings_or_default(settings)
     if not _writer_openai_tier_available(settings=settings):
@@ -1478,15 +1445,6 @@ def create_writer_openai_fallback_llm(
         intent=ModelIntent.PROSE,
         settings=settings,
         request_timeout_seconds=request_timeout_seconds,
-        transport_attempts=(
-            transport_attempts
-            if transport_attempts is not None
-            else construction_transport_attempts(
-                SEATS[SeatId.ARTICLE_WRITER_REVIEW_FALLBACK],
-                vendor="openai",
-                cfg=settings,
-            )
-        ),
         timeout_class=SEATS[SeatId.ARTICLE_WRITER_REVIEW_FALLBACK].timeout_class,
     )
 
@@ -1544,7 +1502,6 @@ def create_consultant_llm(
     temperature: float = 0.3,
     model: str | None = None,
     timeout: float | None = None,
-    max_retries: int = 0,
     quick_mode: bool = False,
     callbacks: list[BaseCallbackHandler] | None = None,
     max_completion_tokens: int | None = None,
@@ -1562,7 +1519,6 @@ def create_consultant_llm(
         model: Model name (overrides env vars if provided)
         timeout: Request timeout in seconds (default: OPENAI_REQUEST_CAP_SECONDS,
             read at the call)
-        max_retries: Max retry attempts for failed requests
         quick_mode: If True, use CONSULTANT_QUICK_MODEL env var (default False)
         callbacks: Optional callback handlers for token tracking
 
@@ -1617,9 +1573,7 @@ def create_consultant_llm(
     if timeout is None:
         timeout = openai_request_cap_seconds(settings)
 
-    logger.info(
-        "consultant_llm_init", model=model_name, timeout=timeout, retries=max_retries
-    )
+    logger.info("consultant_llm_init", model=model_name, timeout=timeout)
 
     # Do NOT set temperature — multiple OpenAI model families (o-series,
     # gpt-5.x, and potentially future models) reject temperature != 1.0.
@@ -1629,7 +1583,6 @@ def create_consultant_llm(
     kwargs: dict[str, Any] = {
         "model": model_name,
         "timeout": timeout,
-        "max_retries": max_retries,
         "api_key": api_key,
         "callbacks": callbacks or [],
         # Keep the consultant concise enough for bounded latency on multi-turn
@@ -1732,12 +1685,6 @@ def create_auditor_llm(
     kwargs: dict[str, Any] = {
         "model": model_name,
         "timeout": openai_request_cap_seconds(settings),
-        # The runtime loop owns the auditor's retries: one SDK attempt per
-        # request (was max_retries=3, i.e. four requests inside one call).
-        "max_retries": sdk_max_retries(
-            "openai",
-            construction_transport_attempts(SEATS[SeatId.AUDITOR], vendor="openai"),
-        ),
         "api_key": api_key,
         "callbacks": callbacks or [],
         "budget_timeout_class": TimeoutClass.CROSS_CHECK.value,
@@ -1822,14 +1769,6 @@ def create_apac_specialist_llm(
         # The node total (APAC_NODE_TOTAL_TIMEOUT_SECONDS) is both the client
         # ceiling and the enclosing deadline every APAC call is bounded by.
         "timeout": apac_client_timeout_seconds(settings),
-        # The runtime loop owns retries (was 1 SDK retry with thinking, 0 without).
-        "max_retries": sdk_max_retries(
-            "openai_compatible",
-            construction_transport_attempts(
-                SEATS[SeatId.APAC if thinking_enabled else SeatId.APAC_DIRECT_RETRY],
-                vendor="openai_compatible",
-            ),
-        ),
         "callbacks": callbacks or [],
         "max_completion_tokens": max_completion_tokens or 8192,
         "streaming": False,
@@ -1891,13 +1830,11 @@ def _is_claude_opus_adaptive_thinking_model(model_name: str) -> bool:
 def create_writer_llm(
     temperature: float = 0.7,
     timeout: float | None = None,
-    max_retries: int | None = None,
     callbacks: list[BaseCallbackHandler] | None = None,
     model: str | None = None,
     allow_fallback: bool = True,
     api_key_override: str | None = None,
     settings: Any | None = None,
-    transport_attempts: int | None = None,
 ) -> BaseChatModel:
     """
     Create the LLM for article writing.
@@ -1910,10 +1847,6 @@ def create_writer_llm(
         temperature: Sampling temperature. NOTE: Overridden to 1.0
                      when Claude adaptive thinking is active (API constraint).
         timeout: Request timeout in seconds (default from config)
-        max_retries: SDK retries after the first request (Anthropic's meaning)
-        transport_attempts: Total attempts; when given, wins over max_retries.
-            With neither, the writer seat's policy applies: one attempt, since
-            the runtime loop owns the writer's retries.
         callbacks: Optional callback handlers
 
     Returns:
@@ -1954,21 +1887,11 @@ def create_writer_llm(
 
     model_name = model or settings.writer_model
     final_timeout = float(timeout if timeout is not None else settings.api_timeout)
-    if transport_attempts is not None:
-        max_retries = sdk_max_retries("anthropic", transport_attempts)
-    elif max_retries is None:
-        max_retries = sdk_max_retries(
-            "anthropic",
-            construction_transport_attempts(
-                SEATS[SeatId.ARTICLE_WRITER], vendor="anthropic", cfg=settings
-            ),
-        )
 
     # Build kwargs — base configuration
     kwargs: dict = {
         "model": model_name,
         "max_tokens": 16384,
-        "max_retries": max_retries,
         "timeout": final_timeout,
         "callbacks": callbacks or [],
         "anthropic_api_key": api_key,
@@ -2028,7 +1951,6 @@ def _build_openai_chat(
     settings: Any | None = None,
     include_reasoning_output: bool = False,
     request_timeout_seconds: float | None = None,
-    transport_attempts: int | None = None,
     timeout_class: TimeoutClass = TimeoutClass.EDITORIAL,
 ) -> BaseChatModel:
     """Shared ChatOpenAI construction for the editor and writer-fallback tiers.
@@ -2038,17 +1960,8 @@ def _build_openai_chat(
     ``effort_preference`` is an ordered wish list, not a literal: it is resolved
     against whatever the configured model family actually documents, so these
     seats behave correctly on an OpenAI-compatible endpoint too.
-
-    ``transport_attempts`` is total attempts. The default serves the editorial
-    seats, whose callers still invoke the model directly; the provider adapter
-    passes the seat's policy value.
     """
     settings = _settings_or_default(settings)
-    attempts = (
-        transport_attempts
-        if transport_attempts is not None
-        else direct_caller_transport_attempts(settings)
-    )
     kwargs: dict[str, Any] = {
         "model": model_name,
         "timeout": (
@@ -2056,7 +1969,6 @@ def _build_openai_chat(
             if request_timeout_seconds is not None
             else openai_request_cap_seconds(settings)
         ),
-        "max_retries": sdk_max_retries("openai", attempts),
         "budget_timeout_class": timeout_class.value,
         "api_key": api_key,
         "callbacks": callbacks or [],
@@ -2152,11 +2064,6 @@ def create_editor_llm(
         effort_preference=_EFFORT_PREFERENCE_FULL,
         intent=ModelIntent.REASONING,
         settings=settings,
-        # The editor's review calls run under the runtime loop, which owns
-        # their retries: the seat's policy, as the provider-scoped path builds it.
-        transport_attempts=construction_transport_attempts(
-            SEATS[SeatId.EDITOR], vendor="openai", cfg=settings
-        ),
         timeout_class=SEATS[SeatId.EDITOR].timeout_class,
     )
 

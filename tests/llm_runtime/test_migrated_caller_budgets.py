@@ -36,6 +36,7 @@ from src.agents import runtime as agent_runtime
 from src.agents.circuit_breaker import reset_circuit_breaker_for_tests
 from src.agents.network_breaker import reset_network_breaker_singleton
 from src.llm_runtime import timeouts as llm_timeouts
+from src.llm_runtime.adapters import transports
 from src.llm_runtime.seats import SEATS, SeatId
 from src.llm_runtime.timeouts import (
     TimeoutClass,
@@ -189,7 +190,7 @@ class TestSeatClientTimeoutInsideAnInvocation:
             return _gemini_result(llm.model)
 
         llm = llms_mod._TieredChatGoogleGenerativeAI(
-            model="gemini-3.8-flash", api_key="k", timeout=300, max_retries=1
+            model="gemini-3.8-flash", api_key="k", timeout=300
         )
         with (
             _run(quick=False),
@@ -204,7 +205,9 @@ class TestSeatClientTimeoutInsideAnInvocation:
             )
         (call,) = sent
         assert call["timeout"] == pytest.approx(HEALTH_CHECK_TIMEOUT)
-        assert call["max_retries"] == 1
+        # One SDK attempt is the client's own; a dispatch never sends a count.
+        assert "max_retries" not in call
+        assert llm.max_retries == 1
 
     def test_shared_display_name_with_conflicting_client_timeouts_fails_closed(
         self, monkeypatch
@@ -272,7 +275,7 @@ class TestRequestCeilingFollowsTheDispatchingVendor:
             seen["timeout"] = options.timeout
             raise RuntimeError("captured")
 
-        cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        cls = transports.deadline_aware_openai_cls()
         llm = cls(
             model="gpt-5.4",
             api_key="k",
@@ -302,7 +305,7 @@ class TestRequestCeilingFollowsTheDispatchingVendor:
             seen["timeout"] = options.timeout
             raise RuntimeError("captured")
 
-        cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        cls = transports.deadline_aware_openai_cls()
         llm = cls(
             model="gpt-5.4",
             api_key="k",

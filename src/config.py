@@ -1058,10 +1058,10 @@ class Settings(BaseSettings):
         validation_alias="QUICK_LLM_API_TIMEOUT_SECONDS",
         description="Provider SDK timeout in seconds for quick-mode Gemini LLMs",
     )
-    # TOTAL attempts for one LLM call (one meaning on every vendor). Under the
-    # application retry loop (`invoke_with_rate_limit_handling`) this is the
-    # transient-retry budget and each dispatch sends a single SDK attempt; a
-    # caller that invokes a model directly gets it as the client's SDK attempts.
+    # TOTAL attempts for one LLM call (one meaning on every vendor): the
+    # transient-retry budget of the application retry loop
+    # (`invoke_with_rate_limit_handling`), the only retry owner. Every client
+    # sends a single SDK attempt per request.
     # Lowered from 10 -> 2 in May 2026: at 10 x 300s a single hung Gemini call
     # could consume 50 min before raising.
     # API_RETRY_ATTEMPTS is the deprecated spelling; LLM_ATTEMPTS wins when both

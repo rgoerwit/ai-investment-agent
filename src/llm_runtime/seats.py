@@ -1,6 +1,5 @@
 """Canonical registry for every application-owned LLM consumer."""
 
-import warnings
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -84,13 +83,6 @@ class SeatExecutionPolicy:
     # Standard per-request ceiling override; dispatch still sizes each request
     # from the invocation deadline (src/llm_runtime/timeouts.py).
     client_timeout_seconds: float | None = None
-    # Total SDK attempts the client is built with (one meaning on every vendor).
-    transport_attempts: int | None = None
-    # DEPRECATED alias for ``transport_attempts``. It meant total attempts on
-    # Google but retries after the first request on OpenAI/Anthropic, so it is
-    # translated per vendor by ``resolved_transport_attempts``. An explicit
-    # ``transport_attempts`` always wins.
-    sdk_max_retries: int | None = None
     standard_tier_only: bool = False
     # Gate-critical seats must not queue on a best-effort tier under ``--quick``:
     # the in-process cap would never fire and the pipeline watchdog would SIGTERM
@@ -107,33 +99,6 @@ class SeatExecutionPolicy:
             raise ValueError("sampling_temperature must be between 0.0 and 2.0")
         if self.client_timeout_seconds is not None and self.client_timeout_seconds <= 0:
             raise ValueError("client_timeout_seconds must be positive")
-        if self.transport_attempts is not None and self.transport_attempts < 1:
-            raise ValueError("transport_attempts counts total attempts; must be >= 1")
-        if self.sdk_max_retries is not None:
-            if self.sdk_max_retries < 0:
-                raise ValueError("sdk_max_retries cannot be negative")
-            warnings.warn(
-                "SeatExecutionPolicy.sdk_max_retries is deprecated; use "
-                "transport_attempts (total attempts on every vendor)",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-
-    def resolved_transport_attempts(self, vendor: str) -> int | None:
-        """Total SDK attempts for ``vendor``, or None to use the policy default.
-
-        Precedence: ``transport_attempts``, then the deprecated
-        ``sdk_max_retries`` translated from its old per-vendor meaning (Google
-        counted total attempts, and treats 0 as 1; every other vendor counted
-        retries after the first request).
-        """
-        if self.transport_attempts is not None:
-            return self.transport_attempts
-        if self.sdk_max_retries is None:
-            return None
-        if vendor == "google":
-            return max(1, self.sdk_max_retries)
-        return self.sdk_max_retries + 1
 
 
 @dataclass(frozen=True)
@@ -401,9 +366,6 @@ SEATS: dict[SeatId, SeatSpec] = {
         normal=ModelIntent.REASONING,
         requires=_TOOLS,
         optional_mode_field="llm_consultant_mode",
-        # One request per dispatch; the runtime loop and the consultant's own
-        # deadline own any retry. (Was sdk_max_retries=0, i.e. zero retries.)
-        execution_policy=SeatExecutionPolicy(transport_attempts=1),
         timeout_class=TimeoutClass.CROSS_CHECK,
     ),
     SeatId.AUDITOR: _seat(
@@ -517,7 +479,8 @@ SEATS: dict[SeatId, SeatSpec] = {
     ),
     SeatId.CONTENT_INSPECTOR: _seat(
         SeatId.CONTENT_INSPECTOR,
-        "Content Inspector",
+        # The token-tracking label the judge has always reported under.
+        "Prompt Injection Judge",
         group=BindingGroup.OPERATIONAL,
         stage=AuthorityStage.OPERATIONAL,
         normal=ModelIntent.CLASSIFIER,
@@ -542,9 +505,6 @@ SEATS: dict[SeatId, SeatSpec] = {
         "Retrospective Lessons",
         group=BindingGroup.OPERATIONAL,
         stage=AuthorityStage.OPERATIONAL,
-        # Invoked through the runtime loop, which owns its retries: one SDK
-        # attempt per request on every vendor.
-        execution_policy=SeatExecutionPolicy(transport_attempts=1),
         timeout_class=TimeoutClass.OPERATIONAL,
     ),
     SeatId.HEALTH_CHECK: _seat(
@@ -555,9 +515,6 @@ SEATS: dict[SeatId, SeatSpec] = {
         execution_policy=SeatExecutionPolicy(
             sampling_temperature=0.0,
             client_timeout_seconds=10.0,
-            # Exactly one request: a probe, not a workload. (Was sdk_max_retries=1
-            # in Google's total-attempts meaning.)
-            transport_attempts=1,
             standard_tier_only=True,
             reasoning_control_enabled=False,
             output_token_override_enabled=False,
@@ -571,9 +528,6 @@ SEATS: dict[SeatId, SeatSpec] = {
         stage=AuthorityStage.OPERATIONAL,
         normal=ModelIntent.REASONING,
         quick=ModelIntent.CLASSIFIER,
-        # Invoked through the runtime loop (scripts/portfolio_manager.py),
-        # which owns its retries: one SDK attempt per request on every vendor.
-        execution_policy=SeatExecutionPolicy(transport_attempts=1),
         timeout_class=TimeoutClass.OPERATIONAL,
     ),
     SeatId.SIGNAL_PROCESSOR: _seat(
@@ -592,9 +546,6 @@ SEATS: dict[SeatId, SeatSpec] = {
         stage=AuthorityStage.EVALUATION,
         normal=ModelIntent.REASONING,
         quick=ModelIntent.FAST,
-        # Invoked through the runtime loop, which owns its retries: one SDK
-        # attempt per request on every vendor.
-        execution_policy=SeatExecutionPolicy(transport_attempts=1),
         timeout_class=TimeoutClass.OPERATIONAL,
     ),
 }

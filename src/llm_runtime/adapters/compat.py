@@ -14,11 +14,7 @@ from src.llm_runtime.provider_policy import (
 )
 from src.llm_runtime.rate_limits import limiter_for_binding
 from src.llm_runtime.seats import SeatId
-from src.llm_runtime.timeouts import (
-    apac_client_timeout_seconds,
-    construction_transport_attempts,
-    sdk_max_retries,
-)
+from src.llm_runtime.timeouts import apac_client_timeout_seconds
 
 # Providers whose effort comes from the seat's resolved intent rather than an
 # explicit per-binding override.
@@ -95,15 +91,6 @@ class CompatibleAdapter:
                 apac_client_timeout_seconds(settings)
                 if seat_id in self._APAC_SEATS
                 else settings.openai_compatible_client_timeout_seconds
-            ),
-            # Total attempts from the seat's policy, translated to the SDK's
-            # retries-after-first: one for runtime-owned classes (APAC, the
-            # cross-check seats), the direct-caller budget for editorial seats.
-            "max_retries": sdk_max_retries(
-                "openai_compatible",
-                construction_transport_attempts(
-                    request.seat, vendor="openai_compatible", cfg=settings
-                ),
             ),
             "callbacks": list(request.callbacks),
             "max_completion_tokens": budget.api_cap_tokens,

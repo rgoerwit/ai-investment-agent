@@ -21,9 +21,11 @@ Three pieces:
   concurrent calls on one model stay isolated, and the failover copy reads the
   same deadline rather than a fresh clock.
 
-Attempt counts have one meaning: **total** attempts. ``llm_attempts`` is the
-application retry budget; a dispatch made under an application-owned
-invocation sends exactly one SDK attempt.
+Retries have one owner: the runtime loop, whose budget is ``llm_attempts``
+(total attempts). Every client sends exactly one SDK attempt per request -- a
+property of the transport classes, never a construction argument -- so an SDK
+retry can neither multiply the loop's attempts nor re-send a request past the
+deadline it was sized from.
 """
 
 from __future__ import annotations
@@ -59,34 +61,12 @@ class TimeoutClass(StrEnum):
     # their retries) inside the article workflow's own deadline; quick-invariant,
     # like the writer's model selection, with ``api_timeout`` per attempt.
     EDITORIAL = "editorial"
-    # Operational helpers (macro context, inspectors, retrospective, health check,
-    # semantic judge). Mixed: some run under the runtime loop, some directly, so
-    # a seat that the loop owns says so with ``transport_attempts=1``.
+    # Operational helpers (macro context, injection judge, retrospective, health
+    # check, signal processor, semantic judge). All but the health check run
+    # under the runtime loop.
     OPERATIONAL = "operational"
     # Reserved for callers that are not registered seats; never valid on a SeatSpec.
     AUXILIARY = "auxiliary"
-
-    @property
-    def retries_owned_by_runtime(self) -> bool:
-        """Whether this class's calls go through the application retry loop.
-
-        Used only where the SDK fixes its retry count at client construction
-        (OpenAI, Anthropic, OpenAI-compatible): those clients are built with one
-        attempt when the runtime loop owns retries, and keep a small SDK budget
-        for classes whose callers still invoke the model directly.
-        """
-        return self in _RUNTIME_OWNED_CLASSES
-
-
-_RUNTIME_OWNED_CLASSES = frozenset(
-    {
-        TimeoutClass.STANDARD,
-        TimeoutClass.APEX,
-        TimeoutClass.CROSS_CHECK,
-        TimeoutClass.REGIONAL,
-        TimeoutClass.EDITORIAL,
-    }
-)
 
 
 class BudgetExhausted(TimeoutError):
@@ -128,8 +108,6 @@ class BudgetPolicy:
     margin: float
     # Total application attempts for transient failures (``llm_attempts``).
     attempts: int
-    # SDK attempts per dispatch under an application-owned invocation.
-    transport_attempts: int = 1
     # A seat's explicit client timeout (``client_timeout_seconds``), kept so a
     # re-resolution for another provider still honours it.
     request_cap_override: float | None = None
@@ -358,17 +336,6 @@ def apac_client_timeout_seconds(cfg: Any = None) -> float:
     in-scope ceiling was the generic compatible-vendor 300 s.
     """
     return float(_settings(cfg).apac_node_total_timeout_seconds)
-
-
-def direct_caller_transport_attempts(cfg: Any = None) -> int:
-    """Total SDK attempts for a client whose callers still invoke it directly.
-
-    The run-scoped ``llm_attempts`` (``LLM_ATTEMPTS``; 0 behaves as 1), on every
-    vendor. Was a fixed 3 on the OpenAI-family and Anthropic paths, so those
-    clients made one more attempt than the configured default of 2.
-    """
-    settings = _settings(cfg)
-    return max(1, int(_runtime(settings, None).llm_attempts))
 
 
 def _editorial_invocation_cap(settings: Any) -> float:
@@ -650,38 +617,3 @@ def policy_for_seat(
         runtime_config=runtime_config,
         request_cap_override=seat.execution_policy.client_timeout_seconds,
     )
-
-
-def construction_transport_attempts(
-    seat: SeatSpec | None, *, vendor: str, cfg: Any = None
-) -> int:
-    """Total SDK attempts a client is *built* with (direct callers rely on it).
-
-    A seat's explicit ``transport_attempts`` (or its deprecated alias,
-    translated) always wins. Google sends per-request attempts under an
-    application invocation, so its built value only serves direct callers.
-    OpenAI-family and Anthropic SDKs fix retries on the client, so a seat whose
-    retries the runtime owns is built with one attempt. Every other client gets
-    the run-scoped ``llm_attempts`` (``direct_caller_transport_attempts``).
-    """
-    if seat is not None:
-        explicit = seat.execution_policy.resolved_transport_attempts(vendor)
-        if explicit is not None:
-            return explicit
-    if (
-        vendor != "google"
-        and seat is not None
-        and seat.timeout_class.retries_owned_by_runtime
-    ):
-        return 1
-    return direct_caller_transport_attempts(cfg)
-
-
-def sdk_max_retries(vendor: str, attempts: int) -> int:
-    """Translate total attempts into the vendor SDK's ``max_retries`` argument.
-
-    langchain-google-genai maps ``max_retries`` to ``HttpRetryOptions(attempts=N)``
-    (total attempts); OpenAI and Anthropic count retries after the first request.
-    """
-    total = max(1, int(attempts))
-    return total if vendor == "google" else total - 1

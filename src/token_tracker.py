@@ -439,9 +439,9 @@ class LLMCallAttempt:
     retryable: bool | None = None
     # Transport requests made inside this attempt (flex, standard re-issue,
     # failover), each with its effective tier, model, request timeout sent,
-    # remaining allowance at dispatch, configured SDK attempt limit, outcome and
-    # elapsed time. Configured limits, not observed physical retries; never
-    # payloads, headers or client reprs. See src/llm_runtime/timeouts.py.
+    # remaining allowance at dispatch, outcome and elapsed time. Each is one
+    # SDK attempt; never payloads, headers or client reprs. See
+    # src/llm_runtime/timeouts.py.
     dispatches: list[dict[str, Any]] = field(default_factory=list)
 
 

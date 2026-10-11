@@ -8,7 +8,6 @@ from src.llm_runtime.adapters import transports
 from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.profiles import ReasoningApiMode
 from src.llm_runtime.rate_limits import limiter_for_binding
-from src.llm_runtime.timeouts import construction_transport_attempts, sdk_max_retries
 
 # Long-form default for a seat that expresses no preference. Anthropic counts
 # thinking tokens against max_tokens, so this must stay generous enough for an
@@ -37,15 +36,6 @@ class AnthropicAdapter:
         kwargs: dict[str, Any] = {
             "model": request.binding.model,
             "max_tokens": request.output_tokens or _DEFAULT_ANTHROPIC_OUTPUT_TOKENS,
-            # Total attempts translated to Anthropic's retries-after-first. The
-            # runtime loop owns the writer's retries, so the seat policy gives
-            # one attempt per dispatch (was three, then four, before Oct 2026).
-            "max_retries": sdk_max_retries(
-                "anthropic",
-                construction_transport_attempts(
-                    request.seat, vendor="anthropic", cfg=settings
-                ),
-            ),
             # The seat's explicit client ceiling when it has one.
             "timeout": float(
                 policy.client_timeout_seconds

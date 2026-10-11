@@ -234,7 +234,6 @@ def test_create_gemini_model_logs_thinking_level_at_debug(caplog):
             "gemini-3-pro-preview",
             temperature=0.1,
             timeout=30,
-            max_retries=1,
             thinking_level="high",
         )
 
@@ -269,7 +268,6 @@ def test_create_gemini_model_uses_thinking_budget_for_gemini_2_5():
                 GEMINI_2_5_FLASH,
                 temperature=0.1,
                 timeout=30,
-                max_retries=1,
                 thinking_level="medium",
             )
 
@@ -293,7 +291,6 @@ def test_create_gemini_model_adds_default_reserve_for_gemini_3():
                 GEMINI_3_PRO,
                 temperature=0.1,
                 timeout=30,
-                max_retries=1,
                 thinking_level="low",
                 max_output_tokens=2048,
                 reserve_class="default",

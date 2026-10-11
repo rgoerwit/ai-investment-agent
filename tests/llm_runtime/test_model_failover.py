@@ -25,6 +25,7 @@ from src.agents import invoke_with_rate_limit_handling
 from src.agents.circuit_breaker import reset_circuit_breaker_for_tests
 from src.agents.network_breaker import reset_network_breaker_singleton
 from src.config import Settings
+from src.llm_runtime.adapters import transports
 from src.llm_runtime.bindings import BindingConfigurationError, resolve_binding_plan
 from src.llm_runtime.construction import build_model_for_seat
 from src.llm_runtime.failover import (
@@ -254,7 +255,7 @@ class TestConstruction:
         model = build_model_for_seat(
             SeatId.CONSULTANT, settings=settings, plan=resolve_binding_plan(settings)
         )
-        assert isinstance(model, llms_mod._get_flex_fallback_chat_openai_cls())
+        assert isinstance(model, transports.deadline_aware_openai_cls())
         assert model.failover_model == "gpt-5.4"
         assert model.service_tier != "flex"  # failover capability, not flex
 
@@ -265,7 +266,7 @@ class TestConstruction:
         model = build_model_for_seat(
             SeatId.CONSULTANT, settings=settings, plan=resolve_binding_plan(settings)
         )
-        assert isinstance(model, llms_mod._get_flex_fallback_chat_openai_cls())
+        assert isinstance(model, transports.deadline_aware_openai_cls())
         assert model.failover_model is None
         assert failover_target(model) is None
 
@@ -339,7 +340,7 @@ class TestTransport:
     async def test_openai_transport_fails_over_at_auto(self):
         from langchain_openai import ChatOpenAI
 
-        cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        cls = transports.deadline_aware_openai_cls()
         llm = cls(
             model="gpt-6.1-sol",
             api_key="k",

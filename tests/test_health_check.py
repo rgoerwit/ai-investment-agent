@@ -78,10 +78,10 @@ async def test_llm_connectivity_uses_shared_gemini_factory():
     kwargs = create.call_args.kwargs
     assert kwargs.pop("settings") is config
     assert kwargs.pop("api_key") == config.get_google_api_key()
+    # One request for the probe is the Gemini transport's own single attempt.
     assert kwargs == {
         "temperature": 0.0,
         "timeout": 10,
-        "max_retries": 1,
         "service_tier": "standard",
     }
 

@@ -1,36 +1,41 @@
-"""The last three LLM policy values are configured or derived, never constants.
+"""LLM policy values are configured or derived, and retries have one owner.
 
-Before October 2026 (round 2, Step 7) three values were module constants in
-``src/llm_runtime/timeouts.py`` that no override could reach:
-
-- ``DIRECT_CALLER_TRANSPORT_ATTEMPTS = 3`` -- every OpenAI-family or Anthropic
-  client whose callers invoke it directly made three SDK attempts, one more than
-  the shipped ``LLM_ATTEMPTS=2`` that Google direct callers already got.
-- ``OPENAI_REQUEST_CAP_SECONDS = 120`` -- now the ``OPENAI_REQUEST_CAP_SECONDS``
-  setting, read at the call.
+- ``OPENAI_REQUEST_CAP_SECONDS`` -- a setting read at the call (was a module
+  constant no override could reach).
 - ``APAC_CLIENT_TIMEOUT_SECONDS = 240`` -- disagreed with the 300 s compatible
   ceiling the same APAC request got inside an invocation scope. Both are now the
   APAC node total (``APAC_NODE_TOTAL_TIMEOUT_SECONDS``), its enclosing deadline.
+- **SDK attempts.** Every client sends exactly one SDK attempt per request,
+  whatever ``LLM_ATTEMPTS`` says; the runtime loop is the only retry owner.
+  Until October 2026 the operational seats (macro context, injection judge,
+  signal processor) were built with ``LLM_ATTEMPTS`` SDK attempts on OpenAI,
+  compatible vendors and Anthropic while also running under the loop, so a
+  failing call sent ``LLM_ATTEMPTS**2`` requests, and each SDK re-send carried
+  the timeout sized for the first one, past the attempt deadline.
 
-Kept values and the intended change are tested separately. Attempt counts are
-measured below the SDK: each client's HTTP transport is replaced with an
-``httpx2.MockTransport`` that answers 500 and counts what was sent, so the
-vendor SDK's own retry loop runs for real. No network; dummy keys.
+Attempt counts are measured below the SDK: each client's HTTP transport is
+replaced with an ``httpx2.MockTransport`` that answers 500 and counts what was
+sent, so the vendor SDK's own retry loop runs for real. No network; dummy keys.
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import anthropic
 import httpx2
 import openai
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from pydantic import ValidationError
 
 import src.config as config_module
 import src.llms as llms_mod
+from src.agents.circuit_breaker import reset_circuit_breaker_for_tests
+from src.agents.network_breaker import reset_network_breaker_singleton
+from src.agents.runtime import invoke_with_rate_limit_handling
 from src.config import Settings
 from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.adapters import transports
@@ -42,8 +47,7 @@ from src.llm_runtime.seats import SEATS, SeatId
 from src.llm_runtime.timeouts import (
     TimeoutClass,
     apac_client_timeout_seconds,
-    construction_transport_attempts,
-    direct_caller_transport_attempts,
+    enclosing_deadline,
     invocation_scope,
     openai_request_cap_seconds,
     policy_for_seat,
@@ -59,6 +63,9 @@ class FakeClock:
 
     def __call__(self) -> float:
         return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
 
 
 def _settings(**overrides: Any) -> Settings:
@@ -120,15 +127,27 @@ def clock(monkeypatch):
 
 
 class Wire:
-    """An HTTP transport below the vendor SDK: counts sends, answers 500."""
+    """An HTTP transport below the vendor SDK: counts sends, answers 500.
 
-    def __init__(self) -> None:
+    With a ``clock``, each send records the instant it left and then spends
+    ``seconds_per_send`` of it, as a slow failing request would.
+    """
+
+    def __init__(self, clock: FakeClock | None = None, seconds_per_send: float = 0.0):
         self.sends: list[dict[str, Any]] = []
+        self.clock = clock
+        self.seconds_per_send = seconds_per_send
 
     def _handle(self, request: httpx2.Request) -> httpx2.Response:
         self.sends.append(
-            {"path": request.url.path, "timeout": request.extensions.get("timeout")}
+            {
+                "path": request.url.path,
+                "timeout": request.extensions.get("timeout"),
+                "sent_at": self.clock() if self.clock is not None else None,
+            }
         )
+        if self.clock is not None:
+            self.clock.advance(self.seconds_per_send)
         return httpx2.Response(500, json={"error": {"message": "boom"}})
 
     def attach(self, llm: Any) -> Any:
@@ -216,88 +235,318 @@ class TestKeptValues:
         # Was the 300 s compatible ceiling: the mismatch is gone.
         assert policy.request_cap == pytest.approx(240.0)
 
+
+# ------------------------------------------------------- one SDK attempt
+
+
+def _legacy_openai_editorial(settings: Settings) -> Any:
+    with use_runtime_config(RuntimeConfig.from_config(settings)):
+        return llms_mod._build_openai_chat(
+            "gpt-5.4",
+            api_key="o",
+            callbacks=None,
+            max_completion_tokens=1024,
+            service_tier_label="openai_sdk_timeout:test",
+            unthrottled_kind="test",
+            effort_preference=("medium",),
+            settings=settings,
+        )
+
+
+def _legacy_claude_writer(settings: Settings) -> Any:
+    with use_runtime_config(RuntimeConfig.from_config(settings)):
+        return llms_mod.create_writer_llm(
+            model="claude-haiku-4-5", api_key_override="a", settings=settings
+        )
+
+
+# Every OpenAI-family and Anthropic construction path, canonical and legacy.
+# The operational seats are the ones that were built with LLM_ATTEMPTS.
+_BUILDERS = {
+    "macro_context": lambda s: _build(SeatId.MACRO_CONTEXT, s),
+    "injection_judge": lambda s: _build(SeatId.CONTENT_INSPECTOR, s),
+    "signal_processor": lambda s: _build(SeatId.SIGNAL_PROCESSOR, s),
+    "health_check": lambda s: _build(SeatId.HEALTH_CHECK, s),
+    "consultant": lambda s: _build(SeatId.CONSULTANT, s),
+    "apac_compatible": lambda s: _build(SeatId.APAC, s),
+    "writer_anthropic": lambda s: _build(SeatId.ARTICLE_WRITER, s),
+    "operational_anthropic": _direct_anthropic,
+    "legacy_openai_editorial": _legacy_openai_editorial,
+    "legacy_claude_writer": _legacy_claude_writer,
+}
+
+
+class TestEveryClientSendsOneSdkAttempt:
     @pytest.mark.asyncio
-    async def test_health_check_explicit_single_attempt_still_wins(self, pin):
-        settings = pin(_settings(llm_attempts=5))
+    @pytest.mark.parametrize("llm_attempts", [0, 1, 2, 5])
+    @pytest.mark.parametrize("builder", sorted(_BUILDERS))
+    async def test_one_request_whatever_llm_attempts_says(
+        self, pin, builder, llm_attempts
+    ):
+        settings = pin(_settings(llm_attempts=llm_attempts))
         wire = Wire()
-        llm = wire.attach(_build(SeatId.HEALTH_CHECK, settings))
+        llm = wire.attach(_BUILDERS[builder](settings))
         await _send(llm)
         assert len(wire.sends) == 1
         assert llm.max_retries == 0
 
-    def test_runtime_owned_seats_keep_one_attempt(self):
-        settings = _settings(llm_attempts=5)
-        with use_runtime_config(RuntimeConfig.from_config(settings)):
-            for vendor in ("openai", "anthropic", "openai_compatible"):
-                assert (
-                    construction_transport_attempts(
-                        SEATS[SeatId.CONSULTANT], vendor=vendor, cfg=settings
-                    )
-                    == 1
-                )
-
-
-# ----------------------------------------------------- intended change: attempts
-
-
-class TestDirectCallerAttemptsFollowLlmAttempts:
-    @pytest.mark.parametrize(("configured", "expected"), [(2, 2), (4, 4), (0, 1)])
-    def test_the_derivation(self, configured, expected):
-        settings = _settings(llm_attempts=configured)
-        with use_runtime_config(RuntimeConfig.from_config(settings)):
-            assert direct_caller_transport_attempts(settings) == expected
-            for vendor in ("openai", "anthropic", "openai_compatible", "google"):
-                assert (
-                    construction_transport_attempts(None, vendor=vendor, cfg=settings)
-                    == expected
-                )
-
-    @pytest.mark.asyncio
-    async def test_canonical_openai_direct_caller_sends_two_requests(self, pin):
-        settings = pin(_settings(llm_attempts=2))
-        wire = Wire()
-        llm = wire.attach(_build(SeatId.MACRO_CONTEXT, settings))
-        await _send(llm)
-        # Two total attempts at LLM_ATTEMPTS=2 (was three).
-        assert len(wire.sends) == 2
-        assert llm.max_retries == 1
-
-    @pytest.mark.asyncio
-    async def test_canonical_anthropic_direct_caller_sends_two_requests(self, pin):
-        settings = pin(_settings(llm_attempts=2))
-        wire = Wire()
-        llm = wire.attach(_direct_anthropic(settings))
-        await _send(llm)
-        assert len(wire.sends) == 2
-        assert llm.max_retries == 1
-
-    @pytest.mark.asyncio
-    async def test_legacy_openai_direct_caller_sends_two_requests(self, pin):
-        settings = pin(_settings(llm_attempts=2))
-        with use_runtime_config(RuntimeConfig.from_config(settings)):
-            llm = llms_mod._build_openai_chat(
-                "gpt-5.4",
-                api_key="o",
-                callbacks=None,
-                max_completion_tokens=1024,
-                service_tier_label="openai_sdk_timeout:test",
-                unthrottled_kind="test",
-                effort_preference=("medium",),
-                settings=settings,
+    # None is the SDK default of 2 retries; a negative count the parent refuses.
+    @pytest.mark.parametrize("bad", [None, 1, 2])
+    def test_an_openai_family_client_cannot_be_built_to_retry(self, bad):
+        with pytest.raises(ValidationError, match="retries belong to the runtime loop"):
+            transports.new_openai_chat(
+                model="gpt-5.4",
+                api_key="k",
+                max_retries=bad,
+                dispatch_provider="openai",
             )
-        wire = Wire()
-        wire.attach(llm)
-        await _send(llm)
-        assert len(wire.sends) == 2
-        assert llm.max_retries == 1
+
+    @pytest.mark.parametrize("bad", [1, 2, -1])
+    def test_an_anthropic_client_cannot_be_built_to_retry(self, bad):
+        with pytest.raises(ValidationError, match="retries belong to the runtime loop"):
+            transports.new_anthropic_chat(
+                model="claude-haiku-4-5",
+                anthropic_api_key="a",
+                max_retries=bad,
+                dispatch_provider="anthropic",
+            )
+
+    @pytest.mark.parametrize("field", ["max_retries", "retries"])
+    @pytest.mark.parametrize("bad", [0, 2, 6])
+    def test_a_gemini_client_cannot_be_built_to_retry(self, field, bad):
+        # 0 is google-genai's "use the SDK default", not "no retries".
+        with pytest.raises(ValidationError, match="retries belong to the runtime loop"):
+            llms_mod._TieredChatGoogleGenerativeAI(
+                model="gemini-3.5-flash", api_key="k", **{field: bad}
+            )
+
+    def test_the_default_is_one_attempt_on_every_family(self):
+        gemini = llms_mod._TieredChatGoogleGenerativeAI(
+            model="gemini-3.5-flash", api_key="k"
+        )
+        openai_llm = transports.new_openai_chat(
+            model="gpt-5.4", api_key="k", dispatch_provider="openai"
+        )
+        claude = transports.new_anthropic_chat(
+            model="claude-haiku-4-5",
+            anthropic_api_key="a",
+            dispatch_provider="anthropic",
+        )
+        assert (gemini.max_retries, openai_llm.max_retries, claude.max_retries) == (
+            1,
+            0,
+            0,
+        )
+        assert openai_llm.root_async_client.max_retries == 0
+        assert claude._async_client.max_retries == 0
 
     @pytest.mark.asyncio
-    async def test_raising_llm_attempts_raises_direct_attempts(self, pin):
-        settings = pin(_settings(llm_attempts=4))
+    async def test_a_per_call_retry_count_is_refused_before_sending(self, pin):
+        settings = pin(_settings())
         wire = Wire()
         llm = wire.attach(_build(SeatId.MACRO_CONTEXT, settings))
-        await _send(llm)
-        assert len(wire.sends) == 4
+        with pytest.raises(ValueError, match="retries belong to the runtime loop"):
+            await llm.ainvoke(_MESSAGES, max_retries=3)
+        assert wire.sends == []
+
+
+@pytest.fixture
+def fresh_breakers():
+    reset_circuit_breaker_for_tests()
+    reset_network_breaker_singleton()
+    yield
+    reset_circuit_breaker_for_tests()
+    reset_network_breaker_singleton()
+
+
+async def _through_the_loop(llm: Any, context: str, settings: Settings) -> None:
+    with (
+        use_runtime_config(RuntimeConfig.from_config(settings)),
+        patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock),
+        pytest.raises((openai.InternalServerError, anthropic.InternalServerError)),
+    ):
+        await invoke_with_rate_limit_handling(llm, _MESSAGES, context=context)
+
+
+@pytest.mark.usefixtures("fresh_breakers")
+class TestTheLoopIsTheOnlyRetryOwner:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("llm_attempts", [1, 2, 3])
+    @pytest.mark.parametrize(
+        ("seat_id", "context"),
+        [
+            (SeatId.MACRO_CONTEXT, "Macro Context Analyst"),
+            (SeatId.CONTENT_INSPECTOR, "Prompt Injection Judge"),
+            (SeatId.SIGNAL_PROCESSOR, "Signal Processor"),
+            (SeatId.ARTICLE_WRITER, "Article Writer"),
+        ],
+    )
+    async def test_a_failing_call_sends_llm_attempts_requests_not_their_square(
+        self, pin, seat_id, context, llm_attempts
+    ):
+        settings = pin(_settings(llm_attempts=llm_attempts))
+        wire = Wire()
+        llm = wire.attach(_build(seat_id, settings))
+        await _through_the_loop(llm, context, settings)
+        assert len(wire.sends) == llm_attempts
+
+    @pytest.mark.asyncio
+    async def test_no_request_reaches_past_the_deadline_it_was_sized_from(
+        self, pin, clock
+    ):
+        # Each failing request spends 30 s. With an SDK retry, the re-send at
+        # t=30 carried the first request's ~38 s timeout to t=68, past the
+        # 40 s deadline; now the loop re-sizes the retry from what is left.
+        settings = pin(_settings(llm_attempts=3))
+        wire = Wire(clock, seconds_per_send=30.0)
+        llm = wire.attach(_build(SeatId.MACRO_CONTEXT, settings))
+        deadline = clock() + 40.0
+        with enclosing_deadline(40.0):
+            await _through_the_loop(llm, "Macro Context Analyst", settings)
+        assert len(wire.sends) == 2
+        for send in wire.sends:
+            assert send["sent_at"] + float(send["timeout"]["read"]) <= deadline
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_the_first_request_sends_no_second(self, pin):
+        import asyncio
+
+        settings = pin(_settings(llm_attempts=3))
+        started = asyncio.Event()
+        release = asyncio.Event()
+        sends: list[str] = []
+
+        async def stalled(request: httpx2.Request) -> httpx2.Response:
+            sends.append(request.url.path)
+            started.set()
+            await release.wait()
+            return httpx2.Response(500, json={"error": {"message": "boom"}})
+
+        llm = _build(SeatId.MACRO_CONTEXT, settings)
+        llm.rate_limiter = None
+        llm.root_async_client._client = httpx2.AsyncClient(
+            transport=httpx2.MockTransport(stalled)
+        )
+        with use_runtime_config(RuntimeConfig.from_config(settings)):
+            task = asyncio.create_task(
+                invoke_with_rate_limit_handling(
+                    llm, _MESSAGES, context="Macro Context Analyst"
+                )
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        release.set()
+        await asyncio.sleep(0)
+        assert sends == ["/v1/responses"]
+        assert llm_timeouts.current_dispatch_scope() is None
+
+
+class TestOperationalCallersResolveTheirSeat:
+    """The loop keys a call's budget by its context; it must name the seat.
+
+    The judge called itself "Prompt Injection Judge" while its seat said
+    "Content Inspector", and the signal processor "SignalProcessor": neither
+    resolved, so both ran under the generic AUXILIARY policy.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_injection_judge_resolves_to_its_seat(self, monkeypatch):
+        from src.tooling import llm_judge_inspector as judge_mod
+        from src.tooling.inspector import InspectionEnvelope, SourceKind
+
+        contexts: list[str] = []
+
+        async def capture(llm, messages, *, context, **_kw):
+            contexts.append(context)
+            return AIMessage(content='{"verdict": "clean", "confidence": 0.9}')
+
+        monkeypatch.setattr(
+            "src.agents.runtime.invoke_with_rate_limit_handling", capture
+        )
+        judge = judge_mod.LLMJudgeInspector(llm=object())
+        decision = await judge.inspect(
+            InspectionEnvelope(
+                content_text="hello", source_kind=SourceKind.web_search, source_name="t"
+            )
+        )
+        assert decision.action == "allow"
+        [context] = contexts
+        seat = llm_timeouts.seat_for_agent(context)
+        assert seat is not None and seat.seat_id is SeatId.CONTENT_INSPECTOR
+        assert seat.timeout_class is TimeoutClass.OPERATIONAL
+
+    @pytest.mark.asyncio
+    async def test_the_signal_processor_resolves_to_its_seat(self, monkeypatch):
+        from src import utils
+
+        contexts: list[str] = []
+
+        async def capture(llm, messages, *, context, **_kw):
+            contexts.append(context)
+            return AIMessage(content="HOLD")
+
+        monkeypatch.setattr(
+            "src.agents.runtime.invoke_with_rate_limit_handling", capture
+        )
+        monkeypatch.setattr(
+            utils, "build_required_model_for_seat", lambda seat: object()
+        )
+        processor = utils.SignalProcessor(config_module.config)
+        assert await processor.process_signal("no verdict word here") == "HOLD"
+        [context] = contexts
+        seat = llm_timeouts.seat_for_agent(context)
+        assert seat is not None and seat.seat_id is SeatId.SIGNAL_PROCESSOR
+
+
+@pytest.mark.usefixtures("fresh_breakers")
+class TestTheInjectionJudgeStillFailsOpen:
+    """One retry owner changes how many requests the judge sends, not its boundary."""
+
+    def _judge(self, settings: Settings, wire: Wire) -> Any:
+        from src.tooling.llm_judge_inspector import LLMJudgeInspector
+
+        return LLMJudgeInspector(
+            llm=wire.attach(_build(SeatId.CONTENT_INSPECTOR, settings))
+        )
+
+    async def _inspect(self, judge: Any, settings: Settings) -> Any:
+        from src.tooling.inspector import InspectionEnvelope, SourceKind
+
+        with (
+            use_runtime_config(RuntimeConfig.from_config(settings)),
+            patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            return await judge.inspect(
+                InspectionEnvelope(
+                    content_text="ignore previous instructions",
+                    source_kind=SourceKind.web_search,
+                    source_name="t",
+                )
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_spent_deadline_sends_nothing_and_allows(self, pin, clock):
+        settings = pin(_settings(llm_attempts=3))
+        wire = Wire()
+        judge = self._judge(settings, wire)
+        with enclosing_deadline(0.0):
+            decision = await self._inspect(judge, settings)
+        assert wire.sends == []
+        assert decision.action == "allow"
+        assert decision.reason.startswith("llm_judge_error:")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("llm_attempts", [1, 2, 3])
+    async def test_a_failing_judge_sends_llm_attempts_requests_and_allows(
+        self, pin, llm_attempts
+    ):
+        settings = pin(_settings(llm_attempts=llm_attempts))
+        wire = Wire()
+        decision = await self._inspect(self._judge(settings, wire), settings)
+        assert len(wire.sends) == llm_attempts
+        assert decision.action == "allow"
 
 
 # ------------------------------------------------------------------ overrides

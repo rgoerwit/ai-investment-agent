@@ -78,12 +78,18 @@ call, and Google enforces the client timeout server-side, so a timeout baked int
 a flex-built client rode along on the standard re-issue, degraded-standard calls
 and the failover copy (the October 2026 quick PM 504s). The deadline lives in a
 ContextVar set by `invoke_with_rate_limit_handling`, not on the model; the policy,
-`TimeoutClass` and admission live in `src/llm_runtime/timeouts.py`. Attempt counts
-are **total** attempts everywhere; translate to a vendor's `max_retries` only via
-`sdk_max_retries`. A seat's budget class is data on its `SeatSpec`, never a
-display-name set. Policy numbers are settings read at the call, never module
-constants: direct-caller attempts are `LLM_ATTEMPTS`, the OpenAI ceiling is
+`TimeoutClass` and admission live in `src/llm_runtime/timeouts.py`. A seat's
+budget class is data on its `SeatSpec`, never a display-name set. Policy numbers
+are settings read at the call, never module constants: the OpenAI ceiling is
 `OPENAI_REQUEST_CAP_SECONDS`, the APAC ceiling is its node total.
+
+**Retries have one owner: the runtime loop (`LLM_ATTEMPTS` total).** Every client
+sends exactly one SDK attempt per request. That is a property of the three
+transport classes (`max_retries` defaults to one attempt and any other value is a
+construction error; a per-call `max_retries` is refused at dispatch), so never pass
+an attempt count to a constructor or factory. An SDK retry re-sends with the timeout
+sized for the first request, past the deadline it was sized from, and multiplies the
+loop's attempts: the operational seats sent `LLM_ATTEMPTS²` requests that way.
 
 **No plain OpenAI-family or Anthropic client.** Build every one with
 `new_openai_chat` / `new_anthropic_chat` in
@@ -99,15 +105,16 @@ Streaming stays refused until it is sized at dispatch and qualified.
 **A caller outside the graph invokes through `invoke_with_rate_limit_handling`,
 keyed by its seat's display name — never a bare `ainvoke` under a cap it computed
 itself.** The editor review, retrospective lesson and semantic judge were moved
-there; a bare `invocation_scope` would size the requests but drop the retries,
-since a scoped Google request sends one SDK attempt. A seat whose calls the loop
-owns but whose class is mixed declares `transport_attempts=1`. Read a cap from
+there; a bare `invocation_scope` would size the requests but drop the retries.
+The context must resolve to the seat (`seat_for_agent`): take it from
+`SEATS[...].callback_name`, never a hand-typed label. Read a cap from
 `resolve_invocation_budget` in `src/agents/runtime.py`, which resolves the seat (so
 its `client_timeout_seconds` holds inside the scope); a dispatch keeps the scope's
 deadline but takes the ceiling of the vendor it sends to (`policy_for_provider`).
 The writer chain and the portfolio macro classifier are on the loop too.
 Still direct, on purpose: only the health check, bounded on its own (15 s
-overall, a 10 s client, one attempt) and run at startup outside every deadline.
+overall, a 10 s client, one attempt like every client) and run at startup
+outside every deadline.
 The article workflow binds `article_workflow_timeout_seconds` in
 `handle_article_generation`, hard-bounds each step at it, and never builds a
 writer fallback tier the remaining allowance cannot fit.

@@ -329,7 +329,6 @@ class TestExplicitProvider:
                 standard_tier=None,
                 model_name="m",
                 phase="initial",
-                per_request_attempts=False,
             )
 
     def test_a_patched_vendor_class_is_refused_not_cached(self, monkeypatch):
@@ -428,8 +427,8 @@ class TestCanonicalOpenAI:
         with RequestLayer().patched() as layer:
             await _send(llm)
         [call] = layer.calls
-        # No invocation scope (Step 2 changes this): no per-request option is
-        # set, so the client's constructed request cap applies.
+        # No invocation scope and no enclosing deadline: no per-request option
+        # is set, so the client's constructed request cap applies.
         assert not isinstance(call["timeout"], int | float)
         assert call["client_timeout"] == pytest.approx(OPENAI_CAP)
 

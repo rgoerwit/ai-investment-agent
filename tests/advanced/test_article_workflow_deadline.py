@@ -749,10 +749,9 @@ class TestWriterSettingsAreHonoured:
             SeatId.ARTICLE_WRITER,
             sampling_temperature=0.3,
             client_timeout_seconds=111.0,
-            transport_attempts=2,
         )
         llm = _build(SeatId.ARTICLE_WRITER, _settings(), execution_policy=policy)
-        assert llm.max_retries == 1
+        assert llm.max_retries == 0
         assert llm.default_request_timeout == pytest.approx(111.0)
 
     def test_legacy_overrides_reach_the_client_temperature_included(self):
@@ -766,21 +765,18 @@ class TestWriterSettingsAreHonoured:
             SeatId.ARTICLE_WRITER,
             sampling_temperature=0.3,
             client_timeout_seconds=111.0,
-            transport_attempts=2,
         )
         llm = _build(SeatId.ARTICLE_WRITER, settings, execution_policy=policy)
         assert llm.temperature == pytest.approx(0.3)
-        assert llm.max_retries == 1
+        assert llm.max_retries == 0
         assert llm.default_request_timeout == pytest.approx(111.0)
 
     def test_the_seam_passes_every_setting_it_is_given(self, monkeypatch):
         from src import article_writer
 
         monkeypatch.setattr(article_writer, "config", _settings())
-        llm = article_writer.create_writer_llm(
-            temperature=0.3, timeout=111.0, transport_attempts=3
-        )
-        assert llm.max_retries == 2
+        llm = article_writer.create_writer_llm(temperature=0.3, timeout=111.0)
+        assert llm.max_retries == 0
         assert llm.default_request_timeout == pytest.approx(111.0)
 
     def test_no_override_keeps_the_registered_policy(self):

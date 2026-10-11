@@ -1,6 +1,8 @@
 # LLM Provider Qualification and Operations
 
-Last updated: 2026-10-10 (one Google RPM reader, embeddings on their provider's
+Last updated: 2026-10-10 (one retry owner: every client sends one SDK attempt
+and the runtime loop owns retries; the injection judge and signal processor
+resolve their seats; one Google RPM reader, embeddings on their provider's
 rate-limit bucket, a first token in every new bucket; 2026-10-09:
 direct-caller attempts follow `LLM_ATTEMPTS`, the
 OpenAI request cap is a setting, and the APAC ceiling is its node total; the
@@ -376,14 +378,36 @@ inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
   before any transport call. A flex share below the minimum goes straight to
   standard. `BudgetExhausted` is a `TimeoutError` but is never a flex-health signal
   and never counted by the circuit breakers.
-- **Application-owned retries.** Under the runtime loop each request carries one
-  SDK attempt. Google takes it per request (`max_retries=1`, which
-  langchain-google-genai maps to `HttpRetryOptions(attempts=1)`); the OpenAI SDK
-  fixes retries on the client, so runtime-owned OpenAI-family seats are built with
-  zero retries. The loop's transient budget defaults to `LLM_ATTEMPTS`, and every
-  retry and backoff is re-admitted against the enclosing deadline: a transient
-  backoff is clamped to fit, a rate-limit wait that leaves no useful attempt
-  refuses the retry.
+- **One retry owner.** Every request is one SDK attempt, on every vendor and
+  every construction path. It is a property of the transport classes, not a
+  constructor argument: the Gemini transport has `max_retries=1`
+  (langchain-google-genai maps it to `HttpRetryOptions(attempts=1)`; `0` would
+  mean the SDK's default), the OpenAI-family and Anthropic transports zero
+  retries, and any other value fails construction. A per-call `max_retries` is
+  refused at dispatch. The loop's transient budget defaults to `LLM_ATTEMPTS`,
+  and every retry and backoff is re-admitted against the enclosing deadline: a
+  transient backoff is clamped to fit, a rate-limit wait that leaves no useful
+  attempt refuses the retry. The loop's backoffs (5 s × attempt plus 1-3 s jitter
+  for a transient error, 60 s × attempt plus 1-10 s for a rate limit, the
+  providers' per-minute quota window) stay literals: admission already clamps
+  them, so a setting would add surface without adding a bound.
+- **Why one owner (October 2026).** Until then a client's SDK attempts were
+  decided by its seat's class: runtime-owned classes were built with one, the
+  rest with `LLM_ATTEMPTS`, on the assumption that their callers invoked the
+  model directly. None did any more: macro context, the injection judge and
+  the signal processor all ran under the loop. On OpenAI, compatible vendors and
+  Anthropic each of their loop attempts therefore sent up to `LLM_ATTEMPTS`
+  requests (`LLM_ATTEMPTS²` in all), and each SDK re-send carried the timeout
+  sized for the first request, so it ran past the attempt deadline (orphaned by
+  the hard timeout, still billed). Google was unaffected inside a scope, where
+  each dispatch sent `max_retries=1`. The per-seat `transport_attempts` (and its
+  deprecated alias `sdk_max_retries`), the class membership that chose it, and
+  every factory's attempt parameter are gone. The judge's context was
+  "Prompt Injection Judge" while its seat said "Content Inspector", and the
+  signal processor's "SignalProcessor": neither resolved to its seat, so both
+  ran under the generic AUXILIARY policy. Both now pass the seat's display name,
+  and the seat is named "Prompt Injection Judge", the label its token
+  accounting always used. The judge still fails open on `BudgetExhausted`.
 - **Former direct callers are on the policy.** The Article Editor's review (tool
   loop, structured and plain final review), the retrospective lesson and the
   semantic judge go through `invoke_with_rate_limit_handling`, keyed by their
@@ -424,10 +448,9 @@ inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
   passes `--article`.
 - **A direct caller under an enclosing deadline is sized from it.** With no
   invocation scope, a dispatch now admits and sizes its request against
-  `current_enclosing_deadline()` under the model's class policy; it keeps the
-  client's constructed SDK attempts, so an OpenAI or Anthropic client built
-  with retries can still run past the deadline by them. With neither a scope
-  nor an enclosing deadline nothing changes.
+  `current_enclosing_deadline()` under the model's class policy, as one SDK
+  attempt like every request. With neither a scope nor an enclosing deadline
+  nothing changes.
 - **The portfolio macro classifier** (`scripts/portfolio_manager.py`) invokes
   through the runtime loop (its own `asyncio.run`, since the script's `main` is
   synchronous) and its seat sends one SDK attempt per request.
@@ -460,20 +483,14 @@ inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
   health. A non-OpenAI host on the legacy path or the alternate transport is
   `openai_compatible`. A compatible vendor never carries a service tier: it
   cannot be built with one, and its failover copy sends none. Anthropic takes the
-  sized `timeout` per request on both its sync and async paths; its retries stay
-  fixed on the client. **Behaviour change:** inside an invocation these clients
+  sized `timeout` per request on both its sync and async paths. **Behaviour change:** inside an invocation these clients
   now send a request sized from the deadline, and the Consultant's alternate
   transport on a compatible base is built with the compatible ceiling instead of
   the OpenAI one. Direct callers are unchanged: outside a scope a standard
   request keeps its built timeout.
-- **The last three policy constants are settings or derived (round 2, Step 7).**
-  A client whose callers invoke it directly (no seat pin, not a runtime-owned
-  class) is built with `LLM_ATTEMPTS` total attempts on every vendor
-  (`direct_caller_transport_attempts`). It was a fixed 3 on the OpenAI-family and
-  Anthropic paths, so at the shipped `LLM_ATTEMPTS=2` those clients now make two
-  requests, not three, in both construction schemas; a seat's explicit
-  `transport_attempts` (the health check's one, the writer's and classifier's
-  one) still wins. The OpenAI standard request ceiling is
+- **The last policy constants are settings or derived (round 2, Step 7).**
+  (Step 7 also derived direct-caller SDK attempts from `LLM_ATTEMPTS`; that was
+  superseded by the single retry owner above.) The OpenAI standard request ceiling is
   `OPENAI_REQUEST_CAP_SECONDS` (120 s), read at the call. The APAC ceiling is the
   APAC node total, `APAC_NODE_TOTAL_TIMEOUT_SECONDS` (240 s), on the client (both
   schemas) and inside an invocation (`REGIONAL` on a compatible vendor): the
@@ -493,20 +510,14 @@ inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
   comes from the seat's class; the clamp's last readers (retrospective and judge)
   are on the resolver, so the full-mode value is read only in full mode.
 - **Telemetry**: each `call_attempts` entry carries `dispatches` -- phase, tier,
-  model, timeout sent, remaining allowance, configured attempt limit, outcome,
-  elapsed. Configured limits, not observed physical retries; no payloads.
+  model, timeout sent, remaining allowance, outcome, elapsed. Each is one SDK
+  attempt; no payloads.
 
 **Attempt counts have one meaning: total attempts.** `API_RETRY_ATTEMPTS` became
 `LLM_ATTEMPTS` (the old name is still read; the new one wins; the value carries over
-unchanged because Google, its main consumer, already counted totals) and
-`SeatExecutionPolicy.sdk_max_retries` became `transport_attempts` (the old field
-still works, translated: it meant total on Google and *retries* elsewhere;
-`transport_attempts` wins). Consequence on OpenAI and Anthropic: at the same
-configured value a direct-caller client now makes one request fewer (the writer
-literal of 3 meant three requests, not four; the editor and then the writer have
-since moved onto the loop and send one SDK attempt per request), and the runtime-owned
-Auditor, APAC and Consultant transport-fallback clients went from 2-4 SDK requests
-per call to one, with retries owned by the runtime loop.
+unchanged because Google, its main consumer, already counted totals). It is the
+runtime loop's budget only: no client takes an attempt count (see "One retry
+owner" above).
 
 **Verified against the installed SDKs** (google-genai 2.24.0, langchain-google-genai
 4.4.0, langchain-openai 1.6.2, openai 3.14.1): a per-request `timeout` reaches the

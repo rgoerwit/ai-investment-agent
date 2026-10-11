@@ -236,7 +236,7 @@ class TestOpenAIRateLimiter:
                 mock_cfg.llm_default_reasoning_reserve_tokens = 0
                 mock_cfg.llm_deep_reasoning_reserve_tokens = 0
                 mock_cfg.get_google_api_key.return_value = "key"
-                llms_mod.create_gemini_model("gemini-3-flash-preview", 0.3, 60, 3)
+                llms_mod.create_gemini_model("gemini-3-flash-preview", 0.3, 60)
 
         assert "rate_limiter" in captured_kw
         assert captured_kw["rate_limiter"] is llms_mod.GLOBAL_RATE_LIMITER

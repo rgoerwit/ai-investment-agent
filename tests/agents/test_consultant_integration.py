@@ -61,7 +61,7 @@ class TestConsultantNodeCreation:
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-4o"
                 assert call_kwargs["api_key"] == "test-key"
-                assert call_kwargs["max_retries"] == 0
+                assert "max_retries" not in call_kwargs
                 assert call_kwargs["max_completion_tokens"] == 8192
                 assert call_kwargs["use_responses_api"] is True
                 assert call_kwargs["output_version"] == "responses/v1"

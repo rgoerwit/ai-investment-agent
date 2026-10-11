@@ -11,11 +11,7 @@ from src.llm_runtime.budgets import resolve_generation_budget, stamp_budget_meta
 from src.llm_runtime.profiles import resolve_sampling_temperature
 from src.llm_runtime.rate_limits import limiter_for_binding
 from src.llm_runtime.seats import SEATS, SeatId
-from src.llm_runtime.timeouts import (
-    construction_transport_attempts,
-    policy_for_seat,
-    sdk_max_retries,
-)
+from src.llm_runtime.timeouts import policy_for_seat
 
 _OPENAI_NATIVE_HOST = "api.openai.com"
 
@@ -28,13 +24,8 @@ class OpenAIAdapter:
 
         settings = request.settings or config
         policy = request.seat.execution_policy
-        # The OpenAI SDK fixes retries on the client (no per-request override),
-        # so the client is built with the seat's policy attempts: one when the
-        # runtime loop owns retries. The request timeout is the policy's
-        # standard ceiling; a tiered transport re-sizes each request at dispatch.
-        attempts = construction_transport_attempts(
-            request.seat, vendor="openai", cfg=settings
-        )
+        # The request timeout is the policy's standard ceiling; the transport
+        # re-sizes each request at dispatch and sends one SDK attempt.
         request_cap = policy_for_seat(
             request.seat, provider="openai", cfg=settings
         ).request_cap
@@ -60,7 +51,6 @@ class OpenAIAdapter:
                 settings=settings,
                 include_reasoning_output=request.include_reasoning_output,
                 request_timeout_seconds=request_cap,
-                transport_attempts=attempts,
                 timeout_class=request.seat.timeout_class,
             )
         else:
@@ -75,7 +65,6 @@ class OpenAIAdapter:
                 "api_key": settings.get_openai_api_key(),
                 "callbacks": list(request.callbacks),
                 "timeout": request_cap,
-                "max_retries": sdk_max_retries("openai", attempts),
                 "max_completion_tokens": budget.api_cap_tokens,
                 "streaming": False,
                 "use_responses_api": True,
@@ -146,13 +135,6 @@ class OpenAIAdapter:
             "timeout": policy_for_seat(
                 consultant, provider=provider, cfg=config
             ).request_cap,
-            # The Consultant's policy: one request per dispatch (was 3 retries).
-            "max_retries": sdk_max_retries(
-                "openai",
-                construction_transport_attempts(
-                    consultant, vendor="openai", cfg=config
-                ),
-            ),
             "streaming": False,
             "api_key": api_key,
             "dispatch_provider": provider,

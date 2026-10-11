@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import warnings
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -32,19 +31,18 @@ from src.agents import invoke_with_rate_limit_handling
 from src.agents.circuit_breaker import reset_circuit_breaker_for_tests
 from src.agents.network_breaker import reset_network_breaker_singleton
 from src.llm_runtime import timeouts as llm_timeouts
+from src.llm_runtime.adapters import transports
 from src.llm_runtime.failover import failover_attempt
-from src.llm_runtime.seats import SEATS, SeatExecutionPolicy, SeatId
+from src.llm_runtime.seats import SEATS, SeatId
 from src.llm_runtime.timeouts import (
     BudgetExhausted,
     TimeoutClass,
-    construction_transport_attempts,
     current_dispatch_scope,
     enclosing_deadline,
     enclosing_deadline_at,
     invocation_scope,
     request_timeout,
     resolve_budget_policy,
-    sdk_max_retries,
 )
 from src.runtime_config import RuntimeConfig, use_runtime_config
 from src.token_tracker import get_tracker
@@ -102,7 +100,11 @@ def budget_config(monkeypatch):
     for target in targets.values():
         for key, value in values.items():
             monkeypatch.setattr(target, key, value, raising=False)
-    yield
+    # Bind the run-scoped view of exactly these values: a RuntimeConfig left
+    # bound by another fixture would otherwise decide llm_attempts and quick
+    # mode, and every expectation here is derived from the table above.
+    with use_runtime_config(RuntimeConfig.from_config(config_module.config)):
+        yield
     reset_circuit_breaker_for_tests()
     reset_network_breaker_singleton()
 
@@ -199,7 +201,6 @@ class TestPolicy:
         assert policy.request_cap == 120.0
         assert (policy.margin, policy.min_useful_attempt) == (MARGIN, MIN_USEFUL)
         assert policy.attempts == 2
-        assert policy.transport_attempts == 1
 
     def test_quick_apex_policy_uses_its_own_cap_and_full_request_ceiling(self):
         with _quick():
@@ -332,7 +333,7 @@ class TestDispatchSizing:
         with _quick():
             # Built through the real factory, so a construction-time flex
             # rewrite (if it ever came back) would show up as llm.timeout.
-            llm = llms_mod.create_gemini_model(PRIMARY, 0.3, 120, 2)
+            llm = llms_mod.create_gemini_model(PRIMARY, 0.3, 120)
             assert llm.service_tier == "flex"
             policy = _policy()
             with (
@@ -459,7 +460,7 @@ class TestDispatchSizing:
         """Outside an application invocation, only a flex request is sized."""
         transport = _Transport()
         with transport.patch_async():
-            await _gemini(service_tier=None, timeout=10, max_retries=1)._agenerate(
+            await _gemini(service_tier=None, timeout=10)._agenerate(
                 [HumanMessage(content="ok?")]
             )
         assert transport.calls[0]["timeout"] == 10
@@ -631,11 +632,15 @@ class TestRuntimeLoop:
         sleep.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_transient_budget_defaults_to_llm_attempts(self, monkeypatch):
-        monkeypatch.setattr(config_module.config, "llm_attempts", 3)
+    async def test_transient_budget_defaults_to_llm_attempts(self):
         runnable = AsyncMock()
         runnable.ainvoke = AsyncMock(side_effect=_server_error(503))
         with (
+            use_runtime_config(
+                RuntimeConfig.from_config(config_module.config).with_overrides(
+                    llm_attempts=3
+                )
+            ),
             patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock),
             pytest.raises(genai_errors.ServerError),
         ):
@@ -654,7 +659,6 @@ class TestRuntimeLoop:
         assert (standard["tier"], standard["outcome"]) == ("standard", "ok")
         assert flex["timeout_s"] == pytest.approx(24)
         assert standard["timeout_s"] == pytest.approx(QUICK_CAP - 3 - MARGIN)
-        assert flex["configured_attempts"] == standard["configured_attempts"] == 1
         assert set(flex) >= {"model", "remaining_s", "elapsed_s", "phase"}
         assert not any(isinstance(v, dict | list) for v in flex.values())
 
@@ -761,79 +765,13 @@ class TestRunDeadlineCeiling:
 
 
 class TestAttemptSemantics:
-    def test_one_attempt_translates_per_vendor(self):
-        assert sdk_max_retries("google", 1) == 1  # HttpRetryOptions(attempts=1)
-        assert sdk_max_retries("openai", 1) == 0
-        assert sdk_max_retries("anthropic", 1) == 0
-        assert sdk_max_retries("openai", 3) == 2
-
-    def test_runtime_owned_openai_seats_are_built_with_one_attempt(self):
-        for seat in (
-            SeatId.CONSULTANT,
-            SeatId.AUDITOR,
-            SeatId.APAC,
-            # Migrated onto the runtime loop in Step 4a.
-            SeatId.EDITOR,
-            SeatId.RETROSPECTIVE,
-            SeatId.SEMANTIC_JUDGE,
-            # The writer chain and the macro classifier joined the loop in
-            # round 2 (EDITORIAL became a runtime-owned class).
-            SeatId.ARTICLE_WRITER,
-            SeatId.ARTICLE_WRITER_REVIEW_FALLBACK,
-            SeatId.ARTICLE_WRITER_BASE_FALLBACK,
-            SeatId.PORTFOLIO_MACRO_CLASSIFIER,
-        ):
-            for vendor in ("openai", "anthropic"):
-                assert construction_transport_attempts(SEATS[seat], vendor=vendor) == 1
-        # A direct-caller (mixed-class) seat gets the run-scoped llm_attempts
-        # (tests/llm_runtime/test_policy_settings.py covers the derivation).
-        assert construction_transport_attempts(
-            SEATS[SeatId.MACRO_CONTEXT], vendor="openai"
-        ) == max(1, config_module.config.llm_attempts)
-
-    def test_google_built_attempts_stay_the_run_scoped_llm_attempts(self):
-        with _quick():
-            assert (
-                construction_transport_attempts(
-                    SEATS[SeatId.PORTFOLIO_MANAGER], vendor="google"
-                )
-                == 2
-            )
-        assert (
-            construction_transport_attempts(SEATS[SeatId.HEALTH_CHECK], vendor="google")
-            == 1
-        )
-
-    def test_deprecated_sdk_max_retries_is_translated_and_warns(self):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            zero = SeatExecutionPolicy(sdk_max_retries=0)
-            two = SeatExecutionPolicy(sdk_max_retries=2)
-        assert any(issubclass(w.category, DeprecationWarning) for w in caught)
-        # Google counted total attempts (0 behaves as 1); others counted retries.
-        assert zero.resolved_transport_attempts("google") == 1
-        assert zero.resolved_transport_attempts("openai") == 1
-        assert two.resolved_transport_attempts("google") == 2
-        assert two.resolved_transport_attempts("openai") == 3
-
-    def test_transport_attempts_wins_over_the_deprecated_alias(self):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            policy = SeatExecutionPolicy(transport_attempts=1, sdk_max_retries=5)
-        assert policy.resolved_transport_attempts("openai") == 1
-        assert policy.resolved_transport_attempts("google") == 1
-
-    def test_transport_attempts_must_be_total(self):
-        with pytest.raises(ValueError, match="total"):
-            SeatExecutionPolicy(transport_attempts=0)
-
     def test_llm_attempts_env_precedence_over_the_deprecated_spelling(
         self, monkeypatch
     ):
         from src.config import Settings
 
+        # The single-spelling values are covered by test_settings_hygiene.py.
         monkeypatch.setenv("API_RETRY_ATTEMPTS", "3")
-        assert Settings(_env_file=None).llm_attempts == 3
         monkeypatch.setenv("LLM_ATTEMPTS", "4")
         settings = Settings(_env_file=None)
         assert settings.llm_attempts == 4
@@ -868,7 +806,7 @@ class TestSdkRequestLayer:
             }
             return _api_client.HttpResponse({}, [json.dumps(body)])
 
-        llm = _gemini(service_tier=None, timeout=300, max_retries=3)
+        llm = _gemini(service_tier=None, timeout=300)
         with _quick():
             policy = _policy()
             with (
@@ -881,36 +819,3 @@ class TestSdkRequestLayer:
         assert captured["attempts"] == 1
         assert captured["timeout"] == pytest.approx(38.0)
         assert captured["header"] == "38"
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("use_responses_api", [True, False])
-    async def test_openai_request_carries_the_sized_timeout(
-        self, clock, use_responses_api
-    ):
-        import openai
-
-        seen: dict = {}
-
-        async def fake_request(self, cast_to, options, *args, **kwargs):
-            seen["timeout"] = options.timeout
-            seen["client_max_retries"] = self.max_retries
-            raise RuntimeError("captured")
-
-        cls = llms_mod._get_flex_fallback_chat_openai_cls()
-        llm = cls(
-            model="gpt-5.4",
-            api_key="k",
-            timeout=120,
-            max_retries=0,
-            use_responses_api=use_responses_api,
-            dispatch_provider="openai",
-        )
-        with _quick():
-            policy = _policy(TimeoutClass.CROSS_CHECK, provider="openai")
-            with (
-                patch.object(openai.AsyncOpenAI, "request", fake_request),
-                invocation_scope(policy, clock() + 33.0),
-                pytest.raises(RuntimeError, match="captured"),
-            ):
-                await llm._agenerate([HumanMessage(content="hi")])
-        assert seen == {"timeout": pytest.approx(31.0), "client_max_retries": 0}
