@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- One minimum-useful-attempt rule and one margin, both derived. A minimum is
+  `MIN_USEFUL_ATTEMPT_FRACTION` (new, 0.04, at most 0.5, chosen not measured) of the
+  plane's configured allowance for one attempt: the LLM per-request ceiling (or the
+  invocation cap when shorter) before any flex floor, the embedding call timeout, the
+  MCP tool-call timeout (2.4-12 s, 1.2 s, 1.8 s at the shipped defaults; 4.8 s for a
+  full-mode OpenAI request, 12 s at most). `LLM_MIN_USEFUL_ATTEMPT_SECONDS`, `MEMORY_EMBEDDING_MIN_USEFUL_SECONDS`
+  and `MCP_RETRY_MIN_USEFUL_SECONDS` and their cross-field validators are removed (all
+  were branch-only). The LLM budget policy's margin is `deadline_margin(cap)`, the tool
+  plane's rule. **Behaviour change:** a quick-mode LLM request's minimum moves from 5 s
+  to 0.04 x its attempt allowance (2.4 s at the 60 s standard quick cap, 4.8 s full
+  mode), and the old `cap / 2`
+  ceiling is now the field's 0.5 bound; margins are unchanged.
 - Settings are read, never defaulted at the call site. Every `getattr(settings, "<field>", <literal>)`
   is now a plain attribute read, one `resolve_settings` in `src/config.py` replaces four private
   "explicit settings or the live singleton" helpers, and a hygiene test scans `src/` for the shape.
@@ -131,7 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stale bound; a successful call sends the same requests in a different order, and
   a failed one costs one extra listing. The retry backoff is admitted like an LLM
   retry: shortened to fit, refused when less than the new
-  `MCP_RETRY_MIN_USEFUL_SECONDS` (1 s) would be left, and re-checked after the
+  the minimum useful attempt would not be left, and re-checked after the
   sleep. A refused retry raises the last attempt's error with `retryable: false`
   and `details.retry == "refused_deadline"`; a 429 still registers its cooldown.
 - An official-document download now has a total deadline,
@@ -166,8 +178,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MEMORY_EMBEDDING_CALL_TIMEOUT_SECONDS` after it). The unthrottled fallback is
   taken only when no rate limiter exists; it no longer re-sends the request after
   a provider error or timeout. Retry backoff is clamped to the caller's deadline,
-  retries stop when less than the new `MEMORY_EMBEDDING_MIN_USEFUL_SECONDS` (1 s)
-  is left, and the last attempt's own error is raised instead of a `RetryError`.
+  retries stop when less than the minimum useful attempt
+  (`MIN_USEFUL_ATTEMPT_FRACTION` of the call timeout) is left, and the last attempt's own error is raised instead of a `RetryError`.
   OpenAI embeddings send one SDK attempt per request (was three).
 - A model invoked outside the runtime loop is admitted and sized against an
   enclosing deadline when one is bound; with none, nothing changes.
@@ -347,7 +359,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retry, rather than a fresh 240 s per call.
 - Seat timeout budgets are chosen by a `TimeoutClass` on each registered seat
   rather than by matching display names; new knobs `FLEX_QUICK_ATTEMPT_FRACTION`
-  (0.4), `LLM_MIN_USEFUL_ATTEMPT_SECONDS` (5) and `LLM_DISPATCH_MARGIN_SECONDS` (2).
+  (0.4), `MIN_USEFUL_ATTEMPT_FRACTION` (0.04) and `LLM_DISPATCH_MARGIN_SECONDS` (2).
 - Treat generic consultant conditions, numerical discrepancies, and suspicious
   OCF/NI ratios as zero-weight review findings rather than issuer-risk penalties.
 - Block BUY when the Consultant reports MAJOR_CONCERNS: unresolved material
@@ -360,7 +372,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of a timeout fixed on the client at construction. The flex-attempt
   timeout (24 s quick, 900 s full) no longer rides along on the standard re-issue,
   on calls sent at standard after flex degrades, or on the model-failover copy;
-  a request with less than `LLM_MIN_USEFUL_ATTEMPT_SECONDS` left is refused before
+  a request with less than `MIN_USEFUL_ATTEMPT_FRACTION` of the cap left is refused before
   any transport call, and each call attempt now records its `dispatches`
   (tier, model, timeout sent, remaining allowance, configured attempts, outcome).
   The full-mode latency fallback to standard is reachable again.

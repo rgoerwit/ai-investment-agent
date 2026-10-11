@@ -1,6 +1,6 @@
 # Codebase Memory
 
-Last updated: 2026-10-10
+Last updated: 2026-10-11
 
 This file is a durable orientation note, not the source of truth.
 Use it to get context quickly, then verify against the live tree.
@@ -803,8 +803,11 @@ keep their defaults because they set how long exit can take. Only the 30 s
 embedding attempt clamps. Each attempt gets one absolute deadline that covers
 the rate-limiter wait (`asyncio.timeout` around `aacquire`) and the request
 together; before October 2026 the limiter wait had no bound and the request got
-a fresh 30 s after it. With less than `MEMORY_EMBEDDING_MIN_USEFUL_SECONDS`
-(1 s, a chosen default, not measured) left before the caller's deadline, the
+a fresh 30 s after it. With less than the minimum useful attempt
+(`MIN_USEFUL_ATTEMPT_FRACTION`, 0.04, of the 30 s call timeout = 1.2 s; a chosen
+fraction, not measured, shared with the LLM and MCP planes through
+`min_useful_seconds` and always taken from the configured allowance, never the
+clamped remainder) left before the caller's deadline, the
 attempt raises `EmbeddingAllowanceSpent` before a token is taken, and tenacity's
 retry excludes it. Without that exclusion, the three-attempt retry would add
 about 6 s of backoff to a deadline that had already passed. Tenacity's backoff

@@ -125,6 +125,10 @@ fallback is still queue-affected even if the final request used standard; capaci
 and capability fallbacks do not establish that cause. Keep seat-specific tier policy
 in `SeatExecutionPolicy` so legacy and bound construction agree.
 
+A minimum useful attempt is a fraction of its plane's configured allowance for
+*one attempt* (`min_useful_seconds`, `MIN_USEFUL_ATTEMPT_FRACTION`); never a new absolute
+setting, and never derived from a clamped remainder. Margins are `deadline_margin(cap)`.
+
 ## The pricing table goes stale silently
 
 `MODEL_PRICING_PER_1M` in `src/token_tracker.py` is hand-copied from vendor pages that

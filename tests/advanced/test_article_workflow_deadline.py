@@ -264,7 +264,7 @@ def workflow_config(monkeypatch):
     values = {
         "api_timeout": 300,
         "llm_attempts": 2,
-        "llm_min_useful_attempt_seconds": 0.05,
+        "min_useful_attempt_fraction": 0.0004,
         "llm_dispatch_margin_seconds": 0.01,
         "llm_circuit_breaker_enabled": False,
         "network_breaker_enabled": False,
@@ -687,7 +687,7 @@ class TestDirectCallerUnderAnEnclosingDeadline:
         fake = FakeClock()
         monkeypatch.setattr(llm_timeouts, "now", fake)
         monkeypatch.setattr(config_module.config, "llm_dispatch_margin_seconds", 2.0)
-        monkeypatch.setattr(config_module.config, "llm_min_useful_attempt_seconds", 5.0)
+        monkeypatch.setattr(config_module.config, "min_useful_attempt_fraction", 0.04)
         return fake
 
     def _client(self):

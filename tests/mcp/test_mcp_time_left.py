@@ -31,10 +31,9 @@ from mcp import ClientSession
 from mcp import types as mcp_types
 from mcp.shared.message import SessionMessage
 from mcp.types import REQUEST_TIMEOUT
-from pydantic import ValidationError
 
 import src.mcp.client as mcp_client
-from src.config import Settings, config
+from src.config import config
 from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.timeouts import enclosing_deadline, tool_call_deadline
 from src.mcp.client import MCPRuntime
@@ -121,18 +120,78 @@ def recording_session(monkeypatch) -> type[RecordingSession]:
     return RecordingSession
 
 
-# --- The retry minimum is a setting -----------------------------------------
+# --- The retry minimum is a share of the tool call's configured allowance -----
+
+# 0.0625 x 45 s = 2.8125 s: a dyadic minimum, so the boundary compares exactly.
+_MINIMUM = 0.0625 * 45.0
 
 
-def test_retry_minimum_shipped_default():
-    assert Settings.model_fields["mcp_retry_min_useful_seconds"].default == 1.0
+async def _retry_after_502(tmp_path, monkeypatch, *, deadline: float):
+    server = FakeMCPServer(status={"tools/call": (502, {})})
+    server.install(monkeypatch)
+    runtime = http_runtime(tmp_path)
+    with enclosing_deadline(deadline):
+        with pytest.raises(MCPCallError) as exc_info:
+            await runtime.execute_raw("fmp_remote", "quote", {}, scope="consultant")
+    return server, exc_info.value
 
 
-@pytest.mark.parametrize("value", ["0", "45", "60"])
-def test_retry_minimum_must_be_positive_and_below_the_call_bound(monkeypatch, value):
-    monkeypatch.setenv("MCP_RETRY_MIN_USEFUL_SECONDS", value)
-    with pytest.raises(ValidationError):
-        Settings()
+@pytest.mark.asyncio
+async def test_a_retry_with_exactly_the_derived_minimum_left_is_sent(
+    tmp_path, monkeypatch, fake_clock, sleeps
+):
+    monkeypatch.setattr(config, "min_useful_attempt_fraction", 0.0625)
+    server, err = await _retry_after_502(tmp_path, monkeypatch, deadline=_MINIMUM)
+    assert server.methods.count("tools/call") == 2
+    assert sleeps == [0.0]
+    assert "retry" not in err.details
+
+
+@pytest.mark.asyncio
+async def test_a_retry_with_just_under_the_derived_minimum_left_is_never_sent(
+    tmp_path, monkeypatch, fake_clock, sleeps
+):
+    monkeypatch.setattr(config, "min_useful_attempt_fraction", 0.0625)
+    server, err = await _retry_after_502(
+        tmp_path, monkeypatch, deadline=_MINIMUM - 0.001
+    )
+    assert server.methods.count("tools/call") == 1
+    assert sleeps == []
+    assert err.details["retry"] == "refused_deadline"
+
+
+@pytest.mark.asyncio
+async def test_the_minimum_is_not_derived_from_the_time_left(
+    tmp_path, monkeypatch, fake_clock, sleeps
+):
+    """1 s left: a minimum taken from the clamped remainder would be 0.0625 s."""
+    monkeypatch.setattr(config, "min_useful_attempt_fraction", 0.0625)
+    server, err = await _retry_after_502(tmp_path, monkeypatch, deadline=1.0)
+    assert server.methods.count("tools/call") == 1
+    assert err.details["retry"] == "refused_deadline"
+
+
+@pytest.mark.asyncio
+async def test_a_tiny_allowance_with_a_small_fraction_still_retries(
+    tmp_path, monkeypatch, fake_clock, sleeps
+):
+    """0.04 x 0.2 s = 0.008 s: 0.01 s left fits one retry, after a 0.002 s sleep."""
+    monkeypatch.setattr(config, "mcp_tool_call_timeout_seconds", 0.2)
+    monkeypatch.setattr(config, "min_useful_attempt_fraction", 0.04)
+    server, _ = await _retry_after_502(tmp_path, monkeypatch, deadline=0.01)
+    assert server.methods.count("tools/call") == 2
+    assert sleeps == [pytest.approx(0.002)]
+
+
+@pytest.mark.asyncio
+async def test_a_fraction_override_moves_the_mcp_minimum(
+    tmp_path, monkeypatch, fake_clock, sleeps
+):
+    """4 s left retries at the default (1.8 s); at 0.5 x 45 s = 22.5 s it does not."""
+    monkeypatch.setattr(config, "min_useful_attempt_fraction", 0.5)
+    server, err = await _retry_after_502(tmp_path, monkeypatch, deadline=4.0)
+    assert server.methods.count("tools/call") == 1
+    assert err.details["retry"] == "refused_deadline"
 
 
 # --- Catalogue: the listing gets what the handshake left ---------------------
@@ -582,16 +641,17 @@ def _stall_advancing(fake_clock: list[float], seconds: float) -> Callable[[], No
 async def test_a_call_timeout_near_the_runner_deadline_does_not_sleep_the_backoff(
     tmp_path, monkeypatch, fake_clock, sleeps
 ):
-    """The call times out with 0.5 s left of the runner's deadline; the minimum is 1 s.
+    """The call times out with 0.05 s left of the runner's deadline; the minimum is 0.1 s.
 
     The 500 ms backoff is refused, never slept, and no second attempt is made.
     """
     server = FakeMCPServer(
         stall=frozenset({"tools/call"}),
-        on_request={"tools/call": _stall_advancing(fake_clock, 1.0)},
+        on_request={"tools/call": _stall_advancing(fake_clock, 1.45)},
     )
     server.install(monkeypatch)
     monkeypatch.setattr(config, "mcp_tool_call_timeout_seconds", 0.2)
+    monkeypatch.setattr(config, "min_useful_attempt_fraction", 0.5)
     runtime = http_runtime(tmp_path)
     before = set(asyncio.all_tasks())
 
@@ -623,13 +683,14 @@ async def test_a_call_timeout_near_the_runner_deadline_does_not_sleep_the_backof
 async def test_a_backoff_is_shortened_to_leave_a_useful_attempt(
     tmp_path, monkeypatch, fake_clock, sleeps
 ):
-    """1.3 s left after the failure, minimum 1 s: sleep 0.3 s, then retry."""
+    """0.3 s left after the failure, minimum 0.1 s: sleep 0.2 s, then retry."""
     server = FakeMCPServer(
         stall=frozenset({"tools/call"}),
-        on_request={"tools/call": _stall_advancing(fake_clock, 0.2)},
+        on_request={"tools/call": _stall_advancing(fake_clock, 1.2)},
     )
     server.install(monkeypatch)
     monkeypatch.setattr(config, "mcp_tool_call_timeout_seconds", 0.2)
+    monkeypatch.setattr(config, "min_useful_attempt_fraction", 0.5)
     runtime = http_runtime(tmp_path)
 
     with tool_call_deadline(1.5):
@@ -639,7 +700,7 @@ async def test_a_backoff_is_shortened_to_leave_a_useful_attempt(
                 timeout=_STALL_CEILING_SECONDS,
             )
 
-    assert sleeps == [pytest.approx(0.3)]
+    assert sleeps == [pytest.approx(0.2)]
     assert server.methods.count("tools/call") == 2
     # The second attempt was sent and timed out on its own: not a refusal.
     assert exc_info.value.json_rpc_code == REQUEST_TIMEOUT
@@ -707,8 +768,8 @@ async def test_a_backoff_that_overruns_is_rechecked_before_the_retry(
 
         @staticmethod
         async def sleep(delay: float) -> None:
-            # 4 s deadline, 1 s minimum: a 0.5 s sleep is admitted, and
-            # returning 3 s late leaves 0.5 s, below the minimum.
+            # 4 s deadline, 1.8 s minimum (0.04 x 45 s): a 0.5 s sleep is
+            # admitted, and returning 3 s late leaves 0.5 s, below it.
             fake_clock[0] += delay + 3.0
 
     monkeypatch.setattr(mcp_client, "asyncio", _OverrunningAsyncio())

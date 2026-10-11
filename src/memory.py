@@ -124,10 +124,6 @@ def _probe_policy() -> BlockingCallPolicy:
     )
 
 
-def _embedding_min_useful_seconds() -> float:
-    return config_module.config.memory_embedding_min_useful_seconds
-
-
 def _fits_before_operational_deadline(seconds: float) -> bool:
     """Whether ``seconds`` still fit before the operational deadline (inclusive)."""
     return (
@@ -145,7 +141,8 @@ def _embedding_call_timeout(collection: str) -> float:
     ``EmbeddingAllowanceSpent`` when less than the embedding minimum is left
     before the enclosing deadline, before any token is taken or request created.
     """
-    minimum = _embedding_min_useful_seconds()
+    allowance = config_module.config.memory_embedding_call_timeout_seconds
+    minimum = llm_timeouts.min_useful_seconds(allowance)
     # A zero wait is admitted exactly when a useful attempt still fits: the same
     # rule the retry stop applies, so the two cannot disagree.
     if not _fits_before_operational_deadline(minimum):
@@ -153,9 +150,7 @@ def _embedding_call_timeout(collection: str) -> float:
             f"memory_embedding:{collection}: less than {minimum:g}s left "
             "before the enclosing deadline"
         )
-    return llm_timeouts.clamp_to_operational_deadline(
-        config_module.config.memory_embedding_call_timeout_seconds
-    )
+    return llm_timeouts.clamp_to_operational_deadline(allowance)
 
 
 def _embedding_retry_sleep(retry_state: RetryCallState) -> float | None:
@@ -167,7 +162,9 @@ def _embedding_retry_sleep(retry_state: RetryCallState) -> float | None:
     return llm_timeouts.wait_allowance(
         llm_timeouts.operational_deadline(),
         _EMBEDDING_BACKOFF(retry_state),
-        minimum=_embedding_min_useful_seconds(),
+        minimum=llm_timeouts.min_useful_seconds(
+            config_module.config.memory_embedding_call_timeout_seconds
+        ),
     )
 
 

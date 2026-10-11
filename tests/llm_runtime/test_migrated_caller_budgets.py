@@ -53,7 +53,7 @@ APEX_CAP = 180.0
 CROSS_CHECK_CAP = 180.0
 FULL_CAP = 120.0
 MARGIN = 2.0
-MIN_USEFUL = 5.0
+MIN_USEFUL_FRACTION = 0.04
 HEALTH_CHECK_TIMEOUT = SEATS[
     SeatId.HEALTH_CHECK
 ].execution_policy.client_timeout_seconds
@@ -87,7 +87,7 @@ def budget_config(monkeypatch):
         "apex_quick_llm_call_hard_timeout_seconds": APEX_CAP,
         "cross_check_quick_llm_call_hard_timeout_seconds": CROSS_CHECK_CAP,
         "llm_call_hard_timeout_seconds": FULL_CAP,
-        "llm_min_useful_attempt_seconds": MIN_USEFUL,
+        "min_useful_attempt_fraction": MIN_USEFUL_FRACTION,
         "llm_dispatch_margin_seconds": MARGIN,
         "flex_quick_attempt_fraction": 0.4,
         "api_timeout": 300,

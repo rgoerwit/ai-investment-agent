@@ -60,7 +60,6 @@ SHIPPED_DEFAULTS = {
     "health_check_connectivity_timeout_seconds": 15.0,
     "memory_embedding_healthcheck_timeout_seconds": 15.0,
     "memory_embedding_call_timeout_seconds": 30.0,
-    "memory_embedding_min_useful_seconds": 1.0,
     "genai_client_close_timeout_seconds": 2.0,
     "langfuse_flush_timeout_seconds": 2.0,
     # LLM request ceilings (round 2, Step 7)

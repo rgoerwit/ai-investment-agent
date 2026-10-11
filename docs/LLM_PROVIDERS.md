@@ -1,6 +1,6 @@
 # LLM Provider Qualification and Operations
 
-Last updated: 2026-10-10 (one retry owner: every client sends one SDK attempt
+Last updated: 2026-10-11 (one minimum-useful-attempt fraction and one margin rule; one retry owner: every client sends one SDK attempt
 and the runtime loop owns retries; the injection judge and signal processor
 resolve their seats; one Google RPM reader, embeddings on their provider's
 rate-limit bucket, a first token in every new bucket; 2026-10-09:
@@ -360,8 +360,22 @@ inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
   invocation cap (full-mode flex floor included), the flex request ceiling (quick:
   `FLEX_QUICK_ATTEMPT_FRACTION` x cap; full: `FLEX_LLM_TIMEOUT_SECONDS`), the
   standard request ceiling (the value clients were already built with), the minimum
-  useful attempt and the margin (`LLM_MIN_USEFUL_ATTEMPT_SECONDS`,
-  `LLM_DISPATCH_MARGIN_SECONDS`), and `LLM_ATTEMPTS`.
+  useful attempt and the margin, and `LLM_ATTEMPTS`. Both are derived: the
+  minimum is `MIN_USEFUL_ATTEMPT_FRACTION` (0.04, chosen, not measured) of one
+  attempt's configured allowance, `min(invocation cap, per-request ceiling)`
+  before any flex floor, so neither a long invocation cap (an operator's 600 s)
+  nor a flexed cap demands a huge minimum; the margin is `deadline_margin(cap)`, the same rule
+  the tool plane uses (`DEADLINE_MARGIN_FRACTION` of the cap, at most
+  `LLM_DISPATCH_MARGIN_SECONDS`, which stays as the absolute ceiling so a
+  1350 s flexed cap keeps a 2 s margin, not 67 s). Shipped defaults: quick
+  standard (cap 60 s) 2.4 s; quick apex or cross-check (cap 180 s) 4.8 s on
+  OpenAI and 4.8-7.2 s elsewhere; full mode (cap 120 s) 4.8 s; editorial on
+  Google or Anthropic (300 s) 12 s, the largest; embeddings (30 s) 1.2 s; MCP
+  (45 s) 1.8 s. `tests/llm_runtime/test_min_useful_attempt.py` pins the whole
+  class x provider x mode table. Because
+  both flex and the minimum are shares of the quick cap, a quick flex request is
+  skipped for lack of room only if `FLEX_QUICK_ATTEMPT_FRACTION` is set below
+  `MIN_USEFUL_ATTEMPT_FRACTION`.
 - **The deadline is absolute and lives in a ContextVar**, never on the model.
   `invoke_with_rate_limit_handling` sets `min(now + cap, enclosing)` per attempt,
   where *enclosing* is `overall_timeout_seconds` or a node scope

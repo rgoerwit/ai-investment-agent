@@ -107,7 +107,6 @@ def pin(monkeypatch):
                 "apac_node_total_timeout_seconds",
                 "openai_compatible_client_timeout_seconds",
                 "llm_call_hard_timeout_seconds",
-                "llm_min_useful_attempt_seconds",
                 "llm_dispatch_margin_seconds",
                 "openai_service_tier",
             ):

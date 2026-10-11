@@ -184,6 +184,19 @@ def deadline_margin(cap: float, cfg: Any = None) -> float:
     )
 
 
+def min_useful_seconds(allowance: float, cfg: Any = None) -> float:
+    """The least time worth starting one attempt for, from its configured allowance.
+
+    ``MIN_USEFUL_ATTEMPT_FRACTION`` of ``allowance``: the one rule for the LLM,
+    embedding and MCP planes. Pass the plane's *configured* per-attempt
+    allowance for one attempt (for the LLM, the per-request ceiling or the
+    invocation cap if shorter -- never the cap of a whole multi-attempt
+    invocation), never a remainder already clamped to a deadline -- the
+    minimum must not shrink with the time left. Always below a positive allowance.
+    """
+    return float(allowance) * float(resolve_settings(cfg).min_useful_attempt_fraction)
+
+
 def operational_deadline() -> float | None:
     """The absolute deadline operational work must meet, or None.
 
@@ -401,6 +414,15 @@ def resolve_budget_policy(
         cap = quick_invocation_cap(timeout_class, settings)
     else:
         cap = float(runtime.llm_call_hard_timeout_seconds)
+    request_cap = (
+        float(request_cap_override)
+        if request_cap_override is not None
+        else _standard_request_cap(timeout_class, provider, settings, quick)
+    )
+    # The minimum is a share of one attempt's allowance: the per-request
+    # ceiling, or the invocation cap when that is shorter. The flex floor below
+    # lengthens the invocation, not the least attempt worth sending.
+    min_useful = min_useful_seconds(min(cap, request_cap), settings)
     # Full-mode flex: the cap must outlast a queued flex request plus its
     # standard re-issue. A no-op in quick mode and when flex is off.
     cap = floor_llm_hard_timeout(
@@ -411,14 +433,7 @@ def resolve_budget_policy(
     )
     fraction = float(settings.flex_quick_attempt_fraction)
     flex_request_cap = cap * fraction if quick else float(flex_floor_seconds(settings))
-    request_cap = (
-        float(request_cap_override)
-        if request_cap_override is not None
-        else _standard_request_cap(timeout_class, provider, settings, quick)
-    )
-    # Scale the floors for a deliberately tiny cap so it stays admissible.
-    min_useful = min(float(settings.llm_min_useful_attempt_seconds), cap / 2.0)
-    margin = min(float(settings.llm_dispatch_margin_seconds), cap * 0.05)
+    margin = deadline_margin(cap, settings)
     attempts = max(1, int(runtime.llm_attempts))
     return BudgetPolicy(
         timeout_class=timeout_class,

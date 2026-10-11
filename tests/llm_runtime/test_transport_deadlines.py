@@ -59,7 +59,7 @@ from src.service_tiers import (
 )
 
 MARGIN = 2.0
-MIN_USEFUL = 5.0
+MIN_USEFUL_FRACTION = 0.04
 COMPATIBLE_CAP = 300.0
 OPENAI_CAP = 120.0
 APAC_NODE_TOTAL = 240.0
@@ -88,7 +88,7 @@ def budget_config(monkeypatch):
         "apex_quick_llm_call_hard_timeout_seconds": 180.0,
         "cross_check_quick_llm_call_hard_timeout_seconds": 180.0,
         "llm_call_hard_timeout_seconds": 600.0,
-        "llm_min_useful_attempt_seconds": MIN_USEFUL,
+        "min_useful_attempt_fraction": MIN_USEFUL_FRACTION,
         "llm_dispatch_margin_seconds": MARGIN,
         "flex_quick_attempt_fraction": 0.4,
         "api_timeout": 300,

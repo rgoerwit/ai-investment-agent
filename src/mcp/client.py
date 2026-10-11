@@ -549,7 +549,9 @@ class MCPRuntime:
             # attempt still fits before the caller's or the runner's deadline. A
             # transient backoff is shortened to fit; a server-requested wait is
             # not, so it is refused instead. Refused means never sent.
-            minimum = settings_config.mcp_retry_min_useful_seconds
+            minimum = llm_timeouts.min_useful_seconds(
+                settings_config.mcp_tool_call_timeout_seconds, settings_config
+            )
             wait = llm_timeouts.wait_allowance(
                 operational_deadline(),
                 backoff,

@@ -1076,12 +1076,6 @@ class Settings(BaseSettings):
     # Per-dispatch admission (src/llm_runtime/timeouts.py). A request is refused,
     # not sent, when less than the minimum useful attempt remains; the margin is
     # held back so a request's own deadline fires before the hard cap does.
-    llm_min_useful_attempt_seconds: float = Field(
-        default=5.0,
-        gt=0.0,
-        validation_alias="LLM_MIN_USEFUL_ATTEMPT_SECONDS",
-        description="Smallest remaining allowance worth sending a request for",
-    )
     llm_dispatch_margin_seconds: float = Field(
         default=2.0,
         ge=0.0,
@@ -1100,6 +1094,21 @@ class Settings(BaseSettings):
         description=(
             "Share of a hard cap kept back from the deadline of the work inside "
             "it (at most LLM_DISPATCH_MARGIN_SECONDS)"
+        ),
+    )
+    # The one minimum-useful-attempt rule (min_useful_seconds in
+    # src/llm_runtime/timeouts.py), shared by LLM requests, embedding attempts
+    # and MCP retries. Chosen, not measured: 0.04 of a 120 s request is 4.8 s, close
+    # to the 5 s the LLM plane used before it was derived.
+    min_useful_attempt_fraction: float = Field(
+        default=0.04,
+        gt=0.0,
+        le=0.5,
+        validation_alias="MIN_USEFUL_ATTEMPT_FRACTION",
+        description=(
+            "Share of an attempt's configured allowance below which the time "
+            "left is not worth sending it for (chosen, not measured); at most "
+            "half, so a minimum is always well inside its allowance"
         ),
     )
     # A quick-mode flex request may queue for this share of its invocation cap,
@@ -1659,18 +1668,6 @@ class Settings(BaseSettings):
             "bounds the whole call (session open included) and so fires first."
         ),
     )
-    mcp_retry_min_useful_seconds: float = Field(
-        default=1.0,
-        gt=0.0,
-        validation_alias="MCP_RETRY_MIN_USEFUL_SECONDS",
-        description=(
-            "Least time (seconds) that must still be left before the caller's or "
-            "the tool runner's deadline after the backoff for an MCP tool call to "
-            "be retried; below it the retry is refused and never sent. A chosen "
-            "default, not a measured one. Must be below "
-            "MCP_TOOL_CALL_TIMEOUT_SECONDS."
-        ),
-    )
     # Operational deadlines: health-check probe, embeddings, and the two
     # shutdown paths. Same one-field-per-scope rule (15 s health probe vs 15 s
     # embeddings probe; 2 s client close vs 2 s trace flush stay separate). Only
@@ -1704,17 +1701,6 @@ class Settings(BaseSettings):
         description=(
             "Hard cap (seconds) on one embedding request for a memory read or "
             "write, per attempt; shrinks to a caller's enclosing deadline."
-        ),
-    )
-    memory_embedding_min_useful_seconds: float = Field(
-        default=1.0,
-        gt=0.0,
-        validation_alias="MEMORY_EMBEDDING_MIN_USEFUL_SECONDS",
-        description=(
-            "Least time (seconds) left before a caller's enclosing deadline for "
-            "which an embedding attempt or retry is still made; below it the "
-            "attempt is refused and the retry stops. A chosen default, not a "
-            "measured one. Must be below MEMORY_EMBEDDING_CALL_TIMEOUT_SECONDS."
         ),
     )
     genai_client_close_timeout_seconds: float = Field(
@@ -2091,42 +2077,6 @@ class Settings(BaseSettings):
         # Use validation_alias for env var names
         populate_by_name=True,
     )
-
-    @model_validator(mode="after")
-    def _validate_embedding_attempt_scopes(self) -> "Settings":
-        """Reject an embedding minimum at or above the per-attempt allowance.
-
-        The minimum is the floor below which a clamped attempt is not worth
-        making. At or above the allowance it would refuse an attempt that a
-        caller's deadline still leaves room to make in full.
-        """
-        if (
-            self.memory_embedding_min_useful_seconds
-            >= self.memory_embedding_call_timeout_seconds
-        ):
-            raise ValueError(
-                "MEMORY_EMBEDDING_MIN_USEFUL_SECONDS "
-                f"({self.memory_embedding_min_useful_seconds:g}) must be below "
-                "MEMORY_EMBEDDING_CALL_TIMEOUT_SECONDS "
-                f"({self.memory_embedding_call_timeout_seconds:g})"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _validate_mcp_retry_minimum(self) -> "Settings":
-        """Reject an MCP retry minimum at or above the tool call's own bound.
-
-        At or above it the minimum would refuse a retry that the caller's
-        deadline still leaves room to make in full.
-        """
-        if self.mcp_retry_min_useful_seconds >= self.mcp_tool_call_timeout_seconds:
-            raise ValueError(
-                "MCP_RETRY_MIN_USEFUL_SECONDS "
-                f"({self.mcp_retry_min_useful_seconds:g}) must be below "
-                "MCP_TOOL_CALL_TIMEOUT_SECONDS "
-                f"({self.mcp_tool_call_timeout_seconds:g})"
-            )
-        return self
 
     @model_validator(mode="after")
     def setup_environment(self) -> "Settings":

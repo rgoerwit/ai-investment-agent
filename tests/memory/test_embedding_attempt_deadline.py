@@ -29,10 +29,9 @@ import pytest
 from google.genai import errors as genai_errors
 from langchain_openai import OpenAIEmbeddings
 from openai import InternalServerError
-from pydantic import ValidationError
 
 import src.memory as memory_module
-from src.config import Settings, config
+from src.config import config
 from src.embeddings import (
     EmbeddingBinding,
     GoogleGenerativeAIEmbeddings,
@@ -161,51 +160,7 @@ def _embeddings(requests: Requests) -> Any:
 def _small_scopes(monkeypatch, *, call: float, minimum: float) -> None:
     """Deliberately small per-attempt and minimum overrides."""
     monkeypatch.setattr(config, "memory_embedding_call_timeout_seconds", call)
-    monkeypatch.setattr(config, "memory_embedding_min_useful_seconds", minimum)
-
-
-# --- Settings ----------------------------------------------------------------
-
-
-def test_min_useful_default_is_one_second():
-    field = Settings.model_fields["memory_embedding_min_useful_seconds"]
-    assert field.default == 1.0
-    assert (
-        field.default
-        < Settings.model_fields["memory_embedding_call_timeout_seconds"].default
-    )
-
-
-def test_small_overrides_below_the_call_allowance_are_accepted(monkeypatch):
-    monkeypatch.delenv("MEMORY_EMBEDDING_MIN_USEFUL_SECONDS", raising=False)
-    monkeypatch.delenv("MEMORY_EMBEDDING_CALL_TIMEOUT_SECONDS", raising=False)
-    settings = Settings(
-        _env_file=None,
-        memory_embedding_min_useful_seconds=0.001,
-        memory_embedding_call_timeout_seconds=0.002,
-    )
-    assert settings.memory_embedding_min_useful_seconds == 0.001
-
-
-@pytest.mark.parametrize("minimum, call", [(30.0, 30.0), (5.0, 0.5)])
-def test_min_useful_at_or_above_the_call_allowance_is_rejected(
-    monkeypatch, minimum, call
-):
-    monkeypatch.delenv("MEMORY_EMBEDDING_MIN_USEFUL_SECONDS", raising=False)
-    monkeypatch.delenv("MEMORY_EMBEDDING_CALL_TIMEOUT_SECONDS", raising=False)
-    with pytest.raises(ValidationError, match="must be below"):
-        Settings(
-            _env_file=None,
-            memory_embedding_min_useful_seconds=minimum,
-            memory_embedding_call_timeout_seconds=call,
-        )
-
-
-@pytest.mark.parametrize("value", [0.0, -1.0])
-def test_non_positive_min_useful_is_rejected(monkeypatch, value):
-    monkeypatch.delenv("MEMORY_EMBEDDING_MIN_USEFUL_SECONDS", raising=False)
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None, memory_embedding_min_useful_seconds=value)
+    monkeypatch.setattr(config, "min_useful_attempt_fraction", minimum / call)
 
 
 # --- One deadline covers the limiter wait and the request -------------------
@@ -479,10 +434,11 @@ async def test_backoff_is_clamped_to_leave_a_useful_attempt(monkeypatch, fake_cl
     monkeypatch.setattr(FinancialSituationMemory._get_embedding.retry, "sleep", advance)
     requests = Requests(lambda: RuntimeError("provider"))
     memory = _memory(monkeypatch, _embeddings(requests), CountingLimiter())
+    _small_scopes(monkeypatch, call=25.0, minimum=1.0)
 
     with enclosing_deadline(3.5), pytest.raises(RuntimeError, match="provider"):
         await memory._get_embedding("text")
-    # Unclamped backoff is 2 s then 2 s; the second is cut to leave the 1 s minimum.
+    # Unclamped backoff is 2 s then 2 s; the second is cut to leave the 1 s minimum (0.04 x 25 s).
     assert sleeps == [pytest.approx(2.0), pytest.approx(0.5)]
     assert requests.count == 3
 
@@ -504,6 +460,7 @@ async def test_backoff_that_cannot_fit_stops_and_reraises_the_original_error(
     monkeypatch.setattr(FinancialSituationMemory._get_embedding.retry, "sleep", advance)
     requests = Requests(slow_failure)
     memory = _memory(monkeypatch, _embeddings(requests), CountingLimiter())
+    _small_scopes(monkeypatch, call=25.0, minimum=1.0)
 
     # t=0 attempt fails at t=1; sleep 1 s; t=2 attempt fails at t=3: nothing fits.
     with enclosing_deadline(3.0), pytest.raises(RuntimeError, match="provider"):
@@ -539,12 +496,105 @@ async def test_small_minimum_override_admits_a_short_remaining_allowance(
         return _VECTOR
 
     memory = _memory(monkeypatch, _embeddings(Requests()), CountingLimiter())
-    monkeypatch.setattr(config, "memory_embedding_min_useful_seconds", 0.1)
+    monkeypatch.setattr(config, "min_useful_attempt_fraction", 0.1 / 30.0)
     monkeypatch.setattr(memory_module, "run_with_hard_timeout", spy)
 
     with enclosing_deadline(0.5):
         await memory._get_embedding("text")
     assert seen == [pytest.approx(0.5)]
+
+
+def _spy_timeouts(monkeypatch) -> list[float]:
+    seen: list[float] = []
+
+    async def spy(coro, *, timeout, label):
+        del label
+        coro.close()
+        seen.append(timeout)
+        return _VECTOR
+
+    monkeypatch.setattr(memory_module, "run_with_hard_timeout", spy)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_remaining_exactly_the_derived_minimum_is_admitted(
+    monkeypatch, fake_clock
+):
+    """Minimum = fraction x the configured allowance: 0.0625 x 32 s = 2 s."""
+    monkeypatch.setattr(config, "memory_embedding_call_timeout_seconds", 32.0)
+    monkeypatch.setattr(config, "min_useful_attempt_fraction", 0.0625)
+    seen = _spy_timeouts(monkeypatch)
+    requests = Requests()
+    memory = _memory(monkeypatch, _embeddings(requests), CountingLimiter())
+
+    with enclosing_deadline(2.0):
+        await memory._get_embedding("text")
+    assert seen == [2.0]
+
+
+@pytest.mark.asyncio
+async def test_remaining_just_below_the_derived_minimum_sends_nothing(
+    monkeypatch, fake_clock, retry_sleeps
+):
+    monkeypatch.setattr(config, "memory_embedding_call_timeout_seconds", 32.0)
+    monkeypatch.setattr(config, "min_useful_attempt_fraction", 0.0625)
+    requests = Requests()
+    limiter = CountingLimiter()
+    memory = _memory(monkeypatch, _embeddings(requests), limiter)
+
+    with enclosing_deadline(2.0 - 0.001), pytest.raises(EmbeddingAllowanceSpent):
+        await memory._get_embedding("text")
+    assert requests.count == limiter.acquired == 0
+    assert retry_sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_minimum_follows_the_configured_allowance_not_the_clamped_one(
+    monkeypatch, fake_clock
+):
+    """A 2.5 s remainder clamps the attempt to 2.5 s; the minimum stays 0.0625 x 32.
+
+    Derived from the clamped remainder (2.5 s) the minimum would be 0.16 s and a
+    0.5 s remainder would pass; it must be refused at the configured 2 s.
+    """
+    monkeypatch.setattr(config, "memory_embedding_call_timeout_seconds", 32.0)
+    monkeypatch.setattr(config, "min_useful_attempt_fraction", 0.0625)
+    seen = _spy_timeouts(monkeypatch)
+    memory = _memory(monkeypatch, _embeddings(Requests()), CountingLimiter())
+
+    with enclosing_deadline(2.5):
+        await memory._get_embedding("text")
+    assert seen == [2.5]
+    with enclosing_deadline(0.5), pytest.raises(EmbeddingAllowanceSpent):
+        await memory._get_embedding("text")
+
+
+@pytest.mark.asyncio
+async def test_tiny_allowance_with_a_small_fraction_still_admits(
+    monkeypatch, fake_clock
+):
+    monkeypatch.setattr(config, "memory_embedding_call_timeout_seconds", 0.01)
+    monkeypatch.setattr(config, "min_useful_attempt_fraction", 0.04)
+    seen = _spy_timeouts(monkeypatch)
+    memory = _memory(monkeypatch, _embeddings(Requests()), CountingLimiter())
+
+    with enclosing_deadline(0.01):
+        await memory._get_embedding("text")
+    assert seen == [pytest.approx(0.01)]
+
+
+@pytest.mark.asyncio
+async def test_a_fraction_override_moves_the_embedding_minimum(monkeypatch, fake_clock):
+    """At the default 0.04 x 30 s = 1.2 s a 1 s remainder is refused; at 0.025 it is not."""
+    seen = _spy_timeouts(monkeypatch)
+    memory = _memory(monkeypatch, _embeddings(Requests()), CountingLimiter())
+    with enclosing_deadline(1.0), pytest.raises(EmbeddingAllowanceSpent):
+        await memory._get_embedding("text")
+    monkeypatch.setattr(config, "min_useful_attempt_fraction", 0.025)
+    with enclosing_deadline(1.0):
+        await memory._get_embedding("text")
+    assert seen == [1.0]
 
 
 # --- Cancellation and concurrent callers ------------------------------------
@@ -632,7 +682,7 @@ async def test_a_timed_out_waiter_does_not_disturb_a_concurrent_one(
     requests = Requests()
     limiter = GatedLimiter()
     memory = _memory(monkeypatch, _embeddings(requests), limiter)
-    monkeypatch.setattr(config, "memory_embedding_min_useful_seconds", 0.005)
+    monkeypatch.setattr(config, "min_useful_attempt_fraction", 0.005 / 30.0)
 
     async def short() -> None:
         with enclosing_deadline(0.02):

@@ -54,7 +54,8 @@ FAILOVER = "gemini-3.7-flash"
 QUICK_CAP = 60.0
 APEX_CAP = 180.0
 MARGIN = 2.0
-MIN_USEFUL = 5.0
+MIN_USEFUL_FRACTION = 0.0625  # dyadic: the boundary tests compare exactly
+MIN_USEFUL = QUICK_CAP * MIN_USEFUL_FRACTION
 FRACTION = 0.4
 
 
@@ -86,7 +87,7 @@ def budget_config(monkeypatch):
         "apex_quick_llm_call_hard_timeout_seconds": APEX_CAP,
         "cross_check_quick_llm_call_hard_timeout_seconds": APEX_CAP,
         "llm_call_hard_timeout_seconds": 120.0,
-        "llm_min_useful_attempt_seconds": MIN_USEFUL,
+        "min_useful_attempt_fraction": MIN_USEFUL_FRACTION,
         "llm_dispatch_margin_seconds": MARGIN,
         "flex_quick_attempt_fraction": FRACTION,
         "api_timeout": 300,
@@ -400,9 +401,12 @@ class TestDispatchSizing:
         monkeypatch.setattr(
             config_module.config, "quick_llm_call_hard_timeout_seconds", 10.0
         )
+        # Both are shares of the cap, so flex is skipped only when its share is
+        # below the minimum's: 0.05 x 10 s = 0.5 s < 0.0625 x 10 s = 0.625 s.
+        monkeypatch.setattr(config_module.config, "flex_quick_attempt_fraction", 0.05)
         transport = _Transport(clock)
         with _quick():
-            policy = _policy()  # flex share 4 s < 5 s minimum useful attempt
+            policy = _policy()
             with (
                 transport.patch_async(),
                 invocation_scope(policy, clock() + 10.0) as scope,
@@ -579,11 +583,13 @@ class TestRuntimeLoop:
             patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock) as sleep,
             patch("src.agents.runtime.random.uniform", return_value=3.0),
         ):
-            # 20 s overall: at t=10 only 10 - 2 - 5 = 3 s may be slept.
+            # 20 s overall, full-mode 120 s cap: at t=10 only 10 - margin - minimum may be slept.
             await _invoke(runnable, "TransientClamp", overall_timeout_seconds=20.0)
         assert runnable.ainvoke.await_count == 2
         sleep.assert_awaited_once()
-        assert sleep.await_args.args[0] == pytest.approx(3.0)
+        assert sleep.await_args.args[0] == pytest.approx(
+            10.0 - MARGIN - MIN_USEFUL_FRACTION * 120.0
+        )
 
     @pytest.mark.asyncio
     async def test_transient_retry_keeps_full_backoff_when_it_fits(self, clock):

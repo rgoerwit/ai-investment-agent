@@ -1,6 +1,6 @@
 # Model Context Protocol (MCP) integration
 
-Last updated: 2026-10-10 (budget counted at send, unlisted tools refused, legacy-only header filter).
+Last updated: 2026-10-11 (retry minimum derived from the call timeout; budget counted at send, unlisted tools refused, legacy-only header filter).
 
 The consultant agent can cross-validate analyst claims against vendor MCP
 servers (currently the FMP MCP server). The consultant-facing MCP wrappers
@@ -193,7 +193,7 @@ operational clamp. MCP reads that deadline and never binds it, so with the
 | `MCP_HTTP_TIMEOUT_SECONDS` | 5 s | `httpx2.AsyncClient(timeout=...)` | each phase (connect, read, write, pool) of each HTTP request. It does not bound a whole request |
 | `MCP_INITIALIZE_TIMEOUT_SECONDS` | 30 s | `ClientSession(read_timeout_seconds=...)`, and `asyncio.timeout(...)` around `list_tools()` | the wait for the initialize response, connecting included; then, re-read after the handshake, the tools/list catalogue response |
 | `MCP_TOOL_CALL_TIMEOUT_SECONDS` | 45 s | `call_tool(read_timeout_seconds=...)` | the wait for one tool call's result |
-| `MCP_RETRY_MIN_USEFUL_SECONDS` | 1 s | `wait_allowance(minimum=...)` before the retry backoff | the least time that must be left after the backoff for the one retry to be sent |
+| `MIN_USEFUL_ATTEMPT_FRACTION` | 0.04 of `MCP_TOOL_CALL_TIMEOUT_SECONDS` (1.8 s) | `wait_allowance(minimum=...)` before the retry backoff | the least time that must be left after the backoff for the one retry to be sent; shared with the LLM and embedding planes, derived from the configured call timeout, never from the time left |
 
 **The catalogue (October 2026, round 2).** `list_tools()` takes no per-request
 timeout, and the session's read timeout is fixed when the session opens, so a
@@ -287,7 +287,7 @@ What the qualification found (mcp 2.2.0, httpx2 2.13.0):
 | `transport`, `retryable: true`, an httpx2 `ReadTimeout` / `ConnectTimeout` message | One HTTP phase outlived `MCP_HTTP_TIMEOUT_SECONDS`; usually a vendor slow to start its response |
 | `transport`, `retryable: false`, `details.timeout == "enclosing_deadline_spent"` | The caller's or the tool runner's deadline had already passed. `details.scope` names the step: `mcp_initialize` means no session was opened, `mcp_list_tools` that one was opened but no listing (and so no call) was sent, and `mcp_tool_call` that the listing was sent but no call |
 | `transport`, `retryable: true`, `details.timeout == "time_left_elapsed"`, `details.scope == "mcp_list_tools"` | The catalogue was sent and outlived what the handshake left. Under `execute_raw` the retry is then usually refused (next row) |
-| any category, `retryable: false`, `details.retry == "refused_deadline"` | The attempt was sent and failed retryably, and the deadline left no room for the backoff plus `MCP_RETRY_MIN_USEFUL_SECONDS`. The rest of the error is that attempt's own |
+| any category, `retryable: false`, `details.retry == "refused_deadline"` | The attempt was sent and failed retryably, and the deadline left no room for the backoff plus the minimum useful attempt (`MIN_USEFUL_ATTEMPT_FRACTION` of `MCP_TOOL_CALL_TIMEOUT_SECONDS`). The rest of the error is that attempt's own |
 | `TOOL_ERROR: TimeoutError` in the Consultant's tool output, or `tool_call_timeout` in the log | The log's `scope` names what fired: `runner` (`TOOL_EXECUTION_TIMEOUT_SECONDS`; work outside the MCP bounds, since those end a margin earlier), `with_inspection` (the combined runner-plus-`TOOL_HOOKS_TIMEOUT_SECONDS` scope, usually a slow inspection), `before_hooks`/`after_hooks` (a hook's own timeout) or `hooks_allowance_spent` (no time left to inspect the result) |
 
 A retryable failure is retried once in `_execute_with_retry`,
