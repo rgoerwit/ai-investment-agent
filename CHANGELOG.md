@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The literal-deadline guard resolves deadline callees through the name they are
+  bound to (a local def, an import alias such as `enclosing_deadline as ed`, or
+  `module.function`), follows constant chains across one import, flags a fixed
+  value inside `max()` unless it is a floor of 0 or a computed bound, checks the
+  default of every deadline-shaped parameter, and respects lexical scope (nested
+  functions, loop and `with` targets no longer leak or shadow wrongly). Each missed
+  pattern is planted in a test that proves it is now rejected.
+
 - `invoke_with_rate_limit_handling` has one attempt count. `max_attempts` (default
   `LLM_ATTEMPTS`) caps every retry, rate-limit and transient alike; a hidden
   `max_attempts=3` beside `max_transient_attempts` let `LLM_ATTEMPTS=5` stop at
