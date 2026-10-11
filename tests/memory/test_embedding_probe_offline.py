@@ -2,7 +2,7 @@
 
 ``FinancialSituationMemory`` probes its embeddings client at construction. The
 session's dummy ``GOOGLE_API_KEY`` is enough to build a real client, so without
-``_embedding_provider_unreachable`` in ``tests/conftest.py`` the probe sent a real
+``refuse_embedding_sdks`` (installed by ``_offline_boundary``) the probe sent a real
 ``embed_content`` request to Google from every unit test that built a memory
 unpatched. Proven by planting: with that fixture removed, the first test below
 records a network attempt.
@@ -13,8 +13,10 @@ from __future__ import annotations
 import pytest
 
 from src.memory import FinancialSituationMemory
-from tests.conftest import EmbeddingProviderUnreachable
-from tests.helpers.offline_network import install_offline_network
+from tests.helpers.offline_network import (
+    EmbeddingProviderUnreachable,
+    install_offline_network,
+)
 
 
 @pytest.fixture

@@ -1061,12 +1061,14 @@ Two kinds of test sent them:
   builds no memory object at all; the no-ticker case also read collections
   shared by every ticker.
 
-`_embedding_provider_unreachable` in `tests/conftest.py` patches the SDK methods to
+`refuse_embedding_sdks` (`tests/helpers/offline_network.py`, installed by the
+`_offline_boundary` fixture in `tests/conftest.py`) patches the SDK methods to
 refuse every request. It covers both providers, sync and async. The client stays
 real, the probe fails as it would against an unreachable provider, and a test's own
-patch of the client or its transport still wins. `integration` and `security` tests
-are exempt: the first need the provider, and the second install their own network
-block and wire fakes. `tests/memory/test_embedding_probe_offline.py` guards it.
+patch of the client or its transport still wins. `integration` tests are exempt
+(they need the provider), and so are `security` tests, for this refusal only: their
+Step-3 tests drive the real SDK into wire fakes, while their sockets are still
+refused. `tests/memory/test_embedding_probe_offline.py` guards it.
 
 The same run measured the rest of the unit suite's egress: 147 tests made 1,309
 network attempts. Most are yfinance over libcurl (568 to `fc.yahoo.com` alone),
@@ -1121,12 +1123,35 @@ Causes, by seam (each closed where the test meets the data source, not at the so
   situation is retrievable from its own memory) so an empty cross-ticker result proves
   isolation rather than a broken store.
 
-Not closed here: the boundary still only observes (`install_offline_network` is opt-in)
-and `integration` tests run by default.
+### The offline boundary is strict and integration is opt-in (October 2026)
 
-Keep the configured `addopts`. `-o addopts=""` drops `--allow-unix-socket`, and
-every `security` test then errors with `SocketBlockedError` when asyncio opens its
-self-pipe. That is 156 errors, and none of them comes from the sandbox.
+The recorder above is now a fixture. `_offline_boundary` (autouse, `tests/conftest.py`)
+installs `install_offline_network` for every non-`integration` test, `security` ones
+included, and at teardown **fails** a test that recorded any attempt, naming targets
+and thread names. Refusal alone is not a guard: production code catches the error and
+degrades, so a leaking test passes while paying the timeout (the 705 s above). A test
+that proves refusal installs its own recorder and asserts on that list.
+`tests/test_offline_boundary.py` drives the fixture through a subprocess pytester
+session (the outer session's own patches would otherwise mask it).
+
+`integration` tests are skipped unless `--run-integration` is passed
+(`pytest_collection_modifyitems`). `RUN_LIVE_EXCHANGE_PDF` was folded into it: it
+guarded one canary with a second switch for the same idea, and an opt-in integration
+run is already the deliberate "spend quota, use the network" act.
+
+pytest-socket is gone (dependency and `--allow-unix-socket` addopt). Everything it
+did is in `install_offline_network`, which also covers libcurl, records instead of
+only raising, and allows AF_UNIX and `socketpair` (asyncio's self-pipe) by itself.
+Its three other users (`security` guard, `tests/prompts/conftest.py`,
+`tests/eval/test_deterministic_replay.py`) were subsumed. The old rule against
+`-o addopts=""` (it dropped `--allow-unix-socket`, 156 `SocketBlockedError`s on
+asyncio's self-pipe) no longer applies, though `--strict-markers` still lives there.
+
+**The one socket created at collection is urllib3's.** `urllib3.util.connection`
+runs `_has_ipv6("::1")` at import: it creates an `AF_INET6` socket and `bind`s it to
+`::1`, never connecting, to set `HAS_IPV6`. Harmless, and it happens before any
+fixture runs. `install_offline_network` imports that module first, so a lazy first
+import inside a test cannot be mistaken for an attempt.
 
 ## Practical Notes
 

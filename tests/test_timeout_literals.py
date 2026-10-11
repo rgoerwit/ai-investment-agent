@@ -155,10 +155,6 @@ ALLOWLIST: dict[str, str] = {
     "src/tools/shared.py::<module>::_DDGS_warm(timeout)": (
         "import-time warm-up instance that is discarded without a request"
     ),
-    "src/tools/shared.py::fetch_with_timeout::def(timeout_seconds)": (
-        "a helper with no caller in src/, tests/ or scripts/; a default "
-        "nothing exercises (deletion is the better fix, left to a later change)"
-    ),
 }
 
 _DEADLINE_NAME = re.compile(r"(^|_)timeout(_seconds|_secs|_s)?$")

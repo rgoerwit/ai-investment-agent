@@ -5791,21 +5791,6 @@ pytest = ">=6.2.5"
 dev = ["pre-commit", "pytest-asyncio", "tox"]
 
 [[package]]
-name = "pytest-socket"
-version = "0.8.1"
-description = "Pytest Plugin to disable socket calls during tests"
-optional = false
-python-versions = ">=3.10"
-groups = ["dev"]
-files = [
-    {file = "pytest_socket-0.8.1-py3-none-any.whl", hash = "sha256:f9846bed1dcd96eed459e5e14795bbaf96715cf4e827891fe70773817ecb8ed4"},
-    {file = "pytest_socket-0.8.1.tar.gz", hash = "sha256:2f57787914ad2e1308d09ce141b95c3e55741fbb4fb7b7556593a6b063e0c9c7"},
-]
-
-[package.dependencies]
-pytest = ">=7.0.0"
-
-[[package]]
 name = "python-dateutil"
 version = "2.9.0.post0"
 description = "Extensions to the standard Python datetime module"
@@ -7992,4 +7977,4 @@ writer = ["langchain-anthropic"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.13"
-content-hash = "66504a1dc3be4f61daf2c1a7c2de8160146bd53ddec83c4cdada93b52155cfd8"
+content-hash = "89adde5bd9c040ec06b8870ed9477da8fef929b761ca84d45350ca8d86391bab"

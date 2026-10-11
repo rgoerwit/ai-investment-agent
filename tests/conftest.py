@@ -2,7 +2,6 @@
 
 import logging
 import os
-import socket
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -192,68 +191,64 @@ def setup_test_env(test_chroma_persist_dir: Path):
         yield
 
 
-@pytest.fixture(autouse=True)
-def _block_network_for_security_tests(request, monkeypatch):
-    """Fail fast if security-marked tests attempt real socket access."""
-    if request.node.get_closest_marker("security") is None:
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-integration",
+        action="store_true",
+        default=False,
+        help="run tests marked 'integration' (live network, real providers)",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Skip ``integration`` tests unless ``--run-integration`` opts in.
+
+    They reach live providers, so a default run must neither need the network nor
+    spend quota; the unit boundary (``_offline_boundary``) refuses them anyway.
+    """
+    if config.getoption("--run-integration"):
         return
-
-    request.getfixturevalue("socket_disabled")
-
-    def blocked_name_resolution(*args, **kwargs):
-        raise RuntimeError("network access blocked for security-marked tests")
-
-    monkeypatch.setattr(socket, "getaddrinfo", blocked_name_resolution)
-
-
-class EmbeddingProviderUnreachable(ConnectionError):
-    """What every embedding-SDK request raises in a unit test."""
-
-
-_EMBEDDING_SDK_METHODS = (
-    "embed_query",
-    "embed_documents",
-    "aembed_query",
-    "aembed_documents",
-)
+    skip = pytest.mark.skip(reason="integration test: pass --run-integration to run")
+    for item in items:
+        if item.get_closest_marker("integration") is not None:
+            item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True)
-def _embedding_provider_unreachable(request, monkeypatch):
-    """Refuse every embedding-SDK request a unit test makes, before it is sent.
+def _offline_boundary(request, monkeypatch):
+    """Every non-``integration`` test is offline, and attempting otherwise fails it.
 
-    The session's dummy ``GOOGLE_API_KEY`` is enough for ``FinancialSituationMemory``
-    to build a real embeddings client and run its startup probe, so any test that
-    constructs a memory without patching the client -- including, until October
-    2026, every graph built with memory disabled -- sent an
-    ``embed_content`` request to Google (57 requests from 19 tests in one full run;
-    offline, each waited out the probe timeout). Refusing at the SDK method keeps
-    the client real for construction assertions, fails the probe exactly as an
-    unreachable provider would, and lets a test's own patch of the client or its
-    transport win. Exempt: ``integration`` tests (they need the provider) and
-    ``security`` tests (they install their own network block and wire fakes).
-    Guarded by ``tests/memory/test_embedding_probe_offline.py``.
+    Refuses TCP/UDP sockets, DNS and libcurl (``install_offline_network``) and, for
+    every test but ``security`` ones, the embedding SDKs (``refuse_embedding_sdks``;
+    Step-3 security tests drive the real SDK into wire fakes). Refusal alone is not
+    enough: code under test usually catches the error and degrades, so a leaking
+    test passes while paying the timeout. At teardown a test that recorded any
+    attempt fails, naming targets and threads. A test that proves refusal calls
+    ``install_offline_network`` itself and asserts on its own list.
+    Guarded by ``tests/test_offline_boundary.py``.
     """
     if request.node.get_closest_marker("integration") is not None:
-        return
-    if request.node.get_closest_marker("security") is not None:
+        yield
         return
 
-    from langchain_google_genai import GoogleGenerativeAIEmbeddings
-    from langchain_openai import OpenAIEmbeddings
+    from tests.helpers.offline_network import (
+        install_offline_network,
+        refuse_embedding_sdks,
+    )
 
-    def refuse(self, *args, **kwargs):
-        raise EmbeddingProviderUnreachable(
-            "embedding provider unreachable: unit tests run offline"
+    attempts = install_offline_network(monkeypatch)
+    if request.node.get_closest_marker("security") is None:
+        refuse_embedding_sdks(monkeypatch)
+    yield
+    if attempts:
+        pytest.fail(
+            f"{len(attempts)} network attempt(s) in a unit test: "
+            f"{attempts.describe()}. Inject a fake at the data source or mark "
+            "the test integration.",
+            pytrace=False,
         )
-
-    async def arefuse(self, *args, **kwargs):
-        refuse(self)
-
-    for client_class in (GoogleGenerativeAIEmbeddings, OpenAIEmbeddings):
-        for method in _EMBEDDING_SDK_METHODS:
-            replacement = arefuse if method.startswith("a") else refuse
-            monkeypatch.setattr(client_class, method, replacement)
 
 
 @pytest.fixture(autouse=True)

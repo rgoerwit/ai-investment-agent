@@ -13,10 +13,9 @@ the boundary is not to be bypassed. Keep collection off the repository root inst
 `poetry run pytest <paths> -q -p no:cacheprovider --rootdir=tests --confcutdir=tests`.
 No conftest lives above `tests/`, so `tests/conftest.py` and its isolation still load.
 
-**Keep the configured `addopts`; never pass `-o addopts=""`.** It drops
-`--allow-unix-socket`, and every `security`-marked test then errors with
-`SocketBlockedError` when asyncio opens its self-pipe — 156 errors, not a sandbox
-fault.
+**Keep the configured `addopts`; never pass `-o addopts=""`.** It carries
+`--strict-markers`/`--strict-config`. (The old `--allow-unix-socket` and pytest-socket
+are gone: the offline boundary below allows AF_UNIX and `socketpair` itself.)
 
 ## Subdirectory conftests and re-collection
 
@@ -32,7 +31,8 @@ is skipped silently. Whether either directory is a package plays no part.
 ## Markers and scope
 
 Mark anything over five seconds `slow` and anything needing the network
-`integration`. Mock model responses in unit tests. Run the directory that owns your
+`integration`; those are skipped unless you pass `--run-integration` (it also gates the
+live SGX PDF canary). Mock model responses in unit tests. Run the directory that owns your
 change while iterating; the full suite once at wrap-up.
 
 ## A guard must be proven against a real regression
@@ -67,11 +67,15 @@ appears in an unrelated file.
 Pin service tiers and model overrides for the session so an operator's environment
 cannot flip construction paths under mock-based tests.
 
-**Unit tests never reach the embeddings provider.** `_embedding_provider_unreachable`
-in `tests/conftest.py` refuses every embedding-SDK request unless the test is marked
-`integration` or `security`. Do not widen the exemption; patch the client or its
-transport in the test instead. To prove a test sent nothing, use
-`tests/helpers/offline_network.py`: pytest-socket alone misses libcurl (yfinance).
+**Unit tests are offline, strictly.** The autouse `_offline_boundary` in
+`tests/conftest.py` refuses sockets, DNS, libcurl and (except for `security` tests, which
+drive the real SDK into wire fakes) the embedding SDKs, and **fails at teardown any
+non-`integration` test that attempted the network**, naming targets and threads.
+A failure means: inject a fake at the data source, or mark the test `integration`.
+Never exempt a test from the boundary and do not widen the embedding exemption. To
+assert a path sends nothing, or to attempt on purpose, call
+`install_offline_network` from `tests/helpers/offline_network.py` in the test and
+assert on its own list. Guarded by `tests/test_offline_boundary.py`.
 
 **Unit tests never read the operator's `.env`.** Every `BaseSettings` subclass in
 `src/` takes `env_file` from `src.env_file.default_settings_env_file()` (None under

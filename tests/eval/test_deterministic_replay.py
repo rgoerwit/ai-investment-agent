@@ -72,12 +72,6 @@ def _register_metrics(state: dict, payload: dict) -> dict:
 _SNAPSHOT = FROZEN / "2330_TW_metrics_snapshot.json"
 
 
-@pytest.fixture(autouse=True)
-def _replay_no_network(request):
-    """Pure parsing only — disable sockets (reuses pytest-socket)."""
-    request.getfixturevalue("socket_disabled")
-
-
 def _read(name: str) -> str:
     return (FROZEN / name).read_text(encoding="utf-8")
 

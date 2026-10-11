@@ -11,7 +11,6 @@ from typing import Any
 import structlog
 
 from src.config import config
-from src.error_safety import summarize_exception
 from src.llm_runtime.timeouts import require_allowance
 
 logger = structlog.get_logger(__name__)
@@ -382,27 +381,6 @@ def _format_and_truncate_tavily_result(
         bounded = f"{_TAVILY_XML_HEADER}\n" + "\n".join(rendered_items) + footer
 
     return bounded
-
-
-async def fetch_with_timeout(coroutine, timeout_seconds=10, error_msg="Timeout"):
-    from src.async_utils import run_with_hard_timeout
-
-    try:
-        return await run_with_hard_timeout(
-            coroutine,
-            timeout=timeout_seconds,
-            label=f"shared.fetch_with_timeout:{error_msg}",
-        )
-    except asyncio.TimeoutError:
-        logger.warning("yfinance_timeout", context=error_msg)
-        return None
-    except Exception as exc:
-        logger.warning(
-            "yfinance_fetch_failed",
-            context=error_msg,
-            **summarize_exception(exc, operation="yfinance_fetch"),
-        )
-        return None
 
 
 async def extract_company_name_async(ticker_or_obj) -> str:

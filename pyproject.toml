@@ -144,7 +144,6 @@ librt = "0.15.0"
 pre-commit = "4.6.2"
 ipython = "9.17.1"
 pytest-env = "1.7.1"
-pytest-socket = ">=0.8.1,<0.9.0"
 
 [tool.poetry.extras]
 observability = ["opentelemetry-api", "opentelemetry-sdk"]
@@ -214,7 +213,6 @@ addopts = """
     --durations=10
     --maxfail=5
     -p no:cacheprovider
-    --allow-unix-socket
 """
 
 # Register custom markers

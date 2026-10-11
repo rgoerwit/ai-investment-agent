@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Unit tests are offline by rule, and integration tests are opt-in. One autouse
+  `_offline_boundary` fixture refuses sockets, DNS, libcurl and the embedding SDKs for
+  every non-`integration` test and fails any test that tried, naming targets and
+  threads, because refusal alone let leaking tests pass while waiting out timeouts.
+  `integration` tests now need `pytest --run-integration` (it also gates the live SGX
+  PDF canary, replacing `RUN_LIVE_EXCHANGE_PDF`). pytest-socket and its
+  `--allow-unix-socket` addopt are removed, and the unused
+  `src.tools.shared.fetch_with_timeout` is deleted.
+
 - yfinance no longer retries inside the library. `configure_yfinance_defaults` pinned
   `yf.config.network.retries = 3`, so one refused or failing Yahoo request slept
   1 + 2 + 4 s inside the library, invisible to every deadline and to the source
