@@ -21,6 +21,7 @@ import pytest
 
 import src.tavily_utils as tavily_utils
 from src.blocking_io import BlockingCallPolicy, InFlightLimit
+from tests.helpers.stalled_workers import join_workers, stalled_worker
 from tests.helpers.tavily_inspection import inspect_tavily_with
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -62,15 +63,6 @@ def _use_tool(monkeypatch: pytest.MonkeyPatch, tool: _FakeTool) -> None:
     )
 
 
-def _join_workers(timeout: float = 2.0) -> list[threading.Thread]:
-    workers = [
-        t for t in threading.enumerate() if t.name.startswith(f"blocking:{LABEL}")
-    ]
-    for worker in workers:
-        worker.join(timeout)
-    return [t for t in workers if t.is_alive()]
-
-
 def test_timeout_default_is_unchanged() -> None:
     from src.config import Settings
 
@@ -89,7 +81,7 @@ def test_fast_search_returns_inspected_payload(
     )
 
     assert result == payload
-    assert _join_workers() == []
+    assert join_workers(LABEL) == []
     assert limit.in_flight == 0
 
 
@@ -107,21 +99,18 @@ def test_stalled_search_caller_returns_by_deadline_then_no_leak(
     monkeypatch: pytest.MonkeyPatch, limit: InFlightLimit
 ) -> None:
     """(a) caller returns within its deadline; released worker leaves no thread."""
-    release = threading.Event()
-    _use_tool(monkeypatch, _FakeTool(lambda _q: release.wait()))
+    with stalled_worker(LABEL) as release:
+        _use_tool(monkeypatch, _FakeTool(lambda _q: release.wait()))
 
-    started = time.monotonic()
-    result = tavily_utils.search_tavily_sync_inspected(
-        "stall", profile="news_basic", timeout=DEADLINE
-    )
-    elapsed = time.monotonic() - started
+        started = time.monotonic()
+        result = tavily_utils.search_tavily_sync_inspected(
+            "stall", profile="news_basic", timeout=DEADLINE
+        )
+        elapsed = time.monotonic() - started
 
-    assert result is None
-    assert DEADLINE <= elapsed < DEADLINE + TOLERANCE
-    assert limit.in_flight == 1
-
-    release.set()
-    assert _join_workers() == []
+        assert result is None
+        assert DEADLINE <= elapsed < DEADLINE + TOLERANCE
+        assert limit.in_flight == 1
     assert limit.in_flight == 0
 
 
@@ -129,11 +118,10 @@ def test_repeated_stalls_stay_within_the_concurrency_bound(
     monkeypatch: pytest.MonkeyPatch, limit: InFlightLimit
 ) -> None:
     """(b) only max_in_flight workers ever exist; extra calls fail fast to None."""
-    release = threading.Event()
-    tool = _FakeTool(lambda _q: release.wait())
-    _use_tool(monkeypatch, tool)
-    before = threading.active_count()
-    try:
+    with stalled_worker(LABEL) as release:
+        tool = _FakeTool(lambda _q: release.wait())
+        _use_tool(monkeypatch, tool)
+        before = threading.active_count()
         for _ in range(2):
             assert (
                 tavily_utils.search_tavily_sync_inspected(
@@ -154,9 +142,6 @@ def test_repeated_stalls_stay_within_the_concurrency_bound(
         assert tool.calls == 2
         assert limit.in_flight == 2
         assert threading.active_count() - before <= 2
-    finally:
-        release.set()
-    assert _join_workers() == []
     assert limit.in_flight == 0
 
 
@@ -168,7 +153,7 @@ def test_search_error_returns_none_as_before(
 
     _use_tool(monkeypatch, _FakeTool(_boom))
     assert tavily_utils.search_tavily_sync_inspected("q", profile="news_basic") is None
-    assert _join_workers() == []
+    assert join_workers(LABEL) == []
     assert limit.in_flight == 0
 
 
@@ -185,7 +170,7 @@ def test_inspection_error_still_propagates(
         tavily_utils.search_tavily_sync_inspected("q", profile="news_basic")
     # The worker publishes its exception before releasing its slot in
     # ``finally``; join it before reading the count.
-    assert _join_workers() == []
+    assert join_workers(LABEL) == []
     assert limit.in_flight == 0
 
 
@@ -193,24 +178,22 @@ def test_late_search_result_is_discarded_before_inspection(
     monkeypatch: pytest.MonkeyPatch, limit: InFlightLimit
 ) -> None:
     """A search finishing after the caller's deadline never reaches inspection."""
-    release = threading.Event()
     inspected: list[Any] = []
 
     async def _record(raw: Any, query_text: str) -> Any:
         inspected.append(raw)
         return raw
 
-    _use_tool(monkeypatch, _FakeTool(lambda _q: (release.wait(), {"r": 1})[1]))
-    inspect_tavily_with(monkeypatch, _record)
+    with stalled_worker(LABEL) as release:
+        _use_tool(monkeypatch, _FakeTool(lambda _q: (release.wait(), {"r": 1})[1]))
+        inspect_tavily_with(monkeypatch, _record)
 
-    assert (
-        tavily_utils.search_tavily_sync_inspected(
-            "late", profile="news_basic", timeout=DEADLINE
+        assert (
+            tavily_utils.search_tavily_sync_inspected(
+                "late", profile="news_basic", timeout=DEADLINE
+            )
+            is None
         )
-        is None
-    )
-    release.set()
-    assert _join_workers() == []
     assert inspected == []
     assert limit.in_flight == 0
 
@@ -241,7 +224,7 @@ def test_stalled_inspection_is_bounded_by_the_remaining_allowance(
     assert result is None
     assert time.monotonic() - started < DEADLINE + TOLERANCE
     # The worker's own wait_for ends it near the deadline, not after 60 s.
-    assert _join_workers() == []
+    assert join_workers(LABEL) == []
     assert cancelled.is_set()
     assert limit.in_flight == 0
 

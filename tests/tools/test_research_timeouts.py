@@ -38,6 +38,7 @@ from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.timeouts import enclosing_deadline
 from src.tools import official_documents as documents
 from src.tools import research, shared
+from tests.helpers.stalled_workers import stalled_worker
 from tests.helpers.tavily_inspection import inspect_tavily_with
 
 # ``src.data.filings`` re-exports its singleton as ``registry``, shadowing the
@@ -489,19 +490,18 @@ def test_sync_worker_inspects_within_an_unspent_clamped_bound(
 
 
 def test_sync_search_timeout_returns_none(monkeypatch, sync_limit):
-    release = threading.Event()
-    tool = _Inert()
-    tool.invoke = lambda payload: release.wait()  # type: ignore[method-assign]
-    monkeypatch.setattr(
-        tavily_utils, "_build_tavily_tool", lambda profile, include_answer=False: tool
-    )
-    monkeypatch.setattr(config, "tavily_search_timeout_seconds", 0.05)
-    try:
+    with stalled_worker("tavily-research-test") as release:
+        tool = _Inert()
+        tool.invoke = lambda payload: release.wait()  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            tavily_utils,
+            "_build_tavily_tool",
+            lambda profile, include_answer=False: tool,
+        )
+        monkeypatch.setattr(config, "tavily_search_timeout_seconds", 0.05)
         assert (
             tavily_utils.search_tavily_sync_inspected("q", profile="news_basic") is None
         )
-    finally:
-        release.set()
 
 
 def test_sync_search_spent_deadline_starts_no_worker(

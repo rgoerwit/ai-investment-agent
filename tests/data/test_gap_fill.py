@@ -23,6 +23,7 @@ import pytest
 
 from src.blocking_io import BlockingCallPolicy, InFlightLimit
 from src.data.gap_fill import _fetch_tavily_gaps_impl
+from tests.helpers.stalled_workers import join_workers, stalled_worker
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEADLINE = 0.2
@@ -80,38 +81,27 @@ async def _company_name_seen(
     return seen[0], elapsed
 
 
-def _join_workers(timeout: float = 2.0) -> list[threading.Thread]:
-    workers = [
-        t for t in threading.enumerate() if t.name.startswith(f"blocking:{LABEL}")
-    ]
-    for worker in workers:
-        worker.join(timeout)
-    return [t for t in workers if t.is_alive()]
-
-
 @pytest.mark.asyncio
 async def test_fast_info_supplies_company_name() -> None:
     name, _elapsed = await _company_name_seen(
         lambda: {"longName": "Toyota Motor Corporation"}, _policy()
     )
     assert name == "Toyota Motor Corporation"
-    assert _join_workers() == []
+    assert join_workers(LABEL) == []
 
 
 @pytest.mark.asyncio
 async def test_stalled_info_returns_by_deadline_and_falls_back_to_symbol() -> None:
     """(a) the caller returns at the deadline; releasing the stall leaks nothing."""
     policy = _policy()
-    release = threading.Event()
 
-    name, elapsed = await _company_name_seen(release.wait, policy)
+    with stalled_worker(LABEL) as release:
+        name, elapsed = await _company_name_seen(release.wait, policy)
 
-    assert name == "7203.T"
-    assert DEADLINE <= elapsed < DEADLINE + TOLERANCE
-    assert policy.in_flight is not None
-    assert policy.in_flight.in_flight == 1
-    release.set()
-    assert _join_workers() == []
+        assert name == "7203.T"
+        assert DEADLINE <= elapsed < DEADLINE + TOLERANCE
+        assert policy.in_flight is not None
+        assert policy.in_flight.in_flight == 1
     assert policy.in_flight.in_flight == 0
 
 
@@ -119,9 +109,8 @@ async def test_stalled_info_returns_by_deadline_and_falls_back_to_symbol() -> No
 async def test_repeated_stalls_stay_within_the_concurrency_bound() -> None:
     """(b) a batch of stalled tickers cannot park more than max_in_flight threads."""
     policy = _policy(max_in_flight=2)
-    release = threading.Event()
     before = threading.active_count()
-    try:
+    with stalled_worker(LABEL) as release:
         for index in range(6):
             name, elapsed = await _company_name_seen(
                 release.wait, policy, symbol=f"000{index}.HK"
@@ -133,9 +122,6 @@ async def test_repeated_stalls_stay_within_the_concurrency_bound() -> None:
         assert policy.in_flight is not None
         assert policy.in_flight.in_flight == 2
         assert threading.active_count() - before <= 2
-    finally:
-        release.set()
-    assert _join_workers() == []
 
 
 @pytest.mark.asyncio

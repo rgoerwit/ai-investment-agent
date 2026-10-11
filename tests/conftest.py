@@ -91,10 +91,6 @@ def _reset_flex_health():
     _reset_flex_health_for_tests()
 
 
-# Capture real API key if present (for integration tests)
-_REAL_GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
-
-
 @pytest.fixture(scope="session")
 def test_chroma_persist_dir(tmp_path_factory) -> Path:
     """Allocate the only ChromaDB directory a pytest session may use.

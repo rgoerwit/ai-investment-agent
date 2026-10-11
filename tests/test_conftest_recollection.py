@@ -9,10 +9,14 @@ See that module's docstring for the pytest source path.
 
 from __future__ import annotations
 
+import inspect
 import os
 import subprocess
 import sys
+import types
 from pathlib import Path
+
+from tests.helpers.conftest_recollection import _reparse_conftest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TESTS_DIR = REPO_ROOT / "tests"
@@ -122,3 +126,92 @@ def test_real_sandwiched_llm_runtime_files_resolve_restore_runtime_config():
     assert result.returncode == 0, out[-3000:] + result.stderr[-2000:]
     assert "not found" not in out, out[-3000:]
     assert "SETUP    F restore_runtime_config" in out, out[-3000:]
+
+
+# --- applicability: the hook acts only where the 9.1 mechanism and signature exist ---
+
+
+class _Manager:
+    _pending_conftests: dict = {}
+
+    def __init__(self):
+        self.calls = []
+
+    def parsefactories(self, node_or_obj=None, nodeid=None, *, holder=None, node=None):
+        self.calls.append((holder, node))
+
+
+def _collector(manager, tmp_path):
+    plugin = object()
+    pluginmanager = types.SimpleNamespace(
+        list_name_plugin=lambda: [
+            (str(tmp_path / "conftest.py"), plugin),
+            (None, object()),
+            (str(tmp_path / "other" / "conftest.py"), object()),
+        ]
+    )
+    return types.SimpleNamespace(
+        path=tmp_path,
+        session=types.SimpleNamespace(_fixturemanager=manager),
+        config=types.SimpleNamespace(pluginmanager=pluginmanager),
+    ), plugin
+
+
+def test_reparse_applies_when_mechanism_and_signature_exist(tmp_path):
+    manager = _Manager()
+    collector, plugin = _collector(manager, tmp_path)
+
+    assert _reparse_conftest(collector) is True
+    assert manager.calls == [(plugin, collector)]
+
+
+def test_reparse_is_a_noop_without_the_deferral_mechanism(tmp_path):
+    class Older:
+        def __init__(self):
+            self.calls = []
+
+        def parsefactories(self, *, holder=None, node=None):
+            self.calls.append((holder, node))
+
+    manager = Older()
+    collector, _ = _collector(manager, tmp_path)
+
+    assert _reparse_conftest(collector) is False
+    assert manager.calls == []
+
+
+def test_reparse_is_a_noop_without_the_keyword_signature(tmp_path):
+    class Legacy(_Manager):
+        def parsefactories(self, node_or_obj, nodeid=None):
+            raise AssertionError("must not be called")
+
+    collector, _ = _collector(Legacy(), tmp_path)
+
+    assert _reparse_conftest(collector) is False
+
+
+def test_reparse_is_a_noop_when_the_signature_cannot_be_inspected(
+    tmp_path, monkeypatch
+):
+    manager = _Manager()
+    collector, _ = _collector(manager, tmp_path)
+
+    def refuse(_obj):
+        raise ValueError("no signature")
+
+    monkeypatch.setattr(inspect, "signature", refuse)
+
+    assert _reparse_conftest(collector) is False
+    assert manager.calls == []
+
+
+def test_installed_pytest_manager_matches_the_detected_mechanism(request, tmp_path):
+    """On the installed pytest the real manager is judged as its source says."""
+    manager = request.session._fixturemanager
+    expected = hasattr(manager, "_pending_conftests") and {"holder", "node"} <= set(
+        inspect.signature(manager.parsefactories).parameters
+    )
+    collector, _ = _collector(manager, tmp_path)
+    collector.config.pluginmanager.list_name_plugin = lambda: []
+
+    assert _reparse_conftest(collector) is expected

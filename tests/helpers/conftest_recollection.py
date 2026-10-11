@@ -23,17 +23,44 @@ either directory has an ``__init__.py``.
 The hook below parses the conftest again for every later ``Directory`` with the
 same path, so each copy gets its own fixture definitions. It is imported into
 ``tests/conftest.py``; ``tests/test_conftest_recollection.py`` guards it.
+
+It calls the private ``FixtureManager.parsefactories(holder=, node=)``, so it acts
+only where both the deferral mechanism (``_pending_conftests`` on the manager) and
+that keyword signature exist; on any other pytest it does nothing. pyproject allows
+``pytest ^9.0.2`` and only 9.1.x was available to check. Remove this module, its
+import in ``tests/conftest.py`` and its test file once upstream fixes the bug (the
+first test in ``tests/test_conftest_recollection.py`` starts passing when it does).
 """
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 # Directory path -> the first Directory collector built for it in this session.
 _FIRST_DIRECTORY_COLLECTORS = pytest.StashKey[dict[Path, pytest.Directory]]()
+
+
+def _reparse_conftest(collector: Any) -> bool:
+    """Re-parse the directory's conftest for ``collector``; False when unsupported."""
+    manager = collector.session._fixturemanager
+    if not hasattr(manager, "_pending_conftests"):
+        return False
+    try:
+        parameters = inspect.signature(manager.parsefactories).parameters
+    except (TypeError, ValueError):
+        return False
+    if not {"holder", "node"} <= parameters.keys():
+        return False
+    conftest_path = collector.path / "conftest.py"
+    for name, plugin in collector.config.pluginmanager.list_name_plugin():
+        if name and Path(name) == conftest_path:
+            manager.parsefactories(holder=plugin, node=collector)
+    return True
 
 
 @pytest.hookimpl(wrapper=True)
@@ -45,10 +72,5 @@ def pytest_make_collect_report(
         firsts = collector.session.stash.setdefault(_FIRST_DIRECTORY_COLLECTORS, {})
         first = firsts.setdefault(collector.path, collector)
         if first is not collector:
-            conftest_path = collector.path / "conftest.py"
-            for name, plugin in collector.config.pluginmanager.list_name_plugin():
-                if name and Path(name) == conftest_path:
-                    collector.session._fixturemanager.parsefactories(
-                        holder=plugin, node=collector
-                    )
+            _reparse_conftest(collector)
     return report

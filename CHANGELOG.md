@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Test infrastructure: the pytest re-collection workaround applies only where the
+  fixture manager has the deferred-conftest mechanism and the keyword
+  `parsefactories` signature it patches, so other supported pytest versions are
+  untouched. Stalled-worker tests release and join their workers in a `finally`
+  through `tests/helpers/stalled_workers.py`. Live integration tests take provider
+  keys from `INTEGRATION_<NAME>` (never a pytest-env dummy) and otherwise skip naming
+  the variable to set, because pytest-env overwrote the real key before the old
+  capture read it, so the live memory tests would have run against the dummy key.
+
 - The "one SDK attempt" guarantee is qualified: it means no SDK retry policy, not one
   physical request. google-genai's aiohttp path resends once after a disconnect or
   connector error inside the attempt, without re-sizing the timeout, so one Gemini
