@@ -316,13 +316,6 @@ class TestSituationStorage:
         async def _stall(*_a, **_k):
             await asyncio.sleep(5)
 
-        # Instant limiter: the real provider limiter can block on aacquire when
-        # tokens are drained (full-suite CI ordering), and that wait would leak into
-        # the timed section and mask the hard-timeout bound this test verifies.
-        class _InstantLimiter:
-            async def aacquire(self, *, blocking=True):
-                return True
-
         memory = FinancialSituationMemory("test_memory")
         memory.available = True
         memory.embeddings = MagicMock()
@@ -330,10 +323,6 @@ class TestSituationStorage:
 
         with (
             patch.object(config, "memory_embedding_call_timeout_seconds", 0.05),
-            patch(
-                "src.memory._embedding_rate_limiter",
-                lambda _binding: _InstantLimiter(),
-            ),
             patch("src.memory.logger"),
         ):
             start = time.monotonic()

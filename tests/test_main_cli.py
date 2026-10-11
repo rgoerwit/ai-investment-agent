@@ -15,6 +15,8 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("offline_main_flow")
+
 
 async def _async_none():
     return None
@@ -297,7 +299,6 @@ class TestOutputCompanyNameLookup:
                     )
                 ),
             ),
-            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
             # Name is unresolved but data exists — the vacuum gate must not fire.
             patch("src.main._is_total_data_vacuum", new=AsyncMock(return_value=False)),
             patch(
@@ -393,7 +394,6 @@ class TestOutputCompanyNameLookup:
                     )
                 ),
             ),
-            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
             patch(
                 "src.main._prefetch_macro_context",
                 new=AsyncMock(return_value=macro_result),
@@ -477,7 +477,6 @@ class TestOutputCompanyNameLookup:
                     )
                 ),
             ),
-            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
             patch(
                 "src.main._prefetch_macro_context",
                 new=AsyncMock(return_value=macro_result),
@@ -643,7 +642,6 @@ class TestTracingMetadataFlow:
                     )
                 ),
             ),
-            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
             patch("src.graph.create_trading_graph", return_value=fake_graph),
             patch("src.token_tracker.get_tracker", return_value=fake_tracker),
             patch("src.main.build_analysis_validity", return_value={"ok": True}),
@@ -688,7 +686,6 @@ class TestTracingMetadataFlow:
                     )
                 ),
             ),
-            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
             patch("src.graph.create_trading_graph", return_value=fake_graph),
             patch("src.token_tracker.get_tracker", return_value=fake_tracker),
             patch("src.main.build_analysis_validity", return_value={"ok": True}),
@@ -756,7 +753,6 @@ class TestTracingMetadataFlow:
                     )
                 ),
             ),
-            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
             patch(
                 "src.main._prefetch_macro_context",
                 new=AsyncMock(return_value=macro_result),
@@ -2809,6 +2805,13 @@ class TestSavedFileBannerRemoval:
     """
 
     BANNER_SENTINEL = "# Multi-Agent Investment Analysis System"
+
+    @pytest.fixture(autouse=True)
+    def no_company_name_lookup(self, monkeypatch):
+        """The report header's synchronous name lookup answers "unknown"."""
+        monkeypatch.setattr(
+            "src.output._load_company_name_for_output", lambda _ticker: None
+        )
 
     def _make_report_result(self):
         return {

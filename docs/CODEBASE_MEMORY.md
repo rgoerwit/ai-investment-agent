@@ -1071,10 +1071,58 @@ block and wire fakes. `tests/memory/test_embedding_probe_offline.py` guards it.
 The same run measured the rest of the unit suite's egress: 147 tests made 1,309
 network attempts. Most are yfinance over libcurl (568 to `fc.yahoo.com` alone),
 then FX-rate fetches, Tavily DNS lookups, and the `find_gems` exchange-scrape
-integration tests. That is a separate, wider boundary and is not yet closed.
-pytest-socket cannot close it alone, because libcurl bypasses Python sockets.
-`tests/helpers/offline_network.py` covers both and is what a test should use to
-prove that it sent nothing.
+integration tests. pytest-socket cannot close it alone, because libcurl bypasses
+Python sockets. `tests/helpers/offline_network.py` covers both and is what a test
+should use to prove that it sent nothing.
+
+### Unit-test egress, measured again (October 2026, round 3)
+
+A refusing recorder (sockets, DNS and libcurl refused and logged per test; not
+committed) over the whole suite found 564 attempts from 87 non-`integration` tests.
+**Every one of those tests passed when refused**: each takes its "unreachable"
+fallback, so no unit test needs the network. The cost was not the requests but
+yfinance's own retry loop: `configure_yfinance_defaults` pinned
+`network.retries = 3`, so each refused request slept 1 + 2 + 4 s. Those 87 tests
+cost about 705 s; the retries are now 0 (the application owns retries and the fetcher
+already falls through to the next source), and the same tests take seconds.
+
+Causes, by seam (each closed where the test meets the data source, not at the socket):
+
+- **IBKR connects (4 tests).** `IbkrSettings` and `DashboardSettings` hard-coded
+  `env_file=".env"`; only `Settings` honoured `PYTEST_DISABLE_DOTENV`. The operator's
+  IBKR credentials loaded, so tests that reach the pooled session tried to connect.
+  `get_env_value`/`_parse_env_file` also parsed `.env` directly. All three now take
+  `src.env_file.default_settings_env_file()`, and
+  `tests/config/test_env_file_policy.py` scans every `BaseSettings` subclass in `src/`.
+  A third, unreproduced symptom (an operator `LLM_CALL_HARD_TIMEOUT_SECONDS` reaching a
+  concurrency test) was probed after every test of a full run: `Settings()` stayed at
+  the shipped value and `os.environ` was clean, so the `.env`-only reader above is the
+  only leak path found; if it recurs, check for a test that reloads `src.config` with
+  the switch cleared.
+- **Fetcher merge step.** `_repair_quote_range_from_history` (a Yahoo chart request)
+  and gap filling (a Tavily client built from the dummy key, then a `.info` lookup).
+- **FX.** The live tier of `get_fx_rate` on every non-USD position, plus a process
+  `FxRateCache` that carried a rate between tests.
+- **`src.main` around a run.** Benchmark note, price snapshot, macro context, company
+  name for the header; six copies of the same patch block in `test_main_cli.py` are now
+  the `offline_main_flow` fixture.
+- **Tests that called the live tool** (ownership structure, foreign-source search,
+  news): now fake the Yahoo property or the name resolver, and assert behaviour they
+  could not before (insider trend, timeout bound). The one live yfinance canary is
+  marked `integration`.
+- **Hidden waits.** The Google process-fallback limiter paces 15 RPM x 0.8 = 0.2 rps, so
+  memory tests waited about 5 s per acquire (100+ s across three modules).
+  `_instant_process_limiters` replaces `create_process_rate_limiter`'s product for
+  every non-`integration` test; `real_rate_limiter` opts a test of the real one back in.
+- **Order dependence.** Two `TestMemoryIsolation` tests skipped when run alone and
+  passed only with a probed embeddings client left on the class by an earlier test.
+  `_reset_shared_memory_state` clears it per test; the tests now use a deterministic
+  fake embedder, assert instead of skip, and add a positive control (the stored
+  situation is retrievable from its own memory) so an empty cross-ticker result proves
+  isolation rather than a broken store.
+
+Not closed here: the boundary still only observes (`install_offline_network` is opt-in)
+and `integration` tests run by default.
 
 Keep the configured `addopts`. `-o addopts=""` drops `--allow-unix-socket`, and
 every `security` test then errors with `SocketBlockedError` when asyncio opens its

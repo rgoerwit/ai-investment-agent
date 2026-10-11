@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- yfinance no longer retries inside the library. `configure_yfinance_defaults` pinned
+  `yf.config.network.retries = 3`, so one refused or failing Yahoo request slept
+  1 + 2 + 4 s inside the library, invisible to every deadline and to the source
+  fallbacks that already answer a transient Yahoo failure; it now pins 0 (the library
+  default) and the application owns retries. Settings classes and the `.env` reader
+  take their file from one policy (`src.env_file.default_settings_env_file`): the
+  IBKR and dashboard settings hard-coded `.env` and `get_env_value` parsed it
+  directly, so under pytest an operator's IBKR credentials and `.env`-only values
+  reached unit tests. The unit suite's remaining Yahoo, Tavily and IBKR requests are
+  cut at their own seams, the process-fallback rate limiter and shared memory clients
+  are reset per test, and the full suite no longer waits on yfinance backoff or the
+  real Google limiter.
+
 - A failed official-document retrieval now says why. The catch-all that collapsed
   every transport failure into `DOCUMENT_RETRIEVAL_FAILED` (11 of ~1,619 network
   attempts in saved runs: six TLS certificate failures, a server disconnect, a read

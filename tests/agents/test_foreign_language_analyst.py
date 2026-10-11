@@ -13,7 +13,7 @@ import json
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import HumanMessage
@@ -1499,13 +1499,19 @@ class TestSearchForeignSourcesTool:
         from src.tools.research import search_foreign_sources
 
         # Mock tavily_tool as None AND DDG returning empty
-        with patch("src.tools.shared.tavily_tool", None):
-            with patch("src.tools.shared._ddg_search", return_value=[]):
-                result = await search_foreign_sources.ainvoke(
-                    {"ticker": "7203.T", "search_query": "Toyota 決算短信"}
-                )
+        with (
+            patch("src.tools.shared.tavily_tool", None),
+            patch("src.tools.shared._ddg_search", return_value=[]),
+            patch(
+                "src.tools.shared.extract_company_name_async",
+                new=AsyncMock(return_value="7203.T"),
+            ),
+        ):
+            result = await search_foreign_sources.ainvoke(
+                {"ticker": "7203.T", "search_query": "Toyota 決算短信"}
+            )
 
-                assert "no results" in result.lower()
+            assert "no results" in result.lower()
 
     @pytest.mark.asyncio
     async def test_output_terminates_with_search_results_closer(self):

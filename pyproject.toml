@@ -229,6 +229,7 @@ markers = [
     "security: marks tests that must not perform network or external side effects",
     "semantic: marks L3 semantic-judge tests requiring LLM (excluded from default run)",
     "asyncio: marks tests as asyncio",
+    "real_rate_limiter: keeps the real process rate limiter (the root fixture installs an instant one)",
 ]
 
 # Filter out warnings from third-party libraries

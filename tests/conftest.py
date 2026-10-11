@@ -257,6 +257,88 @@ def _embedding_provider_unreachable(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _instant_process_limiters(request, monkeypatch):
+    """Replace every process-fallback provider limiter with one that never waits.
+
+    A unit test that sends provider requests through ``limiter_for_binding`` (no
+    bound ``ProviderRuntime``) used to wait on the real Google limiter, paced at
+    ``RPM * 0.8 / 60`` requests a second -- about 5 s per acquire after the first
+    token. Three memory modules spent over 100 s of a full run doing so, and a
+    test's wall time depended on which test ran before it. Limiters are built by
+    ``create_process_rate_limiter``; replacing that (and the module-level copies
+    that bind it) covers the fallback table, ``GLOBAL_RATE_LIMITER`` and the lazily
+    built OpenAI limiter. Tests of the real limiter opt out with the
+    ``real_rate_limiter`` marker; ``integration`` tests keep the real one.
+    Guarded by ``tests/test_isolation_fixtures.py``.
+    """
+    if (
+        request.node.get_closest_marker("integration") is not None
+        or request.node.get_closest_marker("real_rate_limiter") is not None
+    ):
+        yield
+        return
+
+    from src import llms, runtime_services
+    from src.llm_runtime import rate_limits
+    from tests.helpers.instant_limiter import InstantLimiter
+
+    def instant(*_args, **_kwargs) -> InstantLimiter:
+        return InstantLimiter()
+
+    rate_limits.reset_fallback_limiters_for_tests()
+    monkeypatch.setattr(rate_limits, "create_process_rate_limiter", instant)
+    monkeypatch.setattr(runtime_services, "create_process_rate_limiter", instant)
+    monkeypatch.setattr(llms.GLOBAL_RATE_LIMITER, "_instance", None)
+    monkeypatch.setattr(llms, "_openai_rate_limiter", None)
+    monkeypatch.setattr(llms, "_openai_rate_limiter_initialized", False)
+    yield
+    rate_limits.reset_fallback_limiters_for_tests()
+
+
+@pytest.fixture
+def offline_main_flow(monkeypatch):
+    """The advisory lookups ``src.main`` makes around a run, answered "unavailable".
+
+    ``run_analysis`` fetches a benchmark market note, a 52-week price snapshot and
+    the macro context (a Tavily search), and publication looks up the company name
+    for the report header; each degrades to an empty or failed result when its
+    provider is unreachable.
+    Request it (``pytest.mark.usefixtures``) in any module that drives ``main`` or
+    ``run_analysis`` with the graph mocked. A test asserting on one of them patches
+    it again in its own body, which wins.
+    """
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("src.main._fetch_market_context", AsyncMock(return_value=""))
+    monkeypatch.setattr("src.main._fetch_price_snapshot", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        "src.output._load_company_name_for_output_async",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "src.macro_context.get_macro_context",
+        AsyncMock(side_effect=RuntimeError("macro context unavailable offline")),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_memory_state():
+    """Drop the process-wide embeddings and Chroma clients between tests.
+
+    ``FinancialSituationMemory`` caches its probed embeddings client and its Chroma
+    client on the class. A test that left them populated made the next test's
+    memories ``available`` without ever building a client (two
+    ``TestMemoryIsolation`` tests skipped when run alone and passed only after an
+    earlier test happened to leave state behind).
+    """
+    from src.memory import FinancialSituationMemory
+
+    FinancialSituationMemory._reset_shared_state_for_tests()
+    yield
+    FinancialSituationMemory._reset_shared_state_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _pin_config_singleton_identity():
     """Pin ``src.config.config`` to its session-baseline object identity.
 

@@ -336,6 +336,7 @@ async def test_the_binding_provider_selects_the_runtime_limiter(monkeypatch, pro
     assert requests.count == 1
 
 
+@pytest.mark.real_rate_limiter
 def test_an_unscoped_caller_gets_the_providers_process_fallback(monkeypatch):
     rate_limits.reset_fallback_limiters_for_tests()
     binding = EmbeddingBinding(provider="openai", model="m", dimension=8)

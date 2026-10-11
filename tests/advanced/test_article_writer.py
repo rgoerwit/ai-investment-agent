@@ -577,6 +577,14 @@ class TestArticlePathResolution:
 class TestArticleGeneration:
     """Tests for article generation (mocked LLM)."""
 
+    @pytest.fixture(autouse=True)
+    def no_fact_check_search(self, monkeypatch):
+        """The fact-check context search is answered "unavailable" (a non-dict)."""
+        monkeypatch.setattr(
+            "src.article_writer.search_tavily_inspected",
+            AsyncMock(return_value=None),
+        )
+
     @patch("src.article_writer.create_writer_llm")
     def test_article_writer_passes_extra_callbacks_to_llm(self, mock_create_llm):
         from src.article_writer import ArticleWriter

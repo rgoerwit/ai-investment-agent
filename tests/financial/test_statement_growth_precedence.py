@@ -196,6 +196,7 @@ def test_merge_preserves_statement_mrq_provenance() -> None:
 _GROWTH_CANARIES = {".T": "4396.T", ".HK": "3306.HK"}
 
 
+@pytest.mark.integration  # live Yahoo; skips itself when Yahoo is unreachable
 @pytest.mark.parametrize(
     ("suffix", "ticker"),
     list(_GROWTH_CANARIES.items()),

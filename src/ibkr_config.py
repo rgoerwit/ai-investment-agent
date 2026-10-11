@@ -7,6 +7,7 @@ Follows src/config.py pattern: Pydantic Settings, SecretStr for credentials, .en
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.env_file import default_settings_env_file
 from src.ibkr.portfolio_defaults import (
     DEFAULT_CASH_BUFFER_PCT,
     DEFAULT_DRIFT_PCT,
@@ -90,7 +91,7 @@ class IbkrSettings(BaseSettings):
     )
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=default_settings_env_file(),
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,

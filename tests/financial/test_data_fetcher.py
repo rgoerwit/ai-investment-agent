@@ -18,11 +18,12 @@ import pytest
 
 from src.data.fetcher import SmartMarketDataFetcher
 from src.yfinance_runtime import YFRateLimitError
+from tests.helpers.offline_fetcher import offline_market_fetcher
 
 
 @pytest.fixture
 def fetcher():
-    return SmartMarketDataFetcher()
+    return offline_market_fetcher(SmartMarketDataFetcher())
 
 
 class TestParallelExecution:
@@ -142,6 +143,9 @@ class TestParallelExecution:
     @pytest.mark.asyncio
     async def test_get_price_history_uses_short_lived_cache(self, fetcher):
         """Repeated history fetches for the same symbol/period should reuse cached data."""
+        del (
+            fetcher.get_price_history
+        )  # these test the real method, not the offline stub
         frame = pd.DataFrame({"Close": [1.0, 2.0], "Volume": [10, 20]})
         fetcher._get_price_history_uncached = AsyncMock(return_value=frame)
 
@@ -162,6 +166,9 @@ class TestParallelExecution:
         self, fetcher
     ):
         """Bounded and unbounded history requests should not collide in cache."""
+        del (
+            fetcher.get_price_history
+        )  # these test the real method, not the offline stub
         fetcher._get_price_history_uncached = AsyncMock(
             side_effect=[
                 pd.DataFrame({"Close": [1.0]}),
@@ -195,6 +202,9 @@ class TestParallelExecution:
     @pytest.mark.asyncio
     async def test_get_price_history_forwards_start_and_end_to_yfinance(self, fetcher):
         """Explicit history bounds should use start/end instead of the default period."""
+        del (
+            fetcher.get_price_history
+        )  # these test the real method, not the offline stub
         mock_stock = MagicMock()
         expected = pd.DataFrame({"Close": [1.0, 2.0]})
         mock_stock.history.return_value = expected
@@ -856,7 +866,13 @@ class TestPanicMode:
             "debtToEquity",  # SAFE
         ]
 
-        with patch("src.data.fetcher.search_tavily_inspected") as mock_search:
+        with (
+            patch("src.data.fetcher.search_tavily_inspected") as mock_search,
+            patch(
+                "src.data.fetcher.yf.Ticker",
+                return_value=SimpleNamespace(info={"longName": "Test Co"}),
+            ),
+        ):
             mock_search.return_value = {"results": [{"content": "ROE is 15%"}]}
             result = await fetcher._fetch_tavily_gaps("TEST", missing_fields)
 

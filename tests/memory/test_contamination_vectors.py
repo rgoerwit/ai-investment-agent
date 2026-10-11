@@ -134,6 +134,26 @@ class TestMemoryIsolation:
     # CHROMA_PERSIST_DIR to a temporary directory for the full pytest session.
     # Do not run this module through a harness that bypasses that fixture.
 
+    @pytest.fixture(autouse=True)
+    def deterministic_embeddings(self, monkeypatch):
+        """Real Chroma storage, offline vectors.
+
+        A memory is ``available`` only after its embedding probe succeeds, and unit
+        tests refuse the provider SDK. These tests used to skip when run alone
+        and passed only when an earlier test happened to leave a probed client on
+        the class. The fake client makes them assert in every ordering.
+        """
+        import src.memory as memory_module
+        from src.embeddings import resolve_embedding_binding
+        from tests.helpers.fake_embeddings import DeterministicEmbeddings
+
+        dimension = resolve_embedding_binding(memory_module.config).dimension
+        monkeypatch.setattr(
+            memory_module,
+            "build_embeddings",
+            lambda _binding, _config: DeterministicEmbeddings(dimension),
+        )
+
     @pytest.mark.asyncio
     async def test_memory_collections_are_ticker_specific(self):
         """Verify that different tickers get different collection names."""
@@ -160,15 +180,18 @@ class TestMemoryIsolation:
         bull_0291 = mem_0291["0291_HK_bull_memory"]
         bull_0293 = mem_0293["0293_HK_bull_memory"]
 
-        # Only test if ChromaDB is available
-        if not bull_0291.available:
-            pytest.skip("ChromaDB not available")
+        assert bull_0291.available and bull_0293.available
 
         # Add data to 0291.HK memory
+        stored = "China Resources Beer has strong EBITDA growth and margin expansion"
         await bull_0291.add_situations(
-            ["China Resources Beer has strong EBITDA growth and margin expansion"],
-            [{"ticker": "0291.HK", "company": "China Resources Beer"}],
+            [stored], [{"ticker": "0291.HK", "company": "China Resources Beer"}]
         )
+
+        # Positive control: the stored situation is retrievable from its own
+        # memory, so an empty result below proves isolation, not a broken store.
+        own = await bull_0291.query_similar_situations(stored, n_results=5)
+        assert len(own) == 1
 
         # Query from 0293.HK memory with strict filtering
         results = await bull_0293.query_similar_situations(
@@ -191,13 +214,15 @@ class TestMemoryIsolation:
         bull_0291 = mem_0291["0291_HK_bull_memory"]
         bull_0293 = mem_0293["0293_HK_bull_memory"]
 
-        if not bull_0291.available:
-            pytest.skip("ChromaDB not available")
+        assert bull_0291.available and bull_0293.available
 
         # Add to 0291 memory
-        await bull_0291.add_situations(
-            ["Beverage company with strong regional presence"], [{"ticker": "0291.HK"}]
-        )
+        stored = "Beverage company with strong regional presence"
+        await bull_0291.add_situations([stored], [{"ticker": "0291.HK"}])
+
+        # Positive control (see the sibling test).
+        own = await bull_0291.query_similar_situations(stored, n_results=5)
+        assert len(own) == 1
 
         # Query 0293 memory WITHOUT metadata filter
         # Since they're separate collections, should still return empty

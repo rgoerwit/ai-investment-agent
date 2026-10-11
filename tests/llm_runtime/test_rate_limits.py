@@ -7,6 +7,9 @@ import pytest
 from src.config import Settings
 from src.llm_runtime import rate_limits
 
+# This module tests the real limiter's construction and pacing.
+pytestmark = pytest.mark.real_rate_limiter
+
 
 def test_all_shipped_providers_have_safe_default_rpm_ceilings() -> None:
     settings = Settings(_env_file=None)

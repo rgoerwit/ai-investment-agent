@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.data.fetcher import SmartMarketDataFetcher
+from tests.helpers.offline_fetcher import offline_market_fetcher
 
 
 @pytest.fixture
@@ -13,7 +14,7 @@ def coordinator():
         patch("src.data.fetcher.get_eodhd_fetcher") as mock_eodhd,
         patch("src.data.fetcher.get_av_fetcher") as mock_av,
     ):
-        fetcher = SmartMarketDataFetcher()
+        fetcher = offline_market_fetcher(SmartMarketDataFetcher())
 
         # Mock availability - is_available() is a SYNC method, so use MagicMock
         # The async methods (get_financial_metrics) use AsyncMock

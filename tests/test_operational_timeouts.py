@@ -190,16 +190,11 @@ def isolated_memory_state():
     FinancialSituationMemory._reset_shared_state_for_tests()
 
 
-class _InstantLimiter:
-    async def aacquire(self, *, blocking: bool = True) -> bool:
-        return True
-
-
 def _bare_memory(monkeypatch, embeddings: Any) -> FinancialSituationMemory:
-    """A memory object built without its constructor: no Chroma client at all."""
-    monkeypatch.setattr(
-        memory_module, "_embedding_rate_limiter", lambda _binding: _InstantLimiter()
-    )
+    """A memory object built without its constructor: no Chroma client at all.
+
+    Its limiter is the root fixture's instant process fallback.
+    """
     memory = FinancialSituationMemory.__new__(FinancialSituationMemory)
     memory.name = "TEST_operational_memory"
     memory.embedding_binding = resolve_embedding_binding(config)

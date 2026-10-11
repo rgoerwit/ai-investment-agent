@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("offline_main_flow")
+
 from src.main import _is_total_data_vacuum, run_analysis
 
 

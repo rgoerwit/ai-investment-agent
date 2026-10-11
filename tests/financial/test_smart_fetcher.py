@@ -15,6 +15,7 @@ import pytest
 
 from src.data.fetcher import SmartMarketDataFetcher
 from src.data.validator import FineGrainedValidator
+from tests.helpers.offline_fetcher import offline_market_fetcher
 
 
 def _fmt_pct(value) -> str:
@@ -28,6 +29,7 @@ def _mock_source_fetch(
     yfinance: dict,
     yahooquery: dict | None = None,
 ) -> None:
+    offline_market_fetcher(fetcher)
     fetcher._pre_resolve_ticker = AsyncMock(return_value=ticker)
     fetcher._fetch_all_sources_parallel = AsyncMock(
         return_value={"yfinance": yfinance, "yahooquery": yahooquery}

@@ -33,6 +33,14 @@ def _make_sell_item(ticker: str, sell_type: str = "SOFT_REJECT") -> Reconciliati
 
 
 class TestCharacterizeMacroEventScope:
+    @pytest.fixture(autouse=True)
+    def no_news_search(self, monkeypatch):
+        """The headline search is advisory; "no result" is its offline answer."""
+        monkeypatch.setattr(
+            "scripts.portfolio_manager.search_tavily_sync_inspected",
+            lambda *args, **kwargs: None,
+        )
+
     def test_all_same_exchange_yields_regional_scope(self):
         items = [_make_sell_item(f"{i:04d}.T") for i in range(5)]
         scope, region, sector, *_ = _characterize_macro_event("2026-03-05", items, 0.30)

@@ -19,6 +19,14 @@ from src.ticker_corrections import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _live_fx_unavailable(monkeypatch):
+    """Position normalisation converts TWD; answer it from the fallback table."""
+    from tests.helpers.offline_fx import pin_live_fx_unavailable
+
+    pin_live_fx_unavailable(monkeypatch)
+
+
 @pytest.fixture
 def overrides_file(tmp_path, monkeypatch):
     """Point the registry at a temp file and reset the module cache."""

@@ -73,6 +73,23 @@ in `tests/conftest.py` refuses every embedding-SDK request unless the test is ma
 transport in the test instead. To prove a test sent nothing, use
 `tests/helpers/offline_network.py`: pytest-socket alone misses libcurl (yfinance).
 
+**Unit tests never read the operator's `.env`.** Every `BaseSettings` subclass in
+`src/` takes `env_file` from `src.env_file.default_settings_env_file()` (None under
+`PYTEST_DISABLE_DOTENV`), and so does `_parse_env_file`, the reader behind
+`get_env_value`. A new settings class that hard-codes `".env"` fails
+`tests/config/test_env_file_policy.py`.
+
+**Process-global waits and state are reset by root fixtures.** `_instant_process_limiters`
+swaps every process-fallback limiter for `tests/helpers/instant_limiter.py` (a real one
+paces ~5 s per acquire); a test of the real limiter takes
+`@pytest.mark.real_rate_limiter`. `_reset_shared_memory_state` clears the class-level
+embeddings and Chroma clients, so a memory test that needs `available=True` supplies
+`tests/helpers/fake_embeddings.py` rather than relying on a leftover. Tests that drive
+`FinancialSituationMemory`, `SmartMarketDataFetcher`, FX or `src.main` cut the Yahoo and
+Tavily seams with `tests/helpers/offline_fetcher.py`, `tests/helpers/offline_fx.py` and the
+`offline_main_flow` fixture. yfinance retries are 0 (`configure_yfinance_defaults`): the
+application owns retries. Guarded by `tests/test_isolation_fixtures.py`.
+
 ## Subprocesses
 
 Spawn so the runtime uses `posix_spawn`: pass `close_fds=False` and **never** `cwd=`,

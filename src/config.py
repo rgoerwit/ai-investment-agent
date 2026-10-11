@@ -23,6 +23,8 @@ import structlog
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.env_file import default_settings_env_file
+
 # Note: Pydantic Settings handles .env loading natively via env_file in SettingsConfigDict.
 # No manual load_dotenv() needed - it's cleaner and avoids double-loading issues.
 
@@ -96,11 +98,16 @@ def configure_langsmith_tracing(settings: "Settings") -> None:
 def _parse_env_file() -> dict[str, str]:
     """Parse .env file to get explicitly set values (ignoring comments and blank lines).
 
-    Preserved for backwards compatibility with existing tests.
+    Preserved for backwards compatibility with existing tests. Honours the same
+    policy as the ``Settings`` classes: under pytest no file is read, so
+    ``get_env_value`` never serves the operator's ``.env`` to a unit test.
     """
-    env_file = Path(".env")
+    env_file_name = default_settings_env_file()
     env_values: dict[str, str] = {}
 
+    if env_file_name is None:
+        return env_values
+    env_file = Path(env_file_name)
     if not env_file.exists():
         return env_values
 
@@ -326,11 +333,6 @@ def validate_environment_variables() -> None:
 
 
 # --- Pydantic Settings Class ---
-
-
-def _default_settings_env_file() -> str | None:
-    """Keep pytest from ingesting operator configuration during collection."""
-    return None if os.environ.get("PYTEST_DISABLE_DOTENV") == "true" else ".env"
 
 
 class Settings(BaseSettings):
@@ -2114,7 +2116,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         # Tests receive explicit dummy process values and must never ingest the
         # operator's ignored environment file during collection.
-        env_file=_default_settings_env_file(),
+        env_file=default_settings_env_file(),
         env_file_encoding="utf-8",
         # Ignore extra environment variables (don't fail on unknown vars)
         extra="ignore",
