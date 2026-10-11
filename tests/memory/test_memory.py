@@ -26,7 +26,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.config import config
-from src.llms import _LazyRateLimiterProxy
 from src.memory import (
     FinancialSituationMemory,
     cleanup_all_memories,
@@ -67,7 +66,7 @@ class TestFinancialSituationMemoryInitialization:
         with patch("src.memory.config") as mock_config:
             mock_config.get_google_api_key.return_value = "test-key"
             with patch(
-                "src.memory.GoogleGenerativeAIEmbeddings",
+                "src.embeddings.GoogleGenerativeAIEmbeddings",
                 side_effect=Exception("API error"),
             ):
                 memory = FinancialSituationMemory("test_memory")
@@ -80,7 +79,7 @@ class TestFinancialSituationMemoryInitialization:
         with patch("src.memory.config") as mock_config:
             mock_config.get_google_api_key.return_value = "test-key"
             with patch(
-                "src.memory.GoogleGenerativeAIEmbeddings"
+                "src.embeddings.GoogleGenerativeAIEmbeddings"
             ) as mock_embeddings_class:
                 mock_embeddings = MagicMock()
                 mock_embeddings.embed_query.return_value = [0.1] * 768
@@ -103,7 +102,7 @@ class TestFinancialSituationMemoryInitialization:
             mock_config.get_google_api_key.return_value = "test-key"
 
             with patch(
-                "src.memory.GoogleGenerativeAIEmbeddings"
+                "src.embeddings.GoogleGenerativeAIEmbeddings"
             ) as mock_embeddings_class:
                 mock_embeddings = MagicMock()
                 mock_embeddings.embed_query.return_value = [0.1] * 768
@@ -132,7 +131,7 @@ class TestFinancialSituationMemoryInitialization:
             mock_config.chroma_persist_directory = "test-chroma"
 
             with patch(
-                "src.memory.GoogleGenerativeAIEmbeddings"
+                "src.embeddings.GoogleGenerativeAIEmbeddings"
             ) as mock_embeddings_class:
                 mock_embeddings = MagicMock()
                 mock_embeddings.embed_query.return_value = [0.1] * 768
@@ -166,7 +165,7 @@ class TestFinancialSituationMemoryInitialization:
             mock_config.get_google_api_key.return_value = "test-key"
 
             with patch(
-                "src.memory.GoogleGenerativeAIEmbeddings"
+                "src.embeddings.GoogleGenerativeAIEmbeddings"
             ) as mock_embeddings_class:
                 mock_embeddings = MagicMock()
                 mock_embeddings.embed_query.side_effect = socket.gaierror(
@@ -195,7 +194,7 @@ class TestFinancialSituationMemoryInitialization:
             mock_config.get_google_api_key.return_value = "test-key"
 
             with patch(
-                "src.memory.GoogleGenerativeAIEmbeddings"
+                "src.embeddings.GoogleGenerativeAIEmbeddings"
             ) as mock_embeddings_class:
                 mock_embeddings = MagicMock()
                 mock_embeddings.embed_query.side_effect = lambda *_a, **_k: time.sleep(
@@ -302,41 +301,6 @@ class TestSituationStorage:
         assert len(call_kwargs["embeddings"]) == 2
 
     @pytest.mark.asyncio
-    async def test_get_embedding_logs_rate_limiter_fallback(self):
-        """A limiter unavailable at setup is logged before the direct request.
-
-        Only setup decides the fallback: a limiter with no async acquire is
-        unavailable. A limiter whose wait fails is not (see
-        ``tests/memory/test_embedding_attempt_deadline.py``).
-        """
-
-        class BrokenLimiter:
-            pass
-
-        memory = FinancialSituationMemory("test_memory")
-        memory.available = True
-        memory.embeddings = MagicMock()
-        memory.embeddings.aembed_query = AsyncMock(return_value=[0.1] * 768)
-
-        with patch("src.llms.GLOBAL_RATE_LIMITER", BrokenLimiter()):
-            with patch("src.memory.logger") as mock_logger:
-                embedding = await memory._get_embedding("hello world")
-
-        assert embedding == [0.1] * 768
-        mock_logger.warning.assert_called_once()
-        kwargs = mock_logger.warning.call_args.kwargs
-        assert kwargs["fallback"] == "direct_embed_query"
-        assert kwargs["failure_kind"] in {
-            "application_error",
-            "connect_error",
-            "timeout",
-            "unknown_provider_error",
-        }
-        assert kwargs["error_type"] == "TypeError"
-        assert "exc_info" not in kwargs
-        memory.embeddings.aembed_query.assert_awaited_once()
-
-    @pytest.mark.asyncio
     async def test_get_embedding_hard_timeout_bounds_stalled_call(self):
         """A stalled aembed_query must raise TimeoutError, not hang the run
         (both the rate-limited attempt and the fallback are bounded).
@@ -348,7 +312,7 @@ class TestSituationStorage:
         async def _stall(*_a, **_k):
             await asyncio.sleep(5)
 
-        # Instant limiter: the real GLOBAL_RATE_LIMITER can block on aacquire when
+        # Instant limiter: the real provider limiter can block on aacquire when
         # tokens are drained (full-suite CI ordering), and that wait would leak into
         # the timed section and mask the hard-timeout bound this test verifies.
         class _InstantLimiter:
@@ -363,8 +327,8 @@ class TestSituationStorage:
         with (
             patch.object(config, "memory_embedding_call_timeout_seconds", 0.05),
             patch(
-                "src.llms.GLOBAL_RATE_LIMITER",
-                _LazyRateLimiterProxy(lambda: _InstantLimiter()),
+                "src.memory._embedding_rate_limiter",
+                lambda _binding: _InstantLimiter(),
             ),
             patch("src.memory.logger"),
         ):
@@ -374,34 +338,6 @@ class TestSituationStorage:
             elapsed = time.monotonic() - start
 
         assert elapsed < 2
-
-    @pytest.mark.asyncio
-    async def test_get_embedding_accepts_lazy_rate_limiter_proxy(self):
-        """The shared lazy proxy should behave as an async context manager."""
-
-        class TrackingLimiter:
-            def __init__(self):
-                self.acquired = 0
-
-            async def aacquire(self, *, blocking=True):
-                self.acquired += 1
-                return True
-
-        limiter = TrackingLimiter()
-        memory = FinancialSituationMemory("test_memory")
-        memory.available = True
-        memory.embeddings = MagicMock()
-        memory.embeddings.aembed_query = AsyncMock(return_value=[0.2] * 768)
-
-        with patch(
-            "src.llms.GLOBAL_RATE_LIMITER", _LazyRateLimiterProxy(lambda: limiter)
-        ):
-            with patch("src.memory.logger") as mock_logger:
-                embedding = await memory._get_embedding("hello world")
-
-        assert embedding == [0.2] * 768
-        assert limiter.acquired == 1
-        mock_logger.warning.assert_not_called()
 
 
 class TestSituationQuerying:

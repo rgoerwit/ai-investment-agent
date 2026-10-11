@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 
 from src.config import Settings, config
 
+_OPENAI_EMBEDDINGS_HOST = "api.openai.com"
+
 
 @dataclass(frozen=True)
 class EmbeddingBinding:
@@ -52,6 +54,32 @@ def fingerprinted_collection_name(base: str, binding: EmbeddingBinding) -> str:
     return f"{base[: max(1, 63 - len(suffix))]}{suffix}"
 
 
+def GoogleGenerativeAIEmbeddings(**kwargs: Any) -> Any:
+    """The Google embeddings client; the SDK import stays lazy. Tests patch here."""
+
+    from langchain_google_genai import GoogleGenerativeAIEmbeddings as implementation
+
+    return implementation(**kwargs)
+
+
+def embedding_endpoint_host(
+    binding: EmbeddingBinding, settings: Settings = config
+) -> str | None:
+    """The host an embedding request is sent to, when it is not the SDK default.
+
+    Keys the rate limiter (``limiter_for_binding``) and decides the OpenAI base
+    URL, so the two cannot disagree. ``OPENAI_API_BASE`` selects the *review
+    chat plane's* compatible vendor (Moonshot/Kimi and friends). Those vendors
+    serve no embeddings API, so inheriting the base silently pointed every
+    memory read and write at an endpoint that cannot answer, and memory
+    failures degrade quietly. Only an explicit OpenAI base is honoured.
+    """
+    if binding.provider != "openai":
+        return None
+    host = urlsplit(settings.get_openai_api_base() or "").hostname
+    return host if host == _OPENAI_EMBEDDINGS_HOST else None
+
+
 def build_embeddings(
     binding: EmbeddingBinding,
     settings: Settings = config,
@@ -59,8 +87,6 @@ def build_embeddings(
     """Build an embedding client with lazy provider imports."""
 
     if binding.provider == "google":
-        from langchain_google_genai import GoogleGenerativeAIEmbeddings
-
         google_kwargs: dict[str, Any] = {
             "model": f"models/{binding.model}",
             "google_api_key": settings.get_google_api_key(),
@@ -80,14 +106,8 @@ def build_embeddings(
         }
         if binding.dimension is not None:
             kwargs["dimensions"] = binding.dimension
-        base_url = settings.get_openai_api_base()
-        # OPENAI_API_BASE selects the *review chat plane's* compatible vendor
-        # (Moonshot/Kimi and friends). Those vendors serve no embeddings API, so
-        # inheriting the base here silently pointed every memory read/write at an
-        # endpoint that cannot answer — and memory failures degrade quietly. Only
-        # an explicit OpenAI base is honored; a compatible host is ignored.
-        if base_url and urlsplit(base_url).hostname == "api.openai.com":
-            kwargs["base_url"] = base_url
+        if embedding_endpoint_host(binding, settings) is not None:
+            kwargs["base_url"] = settings.get_openai_api_base()
         return OpenAIEmbeddings(**kwargs)
     raise ValueError(f"unsupported embedding provider: {binding.provider!r}")
 

@@ -54,7 +54,7 @@ def test_memory_model_switch_never_deletes_legacy_collection(monkeypatch) -> Non
     )
     monkeypatch.setattr(memory_module, "config", settings)
     monkeypatch.setattr(
-        memory_module, "GoogleGenerativeAIEmbeddings", lambda **kwargs: fake_embeddings
+        "src.embeddings.GoogleGenerativeAIEmbeddings", lambda **kwargs: fake_embeddings
     )
     monkeypatch.setattr(
         memory_module.FinancialSituationMemory,

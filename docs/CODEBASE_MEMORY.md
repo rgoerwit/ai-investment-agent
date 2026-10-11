@@ -781,8 +781,22 @@ The operational deadlines close the category, and most deliberately do **not**
 clamp. The health check's 15 s probe is a top-level entrypoint, so nothing binds
 a deadline around it. Its HEALTH_CHECK seat's 10 s client timeout sits inside
 it, and it still calls `ainvoke` directly. The embeddings startup probe (15 s) is
-unclamped because its result is cached for the process: one caller's short
-deadline would turn embeddings off for every later caller. The 2 s GenAI client
+never clamped because its result is cached for the process: a probe cut short by
+one caller's deadline would turn embeddings off for every later caller. It is
+*admitted* instead: it starts only when its full bound fits before the
+operational deadline, and otherwise it is deferred with nothing cached, so the
+next caller with time left probes (`embeddings_healthcheck_deferred`). Before
+October 2026 it ran for its full bound even under a spent run deadline. The
+probe runs once per process per binding (provider, model, dimension, key),
+after success and after failure alike; it never ran once per memory instance.
+The async entry points (`src/main.py`, before the retrospective and the graph,
+and the retrospective-only mode) run it through
+`FinancialSituationMemory.prepare_shared_embeddings` on a daemon thread
+(`run_blocking_call` with a per-probe `InFlightLimit`), so the synchronous
+constructors that follow find it cached. Before, a constructor ran it on the
+event loop with a thread join, blocking the loop for up to the probe bound at
+graph build. Sync callers (scripts, tests) still probe from the constructor,
+through `run_blocking_call_sync` and the same policy. The 2 s GenAI client
 close and the 2 s Langfuse flush run on the shutdown path, after any caller
 deadline and inside `SHUTDOWN_HARD_TIMEOUT_SECONDS` (the cleanup half). They
 keep their defaults because they set how long exit can take. Only the 30 s
@@ -798,11 +812,17 @@ is clamped with `wait_allowance` (the policy-free form of
 `retry_wait_allowance`), stops once a useful attempt no longer fits, and
 re-raises the last attempt's own error rather than a `RetryError`.
 
-The unthrottled "fallback" is decided only at setup, when no limiter can be had
-(import, construction, or no async acquire). It used to catch *every* exception
-from the wait or the request, timeouts and provider errors included, and send
-the request again directly, so one attempt could make two requests. The
-physical requests per attempt are pinned at the HTTP layer
+Embeddings take their limiter the way every LLM binding does:
+`limiter_for_binding` for the embedding binding's provider and endpoint host
+(`embedding_endpoint_host`, which also decides the OpenAI base URL). Until
+October 2026 they always took the Gemini limiter, so OpenAI embeddings were
+paced at Google's 15 RPM. `None` means the provider has no RPM ceiling, and the
+request goes out without a wait. There is no unthrottled fallback any more: an
+error resolving the limiter, waiting on it or sending is the attempt's error.
+The fallback once caught *every* exception from the wait or the request and
+sent again directly, so one attempt could make two requests; a later version
+kept it only for a limiter that could not be had at setup, a case the binding
+lookup no longer has. The physical requests per attempt are pinned at the HTTP layer
 (`tests/memory/test_embedding_attempt_deadline.py`). OpenAI embeddings are built
 with `max_retries=0` (the SDK default of two tripled every attempt). Google's
 GenAI client, with `retry_options` unset, makes one tenacity attempt
@@ -810,15 +830,47 @@ GenAI client, with `retry_options` unset, makes one tenacity attempt
 its async path runs on aiohttp whenever aiohttp is installed, and that path
 re-sends once after a connection-level error (`ClientConnectorError`,
 `ClientOSError`, `ServerDisconnectedError`, ...) following a 1-10 s sleep,
-outside `retry_options`. That second send is left in place: the attempt
-deadline cancels it, and enforcing one send would mean replacing the SDK's
-transport. Note the patch point when testing: the OpenAI SDK uses the `httpx2`
+outside `retry_options`. That second send is left in place, and the attempt
+deadline cuts it off. A supported switch to one send does exist: google-genai
+uses httpx instead of aiohttp when `async_client_args["transport"]` is set, and
+`GoogleGenerativeAIEmbeddings.client_args` is a public field passed to both the
+sync and the async client. One object implementing both `httpx.BaseTransport`
+and `httpx.AsyncBaseTransport` makes the disconnect a single send (verified on
+google-genai 2.24.0). It is not used because an explicit transport turns off
+httpx's environment proxies (`allow_env_proxies = trust_env and transport is
+None`), and proxy users must keep proxying (`_apply_macos_fork_safety_env`).
+We would have to re-implement `HTTPS_PROXY`/`NO_PROXY` handling and pool per
+event loop to save one cheap re-send the deadline already bounds. The same
+re-send exists for Gemini chat calls; any switch should be one helper serving
+both planes. Note the patch point when testing: the OpenAI SDK uses the `httpx2`
 fork, not `httpx`, and Google's async path uses aiohttp, not its httpx client,
 so a fake `httpx` transport sees neither. The close keeps `asyncio.wait_for`, which is
 safe there because `aclose()` is native async I/O, not a parked thread. The
 memory timeouts read the live `src.config.config` rather than `src.memory.config`,
 which about 28 memory tests replace with a `MagicMock`; a mock attribute would
-reach `Thread.join(timeout=...)` and fail the probe.
+reach the probe's bound and fail it. The Google embeddings client is built in one
+place, `build_embeddings`, and tests patch `src.embeddings.GoogleGenerativeAIEmbeddings`.
+
+A fresh `InMemoryRateLimiter` starts with an empty bucket and refills only after
+a whole `1 / rps` interval, so every process waited about 5 s (15 RPM x 0.8)
+before its first request. `create_process_rate_limiter` now starts the bucket at
+one token; the pace after that is unchanged (`tests/llm_runtime/test_rate_limits.py`).
+The Google RPM ceiling is read through `configured_google_rpm` (`GOOGLE_RPM_LIMIT`
+under the multi-provider schema, `GEMINI_RPM_LIMIT` under the legacy one), which
+the run config, the provider runtime, the unscoped fallback and the legacy proxy
+all share. The unscoped fallback used to read `GOOGLE_RPM_LIMIT` under both
+schemas. The run-scoped vendor list is now the fallback's own, which adds xAI:
+a scoped xAI call used to go unthrottled.
+
+**Per-ticker debate memory is inert (October 2026, left as is).** `src/main.py`
+builds the graph with `cleanup_previous=True`, which deletes the ticker's
+collections at the start of every run, and nothing in `src/` or `scripts/` ever
+writes the bull, bear, judge, trader or risk-manager collections (`add_situations`
+is called only for `lessons_learned`). Each full run still spends about four
+embedding requests querying the empty bull and bear collections (R1 and R2), and
+`create_trader_node`, `create_portfolio_manager_node` and
+`create_research_manager_node` take a `memory` argument they never read. Retire
+it or wire up the writes; do not re-derive this.
 
 ### IBKR path
 
@@ -970,10 +1022,12 @@ Two kinds of test sent them:
 
 - tests that build a memory directly, mostly `tests/memory/test_memory.py`;
 - tests that build the graph with memory disabled. With memory off,
-  `build_graph_components` still constructs the five legacy memories, and each one
-  probes. **This happens in production too:** a `--no-memory` run sends one
-  embeddings probe at graph build. The probe deliberately ignores the run
-  deadline, so it runs even when that deadline is already spent.
+  `build_graph_components` constructed five shared `legacy_*` memories, and the
+  first one probed (the result is cached per process). **This happened in
+  production too:** a `--no-memory` run sent one embeddings probe at graph build,
+  even under a spent run deadline. Since October 2026 memory off, or no ticker,
+  builds no memory object at all; the no-ticker case also read collections
+  shared by every ticker.
 
 `_embedding_provider_unreachable` in `tests/conftest.py` patches the SDK methods to
 refuse every request. It covers both providers, sync and async. The client stays

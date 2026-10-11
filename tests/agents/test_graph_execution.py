@@ -14,9 +14,6 @@ def _stub_graph_component_dependencies(monkeypatch):
 
         return _stub_runtime_node
 
-    stub_memory = tuple(MagicMock() for _ in range(5))
-
-    monkeypatch.setattr(components, "_create_legacy_memories", lambda: stub_memory)
     monkeypatch.setattr(
         components, "create_quick_thinking_llm", lambda **kwargs: Mock()
     )
@@ -1528,7 +1525,6 @@ class TestPostResearchSync:
 
             return _node
 
-        monkeypatch.setattr(components, "_create_legacy_memories", lambda: (None,) * 5)
         monkeypatch.setattr(
             components,
             "_is_auditor_enabled",

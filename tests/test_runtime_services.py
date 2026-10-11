@@ -115,6 +115,7 @@ def test_provider_runtime_builds_only_configured_independent_vendor_buckets(
         anthropic_rpm_limit=61,
         deepseek_rpm_limit=None,
         zai_rpm_limit=31,
+        xai_rpm_limit=9,
     )
     runtime = build_provider_runtime(
         fetcher=SimpleNamespace(), settings=settings, explicit=True
@@ -124,8 +125,12 @@ def test_provider_runtime_builds_only_configured_independent_vendor_buckets(
     assert runtime.limiter_for("openai").rpm == 101
     assert runtime.limiter_for("anthropic").rpm == 61
     assert runtime.limiter_for("zai").rpm == 31
+    # xAI used to be missing from the run-scoped list, so a scoped xAI call
+    # went unthrottled while a direct one was paced; the list is now shared.
+    assert runtime.limiter_for("xai").rpm == 9
     assert runtime.limiter_for("deepseek") is None
-    assert len({id(limiter) for limiter in created}) == 4
+    assert runtime.limiter_for("moonshot") is None
+    assert len({id(limiter) for limiter in created}) == 5
 
 
 def test_issuer_authority_is_validated_and_run_scoped():

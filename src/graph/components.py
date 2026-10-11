@@ -164,18 +164,6 @@ def build_seat_model(
     )
 
 
-def _create_legacy_memories() -> tuple[Any, Any, Any, Any, Any]:
-    from src.memory import FinancialSituationMemory
-
-    return (
-        FinancialSituationMemory("legacy_bull_memory"),
-        FinancialSituationMemory("legacy_bear_memory"),
-        FinancialSituationMemory("legacy_invest_judge_memory"),
-        FinancialSituationMemory("legacy_trader_memory"),
-        FinancialSituationMemory("legacy_risk_manager_memory"),
-    )
-
-
 def cleanup_all_memories(*args: Any, **kwargs: Any) -> Any:
     from src.memory import cleanup_all_memories as _cleanup_all_memories
 
@@ -258,18 +246,15 @@ def build_graph_components(
             bear_available=bear_memory.available,
         )
     else:
+        # No memory object at all: building one opens Chroma and probes the
+        # embeddings provider, and without a ticker there is no isolated
+        # collection to read (a shared one would mix tickers).
         if enable_memory:
-            logger.warning("using_legacy_memories_no_ticker")
+            logger.warning("memory_skipped_no_ticker")
         else:
-            logger.debug("memory_disabled_using_legacy_memories", ticker=ticker)
-
-        (
-            bull_memory,
-            bear_memory,
-            invest_judge_memory,
-            trader_memory,
-            risk_manager_memory,
-        ) = _create_legacy_memories()
+            logger.debug("memory_disabled", ticker=ticker)
+        bull_memory = bear_memory = invest_judge_memory = None
+        trader_memory = risk_manager_memory = None
 
     logger.debug(
         "creating_trading_graph",

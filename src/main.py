@@ -42,6 +42,7 @@ from src.eval import (
     reset_active_capture_manager,
     set_active_capture_manager,
 )
+from src.llm_runtime.rate_limits import configured_google_rpm, google_rpm_field
 from src.llm_runtime.run_deadline import log_deadline_ladder, run_deadline
 from src.llm_runtime.timeouts import enclosing_deadline_at, require_allowance
 from src.runtime_config import (
@@ -1074,6 +1075,19 @@ def _setup_runtime(
     return provider_preflight, runtime_services
 
 
+async def _prepare_memory_embeddings() -> None:
+    """Probe the embeddings client off the event loop before any memory is built.
+
+    The memory constructors are synchronous and would otherwise run the
+    startup probe on the loop, blocking it for up to the probe bound.
+    """
+    if not get_runtime_config(config).enable_memory:
+        return
+    from src.memory import FinancialSituationMemory
+
+    await FinancialSituationMemory.prepare_shared_embeddings()
+
+
 async def _run_retrospective_only(args: argparse.Namespace) -> int:
     """Run retrospective-only mode and return the process exit code."""
     if getattr(args, "no_memory", False):
@@ -1086,6 +1100,7 @@ async def _run_retrospective_only(args: argparse.Namespace) -> int:
         if not getattr(args, "quiet", False) and not getattr(args, "brief", False):
             console.print("[yellow]Retrospective batch skipped (--no-memory).[/yellow]")
         return 0
+    await _prepare_memory_embeddings()
     try:
         from src.observability import flush_traces, get_observability_runtime
         from src.retrospective import SnapshotLoadProgress, run_retrospective
@@ -1563,18 +1578,9 @@ def _warn_quick_timeout_config_drift(args: argparse.Namespace) -> None:
         drift["QUICK_LLM_API_TIMEOUT_SECONDS"] = config.quick_llm_api_timeout_seconds
     if config.api_retry_attempts > 2:
         drift["API_RETRY_ATTEMPTS"] = config.api_retry_attempts
-    configured_google_rpm = (
-        config.google_rpm_limit
-        if config.llm_base_provider is not None
-        else config.gemini_rpm_limit
-    )
-    if configured_google_rpm > 360:
-        key = (
-            "GOOGLE_RPM_LIMIT"
-            if config.llm_base_provider is not None
-            else "GEMINI_RPM_LIMIT"
-        )
-        drift[key] = configured_google_rpm
+    google_rpm = configured_google_rpm(config)
+    if google_rpm > 360:
+        drift[google_rpm_field(config).upper()] = google_rpm
 
     if not drift:
         return
@@ -1722,6 +1728,7 @@ async def run_with_args(
             use_runtime_services(runtime_services),
             enclosing_deadline_at(analysis_deadline),
         ):
+            await _prepare_memory_embeddings()
             await _maybe_run_ticker_retrospective(args)
         welcome_banner = output._emit_start_banner(
             args,

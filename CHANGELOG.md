@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Memory: `--no-memory`, and a graph built without a ticker, construct no memory
+  object (the five shared `legacy_*` memories are gone, and with them a Chroma
+  client, a startup probe and a cross-ticker read). The embeddings startup probe
+  starts only when its full `MEMORY_EMBEDDING_HEALTHCHECK_TIMEOUT_SECONDS` fits
+  before the run deadline (otherwise it is deferred, uncached), and the CLI runs
+  it off the event loop before building memories. Embeddings take their rate
+  limiter from the embedding provider (`limiter_for_binding`), so OpenAI
+  embeddings are no longer paced at Google's RPM; the unthrottled setup fallback
+  and `embedding_rate_limiter_fallback` event are removed.
+- Rate limits: every process limiter starts with one token, so a process's first
+  request no longer waits about 5 s at 15 RPM; the pace afterwards is unchanged.
+  The Google ceiling is read in one place (`configured_google_rpm`), so the
+  unscoped fallback honours `GEMINI_RPM_LIMIT` under the legacy schema, and a
+  run-scoped xAI binding is now throttled at `XAI_RPM_LIMIT`.
 - MCP call budgets are now enforced by `MCPRuntime` itself: each attempt is
   admitted against `daily_call_limit` / `per_run_limit` before a session opens,
   and each tools/call is counted as it is sent. `MCPBudgetHook` is gone; it

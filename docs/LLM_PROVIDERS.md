@@ -1,6 +1,8 @@
 # LLM Provider Qualification and Operations
 
-Last updated: 2026-10-09 (direct-caller attempts follow `LLM_ATTEMPTS`, the
+Last updated: 2026-10-10 (one Google RPM reader, embeddings on their provider's
+rate-limit bucket, a first token in every new bucket; 2026-10-09:
+direct-caller attempts follow `LLM_ATTEMPTS`, the
 OpenAI request cap is a setting, and the APAC ceiling is its node total; the
 article workflow owns a deadline and the writer
 runs on the runtime loop; a direct caller is sized from an enclosing deadline;
@@ -214,9 +216,12 @@ decide which of these two shapes it has before writing the prefixes.
 ## Runtime policy
 
 Rate-limit buckets are independent by effective vendor and sanitized endpoint
-host. Configure the native defaults with `GOOGLE_RPM_LIMIT`,
-`OPENAI_RPM_LIMIT`, `ANTHROPIC_RPM_LIMIT`, `DEEPSEEK_RPM_LIMIT`, and
-`ZAI_RPM_LIMIT`, plus `MOONSHOT_RPM_LIMIT` for Kimi review bindings. Every
+host. Configure the native defaults with `GOOGLE_RPM_LIMIT` (`GEMINI_RPM_LIMIT`
+under the legacy schema; `configured_google_rpm` is the one reader),
+`OPENAI_RPM_LIMIT`, `ANTHROPIC_RPM_LIMIT`, `DEEPSEEK_RPM_LIMIT`, `ZAI_RPM_LIMIT`
+and `XAI_RPM_LIMIT`, plus `MOONSHOT_RPM_LIMIT` for Kimi review bindings. Memory
+embeddings use their provider's bucket too. A new bucket holds one token, so a
+process's first request is not delayed by a refill interval. Every
 shipped provider has a conservative application-side default; operators may raise
 it only after checking the account's real quota. Direct model construction outside
 a bound `RuntimeServices` scope uses the same provider-specific process fallback

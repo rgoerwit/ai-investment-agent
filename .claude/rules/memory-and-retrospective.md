@@ -31,14 +31,20 @@ field, which is declared and never consumed.
 
 Both bounds are `Settings` fields read from the live `src.config.config`, because
 memory tests replace `src.memory.config` with a mock. Clamp only the per-request
-bound to a caller's enclosing deadline. Never clamp the startup probe, whose failure
-is cached for the process. See `docs/CODEBASE_MEMORY.md`.
+bound to a caller's enclosing deadline. Never clamp the startup probe, whose result
+is cached for the process: admit it only when its full bound fits, and never cache a
+deferral. Async entry points run it off the loop with `prepare_shared_embeddings`
+before building any memory. See `docs/CODEBASE_MEMORY.md`.
 
-One deadline per attempt covers the rate-limiter wait and the request. Fall back to
-an unthrottled request **only** when no limiter exists at setup — never after an
-error or timeout from the wait or the request, which would send the request twice.
+Build no memory object when memory is off or there is no ticker; never fall back to
+a shared collection.
+
+One deadline per attempt covers the rate-limiter wait and the request. Take the
+limiter from the embedding binding's provider through `limiter_for_binding`, never
+a Gemini singleton, and never send outside it after an error or timeout.
 Keep the embedding SDKs at one retry layer: OpenAI `max_retries=0`; Google's aiohttp
-path still re-sends once on a connection error, inside the attempt deadline.
+path still re-sends once on a connection error, inside the attempt deadline (the
+httpx-transport switch would drop environment proxies).
 
 ## The retrospective may not adjudicate the thesis
 

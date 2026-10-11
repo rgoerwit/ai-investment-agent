@@ -24,19 +24,33 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import aiohttp
 import pytest
-from langchain_google_genai._common import GoogleGenerativeAIError
+from google.genai import errors as genai_errors
 from langchain_openai import OpenAIEmbeddings
 from openai import InternalServerError
 from pydantic import ValidationError
 
 import src.memory as memory_module
 from src.config import Settings, config
-from src.embeddings import EmbeddingBinding, build_embeddings, resolve_embedding_binding
+from src.embeddings import (
+    EmbeddingBinding,
+    GoogleGenerativeAIEmbeddings,
+    build_embeddings,
+    resolve_embedding_binding,
+)
+from src.llm_runtime import rate_limits
 from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.timeouts import enclosing_deadline
-from src.llms import _LazyRateLimiterProxy
 from src.memory import EmbeddingAllowanceSpent, FinancialSituationMemory
+from src.runtime_services import (
+    ProviderRuntime,
+    ProviderRuntimeKey,
+    RuntimeServices,
+    use_runtime_services,
+)
+from src.tooling.inspection_service import InspectionService
+from src.tooling.runtime import ToolExecutionService
 
 _NOW = 1_000.0
 _VECTOR = [0.1] * 8
@@ -124,10 +138,11 @@ class Requests:
 
 
 def _memory(monkeypatch, embeddings: Any, limiter: Any) -> FinancialSituationMemory:
-    """A memory object built without its constructor: no Chroma client at all."""
-    import src.llms as llms
+    """A memory object built without its constructor: no Chroma client at all.
 
-    monkeypatch.setattr(llms, "GLOBAL_RATE_LIMITER", limiter)
+    ``limiter`` stands in for whatever the binding's provider resolves to.
+    """
+    monkeypatch.setattr(memory_module, "_embedding_rate_limiter", lambda _b: limiter)
     memory = FinancialSituationMemory.__new__(FinancialSituationMemory)
     memory.name = "TEST_embedding_deadline"
     memory.embedding_binding = resolve_embedding_binding(config)
@@ -320,53 +335,120 @@ async def test_limiter_wait_error_is_the_attempts_error_not_a_fallback(
     assert requests.count == 0
 
 
-# --- Fallback only when no limiter exists at setup ---------------------------
+# --- The limiter comes from the embedding binding's provider -----------------
 
 
-def _broken_factory() -> Any:
-    raise RuntimeError("limiter construction failed")
+def _runtime_with(limiters: dict[str, Any]) -> RuntimeServices:
+    """Runtime services whose provider runtime holds one limiter per vendor."""
+    providers = ProviderRuntime(
+        fetcher=SimpleNamespace(),
+        rate_limiter=limiters.get("google", CountingLimiter()),
+        rate_limiters={ProviderRuntimeKey(v): lim for v, lim in limiters.items()},
+    )
+    return RuntimeServices(
+        tool_service=ToolExecutionService(),
+        inspection_service=InspectionService(),
+        providers=providers,
+    )
+
+
+def _bound_memory(monkeypatch, provider: str, requests: Requests) -> Any:
+    """A constructor-free memory whose limiter is resolved for real."""
+    memory = FinancialSituationMemory.__new__(FinancialSituationMemory)
+    memory.name = "TEST_embedding_limiter"
+    memory.embedding_binding = EmbeddingBinding(
+        provider=provider, model="m", dimension=8
+    )
+    memory.available = True
+    memory.embeddings = _embeddings(requests)
+    memory.situation_collection = MagicMock()
+    return memory
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "limiter, error_type",
-    [
-        (object(), "TypeError"),
-        (_LazyRateLimiterProxy(_broken_factory), "RuntimeError"),
-    ],
-    ids=["no_async_acquire", "proxy_cannot_build"],
-)
-async def test_limiter_unavailable_at_setup_falls_back(
-    monkeypatch, limiter, error_type
+@pytest.mark.parametrize("provider", ["google", "openai"])
+async def test_the_binding_provider_selects_the_runtime_limiter(monkeypatch, provider):
+    limiters = {"google": CountingLimiter(), "openai": CountingLimiter()}
+    requests = Requests()
+    memory = _bound_memory(monkeypatch, provider, requests)
+
+    with use_runtime_services(_runtime_with(limiters)):
+        assert await memory._get_embedding("text") == _VECTOR
+
+    other = "openai" if provider == "google" else "google"
+    assert limiters[provider].acquired == 1
+    assert limiters[other].acquired == 0
+    assert requests.count == 1
+
+
+def test_an_unscoped_caller_gets_the_providers_process_fallback(monkeypatch):
+    rate_limits.reset_fallback_limiters_for_tests()
+    binding = EmbeddingBinding(provider="openai", model="m", dimension=8)
+
+    limiter = memory_module._embedding_rate_limiter(binding)
+
+    assert limiter is rate_limits.limiter_for_binding(config, "openai", None)
+    assert limiter.requests_per_second == pytest.approx(
+        config.openai_rpm_limit / 60.0 * 0.8
+    )
+    rate_limits.reset_fallback_limiters_for_tests()
+
+
+def test_an_explicit_openai_base_keys_the_limiter_by_its_host(monkeypatch):
+    seen: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        memory_module,
+        "limiter_for_binding",
+        lambda _s, vendor, host: seen.append((vendor, host)),
+    )
+    monkeypatch.setattr(config, "openai_api_base", "https://api.openai.com/v1")
+    memory_module._embedding_rate_limiter(
+        EmbeddingBinding(provider="openai", model="m", dimension=8)
+    )
+    # A compatible chat-plane base is not where embeddings go: no host.
+    monkeypatch.setattr(config, "openai_api_base", "https://api.moonshot.ai/v1")
+    memory_module._embedding_rate_limiter(
+        EmbeddingBinding(provider="openai", model="m", dimension=8)
+    )
+    assert seen == [("openai", "api.openai.com"), ("openai", None)]
+
+
+@pytest.mark.asyncio
+async def test_no_configured_limiter_sends_without_a_wait_or_a_warning(
+    monkeypatch, retry_sleeps
 ):
     requests = Requests()
-    memory = _memory(monkeypatch, _embeddings(requests), limiter)
+    memory = _bound_memory(monkeypatch, "unrated-vendor", requests)
     monkeypatch.setattr(memory_module, "logger", MagicMock())
 
-    assert await memory._get_embedding("text") == _VECTOR
+    with use_runtime_services(_runtime_with({})):
+        assert await memory._get_embedding("text") == _VECTOR
     assert requests.count == 1
-    kwargs = memory_module.logger.warning.call_args.kwargs
-    assert kwargs["fallback"] == "direct_embed_query"
-    assert kwargs["error_type"] == error_type
+    memory_module.logger.warning.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_limiter_import_failure_falls_back(monkeypatch):
+async def test_a_limiter_that_cannot_be_resolved_fails_the_attempt_unsent(
+    monkeypatch, retry_sleeps
+):
+    def broken(_binding: Any) -> Any:
+        raise RuntimeError("limiter construction failed")
+
     requests = Requests()
-    memory = _memory(monkeypatch, _embeddings(requests), CountingLimiter())
-    monkeypatch.setitem(sys.modules, "src.llms", None)
-    monkeypatch.setattr(memory_module, "logger", MagicMock())
+    memory = _memory(monkeypatch, _embeddings(requests), None)
+    monkeypatch.setattr(memory_module, "_embedding_rate_limiter", broken)
 
-    assert await memory._get_embedding("text") == _VECTOR
-    assert requests.count == 1
-    assert memory_module.logger.warning.call_args.kwargs["error_type"] in {
-        "ImportError",
-        "ModuleNotFoundError",
-    }
+    with pytest.raises(RuntimeError, match="limiter construction failed"):
+        await memory._get_embedding("text")
+    # Never sent outside the limiter, on any of the three attempts.
+    assert requests.count == 0
+    assert len(retry_sleeps) == 2
 
 
 @pytest.mark.asyncio
-async def test_fallback_request_still_has_the_attempt_deadline(monkeypatch, fake_clock):
+async def test_no_limiter_request_still_has_the_attempt_deadline(
+    monkeypatch, fake_clock
+):
     seen: list[float] = []
 
     async def spy(coro, *, timeout, label):
@@ -375,9 +457,8 @@ async def test_fallback_request_still_has_the_attempt_deadline(monkeypatch, fake
         seen.append(timeout)
         return _VECTOR
 
-    memory = _memory(monkeypatch, _embeddings(Requests()), object())
+    memory = _memory(monkeypatch, _embeddings(Requests()), None)
     monkeypatch.setattr(memory_module, "run_with_hard_timeout", spy)
-    monkeypatch.setattr(memory_module, "logger", MagicMock())
 
     with enclosing_deadline(4.0):
         await memory._get_embedding("text")
@@ -665,8 +746,6 @@ class _InstantSleepAsyncio:
 @pytest.fixture
 def google_wire(monkeypatch, no_httpx_escape) -> SimpleNamespace:
     """The Google GenAI async transport (aiohttp): count and script each send."""
-    import aiohttp
-
     wire = SimpleNamespace(sent=[], disconnect=False)
 
     async def respond(self, method, url, **kwargs):
@@ -688,7 +767,7 @@ def google_wire(monkeypatch, no_httpx_escape) -> SimpleNamespace:
 
 
 def _google_embeddings() -> Any:
-    return memory_module.GoogleGenerativeAIEmbeddings(
+    return GoogleGenerativeAIEmbeddings(
         model="models/gemini-embedding-001",
         google_api_key="test-dummy-not-a-key",
         task_type="retrieval_document",
@@ -703,8 +782,10 @@ async def test_google_sends_one_physical_request_per_attempt_on_http_error(
 ):
     memory = _memory(monkeypatch, _google_embeddings(), CountingLimiter())
 
-    with pytest.raises(GoogleGenerativeAIError, match="503"):
+    with pytest.raises(Exception, match="503") as raised:
         await memory._get_embedding("text")
+    # The SDK's own error for the HTTP response, not a wrapper's.
+    assert isinstance(raised.value.__cause__, genai_errors.ServerError)
     assert len(google_wire.sent) == 3  # retry_options=None: one SDK attempt
     assert all("generativelanguage.googleapis.com" in url for url in google_wire.sent)
 
@@ -722,8 +803,9 @@ async def test_google_aiohttp_disconnect_resends_once_within_the_attempt(
     google_wire.disconnect = True
     memory = _memory(monkeypatch, _google_embeddings(), CountingLimiter())
 
-    with pytest.raises(GoogleGenerativeAIError, match="Server disconnected"):
+    with pytest.raises(Exception, match="Server disconnected") as raised:
         await memory._get_embedding("text")
+    assert isinstance(raised.value.__cause__, aiohttp.ServerDisconnectedError)
     assert len(google_wire.sent) == 6  # three attempts, two sends each
 
 

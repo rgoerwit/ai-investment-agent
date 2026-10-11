@@ -140,7 +140,7 @@ class TestMemoryIsolation:
             with patch("src.memory.config") as mock_config:
                 mock_config.get_google_api_key.return_value = "test-key"
                 with patch(
-                    "src.memory.GoogleGenerativeAIEmbeddings"
+                    "src.embeddings.GoogleGenerativeAIEmbeddings"
                 ) as mock_embeddings_class:
                     mock_embeddings = MagicMock()
                     mock_embeddings.embed_query.return_value = [0.1] * 768
@@ -222,7 +222,7 @@ class TestMemoryContaminationPrevention:
             with patch("src.memory.config") as mock_config:
                 mock_config.get_google_api_key.return_value = "test-key"
                 with patch(
-                    "src.memory.GoogleGenerativeAIEmbeddings"
+                    "src.embeddings.GoogleGenerativeAIEmbeddings"
                 ) as mock_embeddings_class:
                     mock_embeddings = MagicMock()
                     mock_embeddings.embed_query.return_value = [0.1] * 768
@@ -373,7 +373,7 @@ class TestMemoryStats:
             with patch("src.memory.config") as mock_config:
                 mock_config.get_google_api_key.return_value = "test-key"
                 with patch(
-                    "src.memory.GoogleGenerativeAIEmbeddings"
+                    "src.embeddings.GoogleGenerativeAIEmbeddings"
                 ) as mock_embeddings_class:
                     mock_embeddings = MagicMock()
                     mock_embeddings.embed_query.return_value = [0.1] * 768

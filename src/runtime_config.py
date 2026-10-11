@@ -7,6 +7,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from src.llm_runtime.rate_limits import configured_google_rpm
+
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -40,18 +42,13 @@ class RuntimeConfig:
 
     @classmethod
     def from_config(cls, base_config: Any) -> RuntimeConfig:
-        google_rpm_limit = (
-            base_config.google_rpm_limit
-            if getattr(base_config, "llm_base_provider", None) is not None
-            else base_config.gemini_rpm_limit
-        )
         return cls(
             quick_think_llm=base_config.quick_think_llm,
             deep_think_llm=base_config.deep_think_llm,
             enable_memory=base_config.enable_memory,
             langfuse_enabled=base_config.langfuse_enabled,
             llm_attempts=base_config.llm_attempts,
-            google_rpm_limit=google_rpm_limit,
+            google_rpm_limit=configured_google_rpm(base_config),
             llm_call_hard_timeout_seconds=base_config.llm_call_hard_timeout_seconds,
             quick_mode_active=getattr(base_config, "quick_mode_active", False),
             images_dir=Path(base_config.images_dir),
@@ -120,14 +117,10 @@ def quick_runtime_clamp_changes(
     after = runtime_config.llm_attempts
     if after < before:
         changes["llm_attempts"] = {"from": before, "to": after}
-    configured_google_rpm = (
-        base_config.google_rpm_limit
-        if getattr(base_config, "llm_base_provider", None) is not None
-        else base_config.gemini_rpm_limit
-    )
-    if runtime_config.google_rpm_limit < configured_google_rpm:
+    configured_rpm = configured_google_rpm(base_config)
+    if runtime_config.google_rpm_limit < configured_rpm:
         changes["google_rpm_limit"] = {
-            "from": configured_google_rpm,
+            "from": configured_rpm,
             "to": runtime_config.google_rpm_limit,
         }
     return changes

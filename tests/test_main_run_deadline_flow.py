@@ -26,8 +26,11 @@ def network_attempts(monkeypatch):
     return install_offline_network(monkeypatch)
 
 
+@pytest.mark.parametrize(
+    "memory_flag", ["--no-memory", None], ids=["no_memory", "memory"]
+)
 def test_spent_run_deadline_fails_closed_through_the_real_main_flow(
-    monkeypatch, tmp_path, capsys, network_attempts
+    monkeypatch, tmp_path, capsys, network_attempts, memory_flag
 ):
     from src import cli
     from src.config import config
@@ -69,17 +72,38 @@ def test_spent_run_deadline_fails_closed_through_the_real_main_flow(
 
     monkeypatch.setattr(main_module, "_attach_run_summary", spy_attach)
 
+    # Memory work under the spent deadline: constructions, embedding clients
+    # built and startup probes sent.
+    import src.memory as memory_module
+
+    constructed: list[str] = []
+    real_init = memory_module.FinancialSituationMemory.__init__
+
+    def spy_init(self, name):
+        constructed.append(name)
+        real_init(self, name)
+
+    monkeypatch.setattr(memory_module.FinancialSituationMemory, "__init__", spy_init)
+    built: list[object] = []
+    real_build = memory_module.build_embeddings
+    monkeypatch.setattr(
+        memory_module,
+        "build_embeddings",
+        lambda *a, **k: built.append(a) or real_build(*a, **k),
+    )
+    memory_module.FinancialSituationMemory._reset_shared_state_for_tests()
+
     args = cli.build_arg_parser().parse_args(
         [
             "--ticker",
             "7203.T",
             "--quick",
             "--quiet",
-            "--no-memory",
             "--no-charts",
             # Name resolution is refused offline; without this the pre-LLM
             # data-vacuum gate stops the run before the graph.
             "--force-data-vacuum",
+            *([memory_flag] if memory_flag else []),
         ]
     )
 
@@ -87,6 +111,16 @@ def test_spent_run_deadline_fails_closed_through_the_real_main_flow(
     out = capsys.readouterr().out
 
     assert network_attempts == []
+    # No embeddings client is built, so no probe can be sent: with memory off
+    # no memory object exists, and with memory on the spent deadline defers
+    # the probe (and caches nothing) instead of running it for its full bound.
+    assert built == []
+    if memory_flag:
+        assert constructed == []
+    else:
+        # The memory path really ran: at least the lessons memory was built.
+        assert constructed
+    memory_module.FinancialSituationMemory._reset_shared_state_for_tests()
 
     # A saved but technically invalid run, never a success.
     assert exit_code == 2

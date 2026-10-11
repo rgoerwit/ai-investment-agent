@@ -49,6 +49,7 @@ from src.llm_runtime.dispatch import (  # noqa: F401 - re-exported for callers
     refuse_streaming,
 )
 from src.llm_runtime.failover import ModelFailoverMixin
+from src.llm_runtime.rate_limits import configured_google_rpm
 from src.llm_runtime.seats import SEATS, ModelIntent, SeatId
 from src.llm_runtime.timeouts import (
     BudgetExhausted,
@@ -364,16 +365,6 @@ def _create_rate_limiter_from_rpm(rpm: int) -> InMemoryRateLimiter:
     return create_process_rate_limiter(rpm)
 
 
-def create_process_rate_limiter(rpm: int | None = None) -> InMemoryRateLimiter:
-    """Create an owned rate limiter for a long-lived process/runtime.
-
-    Bare calls intentionally use base config. CLI-scoped runs pass an explicit
-    rpm from ``RuntimeConfig`` through ``ProviderRuntime``.
-    """
-    effective_rpm = rpm if rpm is not None else config_module.config.gemini_rpm_limit
-    return _create_rate_limiter_from_rpm(effective_rpm)
-
-
 def _reset_init_log_cache_for_tests() -> None:
     """Reset one-time init logging state for tests."""
     _logged_model_init_configs.clear()
@@ -421,15 +412,6 @@ class _LazyRateLimiterProxy(BaseRateLimiter):
             self._instance = self._factory()
         return self._instance
 
-    def resolve(self) -> BaseRateLimiter:
-        """The limiter this proxy delegates to now, built on first use.
-
-        Lets a caller decide once, before it waits, whether a limiter exists
-        (the memory embedding path), so a failure to build one is never confused
-        with a failure of the wait or of the request that follows it.
-        """
-        return self._get_instance()
-
     def acquire(self, *, blocking: bool = True) -> bool:
         return self._get_instance().acquire(blocking=blocking)
 
@@ -454,7 +436,7 @@ class _LazyRateLimiterProxy(BaseRateLimiter):
 GLOBAL_RATE_LIMITER = _LazyRateLimiterProxy(
     # Legacy fallback for unscoped callers; CLI-scoped runs bind a
     # ProviderRuntime with an explicit rate limiter built from RuntimeConfig.
-    lambda: _create_rate_limiter_from_rpm(config_module.config.gemini_rpm_limit)
+    lambda: _create_rate_limiter_from_rpm(configured_google_rpm(config_module.config))
 )
 
 # Lazily-constructed OpenAI rate limiter.  None when OPENAI_RPM_LIMIT is unset

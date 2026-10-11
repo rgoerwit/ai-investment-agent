@@ -198,9 +198,9 @@ class _InstantLimiter:
 
 def _bare_memory(monkeypatch, embeddings: Any) -> FinancialSituationMemory:
     """A memory object built without its constructor: no Chroma client at all."""
-    import src.llms as llms
-
-    monkeypatch.setattr(llms, "GLOBAL_RATE_LIMITER", _InstantLimiter())
+    monkeypatch.setattr(
+        memory_module, "_embedding_rate_limiter", lambda _binding: _InstantLimiter()
+    )
     memory = FinancialSituationMemory.__new__(FinancialSituationMemory)
     memory.name = "TEST_operational_memory"
     memory.embedding_binding = resolve_embedding_binding(config)
@@ -303,9 +303,6 @@ def _probe_memory(monkeypatch, embed_query) -> FinancialSituationMemory:
     )
     embeddings = MagicMock()
     embeddings.embed_query.side_effect = embed_query
-    monkeypatch.setattr(
-        memory_module, "GoogleGenerativeAIEmbeddings", lambda **_k: embeddings
-    )
     monkeypatch.setattr(memory_module, "build_embeddings", lambda *_a, **_k: embeddings)
     monkeypatch.setattr(
         FinancialSituationMemory,
@@ -330,15 +327,48 @@ def test_embedding_probe_override_bounds_the_constructor(
     assert memory.embeddings_available is False
 
 
-def test_embedding_probe_is_not_clamped_to_a_caller_deadline(
+def test_embedding_probe_runs_at_its_full_bound_when_it_fits(
     monkeypatch, isolated_memory_state, fake_clock
 ):
-    # Its failure is cached for the process, so a spent caller deadline must
-    # not turn embeddings off for everyone.
+    # Never clamped: its result is cached for the process, so a probe cut
+    # short by one caller would turn embeddings off for every caller.
+    seen: list[float] = []
+    real_sync = memory_module.run_blocking_call_sync
+
+    def spy(policy, fn):
+        seen.append(policy.hard_timeout_seconds)
+        return real_sync(policy, fn)
+
+    monkeypatch.setattr(memory_module, "run_blocking_call_sync", spy)
+    monkeypatch.setattr(config, "memory_embedding_healthcheck_timeout_seconds", 15.0)
+    with enclosing_deadline(20.0):
+        memory = _probe_memory(monkeypatch, lambda *_a: [0.1] * 8)
+    assert seen == [15.0]
+    assert memory.embeddings_available is True
+
+
+def test_embedding_probe_is_deferred_not_cached_under_a_spent_deadline(
+    monkeypatch, isolated_memory_state, fake_clock
+):
+    calls: list[str] = []
+
+    def embed(text):
+        calls.append(text)
+        return [0.1] * 8
+
     with enclosing_deadline(1.0):
         fake_clock[0] += 2.0
-        memory = _probe_memory(monkeypatch, lambda *_a: [0.1] * 8)
-    assert memory.embeddings_available is True
+        memory = _probe_memory(monkeypatch, embed)
+    assert calls == []
+    assert memory.embeddings is None
+    assert memory.available is False
+
+    # Nothing was cached: the next caller with time left probes, once.
+    later = FinancialSituationMemory("TEST_operational_probe_later")
+    again = FinancialSituationMemory("TEST_operational_probe_again")
+    assert calls == ["initialization test"]
+    assert later.embeddings_available is True
+    assert again.embeddings_available is True
 
 
 # --- Shutdown: GenAI client close ------------------------------------------

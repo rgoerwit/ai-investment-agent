@@ -221,8 +221,8 @@ def _embedding_provider_unreachable(request, monkeypatch):
 
     The session's dummy ``GOOGLE_API_KEY`` is enough for ``FinancialSituationMemory``
     to build a real embeddings client and run its startup probe, so any test that
-    constructs a memory without patching the client -- including every graph built
-    with memory disabled, which still creates the five legacy memories -- sent an
+    constructs a memory without patching the client -- including, until October
+    2026, every graph built with memory disabled -- sent an
     ``embed_content`` request to Google (57 requests from 19 tests in one full run;
     offline, each waited out the probe timeout). Refusing at the SDK method keeps
     the client real for construction assertions, fails the probe exactly as an

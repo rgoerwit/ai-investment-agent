@@ -17,7 +17,12 @@ from urllib.parse import urlparse
 from langchain_core.rate_limiters import BaseRateLimiter
 
 from src.error_safety import redact_sensitive_text
-from src.llm_runtime.rate_limits import create_process_rate_limiter
+from src.llm_runtime.rate_limits import (
+    NON_GOOGLE_RATE_LIMITED_VENDORS,
+    configured_google_rpm,
+    create_process_rate_limiter,
+    provider_rpm,
+)
 from src.text_patterns import is_safe_public_host
 from src.tooling.inspection_service import INSPECTION_SERVICE, InspectionService
 from src.tooling.inspector import ContentInspector
@@ -211,13 +216,8 @@ def build_provider_runtime(
 
     if rate_limiter is None:
         if explicit:
-            configured_google_rpm = (
-                settings.google_rpm_limit
-                if settings.llm_base_provider is not None
-                else settings.gemini_rpm_limit
-            )
             rate_limiter = create_process_rate_limiter(
-                rpm=google_rpm_override or configured_google_rpm
+                rpm=google_rpm_override or configured_google_rpm(settings)
             )
         else:
             from src.llms import GLOBAL_RATE_LIMITER
@@ -226,17 +226,11 @@ def build_provider_runtime(
 
     resolved_limiters = dict(rate_limiters or {})
     resolved_limiters.setdefault(ProviderRuntimeKey("google"), rate_limiter)
-    for vendor_id, field_name in (
-        ("openai", "openai_rpm_limit"),
-        ("anthropic", "anthropic_rpm_limit"),
-        ("deepseek", "deepseek_rpm_limit"),
-        ("zai", "zai_rpm_limit"),
-        ("moonshot", "moonshot_rpm_limit"),
-    ):
-        rpm = getattr(settings, field_name, None)
+    for vendor_id in NON_GOOGLE_RATE_LIMITED_VENDORS:
+        rpm = provider_rpm(settings, vendor_id)
         key = ProviderRuntimeKey(vendor_id)
         if rpm is not None and key not in resolved_limiters:
-            resolved_limiters[key] = create_process_rate_limiter(rpm=int(rpm))
+            resolved_limiters[key] = create_process_rate_limiter(rpm=rpm)
 
     return ProviderRuntime(
         fetcher=fetcher,
