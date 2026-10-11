@@ -138,7 +138,7 @@ ALLOWLIST: dict[str, str] = {
         "(CONSULTANT_HARD_TIMEOUT_GRACE_SECONDS): the gap that lets the "
         "cooperative deadline win over the hard node bound, a relation not a knob"
     ),
-    "src/llm_runtime/construction.py::build_legacy_model::create_gemini_model(timeout)": (
+    "src/llm_runtime/construction.py::_build_legacy_client::create_gemini_model(timeout)": (
         "fallback mirrors the Health Check seat's client_timeout_seconds "
         "(10.0, src/llm_runtime/seats.py), which always sets it; legacy path only"
     ),

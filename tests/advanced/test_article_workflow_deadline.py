@@ -744,40 +744,30 @@ class TestWriterSettingsAreHonoured:
         )
         assert llm.max_retries == 0
 
-    def test_canonical_overrides_reach_the_client(self):
-        policy = seat_policy_with(
-            SeatId.ARTICLE_WRITER,
-            sampling_temperature=0.3,
-            client_timeout_seconds=111.0,
-        )
-        llm = _build(SeatId.ARTICLE_WRITER, _settings(), execution_policy=policy)
-        assert llm.max_retries == 0
-        assert llm.default_request_timeout == pytest.approx(111.0)
+    # The request ceiling an override sends is asserted at the SDK request
+    # layer in tests/llm_runtime/test_policy_override_dispatch.py.
 
-    def test_legacy_overrides_reach_the_client_temperature_included(self):
+    def test_legacy_temperature_reaches_the_client(self):
         settings = Settings(
             _env_file=None,
             google_api_key="g",
             claude_api_key="a",
             writer_model="claude-haiku-4-5",
         )
-        policy = seat_policy_with(
-            SeatId.ARTICLE_WRITER,
-            sampling_temperature=0.3,
-            client_timeout_seconds=111.0,
-        )
+        policy = seat_policy_with(SeatId.ARTICLE_WRITER, sampling_temperature=0.3)
         llm = _build(SeatId.ARTICLE_WRITER, settings, execution_policy=policy)
         assert llm.temperature == pytest.approx(0.3)
         assert llm.max_retries == 0
-        assert llm.default_request_timeout == pytest.approx(111.0)
 
-    def test_the_seam_passes_every_setting_it_is_given(self, monkeypatch):
+    def test_the_seam_takes_a_temperature_and_no_timeout(self, monkeypatch):
         from src import article_writer
 
         monkeypatch.setattr(article_writer, "config", _settings())
-        llm = article_writer.create_writer_llm(temperature=0.3, timeout=111.0)
+        llm = article_writer.create_writer_llm(temperature=0.3)
         assert llm.max_retries == 0
-        assert llm.default_request_timeout == pytest.approx(111.0)
+        assert llm.request_cap_override is None
+        with pytest.raises(TypeError, match="timeout"):
+            article_writer.create_writer_llm(timeout=111.0)
 
     def test_no_override_keeps_the_registered_policy(self):
         assert seat_policy_with(SeatId.ARTICLE_WRITER) is None

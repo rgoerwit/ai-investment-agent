@@ -13,6 +13,9 @@ from src.llm_runtime.seats import SEATS, BindingGroup, SeatId
 
 
 class _FakeOpenAITransport:
+    # Declared like the real transports, which carry a seat's client timeout.
+    request_cap_override: float | None = None
+
     def __init__(self, **kwargs):
         for name, value in kwargs.items():
             setattr(self, name, value)

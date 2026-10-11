@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- An explicit seat client timeout now reaches every request. A writer built with a
+  111 s `client_timeout_seconds` sent about 298 s, because dispatch took the
+  registered seat's policy from the invocation scope and never saw the model's own
+  override. The override is stamped on the transport at construction
+  (`request_cap_override`) and resolved at every dispatch by `policy_for_provider`:
+  the model's override, then the canonical seat's, then the receiving vendor's
+  ceiling, always bounded by the deadline; a shorter ceiling lowers the minimum
+  useful attempt with it. OpenAI-compatible vendors now refuse a `service_tier`
+  passed at invocation or through bound kwargs before sending. The
+  `article_writer.create_writer_llm` seam no longer takes `timeout`, and the legacy
+  writer fallback chain refuses any override other than temperature.
+
 - Unit tests are offline by rule, and integration tests are opt-in. One autouse
   `_offline_boundary` fixture refuses sockets, DNS, libcurl and the embedding SDKs for
   every non-`integration` test and fails any test that tried, naming targets and

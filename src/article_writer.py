@@ -74,40 +74,23 @@ _WRITER_SEAT = SEATS[SeatId.ARTICLE_WRITER].callback_name
 _WRITER_FALLBACK_SEAT = SEATS[SeatId.ARTICLE_WRITER_REVIEW_FALLBACK].callback_name
 
 
-def _policy_overrides(
-    *,
-    temperature: float | None,
-    timeout: float | None,
-) -> dict[str, Any]:
-    """A caller's explicit writer settings, as ``SeatExecutionPolicy`` fields."""
-    return {
-        "sampling_temperature": temperature,
-        "client_timeout_seconds": timeout,
-    }
-
-
 def create_writer_llm(
     *,
     callbacks: list[BaseCallbackHandler] | None = None,
     temperature: float | None = None,
-    timeout: float | None = None,
 ):
     """Patch seam backed by the canonical writer seat.
 
-    Every setting passed is honoured, as a per-construction replacement of
-    the seat's policy: ``temperature`` (sampling temperature; ignored by a
-    Claude model with thinking, which Anthropic requires at 1.0) and
-    ``timeout`` (the client's request ceiling). Omitted, the seat policy
-    stands. Every client sends one SDK attempt per request -- the runtime loop
-    owns the writer's retries -- and inside an invocation every request is
-    sized from the invocation deadline.
+    ``temperature`` (sampling temperature; ignored by a Claude model with
+    thinking, which Anthropic requires at 1.0) replaces the seat policy's for
+    this construction; omitted, the seat policy stands. The client's request
+    ceiling is the seat's: every client sends one SDK attempt per request --
+    the runtime loop owns the writer's retries -- and inside an invocation
+    every request is sized from the invocation deadline.
     """
 
     callbacks = callbacks or []
-    overrides = _policy_overrides(
-        temperature=temperature,
-        timeout=timeout,
-    )
+    overrides = {"sampling_temperature": temperature}
     plan = resolve_binding_plan(config)
     if plan.schema == "new" and not plan.statuses[SeatId.ARTICLE_WRITER].enabled:
         tiers = writer_seat_fallback_chain(

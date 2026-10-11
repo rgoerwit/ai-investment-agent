@@ -17,7 +17,8 @@ construction, and legacy constructors never receive it, so it cannot serve.
 
 A compatible vendor (any ``dispatch_provider`` other than ``"openai"``) has no
 service tiers: it may not be built with one, its failover copy carries none,
-and a dispatch never adds one.
+a dispatch never adds one, and one passed at invocation or through bound kwargs
+is refused before anything is sent.
 
 **One SDK attempt per request is a property of the class.** ``max_retries``
 defaults to zero retries and any other value is refused at construction
@@ -38,7 +39,7 @@ from typing import Any, ClassVar, Literal
 
 import structlog
 from langchain_core.language_models import BaseChatModel
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from src.error_safety import summarize_exception
 from src.llm_runtime.dispatch import (
@@ -157,6 +158,9 @@ def _define_openai_cls() -> type[BaseChatModel]:
         failover_model: str | None = None
         # The seat's TimeoutClass value, used to size a direct caller's flex request.
         budget_timeout_class: str | None = None
+        # The seat policy's explicit client timeout, stamped at construction
+        # (``attach_request_cap_override``) and resolved at every dispatch.
+        request_cap_override: float | None = Field(default=None, gt=0)
         # Streaming would bypass the dispatch check; route every public
         # stream/invoke path through ``_generate``/``_agenerate`` instead.
         disable_streaming: bool | Literal["tool_calling"] = True
@@ -166,12 +170,16 @@ def _define_openai_cls() -> type[BaseChatModel]:
             self.dispatch_provider = _normalized_provider(self.dispatch_provider)
             _refuse_streaming_field(self)
             require_single_sdk_attempt(self, 0)
-            if not self._native() and self.service_tier is not None:
+            if self.service_tier is not None:
+                self._refuse_tier_off_native()
+            return self
+
+        def _refuse_tier_off_native(self) -> None:
+            if not self._native():
                 raise ValueError(
                     "service_tier is an OpenAI product; the OpenAI-compatible "
                     f"vendor {self.dispatch_provider!r} must not receive one"
                 )
-            return self
 
         def _native(self) -> bool:
             return self.dispatch_provider == OPENAI_NATIVE_PROVIDER
@@ -202,6 +210,13 @@ def _define_openai_cls() -> type[BaseChatModel]:
             return tier if isinstance(tier, str) else None
 
         def _payload_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+            if kwargs.get("service_tier") is not None:
+                # From invocation or bound kwargs: refused before any send, as
+                # at construction.
+                self._refuse_tier_off_native()
+            elif "service_tier" in kwargs and not self._native():
+                # An explicit None is no tier: a compatible vendor gets no field.
+                kwargs = {k: v for k, v in kwargs.items() if k != "service_tier"}
             # A model learned to be flex-incapable — or a provider learned to be
             # congested — must not send "flex" from the constructor field; invoke
             # kwargs override _default_params.
@@ -320,6 +335,7 @@ def _define_anthropic_cls() -> type[BaseChatModel]:
         # Zero SDK retries; the parent's default is 2.
         max_retries: int = 0
         budget_timeout_class: str | None = None
+        request_cap_override: float | None = Field(default=None, gt=0)
         disable_streaming: bool | Literal["tool_calling"] = True
 
         @model_validator(mode="after")

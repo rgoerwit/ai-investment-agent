@@ -1,6 +1,6 @@
 # LLM Provider Qualification and Operations
 
-Last updated: 2026-10-11 (one minimum-useful-attempt fraction and one margin rule; one retry owner: every client sends one SDK attempt
+Last updated: 2026-10-11 (an explicit seat client timeout reaches every request through one precedence chain; compatible vendors refuse an invocation tier; one minimum-useful-attempt fraction and one margin rule; one retry owner: every client sends one SDK attempt
 and the runtime loop owns retries; the injection judge and signal processor
 resolve their seats; one Google RPM reader, embeddings on their provider's
 rate-limit bucket, a first token in every new bucket; 2026-10-09:
@@ -478,6 +478,24 @@ inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
   provider (`policy_for_provider`). Model failover is same-vendor by validation,
   so a delegate on another vendor is not reachable today; this keeps a future
   cross-vendor delegate from sending the original vendor's ceiling.
+- **An explicit client timeout reaches the request (round 4).** The scope
+  resolves the *registered* seat by display name, so a client built with an
+  override (`seat_policy_with(..., client_timeout_seconds=111)`) carried 111 s
+  only as its construction timeout: every dispatch re-sized from the scope and
+  sent about 298 s; a direct caller under an enclosing deadline sent the class
+  ceiling (300 s), and so did the Health Check's registered 10 s. Now the two
+  construction choke points (`SeatModelFactory.build`, `build_legacy_model`)
+  stamp the effective `SeatExecutionPolicy.client_timeout_seconds` on the
+  transport as `request_cap_override`, and every dispatch resolves one chain in
+  `policy_for_provider`: the model's override, then the canonical seat's (the
+  scope), then the receiving vendor's ceiling -- always bounded by the inherited
+  deadline. An override replaces the ceiling, as a registered one always did,
+  so it may exceed the vendor's. A shorter ceiling lowers the minimum useful
+  attempt to its share (`min_useful_seconds`). The field survives `model_copy`,
+  the failover copy and every canonical writer fallback tier; settings are still
+  read at dispatch, never frozen on the model. The legacy writer chain refuses
+  any override but the temperature, and the writer seam no longer takes a
+  `timeout` (no production caller passed one).
 - **Every OpenAI-family and Anthropic client is deadline-aware, and names its
   vendor.** Until October 2026 only the flex-tier OpenAI client and Gemini went
   through the dispatch check. The canonical OpenAI adapter without a failover,
@@ -496,7 +514,9 @@ inherited it. It is gone; `src/llm_runtime/timeouts.py` replaces it.
   `OPENAI_COMPATIBLE_CLIENT_TIMEOUT_SECONDS` ceiling, and keyed into OpenAI's flex
   health. A non-OpenAI host on the legacy path or the alternate transport is
   `openai_compatible`. A compatible vendor never carries a service tier: it
-  cannot be built with one, and its failover copy sends none. Anthropic takes the
+  cannot be built with one, its failover copy sends none, and a tier passed at
+  invocation or through bound kwargs is refused before anything is sent (round
+  4; it used to reach the vendor). An explicit `service_tier=None` sends no field. Anthropic takes the
   sized `timeout` per request on both its sync and async paths. **Behaviour change:** inside an invocation these clients
   now send a request sized from the deadline, and the Consultant's alternate
   transport on a compatible base is built with the compatible ceiling instead of

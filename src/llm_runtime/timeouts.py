@@ -459,25 +459,51 @@ def _provider_family(provider: str | None) -> str:
 
 
 def policy_for_provider(
-    policy: BudgetPolicy, provider: str | None, *, cfg: Any = None
+    policy: BudgetPolicy,
+    provider: str | None,
+    *,
+    request_cap_override: float | None = None,
+    cfg: Any = None,
 ) -> BudgetPolicy:
-    """The scope's policy with its request ceiling re-derived for ``provider``.
+    """``policy`` with its request ceiling resolved for the request being sent.
 
-    The invocation's allowance (cap, margin, minimum useful attempt, attempts)
-    belongs to the invocation and is kept, as is the deadline it was opened
-    with. Only the per-request ceiling is a property of the vendor that
-    actually receives the request: a delegate on another vendor must not send
-    the original vendor's ceiling. A seat's explicit client timeout still wins.
+    The one precedence chain for a request's ceiling: the sending model's
+    explicit ``request_cap_override``, then the policy's own (the canonical
+    seat's client timeout), then the ceiling of ``provider``, the vendor that
+    actually receives the request -- a delegate on another vendor must not
+    send the original vendor's ceiling. An override replaces the ceiling, so
+    it may exceed the vendor's; the deadline bounds every request anyway
+    (``request_timeout``).
+
+    The invocation's allowance (cap, margin, attempts) belongs to the
+    invocation and is kept, as is the deadline it was opened with. The
+    minimum useful attempt can only fall, to the share of a shorter ceiling
+    (``min_useful_seconds``): a request ceiling shorter than the minimum
+    would refuse every request.
     """
-    if _provider_family(policy.provider) == _provider_family(provider):
+    override = (
+        float(request_cap_override)
+        if request_cap_override is not None
+        else policy.request_cap_override
+    )
+    same_vendor = _provider_family(policy.provider) == _provider_family(provider)
+    if same_vendor and override == policy.request_cap_override:
         return policy
-    if policy.request_cap_override is not None:
-        request_cap = policy.request_cap_override
+    if override is not None:
+        request_cap = override
     else:
         request_cap = _standard_request_cap(
             policy.timeout_class, provider, resolve_settings(cfg), policy.quick_mode
         )
-    return replace(policy, provider=provider, request_cap=request_cap)
+    return replace(
+        policy,
+        provider=provider,
+        request_cap=request_cap,
+        request_cap_override=override,
+        min_useful_attempt=min(
+            policy.min_useful_attempt, min_useful_seconds(request_cap, cfg)
+        ),
+    )
 
 
 def request_timeout(

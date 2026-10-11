@@ -10,6 +10,7 @@ from langchain_core.language_models import BaseChatModel
 from src.config import Settings, config
 from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.bindings import BindingPlan, resolve_binding_plan
+from src.llm_runtime.dispatch import attach_request_cap_override
 from src.llm_runtime.factory import SeatModelFactory
 from src.llm_runtime.profiles import reasoning_value_for_seat, resolve_profile
 from src.llm_runtime.seats import (
@@ -61,8 +62,25 @@ def build_legacy_model(
     *,
     graph_factories: LegacyGraphFactories | None = None,
 ) -> BaseChatModel | None:
-    """Construct any legacy seat through one compatibility dispatcher."""
+    """Construct any legacy seat through one compatibility dispatcher.
 
+    The seat policy's client timeout is stamped on the result, so every
+    dispatch resolves it whichever legacy factory built the client.
+    """
+
+    model = _build_legacy_client(request, graph_factories=graph_factories)
+    if model is None:
+        return None
+    spec = _spec_with_policy(request.seat_id, request.execution_policy)
+    attach_request_cap_override(model, spec.execution_policy.client_timeout_seconds)
+    return model
+
+
+def _build_legacy_client(
+    request: LegacySeatRequest,
+    *,
+    graph_factories: LegacyGraphFactories | None,
+) -> BaseChatModel | None:
     from src import llms
 
     seat_id = request.seat_id
@@ -419,13 +437,23 @@ def writer_seat_fallback_chain(
 
     ``policy_overrides`` (``SeatExecutionPolicy`` field values) apply to every
     tier's construction, so a caller's explicit settings reach the tier that
-    actually writes. The legacy chain honours ``sampling_temperature`` only;
-    its tiers take their attempts and ceilings from the seat policy.
+    actually writes. The legacy chain honours ``sampling_temperature`` only
+    and refuses any other override rather than drop it.
     """
 
     resolved_plan = plan or resolve_binding_plan(settings)
-    overrides = dict(policy_overrides or {})
+    overrides = {
+        key: value
+        for key, value in (policy_overrides or {}).items()
+        if value is not None
+    }
     if resolved_plan.schema == "legacy":
+        unkept = sorted(set(overrides) - {"sampling_temperature"})
+        if unkept:
+            raise ValueError(
+                f"the legacy writer fallback chain cannot keep {unkept}; "
+                "only sampling_temperature reaches its tiers"
+            )
         from src.llms import writer_fallback_chain
 
         legacy_kwargs: dict[str, Any] = {}

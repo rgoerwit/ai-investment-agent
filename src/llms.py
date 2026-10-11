@@ -603,6 +603,9 @@ class _TieredChatGoogleGenerativeAI(ModelFailoverMixin, ChatGoogleGenerativeAI):
     failover_model: str | None = None
     # The seat's TimeoutClass value, used to size a direct caller's flex request.
     budget_timeout_class: str | None = None
+    # The seat policy's explicit client timeout, stamped at construction
+    # (``attach_request_cap_override``) and resolved at every dispatch.
+    request_cap_override: float | None = Field(default=None, gt=0)
     disable_streaming: bool | Literal["tool_calling"] = True
 
     @model_validator(mode="after")

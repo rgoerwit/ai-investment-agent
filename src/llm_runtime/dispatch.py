@@ -201,14 +201,46 @@ def _construction_timeout(model: Any) -> float | None:
     return None
 
 
+REQUEST_CAP_OVERRIDE_FIELD = "request_cap_override"
+
+
+def attach_request_cap_override(model: Any, seconds: float | None) -> Any:
+    """Stamp a seat policy's explicit client timeout on a constructed transport.
+
+    The two construction choke points (``SeatModelFactory.build`` and
+    ``build_legacy_model``) call this with ``client_timeout_seconds``, so every
+    dispatch of the model -- scoped or direct, a ``model_copy`` and the
+    failover copy included -- resolves the override through
+    ``policy_for_provider``. ``None`` stamps nothing. A model that cannot
+    carry an override fails loudly rather than silently sending another
+    ceiling.
+    """
+    if seconds is None:
+        return model
+    if not hasattr(model, REQUEST_CAP_OVERRIDE_FIELD):
+        raise TypeError(
+            f"{type(model).__name__} cannot carry a {REQUEST_CAP_OVERRIDE_FIELD}; "
+            "only the deadline-aware transports size requests at dispatch"
+        )
+    setattr(model, REQUEST_CAP_OVERRIDE_FIELD, float(seconds))
+    return model
+
+
 def _dispatch_budget(
     model: Any, provider: str
 ) -> tuple[BudgetPolicy, float | None, DispatchScope | None]:
+    # The request ceiling's precedence (policy_for_provider): this model's
+    # explicit override, the canonical seat policy, the receiving vendor's.
+    override = getattr(model, REQUEST_CAP_OVERRIDE_FIELD, None)
     scope = current_dispatch_scope()
     if scope is not None:
-        # The deadline is the invocation's; the request ceiling is the vendor's
-        # that actually receives this request (a delegate could be another one).
-        return policy_for_provider(scope.policy, provider), scope.deadline, scope
+        # The deadline is the invocation's; the request ceiling is resolved for
+        # the vendor that actually receives this request (a delegate could be
+        # another one).
+        policy = policy_for_provider(
+            scope.policy, provider, request_cap_override=override
+        )
+        return policy, scope.deadline, scope
     # A direct caller (no invocation scope). Its requests are still admitted
     # and sized against an enclosing deadline when one is bound, under the
     # model's own class policy; with none bound, nothing changes.
@@ -219,7 +251,9 @@ def _dispatch_budget(
         else TimeoutClass.AUXILIARY
     )
     return (
-        resolve_budget_policy(timeout_class, provider=provider),
+        resolve_budget_policy(
+            timeout_class, provider=provider, request_cap_override=override
+        ),
         current_enclosing_deadline(),
         None,
     )

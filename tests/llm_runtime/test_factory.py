@@ -261,6 +261,8 @@ def test_openai_adapter_omits_temperature_but_keeps_health_bounds(monkeypatch) -
 
     assert SeatModelFactory().build(request) is model
     assert captured["timeout"] == 10.0
+    # Stamped for dispatch, which resolves it under every scope and deadline.
+    assert model.request_cap_override == 10.0
     # One request for the probe: the transport class's zero retries.
     assert "max_retries" not in captured
     assert "temperature" not in captured
