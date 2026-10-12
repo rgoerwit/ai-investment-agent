@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The content-inspection hook delivers only what it inspected. A result over its
+  50k-character input limit that the inspector allows is returned as the
+  inspected, truncated text with a finding, not the original, whose tail used to
+  reach the model uninspected; a result it cannot serialize fails as
+  `INSPECTION_FAILED` instead of passing through uninspected.
+
 - `make env-align` (`scripts/align_env_file.py`) writes a candidate copy of an
   existing `.env` laid out like `.env.example`: each of your settings sits where the
   template names its key, template defaults you never set are commented out, and

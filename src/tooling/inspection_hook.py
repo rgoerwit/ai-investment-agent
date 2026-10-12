@@ -27,6 +27,7 @@ from src.runtime_services import (
 from src.tooling.inspection_service import InspectionService, approved_tool_content
 from src.tooling.inspector import InspectionEnvelope, SourceKind
 from src.tooling.runtime import (
+    INSPECTION_FAILED,
     ToolCallBlocked,
     ToolCallFailed,
     ToolInvocation,
@@ -37,6 +38,7 @@ logger = structlog.get_logger(__name__)
 
 _MAX_INSPECTION_INPUT_CHARS = 50_000
 _UNSAFE_SHAPE_FINDING = "non-string tool output degraded for inspection safety"
+_TRUNCATED_FINDING = "tool output truncated to the inspected length"
 
 
 def _type_marker(value: Any) -> str:
@@ -158,7 +160,7 @@ class ContentInspectionHook:
                     exc, operation="inspection_input_serialization_failed"
                 ),
             )
-            return result
+            raise ToolCallFailed(INSPECTION_FAILED) from None
 
         mcp_parts = parse_mcp_tool_name(call.name)
         if mcp_parts is not None:
@@ -225,6 +227,9 @@ class ContentInspectionHook:
             )
 
         if approved is result.value:
+            # Deliver only what was inspected: the serialized text replaces the
+            # original when its shape is unsafe to retain or it was truncated.
+            degradations: list[str] = []
             if metadata.get("shape_retention_safe") is False:
                 logger.warning(
                     "tool_output_shape_degraded",
@@ -233,13 +238,16 @@ class ContentInspectionHook:
                     agent_key=call.agent_key,
                     output_type=type(result.value).__name__,
                 )
-                findings = (result.findings or []) + [_UNSAFE_SHAPE_FINDING]
-                return ToolResult(
-                    value=content_text,
-                    blocked=False,
-                    findings=findings,
-                )
-            return result
+                degradations.append(_UNSAFE_SHAPE_FINDING)
+            if metadata.get("truncated_for_inspection") is True:
+                degradations.append(_TRUNCATED_FINDING)
+            if not degradations:
+                return result
+            return ToolResult(
+                value=content_text,
+                blocked=False,
+                findings=(result.findings or []) + degradations,
+            )
 
         # Content was sanitized.
         return ToolResult(
