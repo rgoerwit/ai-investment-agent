@@ -15,10 +15,12 @@ For an LLM-backed role:
    runtime modules.
 2. Add or update the prompt through structured JSON handling under `prompts/`.
 3. Register the canonical seat and capabilities in `src/llm_runtime/seats.py`; construct
-   it through `src/llm_runtime/construction.py`. Choose its timeout class and
-   transport-attempt policy from the owning budget architecture in
-   `src/llm_runtime/timeouts.py`; counts mean total attempts, not provider-specific
-   retries. Do not introduce a context-name exception or construction-time flex cap.
+   it through `src/llm_runtime/construction.py`. Choose its timeout class from
+   `src/llm_runtime/timeouts.py`. The runtime owns total application attempts;
+   transports configure one SDK attempt per dispatch, with no per-seat retry setting.
+   This does not prove one physical send: Google's aiohttp connection recovery can
+   resend internally. Verify application retry and rate-limit branch counts.
+   Do not introduce a context-name exception or construction-time flex cap.
 4. Add node logic in the owning `src/agents/` module and tools in the owning
    `src/tools/` module. Tool execution must stay inside the inspection and audit chain.
 5. Update state, reducers, graph wiring, retry/fallback behavior, output budgets,

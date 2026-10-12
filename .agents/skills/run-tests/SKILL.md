@@ -28,7 +28,9 @@ skill or local configuration exists.
 - LLM budget resolution, transport admission or retry ownership:
   `poetry run pytest tests/llm_runtime/test_timeouts.py tests/llm_runtime/test_migrated_caller_budgets.py tests/llm_runtime/test_run_deadline.py tests/test_timeout_literals.py -v`.
 - Tool/inspection scope or MCP deadline changes:
-  `poetry run pytest tests/tooling/test_tool_timeout_scopes.py tests/mcp/test_mcp_timeouts.py -v`.
+  `poetry run pytest tests/tooling/test_tool_timeout_scopes.py tests/tooling/test_tool_reason_codes.py tests/tools/test_inspection_outcome_tools.py tests/mcp/test_mcp_timeouts.py tests/mcp/test_budget.py -v`.
+- Article workflow, publication or writer fallback changes:
+  `poetry run pytest tests/advanced/test_article_workflow_deadline.py tests/advanced/test_article_publication.py tests/advanced/test_article_writer.py -v`.
 - Blocking worker lifecycle or late-result handling:
   `poetry run pytest tests/test_blocking_io.py tests/test_tavily_utils.py tests/data/test_gap_fill.py -v`.
 - Logging and exception safety:
@@ -41,6 +43,26 @@ skill or local configuration exists.
 Use `make check-all` for the complete static surface and `make test-ci` for the
 deterministic credential-free suite. Do not launch paid, networked, integration, or
 destructive tests without the request and prerequisites that authorize them.
+
+Default pytest skips `integration`; `--run-integration` is an explicit opt-in, not
+permission to spend or access external services. Non-integration tests are strictly
+offline under `tests/conftest.py`. Preserve configured addopts and plugins, including
+the exact string `true` for `PYTEST_DISABLE_DOTENV`; there is no pytest-socket or
+`--allow-unix-socket` addopt. Dummy credentials can still trigger real SDK probes:
+use fake providers for unit availability tests. Use `stalled_worker(label, prefix=)`
+from `tests/helpers/stalled_workers.py` for releasable stalled workers. It releases
+and joins them before monkeypatch teardown, including when an assertion fails, so
+late work cannot escape the boundary.
+
+For a standalone audit probe, install isolation before importing application or
+provider modules: set `PYTEST_DISABLE_DOTENV` to the exact string `true`, disable
+`LANGSMITH_TRACING`, `LANGCHAIN_TRACING` and `LANGCHAIN_TRACING_V2`, and refuse
+network/DNS through `tests/helpers/offline_network.py`. Prefer the existing pytest boundary. Dummy
+credentials alone are insufficient; assert no attempts and retain refusal until
+all probe workers finish.
+
+The offline ledger records intercepted socket/DNS/libcurl attempts; assert request
+counts at faked SDK seams too, because SDK-method refusals are not ledger entries.
 
 Budget tests must exercise the selected adapter's effective request options, not
 only mocked factory arguments or model fields. Cover quick/full mode, sync/async,
