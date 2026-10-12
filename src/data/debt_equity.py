@@ -26,13 +26,13 @@ UNIT_TAG = "_debtToEquity_unit"
 INPUT_UNIT_TAG = "_debtToEquity_input_unit"
 SOURCE_TAG = "_debtToEquity_source"
 STATEMENT_SOURCE = "calculated_from_statements"
-CROSS_CHECK_SOURCE = "calculated_from_total_debt_book_equity"
 
-# A percent-vs-ratio mislabel disagrees by a factor of 100. Allow noise (share-class
-# and period differences) but stay far from 1x so a genuine small disagreement is
-# never "corrected".
-_UNIT_CONFLICT_LOW = 80.0
-_UNIT_CONFLICT_HIGH = 125.0
+# A percent-vs-ratio mislabel disagrees by the conversion factor itself. The
+# tolerance absorbs share-class and period noise while staying far from 1x.
+PERCENT_PER_RATIO = 100.0
+_UNIT_CONFLICT_TOLERANCE = 0.25
+_UNIT_CONFLICT_LOW = PERCENT_PER_RATIO / (1.0 + _UNIT_CONFLICT_TOLERANCE)
+_UNIT_CONFLICT_HIGH = PERCENT_PER_RATIO * (1.0 + _UNIT_CONFLICT_TOLERANCE)
 
 
 @dataclass(frozen=True)
@@ -66,7 +66,7 @@ def _finite(value: Any) -> float | None:
         return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return number if math.isfinite(number) else None
 
@@ -90,7 +90,7 @@ def to_ratio(
     if spec is None or spec.unit is None:
         return None, None
     if spec.unit == "percent":
-        return number / 100.0, "percent"
+        return number / PERCENT_PER_RATIO, "percent"
     return number, "ratio"
 
 
@@ -145,27 +145,29 @@ def normalize_source_results(
 
 
 def cross_check(info: dict[str, Any], symbol: str) -> dict[str, Any]:
-    """Cross-check the merged ratio against totalDebt / book equity.
+    """Report a merged ratio about x100 away from totalDebt / book equity.
 
     Book equity is ``bookValue * sharesOutstanding`` (both in the financial
-    currency until the currency-mismatch repair runs, so call this before it). A
-    disagreement of about x100 is a unit error: log it and adopt the derived ratio.
-    Anything else is left alone, and so is a non-positive equity.
+    currency until the currency-mismatch repair runs, so call this before it).
+    The unit is a property of the source and was fixed before the merge, so a
+    disagreement is logged, never "corrected": per-share book value, share
+    count and debt can come from different periods or share classes, and
+    nothing here says which side is wrong. Statement-derived ratios are not
+    checked against the same statements' book value.
     """
     ratio = _finite(info.get(FIELD))
-    if ratio is None or ratio <= 0:
-        return info
-    if info.get(SOURCE_TAG) in (STATEMENT_SOURCE, CROSS_CHECK_SOURCE):
+    if ratio is None or ratio <= 0 or info.get(SOURCE_TAG) == STATEMENT_SOURCE:
         return info
     debt = _finite(info.get("totalDebt"))
     book = _finite(info.get("bookValue"))
     shares = _finite(info.get("sharesOutstanding"))
-    if debt is None or debt <= 0 or book is None or book <= 0:
+    if debt is None or book is None or shares is None:
         return info
-    if shares is None or shares <= 0:
+    equity = book * shares
+    if debt <= 0 or not math.isfinite(equity) or equity <= 0:
         return info
-    derived = debt / (book * shares)
-    if derived <= 0 or not math.isfinite(derived):
+    derived = debt / equity
+    if not math.isfinite(derived) or derived <= 0:
         return info
     factor = ratio / derived
     if _UNIT_CONFLICT_LOW <= factor <= _UNIT_CONFLICT_HIGH or (
@@ -174,11 +176,9 @@ def cross_check(info: dict[str, Any], symbol: str) -> dict[str, Any]:
         logger.warning(
             "debt_equity_unit_conflict",
             symbol=symbol,
+            source=info.get(SOURCE_TAG),
             merged_ratio=round(ratio, 6),
             derived_ratio=round(derived, 6),
             factor=round(factor, 3),
         )
-        info[FIELD] = derived
-        info[SOURCE_TAG] = CROSS_CHECK_SOURCE
-        info[UNIT_TAG] = "ratio"
     return info

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Debt-to-equity hardening. Statement-derived D/E keeps its provenance through
+  the merge, and the total-debt/book-equity cross-check only logs a ×100
+  disagreement instead of replacing the value: the unit is fixed per source,
+  and book value, share count and debt can come from different periods or share
+  classes. The cross-check also guards underflow, overflow and malformed inputs.
+  `DE_RATIO` is read from the last DATA_BLOCK as one complete token, so
+  `8.05 %` is a percentage and `8.05e-2`, grouped or suffixed values are
+  rejected rather than truncated. The `DE_DISCREPANCY` tolerance is a named
+  constant.
+
 - A response the provider stopped at its output cap is classified
   `output_cap_exhausted` from its stop reason before the token count is
   compared with the cap. 0995.HK's Senior stopped on `MAX_TOKENS` reporting

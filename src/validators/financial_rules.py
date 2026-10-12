@@ -486,6 +486,12 @@ def detect_ocf_corroboration_flag(
     }
 
 
+# Relative gap between the report's DE_RATIO and the canonical raw ratio that
+# raises the non-blocking DE_DISCREPANCY review flag. Rounding and a holding
+# company's financial-debt-only figure stay inside it; a unit slip (x100) does not.
+DE_DISCREPANCY_TOLERANCE = 0.25
+
+
 def detect_red_flags(
     metrics: Any,
     ticker: str = "UNKNOWN",
@@ -592,7 +598,8 @@ def detect_red_flags(
         and debt_to_equity is not None
         and de_gate_floor is not None
         and max(report_de_pct, debt_to_equity) > de_gate_floor
-        and abs(report_de_pct - debt_to_equity) > 0.25 * max(abs(debt_to_equity), 1e-9)
+        and abs(report_de_pct - debt_to_equity)
+        > DE_DISCREPANCY_TOLERANCE * max(abs(debt_to_equity), 1e-9)
     ):
         red_flags.append(
             {

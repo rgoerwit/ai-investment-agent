@@ -11,6 +11,7 @@ from src.data_block_utils import (
     effective_m_and_a_status,
     extract_block_number_from_text,
     extract_block_text_value,
+    extract_data_block_field,
     extract_last_data_block,
 )
 from src.monetary import MONETARY_AMOUNT_PATTERN, parse_monetary_amount
@@ -658,7 +659,11 @@ def extract_metrics(
 
 
 _DE_NUMBER = r"([-+]?\d+(?:\.\d+)?)(%?)"
-_DE_RATIO_PATTERN = rf"(?<![A-Z0-9_])DE_RATIO:\s*{_DE_NUMBER}"
+# The whole DE_RATIO token: a signed plain decimal (negative equity stays signed),
+# an optional (spaced) percent sign and sentence period, then only whitespace, an
+# annotation or the end. Scientific notation, grouping
+# and malformed suffixes are rejected rather than read as a leading fragment.
+_DE_RATIO_VALUE = re.compile(r"([-+]?\d+(?:\.\d+)?)\s*(%)?\.?(?=\s|\(|$)")
 _LEGACY_DE_PATTERNS = (
     rf"(?:^|\n)\s*-?\s*D/E:\s*{_DE_NUMBER}",
     rf"(?:^|\n)\s*-?\s*Debt/Equity:\s*{_DE_NUMBER}",
@@ -681,6 +686,18 @@ def _first_de_match(
     return None
 
 
+def _de_ratio_field(report: str) -> tuple[float, bool] | None:
+    """``(value, is_percent)`` from the last DATA_BLOCK's DE_RATIO, if valid."""
+    raw = extract_data_block_field(report, "DE_RATIO")
+    if raw is None:
+        return None
+    match = _DE_RATIO_VALUE.match(raw.strip())
+    if match is None:
+        logger.info("debt_equity_report_value_rejected", value=raw[:40])
+        return None
+    return float(match.group(1)), bool(match.group(2))
+
+
 def extract_debt_to_equity(report: str) -> float | None:
     """Extract D/E as a percentage from the report's unit-explicit statements.
 
@@ -690,7 +707,7 @@ def extract_debt_to_equity(report: str) -> float | None:
     no knowable unit, so it never feeds a code-owned gate: use
     ``extract_legacy_unitless_debt_to_equity`` for display and diagnostics.
     """
-    ratio_match = _first_de_match((_DE_RATIO_PATTERN,), report)
+    ratio_match = _de_ratio_field(report)
     if ratio_match is not None:
         value, is_percent = ratio_match
         return value if is_percent else value * 100
@@ -706,7 +723,7 @@ def extract_debt_to_equity(report: str) -> float | None:
 
 def extract_legacy_unitless_debt_to_equity(report: str) -> float | None:
     """Return a unitless legacy ``D/E:`` figure as written (unit unknown)."""
-    if _first_de_match((_DE_RATIO_PATTERN,), report) is not None:
+    if _de_ratio_field(report) is not None:
         return None
     legacy = _first_de_match(_LEGACY_DE_PATTERNS, report)
     if legacy is None or legacy[1]:

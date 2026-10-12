@@ -25,10 +25,10 @@ The company shows moderate financial health with some concerns.
 RAW_HEALTH_SCORE: 8/12
 ADJUSTED_HEALTH_SCORE: 67%
 PE_RATIO_TTM: 8.5
+DE_RATIO: 0.45
 ### --- END DATA_BLOCK ---
 
 ## Financial Metrics
-- DE_RATIO: 0.45
 - Interest Coverage: 5.2x
 - Free Cash Flow: 150M HKD
 - Net Income: 200M HKD
@@ -386,7 +386,7 @@ class TestDownstreamCompatibility:
             "parts": [
                 {"text": "SECTOR: Technology\n\n"},
                 {
-                    "text": "### --- START DATA_BLOCK ---\nADJUSTED_HEALTH_SCORE: 82%\n### --- END DATA_BLOCK ---\n\n- DE_RATIO: 0.30"
+                    "text": "### --- START DATA_BLOCK ---\nADJUSTED_HEALTH_SCORE: 82%\nDE_RATIO: 0.30\n### --- END DATA_BLOCK ---"
                 },
             ]
         }
@@ -400,8 +400,8 @@ class TestDownstreamCompatibility:
         # This tests that newline joining doesn't break the DATA_BLOCK pattern
         input_list = [
             "SECTOR: Utilities\n",
-            "### --- START DATA_BLOCK ---\nADJUSTED_HEALTH_SCORE: 55%\n### --- END DATA_BLOCK ---",
-            "- DE_RATIO: 2.0",
+            "### --- START DATA_BLOCK ---\nADJUSTED_HEALTH_SCORE: 55%",
+            "DE_RATIO: 2.0\n### --- END DATA_BLOCK ---",
         ]
         extracted = extract_string_content(input_list)
         metrics = RedFlagDetector.extract_metrics(extracted)

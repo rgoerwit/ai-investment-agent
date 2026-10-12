@@ -4073,7 +4073,9 @@ class TestDebtToEquityNormalization:
 
     def test_de_ratio_without_percent_is_a_ratio(self):
         """DE_RATIO: 6.92 (no %) is a ratio by contract → returns 692."""
-        result = RedFlagDetector._extract_debt_to_equity("DE_RATIO: 6.92")
+        result = RedFlagDetector._extract_debt_to_equity(
+            "### --- START DATA_BLOCK ---\nDE_RATIO: 6.92\n### --- END DATA_BLOCK ---"
+        )
         assert result == pytest.approx(692.0)
 
     def test_legacy_unitless_line_never_feeds_a_gate(self):
@@ -4089,7 +4091,9 @@ class TestDebtToEquityNormalization:
 
     def test_de_ratio_label_with_percent(self):
         """DE_RATIO: 50.5% → 50.5 (already a percentage)."""
-        report = "DE_RATIO: 50.5%"
+        report = (
+            "### --- START DATA_BLOCK ---\nDE_RATIO: 50.5%\n### --- END DATA_BLOCK ---"
+        )
         result = RedFlagDetector._extract_debt_to_equity(report)
         assert result == pytest.approx(50.5)
 

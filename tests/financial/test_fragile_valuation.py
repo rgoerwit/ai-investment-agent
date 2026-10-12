@@ -1,3 +1,5 @@
+import textwrap
+
 import pytest
 
 from src.validators.red_flag_detector import RedFlagDetector, Sector
@@ -25,7 +27,7 @@ def test_fragile_valuation_detection():
     ### --- END DATA_BLOCK ---
     """
 
-    metrics = RedFlagDetector.extract_metrics(report)
+    metrics = RedFlagDetector.extract_metrics(textwrap.dedent(report))
 
     # Verify extraction
     assert metrics["net_margin"] == 3.69
@@ -58,7 +60,7 @@ def test_fragile_valuation_pass_scenario():
     NET_MARGIN: 25.0%
     ### --- END DATA_BLOCK ---
     """
-    metrics_sw = RedFlagDetector.extract_metrics(report_software)
+    metrics_sw = RedFlagDetector.extract_metrics(textwrap.dedent(report_software))
     flags_sw, result_sw = RedFlagDetector.detect_red_flags(metrics_sw)
     assert not any(f["type"] == "FRAGILE_VALUATION" for f in flags_sw)
 
@@ -70,6 +72,6 @@ def test_fragile_valuation_pass_scenario():
     NET_MARGIN: 3.5%
     ### --- END DATA_BLOCK ---
     """
-    metrics_val = RedFlagDetector.extract_metrics(report_value)
+    metrics_val = RedFlagDetector.extract_metrics(textwrap.dedent(report_value))
     flags_val, result_val = RedFlagDetector.detect_red_flags(metrics_val)
     assert not any(f["type"] == "FRAGILE_VALUATION" for f in flags_val)

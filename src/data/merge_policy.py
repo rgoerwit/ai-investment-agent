@@ -95,6 +95,7 @@ SOURCE_QUALITY = {
 }
 PRESERVED_FIELD_PROVENANCE = frozenset(
     {
+        "debtToEquity",
         "revenueGrowth",
         "earningsGrowth",
         "revenueGrowth_MRQ",
