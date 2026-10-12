@@ -7,7 +7,9 @@ Shared by the MCP suites that drive the real ``ClientSession`` over an
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
+import types
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,7 @@ from typing import Any
 import httpx2
 from mcp import ClientSession
 
+import src.mcp.client as mcp_client
 from src.llm_runtime import timeouts as llm_timeouts
 from src.mcp.client import MCPRuntime
 from src.mcp.config import MCPServerSpec
@@ -38,6 +41,35 @@ def http_runtime(tmp_path: Path, **spec_fields: Any) -> MCPRuntime:
     return MCPRuntime(
         [http_spec(**spec_fields)], budget_db_path=str(tmp_path / "mcp.db")
     )
+
+
+class FrozenWallClock:
+    """The UTC clock the cooldowns read, frozen at ``start``; ``advance`` moves it.
+
+    A skipped sleep must advance it, or a retry would meet its own cooldown.
+    """
+
+    def __init__(self, monkeypatch, start: dt.datetime | None = None) -> None:
+        frozen = start or dt.datetime.now(dt.UTC)
+        self.elapsed = 0.0
+
+        clock = self
+
+        class _Datetime(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return frozen + dt.timedelta(seconds=clock.elapsed)
+
+        monkeypatch.setattr(
+            mcp_client,
+            "dt",
+            types.SimpleNamespace(
+                UTC=dt.UTC, timedelta=dt.timedelta, datetime=_Datetime
+            ),
+        )
+
+    def advance(self, seconds: float) -> None:
+        self.elapsed += seconds
 
 
 def other_tasks(before: set[asyncio.Task]) -> set[asyncio.Task]:

@@ -44,6 +44,7 @@ from src.mcp.errors import MCPCallError, MCPErrorCategory
 from src.tooling.runtime import ToolExecutionService, ToolInvocation
 from tests.helpers.mcp_server import (
     FakeMCPServer,
+    FrozenWallClock,
     RecordingSession,
     http_runtime,
     other_tasks,
@@ -759,8 +760,16 @@ async def test_a_rate_limit_wait_that_does_not_fit_is_refused_and_still_cools_do
 
 
 @pytest.fixture
-def skipped_sleeps(monkeypatch) -> list[float]:
-    """The client's backoff sleeps, recorded and not slept: a server may ask for minutes."""
+def wall_clock(monkeypatch) -> FrozenWallClock:
+    return FrozenWallClock(monkeypatch)
+
+
+@pytest.fixture
+def skipped_sleeps(monkeypatch, wall_clock: FrozenWallClock) -> list[float]:
+    """The client's backoff sleeps, recorded and not slept: a server may ask for minutes.
+
+    The cooldowns' wall clock moves by each skipped sleep, as it would in life.
+    """
     recorded: list[float] = []
 
     class _NoSleep:
@@ -770,6 +779,7 @@ def skipped_sleeps(monkeypatch) -> list[float]:
         @staticmethod
         async def sleep(delay: float) -> None:
             recorded.append(delay)
+            wall_clock.advance(delay)
 
     monkeypatch.setattr(mcp_client, "asyncio", _NoSleep())
     return recorded
@@ -836,12 +846,25 @@ async def test_a_429_without_a_usable_retry_after_waits_the_default_cooldown(
     server = FakeMCPServer(status={"tools/call": [(429, headers), None]})
     server.install(monkeypatch)
     runtime = http_runtime(tmp_path)
+    registered: list[int] = []
+    register = runtime._register_cooldown
+    monkeypatch.setattr(
+        runtime,
+        "_register_cooldown",
+        lambda server_id, *, duration_seconds: (
+            registered.append(duration_seconds),
+            register(server_id, duration_seconds=duration_seconds),
+        ),
+    )
 
     await runtime.execute_raw("fmp_remote", "quote", {}, scope="consultant")
 
     default = float(mcp_client._DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS)
     assert skipped_sleeps == [default]
-    assert default - 5.0 < _cooldown_left(runtime) <= default
+    assert registered == [default]
+    # The retry was sent only once the whole cooldown had passed.
+    assert server.calls_sent == 2
+    assert "fmp_remote" not in runtime._cooldowns
 
 
 @pytest.mark.asyncio
@@ -881,7 +904,7 @@ async def test_an_http_date_retry_after_is_honoured(
 
 @pytest.mark.asyncio
 async def test_a_fresh_call_during_a_rate_limited_retry_wait_is_held_off(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, wall_clock
 ):
     """The cooldown is recorded before the retry decision, not after the retry."""
     server = FakeMCPServer(status={"tools/call": [(429, {"retry-after": "2"}), None]})
@@ -898,6 +921,7 @@ async def test_a_fresh_call_during_a_rate_limited_retry_wait_is_held_off(
             with pytest.raises(MCPCallError) as exc_info:
                 await runtime.execute_raw("fmp_remote", "quote", {}, scope="consultant")
             fresh.append(exc_info.value)
+            wall_clock.advance(delay)
 
     monkeypatch.setattr(mcp_client, "asyncio", _FreshCallDuringBackoff())
 

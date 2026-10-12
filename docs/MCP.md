@@ -138,7 +138,9 @@ chain; servers without `"consultant"` in `scopes` raise
   whatever follows: a timeout, a 429 or 5xx, an `isError=true` payload, a
   result that fails its output schema, a result the tool plane discards, and
   also a call never sent because it was cancelled, the deadline ran out while
-  the store admitted it, or the worker committed after its caller gave up. A
+  the store admitted it, a cooldown another caller registered during the
+  listing or the reservation refused it (the cooldown is rechecked immediately
+  before the send), or the worker committed after its caller gave up. A
   retried call counts twice. `initialize` and `tools/list` are not counted:
   vendor quotas meter data endpoints, and a request-rate limit on a listing
   surfaces as a 429 and its cooldown.

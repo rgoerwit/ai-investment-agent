@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- An MCP server's cooldown is rechecked immediately before a `tools/call` is
+  sent, after the listing and the budget reservation, so a caller paused there
+  while another caller hit a 429 or 401 no longer sends during the cooldown; its
+  reservation stays counted.
+
 - A cancelled caller never publishes an article. `publish_article` refuses from a
   task that is being cancelled, as well as after an expired deadline, and
   `ArticleWriter.write` drafts through `run_article_workflow_step`; a caller

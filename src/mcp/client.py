@@ -312,15 +312,21 @@ class MCPRuntime:
             ) from exc
 
     def _check_cooldown(self, spec: MCPServerSpec) -> None:
+        refusal = self._cooldown_error(spec)
+        if refusal is not None:
+            raise refusal
+
+    def _cooldown_error(self, spec: MCPServerSpec) -> MCPCallError | None:
+        """The refusal while the server cools down, else None; drops an expired entry."""
         cooldown = self._cooldowns.get(spec.id)
         if cooldown is None:
-            return
+            return None
         now = dt.datetime.now(dt.UTC)
         if now >= cooldown:
             self._cooldowns.pop(spec.id, None)
-            return
+            return None
         remaining = max(int((cooldown - now).total_seconds()), 1)
-        raise MCPCallError(
+        return MCPCallError(
             message=f"MCP server {spec.id} is in cooldown for {remaining}s",
             category=MCPErrorCategory.TRANSPORT,
             server_id=spec.id,
@@ -558,6 +564,11 @@ class MCPRuntime:
             return _spent_allowance_error(
                 "mcp_tool_call", server_id=spec.id, tool_name=tool_name
             )
+        # A cooldown another caller registered while this one listed or reserved
+        # is honoured; the reservation stays counted, never refunded.
+        refusal = self._cooldown_error(spec)
+        if refusal is not None:
+            return refusal
         result: CallToolResult = await session.call_tool(
             tool_name, arguments, read_timeout_seconds=call_timeout
         )

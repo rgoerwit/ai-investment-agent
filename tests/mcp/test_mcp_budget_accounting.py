@@ -33,12 +33,12 @@ import src.mcp.client as mcp_client
 from src.blocking_io import InFlightLimit
 from src.config import config
 from src.llm_runtime import timeouts as llm_timeouts
-from src.llm_runtime.timeouts import enclosing_deadline
+from src.llm_runtime.timeouts import enclosing_deadline, tool_call_deadline
 from src.mcp import budget as budget_module
 from src.mcp.client import MCPRuntime
 from src.mcp.errors import MCPCallError, MCPErrorCategory
 from src.tooling.runtime import ToolExecutionService, ToolInvocation, ToolResult
-from tests.helpers.mcp_server import FakeMCPServer, http_runtime
+from tests.helpers.mcp_server import FakeMCPServer, FrozenWallClock, http_runtime
 from tests.helpers.stalled_workers import stalled_worker
 
 _NOW = 1_000.0
@@ -63,8 +63,13 @@ def fake_clock(monkeypatch) -> list[float]:
 
 
 @pytest.fixture
-def sleeps(monkeypatch) -> list[float]:
-    """The MCP client's backoff sleeps, recorded and skipped."""
+def wall_clock(monkeypatch) -> FrozenWallClock:
+    return FrozenWallClock(monkeypatch)
+
+
+@pytest.fixture
+def sleeps(monkeypatch, wall_clock: FrozenWallClock) -> list[float]:
+    """The MCP client's backoff sleeps, recorded and skipped; the wall clock moves."""
     recorded: list[float] = []
 
     class _NoSleep:
@@ -74,6 +79,7 @@ def sleeps(monkeypatch) -> list[float]:
         @staticmethod
         async def sleep(delay: float) -> None:
             recorded.append(delay)
+            wall_clock.advance(delay)
 
     monkeypatch.setattr(mcp_client, "asyncio", _NoSleep())
     return recorded
@@ -625,3 +631,110 @@ async def test_a_saturated_store_fails_closed_unsent(tmp_path, monkeypatch):
     assert exc_info.value.details["reason"] == "BlockingCallSaturatedError"
     assert server.methods == []
     full.release()
+
+
+# --- A cooldown registered mid-call is honoured immediately before the send ------
+
+
+class _ListingBarrier:
+    """Parks the first tools/list until ``gate`` is set; later listings pass."""
+
+    def __init__(self) -> None:
+        self.parked = asyncio.Event()
+        self.gate = asyncio.Event()
+        self._first = True
+
+    async def __call__(self) -> None:
+        if self._first:
+            self._first = False
+            self.parked.set()
+            await self.gate.wait()
+
+
+async def _execute_in(runtime: MCPRuntime, seconds: float) -> dict[str, Any]:
+    with tool_call_deadline(seconds):
+        return await _execute(runtime)
+
+
+_COOLDOWNS = {
+    "rate_limited": (429, {"retry-after": "120"}),
+    "auth": (401, {}),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", _COOLDOWNS.values(), ids=_COOLDOWNS)
+async def test_a_cooldown_registered_while_a_caller_listed_refuses_its_send(
+    tmp_path, monkeypatch, fake_clock, wall_clock, failure
+):
+    barrier = _ListingBarrier()
+    server = FakeMCPServer(
+        on_request={"tools/list": barrier}, status={"tools/call": failure}
+    )
+    server.install(monkeypatch)
+    runtime = http_runtime(tmp_path)
+
+    # B passes admission (no cooldown yet), then parks inside its listing.
+    caller_b = asyncio.create_task(_execute_in(runtime, 5.0))
+    await asyncio.wait_for(barrier.parked.wait(), _STALL_CEILING_SECONDS)
+    assert "fmp_remote" not in runtime._cooldowns
+
+    # A is sent, fails, and registers the cooldown while B is still listing.
+    with pytest.raises(MCPCallError):
+        await _execute_in(runtime, 1.5)
+    assert "fmp_remote" in runtime._cooldowns
+    assert server.calls_sent == 1
+
+    barrier.gate.set()
+    with pytest.raises(MCPCallError) as exc_info:
+        await caller_b
+
+    err = exc_info.value
+    assert "is in cooldown for" in err.message
+    assert err.category is MCPErrorCategory.TRANSPORT
+    # B was refused before the send; its reservation was taken and stays counted.
+    assert server.calls_sent == 1
+    assert _run_count(runtime) == _daily_count(runtime) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_cooldown_that_expired_while_a_caller_listed_does_not_refuse_it(
+    tmp_path, monkeypatch, fake_clock, wall_clock
+):
+    barrier = _ListingBarrier()
+    server = FakeMCPServer(on_request={"tools/list": barrier})
+    server.install(monkeypatch)
+    runtime = http_runtime(tmp_path)
+
+    caller_b = asyncio.create_task(_execute(runtime))
+    await asyncio.wait_for(barrier.parked.wait(), _STALL_CEILING_SECONDS)
+    runtime._register_cooldown("fmp_remote", duration_seconds=30)
+    wall_clock.advance(31.0)
+    barrier.gate.set()
+
+    payload = await caller_b
+
+    assert payload["is_error"] is False
+    assert server.calls_sent == 1
+    assert "fmp_remote" not in runtime._cooldowns
+    assert _run_count(runtime) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_call_is_admitted_once_the_cooldown_has_passed(
+    tmp_path, monkeypatch, wall_clock
+):
+    server = FakeMCPServer()
+    server.install(monkeypatch)
+    runtime = http_runtime(tmp_path)
+    runtime._register_cooldown("fmp_remote", duration_seconds=30)
+
+    with pytest.raises(MCPCallError):
+        await _execute(runtime)
+    assert server.methods == []
+
+    wall_clock.advance(31.0)
+    payload = await _execute(runtime)
+
+    assert payload["is_error"] is False
+    assert server.calls_sent == 1
