@@ -30,7 +30,9 @@ disposition the configured mode produced, never the raw decision. A blocked
 placeholder never comes back as evidence or a search result. A tool whose one
 Tavily search is its whole answer passes `raise_on_block=True`; one that merges
 sources drops a blocked one; a direct caller outside the service catches
-`ToolCallBlocked` itself (the macro-context fetch). Reason codes are
+`ToolCallBlocked` itself (the macro-context fetch). The content hook delivers
+only what it inspected: past its input limit the inspected, truncated text, and
+an output it cannot serialize fails as `INSPECTION_FAILED`. Reason codes are
 defined once in `src/tooling/runtime.py`, and every surface tells the model the
 code `tool_failure_reason` gives. The service checks hook admission before
 every `before()` and `after()` hook and after the last of each. Admission cannot
@@ -69,7 +71,10 @@ MCP bounds go to the SDK's own parameters in `src/mcp/client.py`: the httpx2
 client `timeout=`, `ClientSession(read_timeout_seconds=)` and
 `call_tool(read_timeout_seconds=)`. Pass the call's bound explicitly, or it inherits
 the handshake bound. `MCP_TOOL_CALL_TIMEOUT_SECONDS` ships unset and follows the
-runner's timeout; read it only through `_configured_tool_call_timeout`. The one wrapper is `asyncio.timeout(time left)` around the
+runner's timeout; read it only through `_configured_tool_call_timeout`. The
+cooldown is rechecked immediately before `call_tool`, after listing and
+reservation; a test that skips a sleep advances `FrozenWallClock`
+(`tests/helpers/mcp_server.py`), or a retry meets its own cooldown. The one wrapper is `asyncio.timeout(time left)` around the
 public `list_tools()`, which has no per-request bound; never swap it for
 `send_request`, which skips `_absorb_tool_listing` and so the output-schema cache
 (the `x-mcp-header` filter there is inert: `initialize()` negotiates only legacy

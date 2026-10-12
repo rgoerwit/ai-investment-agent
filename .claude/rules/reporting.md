@@ -43,7 +43,8 @@ that bound; reject a fallback before constructing it when useful allowance canno
 fit, and discard late step results before publication. Every article write,
 approved or `.draft`, goes through `publish_article`, never a bare file write; the
 CLI calls it after the workflow scope closes, so a draft kept after a workflow
-timeout is still saved.
+timeout is still saved. A task being cancelled never publishes, even when its
+draft completed anyway.
 
 Citations of hard fields are audited deterministically against the underlying data,
 including un-backticked parentheticals, and a mismatch produces a caveat block rather

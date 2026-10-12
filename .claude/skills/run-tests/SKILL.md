@@ -18,10 +18,10 @@ catalogs into this skill: they become stale as the tree grows.
 |---|---|
 | Agent nodes, graph routing or output contracts | Owning `tests/agents/` files and compiled-graph tests |
 | LLM dispatch, budget admission or retries | `tests/llm_runtime/test_timeouts.py`, `tests/llm_runtime/test_migrated_caller_budgets.py`, `tests/llm_runtime/test_run_deadline.py`, `tests/test_timeout_literals.py` |
-| Tool/inspection or MCP scopes | `tests/tooling/test_tool_timeout_scopes.py`, `tests/mcp/test_mcp_timeouts.py` |
+| Tool execution, inspection or MCP scopes | `tests/tooling/test_tool_timeout_scopes.py`, `tests/tooling/test_tool_reason_codes.py`, `tests/tools/test_inspection_outcome_tools.py`, `tests/mcp/test_mcp_timeouts.py`, `tests/mcp/test_budget.py` |
 | Blocking work and late results | `tests/test_blocking_io.py`, `tests/test_to_thread_timeout_consistency.py`, `tests/agents/test_runtime_hard_timeout.py` |
 | Memory probes or availability | `tests/memory/test_embedding_probe_admission.py`, `tests/memory/test_embedding_probe_offline.py` |
-| Article workflow and writer fallbacks | `tests/advanced/test_article_workflow_deadline.py`, `tests/advanced/test_article_writer.py` |
+| Article workflow, publication and writer fallbacks | `tests/advanced/test_article_workflow_deadline.py`, `tests/advanced/test_article_publication.py`, `tests/advanced/test_article_writer.py` |
 | Main orchestration, persistence or baseline capture | `tests/eval/`, `tests/test_main_cli.py` |
 | Logging policy | `tests/test_logging_consistency.py` |
 | Screening behavior | `tests/scripts/test_find_gems.py` |
@@ -30,8 +30,10 @@ catalogs into this skill: they become stale as the tree grows.
 Use the actual adapter's effective request options for timeout tests, with fake
 clocks and transports. Cover spent allowance, tier downgrade, failover, sync/async,
 outer cancellation and concurrent calls sharing one model. Model fields alone do
-not prove a request was sized correctly. Release and join releasable stalled workers
-in `finally` before patch teardown; an orphan surviving the fake can reach a provider.
+not prove a request was sized correctly. Use `stalled_worker(label, prefix=)` from
+`tests/helpers/stalled_workers.py` for releasable stalled workers; it releases and
+joins them before patch teardown, including when an assertion fails. An orphan
+surviving the fake can reach a provider.
 
 Plant the regression a new architectural guard claims to catch, prove it fails,
 then restore the valid case. Prefer AST scans for code patterns and read the owning
