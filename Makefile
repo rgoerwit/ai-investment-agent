@@ -211,6 +211,9 @@ env-setup: ## Copy .env.example to .env
 		echo "$(YELLOW).env file already exists!$(NC)"; \
 	fi
 
+env-align: ## Write .env.aligned: .env laid out like .env.example, values unchanged (counts only)
+	$(POETRY) run python scripts/align_env_file.py .env --output .env.aligned
+
 shell: ## Open Poetry shell
 	$(POETRY) shell
 

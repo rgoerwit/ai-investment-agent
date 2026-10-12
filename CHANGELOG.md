@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `make env-align` (`scripts/align_env_file.py`) writes a candidate copy of an
+  existing `.env` laid out like `.env.example`: each of your settings sits where the
+  template names its key, template defaults you never set are commented out, and
+  anything the template does not mention is kept in trailing sections. Values are
+  copied verbatim and the result must load to exactly the same values, raw and
+  interpolated, or nothing is written; the report is counts only, and the file is
+  created mode 0600.
+
 - The CLI publishes an approved article or its `.draft` through `publish_article`,
   the one publication step, instead of a bare atomic write, so it logs
   `article_saved` like every other publication. It runs after the workflow scope
