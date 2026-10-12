@@ -645,6 +645,80 @@ class TestAnalystStructuralRetry:
         assert retry["overall_timeout_seconds"] == pytest.approx(expected)
         assert retry["overall_timeout_seconds"] == pytest.approx(cap)
 
+    @staticmethod
+    async def _recover(failure_kind: str, *, cap_retry: bool) -> tuple[list, dict]:
+        from src.agents import create_analyst_node
+
+        calls: list[dict] = []
+
+        async def fake_invoke(_runnable, input_data, **kwargs):
+            calls.append(kwargs)
+            return _UNPARSEABLE if len(calls) == 1 else _REPAIRED
+
+        high = MagicMock(model_name="retry-model", thinking_level="high")
+        low = MagicMock(model_name="retry-model", thinking_level="low")
+        with (
+            _run(quick=True),
+            patch(
+                "src.agents.runtime.invoke_with_rate_limit_handling", new=fake_invoke
+            ),
+            patch(
+                "src.agents.analyst_nodes.classify_output_contract_failure",
+                return_value=failure_kind,
+            ),
+        ):
+            node = create_analyst_node(
+                MagicMock(),
+                "fundamentals_analyst",
+                [],
+                "fundamentals_report",
+                retry_llm=high,
+                cap_retry_llm=low if cap_retry else None,
+                allow_retry=True,
+            )
+            result = await node(
+                {
+                    "messages": [],
+                    "company_of_interest": "0995.HK",
+                    "trade_date": "2026-10-03",
+                },
+                {
+                    "configurable": {
+                        "context": MagicMock(ticker="0995.HK", trade_date="2026-10-03")
+                    }
+                },
+            )
+        return calls, result["structural_recovery_events"][0]
+
+    @pytest.mark.asyncio
+    async def test_output_cap_failure_recovers_at_lowered_reasoning(self):
+        """Raising effort after thinking consumed the cap fails the same way."""
+        calls, event = await self._recover("output_cap_exhausted", cap_retry=True)
+
+        assert calls[1]["context"] == "Fundamentals Analyst (RETRY-CAP)"
+        assert calls[1]["canonical_agent"] == "Fundamentals Analyst"
+        assert event["recovery_reasoning_setting"] == "low"
+        assert event["outcome"] == "accepted_text"
+
+    @pytest.mark.asyncio
+    async def test_other_contract_failures_keep_the_high_reasoning_retry(self):
+        calls, event = await self._recover("output_contract_violation", cap_retry=True)
+
+        assert calls[1]["context"] == "Fundamentals Analyst (RETRY-HIGH)"
+        assert event["recovery_reasoning_setting"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_output_cap_failure_without_lowered_binding_keeps_retry_high(
+        self,
+    ):
+        with patch("src.agents.analyst_nodes.logger") as mock_logger:
+            calls, event = await self._recover("output_cap_exhausted", cap_retry=False)
+
+        assert calls[1]["context"] == "Fundamentals Analyst (RETRY-HIGH)"
+        assert event["recovery_reasoning_setting"] == "high"
+        events = [call.args[0] for call in mock_logger.warning.call_args_list]
+        assert "structural_recovery_cap_binding_unavailable" in events
+
 
 # ---------------------------------------------------------------- consultant
 

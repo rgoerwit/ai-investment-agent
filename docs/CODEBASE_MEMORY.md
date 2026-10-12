@@ -85,7 +85,10 @@ Findings from that comparison, attributed through the data layer rather than ver
 - **Senior Fundamentals output-cap failures (model).** `gemini-3.8-flash` hit the
   cap on 8 of 523 quick Senior calls, `gemini-3.7-flash` on 0 of 522: thinking used
   15.6k–18.3k of 19,115 tokens against an 8,192 reserve. The structural retry
-  raises reasoning effort, so it failed the same way; that is unfixed.
+  raised reasoning effort, so it failed the same way (0995.HK, 2026-10-12). An
+  `output_cap_exhausted` failure now recovers as `(RETRY-CAP)` on the same retry
+  binding at the FAST intent's reasoning value (`reasoning_intent` in
+  `build_model_for_seat`); other contract failures keep `(RETRY-HIGH)`.
 
 A two-arm trial produced 19 quick runs per arm across 17 tickers. Two pairs had
 different prompt digests, leaving 17 prompt-matched runs per arm across 15 tickers

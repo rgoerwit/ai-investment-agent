@@ -44,7 +44,9 @@ fan-out: it bounds the turn, not each call.
 A response cut off at the output cap is a fragment, not an answer — and the cap is not
 the only kind of partial. Key recovery on the full partial-response classifier, not on
 the cap alone. Refusals are excluded by construction, since re-asking cannot clear
-them.
+them. An `output_cap_exhausted` recovery must not raise reasoning: thinking already
+spent the visible budget, so it reruns on the `cap_retry_llm` (`RETRY-CAP`, the FAST
+intent's value) and falls back to `RETRY-HIGH` only when no lower value exists.
 
 ## Absence is not failure
 

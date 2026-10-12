@@ -12,7 +12,7 @@ from src.llm_runtime.construction import (
     build_required_model_for_seat,
     writer_seat_fallback_chain,
 )
-from src.llm_runtime.seats import SeatId
+from src.llm_runtime.seats import ModelIntent, SeatId
 from src.token_tracker import TokenTracker, TokenTrackingCallback
 
 
@@ -225,6 +225,80 @@ def test_reasoning_and_service_tier_overrides_reach_adapter_request() -> None:
     request = factory.requests[0]
     assert request.reasoning_value == "high"
     assert request.service_tier == "flex"
+
+
+@pytest.mark.parametrize("provider", ["google", "openai"])
+def test_reasoning_intent_lowers_the_recovery_binding_to_the_fast_value(
+    provider,
+) -> None:
+    """Output-cap recovery reruns the same binding at the FAST intent's value."""
+    settings = _settings(
+        llm_base_provider=provider,
+        llm_review_provider="openai" if provider == "google" else "google",
+    )
+    plan = resolve_binding_plan(settings)
+    factory = RecordingFactory()
+
+    for quick_mode in (True, False):
+        build_required_model_for_seat(
+            SeatId.ANALYST_RETRY,
+            settings=settings,
+            plan=plan,
+            factory=factory,
+            quick_mode=quick_mode,
+        )
+        build_required_model_for_seat(
+            SeatId.ANALYST_RETRY,
+            settings=settings,
+            plan=plan,
+            factory=factory,
+            quick_mode=quick_mode,
+            reasoning_intent=ModelIntent.FAST,
+        )
+
+    for normal, lowered in zip(
+        factory.requests[::2], factory.requests[1::2], strict=True
+    ):
+        assert lowered.binding == normal.binding
+        assert lowered.reasoning_value == "low"
+        assert normal.reasoning_value != lowered.reasoning_value
+
+
+def test_reasoning_intent_without_a_lower_value_builds_nothing() -> None:
+    settings = _settings(llm_base_provider="google", llm_review_provider="openai")
+    plan = resolve_binding_plan(settings)
+    factory = RecordingFactory()
+
+    model = build_model_for_seat(
+        SeatId.ANALYST_RETRY,
+        settings=settings,
+        plan=plan,
+        factory=factory,
+        quick_mode=True,
+        reasoning_intent=ModelIntent.REASONING,
+    )
+
+    assert model is None
+    assert factory.requests == []
+
+
+def test_reasoning_intent_is_not_offered_by_the_legacy_schema() -> None:
+    settings = Settings(_env_file=None, google_api_key="g")
+    plan = resolve_binding_plan(settings)
+    assert plan.schema == "legacy"
+    builder = MagicMock()
+
+    model = build_model_for_seat(
+        SeatId.ANALYST_RETRY,
+        settings=settings,
+        plan=plan,
+        quick_mode=True,
+        legacy_builder=builder,
+        reasoning_intent=ModelIntent.FAST,
+    )
+
+    assert model is None
+    builder.assert_not_called()
 
 
 @pytest.mark.parametrize("configured_tier", ["flex", "standard"])

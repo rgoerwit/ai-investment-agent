@@ -318,12 +318,18 @@ def build_model_for_seat(
     legacy_builder: LegacyBuilder | None = None,
     include_reasoning_output: bool = False,
     execution_policy: SeatExecutionPolicy | None = None,
+    reasoning_intent: ModelIntent | None = None,
 ) -> BaseChatModel | None:
     """Construct one fresh client from a canonical seat binding.
 
     ``execution_policy`` replaces the seat's registered policy for this one
     construction (a caller's explicit temperature, client timeout or SDK
     attempts); every adapter and the legacy builder read it from the request.
+
+    ``reasoning_intent`` resolves the reasoning value for that intent from the
+    binding's own ladder instead of the seat's. It returns ``None`` when the
+    binding cannot honour it: the legacy schema, a seat without reasoning
+    control, or a ladder whose value for the intent equals the seat's own.
     """
 
     resolved_plan = plan or resolve_binding_plan(settings)
@@ -335,6 +341,8 @@ def build_model_for_seat(
     ):
         return None
     if resolved_plan.schema == "legacy":
+        if reasoning_intent is not None:
+            return None
         builder = legacy_builder or _default_legacy_builder
         binding = (
             resolved_plan.quick_bindings if quick_mode else resolved_plan.bindings
@@ -395,6 +403,15 @@ def build_model_for_seat(
                 and not quick_mode
             ),
         )
+    if reasoning_intent is not None:
+        if reasoning_value is None:
+            return None
+        intent_value = reasoning_value_for_seat(
+            binding.profile, reasoning_intent, adjust=False
+        )
+        if intent_value is None or intent_value == reasoning_value:
+            return None
+        reasoning_value = intent_value
     model = (factory or SeatModelFactory()).build(
         SeatModelRequest(
             binding=binding,

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- An analyst output that exhausted its output cap is recovered at a lower
+  reasoning value, not a higher one. The structural retry re-ran every contract
+  failure at the retry seat's raised effort, so when thinking had consumed the
+  cap (0995.HK's Senior Fundamentals on `gemini-3.8-flash`, 19,111 of 19,115
+  tokens) the retry failed the same way and the run failed closed. Such
+  failures now rerun as `(RETRY-CAP)` on the same binding at the FAST intent's
+  reasoning value, through `build_model_for_seat(reasoning_intent=...)`; other
+  failures keep `(RETRY-HIGH)`, and the legacy schema, which cannot lower
+  reasoning, keeps it with a logged fallback.
+
 - A pydantic `ValidationError`, such as a model's invalid tool argument, is
   classified as `application_error` with no host, before any message-marker
   scan. It used to fall through to `unknown_provider_error` with host

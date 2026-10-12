@@ -225,11 +225,11 @@ _AGENT_DISPLAY_NAME_MAP = {
 }
 
 # Suffixes appended at call sites to decorate the base agent name (debate round,
-# consultant/auditor final synthesis, high-thinking retry, escalation). This is a
+# consultant/auditor final synthesis, high- or low-thinking retry, escalation). This is a
 # closed, code-controlled set — stripping it is deterministic, not free-text
 # guessing.
 _AGENT_SUFFIX_RE = re.compile(
-    r"(?:_final_synthesis|\s+R\d+|\s+\(RETRY-HIGH\)|\s+Escalation|\s+Direct Retry)+$"
+    r"(?:_final_synthesis|\s+R\d+|\s+\(RETRY-(?:HIGH|CAP)\)|\s+Escalation|\s+Direct Retry)+$"
 )
 
 

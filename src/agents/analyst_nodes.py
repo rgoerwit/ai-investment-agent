@@ -1117,9 +1117,15 @@ def create_analyst_node(
     retry_llm: Any | None = None,
     allow_retry: bool = False,
     research_budget_policy: ResearchBudgetPolicy | None = None,
+    cap_retry_llm: Any | None = None,
 ) -> Callable:
     """
     Factory function creating data analyst agent nodes.
+
+    ``retry_llm`` regenerates a failed output contract at the retry seat's
+    reasoning value (RETRY-HIGH). ``cap_retry_llm`` is the same binding at the
+    FAST intent's value, used when the first output exhausted its output cap:
+    raising effort there spends the visible budget on thinking again.
     """
 
     async def analyst_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
@@ -1602,8 +1608,21 @@ def create_analyst_node(
                         truncated=initial_truncation["truncated"],
                         validation=initial_validation,
                     )
+                    recovery_llm = retry_llm
+                    retry_label = "RETRY-HIGH"
+                    if initial_failure_kind == "output_cap_exhausted":
+                        if cap_retry_llm is not None:
+                            recovery_llm = cap_retry_llm
+                            retry_label = "RETRY-CAP"
+                        else:
+                            logger.warning(
+                                "structural_recovery_cap_binding_unavailable",
+                                agent_key=agent_key,
+                                ticker=ticker,
+                                fallback="RETRY-HIGH",
+                            )
                     recovery_event = support.structural_recovery_event(
-                        agent_key, initial_failure_kind, llm, retry_llm, content_str
+                        agent_key, initial_failure_kind, llm, recovery_llm, content_str
                     )
                     new_state["structural_recovery_events"] = [recovery_event]
                     log_truncation_diagnostic(
@@ -1639,15 +1658,15 @@ def create_analyst_node(
                     # labeled for this originating agent. That keeps agent totals
                     # intuitive while preserving the actual analyst_retry billing
                     # seat and origin in persisted binding telemetry.
-                    retry_runnable = prompt_template | retry_llm
+                    retry_runnable = prompt_template | recovery_llm
 
                     # The retry's whole budget (every transient attempt together)
                     # is one invocation cap of the originating seat, read from the
                     # same resolver the runtime sizes the call with: the seat's
                     # class in --quick (180 s for gate-critical APEX seats), the
                     # flex-floored hard cap in full mode.
-                    _retry_context = f"{agent_prompt.agent_name} (RETRY-HIGH)"
-                    _retry_provider = support.infer_provider_name(retry_llm)
+                    _retry_context = f"{agent_prompt.agent_name} ({retry_label})"
+                    _retry_provider = support.infer_provider_name(recovery_llm)
                     _retry_budget = agent_runtime.resolve_invocation_budget(
                         _retry_context,
                         agent_prompt.agent_name,
@@ -1662,7 +1681,7 @@ def create_analyst_node(
                                 context=_retry_context,
                                 canonical_agent=agent_prompt.agent_name,
                                 provider=_retry_provider,
-                                model_name=support.get_model_name(retry_llm),
+                                model_name=support.get_model_name(recovery_llm),
                                 overall_timeout_seconds=_retry_budget.invocation_cap,
                             )
                         )
@@ -1747,7 +1766,7 @@ def create_analyst_node(
                                 recovery_event["outcome"] = "accepted_text"
                             if recovery_event["outcome"] == "accepted_text":
                                 response = retry_response
-                                response_runnable = retry_llm
+                                response_runnable = recovery_llm
                     except Exception as retry_error:
                         recovery_event["outcome"] = "failed"
                         logger.error(
