@@ -8,7 +8,9 @@ from typing import Any
 import structlog
 
 from src.data_block_utils import (
+    effective_m_and_a_status,
     extract_block_number_from_text,
+    extract_block_text_value,
     extract_last_data_block,
 )
 from src.monetary import MONETARY_AMOUNT_PATTERN, parse_monetary_amount
@@ -503,7 +505,12 @@ def extract_metrics(
         re.IGNORECASE,
     )
     if m_and_a_match:
-        metrics["m_and_a_status"] = m_and_a_match.group(1).upper()
+        effective_status = effective_m_and_a_status(
+            m_and_a_match.group(1).upper(),
+            extract_block_text_value(data_block, "M_AND_A_TENDER_PRICE"),
+        )
+        if effective_status is not None:
+            metrics["m_and_a_status"] = effective_status
 
     backlog_coverage = read_block_leading_float(data_block, "REVENUE_BACKLOG_COVERAGE")
     if backlog_coverage is not None:

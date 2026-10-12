@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- An `ACTIVE_TENDER` without a positive tender price is demoted to `RUMORED`
+  before anything acts on it, through `effective_m_and_a_status` in
+  `src/data_block_utils.py` (the metric extractor, the retrospective snapshot and
+  both value-trap call sites); a stake percentage, a date, or a value that opens
+  with `N/A` is not a price. The Foreign Language Analyst now reports the
+  analyzed company's Subject Role (TARGET / ACQUIRER / OTHER), and the Senior
+  sets `ACTIVE_TENDER` only for a priced target (prompts: foreign language 1.24,
+  fundamentals 11.16). 6670.TW, the acquirer in a tender for 51% of 6904.TW with
+  no price, had been tagged `ACTIVE_TENDER`, which exempted its health and growth
+  gates. Snapshots already in the analysis index keep their stored status until
+  the ticker is re-analyzed.
+
 - An analyst output that exhausted its output cap is recovered at a lower
   reasoning value, not a higher one. The structural retry re-ran every contract
   failure at the retry seat's raised effort, so when thinking had consumed the

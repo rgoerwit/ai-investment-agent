@@ -30,6 +30,7 @@ from src.async_utils import run_with_hard_timeout
 from src.atomic_files import atomic_write_text
 from src.config import config
 from src.data_block_utils import (
+    effective_m_and_a_status,
     extract_data_block_field,
     extract_data_block_number,
     extract_kill_criteria,
@@ -826,7 +827,10 @@ def extract_snapshot(
         # into M_AND_A_STATUS so the IBKR reconciler can route held positions
         # as M&A EXIT rather than FUNDAMENTAL FAILURE. Empty/missing when no
         # active deal; values are ACTIVE_TENDER, RUMORED, or NONE.
-        "m_and_a_status": _extract_data_block_field(fundamentals, "M_AND_A_STATUS"),
+        "m_and_a_status": effective_m_and_a_status(
+            _extract_data_block_field(fundamentals, "M_AND_A_STATUS"),
+            _extract_data_block_field(fundamentals, "M_AND_A_TENDER_PRICE"),
+        ),
         # TRADE_BLOCK fields (structured for portfolio reconciliation)
         **trade_block_fields,
         # Bear thesis excerpt

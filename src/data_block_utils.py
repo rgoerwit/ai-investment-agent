@@ -3,6 +3,10 @@ from __future__ import annotations
 import re
 from enum import Enum
 
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 
 class BlockShape(Enum):
     """Structured block delimiter family."""
@@ -431,6 +435,38 @@ def extract_block_number(
 def extract_data_block_field(report: str | None, field_name: str) -> str | None:
     """Extract a normalized field value from the last parseable DATA_BLOCK."""
     return extract_block_field(report, "DATA_BLOCK", field_name)
+
+
+def effective_m_and_a_status(
+    status: str | None, tender_price: str | None
+) -> str | None:
+    """Return the M&A status the deterministic consumers may act on.
+
+    ``ACTIVE_TENDER`` exempts health/growth gates and routes held positions to an
+    M&A exit, so it is honored only when the DATA_BLOCK names a positive tender
+    price. An unpriced tender is the signature of an acquirer (or an unconfirmed
+    deal) and is demoted to ``RUMORED``. Every other status passes through.
+    A stake percentage or a date is not a price, and a value that opens with a
+    null token ("N/A (51% stake)") is unpriced whatever follows it.
+    """
+    if status is None or status.strip().upper() != "ACTIVE_TENDER":
+        return status
+    text = (tender_price or "").strip()
+    if text.split("(", 1)[0].strip().upper() not in _NULL_TOKENS:
+        for match in _NUMBER_TOKEN_PATTERN.finditer(text):
+            if text[match.end() : match.end() + 1] in {"%", "-", "/"}:
+                continue
+            try:
+                if float(match.group(0).replace(",", "")) > 0:
+                    return status
+            except ValueError:
+                continue
+    logger.info(
+        "m_and_a_tender_unpriced_demoted",
+        status=status,
+        tender_price=tender_price,
+    )
+    return "RUMORED"
 
 
 def extract_data_block_number(report: str | None, field_name: str) -> float | None:
