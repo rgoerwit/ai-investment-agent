@@ -719,6 +719,7 @@ class TestLegalFlagIntegration:
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 75%
 PE_RATIO_TTM: 12.00
+DE_RATIO: 50%
 ### --- END DATA_BLOCK ---
 
 **Leverage (2/2 pts)**:
@@ -757,6 +758,7 @@ PE_RATIO_TTM: 12.00
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 30%
 PE_RATIO_TTM: 25.00
+DE_RATIO: 600%
 ### --- END DATA_BLOCK ---
 
 **Leverage (0/2 pts)**:

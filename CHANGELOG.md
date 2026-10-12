@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `DE_RATIO` follows one field contract in the last DATA_BLOCK: absent,
+  unavailable (`N/A`), invalid or valid. A valid value matches in full (a plain
+  decimal, an optional percent sign and at most one parenthetical annotation),
+  so `0.45 / 9`, `0.45 percent` and `0.45 or 9` are invalid rather than read as
+  45%. An unavailable, invalid or omitted field is never replaced by prose; only
+  a legacy report with no DATA_BLOCK may use a labelled `D/E: N%` line. The
+  rejection log records a reason and the value's length, not report text. Across
+  1,942 August–October reports none had the field absent, and none of the 17
+  without a valid value carried a percent prose line, so production readings do
+  not change. A source-to-screen test now runs provider observation, merge,
+  canonical claim, report projection and pre-screen together, and pins that the
+  sector-dependent D/E health award stays the analyst's.
+
 - `ACTIVE_TENDER` is honored only for a tender for the analyzed company's own
   shares: the DATA_BLOCK carries `M_AND_A_SUBJECT_ROLE` (fundamentals prompt
   11.18), and `effective_m_and_a_status` requires `TARGET` plus a price that

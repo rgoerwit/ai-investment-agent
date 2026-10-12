@@ -63,7 +63,12 @@ def _placeholder_value(content: str) -> str:
 
 
 def _materialize(text: str) -> str:
-    return re.sub(r"\[([^\[\]]+)\]", lambda m: _placeholder_value(m.group(1)), text)
+    # "[placeholder] or N/A" offers two alternatives; a filled field takes one.
+    return re.sub(
+        r"\[([^\[\]]+)\](?:[ \t]+or[ \t]+N/A\b)?",
+        lambda m: _placeholder_value(m.group(1)),
+        text,
+    )
 
 
 def _sample_for(contract: PromptContract) -> str:

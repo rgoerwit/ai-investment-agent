@@ -40,6 +40,7 @@ PE_RATIO_TTM: 12.34
 PE_RATIO_FORWARD: 10.50
 PEG_RATIO: 0.85
 ADR_EXISTS: NO
+DE_RATIO: 120%
 ### --- END DATA_BLOCK ---
 
 ### FINANCIAL HEALTH DETAIL
@@ -134,6 +135,7 @@ RAW_HEALTH_SCORE: 10/12
 ADJUSTED_HEALTH_SCORE: 87.5% (10/12 available)
 PE_RATIO_TTM: 6.19
 PEG_RATIO: 0.07
+DE_RATIO: 16%
 ### --- END DATA_BLOCK ---
 
 D/E: 16%
@@ -154,6 +156,7 @@ Net Income: ¥15.0B
         report1 = """
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 50%
+DE_RATIO: 250%
 ### --- END DATA_BLOCK ---
 D/E: 250%
 """
@@ -360,6 +363,7 @@ class TestRedFlagValidatorNode:
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 40%
 PE_RATIO_TTM: 15.0
+DE_RATIO: 600%
 ### --- END DATA_BLOCK ---
 
 **Leverage (0/2 pts)**:
@@ -404,6 +408,7 @@ Free Cash Flow: -$1,200M
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 45%
 PE_RATIO_TTM: 8.0
+DE_RATIO: 180%
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
@@ -424,6 +429,7 @@ PE_RATIO_TTM: 8.0
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 75%
 PE_RATIO_TTM: 14.5
+DE_RATIO: 65%
 ### --- END DATA_BLOCK ---
 
 **Leverage (2/2 pts)**:
@@ -453,6 +459,7 @@ PE_RATIO_TTM: 14.5
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 52%
 PE_RATIO_TTM: 16.0
+DE_RATIO: 450%
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
@@ -506,6 +513,7 @@ PE_RATIO_TTM: 10.0
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 25%
 PE_RATIO_TTM: 20.0
+DE_RATIO: 650%
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
@@ -549,6 +557,7 @@ Free Cash Flow: -$500M
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 60%
 PE_RATIO_TTM: 13.5
+DE_RATIO: 85%
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
@@ -767,6 +776,7 @@ RAW_HEALTH_SCORE: 6/12
 ADJUSTED_HEALTH_SCORE: 50% (6/12 available)
 PE_RATIO_TTM: 8.5
 ANALYST_COVERAGE_ENGLISH: 3
+DE_RATIO: 75%
 ### --- END DATA_BLOCK ---
 
 ### FINANCIAL HEALTH DETAIL
@@ -924,6 +934,7 @@ SECTOR: Utilities
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard) for capital-intensive utilities
 ADJUSTED_HEALTH_SCORE: 55%
 PE_RATIO_TTM: 12.5
+DE_RATIO: 250%
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
@@ -958,6 +969,7 @@ SECTOR: Materials
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard). Interest coverage threshold lowered to 1.5x (vs 2.0x standard) for capital-intensive sector.
 ADJUSTED_HEALTH_SCORE: 60%
 PE_RATIO_TTM: 10.2
+DE_RATIO: 220%
 ### --- END DATA_BLOCK ---
 
 **Leverage** - Capital-intensive sector norms:
@@ -994,6 +1006,7 @@ PE_RATIO_TTM: 10.2
 ### --- START DATA_BLOCK ---
 SECTOR: Materials
 ADJUSTED_HEALTH_SCORE: 52%
+DE_RATIO: 180%
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
@@ -1024,6 +1037,7 @@ ADJUSTED_HEALTH_SCORE: 52%
 ### --- START DATA_BLOCK ---
 SECTOR: Materials
 ADJUSTED_HEALTH_SCORE: 30%
+DE_RATIO: 850%
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
@@ -1057,6 +1071,7 @@ SECTOR: Financials
 SECTOR_ADJUSTMENTS: D/E ratio excluded (not applicable for banks) - Leverage score denominator adjusted to 1 pt. ROE threshold lowered to 12% (vs 15% standard). ROA threshold lowered to 1.0% (vs 7% standard).
 ADJUSTED_HEALTH_SCORE: 65%
 PE_RATIO_TTM: 9.8
+DE_RATIO: 1200%
 ### --- END DATA_BLOCK ---
 
 **Leverage** - NOT APPLICABLE FOR BANKS:
@@ -1091,6 +1106,7 @@ PE_RATIO_TTM: 9.8
 SECTOR: Industrials
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
 ADJUSTED_HEALTH_SCORE: 55%
+DE_RATIO: 520%
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
@@ -1210,6 +1226,7 @@ SECTOR: Utilities
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard) for capital-intensive utilities. Interest coverage threshold lowered to 1.5x (vs 2.0x standard).
 ADJUSTED_HEALTH_SCORE: 58%
 PE_RATIO_TTM: 11.2
+DE_RATIO: 210%
 ### --- END DATA_BLOCK ---
 
 **Leverage** (Utility-Adjusted):
@@ -1289,6 +1306,7 @@ SECTOR: Materials
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard). Interest coverage threshold lowered to 1.5x (vs 2.0x standard) for capital-intensive sector.
 ADJUSTED_HEALTH_SCORE: 62%
 PE_RATIO_TTM: 9.8
+DE_RATIO: 220%
 ### --- END DATA_BLOCK ---
 
 **Leverage** - Capital-Intensive Sector Norms:
@@ -1330,6 +1348,7 @@ SECTOR: Materials
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% for capital-intensive sector
 ADJUSTED_HEALTH_SCORE: 28%
 PE_RATIO_TTM: N/A (losses)
+DE_RATIO: 850%
 ### --- END DATA_BLOCK ---
 
 **Leverage** - CRITICAL DISTRESS:
@@ -1376,6 +1395,7 @@ SECTOR: Financials
 SECTOR_ADJUSTMENTS: D/E ratio excluded (not applicable for banks) - Leverage score denominator adjusted to 1 pt. ROE threshold lowered to 12% (vs 15% standard). ROA threshold lowered to 1.0% (vs 7% standard).
 ADJUSTED_HEALTH_SCORE: 68%
 PE_RATIO_TTM: 9.2
+DE_RATIO: 1200%
 ### --- END DATA_BLOCK ---
 
 **Leverage** - NOT APPLICABLE FOR BANKS:
@@ -1417,6 +1437,7 @@ SECTOR: Financials
 SECTOR_ADJUSTMENTS: D/E ratio excluded (not applicable for banks)
 ADJUSTED_HEALTH_SCORE: 55%
 PE_RATIO_TTM: 7.8
+DE_RATIO: 2100%
 ### --- END DATA_BLOCK ---
 
 **Leverage** - NOT APPLICABLE:
@@ -1460,6 +1481,7 @@ SECTOR: Information Technology
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
 ADJUSTED_HEALTH_SCORE: 78%
 PE_RATIO_TTM: 12.5
+DE_RATIO: 45%
 ### --- END DATA_BLOCK ---
 
 **Leverage** - Conservative:
@@ -1502,6 +1524,7 @@ SECTOR: Information Technology
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
 ADJUSTED_HEALTH_SCORE: 38%
 PE_RATIO_TTM: 15.2
+DE_RATIO: 580%
 ### --- END DATA_BLOCK ---
 
 **Leverage** - EXTREME FOR TECH:
@@ -1548,6 +1571,7 @@ SECTOR: Industrials
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
 ADJUSTED_HEALTH_SCORE: 72%
 PE_RATIO_TTM: 9.8
+DE_RATIO: 180%
 ### --- END DATA_BLOCK ---
 
 **Leverage** - Manageable:
@@ -1590,6 +1614,7 @@ SECTOR: Industrials
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
 ADJUSTED_HEALTH_SCORE: 18%
 PE_RATIO_TTM: 3.2 (distressed valuation)
+DE_RATIO: 620%
 ### --- END DATA_BLOCK ---
 
 **Leverage** - CRITICAL DISTRESS:
@@ -1640,6 +1665,7 @@ SECTOR: Energy
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% for capital-intensive Energy sector.
 ADJUSTED_HEALTH_SCORE: 55%
 PE_RATIO_TTM: 8.5
+DE_RATIO: 300%
 ### --- END DATA_BLOCK ---
 
 **Leverage** - Capital-intensive sector:
@@ -1672,6 +1698,7 @@ SECTOR: Real Estate
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% for capital-intensive Real Estate sector.
 ADJUSTED_HEALTH_SCORE: 52%
 PE_RATIO_TTM: 6.0
+DE_RATIO: 350%
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
@@ -1692,6 +1719,7 @@ PE_RATIO_TTM: 6.0
 ### --- START DATA_BLOCK ---
 SECTOR: Real Estate
 ADJUSTED_HEALTH_SCORE: 25%
+DE_RATIO: 850%
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
@@ -1720,6 +1748,7 @@ SECTOR: Health Care
 SECTOR_ADJUSTMENTS: None - standard thresholds applied
 ADJUSTED_HEALTH_SCORE: 70%
 PE_RATIO_TTM: 22.0
+DE_RATIO: 45%
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
@@ -1773,6 +1802,7 @@ DIVIDEND_COVERAGE: UNCOVERED
 ROIC_PERCENT: 5.6%
 ROIC_QUALITY: WEAK
 PROFITABILITY_TREND: DECLINING
+DE_RATIO: 85%
 ### --- END DATA_BLOCK ---
 
 **Cash Generation**:
@@ -3986,15 +4016,10 @@ PFIC_RISK: CLEAN
     async def test_normal_reject_still_rejects_in_strict(self):
         """A normal-mode REJECT (e.g. extreme leverage) still rejects in strict mode.
 
-        The validator's _extract_debt_to_equity reads from the report body (not the
-        DATA_BLOCK DEBT_TO_EQUITY field), so we append a body section with D/E in
-        the format that _extract_debt_to_equity can parse.
+        The gate reads the DATA_BLOCK's DE_RATIO; prose cannot stand in for it.
         """
-        high_leverage_report = (
-            self._CLEAN_DATA_BLOCK
-            + "\n\n### FINANCIAL HEALTH DETAIL\n"
-            + "**Leverage**:\n"
-            + "- D/E: 700%\n"
+        high_leverage_report = self._CLEAN_DATA_BLOCK.replace(
+            "### --- END DATA_BLOCK ---", "DE_RATIO: 7.0\n### --- END DATA_BLOCK ---"
         )
         node = create_financial_health_validator_node(strict_mode=True)
         state = self._make_state(high_leverage_report, self._CLEAN_LEGAL_JSON)
@@ -4103,6 +4128,7 @@ class TestDebtToEquityNormalization:
 ### --- START DATA_BLOCK ---
 SECTOR: Industrials
 ADJUSTED_HEALTH_SCORE: 80%
+DE_RATIO: 6.92%
 ### --- END DATA_BLOCK ---
 
 - D/E: 6.92%: 1 pts

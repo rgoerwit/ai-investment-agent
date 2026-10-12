@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal, NamedTuple
 
 import structlog
 
 from src.data_block_utils import (
     effective_m_and_a_status,
+    extract_block_field_from_text,
+    extract_block_field_from_text_raw,
     extract_block_number_from_text,
     extract_block_text_value,
-    extract_data_block_field,
     extract_last_data_block,
 )
 from src.monetary import MONETARY_AMOUNT_PATTERN, parse_monetary_amount
@@ -660,11 +661,13 @@ def extract_metrics(
 
 
 _DE_NUMBER = r"([-+]?\d+(?:\.\d+)?)(%?)"
-# The whole DE_RATIO token: a signed plain decimal (negative equity stays signed),
-# an optional (spaced) percent sign and sentence period, then only whitespace, an
-# annotation or the end. Scientific notation, grouping
-# and malformed suffixes are rejected rather than read as a leading fragment.
-_DE_RATIO_VALUE = re.compile(r"([-+]?\d+(?:\.\d+)?)\s*(%)?\.?(?=\s|\(|$)")
+# The whole DE_RATIO value, matched in full: a signed plain decimal (negative
+# equity stays signed), an optional (spaced) percent sign, an optional sentence
+# period and at most one parenthetical annotation. Anything else ("0.45 / 9",
+# "0.45 percent", "8.05e-2", "1,234") is invalid rather than a leading fragment.
+_DE_RATIO_VALUE = re.compile(
+    r"([-+]?\d+(?:\.\d+)?)[ \t]*(%)?\.?(?:[ \t]*\([^()\n]*\))?"
+)
 _LEGACY_DE_PATTERNS = (
     rf"(?:^|\n)\s*-?\s*D/E:\s*{_DE_NUMBER}",
     rf"(?:^|\n)\s*-?\s*Debt/Equity:\s*{_DE_NUMBER}",
@@ -687,31 +690,51 @@ def _first_de_match(
     return None
 
 
-def _de_ratio_field(report: str) -> tuple[float, bool] | None:
-    """``(value, is_percent)`` from the last DATA_BLOCK's DE_RATIO, if valid."""
-    raw = extract_data_block_field(report, "DE_RATIO")
+class _DeRatioField(NamedTuple):
+    """The DATA_BLOCK DE_RATIO field: absent, unavailable, invalid or valid."""
+
+    state: Literal["NO_BLOCK", "ABSENT", "UNAVAILABLE", "INVALID", "VALID"]
+    value: float | None = None
+    is_percent: bool = False
+
+
+def _de_ratio_field(report: str) -> _DeRatioField:
+    """Read DE_RATIO from the report's last DATA_BLOCK under its field contract."""
+    block = extract_last_data_block(report)
+    if block is None:
+        return _DeRatioField("NO_BLOCK")
+    raw = extract_block_field_from_text_raw(block, "DE_RATIO")
     if raw is None:
-        return None
-    match = _DE_RATIO_VALUE.match(raw.strip())
+        return _DeRatioField("ABSENT")
+    if extract_block_field_from_text(block, "DE_RATIO") is None:
+        return _DeRatioField("UNAVAILABLE")
+    match = _DE_RATIO_VALUE.fullmatch(raw.strip())
     if match is None:
-        logger.info("debt_equity_report_value_rejected", value=raw[:40])
-        return None
-    return float(match.group(1)), bool(match.group(2))
+        logger.info(
+            "debt_equity_report_value_rejected",
+            reason="unsupported_notation",
+            value_length=len(raw),
+        )
+        return _DeRatioField("INVALID")
+    return _DeRatioField("VALID", float(match.group(1)), bool(match.group(2)))
 
 
 def extract_debt_to_equity(report: str) -> float | None:
-    """Extract D/E as a percentage from the report's unit-explicit statements.
+    """Extract D/E as a percentage under the DATA_BLOCK's DE_RATIO contract.
 
-    The DATA_BLOCK contract is ``DE_RATIO: <ratio>`` (0.45 means 45%), so a
-    ``DE_RATIO`` without ``%`` is a ratio and is converted to percent; with ``%`` it
-    is already a percentage. A legacy unitless ``D/E:`` / ``Debt/Equity:`` line has
-    no knowable unit, so it never feeds a code-owned gate: use
-    ``extract_legacy_unitless_debt_to_equity`` for display and diagnostics.
+    ``DE_RATIO: <ratio>`` means 0.45 is 45%, so a value without ``%`` is converted
+    to percent and one with ``%`` is already a percentage. The last DATA_BLOCK is
+    authoritative: when it holds DE_RATIO as unavailable or invalid, or omits it,
+    no prose can stand in for it. Only a legacy report with no DATA_BLOCK falls
+    back to a labelled ``D/E: N%`` line, and then only with an explicit percent; a
+    unitless legacy line has no knowable unit (see
+    ``extract_legacy_unitless_debt_to_equity``, display only).
     """
-    ratio_match = _de_ratio_field(report)
-    if ratio_match is not None:
-        value, is_percent = ratio_match
-        return value if is_percent else value * 100
+    field = _de_ratio_field(report)
+    if field.state == "VALID" and field.value is not None:
+        return field.value if field.is_percent else field.value * 100
+    if field.state != "NO_BLOCK":
+        return None
     for pattern in _LEGACY_DE_PATTERNS:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
         if match and match.group(2):
@@ -724,7 +747,7 @@ def extract_debt_to_equity(report: str) -> float | None:
 
 def extract_legacy_unitless_debt_to_equity(report: str) -> float | None:
     """Return a unitless legacy ``D/E:`` figure as written (unit unknown)."""
-    if _de_ratio_field(report) is not None:
+    if _de_ratio_field(report).state in {"VALID", "UNAVAILABLE", "INVALID"}:
         return None
     legacy = _first_de_match(_LEGACY_DE_PATTERNS, report)
     if legacy is None or legacy[1]:
