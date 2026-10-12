@@ -2,17 +2,16 @@
 Integration tests for ticker-specific memory isolation - REAL ChromaDB.
 """
 
-import os
 from functools import wraps
-from unittest.mock import patch
 
 import pytest
+from pydantic import SecretStr
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-try:
-    from tests.conftest import _REAL_GOOGLE_API_KEY
-except ImportError:
-    _REAL_GOOGLE_API_KEY = None
+from tests.helpers.integration_prerequisites import (
+    missing_credential_reason,
+    real_credential,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -64,14 +63,20 @@ def with_rate_limit_retry(func):
 
 
 @pytest.fixture
-def restore_real_env():
-    """Restores real API key for integration tests."""
-    if not _REAL_GOOGLE_API_KEY:
-        pytest.skip(
-            "Skipping integration test: No GOOGLE_API_KEY in original environment"
-        )
-    with patch.dict(os.environ, {"GOOGLE_API_KEY": _REAL_GOOGLE_API_KEY}):
-        yield
+def restore_real_env(monkeypatch):
+    """Install the operator's real Google key, or skip naming the prerequisite.
+
+    pytest-env overwrites ``GOOGLE_API_KEY`` with a dummy, so the key comes from
+    ``INTEGRATION_GOOGLE_API_KEY``. Embeddings read the config singleton, so the
+    environment alone would leave them on the dummy.
+    """
+    from src.config import config
+
+    key = real_credential("GOOGLE_API_KEY")
+    if key is None:
+        pytest.skip(missing_credential_reason("GOOGLE_API_KEY"))
+    monkeypatch.setenv("GOOGLE_API_KEY", key)
+    monkeypatch.setattr(config, "google_api_key", SecretStr(key))
 
 
 @pytest.mark.integration

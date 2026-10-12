@@ -100,7 +100,7 @@ def find_opportunities(
         # neutral parser); the lazy import keeps it off the import path entirely
         # when disabled. risk_tally + quality_flag_types are persisted on
         # AnalysisRecord by the analysis index, so both branches are live.
-        if getattr(config, "buy_stability_enabled", False):
+        if config.buy_stability_enabled:
             from src.ibkr.buy_stability import (
                 BuyStabilityConfig,
                 assess_buy_stability,

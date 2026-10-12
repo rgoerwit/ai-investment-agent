@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "multi-agent-trading-system"
-version = "4.0.0"
+version = "4.1.0"
 description = "A multi-agent international equity research system using LangGraph"
 authors = ["Trading System Team <team@example.com>"]
 readme = "README.md"
@@ -25,10 +25,10 @@ langchain-google-genai = "4.4.0"
 # in 1.70.0 / 1.65.0, below the 1.75.0 we were already on. Exact, not a range:
 # a range resolves to the newest release, which was 3 days old at pin time.
 google-genai = "2.24.0"
-# OPTIONAL: OpenAI for consultant node (cross-validation)
-# The consultant node uses OpenAI to provide independent review of Gemini analysis
+# Required, not extras: the transports build every OpenAI-compatible and
+# Anthropic client from these. Listed in an extra, Poetry locks them
+# extra-gated and a plain install (Docker's --only main, a `poetry sync`) drops them.
 langchain-openai = "1.6.2"
-# Writer LLM: Anthropic Claude (falls back to Gemini if CLAUDE_KEY not set)
 langchain-anthropic = "1.7.2"
 langgraph = "1.2.11"
 langgraph-checkpoint = "4.2.0"
@@ -121,10 +121,23 @@ anthropic = "1.6.0"
 # pin is the enforcement point.
 cryptography = "50.0.1"
 # Transitive only (mcp). Exact pin carries the floor for the Oct-2026 PyJWT
-# batch (1 critical, 5 high): 2.14.0 clears all but two. 2.15.0 fixes one
-# more moderate but was under the 14-day cooldown at pin time; one moderate
-# (options-dict mutation in decode) has no fix. Nothing in src/ imports jwt.
-pyjwt = "2.14.0"
+# batches: 2.15.x fixes the pre-verification RecursionError DoS
+# (GHSA-42vr-xj54-vc7v) and the OKP private-JWK import check (GHSA-x33g-cr3x-6449);
+# 2.15.1 was the newest release past the 14-day cooldown at pin time. One
+# moderate (options-dict mutation in decode) has no fix. src/ never imports jwt.
+pyjwt = "2.15.1"
+# Transitive only (aiohttp, yarl). Exact pin is the floor for GHSA-54p9-h82j-f925
+# (items-view reference leak, fixed 6.9.1) and stays below 7.x, which aiohttp
+# (<7.0) does not accept.
+multidict = "6.9.1"
+# Transitive only (langgraph). Exact pin is the floor for GHSA-fvww-7h3r-vfhp
+# (custom auth ignored actions= on resource decorators, fixed 0.4.4); this app
+# runs the graph in-process and never serves LangGraph auth. 0.4.5 was the newest
+# release past the cooldown at pin time.
+langgraph-sdk = "0.4.5"
+# Transitive only (flask, for the IBKR dashboard). Exact pin is the floor for
+# GHSA-g6x2-hccm-hh4m (safe_join accepted Windows device names, fixed 3.1.9).
+werkzeug = "3.1.9"
 # Transitive (openai 3, anthropic 1, mcp 2, langsmith 0.12 all moved to the
 # httpx2 fork). Exact pin only to hold the release-age cooldown: unpinned, the
 # resolver took 2.13.1, a week old. httpcore2 is pinned exactly by httpx2 itself.
@@ -142,14 +155,18 @@ mypy = "2.3.1"
 ast-serialize = "0.11.2"
 librt = "0.15.0"
 pre-commit = "4.6.2"
+# Transitive only (pre-commit). Exact pin is the floor for GHSA-p58f-9548-mpm2
+# (activation scripts run commands embedded in paths; fixed in 21.7.13) and holds
+# the release-age cooldown: 21.13.0 was the newest aged release at pin time.
+virtualenv = "21.13.0"
+# Transitive only (virtualenv >=21.13 needs >=1.6). Exact pin holds the cooldown:
+# unpinned, the resolver took 1.6.2, two days old.
+python-discovery = "1.6.1"
 ipython = "9.17.1"
 pytest-env = "1.7.1"
-pytest-socket = ">=0.8.1,<0.9.0"
 
 [tool.poetry.extras]
 observability = ["opentelemetry-api", "opentelemetry-sdk"]
-consultant = ["langchain-openai"]  # Enable external consultant for cross-validation
-writer = ["langchain-anthropic"]  # Claude-based article writer
 filings = ["edinet-tools"]  # Japan EDINET filing API
 
 [tool.poetry.scripts]
@@ -214,7 +231,6 @@ addopts = """
     --durations=10
     --maxfail=5
     -p no:cacheprovider
-    --allow-unix-socket
 """
 
 # Register custom markers
@@ -229,6 +245,7 @@ markers = [
     "security: marks tests that must not perform network or external side effects",
     "semantic: marks L3 semantic-judge tests requiring LLM (excluded from default run)",
     "asyncio: marks tests as asyncio",
+    "real_rate_limiter: keeps the real process rate limiter (the root fixture installs an instant one)",
 ]
 
 # Filter out warnings from third-party libraries

@@ -44,7 +44,31 @@ fan-out: it bounds the turn, not each call.
 A response cut off at the output cap is a fragment, not an answer — and the cap is not
 the only kind of partial. Key recovery on the full partial-response classifier, not on
 the cap alone. Refusals are excluded by construction, since re-asking cannot clear
-them.
+them. An `output_cap_exhausted` recovery must not raise reasoning: thinking already
+spent the visible budget, so it reruns on the `cap_retry_llm` (`RETRY-CAP`, the FAST
+intent's value) and falls back to `RETRY-HIGH` only when no lower value exists.
+The provider's cap stop reason classifies it first; the token count is the fallback,
+since a capped response can report a few tokens under the cap.
+
+## Absence is not failure
+
+An unavailable *optional* source never counts as an incomplete search. Guidance
+coverage is demoted only by the required searches (`REQUIRED_GUIDANCE_SEARCHES`):
+a filings adapter that exists for no exchange reports UNAVAILABLE on every run, and
+counting it turned "issuer does not guide" into a BUY block on half of all runs —
+twice. Before adding a source to any evidence-completeness check, measure how
+often it is structurally unavailable.
+
+Guidance provenance must reflect the required preflight searches actually recorded.
+If a required execution or evidence status is missing, mark the preflight incomplete;
+never turn missing search evidence into a confident "not disclosed" conclusion.
+
+## Parse latest results within their own block
+
+Promote or normalize `LATEST_RESULTS_*` values only from one complete, uniquely
+identified `LATEST_RESULTS` block with no duplicate field names. A similarly named
+field elsewhere in the report is not evidence for that block. When the block is
+ambiguous, leave it for validation to reject rather than repairing a guessed value.
 
 ## Writing state
 

@@ -28,6 +28,7 @@ from src.error_safety import (
     safe_error_payload,
     summarize_exception,
 )
+from src.llm_runtime.timeouts import require_allowance
 from src.mcp.errors import MCPCallError, make_mcp_tool_name
 from src.runtime_diagnostics import classify_failure
 from src.runtime_services import (
@@ -38,15 +39,15 @@ from src.tooling.runtime import ToolInvocation, ToolResult
 
 logger = structlog.get_logger(__name__)
 
-SPOT_CHECK_TIMEOUT_SECONDS = 8.0
-
 # Fields the consultant is allowed to spot-check (decision-critical metrics only)
 ALLOWED_FIELDS = frozenset(
     {
         "trailingPE",
         "forwardPE",
         "priceToBook",
-        "debtToEquity",
+        # debtToEquity is deliberately absent: FMP's ratio is not verified to share
+        # the canonical basis (total debt / equity; see src/data/debt_equity.py), so a
+        # cross-check against it would report a basis difference as a data error.
         "returnOnEquity",
         "returnOnAssets",
         "operatingMargins",
@@ -72,7 +73,6 @@ FMP_FIELD_MAP: dict[str, tuple[str, str]] = {
     "totalRevenue": ("income-statement", "revenue"),
     "returnOnEquity": ("ratios", "returnOnEquity"),
     "returnOnAssets": ("ratios", "returnOnAssets"),
-    "debtToEquity": ("ratios", "debtEquityRatio"),
     "trailingPE": ("ratios", "priceEarningsRatio"),
     "priceToBook": ("ratios", "priceToBookRatio"),
     "payoutRatio": ("ratios", "payoutRatio"),
@@ -90,7 +90,6 @@ FMP_MCP_REQUIRED_TOOLS = frozenset({"statements", "quote"})
 _FMP_METRIC_DISPATCH: dict[str, tuple[str, str]] = {
     "trailingPE": ("statements", "metrics-ratios-ttm"),
     "priceToBook": ("statements", "metrics-ratios-ttm"),
-    "debtToEquity": ("statements", "metrics-ratios-ttm"),
     "returnOnEquity": ("statements", "metrics-ratios-ttm"),
     "returnOnAssets": ("statements", "metrics-ratios-ttm"),
     "operatingMargins": ("statements", "metrics-ratios-ttm"),
@@ -121,7 +120,6 @@ _FMP_MCP_RESPONSE_FIELDS.update(
         # observed legacy MCP payloads and older fixtures.
         "trailingPE": ("priceToEarningsRatioTTM", "priceEarningsRatio"),
         "priceToBook": ("priceToBookRatioTTM", "priceToBookRatio"),
-        "debtToEquity": ("debtToEquityRatioTTM", "debtEquityRatio"),
         "dividendYield": ("dividendYieldTTM", "dividendYield"),
         "payoutRatio": ("dividendPayoutRatioTTM", "payoutRatio"),
         "currentRatio": ("currentRatioTTM", "currentRatio"),
@@ -259,13 +257,13 @@ def _mcp_wrapper_available(
     )
 
 
-def _classify_mcp_blocked_result(result: ToolResult) -> tuple[str, str]:
-    """Map a blocked hook result onto a stable wrapper-facing failure shape."""
-    message = result.value if isinstance(result.value, str) else "TOOL_BLOCKED"
-    normalized = message.lower()
-    if "budget exhausted" in normalized:
-        return "budget", message
-    return "inspection_blocked", message
+def _mcp_blocked_message(result: ToolResult) -> str:
+    """The wrapper-facing error of a hook-blocked call (policy or inspection).
+
+    Budget exhaustion is not a hook block: the MCP runtime raises it as an
+    ``MCPCallError`` of category ``budget``.
+    """
+    return result.value if isinstance(result.value, str) else "TOOL_BLOCKED"
 
 
 def _build_mcp_text_payload(
@@ -363,11 +361,17 @@ async def spot_check_metric(
             }
         )
 
+    # Read at call time; a spent caller deadline takes the timeout path below
+    # without starting the lookup.
+    timeout_seconds = config.consultant_spot_check_timeout_seconds
     try:
+        timeout_seconds = require_allowance(
+            timeout_seconds, label="consultant_spot_check"
+        )
         stock = yf.Ticker(ticker)
         info = await run_with_hard_timeout(
             asyncio.to_thread(lambda: stock.info),
-            timeout=SPOT_CHECK_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
             label=f"consultant_spot_check:{ticker}",
         )
         value = info.get(metric)
@@ -385,7 +389,7 @@ async def spot_check_metric(
             "spot_check_timeout",
             ticker=ticker,
             metric=metric,
-            timeout_seconds=SPOT_CHECK_TIMEOUT_SECONDS,
+            timeout_seconds=timeout_seconds,
         )
         return json.dumps(
             {
@@ -644,14 +648,13 @@ async def spot_check_metric_mcp_fmp(
         )
 
     if result.blocked:
-        failure_kind, error = _classify_mcp_blocked_result(result)
         return _build_mcp_access_failure(
             ticker=ticker,
             key="metric",
             lookup=metric,
             provider="fmp",
-            error=error,
-            failure_kind=failure_kind,
+            error=_mcp_blocked_message(result),
+            failure_kind="inspection_blocked",
             retryable=False,
             source="fmp_mcp",
         )

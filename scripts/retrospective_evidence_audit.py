@@ -161,7 +161,6 @@ def _dispositions(dirs: tuple[Path, ...], ticker: str | None) -> int:
     )
     from src.retrospective import (
         MINIMUM_DAYS_ELAPSED,
-        RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN,
         evidence_capabilities,
         resolve_cached_regime_delta,
     )
@@ -255,13 +254,7 @@ def _dispositions(dirs: tuple[Path, ...], ticker: str | None) -> int:
 
     total = sum(exact.values()) + evaluable
     assert total == sum(exact.values()) + evaluable, "the report must reconcile"
-    configured_budget = int(
-        getattr(
-            config,
-            "retrospective_max_evaluations_per_run",
-            RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN,
-        )
-    )
+    configured_budget = int(config.retrospective_max_evaluations_per_run)
     # Match `_select_within_budget`: zero and negative values mean no cap.
     per_run_price_ceiling = (
         min(evaluable, configured_budget) if configured_budget > 0 else evaluable

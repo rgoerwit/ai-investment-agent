@@ -7,9 +7,9 @@ import io
 import ipaddress
 import json
 import re
-import shutil
 import socket
-from dataclasses import dataclass
+import ssl
+from dataclasses import dataclass, replace
 from typing import Literal
 from urllib.parse import urljoin, urlparse, urlunsplit
 
@@ -18,17 +18,31 @@ import structlog
 from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
-from src.blocking_io import BlockingCallPolicy, run_blocking_call
+from src.blocking_io import (
+    DEFAULT_WORKER_SLOTS,
+    BlockingCallPolicy,
+    InFlightLimit,
+    run_blocking_call,
+)
 from src.config import config
 from src.error_safety import summarize_exception
 from src.exchange_metadata import registered_official_document_hosts
 from src.forensic_budget import AuditorBudgetPolicy
+from src.llm_runtime import timeouts as llm_timeouts
+from src.llm_runtime.timeouts import require_allowance
 from src.runtime_services import (
     get_current_inspection_service,
     get_current_issuer_hosts,
 )
+from src.subprocesses import resolve_program, run_program
 from src.text_patterns import is_safe_public_host
+from src.tooling.inspection_service import approved_tool_content
 from src.tooling.inspector import InspectionEnvelope, SourceKind
+from src.tooling.runtime import (
+    ToolCallBlocked,
+    ToolCallFailed,
+    tool_execution_timeout_seconds,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -39,13 +53,30 @@ SourceAuthority = Literal[
     "UNSUPPORTED",
 ]
 
+_SEC_HOST = "sec.gov"
 _OFFICIAL_HOST_SUFFIXES = (
-    "sec.gov",
+    _SEC_HOST,
     *registered_official_document_hosts(),
 )
-_PDF_POLICY = BlockingCallPolicy("official_document_pdf_extract", 20.0)
+# Hosts that refuse an anonymous client and require a contact address in the
+# User-Agent (EDGAR's fair-access rule). The one place the rule is written.
+_CONTACT_REQUIRED_HOSTS = (_SEC_HOST,)
+_PRODUCT_TOKEN_RE = re.compile(r"[A-Za-z][\w.-]*/[\w.]+")
+# Each policy's number is only the shipped default of its setting (pinned by a
+# parity test): each call applies OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS or
+# OFFICIAL_DOCUMENT_DNS_TIMEOUT_SECONDS with with_timeout(), read at the call
+# and shrunk to what is left (see "Allocation" below).
+# pypdf and the HTML parse are CPU-bound and cannot be interrupted, so one
+# document-extraction pool bounds both: past its unfinished workers further
+# extractions are refused rather than adding threads behind the stalled ones.
+# pdftotext is a subprocess bounded by its own timeout and kill, not a worker.
+_PDF_POLICY = BlockingCallPolicy(
+    "official_document_pdf_extract",
+    20.0,
+    in_flight=InFlightLimit(DEFAULT_WORKER_SLOTS),
+)
+_HTML_POLICY = replace(_PDF_POLICY, label="official_document_html_extract")
 _DNS_POLICY = BlockingCallPolicy("official_document_dns_check", 5.0)
-_DOCUMENT_TIMEOUT_SECONDS = 35.0
 _MIN_USEFUL_TEXT_CHARS = 200
 _DEFAULT_KEYWORDS = (
     "statement of financial position",
@@ -84,9 +115,176 @@ class ExtractedDocument:
 
 
 class DocumentExtractionError(RuntimeError):
-    def __init__(self, reason: str):
+    def __init__(
+        self, reason: str, *, status: int | None = None, detail: str | None = None
+    ):
         super().__init__(reason)
         self.reason = reason
+        self.status = status
+        self.detail = detail
+
+    def reply(self) -> str:
+        """The typed tool output: reason, then the HTTP status or detail if any."""
+        lines = ["STATUS: INSUFFICIENT_DATA", f"REASON: {self.reason}"]
+        if self.status is not None:
+            lines.append(f"HTTP_STATUS: {self.status}")
+        if self.detail:
+            lines.append(f"DETAIL: {self.detail}")
+        return "\n".join(lines)
+
+
+# --- Transport failures ------------------------------------------------------
+#
+# One reason per kind of network failure, never a shared one: a certificate
+# fault, a refused connection and a stalled read call for different action.
+# Rows are tried in order against every exception in the cause chain (the
+# transport wraps the OS or ssl error), so the TLS row precedes the generic
+# connect row that the same ``ConnectError`` would also match.
+_TRANSPORT_REASONS: tuple[tuple[str, tuple[type[BaseException], ...]], ...] = (
+    ("DOCUMENT_TLS_FAILED", (ssl.SSLError,)),
+    ("DOCUMENT_DOWNLOAD_TIMEOUT", (TimeoutError, httpx.TimeoutException)),
+    ("DOCUMENT_CONNECT_FAILED", (httpx.ConnectError,)),
+    (
+        "DOCUMENT_PROTOCOL_ERROR",
+        (
+            httpx.RemoteProtocolError,
+            httpx.LocalProtocolError,
+            httpx.ReadError,
+            httpx.DecodingError,
+        ),
+    ),
+)
+_RESIDUAL_RETRIEVAL_REASON = "DOCUMENT_RETRIEVAL_FAILED"
+
+
+def _exception_chain(exc: BaseException) -> tuple[BaseException, ...]:
+    """*exc* and everything it was raised from or while handling, once each."""
+    seen: dict[int, BaseException] = {}
+    pending: list[BaseException] = [exc]
+    while pending:
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen[id(current)] = current
+        pending.extend(
+            link for link in (current.__cause__, current.__context__) if link
+        )
+    return tuple(seen.values())
+
+
+def transport_failure_reason(exc: BaseException) -> str:
+    """The typed reason for a failure of the download, by exception class."""
+    chain = _exception_chain(exc)
+    for reason, kinds in _TRANSPORT_REASONS:
+        if any(isinstance(link, kinds) for link in chain):
+            return reason
+    return _RESIDUAL_RETRIEVAL_REASON
+
+
+@dataclass
+class _Progress:
+    """Where a retrieval had got to, for the failure log: the URL being worked
+    on (the redirect hop, not the requested one) and the phase."""
+
+    url: str
+    phase: Literal["dns", "connect", "redirect", "body", "extract", "inspect"] = "dns"
+
+
+def _host_matches(host: str, suffix: str) -> bool:
+    return host == suffix or host.endswith(f".{suffix}")
+
+
+def _product_token(user_agent: str) -> str:
+    """The application's own ``Name/version`` token of a User-Agent string
+    (``Mozilla/5.0`` is the compatibility prefix, not the application)."""
+    for match in _PRODUCT_TOKEN_RE.finditer(user_agent):
+        if not match.group(0).casefold().startswith("mozilla/"):
+            return match.group(0)
+    return user_agent
+
+
+def _user_agent_for(url: str) -> str:
+    """The User-Agent to send to *url*'s host.
+
+    ``HTTP_USER_AGENT`` everywhere except a host that requires a contact
+    address, which gets ``<product token> <SEC_CONTACT_EMAIL>``. Without the
+    contact the request is refused here, before anything connects: sending it
+    would only be refused by the host. The address goes to no other host.
+    """
+    host = (urlparse(url).hostname or "").rstrip(".").lower()
+    if not any(_host_matches(host, suffix) for suffix in _CONTACT_REQUIRED_HOSTS):
+        return config.http_user_agent
+    contact = config.sec_contact_email
+    if not contact:
+        raise DocumentExtractionError(
+            "DOCUMENT_SEC_CONTACT_REQUIRED",
+            detail=(
+                f"{host} requires a contact address in the User-Agent; "
+                "set SEC_CONTACT_EMAIL"
+            ),
+        )
+    return f"{_product_token(config.http_user_agent)} {contact}"
+
+
+# --- Allocation --------------------------------------------------------------
+#
+# The whole sequence (DNS check, download, pypdf, pdftotext, inspection) runs
+# inside the tool's allowance: the runner's setting, clamped to the operational
+# deadline (the caller's enclosing deadline and the tool runner, kept back from
+# the runner's hard cap by a margin). It is shared by fractions of that
+# allowance, so the split holds for any runner value:
+#
+# - the download (DNS checks and redirects included) may use
+#   OFFICIAL_DOCUMENT_DOWNLOAD_FRACTION of it;
+# - of the rest, OFFICIAL_DOCUMENT_INSPECTION_FRACTION is held back for the
+#   content inspection of the evidence; extraction gets the remainder, each
+#   backend at most OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS, and one that
+#   cannot start is skipped with EXTRACTION_TIMEOUT;
+# - inspection gets whatever is then left, and one that cannot finish fails the
+#   document closed with INSPECTION_TIMEOUT.
+#
+# Read, never bound here: binding the LLM enclosing deadline would also cap
+# the injection judge, which fails open.
+
+
+@dataclass(frozen=True)
+class _Allocation:
+    """One document's time budget: an absolute deadline and how it is shared."""
+
+    deadline: float
+    download_seconds: float
+    inspection_reserve: float
+
+    def left(self) -> float:
+        return self.deadline - llm_timeouts.now()
+
+
+def _allocate() -> _Allocation:
+    """Share the tool's allowance between download, extraction and inspection.
+
+    The allowance is read once, when the tool starts. A spent one leaves every
+    share at or below zero, so the download refuses before a client opens.
+    """
+    allowance = tool_execution_timeout_seconds()
+    download = allowance * config.official_document_download_fraction
+    return _Allocation(
+        deadline=llm_timeouts.now() + allowance,
+        download_seconds=download,
+        inspection_reserve=(allowance - download)
+        * config.official_document_inspection_fraction,
+    )
+
+
+def _extraction_allowance(allocation: _Allocation, *, label: str) -> float:
+    """One extractor's bound: its cap, within what is left less the inspection
+    reserve. Raises ``TimeoutError`` before any work once nothing is left."""
+    return require_allowance(
+        min(
+            config.official_document_extract_timeout_seconds,
+            allocation.left() - allocation.inspection_reserve,
+        ),
+        label=label,
+    )
 
 
 def _rank_same_host_document_paths(
@@ -165,7 +363,26 @@ def _official_url(url: str, extra_hosts: tuple[str, ...] = ()) -> bool:
         return False
     host = parsed.hostname.rstrip(".").lower()
     approved = (*_OFFICIAL_HOST_SUFFIXES, *extra_hosts)
-    return any(host == suffix or host.endswith(f".{suffix}") for suffix in approved)
+    return any(_host_matches(host, suffix) for suffix in approved)
+
+
+def _refusal_reason(url: str, extra_hosts: tuple[str, ...]) -> str:
+    """Why a redirect target is refused: an approved host reached over plain
+    http is an insecure redirect, anything else an unapproved host."""
+    parsed = urlparse(url)
+    if parsed.scheme == "http" and parsed.hostname:
+        try:
+            port = parsed.port
+        except ValueError:
+            return "UNAPPROVED_DOCUMENT_HOST"
+        # The https twin of the same address: http's own default port drops.
+        netloc = parsed.netloc.rpartition("@")[2]
+        if port == 80:
+            netloc = netloc.rpartition(":")[0]
+        twin = urlunsplit(("https", netloc, parsed.path, parsed.query, ""))
+        if _official_url(twin, extra_hosts):
+            return "DOCUMENT_INSECURE_REDIRECT"
+    return "UNAPPROVED_DOCUMENT_HOST"
 
 
 def is_official_document_url(url: str) -> bool:
@@ -207,7 +424,10 @@ async def _ensure_public_hostname(url: str) -> None:
         return addresses
 
     try:
-        addresses = await run_blocking_call(_DNS_POLICY, _resolve)
+        # A spent deadline raises TimeoutError in run_blocking_call, before
+        # any lookup, and fails the document exactly as a DNS timeout does.
+        policy = _DNS_POLICY.with_timeout(config.official_document_dns_timeout_seconds)
+        addresses = await run_blocking_call(policy, _resolve)
     except Exception as exc:
         raise DocumentExtractionError("DOCUMENT_DNS_FAILED") from exc
     if not addresses:
@@ -263,34 +483,42 @@ def _extract_with_pypdf(
 
 
 async def _extract_with_pdftotext(
-    payload: bytes, *, max_pages: int, selected_pages: int, keywords: tuple[str, ...]
+    payload: bytes,
+    *,
+    max_pages: int,
+    selected_pages: int,
+    keywords: tuple[str, ...],
+    allocation: _Allocation | None = None,
 ) -> ExtractedDocument:
-    executable = shutil.which("pdftotext")
+    executable = resolve_program("pdftotext")
     if executable is None:
         raise DocumentExtractionError("PDF_PARSER_UNAVAILABLE")
-    process = await asyncio.create_subprocess_exec(
-        executable,
-        "-f",
-        "1",
-        "-l",
-        str(max_pages),
-        "-",
-        "-",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    # Read now (pypdf may have used part of the allowance) and resolved before
+    # the subprocess exists, so a spent allowance spawns nothing. With no
+    # allocation (a direct caller) the tool's own is taken now.
     try:
-        stdout, _ = await asyncio.wait_for(
-            process.communicate(payload), timeout=_PDF_POLICY.hard_timeout_seconds
+        timeout = _extraction_allowance(
+            allocation or _allocate(), label="official_document_pdftotext"
         )
     except TimeoutError as exc:
-        process.kill()
-        await process.wait()
+        logger.info(
+            "official_document_extraction_skipped",
+            backend="pdftotext",
+            reason="EXTRACTION_TIMEOUT",
+        )
         raise DocumentExtractionError("EXTRACTION_TIMEOUT") from exc
-    if process.returncode != 0:
+    try:
+        output = await run_program(
+            executable,
+            *("-f", "1", "-l", str(max_pages), "-", "-"),
+            input=payload,
+            timeout=timeout,
+        )
+    except TimeoutError as exc:
+        raise DocumentExtractionError("EXTRACTION_TIMEOUT") from exc
+    if output.returncode != 0:
         raise DocumentExtractionError("PDF_MALFORMED")
-    page_texts = stdout.decode("utf-8", errors="replace").split("\f")
+    page_texts = output.stdout.decode("utf-8", errors="replace").split("\f")
     if page_texts and not page_texts[-1].strip():
         page_texts.pop()
     selected = _select_pages(page_texts, keywords, selected_pages)
@@ -301,14 +529,28 @@ async def _extract_with_pdftotext(
 
 
 async def extract_pdf_text(
-    payload: bytes, policy: AuditorBudgetPolicy, keywords: str
+    payload: bytes,
+    policy: AuditorBudgetPolicy,
+    keywords: str,
+    allocation: _Allocation | None = None,
 ) -> ExtractedDocument:
+    """Extract evidence text: pypdf, then pdftotext, inside *allocation*.
+
+    With no allocation (a direct caller) the tool's own is taken now.
+    """
+    allocation = allocation or _allocate()
     terms = tuple(filter(None, (part.strip() for part in keywords.split(","))))
     search_terms = terms or _DEFAULT_KEYWORDS
     primary_reason = "PDF_PARSER_UNAVAILABLE"
     try:
+        # A spent allowance raises TimeoutError before the thread starts and
+        # takes the EXTRACTION_TIMEOUT path below, as a pypdf stall does;
+        # pdftotext then re-checks what is left.
+        pdf_policy = _PDF_POLICY.with_timeout(
+            _extraction_allowance(allocation, label=_PDF_POLICY.label)
+        )
         extracted = await run_blocking_call(
-            _PDF_POLICY,
+            pdf_policy,
             lambda: _extract_with_pypdf(
                 payload,
                 max_pages=policy.max_document_pages,
@@ -334,6 +576,7 @@ async def extract_pdf_text(
             max_pages=policy.max_document_pages,
             selected_pages=policy.max_selected_pages,
             keywords=search_terms,
+            allocation=allocation,
         )
         if len(fallback.text) >= _MIN_USEFUL_TEXT_CHARS:
             return fallback
@@ -346,25 +589,60 @@ async def extract_pdf_text(
 
 
 async def _download_official(
-    url: str, max_bytes: int, extra_hosts: tuple[str, ...] = ()
+    url: str,
+    max_bytes: int,
+    extra_hosts: tuple[str, ...] = (),
+    *,
+    allocation: _Allocation,
+    progress: _Progress | None = None,
 ) -> tuple[bytes, str, str]:
     current = url
-    async with httpx.AsyncClient(timeout=_DOCUMENT_TIMEOUT_SECONDS) as client:
-        for _ in range(4):
+    progress = progress or _Progress(url)
+    # One bound for the whole download (DNS checks and redirects included):
+    # its share of the allocation, so a trickling body stops there. httpx gets
+    # the same value per phase; a tighter per-phase bound would only fail a
+    # stall sooner with nothing to spend the time on. A spent share is refused
+    # before the client opens, as DOCUMENT_ALLOWANCE_SPENT.
+    try:
+        total = require_allowance(
+            allocation.download_seconds, label="official_document_download"
+        )
+    except TimeoutError as exc:
+        raise DocumentExtractionError("DOCUMENT_ALLOWANCE_SPENT") from exc
+    async with (
+        asyncio.timeout(total),
+        httpx.AsyncClient(timeout=total) as client,
+    ):
+        for hop in range(4):
+            progress.url = current
+            progress.phase = "dns"
             if not _official_url(current, extra_hosts):
-                raise DocumentExtractionError("UNAPPROVED_DOCUMENT_HOST")
+                raise DocumentExtractionError(
+                    _refusal_reason(current, extra_hosts)
+                    if hop
+                    else "UNAPPROVED_DOCUMENT_HOST"
+                )
+            user_agent = _user_agent_for(current)
             await _ensure_public_hostname(current)
+            progress.phase = "connect"
             async with client.stream(
-                "GET", current, follow_redirects=False
+                "GET",
+                current,
+                headers={"User-Agent": user_agent},
+                follow_redirects=False,
             ) as response:
                 if response.is_redirect:
+                    progress.phase = "redirect"
                     location = response.headers.get("location")
                     if not location:
                         raise DocumentExtractionError("DOCUMENT_REDIRECT_INVALID")
                     current = urljoin(current, location)
                     continue
+                progress.phase = "body"
                 if response.status_code >= 400:
-                    raise DocumentExtractionError("DOCUMENT_HTTP_ERROR")
+                    raise DocumentExtractionError(
+                        "DOCUMENT_HTTP_ERROR", status=response.status_code
+                    )
                 declared = response.headers.get("content-length")
                 if declared and declared.isdigit() and int(declared) > max_bytes:
                     raise DocumentExtractionError("DOCUMENT_SIZE_LIMIT")
@@ -381,6 +659,78 @@ async def _download_official(
                     current,
                 )
     raise DocumentExtractionError("DOCUMENT_REDIRECT_LIMIT")
+
+
+def _html_document_text(soup: BeautifulSoup) -> str:
+    """Keep the established flattened-cell grammar used by evidence readers."""
+    return soup.get_text("\n", strip=True)
+
+
+def _extract_html(
+    payload: bytes, base_url: str, keywords: str
+) -> tuple[str, tuple[str, ...]]:
+    """Parse, rank and flatten one HTML document: the whole CPU-bound part, so
+    it runs as one worker call."""
+    soup = BeautifulSoup(payload, "html.parser")
+    return (
+        _html_document_text(soup),
+        _rank_same_host_document_paths(soup, base_url, keywords),
+    )
+
+
+async def extract_html_text(
+    payload: bytes,
+    base_url: str,
+    keywords: str,
+    allocation: _Allocation,
+) -> tuple[ExtractedDocument, tuple[str, ...]]:
+    """Extract an HTML document's evidence text and ranked candidate paths off
+    the event loop, inside *allocation*'s extraction allowance.
+
+    A stall, a saturated worker limit or a spent allowance is
+    EXTRACTION_TIMEOUT; a result that arrives late is discarded by
+    ``run_blocking_call`` and never reaches inspection.
+    """
+    try:
+        html_policy = _HTML_POLICY.with_timeout(
+            _extraction_allowance(allocation, label=_HTML_POLICY.label)
+        )
+        text, candidate_paths = await run_blocking_call(
+            html_policy, lambda: _extract_html(payload, base_url, keywords)
+        )
+    except TimeoutError as exc:
+        raise DocumentExtractionError("EXTRACTION_TIMEOUT") from exc
+    return ExtractedDocument(text, "html", 1, (0,)), candidate_paths
+
+
+_DOWNLOAD_PHASES = frozenset({"dns", "connect", "redirect", "body"})
+
+
+def _typed_failure(exc: Exception, progress: _Progress) -> DocumentExtractionError:
+    """*exc* as a typed failure: already one, a transport failure of the
+    download (classified by exception class), or the residual reason."""
+    if isinstance(exc, DocumentExtractionError):
+        return exc
+    if progress.phase in _DOWNLOAD_PHASES:
+        return DocumentExtractionError(transport_failure_reason(exc))
+    return DocumentExtractionError(_RESIDUAL_RETRIEVAL_REASON)
+
+
+def _log_failure(
+    failure: DocumentExtractionError, exc: Exception, progress: _Progress
+) -> None:
+    """One warning per failed retrieval: where it stopped, never the full URL
+    (a path or query can carry a token)."""
+    target = urlparse(progress.url)
+    logger.warning(
+        "official_document_failed",
+        reason=failure.reason,
+        phase=progress.phase,
+        document_scheme=target.scheme,
+        document_host=target.hostname,
+        http_status=failure.status,
+        **summarize_exception(exc, operation="official_document_failed"),
+    )
 
 
 @tool
@@ -403,23 +753,27 @@ async def get_official_document(
             f"REJECTED_HOST: {rejected_host}\n"
             f"APPROVED_HOSTS: {', '.join(approved) if approved else 'none'}"
         )
+    allocation = _allocate()
+    progress = _Progress(url)
     try:
         payload, content_type, final_url = await _download_official(
-            url, policy.max_document_bytes, extra_hosts
+            url,
+            policy.max_document_bytes,
+            extra_hosts,
+            allocation=allocation,
+            progress=progress,
         )
+        progress.phase = "extract"
         is_pdf = payload.startswith(b"%PDF") or "application/pdf" in content_type
         if is_pdf:
-            extracted = await extract_pdf_text(payload, policy, keywords)
+            extracted = await extract_pdf_text(
+                payload, policy, keywords, allocation=allocation
+            )
             candidate_paths: tuple[str, ...] = ()
         elif "html" in content_type or payload.lstrip().startswith(b"<"):
-            soup = BeautifulSoup(payload, "html.parser")
-            candidate_paths = _rank_same_host_document_paths(
-                soup,
-                final_url,
-                keywords,
+            extracted, candidate_paths = await extract_html_text(
+                payload, final_url, keywords, allocation
             )
-            text = soup.get_text("\n", strip=True)
-            extracted = ExtractedDocument(text, "html", 1, (0,))
         elif content_type.startswith("text/"):
             candidate_paths = ()
             extracted = ExtractedDocument(
@@ -436,15 +790,30 @@ async def get_official_document(
         reason = extracted.reason or (
             "EVIDENCE_CHAR_LIMIT" if len(extracted.text) > len(evidence) else None
         )
-        inspected = await get_current_inspection_service().check(
+        progress.phase = "inspect"
+        # Whatever is left, at least the reserve held back from extraction.
+        # Fails closed: evidence that could not be inspected in time is
+        # never returned.
+        outcome = await get_current_inspection_service().check_within(
             InspectionEnvelope(
                 content_text=evidence,
                 raw_content=evidence,
                 source_kind=SourceKind.official_filing,
                 source_name="official_document",
                 metadata={"url": final_url, "backend": extracted.backend},
-            )
+            ),
+            seconds=allocation.left(),
+            label="official_document_inspection",
         )
+        if outcome is None:
+            logger.warning(
+                "official_document_inspection_timeout", backend=extracted.backend
+            )
+        # A block or a failed inspection leaves the tool as such, never as
+        # evidence wrapping a placeholder, so the ledger records BLOCKED or FAILED.
+        inspected = approved_tool_content(outcome)
+        if len(str(inspected)) < _MIN_USEFUL_TEXT_CHARS:
+            raise DocumentExtractionError("DOCUMENT_TEXT_UNAVAILABLE")
         metadata = {
             "status": "PARTIAL_DATA" if reason else "EXTRACTED",
             "authority": resolve_source_authority(final_url),
@@ -461,11 +830,9 @@ async def get_official_document(
             "STATUS: EVIDENCE_FOUND\n"
             f"DOCUMENT_METADATA: {json.dumps(metadata, sort_keys=True)}\n\n{inspected}"
         )
-    except DocumentExtractionError as exc:
-        return f"STATUS: INSUFFICIENT_DATA\nREASON: {exc.reason}"
+    except (ToolCallBlocked, ToolCallFailed):
+        raise
     except Exception as exc:
-        logger.warning(
-            "official_document_failed",
-            **summarize_exception(exc, operation="official_document_failed"),
-        )
-        return "STATUS: INSUFFICIENT_DATA\nREASON: DOCUMENT_RETRIEVAL_FAILED"
+        failure = _typed_failure(exc, progress)
+        _log_failure(failure, exc, progress)
+        return failure.reply()

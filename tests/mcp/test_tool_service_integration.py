@@ -1,7 +1,7 @@
 """End-to-end test that the consultant MCP wrappers route through
-``ToolExecutionService`` so audit, argument-policy, content-inspection, and
-``MCPBudgetHook`` all observe the call under its canonical
-``mcp__<server>__<tool>`` name.
+``ToolExecutionService`` so audit, argument-policy and content-inspection
+hooks all observe the call under its canonical ``mcp__<server>__<tool>`` name,
+and that the MCP runtime counts and gates its budget beneath them.
 
 This is the load-bearing assertion for R-2: the MCP path must not bypass the
 shared hook chain.
@@ -14,10 +14,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
 from src.consultant_tools import spot_check_metric_mcp_fmp
-from src.mcp.budget import MCPBudgetHook
 from src.mcp.client import MCPRuntime
 from src.mcp.config import MCPServerSpec
 from src.runtime_services import RuntimeServices, use_runtime_services
@@ -81,7 +80,14 @@ async def test_consultant_mcp_call_flows_through_tool_service(
     @asynccontextmanager
     async def fake_open_session(_spec):
         class _Session:
-            async def call_tool(self, name, arguments):
+            async def list_tools(self, *, params=None):
+                # Listed before every call, so the output schema is cached
+                # within the time left (src/mcp/client.py::_call_in_time).
+                return ListToolsResult(
+                    tools=[Tool(name="statements", inputSchema={"type": "object"})]
+                )
+
+            async def call_tool(self, name, arguments, read_timeout_seconds=None):
                 return CallToolResult(
                     content=[
                         TextContent(
@@ -97,15 +103,14 @@ async def test_consultant_mcp_call_flows_through_tool_service(
 
     monkeypatch.setattr(runtime, "_open_session", fake_open_session)
 
-    # Build a real hook chain that includes the budget hook + an inspector hook
-    # plus a recording probe so we can assert on the canonical tool name.
+    # A real hook chain: an inspector hook plus a recording probe so we can
+    # assert on the canonical tool name.
     inspector = _RecordingInspector()
     inspection_service = InspectionService(inspector=inspector)
     recording_hook: ToolHook = _RecordingHook()
     hooks: list[ToolHook] = [
         recording_hook,
         ContentInspectionHook(inspection_service),
-        MCPBudgetHook(runtime),
     ]
     tool_service = ToolExecutionService(hooks)
 
@@ -145,7 +150,7 @@ async def test_consultant_mcp_call_flows_through_tool_service(
     assert envelope.metadata["trust_tier"] == "official_vendor"
     assert envelope.metadata["transport"] == "streamable_http"
 
-    # Budget hook must have recorded one upstream consumption for the server.
+    # The runtime counted the one tools/call it sent.
     assert runtime.budget._run_calls["fmp_remote"] == 1
 
 
@@ -154,19 +159,19 @@ async def test_consultant_mcp_call_blocked_by_budget_returns_failure(
     tmp_path: Path, monkeypatch
 ):
     runtime = _runtime_with_streaming(tmp_path)
-    # Pre-saturate the per-run limit so the budget hook blocks before the runner.
+    # Pre-saturate the per-run limit so the runtime refuses before any session.
     spec = runtime.specs["fmp_remote"]
     runtime.budget._run_calls["fmp_remote"] = spec.per_run_limit
 
     @asynccontextmanager
     async def fake_open_session(_spec):  # pragma: no cover - never invoked when blocked
-        raise AssertionError("runner should not run when budget hook blocks")
+        raise AssertionError("no session may open once the budget is spent")
         yield None
 
     monkeypatch.setattr(runtime, "_open_session", fake_open_session)
 
     inspection_service = InspectionService()
-    tool_service = ToolExecutionService([MCPBudgetHook(runtime)])
+    tool_service = ToolExecutionService([])
     services = RuntimeServices(
         tool_service=tool_service,
         inspection_service=inspection_service,

@@ -9,7 +9,7 @@ from collections.abc import Callable
 
 import structlog
 
-from src.agents import extract_string_content
+from src.agents.message_utils import extract_string_content
 from src.config import Config
 from src.data_block_utils import (
     BLOCK_SHAPES,
@@ -23,7 +23,7 @@ from src.data_block_utils import (
 )
 from src.error_safety import summarize_exception
 from src.llm_runtime.construction import build_required_model_for_seat
-from src.llm_runtime.seats import SeatId
+from src.llm_runtime.seats import SEATS, SeatId
 
 logger = structlog.get_logger(__name__)
 
@@ -102,6 +102,11 @@ def _ends_with_known_structured_terminator(text: str, agent: str | None) -> bool
     if agent is not None and agent != "junior_fundamentals_analyst":
         return False
     return text.rstrip().endswith(raw_data_end)
+
+
+def format_tool_output_cap(removed_chars: int, tool_name: str) -> str:
+    """Render the code-owned marker copied by tool-result consumers."""
+    return f"[...TRUNCATED {removed_chars:,} chars of tool output '{tool_name}'...]"
 
 
 _CODE_TRUNCATION_MARKERS = (
@@ -285,8 +290,8 @@ class SignalProcessor:
             result = await invoke_with_rate_limit_handling(
                 self.llm,
                 messages,
-                max_attempts=2,
-                context="SignalProcessor",
+                # The seat display name, so the loop resolves this seat's budget.
+                context=SEATS[SeatId.SIGNAL_PROCESSOR].callback_name,
             )
             # CRITICAL FIX: Normalize response.content to string (Gemini may return dict)
             content = extract_string_content(result.content).strip().upper()

@@ -25,6 +25,14 @@ skill or local configuration exists.
   `poetry run pytest tests/eval/ tests/test_main_cli.py -v`.
 - Blocking work or async timeouts:
   `poetry run pytest tests/test_to_thread_timeout_consistency.py tests/agents/test_runtime_hard_timeout.py -v`.
+- LLM budget resolution, transport admission or retry ownership:
+  `poetry run pytest tests/llm_runtime/test_timeouts.py tests/llm_runtime/test_migrated_caller_budgets.py tests/llm_runtime/test_run_deadline.py tests/test_timeout_literals.py -v`.
+- Tool/inspection scope or MCP deadline changes:
+  `poetry run pytest tests/tooling/test_tool_timeout_scopes.py tests/tooling/test_tool_reason_codes.py tests/tools/test_inspection_outcome_tools.py tests/mcp/test_mcp_timeouts.py tests/mcp/test_budget.py -v`.
+- Article workflow, publication or writer fallback changes:
+  `poetry run pytest tests/advanced/test_article_workflow_deadline.py tests/advanced/test_article_publication.py tests/advanced/test_article_writer.py -v`.
+- Blocking worker lifecycle or late-result handling:
+  `poetry run pytest tests/test_blocking_io.py tests/test_tavily_utils.py tests/data/test_gap_fill.py -v`.
 - Logging and exception safety:
   `poetry run pytest tests/test_logging_consistency.py -v`.
 - MCP behavior: `poetry run pytest tests/mcp/ -v`.
@@ -36,11 +44,48 @@ Use `make check-all` for the complete static surface and `make test-ci` for the
 deterministic credential-free suite. Do not launch paid, networked, integration, or
 destructive tests without the request and prerequisites that authorize them.
 
+Default pytest skips `integration`; `--run-integration` is an explicit opt-in, not
+permission to spend or access external services. Non-integration tests are strictly
+offline under `tests/conftest.py`. Preserve configured addopts and plugins, including
+the exact string `true` for `PYTEST_DISABLE_DOTENV`; there is no pytest-socket or
+`--allow-unix-socket` addopt. Dummy credentials can still trigger real SDK probes:
+use fake providers for unit availability tests. Use `stalled_worker(label, prefix=)`
+from `tests/helpers/stalled_workers.py` for releasable stalled workers. It releases
+and joins them before monkeypatch teardown, including when an assertion fails, so
+late work cannot escape the boundary.
+
+For a standalone audit probe, install isolation before importing application or
+provider modules: set `PYTEST_DISABLE_DOTENV` to the exact string `true`, disable
+`LANGSMITH_TRACING`, `LANGCHAIN_TRACING` and `LANGCHAIN_TRACING_V2`, and refuse
+network/DNS through `tests/helpers/offline_network.py`. Prefer the existing pytest boundary. Dummy
+credentials alone are insufficient; assert no attempts and retain refusal until
+all probe workers finish.
+
+The offline ledger records intercepted socket/DNS/libcurl attempts; assert request
+counts at faked SDK seams too, because SDK-method refusals are not ledger entries.
+
+Budget tests must exercise the selected adapter's effective request options, not
+only mocked factory arguments or model fields. Cover quick/full mode, sync/async,
+minimum-allowance rejection, tier downgrade, model failover, outer cancellation,
+and concurrent calls sharing a model. Use fake clocks/transports for request
+budgets and releasable stalled workers for caller bounds; test interpreter exit in
+a subprocess with an external test timeout. Plant the defect a new guard claims
+to reject, then prove the valid centralized-policy case passes. Polling, cooldowns
+and protocol constants are not request deadlines.
+
+## Restricted collection
+
+If pytest collection specifically fails while accessing ancestor guidance, retry
+the same tests with `--rootdir=tests --confcutdir=tests`. This retains
+`tests/conftest.py` and its credential-free isolation. It does not authorize access
+to private configuration or suppress failures inside tests. Record the exact
+remaining limitation instead of treating every sandbox collection failure as an
+unrun suite.
+
 ## Detect macOS collection stalls
 
-A warm focused file should usually start and finish within about two seconds. The
-roughly 10.3k-test full suite may take about 15 minutes, with several minutes of
-continuously advancing collection; that alone is not a hang. If a focused probe is
+A focused file should normally start promptly. The full suite can take much longer,
+with continuously advancing collection; that alone is not a hang. If a focused probe is
 repeatedly slow or collection stops advancing, let pytest's macOS preflight hydrate
 public inputs automatically. If it cannot, immediately run
 `poetry run python scripts/check_macos_cloud_files.py --hydrate`, then rerun the exact

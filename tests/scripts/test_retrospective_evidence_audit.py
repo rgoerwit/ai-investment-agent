@@ -78,9 +78,10 @@ class TestTheReportDistinguishesItsStages:
 
     def test_per_run_price_ceiling_uses_the_runtime_budget(self, tmp_path, capsys):
         """Corpus eligibility must not be reported as one run's price volume."""
-        from src.retrospective import RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN
+        from src.config import config
 
-        for index in range(RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN + 1):
+        ceiling = config.retrospective_max_evaluations_per_run
+        for index in range(ceiling + 1):
             _artifact(
                 tmp_path,
                 f"T{index}.T_20260101_000000_analysis.json",
@@ -89,13 +90,8 @@ class TestTheReportDistinguishesItsStages:
 
         audit._dispositions((tmp_path,), None)
         out = capsys.readouterr().out
-        assert (
-            f"{RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN + 1:,} snapshots eligible" in out
-        )
-        assert (
-            f"price at most\n{RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN:,} in one run"
-            in out
-        )
+        assert f"{ceiling + 1:,} snapshots eligible" in out
+        assert f"price at most\n{ceiling:,} in one run" in out
 
 
 class TestTheDenominatorIsAuditable:

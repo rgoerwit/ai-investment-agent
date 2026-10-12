@@ -274,7 +274,7 @@ class TestPortfolioManagerArtifactInputs:
                 "RISK_TALLY: 0.5\n"
                 "ZONE: MODERATE\n"
                 "DECISION_FACTS: NONE\n"
-                "DECISION_GATES: NONE\n"
+                "DECISION_GATES: LIQUIDITY_HARD_FAIL\n"
                 "### --- END PM_BLOCK ---"
             )
         )
@@ -387,7 +387,7 @@ PE_RATIO_TTM: 16.55
 
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")
-    async def test_pm_reconciles_invalid_trace_without_a_model_correction(
+    async def test_pm_correction_does_not_invent_a_replacement_fact(
         self, mock_get_prompt
     ):
         mock_get_prompt.return_value = SimpleNamespace(
@@ -444,16 +444,18 @@ PE_RATIO_TTM: 16.55
 
         with patch(
             "src.agents.decision_nodes.agent_runtime.invoke_with_rate_limit_handling",
-            new=AsyncMock(side_effect=responses),
+            new=AsyncMock(side_effect=responses * 2),
         ) as mock_invoke:
             result = await create_portfolio_manager_node(_mock_llm(), None)(state, {})
 
-        assert mock_invoke.await_count == 1
+        assert mock_invoke.await_count == 2
         # Reconciliation may remove an invented claim ID, but it must not invent a
         # different eligible claim as the model's rationale. The trace therefore
-        # remains fail-closed without buying a second model call.
+        # remains fail-closed after its one bounded correction attempt.
         assert result["decision_trace"]["status"] == "INVALID"
         assert result["decision_trace"]["decision_facts"] == []
+        assert result["decision_trace"]["support_facts"] == []
+        assert result["artifact_statuses"]["final_trade_decision"]["ok"] is False
 
     @pytest.mark.asyncio
     @patch("src.prompts.get_prompt")
@@ -485,7 +487,7 @@ PE_RATIO_TTM: 16.55
                 "VERDICT: HOLD\n"
                 "RISK_TALLY: 0.5\n"
                 "ZONE: MODERATE\n"
-                "DECISION_FACTS: NONE\n"
+                "DECISION_FACTS: claim:pe\n"
                 "DECISION_GATES: NONE\n"
                 "### --- END PM_BLOCK ---"
             ),
@@ -504,6 +506,20 @@ PE_RATIO_TTM: 16.55
             "fundamentals_report": fundamentals,
             "pre_screening_result": "PASS",
             "red_flags": [],
+            "analysis_snapshot": {
+                "contract_status": "VALID",
+                "claims": {
+                    "claim:pe": {
+                        "id": "claim:pe",
+                        "field": "PE_RATIO_TTM",
+                        "value": "12.0",
+                        "authority": "AGGREGATOR",
+                        "coverage": "FOUND",
+                        "decision_eligible": True,
+                        "decision_role": "SUPPORT",
+                    }
+                },
+            },
             "artifact_statuses": _ok("fundamentals_report", fundamentals),
         }
 
@@ -561,7 +577,7 @@ PE_RATIO_TTM: 16.55
             "company_of_interest": "TEST",
             "fundamentals_report": fundamentals,
             "pre_screening_result": "PASS",
-            "red_flags": [],
+            "red_flags": [{"type": "COVERAGE", "blocks_buy": True}],
             "artifact_statuses": _ok("fundamentals_report", fundamentals),
         }
 

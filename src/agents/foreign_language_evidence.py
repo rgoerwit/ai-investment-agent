@@ -2,25 +2,46 @@
 
 from __future__ import annotations
 
+import calendar
 import re
+import unicodedata
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit
 
 import structlog
 from langchain_core.messages import BaseMessage
 
-from src.data_block_utils import replace_or_append_block_line
+from src.data_block_utils import (
+    extract_last_fenced_block,
+    fenced_block_pattern,
+    fenced_marker_fragment,
+    replace_or_append_block_line,
+)
+from src.exchange_metadata import (
+    CURRENCY_CODE_ALIASES,
+    CURRENCY_DISPLAY_FORMATS,
+    CURRENCY_REPORTING_NAMES,
+    CURRENCY_SYMBOL_TO_CODE,
+)
+from src.fx_normalization import canonical_currency_code
+from src.monetary import (
+    REPORTING_SCALE_PATTERN,
+    exact_decimal,
+    reporting_unit_declarations,
+    reporting_unit_scale,
+)
 from src.text_patterns import (
     EXCHANGE_QUALIFIED_TICKER_RE,
-    RESULT_ENVELOPE_BODY_RE,
     RESULT_ENVELOPE_RE,
     URL_RE,
 )
+from src.tooling.evidence_recorder import classify_evidence_value
 
 from .message_utils import (
     ToolEvidenceRecord,
+    make_tool_evidence_record,
     normalize_http_url,
     tool_evidence_records,
 )
@@ -38,23 +59,46 @@ _CONTROL_BASIS_TERMS = {
     "VOTING_AGREEMENT": ("voting agreement", "voting rights agreement"),
 }
 _NON_CONTROL_RELATIONSHIPS = {
-    "EQUITY METHOD": (
-        "SIGNIFICANT_INFLUENCE_ONLY",
-        ("equity method", "equity-method", "significant influence", "associate"),
-    ),
-    "SIGNIFICANT INFLUENCE": (
-        "SIGNIFICANT_INFLUENCE_ONLY",
-        ("significant influence", "equity method", "equity-method", "associate"),
-    ),
-    "ASSOCIATE": (
-        "SIGNIFICANT_INFLUENCE_ONLY",
-        ("associate", "significant influence", "equity method", "equity-method"),
-    ),
-    "INDEPENDENT": (
-        "NONE",
-        ("independent", "not controlled", "no control"),
-    ),
+    "EQUITY METHOD": "SIGNIFICANT_INFLUENCE_ONLY",
+    "SIGNIFICANT INFLUENCE": "SIGNIFICANT_INFLUENCE_ONLY",
+    "ASSOCIATE": "SIGNIFICANT_INFLUENCE_ONLY",
+    "INDEPENDENT": "NONE",
 }
+_ACCOUNTING_RELATIONSHIP_RE = re.compile(
+    r"\b(?:uses?|using|applies?|under)\s+(?:the\s+)?equity[- ]method\b|"
+    r"\b(?:accounted\s+for|classified|treated)\s+as\s+(?:an?\s+)?associate\b|"
+    r"\b(?:is|remains)\s+an?\s+associate\s+of\s+(?:the\s+)?(?:company|group|issuer)\b|"
+    r"\b(?:has|have|having|exercises?|with)\s+significant\s+influence"
+    r"(?=\s*(?:only\b|over\s+(?:the\s+)?(?:company|group|issuer|investee)\b|under\s+(?:the\s+)?equity|[.;,。!?]|$))",
+    re.I,
+)
+_ASSERTION_QUALIFIERS = (
+    r"if|unless|subject\s+to|unverified|uncertain|"
+    r"unconfirmed|alleged|allegedly|reportedly|hypothetical"
+)
+_ASSERTION_MODAL_RE = re.compile(r"\b(?:may|might|could|would)\b", re.I)
+_UNASSERTED_ASSERTION_RE = re.compile(
+    rf"\b(?:not|no|never|without|whether|claims?|discusses|denies|{_ASSERTION_QUALIFIERS})\b",
+    re.I,
+)
+_ASSERTION_QUALIFIER_RE = re.compile(
+    rf"\b(?:{_ASSERTION_QUALIFIERS}|(?:may|might|could|would)\s+(?:not\s+)?(?:be|have\s+been))\b",
+    re.I,
+)
+# Role descriptions are not shareholder independence evidence. Remove only the
+# unrelated phrase, retaining any actual control assertion in the same sentence.
+_UNRELATED_INDEPENDENT_RE = re.compile(
+    r"\bindependent\s+(?:non[- ]executive\s+)?directors?\b|"
+    r"\bindependent\s+(?:auditors?|board\s+committee|financial\s+advis[eo]rs?|business)\b",
+    re.I,
+)
+_EXPLICIT_NON_CONTROL_RE = re.compile(
+    r"\b(?:does not control|no control|not controlled|not a controlling shareholder|non[- ]voting shares|no voting rights)\b|"
+    r"\bvoting rights\b[^.;。!?\n]*\b(?:waived|capped|restricted)\b",
+    re.I,
+)
+
+
 _CORPORATE_SUFFIXES = {
     "ag",
     "co",
@@ -83,7 +127,6 @@ _FACILITY_STATUS_TERMS = {
     "AT_CAPACITY": ("at capacity", "full capacity"),
     "NONE": ("no expansion", "no buildout", "no facility expansion"),
 }
-_PREFLIGHT_RESULT_RE = RESULT_ENVELOPE_BODY_RE
 LATEST_RESULTS_SOURCE_FIELDS = (
     "LATEST_RESULTS_PERIOD",
     "LATEST_RESULTS_PERIOD_END",
@@ -105,7 +148,16 @@ _LATEST_RESULTS_NUMERIC_FIELDS = (
     "LATEST_RESULTS_EARNINGS",
     "LATEST_RESULTS_PRIOR_EARNINGS",
 )
-_NUMBER_TOKEN_RE = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?(?![\w.])")
+_TABLE_NUMBER_RE = re.compile(r"-?\d{1,3}(?:[ ,]\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?")
+_TABLE_CHANGE_RE = re.compile(r"(?:%\s*change|qoq|yoy)", re.IGNORECASE)
+_REVENUE_ROW_LABELS = {
+    "revenue",
+    "net sales",
+    "sales",
+    "total sales",
+    "operating revenue",
+    "營業收入",
+}
 _URL_RE = URL_RE
 _REQUIRED_BLOCK_START_RE = re.compile(
     r"(?im)^###\s+---\s+START\s+(?:MANAGEMENT_GUIDANCE|LATEST_RESULTS)\s+---\s*$"
@@ -122,6 +174,38 @@ def _field(report: str, label: str) -> str:
         report,
     )
     return match.group(1).strip() if match else ""
+
+
+def unique_latest_results_block(report: str) -> str | None:
+    """Return the sole complete block only when its field names are unambiguous."""
+    openers = re.findall(
+        rf"(?m)^{fenced_marker_fragment('LATEST_RESULTS', 'START')}[ \t]*$",
+        report,
+    )
+    if len(openers) != 1:
+        return None
+    matches = list(fenced_block_pattern("LATEST_RESULTS").finditer(report))
+    if len(matches) != 1:
+        return None
+    block = matches[0].group(1)
+    fields = re.findall(
+        r"(?im)^[ \t]*(?:[-*][ \t]*)?(LATEST_RESULTS_[A-Z_]+)[ \t]*:",
+        block,
+    )
+    if len(fields) != len({field.upper() for field in fields}):
+        return None
+    return block
+
+
+def _replace_latest_results_field(report: str, label: str, value: str) -> str:
+    match = next(fenced_block_pattern("LATEST_RESULTS").finditer(report))
+    body = match.group(1)
+    pattern = re.compile(rf"(?im)^([ \t]*(?:[-*][ \t]*)?){re.escape(label)}[ \t]*:.*$")
+    if pattern.search(body):
+        updated = pattern.sub(lambda item: f"{item.group(1)}{label}: {value}", body)
+    else:
+        updated = body.rstrip() + f"\n{label}: {value}\n"
+    return report[: match.start(1)] + updated + report[match.end(1) :]
 
 
 def has_foreign_language_protocol_residue(report: str) -> bool:
@@ -167,25 +251,42 @@ def _split_search_result_records(
     """Make source matching operate on one search result, not an entire result page."""
     split_records: list[ToolEvidenceRecord] = []
     for record in records:
+        if record.evidence_status not in {"EVIDENCE_FOUND", "RESULTS_FOUND"}:
+            continue
         tool_name, content, urls = record
         blocks = RESULT_ENVELOPE_RE.findall(content)
         if not blocks:
             split_records.append(record)
             continue
         for block in blocks:
+            block_status = classify_evidence_value(tool_name or "", block)[1]
+            if block_status not in {
+                "EVIDENCE_FOUND",
+                "RESULTS_FOUND",
+            }:
+                continue
             block_urls = {
                 normalized
-                for match in _URL_RE.finditer(block)
-                if (normalized := normalize_http_url(match.group(0)))
+                for raw_url in re.findall(r"(?is)<url>\s*(.*?)\s*</url>", block)
+                if (normalized := normalize_http_url(raw_url))
             }
             if block_urls:
                 split_records.append(
-                    ToolEvidenceRecord(
+                    make_tool_evidence_record(
                         tool_name=tool_name,
                         content=block,
                         urls=block_urls,
-                        evidence_status=record.evidence_status,
-                        authority=record.authority,
+                        evidence_status=(
+                            block_status
+                            if record.evidence_status == "EVIDENCE_FOUND"
+                            and _field(block, "STATUS")
+                            else record.evidence_status
+                        ),
+                        authority_by_url=tuple(
+                            pair
+                            for pair in record.authority_by_url
+                            if pair[0] in block_urls
+                        ),
                     )
                 )
     return split_records
@@ -224,18 +325,67 @@ def _holder_parts(value: str) -> tuple[str, float | None]:
 
 
 def _claim_in_text(text: str, holder: str, pct: float | None) -> bool:
-    folded = " ".join(text.casefold().split())
-    holder_tokens = [
-        token
-        for token in re.findall(r"\w+", holder.casefold())
-        if len(token) > 1 and token not in _CORPORATE_SUFFIXES
-    ]
-    if not holder_tokens or not all(token in folded for token in holder_tokens):
-        return False
     if pct is None:
         return False
-    pct_token = f"{pct:g}"
-    return bool(re.search(rf"(?<!\d){re.escape(pct_token)}(?:0+)?\s*%?", folded))
+    token = f"{pct:g}"
+    zero_suffix = r"0*" if "." in token else r"(?:\.0+)?"
+    percentage = re.compile(rf"(?<![\d.]){re.escape(token)}{zero_suffix}\s*%")
+    text = re.sub(r"<[^>]+>", "\n", text)
+    # Bind shareholder table values within one row, retaining the declared header.
+    table_header = False
+    for line in text.splitlines():
+        if line.strip().startswith("|"):
+            if re.search(r"shareholder|holder|股東|股东", line, re.I):
+                table_header = True
+            if (
+                table_header
+                and _holder_in_text(line, holder)
+                and percentage.search(line)
+            ):
+                return True
+        else:
+            table_header = False
+    normalized_holder = _normalize_corporate_abbreviations(holder)
+    for clause in _holder_sentences(text, holder):
+        interest = re.match(
+            rf"^\s*{re.escape(normalized_holder.rstrip('.'))}"
+            r"(?:,?\s+(?:and|together with)\s+(?:his|her|its|their)\s+associates,?)?"
+            rf"\s+(?:is|are) interested in\s+{re.escape(token)}{zero_suffix}\s*%\s+of\s+(?:the\s+)?issued\s+shares\b",
+            clause,
+            re.I,
+        )
+        if (
+            _holder_in_text(clause, holder)
+            and percentage.search(clause)
+            and (
+                (
+                    interest is None
+                    and re.search(
+                        r"\b(?:owns?|holds?|shareholders?|ownership)\b|持股",
+                        clause,
+                        re.I,
+                    )
+                )
+                or (
+                    interest is not None
+                    and _assertion_is_unqualified(
+                        clause, interest.start(), interest.end()
+                    )
+                )
+            )
+            and (
+                not re.search(
+                    r"\b(?:acquisition|acquired|bought|purchased)\b", clause, re.I
+                )
+                or re.search(
+                    r"\b(?:company(?:['’]s)?\s+shares?|share\s+capital|voting\s+rights)\b",
+                    clause,
+                    re.I,
+                )
+            )
+        ):
+            return True
+    return False
 
 
 def _holder_in_text(text: str, holder: str) -> bool:
@@ -248,32 +398,32 @@ def _holder_in_text(text: str, holder: str) -> bool:
     return bool(holder_tokens) and all(token in folded for token in holder_tokens)
 
 
-def _is_primary_evidence(record: ToolEvidenceRecord) -> bool:
-    return record.evidence_status == "EVIDENCE_FOUND" and record.authority in {
+def _is_primary_evidence(
+    record: ToolEvidenceRecord, source_url: str | None = None
+) -> bool:
+    from src.tooling.evidence_recorder import resolve_evidence_authority
+
+    if source_url is not None and source_url not in record.urls:
+        return False
+    authority = (
+        record.authority
+        if source_url is None
+        else resolve_evidence_authority(
+            tool_name=record.tool_name or "",
+            evidence_status=record.evidence_status,
+            urls=(source_url,),
+            authority_by_url=record.authority_by_url,
+        )
+    )
+    return record.evidence_status == "EVIDENCE_FOUND" and authority in {
         "PRIMARY_REGISTRY",
         "PRIMARY_ISSUER",
     }
 
 
 def _normalized_text(value: str) -> str:
-    return " ".join(value.casefold().split())
-
-
-def _exact_decimal(value: str) -> Decimal | None:
-    candidate = value.strip()
-    if not re.fullmatch(r"-?\d[\d,]*(?:\.\d+)?", candidate):
-        return None
-    try:
-        return Decimal(candidate.replace(",", ""))
-    except InvalidOperation:
-        return None
-
-
-def _evidence_has_decimal(content: str, expected: Decimal) -> bool:
-    return any(
-        parsed == expected
-        for token in _NUMBER_TOKEN_RE.findall(content)
-        if (parsed := _exact_decimal(token)) is not None
+    return " ".join(
+        unicodedata.normalize("NFKC", value).casefold().replace("’", "'").split()
     )
 
 
@@ -292,57 +442,935 @@ def _valid_comparative_period(
     return 1 <= months <= 12 and 320 <= delta_days <= 410
 
 
+_FISCAL_QUARTER_RE = re.compile(
+    r"(?P<year>20\d{2})年\s*(?P<month>\d{1,2})月期\s*第(?P<quarter>[1-4])四半期"
+    r"(?:連結累計期間)?"
+)
+
+
+_SOURCE_DATE_PATTERN = (
+    r"[A-Za-z]+[ \t]+\d{1,2},[ \t]+20\d{2}|\d{1,2}[ \t]+[A-Za-z]+[ \t]+20\d{2}"
+)
+
+
+def _parse_source_date(value: str) -> date | None:
+    format_string = "%d %B %Y" if value[0].isdigit() else "%B %d, %Y"
+    for source_format in (format_string, format_string.replace("%B", "%b")):
+        try:
+            return datetime.strptime(value, source_format).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _reporting_unit_compatible(
+    unit: str, currency: str | None, scale: float | None
+) -> bool:
+    return (
+        scale is not None
+        and reporting_unit_scale(unit) == scale
+        and all(code == currency for code, _ in reporting_unit_declarations(unit))
+    )
+
+
+_TABLE_CURRENCY_PATTERN = "|".join(
+    re.escape(token.casefold())
+    for token in sorted(
+        {
+            *CURRENCY_DISPLAY_FORMATS,
+            *CURRENCY_CODE_ALIASES,
+            *CURRENCY_SYMBOL_TO_CODE,
+            "$",
+            "¥",
+        },
+        key=len,
+        reverse=True,
+    )
+)
+
+
+def _statement_boundary(line: str) -> bool:
+    normalized = _normalized_text(line)
+    return bool(
+        line.startswith("[PDF PAGE")
+        or re.fullmatch(
+            r"(?:\([^()]*\)\s*)?(?:Notes?\s+)?20\d{2}\s+20\d{2}", line, re.I
+        )
+        or re.search(
+            r"(?:months|year) ended|截至|20\d{2}年第[1-4]季|\d{3}年Q[1-4]"
+            r"|(?<!\w)[QH][1-4]\s+20\d{2}\b|(?<!\w)[1-4]T\d{2}(?!\w)",
+            line,
+            re.I,
+        )
+        or (
+            re.search(REPORTING_SCALE_PATTERN, normalized)
+            and re.search(
+                rf"(?<!\w)(?:{_TABLE_CURRENCY_PATTERN})(?=$|\W|[kmbt]\b)", normalized
+            )
+        )
+        or reporting_unit_declarations(line)
+        or reporting_unit_scale(normalized) is not None
+        or _FISCAL_QUARTER_RE.search(normalized)
+    )
+
+
+def _heading_currency_forms(values: dict[str, str]) -> tuple[str, ...]:
+    raw = values["LATEST_RESULTS_CURRENCY"]
+    currency = canonical_currency_code(raw) or ""
+    aliases = tuple(
+        alias for alias, code in CURRENCY_CODE_ALIASES.items() if code == currency
+    )
+    symbols = tuple(
+        symbol for symbol, code in CURRENCY_SYMBOL_TO_CODE.items() if code == currency
+    )
+    source_names = tuple(
+        name for name, code in CURRENCY_REPORTING_NAMES.items() if code == currency
+    )
+    return (raw, currency, *aliases, *symbols, *source_names)
+
+
+def _heading_has_currency_and_unit(heading: str, values: dict[str, str]) -> bool:
+    """Require explicit currency and reporting scale tokens in the table heading."""
+    declarations = reporting_unit_declarations(unicodedata.normalize("NFKC", heading))
+    heading = _normalized_text(heading)
+    raw_unit = unicodedata.normalize("NFKC", values["LATEST_RESULTS_REPORTING_UNIT"])
+    unit = _normalized_text(raw_unit)
+    scale = reporting_unit_scale(raw_unit)
+    currency = canonical_currency_code(values["LATEST_RESULTS_CURRENCY"])
+    if not _reporting_unit_compatible(raw_unit, currency, scale):
+        return False
+    if declarations and currency:
+        return scale is not None and set(declarations) == {(currency, scale)}
+    if re.search(REPORTING_SCALE_PATTERN, unit) is None:
+        return False
+    if re.search(rf"(?<!\w){re.escape(unit)}(?!\w)", heading) is None:
+        return False
+    forms = _heading_currency_forms(values)
+    return any(
+        re.search(
+            rf"(?<!\w){re.escape(_normalized_text(form))}(?=$|\W|[kmbt]\b)",
+            heading,
+        )
+        for form in forms
+    )
+
+
+def _compatible_unit_only_header(line: str, values: dict[str, str]) -> bool:
+    """Only a unit declaration may continue an existing comparative table."""
+    unit = re.escape(_normalized_text(values["LATEST_RESULTS_REPORTING_UNIT"]))
+    # The owning table heading already binds currency. Ambiguous display symbols
+    # can repeat the declared unit here without independently proving identity.
+    currency = canonical_currency_code(values["LATEST_RESULTS_CURRENCY"]) or ""
+    display = CURRENCY_DISPLAY_FORMATS.get(currency)
+    forms = (*_heading_currency_forms(values), *((display[0],) if display else ()))
+    currency_tokens = "|".join(re.escape(_normalized_text(form)) for form in forms)
+    declarations = reporting_unit_declarations(line)
+    if declarations:
+        if not _heading_has_currency_and_unit(line, values):
+            return False
+        # Equivalent spellings may repeat a declaration, never a new period/row.
+        scale = REPORTING_SCALE_PATTERN
+        return (
+            re.fullmatch(
+                rf"\(?\s*(?:notes?\s+|(?:expressed\s+)?in\s+|単位[:：]\s*)?"
+                rf"(?:(?:(?:{currency_tokens})\s*(?:{scale})|"
+                rf"(?:{scale})\s+(?:of\s+)?(?:{currency_tokens})|"
+                rf"[kmbt](?:{currency_tokens})|(?:{scale}))\s*)+\)?",
+                _normalized_text(line),
+            )
+            is not None
+        )
+    return (
+        re.fullmatch(
+            rf"\(?\s*(?:notes?\s+)?(?:(?:(?:{currency_tokens})\s*)?{unit}\s*)+\)?",
+            _normalized_text(line),
+        )
+        is not None
+    )
+
+
 def _latest_results_record_supports(
     record: ToolEvidenceRecord,
     values: dict[str, str],
     decimals: dict[str, Decimal],
 ) -> bool:
-    content = record[1]
-    normalized_content = _normalized_text(content)
-    required_text = (
-        "LATEST_RESULTS_PERIOD",
-        "LATEST_RESULTS_PERIOD_END",
-        "LATEST_RESULTS_PRIOR_PERIOD",
-        "LATEST_RESULTS_PRIOR_PERIOD_END",
-        "LATEST_RESULTS_CURRENCY",
-        "LATEST_RESULTS_REPORTING_UNIT",
-        "LATEST_RESULTS_EARNINGS_SCOPE",
+    """Bind both metric pairs to labelled rows under one retained period header."""
+    if record.evidence_status not in {"EVIDENCE_FOUND", "RESULTS_FOUND"}:
+        return False
+    lines = [line.strip() for line in record.content.splitlines() if line.strip()]
+    current = _normalized_text(values["LATEST_RESULTS_PERIOD"])
+    prior = _normalized_text(values["LATEST_RESULTS_PRIOR_PERIOD"])
+    scope = _normalized_text(values["LATEST_RESULTS_EARNINGS_SCOPE"])
+    months = int(values["LATEST_RESULTS_PERIOD_MONTHS"])
+    label_statuses = [
+        _header_period_matches(values[label], values[end], months)
+        for label, end in (
+            ("LATEST_RESULTS_PERIOD", "LATEST_RESULTS_PERIOD_END"),
+            ("LATEST_RESULTS_PRIOR_PERIOD", "LATEST_RESULTS_PRIOR_PERIOD_END"),
+        )
+    ]
+    if False in label_statuses:
+        return False
+    if _two_column_statement_supports(lines, values, decimals):
+        return True
+    if _comparative_narrative_supports(lines, values, decimals):
+        return True
+    # Unknown claim wording can use only the independent presentation readers.
+    # The exact-label reader below needs labels that themselves prove the period.
+    if not all(label_statuses):
+        return False
+    for start, line in enumerate(lines):
+        if _normalized_text(line) != current:
+            continue
+        header = lines[start : start + 16]
+        prior_positions = [
+            index
+            for index, item in enumerate(header)
+            if _normalized_text(item) == prior
+        ]
+        if len(prior_positions) != 1:
+            continue
+        row_start = None
+        for index in range(start + 1, min(start + 32, len(lines))):
+            normalized = _normalized_text(lines[index])
+            if normalized in _REVENUE_ROW_LABELS:
+                row_start = index
+                break
+            if normalized not in {current, prior} and _statement_boundary(lines[index]):
+                if not _compatible_unit_only_header(lines[index], values):
+                    break
+        if row_start is None or row_start <= start + prior_positions[0]:
+            continue
+        heading = lines[max(0, start - 5) : row_start]
+        heading_text = _normalized_text(" ".join(heading))
+        if not _heading_has_currency_and_unit(heading_text, values):
+            continue
+        columns = [
+            item
+            for item in lines[start:row_start]
+            if _normalized_text(item) in {current, prior}
+            or _TABLE_CHANGE_RE.fullmatch(item)
+            or re.fullmatch(r"\d{3}年[QH][1-4]|[QH][1-4]\s+\d{4}", item, re.I)
+        ]
+        if len(columns) < 2 or columns[0] != line:
+            continue
+        prior_column = next(
+            (i for i, item in enumerate(columns) if _normalized_text(item) == prior),
+            None,
+        )
+        if prior_column is None:
+            continue
+        earnings_row = None
+        for index in range(row_start + 1, min(row_start + 45, len(lines))):
+            if _statement_boundary(lines[index]):
+                break
+            if _normalized_text(lines[index]) == scope:
+                earnings_row = index
+                break
+        if earnings_row is None:
+            continue
+        revenue_cells = _table_row_cells(lines, row_start, len(columns))
+        earnings_cells = _table_row_cells(lines, earnings_row, len(columns))
+        if revenue_cells is None or earnings_cells is None:
+            continue
+        if (
+            revenue_cells[0] == decimals["LATEST_RESULTS_REVENUE"]
+            and revenue_cells[prior_column] == decimals["LATEST_RESULTS_PRIOR_REVENUE"]
+            and earnings_cells[0] == decimals["LATEST_RESULTS_EARNINGS"]
+            and earnings_cells[prior_column]
+            == decimals["LATEST_RESULTS_PRIOR_EARNINGS"]
+        ):
+            return True
+    return False
+
+
+def _source_has_period_end(content: str, period_end: str) -> bool:
+    """Check a date to choose a rejection reason after authority readers fail.
+
+    This diagnostic cannot grant source authority or acceptance.
+    """
+    try:
+        end = date.fromisoformat(period_end)
+    except ValueError:
+        return False
+    content = unicodedata.normalize("NFKC", content)
+    month_name = end.strftime("%B")
+    variants = (
+        end.isoformat(),
+        f"{end.year}/{end.month:02d}/{end.day:02d}",
+        f"{end.day} {month_name} {end.year}",
+        f"{month_name} {end.day}, {end.year}",
+        f"{end.day} {end.strftime('%b')} {end.year}",
+        f"{end.strftime('%b')} {end.day}, {end.year}",
+        f"{end.year}年{end.month}月{end.day}日",
     )
     if any(
-        _normalized_text(values[field]) not in normalized_content
-        for field in required_text
+        _normalized_text(variant) in _normalized_text(content) for variant in variants
+    ):
+        return True
+    # A retained year/month fiscal label proves Q1's calendar end. Later fiscal
+    # quarters need explicit duration/date evidence; do not infer a YTD basis.
+    if any(
+        _header_period_matches(match.group(), period_end, 3) is True
+        for match in _FISCAL_QUARTER_RE.finditer(content)
+        if match.group("quarter") == "1"
+    ):
+        return True
+    # Explicit calendar half-years bind the same end date without inventing a
+    # fiscal calendar. The row readers must still bind each claimed metric.
+    if re.search(r"\bfiscal\b|\bFY\s*20\d{2}\b", content, re.I):
+        return False
+    return any(
+        _header_period_matches(match.group(0), period_end, 6)
+        for match in re.finditer(
+            r"(?<!\w)(?:H[12]\s+20\d{2}|(?:First|Second) half(?: of)? 20\d{2})(?!\w)",
+            content,
+            re.I,
+        )
+    )
+
+
+def _header_period_matches(label: str, period_end: str, months: int) -> bool | None:
+    """Return match, contradiction, or None for wording without calendar proof."""
+    label = " ".join(unicodedata.normalize("NFKC", label).split())
+    fiscal = _FISCAL_QUARTER_RE.fullmatch(label)
+    if fiscal and fiscal.group("quarter") == "1":
+        fiscal_year, fiscal_month = (
+            int(fiscal.group("year")),
+            int(fiscal.group("month")),
+        )
+        if not 1 <= fiscal_month <= 12:
+            return False
+        fiscal_month -= 9
+        if fiscal_month <= 0:
+            fiscal_year -= 1
+            fiscal_month += 12
+        day = calendar.monthrange(fiscal_year, fiscal_month)[1]
+        return (
+            months == 3
+            and period_end == date(fiscal_year, fiscal_month, day).isoformat()
+        )
+    for token in re.finditer(r"(?<!\w)([QH])(\d+)(?!\w)", label, re.I):
+        allowed = {"1", "2", "3", "4"} if token.group(1).upper() == "Q" else {"1", "2"}
+        if token.group(2) not in allowed:
+            return False
+    half_match = re.fullmatch(r"(First|Second) half(?: of)? (20\d{2})", label, re.I)
+    korean_half = re.fullmatch(
+        r"(20\d{2})년 (상반기|하반기) \(H([12]) (20\d{2})\)", label, re.I
+    )
+    if half_match:
+        half = 1 if half_match.group(1).casefold() == "first" else 2
+        label = f"H{half} {half_match.group(2)}"
+    elif korean_half:
+        year, name, half_number, repeated_year = korean_half.groups()
+        if year != repeated_year or half_number != ("1" if name == "상반기" else "2"):
+            return False
+        label = f"H{half_number} {year}"
+    quarter_match = re.fullmatch(r"Q([1-4]) (20\d{2})", label, re.I)
+    chinese_match = re.fullmatch(r"(20\d{2})年第([1-4])季", label)
+    short_match = re.fullmatch(r"([1-4])T(\d{2})", label, re.I)
+    if quarter_match or chinese_match or short_match:
+        if quarter_match:
+            quarter, year = map(int, quarter_match.groups())
+        elif chinese_match:
+            year, quarter = map(int, chinese_match.groups())
+        else:
+            assert short_match is not None
+            quarter, short_year = map(int, short_match.groups())
+            year = 2000 + short_year
+        month = quarter * 3
+        day = 30 if month in {6, 9} else 31
+        return months == 3 and period_end == f"{year}-{month:02d}-{day}"
+    match = re.fullmatch(r"H([12]) (20\d{2})", label, re.I)
+    if match:
+        half, year = map(int, match.groups())
+        day = 30 if half == 1 else 31
+        return months == 6 and period_end == f"{year}-{half * 6:02d}-{day}"
+    match = re.fullmatch(r"(\d{3})年Q([1-4])", label)
+    if match:
+        roc_year, quarter = map(int, match.groups())
+        month = quarter * 3
+        day = 30 if month in {6, 9} else 31
+        return months == 3 and period_end == f"{roc_year + 1911}-{month:02d}-{day}"
+    match = re.fullmatch(
+        rf"(?:For the )?(Three months|Six months|Twelve months|Half[- ]year) ended ({_SOURCE_DATE_PATTERN})(?: \(H[12] 20\d{{2}}\))?",
+        label,
+        re.I,
+    )
+    if match:
+        expected_months = {
+            "three months": 3,
+            "six months": 6,
+            "twelve months": 12,
+            "half-year": 6,
+            "half year": 6,
+        }[match.group(1).lower()]
+        parsed_end = _parse_source_date(match.group(2))
+        if parsed_end is None:
+            return False
+        return (
+            months == expected_months
+            and period_end == parsed_end.isoformat()
+            and all(
+                _header_period_matches(token.group(), period_end, months) is not False
+                for token in re.finditer(r"H[12] 20\d{2}", label, re.I)
+            )
+        )
+    match = re.fullmatch(
+        rf"(?:For the )?years? ended ({_SOURCE_DATE_PATTERN})(?: and (20\d{{2}}))?",
+        label,
+        re.I,
+    )
+    if match:
+        parsed_end = _parse_source_date(match.group(1))
+        if parsed_end is None:
+            return False
+        ends = {parsed_end.isoformat()}
+        if match.group(2):
+            try:
+                ends.add(parsed_end.replace(year=int(match.group(2))).isoformat())
+            except ValueError:
+                return False
+        return months == 12 and period_end in ends
+    match = re.fullmatch(
+        r"截至(20\d{2})年(\d{1,2})月(\d{1,2})日止(三|六|十二)個月", label
+    )
+    if match:
+        try:
+            parsed_end = date(*map(int, match.groups()[:3]))
+        except ValueError:
+            return False
+        return (
+            months == {"三": 3, "六": 6, "十二": 12}[match.group(4)]
+            and period_end == parsed_end.isoformat()
+        )
+    # Recognizable statements embedded in unfamiliar wording still constrain the
+    # claim. FY alone supplies no calendar proof; independently bound source
+    # headers must establish its dates and duration.
+    for match in re.finditer(
+        r"(?<!\w)(?:(?:Q[1-4]|H[12])\s+20\d{2}|[1-4]T\d{2}|20\d{2}年第[1-4]季"
+        r"|\d{3}年Q[1-4]|(?:First|Second) half(?: of)? 20\d{2}"
+        r"|(?:Three|Six|Twelve) months ended (?:[A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})"
+        r"|Half[- ]year ended (?:[A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})(?: \(H[12] 20\d{2}\))?"
+        r"|(?<!half-)(?<!half )(?:For the )?year ended (?:[A-Za-z]+ \d{1,2}, 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})"
+        r"|截至20\d{2}年\d{1,2}月\d{1,2}日止(?:三|六|十二)個月)(?!\w)",
+        label,
+        re.I,
+    ):
+        if _header_period_matches(match.group(), period_end, months) is False:
+            return False
+    for match in re.finditer(r"(?<!\d)20\d{2}-\d{2}-\d{2}(?!\d)", label):
+        if match.group() != period_end:
+            return False
+    return None
+
+
+def _comparative_narrative_supports(
+    lines: list[str], values: dict[str, str], decimals: dict[str, Decimal]
+) -> bool:
+    """Bind the observed explicit comparative sentences within one source result.
+
+    Each metric must name both calendar periods, currencies and scales on its
+    own line. Duplicate metric statements are ambiguous, even if one matches.
+    """
+    if any(re.search(r"\bfiscal\b|\bFY\s*20\d{2}\b", line, re.I) for line in lines):
+        return False
+    currency_forms = "|".join(
+        re.escape(form) for form in _heading_currency_forms(values)
+    )
+    unit = REPORTING_SCALE_PATTERN
+    scale = reporting_unit_scale(values["LATEST_RESULTS_REPORTING_UNIT"])
+    currency = canonical_currency_code(values["LATEST_RESULTS_CURRENCY"])
+    if not _reporting_unit_compatible(
+        values["LATEST_RESULTS_REPORTING_UNIT"], currency, scale
     ):
         return False
-    return all(
-        _evidence_has_decimal(content, decimals[field])
-        for field in _LATEST_RESULTS_NUMERIC_FIELDS
+    number = r"-?\d[\d,]*(?:\.\d+)?"
+    period = r"H[12] 20\d{2}"
+    scope = _normalized_text(values["LATEST_RESULTS_EARNINGS_SCOPE"])
+    patterns = {
+        "REVENUE": r"(?:Consolidated )?revenue",
+        "EARNINGS": re.escape(scope),
+    }
+    for metric, label in patterns.items():
+        pattern = re.compile(
+            rf"(?:<summary>)?{label} for (?P<current_period>{period}) was "
+            rf"(?P<current_currency>{currency_forms}) (?P<current>{number}) (?P<current_unit>{unit}), "
+            rf"(?:down from|compared to) (?P<prior_currency>{currency_forms}) (?P<prior>{number}) (?P<prior_unit>{unit}) "
+            rf"in (?P<prior_period>{period})\.(?:</summary>)?",
+            re.I,
+        )
+        candidates = []
+        for line in lines:
+            heading = re.match(
+                rf"(?:<summary>)?{label} for (?P<period>{period})\b", line, re.I
+            )
+            if heading and _header_period_matches(
+                heading.group("period"),
+                values["LATEST_RESULTS_PERIOD_END"],
+                int(values["LATEST_RESULTS_PERIOD_MONTHS"]),
+            ):
+                candidates.append(line)
+        if len(candidates) != 1 or (match := pattern.fullmatch(candidates[0])) is None:
+            return False
+        if any(
+            not _reporting_unit_compatible(
+                f"{match.group(key + '_currency')} {match.group(key + '_unit')}",
+                currency,
+                scale,
+            )
+            for key in ("current", "prior")
+        ):
+            return False
+        if not all(
+            _header_period_matches(
+                match.group(group),
+                values[field],
+                int(values["LATEST_RESULTS_PERIOD_MONTHS"]),
+            )
+            for group, field in (
+                ("current_period", "LATEST_RESULTS_PERIOD_END"),
+                ("prior_period", "LATEST_RESULTS_PRIOR_PERIOD_END"),
+            )
+        ):
+            return False
+        if (
+            exact_decimal(match.group("current"))
+            != decimals[f"LATEST_RESULTS_{metric}"]
+            or exact_decimal(match.group("prior"))
+            != decimals[f"LATEST_RESULTS_PRIOR_{metric}"]
+        ):
+            return False
+    return True
+
+
+# Total period profit is equivalent here; owner-attributable and adjusted scopes
+# remain distinct. Additions require separate accounting-scope review.
+_EQUIVALENT_EARNINGS_SCOPES = {"net profit (profit for the period)": "net profit"}
+
+
+def _flattened_statement_supports(
+    lines: list[str], start: int, values: dict[str, str], decimals: dict[str, Decimal]
+) -> bool:
+    """Bind flattened rows to two period/unit columns and any declared change."""
+    current_end = values["LATEST_RESULTS_PERIOD_END"]
+    prior_end = values["LATEST_RESULTS_PRIOR_PERIOD_END"]
+    current_year, prior_year = current_end[:4], prior_end[:4]
+    months = int(values["LATEST_RESULTS_PERIOD_MONTHS"])
+    scope = _normalized_text(values["LATEST_RESULTS_EARNINGS_SCOPE"])
+    number = r"-?\d[\d,]*(?:\.\d+)?"
+    years = lines[start : start + 2]
+    if len(years) != 2 or set(years) != {current_year, prior_year}:
+        return False
+    labels = [lines[start - 1]]
+    if start > 1 and _statement_boundary(lines[start - 2]):
+        labels.append(lines[start - 2])
+    if not all(
+        _header_period_matches(f"{label} {year}", end, months) is True
+        for label in labels
+        for year, end in ((current_year, current_end), (prior_year, prior_end))
+    ):
+        return False
+    row_start = start + 2
+    has_change = row_start < len(lines) and bool(
+        re.fullmatch(
+            r"Change(?:\s*%)?|%\s*Change|YoY(?:\s*%)?|\+/-",
+            lines[row_start],
+            re.I,
+        )
+    )
+    row_start += int(has_change)
+    units = []
+    while row_start < min(start + 12, len(lines)):
+        header_line = lines[row_start]
+        if _compatible_unit_only_header(header_line, values):
+            units.append(header_line)
+        elif not re.fullmatch(r"\((?:Unaudited|Audited)\)", header_line, re.I):
+            break
+        row_start += 1
+    if len(units) != 2 or not all(
+        _heading_has_currency_and_unit(unit, values) for unit in units
+    ):
+        return False
+    flat_current_column = years.index(current_year)
+    pairs: dict[str, tuple[Decimal | None, Decimal | None]] = {}
+    ambiguous = False
+    index = row_start
+    # This narrow parenthetical is the unadjusted total-period-profit
+    # label. Owner-attributable and adjusted qualifiers stay distinct.
+    flattened_scope = _EQUIVALENT_EARNINGS_SCOPES.get(scope, scope)
+    while index < min(row_start + 75, len(lines)):
+        row = lines[index]
+        if _statement_boundary(row) or row.startswith(("*", "-ENDS-")):
+            break
+        label = _normalized_text(row).rstrip("*† ")
+        flat_cells = _table_row_cells(lines, index, 2)
+        if flat_cells is None or (
+            has_change
+            and (
+                index + 3 >= len(lines)
+                or not re.fullmatch(rf"[+-]?{number}(?:%|pts)", lines[index + 3], re.I)
+            )
+        ):
+            ambiguous = True
+            break
+        metric = (
+            "REVENUE"
+            if label in _REVENUE_ROW_LABELS
+            else "EARNINGS"
+            if label == flattened_scope
+            else None
+        )
+        if metric:
+            if metric in pairs:
+                ambiguous = True
+                break
+            pairs[metric] = (
+                flat_cells[flat_current_column],
+                flat_cells[1 - flat_current_column],
+            )
+        index += 3 + int(has_change)
+    if not ambiguous and all(
+        pairs.get(metric)
+        == (
+            decimals[f"LATEST_RESULTS_{metric}"],
+            decimals[f"LATEST_RESULTS_PRIOR_{metric}"],
+        )
+        for metric in ("REVENUE", "EARNINGS")
+    ):
+        return True
+    return False
+
+
+def _two_column_statement_supports(
+    lines: list[str], values: dict[str, str], decimals: dict[str, Decimal]
+) -> bool:
+    """Bind two explicit period columns, excluding declared notes/percentages."""
+    current_end = values["LATEST_RESULTS_PERIOD_END"]
+    prior_end = values["LATEST_RESULTS_PRIOR_PERIOD_END"]
+    current_year, prior_year = current_end[:4], prior_end[:4]
+    months = int(values["LATEST_RESULTS_PERIOD_MONTHS"])
+    scope = _normalized_text(values["LATEST_RESULTS_EARNINGS_SCOPE"])
+    number = r"-?\d[\d,]*(?:\.\d+)?"
+    # Cell symbols are display only after the heading binds currency and scale.
+    forms = _heading_currency_forms(values)
+    display_symbols = (*forms, *(("$",) if any("$" in form for form in forms) else ()))
+    symbols = "|".join(re.escape(form) for form in display_symbols)
+    currency_declaration = re.compile(rf"\(Expressed in (?:{symbols})\)", re.I)
+    cell_prefix = rf"(?:(?:{symbols})\s*)?"
+    for start, line in enumerate(lines):
+        # HTML extraction can retain one cell per line, including a declared
+        # change column. Bind years and every unit before reading any metric.
+        if re.fullmatch(r"20\d{2}", line) and start > 0:
+            if _flattened_statement_supports(lines, start, values, decimals):
+                return True
+            continue
+        column_header = re.fullmatch(
+            r"(?P<unit>.*?)\s*(?P<first>[QH][1-4]\s+20\d{2})\s+"
+            r"(?P<second>[QH][1-4]\s+20\d{2})(?:\s+(?P<change>\+/-|Change\s*%|YoY\s*%))?",
+            line,
+            re.I,
+        ) or re.fullmatch(
+            r"(?P<unit>\([^()]*\)\s*)?(?:Notes?\s+)?"
+            r"(?P<first>20\d{2})\s+(?P<second>20\d{2})",
+            line,
+            re.I,
+        )
+        if column_header is None or start == 0:
+            continue
+        unit_header = column_header.group("unit")
+        if unit_header and (
+            not _heading_has_currency_and_unit(unit_header, values)
+            or re.search(r"(?<!\w)[QH][1-4]\b|\b20\d{2}\b", unit_header, re.I)
+        ):
+            continue
+        # PDF line wrapping and a parenthesized presentation-currency declaration
+        # may separate the period from its columns. Keep the search bounded and
+        # require the complete candidate header to prove both periods.
+        headers = [
+            " ".join(
+                item
+                for item in lines[max(0, start - count) : start]
+                if not currency_declaration.fullmatch(_normalized_text(item))
+                and not (
+                    item.startswith("(")
+                    and item.endswith(")")
+                    and _heading_has_currency_and_unit(item, values)
+                )
+            )
+            for count in range(1, 4)
+        ]
+        explicit_periods = " " in column_header.group("first")
+        ordered_periods = (column_header.group("first"), column_header.group("second"))
+        current_column = next(
+            (
+                index
+                for index, label in enumerate(ordered_periods)
+                if current_year in label
+            ),
+            None,
+        )
+        if (
+            current_column is None
+            or prior_year not in ordered_periods[1 - current_column]
+        ):
+            continue
+        if explicit_periods:
+            supported_periods = all(
+                _header_period_matches(label, end, months) is True
+                for label, end in (
+                    (ordered_periods[current_column], current_end),
+                    (ordered_periods[1 - current_column], prior_end),
+                )
+            )
+        else:
+            supported_periods = any(
+                _header_period_matches(
+                    header if current_year in header else f"{header} {current_year}",
+                    current_end,
+                    months,
+                )
+                is True
+                and _header_period_matches(
+                    re.sub(
+                        rf"\b{current_year}\b",
+                        prior_year,
+                        header
+                        if current_year in header
+                        else f"{header} {current_year}",
+                    ),
+                    prior_end,
+                    months,
+                )
+                is True
+                for header in headers
+            )
+        if not supported_periods:
+            continue
+        heading = _normalized_text(
+            " ".join(
+                lines[max(0, start - 3) : start + 1] + lines[start + 1 : start + 3]
+            )
+        )
+        if not _heading_has_currency_and_unit(heading, values):
+            continue
+        note_declared = re.search(r"\bnotes?\b", heading) is not None
+        percentages = bool(
+            start + 1 < len(lines)
+            and re.fullmatch(r"Amount\s+%\s+Amount\s+%", lines[start + 1], re.I)
+        )
+        percent_cell = rf"(?:{number}|-)\s*%?"
+        between = rf"\s+{percent_cell}" if percentages else ""
+        trailing = (
+            rf"\s+{percent_cell}"
+            if percentages
+            else rf"(?:\s+{number}\s*%)?"
+            if column_header.groupdict().get("change")
+            else ""
+        )
+        row_pattern = re.compile(
+            rf"(?P<label>[^\d]+?)\s+(?:(?P<note>\d+(?:\s*&\s*\d+)?|\d+\([a-z]\))\s+)?"
+            rf"{cell_prefix}(?P<first>{number}){between}\s+"
+            rf"{cell_prefix}(?P<second>{number}){trailing}\s*$",
+            re.I,
+        )
+        revenue_pair = None
+        earnings_pair = None
+        ambiguous = False
+        rows_started = False
+        for row_index in range(start + 1, min(start + 45, len(lines))):
+            row = lines[row_index]
+            if _statement_boundary(row):
+                if not rows_started and _compatible_unit_only_header(row, values):
+                    continue
+                break
+            match = row_pattern.fullmatch(
+                re.sub(r"\s+\(Notes?\s+\d[\d, &and]*\)", "", row, flags=re.I)
+            )
+            if match is None:
+                continue
+            rows_started = True
+            if match.group("note") is not None and not note_declared:
+                ambiguous = True
+                break
+            label = _normalized_text(match.group("label")).rstrip(":")
+            cells = tuple(
+                exact_decimal(match.group(key)) for key in ("first", "second")
+            )
+            pair = (cells[current_column], cells[1 - current_column])
+            if label in _REVENUE_ROW_LABELS:
+                if revenue_pair is not None:
+                    ambiguous = True
+                    break  # Multiple headline rows are ambiguous.
+                revenue_pair = pair
+            scoped_label = _normalized_text(
+                lines[row_index - 1].rstrip(":") + " " + match.group("label")
+            )
+            if label == scope or scoped_label.removeprefix(
+                "profit "
+            ) == scope.removeprefix("profit "):
+                if earnings_pair is not None:
+                    ambiguous = True
+                    break
+                earnings_pair = pair
+        if (
+            not ambiguous
+            and revenue_pair
+            == (
+                decimals["LATEST_RESULTS_REVENUE"],
+                decimals["LATEST_RESULTS_PRIOR_REVENUE"],
+            )
+            and earnings_pair
+            == (
+                decimals["LATEST_RESULTS_EARNINGS"],
+                decimals["LATEST_RESULTS_PRIOR_EARNINGS"],
+            )
+        ):
+            return True
+    return False
+
+
+def _table_row_cells(
+    lines: list[str], row_start: int, count: int
+) -> list[Decimal | None] | None:
+    cells: list[Decimal | None] = []
+    for line in lines[row_start + 1 : row_start + count + 1]:
+        if line == "-" or "%" in line:
+            cells.append(None)
+            continue
+        if not _TABLE_NUMBER_RE.fullmatch(line):
+            return None
+        try:
+            cells.append(Decimal(line.replace(",", "").replace(" ", "")))
+        except InvalidOperation:
+            return None
+    return cells if len(cells) == count else None
+
+
+_LATEST_RESULTS_START = "### --- START LATEST_RESULTS ---"
+_LATEST_RESULTS_END = "### --- END LATEST_RESULTS ---"
+_LATEST_RESULTS_OPENER_RE = re.compile(
+    r"^#{2,}[ \t]*(?:-{2,}[ \t]*START[ \t]+)?LATEST_RESULTS\b[ \t-]*$"
+)
+_LATEST_RESULTS_LOOSE_END_RE = re.compile(
+    r"^#{2,}[ \t]*-*[ \t]*END[ \t]+LATEST_RESULTS\b"
+)
+# The optional bullet matches _replace_or_add_field, which inserts "- FIELD: value".
+_LATEST_RESULTS_FIELD_LINE_RE = re.compile(
+    r"^(?:[-*][ \t]*)?LATEST_RESULTS_[A-Z_]+[ \t]*:"
+)
+_ANNOTATED_URL_RE = re.compile(r"^(\S+)\s+\([^()]*\)\s*$")
+# A heading or a horizontal rule ends the block; anything else is prose.
+_SECTION_BOUNDARY_RE = re.compile(r"^(?:#{2,}|-{3,}$|\*{3,}$)")
+
+
+def _reframe_latest_results_block(report: str) -> str:
+    """Restore canonical LATEST_RESULTS markers when only the markers drifted.
+
+    Oct 2026: 19 of 29 FLA contract failures were complete blocks behind a bare
+    ``### LATEST_RESULTS`` heading or an END marker missing its dashes. Only an
+    unbroken run of field lines is re-framed: prose before the next heading leaves
+    the report untouched, so no surrounding text can be absorbed into the block.
+    """
+    if extract_last_fenced_block(report, "LATEST_RESULTS") is not None:
+        return report
+    lines = report.splitlines()
+    opener = next(
+        (i for i, line in enumerate(lines) if _LATEST_RESULTS_OPENER_RE.match(line)),
+        None,
+    )
+    if opener is None:
+        return report
+    cursor, fields = opener + 1, 0
+    while cursor < len(lines) and (
+        not lines[cursor].strip() or _LATEST_RESULTS_FIELD_LINE_RE.match(lines[cursor])
+    ):
+        fields += bool(lines[cursor].strip())
+        cursor += 1
+    at_end = cursor == len(lines)
+    if not fields or not (at_end or _SECTION_BOUNDARY_RE.match(lines[cursor].strip())):
+        return report
+    closes_here = not at_end and _LATEST_RESULTS_LOOSE_END_RE.match(lines[cursor])
+    body = [line for line in lines[opener + 1 : cursor] if line.strip()]
+    tail = lines[cursor + 1 :] if closes_here else lines[cursor:]
+    rebuilt = [
+        *lines[:opener],
+        _LATEST_RESULTS_START,
+        *body,
+        _LATEST_RESULTS_END,
+        *([""] if tail else []),
+        *tail,
+    ]
+    return "\n".join(rebuilt) + ("\n" if report.endswith("\n") else "")
+
+
+def _strip_source_url_annotation(report: str) -> str:
+    """Drop a trailing ``(note)`` after the source URL when the rest is a URL."""
+    block = unique_latest_results_block(report)
+    if block is None:
+        return report
+    raw = _field(block, "LATEST_RESULTS_SOURCE_URL")
+    match = _ANNOTATED_URL_RE.match(raw)
+    if not match or not URL_RE.fullmatch(match.group(1)):
+        return report
+    return _replace_latest_results_field(
+        report, "LATEST_RESULTS_SOURCE_URL", match.group(1)
     )
 
 
 def _normalize_latest_results(
     report: str,
     records: list[ToolEvidenceRecord],
-    *,
-    ticker: str,
 ) -> str:
-    coverage = _field(report, "LATEST_RESULTS_COVERAGE_STATUS").upper()
-    asserted = any(_field(report, field) for field in LATEST_RESULTS_SOURCE_FIELDS)
+    report = _strip_source_url_annotation(_reframe_latest_results_block(report))
+    block = unique_latest_results_block(report)
+    if block is None:
+        return report
+    coverage = _field(block, "LATEST_RESULTS_COVERAGE_STATUS").upper()
+    asserted = any(_field(block, field) for field in LATEST_RESULTS_SOURCE_FIELDS)
     if coverage != "FOUND":
         if not asserted:
             return report
-        return _replace_or_add_field(
-            report,
-            "LATEST_RESULTS_SOURCE_AUTHORITY",
-            "UNKNOWN",
-            section="START LATEST_RESULTS",
+        return _replace_latest_results_field(
+            report, "LATEST_RESULTS_SOURCE_AUTHORITY", "UNKNOWN"
         )
 
-    values = {field: _field(report, field) for field in LATEST_RESULTS_SOURCE_FIELDS}
+    values = {field: _field(block, field) for field in LATEST_RESULTS_SOURCE_FIELDS}
     source_url = normalize_http_url(values["LATEST_RESULTS_SOURCE_URL"])
+    if source_url is None:
+        # A citation-free candidate cannot supply growth, but it must not erase
+        # an independently valid MANAGEMENT_GUIDANCE block in the same report.
+        normalized = _replace_latest_results_field(
+            report, "LATEST_RESULTS_SOURCE_URL", "N/A"
+        )
+        for field in _LATEST_RESULTS_NUMERIC_FIELDS:
+            normalized = _replace_latest_results_field(normalized, field, "N/A")
+        normalized = _replace_latest_results_field(
+            normalized, "LATEST_RESULTS_SOURCE_AUTHORITY", "UNSUPPORTED"
+        )
+        for field in (
+            "LATEST_RESULTS_REVENUE_GROWTH_YOY",
+            "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
+        ):
+            normalized = _replace_latest_results_field(normalized, field, "N/A")
+        normalized = _replace_latest_results_field(
+            normalized, "LATEST_RESULTS_NORMALIZATION_REASON", "SOURCE_URL_INVALID"
+        )
+        return _replace_latest_results_field(
+            normalized,
+            "LATEST_RESULTS_WITHHELD_FIELDS",
+            ", ".join(
+                (
+                    *_LATEST_RESULTS_NUMERIC_FIELDS,
+                    "LATEST_RESULTS_REVENUE_GROWTH_YOY",
+                    "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
+                )
+            ),
+        )
     decimals = {
         field: parsed
         for field in _LATEST_RESULTS_NUMERIC_FIELDS
-        if (parsed := _exact_decimal(values[field])) is not None
+        if (parsed := exact_decimal(values[field])) is not None
     }
     required_text_values = (
         values["LATEST_RESULTS_PERIOD"],
@@ -379,36 +1407,74 @@ def _normalize_latest_results(
         if structurally_valid
         else []
     )
-    primary = any(_is_primary_evidence(record) for record in supporting_records)
+    primary = any(
+        _is_primary_evidence(record, source_url) for record in supporting_records
+    )
     authority = (
         "PRIMARY" if primary else "SECONDARY" if supporting_records else "UNSUPPORTED"
     )
+    if primary:
+        reason = "SUPPORTED_PRIMARY"
+    elif supporting_records:
+        reason = "SUPPORTED_SECONDARY"
+    elif not structurally_valid:
+        reason = "INVALID_COMPARATIVE_CLAIM"
+    elif not candidate_records:
+        reason = "SOURCE_NOT_RETAINED"
+    elif any(
+        _header_period_matches(
+            values[label], values[end], int(values["LATEST_RESULTS_PERIOD_MONTHS"])
+        )
+        is False
+        for label, end in (
+            ("LATEST_RESULTS_PERIOD", "LATEST_RESULTS_PERIOD_END"),
+            ("LATEST_RESULTS_PRIOR_PERIOD", "LATEST_RESULTS_PRIOR_PERIOD_END"),
+        )
+    ):
+        reason = "PERIOD_LABEL_MISMATCH"
+    elif not any(
+        all(
+            _source_has_period_end(record.content, values[field])
+            for field in (
+                "LATEST_RESULTS_PERIOD_END",
+                "LATEST_RESULTS_PRIOR_PERIOD_END",
+            )
+        )
+        for record in candidate_records
+    ):
+        reason = "PERIOD_END_NOT_RETAINED"
+    elif not any(
+        _heading_has_currency_and_unit(record.content, values)
+        for record in candidate_records
+    ):
+        reason = "CURRENCY_OR_UNIT_UNBOUND"
+    else:
+        reason = "COMPARATIVE_ROWS_UNBOUND"
 
-    normalized = _replace_or_add_field(
-        report,
-        "LATEST_RESULTS_SOURCE_AUTHORITY",
-        authority,
-        section="START LATEST_RESULTS",
+    normalized = _replace_latest_results_field(
+        report, "LATEST_RESULTS_SOURCE_AUTHORITY", authority
+    )
+    normalized = _replace_latest_results_field(
+        normalized, "LATEST_RESULTS_NORMALIZATION_REASON", reason
+    )
+    normalized = _replace_latest_results_field(
+        normalized,
+        "LATEST_RESULTS_WITHHELD_FIELDS",
+        "NONE"
+        if primary
+        else "LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY",
     )
     if not primary:
-        normalized = _replace_or_add_field(
+        normalized = _replace_latest_results_field(
             normalized,
             "LATEST_RESULTS_REVENUE_GROWTH_YOY",
             "N/A",
-            section="START LATEST_RESULTS",
         )
-        normalized = _replace_or_add_field(
+        normalized = _replace_latest_results_field(
             normalized,
             "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
             "N/A",
-            section="START LATEST_RESULTS",
         )
-        if authority == "UNSUPPORTED":
-            logger.warning(
-                "fla_latest_results_evidence_rejected",
-                ticker=ticker,
-                source_url_present=source_url is not None,
-            )
         return normalized
 
     revenue_prior = decimals["LATEST_RESULTS_PRIOR_REVENUE"]
@@ -423,17 +1489,15 @@ def _normalize_latest_results(
         if earnings_prior > 0
         else None
     )
-    normalized = _replace_or_add_field(
+    normalized = _replace_latest_results_field(
         normalized,
         "LATEST_RESULTS_REVENUE_GROWTH_YOY",
         f"{revenue_growth * 100:.1f}%" if revenue_growth is not None else "N/A",
-        section="START LATEST_RESULTS",
     )
-    return _replace_or_add_field(
+    return _replace_latest_results_field(
         normalized,
         "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
         f"{earnings_growth * 100:.1f}%" if earnings_growth is not None else "N/A",
-        section="START LATEST_RESULTS",
     )
 
 
@@ -442,27 +1506,29 @@ def _preflight_capacity_records(
     pct_token: str,
 ) -> list[ToolEvidenceRecord]:
     """Recover exact capacity claims from code-owned preflight search results."""
-    records: list[ToolEvidenceRecord] = []
     pct_pattern = re.compile(rf"(?<!\d){re.escape(pct_token)}(?:0+)?\s*%")
-    for block in _PREFLIGHT_RESULT_RE.findall(supplemental_evidence or ""):
-        if "capacity" not in block.casefold() or not pct_pattern.search(block):
-            continue
-        urls = {
-            normalized
-            for raw_url in re.findall(r"(?is)<url>\s*(.*?)\s*</url>", block)
-            if (normalized := normalize_http_url(raw_url))
-        }
-        if urls:
-            records.append(
-                ToolEvidenceRecord(
-                    tool_name="management_guidance_preflight",
-                    content=block,
-                    urls=urls,
-                    evidence_status="RESULTS_FOUND",
-                    authority="SECONDARY",
-                )
-            )
-    return records
+    text = supplemental_evidence or ""
+    if classify_evidence_value("management_guidance_preflight", text)[1] not in {
+        "EVIDENCE_FOUND",
+        "RESULTS_FOUND",
+    }:
+        return []
+    # Search preflight can corroborate capacity, but is never a fetched filing.
+    # Split the combined preflight before bounding each individual source record.
+    record = ToolEvidenceRecord(
+        tool_name="management_guidance_preflight",
+        content=text,
+        urls=set(),
+        evidence_status="RESULTS_FOUND",
+        authority="SECONDARY",
+    )
+    return [
+        item
+        for item in _split_search_result_records([record])
+        if item.urls
+        and "capacity" in item.content.casefold()
+        and pct_pattern.search(item.content)
+    ]
 
 
 def _normalized_relationship(relationship: str) -> str:
@@ -486,30 +1552,216 @@ def _has_independent_corroboration(
     return len(domains) >= 2
 
 
+def _normalize_corporate_abbreviations(text: str) -> str:
+    """Preserve the same name spelling in prose and exact holder assertions."""
+    return re.sub(
+        r"\b(?:corp|co|inc|ltd)\.", lambda m: m.group()[:-1], text, flags=re.I
+    )
+
+
+def _holder_sentences(content: str, holder: str) -> list[str]:
+    """Bind relationship evidence without splitting percentages or company names."""
+    if holder.strip().upper() in _UNKNOWN:
+        return []
+    prose = _normalize_corporate_abbreviations(content)
+    normalized_holder = _normalize_corporate_abbreviations(holder)
+    holder_spans = [
+        match.span() for match in re.finditer(re.escape(normalized_holder), prose, re.I)
+    ]
+    clauses = []
+    cursor = 0
+    for separator in re.finditer(
+        r"\n+|[;。!?]|(?<=\.)\s+|,?\s+(?:while|whereas|and(?!\s+(?:his|her|its|their|is|has|uses|holds|owns|does|voting)\b))\s+",
+        prose,
+        re.I,
+    ):
+        if any(start <= separator.start() < end for start, end in holder_spans):
+            continue  # A conjunction within the holder's own name is not a new subject.
+        clauses.append(prose[cursor : separator.start()])
+        cursor = separator.end()
+    clauses.append(prose[cursor:])
+    return [
+        _UNRELATED_INDEPENDENT_RE.sub("", clause)
+        for clause in clauses
+        if _holder_in_text(clause, holder)
+    ]
+
+
+def _assertion_is_unqualified(
+    text: str, start: int, end: int, *, subject_span: tuple[int, int] | None = None
+) -> bool:
+    """Bind certainty to an assertion, preserving independent contrast clauses."""
+    # Names and validated calendar dates are evidence context, not modality.
+    # Preserve offsets because the assertion and its exact subject are already bound.
+    if subject_span is not None:
+        left, right = subject_span
+        text = text[:left] + " " * (right - left) + text[right:]
+    text = re.sub(
+        _SOURCE_DATE_PATTERN,
+        lambda match: (
+            " " * len(match.group())
+            if _parse_source_date(match.group()) is not None
+            else match.group()
+        ),
+        text,
+    )
+    prefix = re.split(r"\b(?:but|however)\b", text[:start], flags=re.I)[-1]
+    if _UNASSERTED_ASSERTION_RE.search(prefix) or _ASSERTION_MODAL_RE.search(prefix):
+        return False
+    suffixes = re.split(r"\b(?:but|however|and)\b", text[end:], flags=re.I)
+    if _ASSERTION_QUALIFIER_RE.search(suffixes[0]):
+        return False
+    for suffix in suffixes[1:]:
+        # An anaphoric qualification refers to the preceding assertion. A new
+        # entity's plans or accounting cannot qualify the holder's assertion.
+        if re.match(
+            r"\s*(?:this|that|it|the (?:accounting treatment|relationship|assertion|claim|interest|holding))\b",
+            suffix,
+            re.I,
+        ) and (
+            _UNASSERTED_ASSERTION_RE.search(suffix)
+            or _ASSERTION_QUALIFIER_RE.search(suffix)
+        ):
+            return False
+        if _ASSERTION_QUALIFIER_RE.match(suffix.lstrip()):
+            return False
+    return True
+
+
+def _supports_non_control_relationship(
+    sentence: str, holder: str, relationship: str
+) -> bool:
+    """Require an asserted relationship in an already holder-bound clause.
+
+    Co-holder associates, names and director affiliations are not accounting
+    relationships. Unsupported language or uncertain assertions grant no control fact.
+    """
+    if _normalized_relationship(relationship) == "INDEPENDENT":
+        return any(
+            term in sentence.casefold()
+            for term in (
+                "independent of the company",
+                "independent of the group",
+                "not controlled",
+                "no control",
+            )
+        )
+    prose = re.sub(
+        r'"[^"\n]*"|“[^”\n]*”|\'[^\'\n]*\'',
+        "",
+        _normalize_corporate_abbreviations(sentence),
+    )
+    normalized_holder = _normalize_corporate_abbreviations(holder).rstrip(".")
+    for match in _ACCOUNTING_RELATIONSHIP_RE.finditer(prose):
+        prefix = prose[: match.start()]
+        subjects = list(
+            re.finditer(rf"(?<!\w){re.escape(normalized_holder)}(?!\w)", prefix, re.I)
+        )
+        if not subjects or not _assertion_is_unqualified(
+            prose, match.start(), match.end(), subject_span=subjects[-1].span()
+        ):
+            continue
+        # A continuation may omit the holder or refer to its investment, but
+        # another named entity inside a possessive clause owns its own assertion.
+        continuation = re.split(
+            r"\b(?:and|but|however)\b", prefix[subjects[-1].end() :], flags=re.I
+        )[-1].strip(" ,")
+        if re.fullmatch(
+            r"(?:is(?: the entity)?|(?:its|his|her|their|the) investment)?",
+            continuation,
+            re.I,
+        ) or (
+            match.group().lower().startswith(("with ", "under "))
+            and re.match(r"(?:owns?|holds?)\b", continuation, re.I)
+        ):
+            return True
+    return False
+
+
+def _majority_is_class_scoped(
+    records: list[ToolEvidenceRecord], holder: str, pct: float
+) -> bool:
+    """A class-only percentage cannot prove majority issuer votes.
+
+    Explicit same-holder total-votes evidence for the claimed percentage resolves
+    class scope; unresolved scope keeps contractual fallback holder-bound.
+    """
+    normalized_holder = _normalize_corporate_abbreviations(holder).rstrip(".")
+    class_scoped = False
+    total_votes_supported = False
+    for record in records:
+        lines = _normalize_corporate_abbreviations(
+            re.sub(r"<[^>]+>", "\n", record.content)
+        ).splitlines()
+        for index, line in enumerate(lines):
+            if not re.search(
+                rf"(?<!\w){re.escape(normalized_holder)}(?!\w)", line, re.I
+            ):
+                continue
+            context = "\n".join(_holder_sentences(line, holder))
+            for preceding in reversed(lines[:index]):
+                if not preceding.strip().startswith("|"):
+                    break
+                context = preceding + "\n" + context
+            class_scoped |= bool(
+                re.search(
+                    r"\bclass\s+(?:[a-z]\b|[ivx]+\b|\d+\b|\w+\s+(?:number|votes?|shares?|common|subordinate|multiple))|\baggregate\s+votes\s*\(",
+                    context,
+                    re.I,
+                )
+            )
+        for sentence in _holder_sentences(record.content, holder):
+            total_votes_supported |= any(
+                float(match.group(1)) == pct
+                for match in re.finditer(
+                    rf"^\s*{re.escape(normalized_holder)}\s+(?:owns?|holds?|controls?)\s+"
+                    r"(?:\d{1,3}(?:\.\d+)?\s*%\s+of\s+(?:the\s+)?class\s+\w+\s+shares?\s+and\s+(?:owns?|holds?|controls?)\s+)?"
+                    r"(\d{1,3}(?:\.\d+)?)\s*%\s+of\s+(?:the\s+)?(?:total|aggregate)\s+(?:voting\s+rights|votes)\b",
+                    sentence,
+                    re.I,
+                )
+            )
+    return class_scoped and not total_votes_supported
+
+
 def _validated_control_status(
     *,
     claimed_status: str,
     relationship: str,
     basis: str,
     pct: float | None,
+    holder: str,
+    ownership_verified: bool,
     supporting_records: list[ToolEvidenceRecord],
+    source_url: str | None = None,
 ) -> tuple[str, str]:
+    sentences = [
+        sentence
+        for record in supporting_records
+        for sentence in _holder_sentences(record.content, holder)
+    ]
+    class_scoped = False
+    if ownership_verified and pct is not None and pct > 50.0:
+        if any(
+            _EXPLICIT_NON_CONTROL_RE.search(sentence)
+            or _supports_non_control_relationship(sentence, holder, "EQUITY METHOD")
+            for sentence in sentences
+        ):
+            return "UNKNOWN", "CONFLICTING_CONTROL_EVIDENCE"
+        class_scoped = _majority_is_class_scoped(supporting_records, holder, pct)
+        if not class_scoped:
+            return "CONTROLLED", "MAJORITY_VOTING_RIGHTS"
+
     non_control_rule = _NON_CONTROL_RELATIONSHIPS.get(
         _normalized_relationship(relationship)
     )
     if non_control_rule:
-        basis_value, terms = non_control_rule
-        relationship_records = [
-            record
-            for record in supporting_records
-            if any(term in record[1].casefold() for term in terms)
-        ]
-        if relationship_records:
-            return "NOT_CONTROLLED", basis_value
+        if any(
+            _supports_non_control_relationship(sentence, holder, relationship)
+            for sentence in sentences
+        ):
+            return "NOT_CONTROLLED", non_control_rule
         return "UNKNOWN", "UNKNOWN"
-
-    if pct is not None and pct > 50.0:
-        return "CONTROLLED", "MAJORITY_VOTING_RIGHTS"
 
     if claimed_status.upper() != "CONTROLLED":
         return "UNKNOWN", "UNKNOWN"
@@ -522,10 +1774,18 @@ def _validated_control_status(
     corroborating_records = [
         record
         for record in supporting_records
-        if any(term in record[1].casefold() for term in control_terms)
+        if any(
+            term in passage.casefold()
+            for passage in (
+                _holder_sentences(record.content, holder)
+                if class_scoped
+                else [record.content]
+            )
+            for term in control_terms
+        )
     ]
     official_support = any(
-        _is_primary_evidence(record) for record in corroborating_records
+        _is_primary_evidence(record, source_url) for record in corroborating_records
     )
     if official_support or _has_independent_corroboration(corroborating_records):
         return "CONTROLLED", normalized_basis
@@ -569,7 +1829,15 @@ def _normalize_ownership(
 
     normalized_source = normalize_http_url(source_url)
     claim_records = [
-        record for record in records if _claim_in_text(record[1], holder, pct)
+        record
+        for record in records
+        if _claim_in_text(record[1], holder, pct)
+        or (
+            holder
+            and pct is None
+            and _holder_in_text(record[1], holder)
+            and "largest shareholder" in record[1].casefold()
+        )
     ]
     supporting = [
         record
@@ -588,9 +1856,11 @@ def _normalize_ownership(
     relationship_records = [
         record
         for record in records
-        if _holder_in_text(record[1], holder)
-        and non_control_rule
-        and any(term in record[1].casefold() for term in non_control_rule[1])
+        if non_control_rule
+        and any(
+            _supports_non_control_relationship(sentence, holder, relationship)
+            for sentence in _holder_sentences(record.content, holder)
+        )
     ]
     relationship_supporting = [
         record
@@ -627,14 +1897,19 @@ def _normalize_ownership(
             relationship=relationship,
             basis=basis,
             pct=pct,
+            holder=holder,
+            ownership_verified=verified,
             supporting_records=(claim_records if verified else relationship_supporting),
+            source_url=normalized_source,
         )
         if verified or evidence_status == "DISCLOSED_UNVERIFIED"
         else ("UNKNOWN", "UNKNOWN")
     )
 
     largest_value = (
-        f"{holder} ({pct:g}%)" if verified and holder and pct is not None else "UNKNOWN"
+        (f"{holder} ({pct:g}%)" if pct is not None else holder)
+        if verified and holder
+        else "UNKNOWN"
     )
     influential_entity = (
         holder
@@ -706,6 +1981,9 @@ def _normalize_ownership(
         "Controlling Shareholder": controller_value,
         "Control Status": control_status,
         "Control Basis": control_basis,
+        "Relationship": "UNKNOWN"
+        if control_status == "CONTROLLED" and non_control_rule
+        else relationship,
         "Parent Company": parent_value or "UNKNOWN",
         "ENTITY_ROLE_OBSERVED": entity_role,
         "Related Listed Tickers": related,
@@ -796,7 +2074,10 @@ def _normalize_capacity(
     evidence_status = (
         "PRIMARY"
         if supported
-        and any(_is_primary_evidence(record) for record in matching_records)
+        and any(
+            _is_primary_evidence(record, normalized_source)
+            for record in matching_records
+        )
         else "SECONDARY"
         if supported
         else "UNSUPPORTED"
@@ -901,7 +2182,7 @@ def normalize_foreign_language_evidence(
         ticker=ticker,
         supplemental_evidence=supplemental_evidence,
     )
-    return _normalize_latest_results(normalized, records, ticker=ticker)
+    return _normalize_latest_results(normalized, records)
 
 
 FOREIGN_GROWTH_PROMOTION_FIELDS: dict[str, str] = {
@@ -958,15 +2239,19 @@ def promote_foreign_growth_evidence(body: str, foreign_data: str) -> tuple[str, 
             "UNKNOWN",
         )
         promoted = True
+    latest_block = unique_latest_results_block(foreign_data)
     for field in LATEST_RESULTS_CONTEXT_PROMOTION_FIELDS:
-        value = _field(foreign_data, field)
+        value = _field(latest_block, field) if latest_block is not None else ""
         if not value:
             continue
         updated = replace_or_append_block_line(updated, field, value)
         promoted = True
-    if _field(foreign_data, "LATEST_RESULTS_SOURCE_AUTHORITY").upper() == "PRIMARY":
+    if (
+        latest_block is not None
+        and _field(latest_block, "LATEST_RESULTS_SOURCE_AUTHORITY").upper() == "PRIMARY"
+    ):
         for field in LATEST_RESULTS_NUMERIC_PROMOTION_FIELDS:
-            value = _field(foreign_data, field)
+            value = _field(latest_block, field)
             if not value:
                 continue
             updated = replace_or_append_block_line(updated, field, value)

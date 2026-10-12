@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 
 import pytest
 
@@ -20,6 +21,7 @@ from src.agents.verdict_policy import (
 )
 from src.charts.extractors.pm_block import extract_pm_block
 from src.decision_inputs import DecisionInputs
+from src.liquidity_assessment import LiquidityAssessment
 from src.validators.metric_extractor import extract_metrics
 
 
@@ -53,11 +55,18 @@ def _inputs(
                 },
             },
         }
-    return DecisionInputs.from_metrics_and_snapshot(
+    inputs = DecisionInputs.from_metrics_and_snapshot(
         metrics,
         None,
         snapshot,
         ticker="TEST",
+    )
+
+    # These unit profiles isolate growth policy with known independent gates.
+    return replace(
+        inputs,
+        english_analyst_count=4,
+        liquidity=LiquidityAssessment("PASS", average_daily_turnover_usd=500_000),
     )
 
 
@@ -419,6 +428,47 @@ def test_not_floored_with_auto_reject_flag():
         ticker="X",
     )
     assert floored is False
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        {"type": "VALUE_TRAP_VERDICT", "risk_penalty": 1.0},
+        {"type": "FUTURE_MATERIAL_RISK", "risk_penalty": 1.0},
+    ],
+)
+def test_material_risk_is_not_erased_by_net_subtotal(flag):
+    out, floored = maybe_floor_verdict_to_hold(
+        _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+        decision_inputs=_inputs(APR_BLOCK, current_growth_fields=frozenset()),
+        red_flags=[flag, {"type": "QUALITY_BONUS", "risk_penalty": -0.5}],
+        code_subtotal=1.5,
+        pre_screening_result="PASS",
+        ticker="TEST",
+    )
+
+    assert floored is False
+    assert "VERDICT: DO_NOT_INITIATE" in out
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        {"type": "MANAGEMENT_GUIDANCE_EVIDENCE_GAP", "blocks_buy": True},
+        {"type": "REGULATORY_UNCERTAINTY", "risk_penalty": 0.5},
+    ],
+)
+def test_nonmaterial_caveat_does_not_prevent_hold_floor(flag):
+    out, floored = maybe_floor_verdict_to_hold(
+        _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+        decision_inputs=_inputs(APR_BLOCK, current_growth_fields=frozenset()),
+        red_flags=[flag],
+        code_subtotal=1.0,
+        pre_screening_result="PASS",
+    )
+
+    assert floored is True
+    assert "VERDICT: HOLD" in out
 
 
 def test_not_floored_when_prescreen_reject():
@@ -1090,3 +1140,390 @@ def test_verdict_policy_owns_no_private_score_regex():
     source = inspect.getsource(vp)
     assert "ADJUSTED_GROWTH_SCORE" not in source
     assert "ADJUSTED_HEALTH_SCORE" not in source
+
+
+@pytest.mark.parametrize(
+    "count,should_floor", [(14, True), (15, False), (16, False), (None, False)]
+)
+def test_coverage_boundary_cannot_be_overridden_by_growth_exception(
+    count, should_floor
+):
+    inputs = replace(
+        _inputs(APR_BLOCK, current_growth_fields=frozenset()),
+        english_analyst_count=count,
+    )
+    output = _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE")
+    result, floored = maybe_floor_verdict_to_hold(
+        output,
+        decision_inputs=inputs,
+        red_flags=[],
+        code_subtotal=1.0,
+        pre_screening_result="PASS",
+    )
+    assert floored is should_floor
+    if not should_floor:
+        assert result == output
+    violation = assess_verdict_policy(
+        _pm_output("HOLD", "HOLD"), decision_inputs=inputs
+    )
+    assert (violation is not None) is (count is not None and count >= 15)
+
+
+@pytest.mark.parametrize(
+    "us_revenue,should_floor", [(None, True), (35.0, True), (35.01, False)]
+)
+def test_disclosed_us_revenue_gate_respects_existing_policy(us_revenue, should_floor):
+    inputs = replace(
+        _inputs(APR_BLOCK, current_growth_fields=frozenset()), us_revenue_pct=us_revenue
+    )
+    _, floored = maybe_floor_verdict_to_hold(
+        _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+        decision_inputs=inputs,
+        red_flags=[],
+        code_subtotal=1.0,
+        pre_screening_result="PASS",
+    )
+    assert floored is should_floor
+
+
+@pytest.mark.parametrize(
+    "liquidity",
+    [
+        None,
+        LiquidityAssessment("ERROR"),
+        LiquidityAssessment(
+            "FAIL_INSUFFICIENT_LIQUIDITY", average_daily_turnover_usd=10_000
+        ),
+    ],
+)
+def test_unresolved_or_failed_liquidity_withholds_floor(liquidity):
+    inputs = replace(
+        _inputs(APR_BLOCK, current_growth_fields=frozenset()), liquidity=liquidity
+    )
+    _, floored = maybe_floor_verdict_to_hold(
+        _pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+        decision_inputs=inputs,
+        red_flags=[],
+        code_subtotal=1.0,
+        pre_screening_result="PASS",
+    )
+    assert floored is False
+
+
+def test_unknown_and_unreliable_growth_are_indeterminate_in_context():
+    for inputs in [
+        replace(_inputs(APR_BLOCK), growth_decision_pct=None),
+        replace(_inputs(APR_BLOCK), growth_score_reliable=False),
+    ]:
+        assert "STATUS: INDETERMINATE" in render_growth_gate_context(inputs)
+
+
+@pytest.mark.parametrize("gate", ["coverage", "liquidity", "us_revenue"])
+def test_active_tender_preserves_verified_independent_rejections(gate):
+    inputs = _inputs(APR_BLOCK, current_growth_fields=frozenset())
+    inputs.decision_metrics["m_and_a_status"] = "ACTIVE_TENDER"
+    if gate == "coverage":
+        inputs = replace(inputs, english_analyst_count=15)
+    elif gate == "liquidity":
+        inputs = replace(
+            inputs,
+            liquidity=LiquidityAssessment(
+                "FAIL_INSUFFICIENT_LIQUIDITY", average_daily_turnover_usd=99_999
+            ),
+        )
+    else:
+        inputs = replace(inputs, us_revenue_pct=35.01)
+    violation = assess_verdict_policy(
+        _pm_output("HOLD", "HOLD"), decision_inputs=inputs
+    )
+    assert violation is not None
+    assert (
+        violation.rule
+        == {
+            "coverage": "analyst_coverage",
+            "liquidity": "liquidity",
+            "us_revenue": "us_revenue",
+        }[gate]
+    )
+
+
+def test_active_tender_retains_existing_growth_exemption_without_proven_independent_fail():
+    inputs = replace(_inputs(KTY_BLOCK), english_analyst_count=None)
+    inputs.decision_metrics["m_and_a_status"] = "ACTIVE_TENDER"
+    assert (
+        assess_verdict_policy(_pm_output("HOLD", "HOLD"), decision_inputs=inputs)
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "ticker,health,growth,pe,cagr,opinions",
+    [
+        ("HNR1.DE", 80.0, 0.0, 11.27, 2.6, 16),
+        ("BOL.ST", 81.8, 20.0, 11.81, 2.7, 15),
+    ],
+)
+def test_oct5_real_aggregator_coverage_cases_withhold_growth_floor(
+    ticker, health, growth, pe, cagr, opinions
+):
+    # Trimmed decisive fields from the public Oct-5 retained fundamentals artifacts.
+    from src.agents.verdict_policy import assess_growth_gate
+
+    fundamentals = _data_block(health, pe, growth, cagr).replace(
+        "### --- END DATA_BLOCK ---",
+        f"ANALYST_COVERAGE_ENGLISH: {opinions}\n### --- END DATA_BLOCK ---",
+    )
+    inputs = DecisionInputs.from_metrics(extract_metrics(fundamentals))
+    inputs = replace(
+        inputs,
+        liquidity=LiquidityAssessment("PASS", average_daily_turnover_usd=500_000),
+    )
+    assert assess_growth_gate(inputs).exception == "marginal_turnaround"
+    assert inputs.english_analyst_count is None
+    original = _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE")
+    output, floored = maybe_floor_verdict_to_hold(
+        original,
+        decision_inputs=inputs,
+        red_flags=[],
+        code_subtotal=0.0,
+        pre_screening_result="PASS",
+        ticker=ticker,
+    )
+    assert not floored
+    assert output == original
+
+
+def test_unreliable_health_cannot_advertise_a_growth_exception():
+    from src.agents.verdict_policy import assess_growth_gate
+
+    inputs = replace(_inputs(_data_block(75, 12, 40, 16)), health_score_reliable=False)
+    gate = assess_growth_gate(inputs)
+    assert not gate.hard_fail
+    assert gate.exception is None
+    assert "STATUS: INDETERMINATE" in render_growth_gate_context(inputs)
+
+
+def test_floor_regression_detects_an_independent_gate_bypass(monkeypatch):
+    import src.agents.verdict_policy as policy
+
+    inputs = replace(
+        _inputs(APR_BLOCK, current_growth_fields=frozenset()), english_analyst_count=15
+    )
+    args = {
+        "decision_inputs": inputs,
+        "red_flags": [],
+        "code_subtotal": 0.0,
+        "pre_screening_result": "PASS",
+    }
+    output = _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE")
+    assert not policy.maybe_floor_verdict_to_hold(output, **args)[1]
+    monkeypatch.setattr(policy, "assess_initiation_gates", lambda inputs: ())
+    assert policy.maybe_floor_verdict_to_hold(output, **args)[1]
+
+
+@pytest.mark.parametrize(
+    "health,status,violation",
+    [
+        (None, "INDETERMINATE", False),
+        (64.0, "HARD_FAIL", True),
+        (65.0, "EXCEPTION_MARGINAL_TURNAROUND", False),
+    ],
+)
+def test_missing_health_does_not_imply_verified_low_health(health, status, violation):
+    from src.agents.verdict_policy import assess_growth_gate
+
+    inputs = replace(_inputs(_data_block(75, 12, 40, 16)), health_decision_pct=health)
+    assessment = assess_growth_gate(inputs)
+    assert assessment.status == status
+    assert (
+        assess_verdict_policy(_pm_output("HOLD", "HOLD"), decision_inputs=inputs)
+        is not None
+    ) is violation
+    if health is None:
+        assert assessment.exception is None
+        assert not maybe_floor_verdict_to_hold(
+            _full_pm_output("DO NOT INITIATE", "DO_NOT_INITIATE"),
+            decision_inputs=inputs,
+            red_flags=[],
+            code_subtotal=0.0,
+            pre_screening_result="PASS",
+        )[1]
+
+
+@pytest.mark.parametrize(
+    "pe,current_fields,expected",
+    [(12.52, None, "marginal_turnaround"), (14.0, frozenset(), "data_vacuum")],
+)
+def test_exception_growth_caps_buy_to_hold_with_consistent_surfaces_and_idempotence(
+    pe, current_fields, expected
+):
+    from src.agents.verdict_policy import (
+        assess_growth_gate,
+        maybe_cap_exception_growth_buy_to_hold,
+    )
+
+    inputs = _inputs(
+        _data_block(90.9, pe, 0.0, 5.1), current_growth_fields=current_fields
+    )
+    assert assess_growth_gate(inputs).exception == expected
+    initial = _full_pm_output("BUY", "BUY").replace(
+        "POSITION_SIZE: 0.0%", "POSITION_SIZE: 3.0%"
+    )
+    capped, changed = maybe_cap_exception_growth_buy_to_hold(
+        initial, decision_inputs=inputs
+    )
+    assert changed
+    assert "PORTFOLIO MANAGER VERDICT: HOLD" in capped
+    assert "Actual Decision: HOLD" in capped and "**Action**: HOLD" in capped
+    assert "POSITION_SIZE: 0.0%" in capped
+    assert extract_pm_block(capped).verdict == "HOLD"
+    assert "MAX_VERDICT: HOLD" in render_growth_gate_context(inputs)
+    assert maybe_cap_exception_growth_buy_to_hold(capped, decision_inputs=inputs) == (
+        capped,
+        False,
+    )
+
+
+@pytest.mark.parametrize(
+    "verdict,growth,tender",
+    [
+        ("HOLD", 0, False),
+        ("DO_NOT_INITIATE", 0, False),
+        ("SELL", 0, False),
+        ("BUY", 50, False),
+        ("BUY", 66.7, False),
+        ("BUY", 0, True),
+    ],
+)
+def test_exception_ceiling_preserves_other_verdicts_ordinary_growth_and_active_tender(
+    verdict, growth, tender
+):
+    from src.agents.verdict_policy import maybe_cap_exception_growth_buy_to_hold
+
+    inputs = _inputs(_data_block(90.9, 12.52, growth, 5.1))
+    if tender:
+        inputs = replace(
+            inputs,
+            decision_metrics={
+                **inputs.decision_metrics,
+                "m_and_a_status": "ACTIVE_TENDER",
+            },
+        )
+    initial = _pm_output(verdict, verdict)
+    assert maybe_cap_exception_growth_buy_to_hold(initial, decision_inputs=inputs) == (
+        initial,
+        False,
+    )
+    if tender or growth >= 50:
+        assert "MAX_VERDICT" not in render_growth_gate_context(inputs)
+
+
+@pytest.mark.parametrize("failure", ["liquidity", "auto_reject"])
+def test_hard_fail_precedes_exception_ceiling(failure):
+    from src.agents.verdict_policy import maybe_cap_exception_growth_buy_to_hold
+
+    inputs = _inputs(_data_block(90.9, 12.52, 0, 5.1))
+    flags = (
+        [{"type": "REJECT", "action": "AUTO_REJECT"}]
+        if failure == "auto_reject"
+        else []
+    )
+    if failure == "liquidity":
+        inputs = replace(
+            inputs,
+            liquidity=LiquidityAssessment(
+                "FAIL_INSUFFICIENT_LIQUIDITY", average_daily_turnover_usd=99_999
+            ),
+        )
+    initial = _pm_output("BUY", "BUY")
+    violation = assess_verdict_policy(initial, decision_inputs=inputs, red_flags=flags)
+    assert violation is not None and violation.required_verdict == "DO_NOT_INITIATE"
+    rejected, _ = apply_required_verdict(
+        initial,
+        required_verdict=violation.required_verdict,
+        rule=violation.rule,
+        reason=violation.reason,
+    )
+    assert maybe_cap_exception_growth_buy_to_hold(rejected, decision_inputs=inputs) == (
+        rejected,
+        False,
+    )
+
+
+@pytest.mark.parametrize("content", ["no verdict", _pm_output("BUY", "HOLD")])
+def test_exception_ceiling_reuses_guarded_verdict_parser(content):
+    from src.agents.verdict_policy import maybe_cap_exception_growth_buy_to_hold
+
+    result, changed = maybe_cap_exception_growth_buy_to_hold(
+        content, decision_inputs=_inputs(_data_block(90.9, 12.52, 0, 5.1))
+    )
+    if changed:
+        assert "PORTFOLIO MANAGER VERDICT: HOLD" in result
+        assert "VERDICT: HOLD" in result
+        assert "PORTFOLIO MANAGER VERDICT: BUY" not in result
+    else:
+        assert result == content
+
+
+@pytest.mark.parametrize(
+    "coverage,status", [(None, "INDETERMINATE"), (4, "PASS"), (100, "FAIL")]
+)
+@pytest.mark.parametrize("us_revenue", [None, 10.0, 99.0])
+def test_code_owned_compliance_display_preserves_rationale_and_verdict(
+    coverage, status, us_revenue
+):
+    from src.agents.verdict_policy import (
+        assess_initiation_gates,
+        project_compliance_gates,
+    )
+
+    inputs = replace(
+        _inputs("ADJUSTED_HEALTH_SCORE: 80%\nADJUSTED_GROWTH_SCORE: 20%"),
+        english_analyst_count=coverage,
+        us_revenue_pct=us_revenue,
+    )
+    content = """### PORTFOLIO MANAGER VERDICT: DO NOT INITIATE
+### THESIS COMPLIANCE SUMMARY
+- **Growth Transition**: 99% (Adjusted) - PASS
+- **Analyst Coverage**: 1 - PASS
+- **US Revenue**: Not disclosed - PASS
+- **Liquidity**: FAIL
+**Hard Fail Result**: PASS
+**Qualitative Risks**: Independent source-supported risk +1
+### FINAL POSITION PARAMETERS
+PM discretion: retain economic risks.
+VERDICT: DO_NOT_INITIATE
+"""
+    projected = project_compliance_gates(content, inputs)
+    assert project_compliance_gates(projected, inputs) == projected
+    assert f" - {status};" in projected
+    for gate in assess_initiation_gates(inputs):
+        assert f"{gate.status};" in projected
+        assert (
+            "Unknown" in projected
+            if gate.value is None
+            else f"{gate.value:g}" in projected or gate.rule == "liquidity"
+        )
+    assert "Independent source-supported risk +1" in projected
+    assert "VERDICT: DO_NOT_INITIATE" in projected
+    assert "PM discretion: retain economic risks." in projected
+    assert "99% (Adjusted) - PASS" not in projected
+    assert "Hard Fail Result" in projected
+
+
+@pytest.mark.parametrize(
+    "health,status",
+    [
+        (None, "INDETERMINATE"),
+        (64.0, "HARD_FAIL"),
+        (65.0, "EXCEPTION_MARGINAL_TURNAROUND"),
+    ],
+)
+def test_growth_display_uses_actual_exception_without_changing_policy(health, status):
+    from src.agents.verdict_policy import project_compliance_gates
+
+    inputs = replace(_inputs(_data_block(75, 12, 40, 16)), health_decision_pct=health)
+    text = "### THESIS COMPLIANCE SUMMARY\n- **Growth Transition**: 40% - FAIL\n### FINAL POSITION PARAMETERS\nIndependent tender blocker retained."
+    projected = project_compliance_gates(text, inputs)
+    assert f"(Adjusted) - {status};" in projected
+    assert "Independent tender blocker retained." in projected

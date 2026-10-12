@@ -40,6 +40,7 @@ import argparse
 import json
 import re
 import sys
+from collections import Counter
 from collections.abc import Collection, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -270,6 +271,7 @@ class ScanResult:
     label: str
     flagged: list[tuple[Record, list[str]]] = field(default_factory=list)
     total: int = 0
+    coverage: dict[str, int] = field(default_factory=dict)
     run_date: str | None = None  # YYYY-MM-DD (date mode)
     modified_since: float | None = None  # epoch (mtime mode)
 
@@ -377,13 +379,42 @@ def scan(
         run_date=run_date_display,
         modified_since=modified_since,
     )
+    coverage: Counter[str] = Counter()
     for rec in sorted(batch, key=lambda r: r.sort_key):
+        if rec.is_quick is False:
+            coverage["full_runs"] += 1
+            if rec.run_summary.get("publishable") is True:
+                coverage["publishable_full_runs"] += 1
+            latest_reason = rec.run_summary.get("latest_results_reason")
+            if latest_reason:
+                coverage[f"latest_results_{latest_reason}"] += 1
+            tool_outcomes = rec.run_summary.get("tool_outcomes")
+            executions = (
+                tool_outcomes.get("recorded_executions")
+                if isinstance(tool_outcomes, dict)
+                else None
+            )
+            raw_reasons = (
+                executions.get("by_reason") if isinstance(executions, dict) else None
+            )
+            reasons = raw_reasons if isinstance(raw_reasons, dict) else {}
+            for reason in (
+                "GUIDANCE_EXTRACTION_AUTH_ERROR",
+                "ADAPTER_UNAVAILABLE",
+                "EMBEDDED_PROVIDER_ERROR",
+                "UNAPPROVED_DOCUMENT_HOST",
+            ):
+                if reasons.get(reason, 0):
+                    coverage[f"runs_with_{reason}"] += 1
+            if rec.run_summary.get("consultant_review_status") == "LIMITED":
+                coverage["limited_consultant_runs"] += 1
         anomalies = detect_anomalies(
             rec,
             _prior_verdict_from_candidates(rec, candidates),
         )
         if anomalies:
             result.flagged.append((rec, anomalies))
+    result.coverage = dict(coverage)
     return result
 
 
@@ -392,6 +423,9 @@ def _render(result: ScanResult) -> str:
         f"━━━ Batch health digest — {result.label} "
         f"({result.total} analyses, {len(result.flagged)} flagged) ━━━"
     ]
+    if result.coverage:
+        lines.append("Full-run coverage (run counts; distinct from artifact validity):")
+        lines.extend(f"  {key}: {value}" for key, value in result.coverage.items())
     if not result.flagged:
         lines.append("✓ No anomalies.")
         return "\n".join(lines)
@@ -480,6 +514,7 @@ def main(argv: list[str] | None = None) -> int:
                     "run_date": result.run_date,
                     "modified_since": result.modified_since,
                     "total": result.total,
+                    "coverage": result.coverage,
                     "flagged": [
                         {
                             "ticker": rec.ticker,

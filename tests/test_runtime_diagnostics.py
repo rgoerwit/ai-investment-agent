@@ -1,6 +1,8 @@
 import socket
+from typing import Literal
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
 from src.agents.message_utils import ToolHistoryIntegrityError
 from src.runtime_diagnostics import (
@@ -62,6 +64,35 @@ class TestRuntimeFailureClassification:
 
         assert details.kind == "application_error"
         assert details.retryable is False
+
+    def test_classifies_tool_argument_validation_error_as_application_error(self):
+        class _SearchArgs(BaseModel):
+            purpose: Literal["filings", "news"]
+
+        with pytest.raises(ValidationError) as caught:
+            _SearchArgs(purpose="ownership")
+
+        details = classify_failure(caught.value, provider="unknown")
+
+        # pydantic appends an errors.pydantic.dev URL; it is not a contacted host.
+        assert "errors.pydantic.dev" in str(caught.value)
+        assert details.kind == "application_error"
+        assert details.retryable is False
+        assert details.host is None
+
+    def test_classifies_wrapped_validation_error_by_root_cause(self):
+        class _Args(BaseModel):
+            timeout: int
+
+        with pytest.raises(ValidationError) as caught:
+            _Args(timeout="timed out")
+        wrapper = RuntimeError("tool failed")
+        wrapper.__cause__ = caught.value
+
+        details = classify_failure(wrapper, provider="unknown")
+
+        assert details.kind == "application_error"
+        assert details.host is None
 
     def test_classifies_rate_limit(self):
         exc = Exception("HTTP 429: Too Many Requests")

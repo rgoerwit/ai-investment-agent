@@ -27,6 +27,7 @@ from src.earnings_baseline import (
     canonical_guidance_enum,
     guidance_contract_value_is_uninterpretable,
 )
+from src.forensic_budget import ResearchBudgetLedger
 from src.guidance_vocabulary import guidance_locale_policy
 from src.text_patterns import RESULT_ENVELOPE_BODY_RE, URL_RE
 
@@ -60,6 +61,14 @@ GUIDANCE_PREFLIGHT_MAX_CHARS = 36_000
 INCOMPLETE_SEARCH_EVIDENCE_STATUSES = frozenset(
     {"UNAVAILABLE", "AUTH_ERROR", "INSUFFICIENT"}
 )
+
+# The searches that can establish whether an issuer guides. Only these may demote
+# NOT_DISCLOSED: the optional sources (statutory_filing_api, guidance_extract)
+# report UNAVAILABLE whenever no filings adapter covers the exchange, which in
+# Oct 2026 was every exchange. Checking them too reproduced the Aug defect by
+# another route: NOT_DISCLOSED survived 29 of 56 runs that skipped the filing
+# adapter and 0 of 449 that called it, and the gap flag blocked BUY on 55.8%.
+REQUIRED_GUIDANCE_SEARCHES = ("results_package", "earnings_bridge")
 
 GUIDANCE_PROMOTION_FIELDS: dict[str, str] = {
     "COVERAGE_STATUS": "GUIDANCE_COVERAGE_STATUS",
@@ -369,6 +378,72 @@ def _entity_matched_result_urls(
     return urls
 
 
+async def fetch_unresolved_latest_results(
+    report: str,
+    *,
+    ticker: str,
+    company_name: str,
+    budget: ResearchBudgetLedger,
+) -> str:
+    """Fetch one approved citation only for a complete, withheld results claim."""
+    from src.agents.foreign_language_evidence import unique_latest_results_block
+    from src.runtime_services import get_current_evidence_records
+    from src.tooling.evidence_recorder import (
+        DOCUMENT_ACQUISITION_TOOLS,
+        normalize_http_url,
+    )
+    from src.tools.official_documents import (
+        get_official_document,
+        is_official_document_url,
+    )
+
+    block = unique_latest_results_block(report)
+    if block is None or extract_block_text_value(
+        block, "LATEST_RESULTS_NORMALIZATION_REASON"
+    ) not in {
+        "SOURCE_NOT_RETAINED",
+        "PERIOD_END_NOT_RETAINED",
+        "CURRENCY_OR_UNIT_UNBOUND",
+        "COMPARATIVE_ROWS_UNBOUND",
+        "SUPPORTED_SECONDARY",
+    }:
+        return ""
+    source_url = normalize_http_url(
+        extract_block_text_value(block, "LATEST_RESULTS_SOURCE_URL") or ""
+    )
+    if not source_url or not is_official_document_url(source_url):
+        return ""
+    # A successful, blocked, or failed fetch is already an attempted source. Avoid
+    # another request with different keywords or a different tool-call signature.
+    if any(
+        source_url in (*record.requested_urls, *record.urls)
+        and record.tool_name in DOCUMENT_ACQUISITION_TOOLS
+        for record in get_current_evidence_records(agent_key="foreign_language_analyst")
+    ):
+        return ""
+    outcomes, _ = await run_preflight_calls(
+        [
+            (
+                "latest_results_targeted_document",
+                get_official_document,
+                {
+                    "url": source_url,
+                    "keywords": "revenue,net sales,net income,profit",
+                    "ticker": ticker,
+                    "company_name": company_name,
+                },
+            )
+        ],
+        agent_key="foreign_language_analyst",
+        source="preflight",
+        ticker=ticker,
+        failure_event="latest_results_targeted_fetch_failed",
+        logger=logger,
+        budget=budget,
+    )
+    return "\n#### latest_results_targeted_document\n" + outcomes[0].render()
+
+
 async def _preload_management_guidance_evidence(
     ticker: str,
     company_name: str,
@@ -449,6 +524,7 @@ async def _preload_management_guidance_evidence(
         )
         if is_official_document_url(url.rstrip(".,;:!?)]}"))
     ][:2]
+    child_urls: list[str] = []
     if enable_extraction and official_candidate_urls:
         labels = ("latest_results_document", "latest_results_document_backup")
         official_outcomes, official_durations = await run_preflight_calls(
@@ -542,6 +618,42 @@ async def _preload_management_guidance_evidence(
         )
         outcomes.extend(extraction_outcomes)
         call_durations_ms.update(extraction_durations)
+        # An extraction-provider outage must not prevent bounded retrieval of
+        # newly discovered approved issuer documents. Keep the failed outcome,
+        # and use the same inspected tool-execution chain for the fallback.
+        if any(
+            outcome.evidence_status in INCOMPLETE_SEARCH_EVIDENCE_STATUSES
+            for outcome in extraction_outcomes
+        ):
+            already_requested = {*official_candidate_urls, *child_urls}
+            fallback_urls = [
+                url
+                for url in guidance_candidate_urls
+                if url not in already_requested and is_official_document_url(url)
+            ][:2]
+            if fallback_urls:
+                fallback_outcomes, fallback_durations = await run_preflight_calls(
+                    [
+                        (
+                            f"guidance_document_fallback_{index + 1}",
+                            get_official_document,
+                            {
+                                "url": url,
+                                "keywords": ",".join(priority_terms[:12]),
+                                "ticker": ticker,
+                                "company_name": company_name,
+                            },
+                        )
+                        for index, url in enumerate(fallback_urls)
+                    ],
+                    agent_key="foreign_language_analyst",
+                    source="preflight",
+                    ticker=ticker,
+                    failure_event="management_guidance_preflight_call_failed",
+                    logger=logger,
+                )
+                outcomes.extend(fallback_outcomes)
+                call_durations_ms.update(fallback_durations)
     else:
         reason = "QUICK_MODE" if not enable_extraction else "NO_ENTITY_MATCHING_URLS"
         outcomes.append(skipped_preflight_outcome("guidance_extract", reason))
@@ -584,10 +696,39 @@ async def _preload_management_guidance_evidence(
     )
 
 
+def guidance_input_reason(content: str) -> str:
+    """Classify the first model block before conservative normalization hides it."""
+    normalized = normalize_structured_block_boundaries(content) or content
+    block_body = extract_last_fenced_block(normalized, "MANAGEMENT_GUIDANCE")
+    if block_body is None:
+        return "MISSING_BLOCK"
+    coverage = extract_block_text_value(block_body, "COVERAGE_STATUS").strip().upper()
+    return "UNCHANGED" if coverage in GUIDANCE_COVERAGE_STATUSES else "INVALID_COVERAGE"
+
+
+def guidance_coverage_is_canonicalizable(content: str) -> bool:
+    """Identify readable whitespace spelling of an existing coverage status."""
+    block = extract_last_fenced_block(
+        normalize_structured_block_boundaries(content) or content,
+        "MANAGEMENT_GUIDANCE",
+    )
+    if not block:
+        return False
+    raw = extract_block_text_value(block, "COVERAGE_STATUS").strip().upper()
+    return bool(
+        raw
+        and raw not in GUIDANCE_COVERAGE_STATUSES
+        and canonical_guidance_enum("COVERAGE_STATUS", raw)
+        in GUIDANCE_COVERAGE_STATUSES
+    )
+
+
 def normalize_management_guidance_output(
     content: str,
     management_guidance_evidence: str,
     evidence_records: Sequence[Any] = (),
+    *,
+    insert_fallback: bool = True,
 ) -> str:
     """Attach code-owned provenance and enforce conservative bridge semantics."""
     normalized = normalize_structured_block_boundaries(content) or content
@@ -605,7 +746,7 @@ def normalize_management_guidance_output(
         evidence_statuses,
     )
     if not block_with_markers or block_body is None:
-        if not _has_substantive_report_content(normalized) or not execution_statuses:
+        if not insert_fallback or not _has_substantive_report_content(normalized):
             return normalized
         conservative_block = _build_unresolved_guidance_block(
             execution_statuses,
@@ -613,10 +754,12 @@ def normalize_management_guidance_output(
         )
         return normalized.rstrip() + "\n\n" + conservative_block + "\n"
 
-    coverage_status = (
-        extract_block_text_value(block_body, "COVERAGE_STATUS").strip().upper()
+    coverage_status = canonical_guidance_enum(
+        "COVERAGE_STATUS", extract_block_text_value(block_body, "COVERAGE_STATUS")
     )
     if coverage_status not in GUIDANCE_COVERAGE_STATUSES:
+        if not insert_fallback:
+            return normalized
         conservative_block = _build_unresolved_guidance_block(
             execution_statuses,
             searches_completed,
@@ -646,23 +789,29 @@ def normalize_management_guidance_output(
             block_body = replace_or_append_block_line(
                 block_body,
                 field,
-                canonical_guidance_enum(field, value),
+                coverage_status
+                if field == "COVERAGE_STATUS"
+                else canonical_guidance_enum(field, value),
             )
 
-    if execution_statuses:
-        block_body = replace_or_append_block_line(
-            block_body,
-            "SEARCHES_COMPLETED",
-            searches_completed,
-        )
-        block_body = replace_or_append_block_line(
-            block_body,
-            "SEARCH_PROVENANCE",
-            "CODE_OWNED_PREFLIGHT",
-        )
+    required_present = all(
+        label in execution_statuses and label in evidence_statuses
+        for label in REQUIRED_GUIDANCE_SEARCHES
+    )
+    block_body = replace_or_append_block_line(
+        block_body, "SEARCHES_COMPLETED", searches_completed
+    )
+    block_body = replace_or_append_block_line(
+        block_body,
+        "SEARCH_PROVENANCE",
+        "CODE_OWNED_PREFLIGHT" if required_present else "INCOMPLETE_PREFLIGHT",
+    )
 
+    required_evidence = {
+        evidence_statuses.get(label) for label in REQUIRED_GUIDANCE_SEARCHES
+    }
     if coverage_status == "NOT_DISCLOSED_AFTER_TARGETED_SEARCH" and (
-        INCOMPLETE_SEARCH_EVIDENCE_STATUSES & set(evidence_statuses.values())
+        not required_present or INCOMPLETE_SEARCH_EVIDENCE_STATUSES & required_evidence
     ):
         coverage_status = "UNRESOLVED_AFTER_TARGETED_SEARCH"
         block_body = replace_or_append_block_line(
@@ -846,8 +995,7 @@ def _build_unresolved_guidance_block(
     searches_completed: str,
 ) -> str:
     required_search_statuses = {
-        execution_statuses.get("results_package"),
-        execution_statuses.get("earnings_bridge"),
+        execution_statuses.get(label) for label in REQUIRED_GUIDANCE_SEARCHES
     }
     search_executed = "SUCCEEDED" in required_search_statuses
     coverage_status = (
@@ -861,7 +1009,14 @@ def _build_unresolved_guidance_block(
             "SOURCE_DATE: N/A",
             "SOURCE_URL: N/A",
             f"SEARCHES_COMPLETED: {searches_completed}",
-            "SEARCH_PROVENANCE: CODE_OWNED_PREFLIGHT",
+            "SEARCH_PROVENANCE: "
+            + (
+                "CODE_OWNED_PREFLIGHT"
+                if all(
+                    label in execution_statuses for label in REQUIRED_GUIDANCE_SEARCHES
+                )
+                else "INCOMPLETE_PREFLIGHT"
+            ),
             "GUIDANCE_PERIOD: N/A",
             "REVENUE_GUIDANCE: N/A",
             "OPERATING_PROFIT_GUIDANCE: N/A",

@@ -2,33 +2,24 @@
 
 from __future__ import annotations
 
+import math
 import re
-from typing import Any
+from typing import Any, Literal, NamedTuple
 
 import structlog
 
+from src.data.debt_equity import PERCENT_PER_RATIO
 from src.data_block_utils import (
+    effective_m_and_a_status,
+    extract_block_field_from_text,
+    extract_block_field_from_text_raw,
     extract_block_number_from_text,
+    extract_block_text_value,
     extract_last_data_block,
 )
+from src.monetary import MONETARY_AMOUNT_PATTERN, parse_monetary_amount
 
 logger = structlog.get_logger(__name__)
-
-
-def parse_currency_value(sign: str, value_str: str, multiplier: str | None) -> float:
-    """Parse a sign + numeric string + B/M/K multiplier into a float."""
-    value = float(value_str.replace(",", ""))
-    if sign == "-":
-        value = -value
-    if multiplier:
-        normalized = multiplier.upper()
-        if normalized == "B":
-            value *= 1_000_000_000
-        elif normalized == "M":
-            value *= 1_000_000
-        elif normalized == "K":
-            value *= 1_000
-    return value
 
 
 def parse_ratio_or_percent(raw_value: str) -> float | None:
@@ -381,14 +372,12 @@ def extract_metrics(
             metrics[metric_name] = value
 
     ocf_match = re.search(
-        r"OPERATING_CASH_FLOW:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        rf"OPERATING_CASH_FLOW:\s*{MONETARY_AMOUNT_PATTERN}",
         data_block,
         re.IGNORECASE,
     )
     if ocf_match:
-        metrics["ocf"] = parse_currency_value(
-            ocf_match.group(1), ocf_match.group(2), ocf_match.group(3)
-        )
+        metrics["ocf"] = parse_monetary_amount(ocf_match.group(0))
 
     ocf_source_match = re.search(
         r"OPERATING_CASH_FLOW_SOURCE:\s*(JUNIOR|FILING|N/A)",
@@ -520,7 +509,13 @@ def extract_metrics(
         re.IGNORECASE,
     )
     if m_and_a_match:
-        metrics["m_and_a_status"] = m_and_a_match.group(1).upper()
+        effective_status = effective_m_and_a_status(
+            m_and_a_match.group(1).upper(),
+            extract_block_text_value(data_block, "M_AND_A_TENDER_PRICE"),
+            extract_block_text_value(data_block, "M_AND_A_SUBJECT_ROLE"),
+        )
+        if effective_status is not None:
+            metrics["m_and_a_status"] = effective_status
 
     backlog_coverage = read_block_leading_float(data_block, "REVENUE_BACKLOG_COVERAGE")
     if backlog_coverage is not None:
@@ -649,6 +644,15 @@ def extract_metrics(
         metrics["industry"] = industry_match.group(1).strip().lower()
 
     metrics["debt_to_equity"] = extract_debt_to_equity(fundamentals_report)
+    legacy_de = extract_legacy_unitless_debt_to_equity(fundamentals_report)
+    if legacy_de is not None and metrics["debt_to_equity"] is None:
+        # Display/diagnostic only: a unitless figure cannot authorize a gate.
+        metrics["debt_to_equity_legacy_unitless"] = legacy_de
+        logger.info(
+            "debt_equity_legacy_unitless_ignored",
+            ticker=ticker,
+            value=legacy_de,
+        )
     metrics["interest_coverage"] = extract_interest_coverage(fundamentals_report)
     metrics["fcf"] = extract_free_cash_flow(fundamentals_report)
     metrics["net_income"] = extract_net_income(fundamentals_report)
@@ -658,27 +662,108 @@ def extract_metrics(
     return metrics
 
 
-def extract_debt_to_equity(report: str) -> float | None:
-    """Extract D/E ratio, converting a ratio to percentage where needed."""
-    patterns = [
-        r"(?:^|\n)\s*-?\s*D/E:\s*([-+]?\d+(?:\.\d+)?)(%?)",
-        r"(?:^|\n)\s*-?\s*Debt/Equity:\s*([-+]?\d+(?:\.\d+)?)(%?)",
-        r"(?:^|\n)\s*-?\s*Debt-to-Equity:\s*([-+]?\d+(?:\.\d+)?)(%?)",
-        r"D/E:\s*([-+]?\d+(?:\.\d+)?)(%?)",
-        r"Debt/Equity:\s*([-+]?\d+(?:\.\d+)?)(%?)",
-        r"DE_RATIO:\s*([-+]?\d+(?:\.\d+)?)(%?)",
-    ]
+_DE_NUMBER = r"([-+]?\d+(?:\.\d+)?)(%?)"
+# The whole DE_RATIO value, matched in full: a signed plain decimal (negative
+# equity stays signed), an optional (spaced) percent sign, an optional sentence
+# period and at most one parenthetical annotation. Anything else ("0.45 / 9",
+# "0.45 percent", "8.05e-2", "1,234") is invalid rather than a leading fragment.
+_DE_RATIO_VALUE = re.compile(
+    r"([-+]?\d+(?:\.\d+)?)[ \t]*(%)?\.?(?:[ \t]*\([^()\n]*\))?"
+)
+_LEGACY_DE_PATTERNS = (
+    rf"(?:^|\n)\s*-?\s*D/E:\s*{_DE_NUMBER}",
+    rf"(?:^|\n)\s*-?\s*Debt/Equity:\s*{_DE_NUMBER}",
+    rf"(?:^|\n)\s*-?\s*Debt-to-Equity:\s*{_DE_NUMBER}",
+    rf"D/E:\s*{_DE_NUMBER}",
+    rf"Debt/Equity:\s*{_DE_NUMBER}",
+)
+
+
+def _first_de_match(
+    patterns: tuple[str, ...], report: str
+) -> tuple[float, bool] | None:
     for pattern in patterns:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
         if match:
             try:
-                value = float(match.group(1))
+                return float(match.group(1)), bool(match.group(2))
             except ValueError:
                 continue
-            if match.group(2):
-                return value
-            return value if value >= 10 else value * 100
     return None
+
+
+class _DeRatioField(NamedTuple):
+    """The DATA_BLOCK DE_RATIO field: absent, unavailable, invalid or valid."""
+
+    state: Literal["NO_BLOCK", "ABSENT", "UNAVAILABLE", "INVALID", "VALID"]
+    value: float | None = None
+    is_percent: bool = False
+
+
+def _de_ratio_field(report: str) -> _DeRatioField:
+    """Read DE_RATIO from the report's last DATA_BLOCK under its field contract."""
+    block = extract_last_data_block(report)
+    if block is None:
+        return _DeRatioField("NO_BLOCK")
+    raw = extract_block_field_from_text_raw(block, "DE_RATIO")
+    if raw is None:
+        return _DeRatioField("ABSENT")
+    if extract_block_field_from_text(block, "DE_RATIO") is None:
+        return _DeRatioField("UNAVAILABLE")
+    match = _DE_RATIO_VALUE.fullmatch(raw.strip())
+    if match is None:
+        reason = "unsupported_notation"
+    else:
+        value = float(match.group(1))
+        if math.isfinite(value):
+            return _DeRatioField("VALID", value, bool(match.group(2)))
+        reason = "non_finite"
+    logger.info(
+        "debt_equity_report_value_rejected", reason=reason, value_length=len(raw)
+    )
+    return _DeRatioField("INVALID")
+
+
+def _finite_or_none(value: float) -> float | None:
+    return value if math.isfinite(value) else None
+
+
+def extract_debt_to_equity(report: str) -> float | None:
+    """Extract D/E as a percentage under the DATA_BLOCK's DE_RATIO contract.
+
+    ``DE_RATIO: <ratio>`` means 0.45 is 45%, so a value without ``%`` is converted
+    to percent and one with ``%`` is already a percentage. The last DATA_BLOCK is
+    authoritative: when it holds DE_RATIO as unavailable or invalid, or omits it,
+    no prose can stand in for it. Only a legacy report with no DATA_BLOCK falls
+    back to a labelled ``D/E: N%`` line, and then only with an explicit percent; a
+    unitless legacy line has no knowable unit (see
+    ``extract_legacy_unitless_debt_to_equity``, display only).
+    """
+    field = _de_ratio_field(report)
+    if field.state == "VALID" and field.value is not None:
+        return _finite_or_none(
+            field.value if field.is_percent else field.value * PERCENT_PER_RATIO
+        )
+    if field.state != "NO_BLOCK":
+        return None
+    for pattern in _LEGACY_DE_PATTERNS:
+        match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
+        if match and match.group(2):
+            try:
+                return _finite_or_none(float(match.group(1)))
+            except ValueError:
+                continue
+    return None
+
+
+def extract_legacy_unitless_debt_to_equity(report: str) -> float | None:
+    """Return a unitless legacy ``D/E:`` figure as written (unit unknown)."""
+    if _de_ratio_field(report).state in {"VALID", "UNAVAILABLE", "INVALID"}:
+        return None
+    legacy = _first_de_match(_LEGACY_DE_PATTERNS, report)
+    if legacy is None or legacy[1]:
+        return None
+    return legacy[0]
 
 
 def extract_interest_coverage(report: str) -> float | None:
@@ -702,49 +787,44 @@ def extract_free_cash_flow(report: str) -> float | None:
     """Extract free cash flow with support for signs and B/M/K multipliers."""
     patterns = [
         # Canonical DATA_BLOCK field (fundamentals prompt v9.31)
-        r"(?:^|\n)\s*FREE_CASH_FLOW:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"\*\*Free Cash Flow\*\*:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"(?:^|\n)\s*Free Cash Flow:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"(?:^|\n)\s*FCF:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"(?:Free Cash Flow|FCF):\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"Positive FCF:\s*[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        rf"(?:^|\n)\s*FREE_CASH_FLOW:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"\*\*Free Cash Flow\*\*:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"(?:^|\n)\s*Free Cash Flow:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"(?:^|\n)\s*FCF:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"(?:Free Cash Flow|FCF):\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"Positive FCF:\s*{MONETARY_AMOUNT_PATTERN}",
     ]
     for pattern in patterns:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
         if match:
-            groups = match.groups()
-            if len(groups) == 2:
-                return parse_currency_value("", groups[0], groups[1])
-            return parse_currency_value(groups[0], groups[1], groups[2])
+            return parse_monetary_amount(match.group(0))
     return None
 
 
 def extract_net_income(report: str) -> float | None:
     """Extract net income with support for signs and B/M/K multipliers."""
     patterns = [
-        r"\*\*Net Income\*\*:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"(?:^|\n)\s*Net Income:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"Net Income:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        rf"\*\*Net Income\*\*:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"(?:^|\n)\s*Net Income:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"Net Income:\s*{MONETARY_AMOUNT_PATTERN}",
     ]
     for pattern in patterns:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
         if match:
-            groups = match.groups()
-            return parse_currency_value(groups[0], groups[1], groups[2])
+            return parse_monetary_amount(match.group(0))
     return None
 
 
 def extract_operating_cash_flow(report: str) -> float | None:
     """Extract operating cash flow with support for signs and B/M/K multipliers."""
     patterns = [
-        r"\*\*Operating Cash Flow\*\*:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"(?:^|\n)\s*Operating Cash Flow:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"(?:^|\n)\s*OCF:\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
-        r"(?:Operating Cash Flow|OCF):\s*([+-]?)[$¥€£]?\s*(\d[\d,]*(?:\.\d+)?)\s*([BMK])?",
+        rf"\*\*Operating Cash Flow\*\*:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"(?:^|\n)\s*Operating Cash Flow:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"(?:^|\n)\s*OCF:\s*{MONETARY_AMOUNT_PATTERN}",
+        rf"(?:Operating Cash Flow|OCF):\s*{MONETARY_AMOUNT_PATTERN}",
     ]
     for pattern in patterns:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
         if match:
-            groups = match.groups()
-            return parse_currency_value(groups[0], groups[1], groups[2])
+            return parse_monetary_amount(match.group(0))
     return None

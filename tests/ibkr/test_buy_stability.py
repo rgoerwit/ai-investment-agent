@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from src.config import Settings
 from src.ibkr.analysis_index import _build_analysis_record_from_data
 from src.ibkr.buy_stability import (
     BuyStabilityConfig,
@@ -26,7 +28,7 @@ def _pm_block(verdict: str) -> str:
 
 class TestAssessBuyStability:
     def test_disabled_is_inert(self):
-        cfg = BuyStabilityConfig(enabled=False)
+        cfg = BuyStabilityConfig(enabled=False, lookback_days=7, margin_tally=0.5)
         assert assess_buy_stability("BUY", ["HOLD"], cfg=cfg) is None
 
     def test_non_buy_verdict_ignored(self):
@@ -310,3 +312,35 @@ class TestParserCoherenceWithAnalysisIndex:
         )
         assert record is not None
         assert gate_verdicts == [record.verdict]
+
+
+class TestConfigFailsClosed:
+    """The gate is default-ON in Settings; no spelling may quietly turn it off."""
+
+    def test_settings_defaults_enable_the_gate(self):
+        cfg = BuyStabilityConfig.from_config(Settings(_env_file=None))
+        assert cfg.enabled is True
+        assert (
+            cfg.lookback_days
+            == Settings.model_fields["buy_stability_lookback_days"].default
+        )
+        assert (
+            cfg.margin_tally
+            == Settings.model_fields["buy_stability_margin_tally"].default
+        )
+
+    def test_explicit_opt_out_is_honoured(self):
+        cfg = BuyStabilityConfig.from_config(
+            Settings(_env_file=None, buy_stability_enabled=False)
+        )
+        assert cfg.enabled is False
+
+    def test_an_object_without_the_field_raises_instead_of_disabling(self):
+        # The old getattr(config, "buy_stability_enabled", False) turned the gate
+        # off for any config object that lacked the field.
+        with pytest.raises(AttributeError):
+            BuyStabilityConfig.from_config(SimpleNamespace())
+
+    def test_the_dataclass_carries_no_defaults_of_its_own(self):
+        with pytest.raises(TypeError):
+            BuyStabilityConfig()  # type: ignore[call-arg]

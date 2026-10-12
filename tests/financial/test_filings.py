@@ -614,7 +614,7 @@ class TestDdgSearch:
                 time.sleep(1)
                 return []
 
-        with patch("src.tools.shared.DDG_SEARCH_TIMEOUT_SECONDS", 0.01):
+        with patch("src.tools.shared.config.ddg_search_timeout_seconds", 0.01):
             with patch("ddgs.DDGS", SlowDDGS):
                 result = await _ddg_search("test query")
 
@@ -714,7 +714,9 @@ class TestGetOfficialFilingsTool:
         mock_registry = MagicMock()
         mock_registry.fetch = slow_fetch
 
-        with patch("src.tools.research.OFFICIAL_FILINGS_TIMEOUT_SECONDS", 0.01):
+        with patch(
+            "src.tools.research.config.official_filings_lookup_timeout_seconds", 0.01
+        ):
             with patch("src.data.filings.registry", mock_registry):
                 result = await get_official_filings.ainvoke({"ticker": "SNTIA.OL"})
 

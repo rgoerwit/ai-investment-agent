@@ -14,10 +14,12 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 import src.llms as llms_mod
 from src.config import config
+from src.llm_runtime.adapters import transports
 from src.service_tiers import (
     _reset_flex_capability_cache_for_tests,
     _reset_floor_log_cache_for_tests,
     is_flex_unsupported,
+    track_tier_attempt,
 )
 
 
@@ -34,14 +36,14 @@ def _set_cfg(monkeypatch, **attrs):
     """Patch config attributes on every live binding.
 
     Other suites reload ``src.config``/``src.llms``, which can leave
-    ``llms_mod.config`` pointing at a different Settings object than
+    ``llms_mod.resolve_settings()`` pointing at a different Settings object than
     ``src.config.config``. Patch both so these tests are order-independent.
     """
     import src.config as config_module
 
     targets = {
         id(config_module.config): config_module.config,
-        id(llms_mod.config): llms_mod.config,
+        id(llms_mod.resolve_settings()): llms_mod.resolve_settings(),
         id(config): config,
     }
     for target in targets.values():
@@ -125,13 +127,18 @@ class TestGeminiFlexFallback:
                 raise ValueError("503 UNAVAILABLE: no flex capacity")
             return _chat_result()
 
-        with patch.object(ChatGoogleGenerativeAI, "_agenerate", fake_agenerate):
+        with (
+            patch.object(ChatGoogleGenerativeAI, "_agenerate", fake_agenerate),
+            track_tier_attempt("flex") as attempt,
+        ):
             result = await llm._agenerate([HumanMessage(content="hi")])
 
         assert len(calls) == 2
         assert calls[1]["service_tier"] == "standard"
         # Fallback call is priced at standard rates by the tracker
         assert result.llm_output["service_tier"] == "standard"
+        assert attempt.tier == "standard"
+        assert attempt.latency_fallback is False
         # Capacity errors are NOT cached — next call still tries flex
         assert not is_flex_unsupported("gemini-3.5-flash")
 
@@ -200,18 +207,21 @@ class TestGeminiFlexFallback:
 
 
 class TestCreateGeminiModelWiring:
-    def test_flex_config_builds_tiered_instance_with_floored_timeout(self, monkeypatch):
+    def test_flex_config_builds_tiered_instance_without_rewriting_timeout(
+        self, monkeypatch
+    ):
         _set_cfg(monkeypatch, gemini_service_tier="flex")
         _set_cfg(monkeypatch, flex_llm_timeout_seconds=900)
-        llm = llms_mod.create_gemini_model("gemini-3.5-flash", 0.3, 60, 2)
+        llm = llms_mod.create_gemini_model("gemini-3.5-flash", 0.3, 60)
         assert isinstance(llm, llms_mod._TieredChatGoogleGenerativeAI)
         assert llm.service_tier == "flex"
-        # SDK client timeout floored so queued flex calls aren't killed
-        assert llm.timeout >= 900
+        # The constructed timeout is only a standard ceiling: the flex request
+        # timeout is sized per dispatch, so a tier change cannot inherit it.
+        assert llm.timeout == 60
 
     def test_standard_config_leaves_timeout_and_tier_alone(self, monkeypatch):
         _set_cfg(monkeypatch, gemini_service_tier="standard")
-        llm = llms_mod.create_gemini_model("gemini-3.5-flash", 0.3, 60, 2)
+        llm = llms_mod.create_gemini_model("gemini-3.5-flash", 0.3, 60)
         assert llm.service_tier is None
         assert llm.timeout == 60
 
@@ -219,7 +229,7 @@ class TestCreateGeminiModelWiring:
         # The LLM-judge inspector path: must not queue on flex
         _set_cfg(monkeypatch, gemini_service_tier="flex")
         llm = llms_mod.create_gemini_model(
-            "gemini-3.5-flash", 0.0, 60, 2, service_tier="standard"
+            "gemini-3.5-flash", 0.0, 60, service_tier="standard"
         )
         assert llm.service_tier is None
         assert llm.timeout == 60
@@ -233,7 +243,8 @@ class TestOpenAIFlexWiring:
         kwargs = {"model": "gpt-5.4", "timeout": 120}
         llms_mod._apply_openai_service_tier(kwargs, label="test")
         assert kwargs["service_tier"] == "flex"
-        assert kwargs["timeout"] >= 900
+        # No construction-time flex timeout: dispatch sizes each request.
+        assert kwargs["timeout"] == 120
         assert kwargs["flex_fallback_to_standard"] is True
 
     def test_apply_openai_service_tier_noop_when_auto(self, monkeypatch):
@@ -252,14 +263,18 @@ class TestOpenAIFlexWiring:
         llms_mod._apply_openai_service_tier(kwargs, label="test")
         assert "service_tier" not in kwargs
 
-    def test_construct_chat_openai_uses_subclass_only_for_flex(self):
-        flex_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+    def test_construct_chat_openai_is_deadline_aware_with_or_without_flex(self):
+        # No plain-client branch: a standard-tier client must pass the dispatch
+        # check too, or it sends its construction-time timeout in a scope.
+        flex_cls = transports.deadline_aware_openai_cls()
         llm = llms_mod._construct_chat_openai(
             {"model": "gpt-5.4", "api_key": "k", "service_tier": "flex"}
         )
         assert isinstance(llm, flex_cls)
-        plain = llms_mod._construct_chat_openai({"model": "gpt-5.4", "api_key": "k"})
-        assert not isinstance(plain, flex_cls)
+        standard = llms_mod._construct_chat_openai({"model": "gpt-5.4", "api_key": "k"})
+        assert isinstance(standard, flex_cls)
+        assert standard.service_tier is None
+        assert standard.dispatch_provider == "openai"
 
     def test_consultant_llm_gets_flex_tier(self, monkeypatch):
         _set_cfg(monkeypatch, openai_service_tier="flex")
@@ -267,18 +282,19 @@ class TestOpenAIFlexWiring:
         monkeypatch.setattr(type(config), "get_openai_api_key", lambda self: "test-key")
         llm = llms_mod.create_consultant_llm(model="gpt-5.4")
         assert llm.service_tier == "flex"
-        flex_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        flex_cls = transports.deadline_aware_openai_cls()
         assert isinstance(llm, flex_cls)
 
     @pytest.mark.asyncio
     async def test_openai_capacity_fallback_retries_on_auto(self):
         from langchain_openai import ChatOpenAI
 
-        flex_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        flex_cls = transports.deadline_aware_openai_cls()
         llm = flex_cls(
             model="gpt-5.4",
             api_key="test-key",
             service_tier="flex",
+            dispatch_provider="openai",
             flex_fallback_to_standard=True,
         )
         calls: list[dict] = []
@@ -299,11 +315,12 @@ class TestOpenAIFlexWiring:
     async def test_openai_capability_error_caches_downgrade(self):
         from langchain_openai import ChatOpenAI
 
-        flex_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        flex_cls = transports.deadline_aware_openai_cls()
         llm = flex_cls(
             model="gpt-4o-mini-retired",
             api_key="test-key",
             service_tier="flex",
+            dispatch_provider="openai",
         )
         calls: list[dict] = []
 
@@ -444,6 +461,7 @@ class TestGeminiFlexLatencyFallback:
 
         with (
             patch.object(ChatGoogleGenerativeAI, "_agenerate", fake_agenerate),
+            track_tier_attempt("flex") as attempt,
             pytest.raises(TimeoutError),
         ):
             await llm._agenerate([HumanMessage(content="hi")])
@@ -451,6 +469,8 @@ class TestGeminiFlexLatencyFallback:
         # Exactly two SDK calls: the flex attempt + one standard re-issue.
         assert len(calls) == 2
         assert calls[1]["service_tier"] == "standard"
+        assert attempt.tier == "standard"
+        assert attempt.latency_fallback is True
 
     def test_flex_retry_tier_none_for_standard_attempt(self):
         llm = _tiered_llm()
@@ -466,11 +486,12 @@ class TestOpenAIFlexLatencyFallback:
     async def test_latency_timeout_falls_back_to_auto(self):
         from langchain_openai import ChatOpenAI
 
-        flex_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        flex_cls = transports.deadline_aware_openai_cls()
         llm = flex_cls(
             model="gpt-5.4",
             api_key="test-key",
             service_tier="flex",
+            dispatch_provider="openai",
             flex_fallback_to_standard=True,
         )
         calls: list[dict] = []
@@ -481,22 +502,28 @@ class TestOpenAIFlexLatencyFallback:
                 raise TimeoutError("flex attempt exceeded client timeout")
             return _chat_result()
 
-        with patch.object(ChatOpenAI, "_agenerate", fake_agenerate):
+        with (
+            patch.object(ChatOpenAI, "_agenerate", fake_agenerate),
+            track_tier_attempt("flex") as attempt,
+        ):
             await llm._agenerate([HumanMessage(content="hi")])
 
         assert len(calls) == 2
         assert calls[1]["service_tier"] == "auto"
+        assert attempt.tier == "auto"
+        assert attempt.latency_fallback is True
         assert not is_flex_unsupported("gpt-5.4")
 
     @pytest.mark.asyncio
     async def test_latency_timeout_propagates_when_fallback_disabled(self):
         from langchain_openai import ChatOpenAI
 
-        flex_cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        flex_cls = transports.deadline_aware_openai_cls()
         llm = flex_cls(
             model="gpt-5.4",
             api_key="test-key",
             service_tier="flex",
+            dispatch_provider="openai",
             flex_fallback_to_standard=False,
         )
 
@@ -540,12 +567,17 @@ class TestFlexHealthGatesTheTransports:
 
         self._degrade("google")
 
-        assert model._effective_tier({}) is None
+        assert model._effective_tier({}) == "standard"
         assert model._flex_ineligible() is True
 
     def test_openai_falls_back_to_auto_once_degraded(self):
-        cls = llms_mod._get_flex_fallback_chat_openai_cls()
-        model = cls(model="gpt-5.4", api_key="k", service_tier="flex")
+        cls = transports.deadline_aware_openai_cls()
+        model = cls(
+            model="gpt-5.4",
+            api_key="k",
+            service_tier="flex",
+            dispatch_provider="openai",
+        )
         assert model._effective_tier({}) == "flex"
 
         self._degrade("openai")
@@ -558,12 +590,17 @@ class TestFlexHealthGatesTheTransports:
         gemini = llms_mod._TieredChatGoogleGenerativeAI(
             model="gemini-3.6-flash", google_api_key="k", service_tier="flex"
         )
-        openai_cls = llms_mod._get_flex_fallback_chat_openai_cls()
-        openai = openai_cls(model="gpt-5.4", api_key="k", service_tier="flex")
+        openai_cls = transports.deadline_aware_openai_cls()
+        openai = openai_cls(
+            model="gpt-5.4",
+            api_key="k",
+            service_tier="flex",
+            dispatch_provider="openai",
+        )
 
         self._degrade("google")
 
-        assert gemini._effective_tier({}) is None
+        assert gemini._effective_tier({}) == "standard"
         assert openai._effective_tier({}) == "flex"
 
     def test_capability_downgrade_still_wins_and_stays_permanent(self):
@@ -577,7 +614,7 @@ class TestFlexHealthGatesTheTransports:
 
         assert model._flex_ineligible() is True
         # No cool-off can restore a model the vendor rejects.
-        assert model._effective_tier({}) is None
+        assert model._effective_tier({}) == "standard"
 
     def test_latency_fallback_records_the_failure(self):
         from src.service_tiers import flex_degradation_snapshot
@@ -608,7 +645,7 @@ class TestFlexHealthGatesTheTransports:
         )
         self._degrade("google")
 
-        assert model._effective_tier({}) is None
+        assert model._effective_tier({}) == "standard"
 
 
 def test_per_call_tier_resolvers_consult_both_caches():
@@ -659,3 +696,19 @@ def test_per_call_tier_resolvers_consult_both_caches():
         f"construction-time site -- add it to _CONSTRUCTION_TIME_SITES with the "
         f"reason."
     )
+
+
+@pytest.mark.parametrize("async_call", [False, True])
+@pytest.mark.asyncio
+async def test_unset_google_transport_reports_standard_without_request_injection(
+    async_call,
+):
+    llm = _tiered_llm(service_tier=None)
+    request = llm._prepare_request([HumanMessage(content="hi")])
+    assert request["config"].service_tier is None
+    method = "_agenerate" if async_call else "_generate"
+    with patch.object(ChatGoogleGenerativeAI, method, return_value=_chat_result()):
+        with track_tier_attempt(None) as attempt:
+            result = await llm._agenerate([]) if async_call else llm._generate([])
+    assert attempt.tier == "standard"
+    assert result.generations[0].message.response_metadata["service_tier"] == "standard"

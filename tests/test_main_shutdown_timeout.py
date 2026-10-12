@@ -21,6 +21,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("offline_main_flow")
+
 
 async def _async_none():
     return None

@@ -268,7 +268,7 @@ def classify_aggregate_source_failure(source_outcomes: dict[str, str]) -> str:
 async def fetch_all_sources_parallel(
     fetcher: Any,
     symbol: str,
-    per_source_timeout: int,
+    per_source_timeout: float,
     *,
     logger_obj: Any = logger,
     asyncio_module: Any = asyncio,
@@ -299,21 +299,32 @@ async def fetch_all_sources_parallel(
     # identity probe resolves VERIFIED with at least one usable field.
     from src.config import config as _runtime_config
 
-    if getattr(_runtime_config, "ibkr_data_source_enabled", False):
+    if _runtime_config.ibkr_data_source_enabled:
         builders["ibkr"] = lambda: fetcher._fetch_ibkr_fallback(symbol)
 
     async def _run_one(name: str) -> tuple[str, dict | None, str]:
+        # Imported here, not above, so the to_thread allowlist line numbers in
+        # tests/test_to_thread_timeout_consistency.py stay put.
+        from src.llm_runtime.timeouts import clamp_to_operational_deadline
+
+        # Read per source, so time spent before a source starts counts against
+        # a caller's enclosing deadline rather than extending it.
+        timeout = clamp_to_operational_deadline(per_source_timeout)
         try:
+            if timeout <= 0:
+                # The caller's allowance is spent: record a timeout without
+                # building (and so never starting) the source coroutine.
+                raise asyncio_module.TimeoutError("enclosing deadline already passed")
             result = await run_with_hard_timeout(
                 builders[name](),
-                timeout=per_source_timeout,
+                timeout=timeout,
                 label=f"data_source:{name}:{symbol}",
             )
         except asyncio_module.TimeoutError:
             logger_obj.warning(
                 f"{name}_timeout",
                 symbol=symbol,
-                timeout_seconds=per_source_timeout,
+                timeout_seconds=max(timeout, 0.0),
             )
             return name, None, "timeout"
         except Exception as exc:

@@ -40,6 +40,7 @@ from src.data_block_utils import (
     extract_last_data_block,
     extract_last_fenced_block,
     fenced_block_pattern,
+    replace_last_fenced_block,
     replace_or_append_block_line,
 )
 from src.pm_decision_parser import canonicalize_pm_verdict
@@ -79,7 +80,7 @@ _NONASSERTIVE_MARKERS = (
 )
 
 
-def _active_gate_ids(red_flags: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+def active_decision_gate_ids(red_flags: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     return tuple(
         dict.fromkeys(
             str(flag.get("type") or "UNKNOWN")
@@ -91,7 +92,7 @@ def _active_gate_ids(red_flags: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     )
 
 
-def _eligible_claims(
+def eligible_decision_claims(
     snapshot: Mapping[str, Any] | None,
 ) -> dict[str, Mapping[str, Any]]:
     if not snapshot or snapshot.get("contract_status") != "VALID":
@@ -109,6 +110,15 @@ def _parse_trace_ids(value: str | None) -> list[str]:
     if not value or value.strip().upper() == "NONE":
         return []
     return [token.strip() for token in value.split(",") if token.strip()]
+
+
+def trace_has_citations(pm_output: str) -> bool:
+    """Whether either trace field cites a fact or gate, independent of authority."""
+    block = extract_last_fenced_block(pm_output, "PM_BLOCK")
+    return any(
+        _parse_trace_ids(extract_block_field_from_text_raw(block, field))
+        for field in _TRACE_FIELDS
+    )
 
 
 def _untraced_source_families(
@@ -144,7 +154,7 @@ def render_decision_trace_instruction(
     red_flags: Sequence[Mapping[str, Any]],
 ) -> str:
     """Render the only claim and gate identifiers the PM may cite."""
-    claims = _eligible_claims(snapshot)
+    claims = eligible_decision_claims(snapshot)
     claim_lines = [
         (
             f"- {claim_id} | role={claim.get('decision_role')} | "
@@ -152,7 +162,7 @@ def render_decision_trace_instruction(
         )
         for claim_id, claim in claims.items()
     ]
-    gates = _active_gate_ids(red_flags)
+    gates = active_decision_gate_ids(red_flags)
     return "\n".join(
         [
             "=== DECISION TRACE CONTRACT ===",
@@ -190,14 +200,14 @@ def validate_decision_trace(
         return DecisionTrace(
             status="INVALID",
             verdict=verdict,
-            missing_gates=tuple(_active_gate_ids(red_flags)),
+            missing_gates=tuple(active_decision_gate_ids(red_flags)),
             reason="PM_BLOCK_MISSING",
         ).to_dict()
 
     facts = _parse_trace_ids(extract_block_field_from_text_raw(block, "DECISION_FACTS"))
     gates = _parse_trace_ids(extract_block_field_from_text_raw(block, "DECISION_GATES"))
-    eligible = _eligible_claims(snapshot)
-    active_gate_ids = _active_gate_ids(red_flags)
+    eligible = eligible_decision_claims(snapshot)
+    active_gate_ids = active_decision_gate_ids(red_flags)
     active_gate_set = set(active_gate_ids)
     invalid_facts = [claim_id for claim_id in facts if claim_id not in eligible]
     invalid_gates = [gate for gate in gates if gate not in active_gate_set]
@@ -237,7 +247,7 @@ def validate_decision_trace(
         or invalid_facts
         or invalid_gates
         or missing_gates
-        or not (facts or gates)
+        or not trace_has_citations(pm_output)
         or verdict == "UNPARSEABLE"
         or (verdict == "BUY" and not thesis_support_facts)
     )
@@ -257,17 +267,21 @@ def validate_decision_trace(
     ).to_dict()
 
 
-def reconcile_final_decision_trace(
+def normalize_decision_trace_citations(
     pm_output: str,
     snapshot: Mapping[str, Any] | None,
     red_flags: Sequence[Mapping[str, Any]],
-) -> tuple[str, dict[str, Any]]:
-    """Align trace fields with the final post-policy verdict and active gates."""
+) -> str:
+    """Remove unknown facts and align gates without changing substantive output.
+
+    Missing fields remain contract failures. This cleanup cannot create thesis
+    support, change scores or verdicts, or qualify unsupported prose for audits.
+    """
     block = extract_last_fenced_block(pm_output, "PM_BLOCK")
     if not block:
-        return pm_output, validate_decision_trace(pm_output, snapshot, red_flags)
+        return pm_output
 
-    eligible = _eligible_claims(snapshot)
+    eligible = eligible_decision_claims(snapshot)
     facts = [
         claim_id
         for claim_id in _parse_trace_ids(
@@ -275,17 +289,28 @@ def reconcile_final_decision_trace(
         )
         if claim_id in eligible
     ]
-    gates = list(_active_gate_ids(red_flags))
-    updated = replace_or_append_block_line(
-        block,
-        "DECISION_FACTS",
-        ", ".join(facts) if facts else "NONE",
-    )
-    updated = replace_or_append_block_line(
-        updated,
-        "DECISION_GATES",
-        ", ".join(gates) if gates else "NONE",
-    )
+    gates = list(active_decision_gate_ids(red_flags))
+    updated = block
+    for field, ids in (("DECISION_FACTS", facts), ("DECISION_GATES", gates)):
+        if extract_block_field_from_text_raw(block, field) is not None:
+            updated = replace_or_append_block_line(
+                updated, field, ", ".join(ids) if ids else "NONE"
+            )
+    replacement = build_fenced_block("PM_BLOCK", updated.strip())
+    return replace_last_fenced_block(pm_output, "PM_BLOCK", replacement)
+
+
+def reconcile_final_decision_trace(
+    pm_output: str,
+    snapshot: Mapping[str, Any] | None,
+    red_flags: Sequence[Mapping[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """Align trace fields and scores with the final post-policy verdict."""
+    pm_output = normalize_decision_trace_citations(pm_output, snapshot, red_flags)
+    block = extract_last_fenced_block(pm_output, "PM_BLOCK")
+    if not block:
+        return pm_output, validate_decision_trace(pm_output, snapshot, red_flags)
+    updated = block
     scorecards = snapshot.get("scorecards", {}) if snapshot else {}
     for kind, field in (
         ("HEALTH", "HEALTH_ADJ"),

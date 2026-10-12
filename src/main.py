@@ -42,6 +42,9 @@ from src.eval import (
     reset_active_capture_manager,
     set_active_capture_manager,
 )
+from src.llm_runtime.rate_limits import configured_google_rpm, google_rpm_field
+from src.llm_runtime.run_deadline import log_deadline_ladder, run_deadline
+from src.llm_runtime.timeouts import enclosing_deadline_at, require_allowance
 from src.runtime_config import (
     bind_runtime_config,
     build_runtime_config,
@@ -378,9 +381,14 @@ async def _fetch_market_context(ticker: str, trade_date: str) -> str:
 
         suffix = get_ticker_suffix(ticker)
         benchmark = EXCHANGE_BENCHMARK.get(suffix, FALLBACK_BENCHMARK)
+        # Resolved before the thread is created; a spent caller deadline takes
+        # the empty-note fallback below without starting the fetch.
+        fetch_timeout = require_allowance(
+            config.market_context_fetch_timeout_seconds, label="market_context"
+        )
         hist = await run_with_hard_timeout(
             asyncio.to_thread(lambda: yf.Ticker(benchmark).history(period="2d")),
-            timeout=10,
+            timeout=fetch_timeout,
             label=f"market_context:{benchmark}",
         )
         if len(hist) >= 2:
@@ -421,11 +429,14 @@ async def _fetch_price_snapshot(ticker: str) -> dict[str, float] | None:
         # auto_adjust=False: the trigger must share the DATA_BLOCK's basis
         # (vendor fiftyTwoWeekHigh is unadjusted; adjusted highs sit lower and
         # silently under-trigger — 6831.HK 2026-07-02: 8.73 adjusted vs 9.81).
+        fetch_timeout = require_allowance(
+            config.price_snapshot_fetch_timeout_seconds, label="price_snapshot"
+        )
         hist = await run_with_hard_timeout(
             asyncio.to_thread(
                 lambda: yf.Ticker(ticker).history(period="1y", auto_adjust=False)
             ),
-            timeout=10,
+            timeout=fetch_timeout,
             label=f"price_snapshot:{ticker}",
         )
         closes = hist["Close"].dropna()
@@ -1064,6 +1075,19 @@ def _setup_runtime(
     return provider_preflight, runtime_services
 
 
+async def _prepare_memory_embeddings() -> None:
+    """Probe the embeddings client off the event loop before any memory is built.
+
+    The memory constructors are synchronous and would otherwise run the
+    startup probe on the loop, blocking it for up to the probe bound.
+    """
+    if not get_runtime_config(config).enable_memory:
+        return
+    from src.memory import FinancialSituationMemory
+
+    await FinancialSituationMemory.prepare_shared_embeddings()
+
+
 async def _run_retrospective_only(args: argparse.Namespace) -> int:
     """Run retrospective-only mode and return the process exit code."""
     if getattr(args, "no_memory", False):
@@ -1076,6 +1100,7 @@ async def _run_retrospective_only(args: argparse.Namespace) -> int:
         if not getattr(args, "quiet", False) and not getattr(args, "brief", False):
             console.print("[yellow]Retrospective batch skipped (--no-memory).[/yellow]")
         return 0
+    await _prepare_memory_embeddings()
     try:
         from src.observability import flush_traces, get_observability_runtime
         from src.retrospective import SnapshotLoadProgress, run_retrospective
@@ -1551,22 +1576,11 @@ def _warn_quick_timeout_config_drift(args: argparse.Namespace) -> None:
     drift: dict[str, float | int] = {}
     if config.quick_llm_api_timeout_seconds > 120:
         drift["QUICK_LLM_API_TIMEOUT_SECONDS"] = config.quick_llm_api_timeout_seconds
-    if config.llm_call_hard_timeout_seconds > 120:
-        drift["LLM_CALL_HARD_TIMEOUT_SECONDS"] = config.llm_call_hard_timeout_seconds
     if config.api_retry_attempts > 2:
         drift["API_RETRY_ATTEMPTS"] = config.api_retry_attempts
-    configured_google_rpm = (
-        config.google_rpm_limit
-        if config.llm_base_provider is not None
-        else config.gemini_rpm_limit
-    )
-    if configured_google_rpm > 360:
-        key = (
-            "GOOGLE_RPM_LIMIT"
-            if config.llm_base_provider is not None
-            else "GEMINI_RPM_LIMIT"
-        )
-        drift[key] = configured_google_rpm
+    google_rpm = configured_google_rpm(config)
+    if google_rpm > 360:
+        drift[google_rpm_field(config).upper()] = google_rpm
 
     if not drift:
         return
@@ -1578,7 +1592,6 @@ def _warn_quick_timeout_config_drift(args: argparse.Namespace) -> None:
         config=drift,
         suggested_defaults={
             "QUICK_LLM_API_TIMEOUT_SECONDS": 120,
-            "LLM_CALL_HARD_TIMEOUT_SECONDS": 120,
             "API_RETRY_ATTEMPTS": 2,
             "GOOGLE_RPM_LIMIT": "15-360",
         },
@@ -1669,7 +1682,12 @@ async def run_with_args(
             images_dir=output_targets.image_dir
         )
         _restore_runtime_config = bind_runtime_config(runtime_config)
+        # The pipeline watchdog's ceiling, converted once to a monotonic analysis
+        # deadline (less the publication reserve). Bound around the analysis
+        # below, never around final publication, which runs on the reserve.
+        analysis_deadline = run_deadline()
         provider_preflight, runtime_services = _setup_runtime(args, output_targets)
+        log_deadline_ladder(analysis_deadline)
         _warn_quick_timeout_config_drift(args)
         baseline_capture = _create_baseline_capture_manager(args)
 
@@ -1706,7 +1724,11 @@ async def run_with_args(
             with use_runtime_services(runtime_services):
                 return await _run_retrospective_only(args)
 
-        with use_runtime_services(runtime_services):
+        with (
+            use_runtime_services(runtime_services),
+            enclosing_deadline_at(analysis_deadline),
+        ):
+            await _prepare_memory_embeddings()
             await _maybe_run_ticker_retrospective(args)
         welcome_banner = output._emit_start_banner(
             args,
@@ -1740,25 +1762,29 @@ async def run_with_args(
 
         try:
             with use_runtime_services(runtime_services):
-                if baseline_capture is None:
-                    result = await _execute_analysis(
-                        args,
-                        output_targets,
-                        runtime_services=runtime_services,
-                        session_id=session_id,
-                        tracing_callbacks=trace_context.callbacks,
-                        tracing_metadata=trace_context.graph_metadata,
-                    )
-                else:
-                    result = await _execute_analysis(
-                        args,
-                        output_targets,
-                        baseline_capture=baseline_capture,
-                        runtime_services=runtime_services,
-                        session_id=session_id,
-                        tracing_callbacks=trace_context.callbacks,
-                        tracing_metadata=trace_context.graph_metadata,
-                    )
+                # Every LLM admission and operational clamp inside the graph run
+                # is capped by the run deadline; the scope closes before
+                # publication, so rendering and persistence keep the reserve.
+                with enclosing_deadline_at(analysis_deadline):
+                    if baseline_capture is None:
+                        result = await _execute_analysis(
+                            args,
+                            output_targets,
+                            runtime_services=runtime_services,
+                            session_id=session_id,
+                            tracing_callbacks=trace_context.callbacks,
+                            tracing_metadata=trace_context.graph_metadata,
+                        )
+                    else:
+                        result = await _execute_analysis(
+                            args,
+                            output_targets,
+                            baseline_capture=baseline_capture,
+                            runtime_services=runtime_services,
+                            session_id=session_id,
+                            tracing_callbacks=trace_context.callbacks,
+                            tracing_metadata=trace_context.graph_metadata,
+                        )
 
                 if not result:
                     if baseline_capture:
@@ -1877,7 +1903,7 @@ async def run_with_args(
     finally:
         from src.cleanup import cleanup_async_resources
 
-        shutdown_timeout = float(getattr(config, "shutdown_hard_timeout_seconds", 15.0))
+        shutdown_timeout = float(config.shutdown_hard_timeout_seconds)
         forced_exit_code: int | None = None
         try:
             await run_with_hard_timeout(

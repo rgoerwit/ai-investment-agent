@@ -8,6 +8,7 @@ Tests cover:
 - Editorial loop with mock LLMs
 """
 
+import asyncio
 import json
 import warnings
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -335,7 +336,7 @@ class TestArticleRevision:
         mock_llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = "# Revised Article\n\nFixed content here."
-        mock_llm.invoke = MagicMock(return_value=mock_response)
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         mock_create.return_value = mock_llm
 
         writer = ArticleWriter()
@@ -349,16 +350,18 @@ class TestArticleRevision:
             "style_issues": ["Avoid 'might' in intro"],
         }
 
-        result = writer.revise(
-            original_draft="# Original\n\nSome content.",
-            editor_feedback=feedback,
-            ticker="TEST",
-            company_name="Test Corp",
+        result = asyncio.run(
+            writer.revise(
+                original_draft="# Original\n\nSome content.",
+                editor_feedback=feedback,
+                ticker="TEST",
+                company_name="Test Corp",
+            )
         )
 
         assert result == "# Revised Article\n\nFixed content here."
         # Verify LLM was called
-        assert mock_llm.invoke.called
+        assert mock_llm.ainvoke.called
 
 
 # =============================================================================
@@ -518,7 +521,7 @@ class TestCreateEditorLLM:
         from src.llms import create_editor_llm
 
         # Mock config to have no API key
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = True
             mock_config.get_openai_api_key.return_value = ""
 
@@ -529,7 +532,7 @@ class TestCreateEditorLLM:
         """create_editor_llm should return None if consultant disabled."""
         from src.llms import create_editor_llm
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = False
 
             result = create_editor_llm()
@@ -539,9 +542,11 @@ class TestCreateEditorLLM:
         """Editor should use the OpenAI Responses API via ChatOpenAI."""
         from src.llms import create_editor_llm
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.get_openai_api_key.return_value = "test-key"
                 mock_config.editor_model = "gpt-4o"
@@ -560,10 +565,12 @@ class TestCreateEditorLLM:
         """Non-pro GPT-5 editor models should opt into medium reasoning effort."""
         from src.llms import create_editor_llm
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             llm = MagicMock()
             mock_chatgpt.return_value = llm
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.get_openai_api_key.return_value = "test-key"
                 mock_config.editor_model = "gpt-5"
@@ -692,7 +699,7 @@ class TestEditorialLoopIntegration:
         editor.llm = MagicMock()
 
         # Mock writer revise
-        writer.revise = MagicMock(return_value="# Revised Article\n\nFixed.")
+        writer.revise = AsyncMock(return_value="# Revised Article\n\nFixed.")
 
         draft = "# Original\n\nWith errors."
         result, feedback = await editor.edit(
@@ -741,7 +748,7 @@ class TestEditorialLoopIntegration:
         editor.review = mock_review
         editor.llm = MagicMock()
 
-        writer.revise = MagicMock(
+        writer.revise = AsyncMock(
             side_effect=RuntimeError(
                 "Writer LLM hit the output token limit before finishing"
             )
@@ -786,7 +793,7 @@ class TestEditorialLoopIntegration:
         editor.review = mock_review_always_revise
         editor.llm = MagicMock()
 
-        writer.revise = MagicMock(return_value="# Still has issues")
+        writer.revise = AsyncMock(return_value="# Still has issues")
 
         draft = "# Problematic Article"
         result, feedback = await editor.edit(
@@ -810,6 +817,7 @@ class TestEditorialLoopIntegration:
         )
 
         writer = MagicMock()
+        writer.revise = AsyncMock()
         writer.revise.return_value = "# Revised\n\nLeverage `(NET_DEBT_EBITDA: 1.95)`."
         data_block = (
             "### --- START DATA_BLOCK ---\n"
@@ -845,6 +853,7 @@ class TestEditorialLoopIntegration:
         )
 
         writer = MagicMock()
+        writer.revise = AsyncMock()
         writer.revise.return_value = (
             "# Still Wrong\n\nLeverage `(NET_DEBT_EBITDA: -0.01)`."
         )
@@ -925,6 +934,7 @@ class TestMainPyIntegration:
 
         # Mock the writer and editor
         mock_writer_instance = MagicMock()
+        mock_writer_instance.write = AsyncMock()
         mock_writer_instance.write.return_value = "# Draft Article\n\nContent here."
 
         mock_editor_instance = MagicMock()
@@ -1003,6 +1013,7 @@ class TestMainPyIntegration:
         args.brief = True
 
         mock_writer_instance = MagicMock()
+        mock_writer_instance.write = AsyncMock()
         mock_writer_instance.write.return_value = "# Draft Article"
 
         mock_editor_instance = MagicMock()
@@ -1064,6 +1075,7 @@ class TestMainPyIntegration:
         args.brief = False
 
         mock_writer_instance = MagicMock()
+        mock_writer_instance.write = AsyncMock()
         mock_writer_instance.write.return_value = (
             "# Original Draft\n\nThis is the draft."
         )
@@ -1121,6 +1133,7 @@ class TestMainPyIntegration:
         args.brief = False
 
         mock_writer_instance = MagicMock()
+        mock_writer_instance.write = AsyncMock()
         mock_writer_instance.write.return_value = "# Draft"
         mock_writer_instance.current_model_name = "gemini-3.5-flash"
         mock_writer_instance.writer_fell_back = True
@@ -1177,6 +1190,7 @@ class TestMainPyIntegration:
         args.brief = False
 
         mock_writer_instance = MagicMock()
+        mock_writer_instance.write = AsyncMock()
         mock_writer_instance.write.return_value = "# Draft"
         mock_writer_instance.current_model_name = "gemini-3.5-flash"
         mock_writer_instance.writer_fell_back = True
@@ -1235,6 +1249,7 @@ class TestMainPyIntegration:
         args.brief = False
 
         mock_writer_instance = MagicMock()
+        mock_writer_instance.write = AsyncMock()
         mock_writer_instance.write.return_value = "# Draft"
         mock_writer_instance.current_model_name = "claude-opus-4-8"
         mock_writer_instance.writer_fell_back = False
@@ -1550,7 +1565,8 @@ class TestInvokeWriter:
         from src.article_writer import ArticleWriter
 
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
+        mock_llm.ainvoke = AsyncMock()
+        mock_llm.ainvoke.return_value = MagicMock(
             content="I cannot provide financial advice about specific stocks."
         )
         mock_create.return_value = mock_llm
@@ -1558,7 +1574,7 @@ class TestInvokeWriter:
         writer = ArticleWriter()
 
         with pytest.raises(RuntimeError, match="refused"):
-            writer._invoke_writer([])
+            asyncio.run(writer._invoke_writer([]))
 
     @patch("src.article_writer.create_writer_llm")
     def test_passes_clean_article(self, mock_create):
@@ -1566,13 +1582,14 @@ class TestInvokeWriter:
         from src.article_writer import ArticleWriter
 
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
+        mock_llm.ainvoke = AsyncMock()
+        mock_llm.ainvoke.return_value = MagicMock(
             content="# Toyota: Value in Motion\n\nContent here."
         )
         mock_create.return_value = mock_llm
 
         writer = ArticleWriter()
-        result = writer._invoke_writer([])
+        result = asyncio.run(writer._invoke_writer([]))
         assert result.startswith("# Toyota")
 
     @patch("src.article_writer.create_writer_llm")
@@ -1581,13 +1598,14 @@ class TestInvokeWriter:
         from src.article_writer import ArticleWriter
 
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
+        mock_llm.ainvoke = AsyncMock()
+        mock_llm.ainvoke.return_value = MagicMock(
             content="Certainly! Here is the article:\n\n# The Real Title\n\nContent."
         )
         mock_create.return_value = mock_llm
 
         writer = ArticleWriter()
-        result = writer._invoke_writer([])
+        result = asyncio.run(writer._invoke_writer([]))
         assert result.startswith("# The Real Title")
 
     @patch("src.article_writer.create_writer_llm")
@@ -1601,11 +1619,11 @@ class TestInvokeWriter:
             {"type": "thinking", "thinking": "Planning the article structure..."},
             {"type": "text", "text": "# Great Article\n\nSolid content."},
         ]
-        mock_llm.invoke.return_value = mock_response
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         mock_create.return_value = mock_llm
 
         writer = ArticleWriter()
-        result = writer._invoke_writer([])
+        result = asyncio.run(writer._invoke_writer([]))
         assert result == "# Great Article\n\nSolid content."
 
 
@@ -1629,7 +1647,7 @@ class TestCreateWriterLLM:
 
         mock_llm = MagicMock()
         with (
-            patch("src.llms.config") as mock_config,
+            patch("src.config.config") as mock_config,
             # Prevent ChatGoogleGenerativeAI from probing network/proxy at construction time
             patch("src.llms.ChatGoogleGenerativeAI", return_value=mock_llm),
         ):
@@ -1655,7 +1673,7 @@ class TestCreateWriterLLM:
         """
         from src.llms import create_writer_llm
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.get_claude_api_key.return_value = "fake-key"
             mock_config.writer_model = "claude-opus-4-6"
             mock_config.api_timeout = 300
@@ -1684,7 +1702,7 @@ class TestCreateWriterLLM:
     def test_opus_4_6_plus_uses_adaptive_thinking(self, model_name):
         from src.llms import create_writer_llm
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.get_claude_api_key.return_value = "fake-key"
             mock_config.writer_model = model_name
             mock_config.api_timeout = 300
@@ -1699,7 +1717,7 @@ class TestCreateWriterLLM:
     def test_opus_4_5_keeps_manual_thinking(self):
         from src.llms import create_writer_llm
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.get_claude_api_key.return_value = "fake-key"
             mock_config.writer_model = "claude-opus-4-5"
             mock_config.api_timeout = 300
@@ -1723,7 +1741,7 @@ class TestCreateWriterLLM:
 
         from src.llms import create_writer_llm
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.get_claude_api_key.return_value = "fake-key"
             mock_config.writer_model = "claude-opus-4-6"
             mock_config.api_timeout = 300
@@ -1772,7 +1790,7 @@ class TestCreateWriterLLM:
             "claude-sonnet-4-5-20250929",
             "claude-haiku-4-5-20251001",
         ]:
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.get_claude_api_key.return_value = "fake-key"
                 mock_config.writer_model = model_name
                 mock_config.api_timeout = 300
@@ -2154,11 +2172,14 @@ class TestEditorToolCalling:
 
     @pytest.mark.asyncio
     async def test_execute_tool_calls_handles_tool_exception(self):
-        """_execute_tool_calls should catch exceptions from tool execution."""
+        """_execute_tool_calls catches a tool failure and tells the model its
+        typed code, never the exception prose (which can carry a URL or key)."""
         editor = _create_article_editor()
 
         mock_tool = AsyncMock()
-        mock_tool.ainvoke = AsyncMock(side_effect=RuntimeError("Connection reset"))
+        mock_tool.ainvoke = AsyncMock(
+            side_effect=RuntimeError("Connection reset https://x?token=1")
+        )
         mock_tool.name = "fetch_reference_content"
 
         editor._tools_by_name = {"fetch_reference_content": mock_tool}
@@ -2174,8 +2195,8 @@ class TestEditorToolCalling:
         )
 
         assert len(results) == 1
-        assert "TOOL_ERROR" in results[0].content
-        assert "Connection reset" in results[0].content
+        assert results[0].content == "TOOL_ERROR: TOOL_EXECUTION_FAILED"
+        assert editor._failed_urls == {"https://example.com"}
 
     @pytest.mark.asyncio
     async def test_execute_tool_calls_routes_through_tool_service(self):
@@ -2211,6 +2232,36 @@ class TestEditorToolCalling:
         mock_tool.ainvoke.assert_not_called()
         assert len(results) == 1
         assert results[0].content == "hooked-result"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("blocked", [True, False])
+    async def test_a_blocked_reference_fetch_marks_the_url_failed(self, blocked):
+        """The service's blocked flag decides, whatever the text reads like."""
+        from src.tooling.runtime import ToolResult
+
+        editor = _create_article_editor()
+        mock_tool = AsyncMock()
+        mock_tool.name = "fetch_reference_content"
+        editor._tools_by_name = {"fetch_reference_content": mock_tool}
+        tool_service = Mock()
+        tool_service.execute = AsyncMock(
+            return_value=ToolResult(value="TOOL_BLOCKED: x", blocked=blocked)
+        )
+        with patch(
+            "src.article_writer.get_current_tool_service",
+            return_value=tool_service,
+        ):
+            await editor._execute_tool_calls(
+                [
+                    {
+                        "name": "fetch_reference_content",
+                        "args": {"url": "https://example.com"},
+                        "id": "call_1",
+                    }
+                ]
+            )
+
+        assert editor._failed_urls == ({"https://example.com"} if blocked else set())
 
 
 # =============================================================================
@@ -2394,17 +2445,21 @@ class TestSearchClaimTool:
             assert "SEARCH_UNAVAILABLE" in result
 
     @pytest.mark.asyncio
-    async def test_search_claim_preserves_blocked_sentinel_from_tavily(self):
-        """Blocked Tavily content should pass through without a second inspection pass."""
+    async def test_search_claim_raises_a_tavily_block_never_returns_it(self):
+        """Its one source blocked is the call blocked: raised for the tool
+        service to record, never returned as a result or folded into
+        SEARCH_FAILED."""
         from src.editor_tools import search_claim
+        from src.tooling.runtime import INSPECTION_BLOCKED, ToolCallBlocked
 
         with patch(
             "src.tavily_utils.tavily_search_with_timeout",
             new_callable=AsyncMock,
-            return_value="TOOL_BLOCKED: suspicious content",
-        ):
-            result = await search_claim.ainvoke({"query": "test query here"})
-            assert result == "TOOL_BLOCKED: suspicious content"
+            side_effect=ToolCallBlocked(INSPECTION_BLOCKED),
+        ) as search:
+            with pytest.raises(ToolCallBlocked):
+                await search_claim.ainvoke({"query": "test query here"})
+        assert search.await_args.kwargs == {"raise_on_block": True}
 
     @pytest.mark.asyncio
     async def test_search_truncates_long_results(self):
@@ -2686,6 +2741,7 @@ class TestStripEditorNotes:
 
         editor.review = mock_review
         writer = MagicMock()
+        writer.revise = AsyncMock()
         writer.revise.return_value = "# Revised\n\nClean."
 
         result, feedback = await editor.edit(

@@ -4,10 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import tempfile
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +14,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from src.atomic_files import atomic_write_text
 from src.cli import OutputTargets, resolve_article_path
 from src.config import config
 from src.report_generator import QuietModeReporter
@@ -26,26 +23,6 @@ from src.runtime_diagnostics import has_provenance_contract, is_publishable_anal
 
 logger = structlog.get_logger(__name__)
 console = Console()
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Publish a complete text artifact with one filesystem replacement."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            delete=False,
-        ) as handle:
-            handle.write(content)
-            temp_path = Path(handle.name)
-        os.replace(temp_path, path)
-    finally:
-        if temp_path and temp_path.exists():
-            temp_path.unlink()
 
 
 def _bounded_review_findings(feedback: dict[str, Any]) -> dict[str, Any]:
@@ -89,6 +66,10 @@ def _article_is_publishable(
     require_decision_trace: bool = False,
     require_provenance: bool = False,
 ) -> bool:
+    # A review that errored or ran out of the workflow allowance never
+    # approves, whatever verdict a partial result carried.
+    if feedback.get("review_error") or feedback.get("workflow_deadline_exceeded"):
+        return False
     base_ok = (
         feedback.get("verdict") == "APPROVED"
         and str(feedback.get("citation_audit_status") or "NOT_RUN").upper() == "PASSED"
@@ -426,7 +407,14 @@ async def handle_article_generation(
 
     try:
         from src.agents.evidence_constraints import downstream_evidence_constraints
-        from src.article_writer import ArticleEditor, ArticleWriter
+        from src.article_writer import (
+            ArticleEditor,
+            ArticleWorkflowExpired,
+            ArticleWriter,
+            article_workflow_deadline,
+            publish_article,
+            run_article_workflow_step,
+        )
         from src.error_safety import summarize_exception
 
         if not args.quiet and not args.brief:
@@ -450,78 +438,97 @@ async def handle_article_generation(
             report_text,
             analysis_result,
         )
-        draft_article = writer.write(
-            ticker=ticker,
-            company_name=company_name,
-            report_text=article_source_context,
-            trade_date=trade_date,
-            output_path=None,
-            valuation_context=valuation_context,
-            governance_card=governance_card,
-            chart_paths=chart_paths if isinstance(chart_paths, dict) else None,
-            article_dir=article_path.parent,
-            evidence_constraints=evidence_constraints,
-        )
-
-        editor = ArticleEditor(
-            callbacks=tracing_callbacks,
-            tracing_metadata=tracing_metadata,
-        )
-        final_article = draft_article
         feedback: dict[str, Any] = {
             "verdict": "REVISE",
             "confidence": 0.0,
             "skipped": True,
             "citation_audit_status": "NOT_RUN",
         }
-
-        if editor.is_available():
-            if not args.quiet and not args.brief:
-                console_obj.print("[cyan]Running Editor-in-Chief review...[/cyan]")
-
-            data_block = ""
-            pm_block = ""
-            valuation_params = ""
-            consultant_review = ""
-            if analysis_result:
-                data_block = analysis_result.get("fundamentals_report", "")
-                pm_block = analysis_result.get("final_trade_decision", "")
-                valuation_params = analysis_result.get("valuation_params", "")
-                consultant_review = analysis_result.get("consultant_review", "")
-
-            try:
-                final_article, feedback = await editor.edit(
-                    writer=writer,
-                    article_draft=draft_article,
+        # The workflow's own allowance: draft, review and revisions, and every
+        # writer fallback tier share one deadline. It is bound here because the
+        # analysis deadline's scope has already closed (src/main.py), so the
+        # writer cannot inherit a spent one. Each step is also hard-bounded at
+        # it, and a step that overruns is discarded rather than awaited, so no
+        # late draft can reach the writes below.
+        with article_workflow_deadline():
+            draft_article = await run_article_workflow_step(
+                writer.write(
                     ticker=ticker,
                     company_name=company_name,
-                    data_block=data_block,
-                    pm_block=pm_block,
-                    valuation_params=valuation_params,
-                    consultant_review=consultant_review,
-                    voice_samples=writer.load_voice_samples(max_chars=5000),
+                    report_text=article_source_context,
+                    trade_date=trade_date,
+                    output_path=None,
                     valuation_context=valuation_context,
-                    governance_card=governance_card
-                    if isinstance(governance_card, dict)
-                    else None,
+                    governance_card=governance_card,
+                    chart_paths=chart_paths if isinstance(chart_paths, dict) else None,
+                    article_dir=article_path.parent,
                     evidence_constraints=evidence_constraints,
-                )
-            except Exception as exc:
-                final_article = draft_article
-                feedback = {
-                    "verdict": "REVISE",
-                    "confidence": 0.0,
-                    "review_error": True,
-                    "citation_audit_status": "NOT_RUN",
-                }
-                logger_obj.warning(
-                    "article_editor_failed",
-                    **summarize_exception(exc, operation="article editorial review"),
-                )
+                ),
+                label=f"article_workflow:write:{ticker}",
+            )
+
+            editor = ArticleEditor(
+                callbacks=tracing_callbacks,
+                tracing_metadata=tracing_metadata,
+            )
+            final_article = draft_article
+
+            if editor.is_available():
                 if not args.quiet and not args.brief:
-                    console_obj.print(
-                        "[yellow]Editor review failed; draft retained for review.[/yellow]"
+                    console_obj.print("[cyan]Running Editor-in-Chief review...[/cyan]")
+
+                data_block = ""
+                pm_block = ""
+                valuation_params = ""
+                consultant_review = ""
+                if analysis_result:
+                    data_block = analysis_result.get("fundamentals_report", "")
+                    pm_block = analysis_result.get("final_trade_decision", "")
+                    valuation_params = analysis_result.get("valuation_params", "")
+                    consultant_review = analysis_result.get("consultant_review", "")
+
+                try:
+                    final_article, feedback = await run_article_workflow_step(
+                        editor.edit(
+                            writer=writer,
+                            article_draft=draft_article,
+                            ticker=ticker,
+                            company_name=company_name,
+                            data_block=data_block,
+                            pm_block=pm_block,
+                            valuation_params=valuation_params,
+                            consultant_review=consultant_review,
+                            voice_samples=writer.load_voice_samples(max_chars=5000),
+                            valuation_context=valuation_context,
+                            governance_card=governance_card
+                            if isinstance(governance_card, dict)
+                            else None,
+                            evidence_constraints=evidence_constraints,
+                        ),
+                        label=f"article_workflow:edit:{ticker}",
                     )
+                except Exception as exc:
+                    # The draft already held is kept, never presented as
+                    # reviewed: the editor did not finish with it.
+                    final_article = draft_article
+                    feedback = {
+                        "verdict": "REVISE",
+                        "confidence": 0.0,
+                        "review_error": True,
+                        "citation_audit_status": "NOT_RUN",
+                    }
+                    if isinstance(exc, ArticleWorkflowExpired):
+                        feedback["workflow_deadline_exceeded"] = True
+                    logger_obj.warning(
+                        "article_editor_failed",
+                        **summarize_exception(
+                            exc, operation="article editorial review"
+                        ),
+                    )
+                    if not args.quiet and not args.brief:
+                        console_obj.print(
+                            "[yellow]Editor review failed; draft retained for review.[/yellow]"
+                        )
 
         citation_audit_status = str(
             feedback.get("citation_audit_status") or "NOT_RUN"
@@ -575,7 +582,7 @@ async def handle_article_generation(
                 f"{article_path.stem}.draft{article_path.suffix or '.md'}"
             )
         )
-        _atomic_write_text(saved_article_path, final_article)
+        publish_article(final_article, saved_article_path)
         article_hash = hashlib.sha256(final_article.encode("utf-8")).hexdigest()
 
         writer_model = getattr(writer, "current_model_name", "")
@@ -593,6 +600,9 @@ async def handle_article_generation(
                 "editor_revisions": feedback.get("revisions", 0),
                 "editor_skipped": bool(feedback.get("skipped")),
                 "editor_review_error": bool(feedback.get("review_error")),
+                "workflow_deadline_exceeded": bool(
+                    feedback.get("workflow_deadline_exceeded")
+                ),
                 "citation_audit_status": citation_audit_status,
                 "canonical_claim_audit_status": (
                     "FAILED" if claim_audit_errors else "PASSED"
@@ -653,27 +663,39 @@ async def handle_article_generation(
             )
 
 
-def _load_company_name_for_output(
-    ticker: str,
-    *,
-    thread_pool_executor_cls=ThreadPoolExecutor,
-) -> str | None:
-    """Best-effort company-name lookup for markdown output contexts."""
-    executor = None
+def _load_company_name_for_output(ticker: str) -> str | None:
+    """Best-effort company-name lookup for markdown output contexts.
+
+    Each candidate symbol's yfinance ``.info`` runs on a slot-capped daemon
+    worker (``run_blocking_call_sync``), bounded by
+    ``COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS`` shrunk to a caller's enclosing
+    deadline. A stalled lookup returns None at that bound and leaves nothing an
+    executor would join at interpreter exit.
+    """
     try:
         import yfinance as yf
 
+        from src.blocking_io import (
+            OUTPUT_COMPANY_NAME_INFO_POLICY,
+            run_blocking_call_sync,
+        )
         from src.ticker_utils import (
             _company_name_lookup_candidates,
             _is_valid_company_name,
         )
 
-        executor = thread_pool_executor_cls(max_workers=1)
         for lookup_ticker, _lookup_strategy in _company_name_lookup_candidates(ticker):
-            future = executor.submit(
-                lambda symbol=lookup_ticker: yf.Ticker(symbol).info
-            )
-            info = future.result(timeout=5)
+            # Clamped per candidate by run_blocking_call_sync, before its worker
+            # starts; a spent deadline raises TimeoutError and ends the lookup
+            # like a stall.
+            policy = OUTPUT_COMPANY_NAME_INFO_POLICY.with_label(
+                f"{OUTPUT_COMPANY_NAME_INFO_POLICY.label}:{lookup_ticker}"
+            ).with_timeout(config.company_name_lookup_timeout_seconds)
+
+            def _fetch_info(symbol: str = lookup_ticker) -> Any:
+                return yf.Ticker(symbol).info
+
+            info = run_blocking_call_sync(policy, _fetch_info)
             if not info:
                 continue
             raw_name = info.get("longName") or info.get("shortName")
@@ -684,26 +706,26 @@ def _load_company_name_for_output(
                 # the writer downstream both want the full legal name.
                 return raw_name.strip()
         return None
-    except FuturesTimeoutError:
+    except TimeoutError:
+        # A stall, a saturated slot cap or a spent caller deadline.
         return None
     except Exception:
         return None
-    finally:
-        shutdown = getattr(executor, "shutdown", None)
-        if shutdown is not None:
-            try:
-                shutdown(wait=False, cancel_futures=True)
-            except TypeError:
-                shutdown(wait=False)
 
 
 async def _load_company_name_for_output_async(ticker: str) -> str | None:
-    """Async wrapper for output paths running inside the main event loop."""
+    """Async wrapper for output paths running inside the main event loop.
+
+    Bounded as a whole by ``OUTPUT_COMPANY_NAME_TIMEOUT_SECONDS``, shrunk to a
+    caller's enclosing deadline before the worker starts.
+    """
     from src.blocking_io import OUTPUT_COMPANY_NAME_POLICY, run_blocking_call
 
     try:
         return await run_blocking_call(
-            OUTPUT_COMPANY_NAME_POLICY.with_label(f"output_company_name:{ticker}"),
+            OUTPUT_COMPANY_NAME_POLICY.with_label(
+                f"output_company_name:{ticker}"
+            ).with_timeout(config.output_company_name_timeout_seconds),
             lambda: _load_company_name_for_output(ticker),
         )
     except TimeoutError:
@@ -814,10 +836,7 @@ def _render_primary_output(
 
     if output_targets.output_file:
         try:
-            if output_targets.output_file.parent != Path("."):
-                output_targets.output_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_targets.output_file, "w", encoding="utf-8") as f:
-                f.write(report)
+            atomic_write_text(output_targets.output_file, report)
             if not args.quiet and not args.brief:
                 console_obj.print(
                     f"[green]Report saved to:[/green] [cyan]{output_targets.output_file}[/cyan]{cost_suffix_fn()}"

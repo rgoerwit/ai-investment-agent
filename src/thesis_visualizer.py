@@ -16,6 +16,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from src import thesis_constants
+from src.agents.verdict_policy import (
+    format_compliance_result,
+    format_initiation_gate,
+    health_gate_from_policy,
+    initiation_gates_from_policy,
+)
 
 
 class AnsiColors:
@@ -281,6 +287,18 @@ class ThesisVisualizer:
         policy_verdict = self.decision_policy.get("final_verdict")
         if isinstance(policy_verdict, str) and policy_verdict:
             metrics.decision = policy_verdict
+        if self.decision_policy:
+            health = health_gate_from_policy(self.decision_policy)
+            metrics.health_score = (
+                float(health.value) if health.value is not None else None
+            )
+            metrics.health_pass = (
+                True
+                if health.status == "PASS"
+                else False
+                if health.status == "FAIL"
+                else None
+            )
 
         return metrics
 
@@ -362,7 +380,7 @@ class ThesisVisualizer:
         # Check if we have enough data to generate a meaningful visual
         has_scores = m.health_score is not None or m.growth_score is not None
         has_valuation = m.pe_ratio is not None
-        if not has_scores and not has_valuation:
+        if not has_scores and not has_valuation and not self.decision_policy:
             return ""  # Not enough data for visualization
 
         lines = [
@@ -393,6 +411,14 @@ class ThesisVisualizer:
                     if health_ok == threshold_ok
                     else "(PM gate)"
                 )
+                if self.decision_policy:
+                    suffix = (
+                        format_initiation_gate(
+                            health_gate_from_policy(self.decision_policy)
+                        )
+                        .split(";", 1)[-1]
+                        .strip()
+                    )
                 lines.append(
                     f"Financial Health  {bar} {m.health_score:5.1f}% {check} {suffix}"
                 )
@@ -489,6 +515,33 @@ class ThesisVisualizer:
             check = self._check(m.us_revenue_pass, c)
             val = m.us_revenue or "N/A"
             hard_checks.append(f"  {check} US Revenue ({val})")
+
+        if self.decision_policy:
+            gates = initiation_gates_from_policy(self.decision_policy)
+            health = health_gate_from_policy(self.decision_policy)
+            hard_checks = [
+                f"  {self._check(True if gate.status == 'PASS' else False if gate.status == 'FAIL' else None, c)} {format_initiation_gate(gate)}"
+                for gate in (health, *gates)
+            ]
+            growth = self.decision_policy.get("growth_gate")
+            growth_status = (
+                growth.get("status")
+                if isinstance(growth, Mapping)
+                and type(self.decision_policy.get("schema_version")) is int
+                and self.decision_policy["schema_version"] == 1
+                else None
+            )
+            if not isinstance(growth_status, str) or growth_status not in {
+                "PASS",
+                "HARD_FAIL",
+                "INDETERMINATE",
+                "EXCEPTION_DATA_VACUUM",
+                "EXCEPTION_MARGINAL_TURNAROUND",
+            }:
+                growth_status = "INDETERMINATE"
+            hard_checks.append(
+                f"  Hard Fail Result: {format_compliance_result(gates, growth_status, health)}"
+            )
 
         if hard_checks:
             lines.append("HARD FAIL CHECKS")

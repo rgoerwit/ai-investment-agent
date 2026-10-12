@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.config import config as consultant_config
 from src.consultant_tools import (
     FMP_FIELD_MAP,
     get_consultant_tools,
@@ -19,6 +20,7 @@ from src.consultant_tools import (
     spot_check_metric_mcp_fmp,
 )
 from src.data.fmp_fetcher import FMPSubscriptionUnavailableError
+from src.mcp.errors import MCPCallError, MCPErrorCategory
 from src.runtime_services import RuntimeServices, use_runtime_services
 from src.tooling.inspection_service import InspectionService
 from src.tooling.runtime import ToolExecutionService, ToolResult
@@ -62,7 +64,9 @@ class TestSpotCheckMetric:
 
         with patch("src.consultant_tools.yf.Ticker") as mock_ticker:
             mock_ticker.return_value.info = {"trailingPE": 12.5}
-            with patch("src.consultant_tools.SPOT_CHECK_TIMEOUT_SECONDS", 0.01):
+            with patch.object(
+                consultant_config, "consultant_spot_check_timeout_seconds", 0.01
+            ):
                 with patch(
                     "src.consultant_tools.asyncio.to_thread",
                     side_effect=slow_to_thread,
@@ -441,14 +445,17 @@ class TestMCPConsultantTools:
         assert result["source"] == "fmp_mcp"
 
     @pytest.mark.asyncio
-    async def test_fmp_mcp_wrapper_labels_budget_block_correctly(self):
+    async def test_fmp_mcp_wrapper_labels_budget_exhaustion_correctly(self):
+        # The MCP runtime refuses a call its budget cannot cover before any
+        # session opens; it is an MCPCallError, not a hook block.
         with patch(
             "src.consultant_tools._execute_mcp_via_tool_service",
             AsyncMock(
-                return_value=ToolResult(
-                    value="TOOL_BLOCKED: MCP budget exhausted for fmp_remote",
-                    blocked=True,
-                    findings=["MCP budget exhausted for fmp_remote"],
+                side_effect=MCPCallError(
+                    message="MCP budget exhausted for fmp_remote",
+                    category=MCPErrorCategory.BUDGET,
+                    server_id="fmp_remote",
+                    tool_name="statements",
                 )
             ),
         ):
@@ -465,7 +472,36 @@ class TestMCPConsultantTools:
                 )
 
         assert result["failure_kind"] == "budget"
+        assert result["retryable"] is False
         assert "budget exhausted" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_fmp_mcp_wrapper_labels_a_hook_block_as_inspection_blocked(self):
+        with patch(
+            "src.consultant_tools._execute_mcp_via_tool_service",
+            AsyncMock(
+                return_value=ToolResult(
+                    value="TOOL_BLOCKED: injection pattern",
+                    blocked=True,
+                    findings=["injection pattern"],
+                )
+            ),
+        ):
+            services = RuntimeServices(
+                tool_service=ToolExecutionService(),
+                inspection_service=InspectionService(),
+                mcp_runtime=MagicMock(),
+            )
+            with use_runtime_services(services):
+                result = json.loads(
+                    await spot_check_metric_mcp_fmp.ainvoke(
+                        {"ticker": "7203.T", "metric": "trailingPE"}
+                    )
+                )
+
+        assert result["failure_kind"] == "inspection_blocked"
+        assert result["error"] == "TOOL_BLOCKED: injection pattern"
+        assert result["retryable"] is False
 
     @pytest.mark.asyncio
     async def test_fmp_mcp_wrapper_preserves_sanitized_text_payload(self):

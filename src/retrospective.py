@@ -27,11 +27,13 @@ from typing import Any, TypedDict, cast
 import structlog
 
 from src.async_utils import run_with_hard_timeout
+from src.atomic_files import atomic_write_text
 from src.config import config
 from src.data_block_utils import (
     extract_data_block_field,
     extract_data_block_number,
     extract_kill_criteria,
+    m_and_a_status_from_report,
 )
 from src.error_safety import summarize_exception
 from src.exchange_metadata import SUFFIX_TO_CURRENCY_CODE
@@ -53,6 +55,7 @@ from src.lesson_disposition import (
     derive_disposition,
     render_record,
 )
+from src.llm_runtime.timeouts import require_allowance
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import classify_failure, get_runtime_provider
 from src.runtime_diagnostics.failure_classification import ProviderName, get_model_name
@@ -228,12 +231,6 @@ OUTCOME_LESSON_TYPES = LESSON_TYPES - {"prior_rejection"}
 # below-threshold evaluation is provisional rather than final. Re-price once the
 # holding period has moved materially.
 RETROSPECTIVE_REEVALUATION_INTERVAL_DAYS = 30
-
-# Hard ceiling on yfinance round-trips per run. Without it, every non-triggering
-# snapshot is re-fetched on every run forever: 7,690 snapshots are >= 30 days old
-# across the live and archived corpora, each costing a stock fetch plus a
-# benchmark fetch, sequentially, at a 15 s timeout apiece.
-RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN = 400
 
 # Centre of the 1.0-weight TEMPORAL_WEIGHTS band (91-270 days). Budgeted
 # evaluation spends its allowance on the highest-confidence window first.
@@ -830,7 +827,7 @@ def extract_snapshot(
         # into M_AND_A_STATUS so the IBKR reconciler can route held positions
         # as M&A EXIT rather than FUNDAMENTAL FAILURE. Empty/missing when no
         # active deal; values are ACTIVE_TENDER, RUMORED, or NONE.
-        "m_and_a_status": _extract_data_block_field(fundamentals, "M_AND_A_STATUS"),
+        "m_and_a_status": m_and_a_status_from_report(fundamentals),
         # TRADE_BLOCK fields (structured for portfolio reconciliation)
         **trade_block_fields,
         # Bear thesis excerpt
@@ -1488,11 +1485,9 @@ class EvaluationMemo:
         if not self._dirty:
             return
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
-            with open(tmp_path, "w") as handle:
-                json.dump(self._entries, handle, indent=2, sort_keys=True)
-            tmp_path.replace(self.path)
+            atomic_write_text(
+                self.path, json.dumps(self._entries, indent=2, sort_keys=True)
+            )
             self._dirty = False
         except Exception as exc:
             logger.warning(
@@ -1789,9 +1784,16 @@ async def compare_to_reality(snapshot: dict[str, Any]) -> dict[str, Any] | None:
 
             return result
 
+        # RETROSPECTIVE_PRICE_FETCH_TIMEOUT_SECONDS, read at the call and shrunk
+        # to a caller's enclosing deadline before the thread is created; a spent
+        # deadline takes the timeout path below without starting the fetch.
+        fetch_timeout = require_allowance(
+            config.retrospective_price_fetch_timeout_seconds,
+            label="retrospective_yfinance",
+        )
         data = await run_with_hard_timeout(
             asyncio.to_thread(_fetch_current_data),
-            timeout=15.0,
+            timeout=fetch_timeout,
             label=f"retrospective_yfinance:{ticker}",
         )
 
@@ -2500,34 +2502,28 @@ FAILURE_MODE: {UNRESOLVED_PRICE_ONLY} | CYCLICAL_PEAK | FX_DRIVEN | GOVERNANCE_B
                 "ticker": comparison.get("ticker"),
             }
         )
-        from src.config import config as settings_config
-        from src.service_tiers import floor_llm_hard_timeout
+        from src.agents.runtime import invoke_with_rate_limit_handling
+        from src.llm_runtime.seats import SEATS
 
-        # The flex floor is provider-scoped, so it must follow the seat's actual
+        # The budget is provider-scoped, so it must follow the seat's actual
         # binding rather than assume Google: SeatId.RETROSPECTIVE is bindable,
         # and hardcoding a vendor here gave a non-Google operational plane the
         # wrong ceiling (and a misleading provider in every diagnostic below).
         lesson_provider = get_runtime_provider(llm)
         lesson_model = get_model_name(llm)
-        hard_timeout = floor_llm_hard_timeout(
-            float(get_runtime_config(settings_config).llm_call_hard_timeout_seconds),
+        # The runtime loop owns the deadline: the seat's OPERATIONAL policy caps
+        # each attempt, sizes every request from the remaining allowance, and
+        # owns the retries (the seat sends one SDK attempt per request).
+        lesson_seat = SEATS[SeatId.RETROSPECTIVE].callback_name
+        response = await invoke_with_rate_limit_handling(
+            llm,
+            [HumanMessage(content=prompt)],
+            context=lesson_seat,
+            canonical_agent=lesson_seat,
             provider=lesson_provider,
-            label="retrospective_lesson_timeout",
+            model_name=lesson_model,
+            config=cast(Any, invoke_config) if invoke_config else None,
         )
-        if invoke_config:
-            response = await run_with_hard_timeout(
-                llm.ainvoke(
-                    [HumanMessage(content=prompt)], config=cast(Any, invoke_config)
-                ),
-                timeout=hard_timeout,
-                label=f"llm:retrospective_lesson:{comparison.get('ticker', '?')}",
-            )
-        else:
-            response = await run_with_hard_timeout(
-                llm.ainvoke([HumanMessage(content=prompt)]),
-                timeout=hard_timeout,
-                label=f"llm:retrospective_lesson:{comparison.get('ticker', '?')}",
-            )
 
         from src.agents import extract_string_content
 
@@ -3676,13 +3672,7 @@ async def run_retrospective(
                 )
 
     if max_evaluations is None:
-        max_evaluations = int(
-            getattr(
-                config,
-                "retrospective_max_evaluations_per_run",
-                RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN,
-            )
-        )
+        max_evaluations = int(config.retrospective_max_evaluations_per_run)
 
     # Create lessons memory if not provided
     if lessons_memory is None:

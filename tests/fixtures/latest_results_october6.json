@@ -1,0 +1,693 @@
+[
+  {
+    "case": "captured_GFT.DE",
+    "ticker": "GFT.DE",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: H1 2026\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: H1 2025\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 6\nLATEST_RESULTS_CURRENCY: EUR\nLATEST_RESULTS_REPORTING_UNIT: EUR million\nLATEST_RESULTS_REVENUE: 462.6\nLATEST_RESULTS_PRIOR_REVENUE: 441.5\nLATEST_RESULTS_EARNINGS: 17.1\nLATEST_RESULTS_PRIOR_EARNINGS: 13.5\nLATEST_RESULTS_EARNINGS_SCOPE: Net income\nLATEST_RESULTS_SOURCE_URL: https://www.gft.com/int/en/about-us/newsroom/press-and-news/2026/financial-news/gft-technologies-confirms-full-year-guidance-after-a-solid-first-half\nLATEST_RESULTS_SOURCE_AUTHORITY: PRIMARY\nLATEST_RESULTS_NORMALIZATION_REASON: SUPPORTED_PRIMARY\nLATEST_RESULTS_WITHHELD_FIELDS: NONE\nLATEST_RESULTS_REVENUE_GROWTH_YOY: 4.8%\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: 26.7%\n### --- END LATEST_RESULTS ---\n",
+    "capture": {
+      "date": "2026-10-06",
+      "kind": "verbatim_trimmed_retained_excerpt",
+      "original_content_sha256": [
+        "954a4ddae4f94c6216487a80fe31d9d7b87bcab1abe9436de2b27ffb7a5642f6"
+      ]
+    },
+    "evidence_records": [
+      {
+        "tool_name": "get_official_document",
+        "urls": [
+          "https://www.gft.com/int/en/about-us/newsroom/press-and-news/2026/financial-news/gft-technologies-confirms-full-year-guidance-after-a-solid-first-half"
+        ],
+        "evidence_status": "EVIDENCE_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://www.gft.com/int/en/about-us/newsroom/press-and-news/2026/financial-news/gft-technologies-confirms-full-year-guidance-after-a-solid-first-half",
+            "PRIMARY_ISSUER"
+          ]
+        ],
+        "content": "Key Figures (IFRS)\n(Deviations possible due to rounding differences)\nIn EUR million\nH1 2026\nH1 2025\n∆\nRevenue\n462.6\n441.5\n5%\nEBITDA\n34.8\n30.9\n13%\nAdjusted EBIT*\n32.6\n30.1\n8%\nAdjusted EBIT margin (in %)\n7.1\n6.8\n0.3 PP\nEBIT\n25.8\n20.7\n25%\nEBT\n24.0\n19.0\n26%\nNet income\n17.1\n13.5\n27%\nEarnings per share in EUR\n0.67\n0.51\n31%\nOperating cash flow",
+        "content_sha256": "aa3626a54c1e26db48aa0e490e21093b77a1b8e4a99c560498992e6e77a8ee45"
+      }
+    ],
+    "senior_excerpt": "GROWTH_SCORE_BREAKDOWN: REVENUE_GROWTH=0; EPS_GROWTH=N/A; ROA_ROE_IMPROVING=0; GROSS_MARGIN=0; GLOBAL_EXPANSION=1; R_AND_D_CAPEX_BACKLOG=1\nADJUSTED_HEALTH_SCORE: 45.5% (based on 11 available points)\nADJUSTED_GROWTH_SCORE: 0.0% (based on 5 available points)\nPE_RATIO_TTM: 18.74\nREVENUE_CAGR_3Y: 6.8%\nREVENUE_GROWTH_FY: 2.0%\nEARNINGS_GROWTH_FY: -28.2%\nREVENUE_GROWTH_TTM: N/A\nREVENUE_GROWTH_MRQ: 6.1%\nEARNINGS_GROWTH_TTM: N/A\nEARNINGS_GROWTH_MRQ: 33.3%\nEARNINGS_BASELINE_STATUS: UNKNOWN"
+  },
+  {
+    "case": "captured_BSLN.SW",
+    "ticker": "BSLN.SW",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: H1 2026\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: H1 2025\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 6\nLATEST_RESULTS_CURRENCY: CHF\nLATEST_RESULTS_REPORTING_UNIT: CHF million\nLATEST_RESULTS_REVENUE: 119.0\nLATEST_RESULTS_PRIOR_REVENUE: 104.4\nLATEST_RESULTS_EARNINGS: 28.0\nLATEST_RESULTS_PRIOR_EARNINGS: 15.8\nLATEST_RESULTS_EARNINGS_SCOPE: Net profit\nLATEST_RESULTS_SOURCE_URL: https://www.basilea.com/news/news/basilea-reports-strong-2026-half-year-results-and-raises-full-year-guidance-fosmanogepix-phase-3-program-on-track\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: COMPARATIVE_ROWS_UNBOUND\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "capture": {
+      "date": "2026-10-06",
+      "kind": "verbatim_trimmed_retained_excerpt",
+      "original_content_sha256": [
+        "8448e1be778dbba8c8a8748c7e1f3f48a3d3d68831cdb667695222ce25b43969"
+      ]
+    },
+    "evidence_records": [
+      {
+        "tool_name": "get_official_document",
+        "urls": [
+          "https://www.basilea.com/news/news/basilea-reports-strong-2026-half-year-results-and-raises-full-year-guidance-fosmanogepix-phase-3-program-on-track"
+        ],
+        "evidence_status": "EVIDENCE_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://www.basilea.com/news/news/basilea-reports-strong-2026-half-year-results-and-raises-full-year-guidance-fosmanogepix-phase-3-program-on-track",
+            "PRIMARY_ISSUER"
+          ]
+        ],
+        "content": "Ad hoc announcement pursuant to Art. 53 LR\nAllschwil, Switzerland, August 18, 2026\nBasilea Pharmaceutica Ltd, Allschwil (SIX: BSLN), a commercial-stage biopharma company committed to meeting the needs of patients with severe bacterial and fungal infections, announced today its results for the first half year 2026.\nDavid Veitch, Chief Executive Officer, stated: “Our half-year results demonstrate the successful execution of our strategy across both our commercial and R&D portfolio. We have continued to focus on our key value drivers, with Cresemba maintaining its market leadership position in invasive fungal infections and the progress of the phase 3 program for our key asset fosmanogepix. We also continue to prepare for the initiation of the phase 3 program for our antibiotic ceftibuten-ledaborbactam. Our operational progress is underscored by the continued support from the Biomedical Advanced Research and Development Authority, BARDA, which has awarded additional non-dilutive funding for these two clinical programs this year.”\nHe continued: “Beyond these late-stage programs, we are focusing on creating future value by advancing our earlier-stage pipeline. A highlight was the award of additional non-dilutive funding from Combating Antibiotic-Resistant Bacteria Biopharmaceutical Accelerator, CARB-X, for BAL2420, as we initiated the first phase 1 study. Our research collaborations with Prokaryotics and Phare Bio are progressing too, advancing innovative approaches to developing the next generation of antifungal and antibacterial therapies. With a growing portfolio that spans commercial products, late- and early-stage development programs and promising research projects, we remain firmly on track to achieve our goal of being a leading anti-infectives company with four commercial assets by 2030 and strong long-term growth prospects.”\nAdesh Kaul, Chief Financial Officer, said: “We delivered a strong financial performance in the first half-year. Global in-market sales of Cresemba by our partners increased by 27% year-on-year to USD 782 million for the twelve months from April 2025 to March 2026. Following the launch of Zevtera in the US in July of last year, and with market access enabled, we are now seeing increasing numbers of hospitals ordering across the US. In addition, our commercial partner Innoviva Specialty Therapeutics recently expanded its commercial infrastructure to further broaden hospital coverage, which will also benefit Zevtera. Our strong operational execution allows us to significantly increase our operating profit guidance for full-year 2026, and gives us confidence that we are fully on track to deliver on our cash flow targets under Basilea’s Agenda 2030.”\nHe added: “We continue to invest in the future of Basilea. R&D expenditure increased in line with the progress of the phase 3 fosmanogepix program, the preparations for the phase 3 development of ceftibuten-ledaborbactam and the start of the phase 1 clinical study of BAL2420. We made these investments while improving profitability, reducing financial debt and further expanding our net cash position. This combination of strong cash flows from our commercial business and a strong balance sheet provides us with the financial flexibility to advance our phase 3 pipeline, progress our earlier stage programs and pursue additional external growth opportunities, in order to remain one step ahead as outlined in our Agenda 2030.”\nFinancial summary\nIn the first half year (H1) 2026, Basilea reported total revenue of CHF 119.0 million (H1 2025: CHF 104.0 million), an increase of 14.4% year-on-year. Royalty income rose to CHF 57.8 million (H1 2025: CHF 52.1 million), up 10.9% year-on-year, mainly driven by continued strong market demand for Cresemba. Product revenue amounted to CHF 29.9 million (H1 2025: CHF 31.5 million). Milestone and upfront payments totaled CHF 4.7 million (H1 2025: CHF 6.9 million). Other revenue increased to CHF 26.7 million (H1 2025: CHF 13.5 million). This included CHF 22.3 million revenue related to the contracts with BARDA\n[\n1\n]\n(H1 2025: CHF 11.1 million) and CHF 1.7 million revenue related to the contract with CARB-X\n[\n2\n]\n(H1 2025: CHF 1.9 million). BARDA revenue is based on activities related to the fosmanogepix phase 3 program, the antifungal BAL2062, the close-out of the ceftobiprole phase 3 program, and ceftibuten-ledaborbactam, while CARB-X revenue is based on activities related to the antibiotic BAL2420.\nIn H1 2026, Basilea invested CHF 54.0 million (H1 2025: CHF 38.3 million) in R&D, mainly related to the two ongoing phase 3 clinical studies of fosmanogepix in invasive yeast and mold infections. It also includes expenses related to preparations for the upcoming phase 3 program of ceftibuten-ledaborbactam in complicated urinary tract infections, which is planned to start mid next year. Additionally, it includes expenses for the phase 2 preparation for BAL2062, the phase 1 study for BAL2420, and for research work on compounds in the Company’s early-stage portfolio.\nSelling, general and administrative expenses, including costs for the commercialization of Cresemba and Zevtera, amounted to CHF 18.0 million (H1 2025: CHF 17.4 million) and cost of products sold amounted to CHF 15.4 million (H1 2025: CHF 24.2 million).\nBasilea recorded an operating profit of CHF 31.6 million (H1 2025: CHF 24.0 million), an increase of 31.7% year-on-year. The net profit increased by 76.6% year-on-year to CHF 27.9 million (H1 2025: CHF 15.8 million), resulting in basic and diluted earnings per share of CHF 2.26 and CHF 2.13, respectively (H1 2025: basic and diluted earnings per share CHF 1.29 and CHF 1.26, respectively).\nIn H1 2026, Basilea presented a positive operating cash flow of CHF 19.0 million (H1 2025: CHF 23.1 million). The decrease compared to the previous year’s period was mainly driven by a temporary increase in receivables and inventory because of the growing commercial business and strong operational execution.\nThe Company repurchased senior unsecured convertible bonds, due July 2027, in the amount of CHF 5.0 million nominal value in the first half of 2026, further reducing its debt to CHF 71.0 million nominal value as of June 30, 2026. Since the beginning of 2022, Basilea has reduced its total financial debt by approximately CHF 150 million. Cash, cash equivalents and restricted cash increased by 32.6% to CHF 176.0 million as of June 30, 2026 (June 30, 2025: CHF 132.7 million). Furthermore, Basilea increased its net cash position to CHF 105.3 million as of June 30, 2026 (June 30, 2025: CHF 50.7 million).\nKey financial figures\n(in CHF million, except per share data)\nH1 2026\nH1 2025\nProduct revenue\n29.9\n31.5\nContract revenue\n62.4\n59.0\nOther revenue\n26.7\n13.5\nTotal revenue\n119.0\n104.0\nCost of products sold\n(15.4)\n(24.2)\nResearch & development expenses\n(54.0)\n(38.3)\nSelling, general & administrative expenses\n(18.0)\n(17.4)\nTotal cost and operating expenses\n(87.4)\n(79.9)\nOperating profit\n31.6\n24.0\nProfit before taxes\n32.1\n19.3\nIncome taxes\n(4.2)\n(3.5)\nNet profit\n27.9\n15.8\nNet cash provided by operating activities\n19.0\n23.1\nBasic earnings per share, in CHF\n2.26\n1.29",
+        "content_sha256": "87f1d9403cb15540119171f54d523ca869c838b1fd057f2559a69801a30a7c10"
+      }
+    ]
+  },
+  {
+    "case": "captured_BIJ.DE",
+    "ticker": "BIJ.DE",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: Half Year ended June 30, 2026 (H1 2026)\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: Half Year ended June 30, 2025 (H1 2025)\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 6\nLATEST_RESULTS_CURRENCY: EUR\nLATEST_RESULTS_REPORTING_UNIT: EUR million\nLATEST_RESULTS_REVENUE: 153.38\nLATEST_RESULTS_PRIOR_REVENUE: 154.83\nLATEST_RESULTS_EARNINGS: 8.82\nLATEST_RESULTS_PRIOR_EARNINGS: 4.18\nLATEST_RESULTS_EARNINGS_SCOPE: Net profit after taxes attributable to shareholders of the parent company\nLATEST_RESULTS_SOURCE_URL: https://www.marketscreener.com/news/bijou-brigitte-modische-accessoires-aktiengesellschaft-reports-earnings-results-for-the-half-year-en-ce785bd2d98bff22\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: PERIOD_LABEL_MISMATCH\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "capture": {
+      "date": "2026-10-06",
+      "kind": "verbatim_trimmed_retained_excerpt",
+      "original_content_sha256": [
+        "2c255b0aa557ba96d0ae14eb0bbaaa73a8f161ab56d567be644bcc072b7ca694",
+        "a1e0fbe4cd665bfbfd1f0717fdb13239c265dd99cf372b98d7ec527afdda6282"
+      ]
+    },
+    "evidence_records": [
+      {
+        "tool_name": "search_foreign_sources",
+        "urls": [
+          "https://quartr.com/companies/bijou-brigitte-modische-accessoires-aktiengesellschaft_19697",
+          "https://www.marketscreener.com/news/bijou-brigitte-modische-accessoires-aktiengesellschaft-reports-earnings-results-for-the-half-year-en-ce785bd2d98bff22",
+          "https://www.investing.com/equities/bijou-brigitte",
+          "https://www.dividendmax.com/germany/frankfurt-stock-exchange/leisure-goods/bijou-brigitte-mod-access-ag/dividends",
+          "https://group.bijou-brigitte.com/wp-content/uploads/2025/09/Half-year-financial-report_2025.pdf"
+        ],
+        "evidence_status": "RESULTS_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://quartr.com/companies/bijou-brigitte-modische-accessoires-aktiengesellschaft_19697",
+            "SECONDARY"
+          ],
+          [
+            "https://www.marketscreener.com/news/bijou-brigitte-modische-accessoires-aktiengesellschaft-reports-earnings-results-for-the-half-year-en-ce785bd2d98bff22",
+            "SECONDARY"
+          ],
+          [
+            "https://www.investing.com/equities/bijou-brigitte",
+            "SECONDARY"
+          ],
+          [
+            "https://www.dividendmax.com/germany/frankfurt-stock-exchange/leisure-goods/bijou-brigitte-mod-access-ag/dividends",
+            "SECONDARY"
+          ],
+          [
+            "https://group.bijou-brigitte.com/wp-content/uploads/2025/09/Half-year-financial-report_2025.pdf",
+            "SECONDARY"
+          ]
+        ],
+        "content": "<result relevance=\"0.91\" provider=\"tavily\">\n<title>Bijou Brigitte modische Accessoires Aktiengesellschaft Reports Earnings Results for the Half Year Ended June 30, 2026 | MarketScreener</title>\n<url>https://www.marketscreener.com/news/bijou-brigitte-modische-accessoires-aktiengesellschaft-reports-earnings-results-for-the-half-year-en-ce785bd2d98bff22</url>\n<summary>Bijou Brigitte modische Accessoires Aktiengesellschaft reported earnings results for the half year ended June 30, 2026. For the half year, the company reported sales was EUR 153.38 million compared to EUR 154.83 million a year ago. Net income was EUR 8.82 million compared to EUR 4.18 million a year ago. [...] ## Bijou Brigitte modische Accessoires AG\n\n## Stocks\n\n## BIJ\n\n## DE0005229504\n\n## Apparel & Accessories Retailers\n\n|  |  |  |  |  |\n ---  --- \n| Market Closed - Xetra   11:35:26 2026-10-02 am EDT | | | 5-day change | 1st Jan Change |\n| 43.50 EUR | -3.55% | Intraday chart for Bijou Brigitte modische Accessoires AG | -6.45% | +5.33% |\n\nIntraday chart for Bijou Brigitte modische Accessoires AG [...] Basic earnings per share from continuing operations was EUR 1.18 compared to EUR 0.55 a year ago. Diluted earnings per share from continuing operations was EUR 1.18 compared to EUR 0.55 a year ago.\n\n### Latest news about Bijou Brigitte modische Accessoires AG</summary>\n</result>",
+        "content_sha256": "6dc5c8bb9c093bf8bbabc6aaca53b07e99c3f43cfb4e19940ef1308c135b9498"
+      },
+      {
+        "tool_name": "search_foreign_sources",
+        "urls": [
+          "https://www.marketscreener.com/news/bijou-brigitte-modische-accessoires-aktiengesellschaft-reports-earnings-results-for-the-half-year-en-ce785bd2d98bff22",
+          "https://finance.yahoo.com/quote/BIJ.DE",
+          "https://www.dividendmax.com/germany/frankfurt-stock-exchange/leisure-goods/bijou-brigitte-mod-access-ag/dividends",
+          "https://www.investing.com/equities/bijou-brigitte",
+          "https://group.bijou-brigitte.com/wp-content/uploads/2024/05/Bijou_Brigitte_annual_report_2023.pdf"
+        ],
+        "evidence_status": "RESULTS_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://www.marketscreener.com/news/bijou-brigitte-modische-accessoires-aktiengesellschaft-reports-earnings-results-for-the-half-year-en-ce785bd2d98bff22",
+            "SECONDARY"
+          ],
+          [
+            "https://finance.yahoo.com/quote/BIJ.DE",
+            "SECONDARY"
+          ],
+          [
+            "https://www.dividendmax.com/germany/frankfurt-stock-exchange/leisure-goods/bijou-brigitte-mod-access-ag/dividends",
+            "SECONDARY"
+          ],
+          [
+            "https://www.investing.com/equities/bijou-brigitte",
+            "SECONDARY"
+          ],
+          [
+            "https://group.bijou-brigitte.com/wp-content/uploads/2024/05/Bijou_Brigitte_annual_report_2023.pdf",
+            "SECONDARY"
+          ]
+        ],
+        "content": "<result relevance=\"0.92\" provider=\"tavily\">\n<title>Bijou Brigitte modische Accessoires Aktiengesellschaft Reports Earnings Results for the Half Year Ended June 30, 2026 | MarketScreener</title>\n<url>https://www.marketscreener.com/news/bijou-brigitte-modische-accessoires-aktiengesellschaft-reports-earnings-results-for-the-half-year-en-ce785bd2d98bff22</url>\n<summary>Bijou Brigitte modische Accessoires Aktiengesellschaft reported earnings results for the half year ended June 30, 2026. For the half year, the company reported sales was EUR 153.38 million compared to EUR 154.83 million a year ago. Net income was EUR 8.82 million compared to EUR 4.18 million a year ago. [...] Basic earnings per share from continuing operations was EUR 1.18 compared to EUR 0.55 a year ago. Diluted earnings per share from continuing operations was EUR 1.18 compared to EUR 0.55 a year ago.\n\n### Latest news about Bijou Brigitte modische Accessoires AG [...] ## Bijou Brigitte modische Accessoires AG\n\n## Stocks\n\n## BIJ\n\n## DE0005229504\n\n## Apparel & Accessories Retailers\n\n|  |  |  |  |  |\n ---  --- \n| Market Closed - Xetra   11:35:26 2026-10-02 am EDT | | | 5-day change | 1st Jan Change |\n| 43.50 EUR | -3.55% | Intraday chart for Bijou Brigitte modische Accessoires AG | -6.45% | +5.33% |\n\nIntraday chart for Bijou Brigitte modische Accessoires AG</summary>\n</result>",
+        "content_sha256": "ad5f470bed91fa64444a4cd361f4255a4f870e408052cc1e2e0ab220f9ae5782"
+      }
+    ]
+  },
+  {
+    "case": "captured_EMMN.SW",
+    "ticker": "EMMN.SW",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: Half-year ended 30 June 2026\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: Half-year ended 30 June 2025\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 6\nLATEST_RESULTS_CURRENCY: CHF\nLATEST_RESULTS_REPORTING_UNIT: millions\nLATEST_RESULTS_REVENUE: 2323.5\nLATEST_RESULTS_PRIOR_REVENUE: 2273.5\nLATEST_RESULTS_EARNINGS: 100.9\nLATEST_RESULTS_PRIOR_EARNINGS: 97.2\nLATEST_RESULTS_EARNINGS_SCOPE: Net profit\nLATEST_RESULTS_SOURCE_URL: https://report.emmi.com/h2026/en/key-figures\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: PERIOD_LABEL_MISMATCH\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "capture": {
+      "date": "2026-10-06",
+      "kind": "verbatim_trimmed_retained_excerpt",
+      "original_content_sha256": [
+        "872023bfc1c53ad84ba3c6c339982f2f19904769d231f1ee4619733659fde017",
+        "0ea833326c142ca9c943ed04777bdc011ddb9078ff266c51b1ee3b75fa7ef845"
+      ]
+    },
+    "evidence_records": [
+      {
+        "tool_name": "search_foreign_sources",
+        "urls": [
+          "https://quartr.com/events/emmi-ag-emmn-h1-2026_FeSKLJEj",
+          "https://www.marketscreener.com/news/emmi-ag-reports-earnings-results-for-the-half-year-ended-june-30-2026-ce7859d2d980f02c",
+          "https://report.emmi.com/h2026/en/key-figures",
+          "https://companiesmarketcap.com/emmi-ag/revenue",
+          "https://report.emmi.com/en",
+          "https://en.wikipedia.org/wiki/Emmi_AG",
+          "https://www.uabmedicine.org/plan-your-visit/before-your-stay/what-is-emmi",
+          "https://www.uhhospitals.org/health-information/emmi",
+          "https://www.emmidesserts.com/usa/en",
+          "https://group.emmi.com/che/en"
+        ],
+        "evidence_status": "RESULTS_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://quartr.com/events/emmi-ag-emmn-h1-2026_FeSKLJEj",
+            "SECONDARY"
+          ],
+          [
+            "https://www.marketscreener.com/news/emmi-ag-reports-earnings-results-for-the-half-year-ended-june-30-2026-ce7859d2d980f02c",
+            "SECONDARY"
+          ],
+          [
+            "https://report.emmi.com/h2026/en/key-figures",
+            "SECONDARY"
+          ],
+          [
+            "https://companiesmarketcap.com/emmi-ag/revenue",
+            "SECONDARY"
+          ],
+          [
+            "https://report.emmi.com/en",
+            "SECONDARY"
+          ],
+          [
+            "https://en.wikipedia.org/wiki/Emmi_AG",
+            "SECONDARY"
+          ],
+          [
+            "https://www.uabmedicine.org/plan-your-visit/before-your-stay/what-is-emmi",
+            "SECONDARY"
+          ],
+          [
+            "https://www.uhhospitals.org/health-information/emmi",
+            "SECONDARY"
+          ],
+          [
+            "https://www.emmidesserts.com/usa/en",
+            "SECONDARY"
+          ],
+          [
+            "https://group.emmi.com/che/en",
+            "SECONDARY"
+          ]
+        ],
+        "content": "<result relevance=\"0.81\" provider=\"tavily\" truncated=\"true\" original_chars=\"1418\">\n<title>Half-year report 2026</title>\n<url>https://report.emmi.com/h2026/en/key-figures</url>\n<summary>...026\n\nHALF-YEAR REPORT 2026\n\nde\n\n Management Report\n\n  + Key figures\n  + Shareholder letter\n Half-year results\n\n  + Breakdown of the half-year results\n  + ### Interim consolidated financial statements of Emmi Group\n\n    - Consolidated income statement\n    - Consolidated balance sheet\n    - Consolidated cash flow statement\n    - Consolidated statement of changes in equity\n    - Segment reporting\n    - Notes to the half-year results\n\n Management Report</summary>\n</result>",
+        "content_sha256": "95a13c09fff4be22a49f9f1819f0ffdbc13144a59677933857c7bf9739dcb8c4"
+      },
+      {
+        "tool_name": "search_foreign_sources",
+        "urls": [
+          "https://ca.finance.yahoo.com/quote/EMMN.SW/cash-flow",
+          "https://uk.finance.yahoo.com/quote/EMMN.SW/cash-flow",
+          "https://report.emmi.com/h2026/en/key-figures",
+          "https://report.emmi.com/h2025/en/consolidated-cash-flow-statement",
+          "https://www.wsj.com/market-data/quotes/CH/XSWX/EMMN/financials/annual/cash-flow",
+          "https://en.wikipedia.org/wiki/Emmi_AG",
+          "https://www.uabmedicine.org/plan-your-visit/before-your-stay/what-is-emmi",
+          "https://www.uhhospitals.org/health-information/emmi",
+          "https://www.emmidesserts.com/usa/en",
+          "https://group.emmi.com/che/en"
+        ],
+        "evidence_status": "RESULTS_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://ca.finance.yahoo.com/quote/EMMN.SW/cash-flow",
+            "SECONDARY"
+          ],
+          [
+            "https://uk.finance.yahoo.com/quote/EMMN.SW/cash-flow",
+            "SECONDARY"
+          ],
+          [
+            "https://report.emmi.com/h2026/en/key-figures",
+            "SECONDARY"
+          ],
+          [
+            "https://report.emmi.com/h2025/en/consolidated-cash-flow-statement",
+            "SECONDARY"
+          ],
+          [
+            "https://www.wsj.com/market-data/quotes/CH/XSWX/EMMN/financials/annual/cash-flow",
+            "SECONDARY"
+          ],
+          [
+            "https://en.wikipedia.org/wiki/Emmi_AG",
+            "SECONDARY"
+          ],
+          [
+            "https://www.uabmedicine.org/plan-your-visit/before-your-stay/what-is-emmi",
+            "SECONDARY"
+          ],
+          [
+            "https://www.uhhospitals.org/health-information/emmi",
+            "SECONDARY"
+          ],
+          [
+            "https://www.emmidesserts.com/usa/en",
+            "SECONDARY"
+          ],
+          [
+            "https://group.emmi.com/che/en",
+            "SECONDARY"
+          ]
+        ],
+        "content": "<result relevance=\"0.69\" provider=\"tavily\">\n<title>Half-year report 2026</title>\n<url>https://report.emmi.com/h2026/en/key-figures</url>\n<summary>| Net profit | 100.9 | 97.2 |\n| as % of net sales | 4.3 | 4.3 |\n|  |  |  |\n| Cash flow from operating activities | 202.6 | 168.0 |\n| as % of EBITDA (operating cash conversion) | 87.8 | 75.3 |\n| Free cash flow (before acquisitions) | 118.4 | 93.6 |\n|  |  |  |\n| Investment in fixed assets (before acquisitions) | 66.3 | 62.6 |\n| as % of net sales | 2.9 | 2.8 |\n| Net debt in relation to annualised EBITDA (net debt ratio) | 1.73 | 1.79 1) |\n|  |  |  | [...] HALF-YEAR REPORT 2026\n\nHALF-YEAR REPORT 2026\n\nde\n\n Management Report\n\n  + Key figures\n  + Shareholder letter\n Half-year results\n\n  + Breakdown of the half-year results\n  + ### Interim consolidated financial statements of Emmi Group\n\n    - Consolidated income statement\n    - Consolidated balance sheet\n    - Consolidated cash flow statement\n    - Consolidated statement of changes in equity\n    - Segment reporting\n    - Notes to the half-year results\n\n Management Report [...] Management Report\n\n  + Key figures\n  + Shareholder letter\n Half-year results\n\n  + Breakdown of the half-year results\n  + ### Interim consolidated financial statements of Emmi Group\n\n    - Consolidated income statement\n    - Consolidated balance sheet\n    - Consolidated cash flow statement\n    - Consolidated statement of changes in equity\n    - Segment reporting\n    - Notes to the half-year results\n\nManagement Report/Key figures\n\n# Key figures Emmi Group</summary>\n</result>",
+        "content_sha256": "f400646542117c7b4cf78deb43efdbca562aff6c186f6684684eb7ba32bc3a92"
+      }
+    ]
+  },
+  {
+    "case": "captured_TXG.TO",
+    "ticker": "TXG.TO",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: Three Months Ended Jun 30, 2026\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: Three Months Ended Jun 30, 2025\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 3\nLATEST_RESULTS_CURRENCY: USD\nLATEST_RESULTS_REPORTING_UNIT: millions\nLATEST_RESULTS_REVENUE: 406.9\nLATEST_RESULTS_PRIOR_REVENUE: 253.9\nLATEST_RESULTS_EARNINGS: 113.8\nLATEST_RESULTS_PRIOR_EARNINGS: 83.2\nLATEST_RESULTS_EARNINGS_SCOPE: Net income\nLATEST_RESULTS_SOURCE_URL: https://torexgold.com/news-and-media/news/torex-gold-reports-q2-2026-results-15384/\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: PERIOD_LABEL_MISMATCH\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "capture": {
+      "date": "2026-10-06",
+      "kind": "verbatim_trimmed_retained_excerpt",
+      "original_content_sha256": [
+        "554826ef150f615e310ffffe2423f6fff9cb074f2d07c34b737b59fabc4b405b"
+      ]
+    },
+    "evidence_records": [
+      {
+        "tool_name": "get_official_document",
+        "urls": [
+          "https://torexgold.com/news-and-media/news/torex-gold-reports-q2-2026-results-15384",
+          "https://torexgold.com/investors/upcoming-events"
+        ],
+        "evidence_status": "EVIDENCE_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://torexgold.com/news-and-media/news/torex-gold-reports-q2-2026-results-15384",
+            "PRIMARY_ISSUER"
+          ],
+          [
+            "https://torexgold.com/investors/upcoming-events",
+            "PRIMARY_ISSUER"
+          ]
+        ],
+        "content": " Reyes Preliminary Economic Assessment\" issued on July 7, 2026, and filed on SEDAR+ at\nwww.sedarplus.ca\nand on the Company's website at\nwww.torexgold.com\n.\nTable 1: Operating and Financial Highlights\nThree Months Ended\nSix Months Ended\nJun 30,\nMar 31,\nJun 30,\nJun 30,\nJun 30,\nIn millions of U.S. dollars, unless otherwise noted\n2026\n2026\n2025\n2026\n2025\nSafety\nLost-time injury frequency\n1\n/million hours\n0.00\n0.00\n0.46\n0.00\n0.46\nTotal recordable injury frequency\n1\n/million hours\n0.63\n0.61\n1.00\n0.63\n1.00\nOperating Results - Gold Equivalent basis\nGold equivalent produced\noz AuEq\n96,297\n100,874\n84,296\n197,171\n144,073\nGold equivalent payable produced\n2\noz AuEq\n93,686\n98,482\n82,856\n192,168\n142,486\nGold equivalent sold\n2\noz AuEq\n92,351\n109,222\n76,922\n201,573\n137,490\nTotal cash costs\n2,3\n$/oz AuEq\n1,912\n1,534\n1,606\n1,707\n1,348\nAll-in sustaining costs\n2,3\n$/oz AuEq\n2,459\n1,917\n2,103\n2,165\n1,796\nAverage realized gold price\n2,3\n$/oz AuEq\n4,525\n4,784\n3,299\n4,665\n3,077\nFinancial Results\nRevenue\n$\n406.9\n539.3\n253.9\n946.2\n423.9\nCost of sales\n$\n228.5\n226.7\n152.6\n455.2\n246.7\nEarnings from mine operations\n$\n178.4\n312.6\n101.3\n491.0\n177.2\nNet income\n$\n113.8\n207.5\n83.2\n321.3\n122.2\nPer share - Basic\n$/share\n1.22\n2.18\n0.97\n3.41\n1.42\nPer share - Diluted\n$/share\n1.20\n2.16\n0.95\n3.38\n1.40\nAdjusted net earnings\n3\n$\n84.9\n199.7\n43.8\n284.6\n79.7\nPer share - Basic\n3\n$/share\n0.91\n2.10\n0.51\n3.02\n0.92\nPer share - Diluted\n3\n$/share\n0.90\n2.08\n0.50\n2.99\n0.91\nEBITDA\n3\n$\n209.1\n358.1\n114.1\n567.2\n202.2\nAdjusted EBITDA\n3\n$\n203.5\n358.6\n117.7\n562.1\n209.5\nCost of sales - gold equivalent basis\n$/oz AuEq\n2,474\n2,076\n1,984\n2,258\n1,794\nNet cash generated from operating activities\n$\n167.6\n209.8\n67.8\n377.4\n57.9\nNet cash generated from operating activities before changes in non-cash operating working capital\n$\n165.1\n174.2\n95.3\n339.3\n77.6\nFree cash flow\n3\n$\n94.2\n157.3\n(37.5\n)\n251.5\n(170.8\n)\nCash and cash equivalents\n$\n169.4\n130.0\n103.0\n169.4\n103.0\nDebt, net of deferred finance charges\n$\n-\n-\n227.2\n-\n227.2\nLease-related obligations\n$\n99.4\n101.1\n98.9\n99.4\n98.9\nNet cash (debt)\n3\n$\n70.0\n28.9\n(225.9\n)\n70.0\n(225.9\n)\nAvailable liquidity\n3\n$\n506.3\n466.9\n209.1\n506.3\n209.1\nOn a 12-month rolling basis, per million hours worked.\nGold equivalent ounces produced and sold include production of silver and copper converted to a gold equivalent based on a ratio of the average market prices for each commodity sold in the period. Refer to the \"Gold \n...[evidence ledger truncated]",
+        "content_sha256": "b340c81c5b2f4668e3220320dbfa2d6937fe5ee517e39fbea379b67d80de109d"
+      }
+    ]
+  },
+  {
+    "case": "captured_8056.T",
+    "ticker": "8056.T",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: 当第1四半期連結累計期間 (自 2026年 4月 1日 至 2026年 6月30日)\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: 前第1四半期連結累計期間 (自 2025年 4月 1日 至 2025年 6月30日)\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 3\nLATEST_RESULTS_CURRENCY: JPY\nLATEST_RESULTS_REPORTING_UNIT: 百万円\nLATEST_RESULTS_REVENUE: 91464\nLATEST_RESULTS_PRIOR_REVENUE: 96844\nLATEST_RESULTS_EARNINGS: 4484\nLATEST_RESULTS_PRIOR_EARNINGS: 5827\nLATEST_RESULTS_EARNINGS_SCOPE: 親会社の所有者に帰属する四半期利益\nLATEST_RESULTS_SOURCE_URL: https://www.biprogy.com/pdf/news/nr_260805_2.pdf\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: CURRENCY_OR_UNIT_UNBOUND\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "capture": {
+      "date": "2026-10-06",
+      "kind": "verbatim_trimmed_retained_excerpt",
+      "original_content_sha256": [
+        "d44e3579265cc601bc552201f247bf37c1ca64e2ffe2daee90bd89a7ca1cd76b"
+      ]
+    },
+    "evidence_records": [
+      {
+        "tool_name": "get_official_document",
+        "urls": [
+          "https://www.biprogy.com/pdf/news/nr_260805_2.pdf",
+          "https://www.biprogy.com",
+          "https://www.biprogy.com/com/management_policy.html"
+        ],
+        "evidence_status": "EVIDENCE_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://www.biprogy.com/pdf/news/nr_260805_2.pdf",
+            "PRIMARY_ISSUER"
+          ],
+          [
+            "https://www.biprogy.com",
+            "PRIMARY_ISSUER"
+          ],
+          [
+            "https://www.biprogy.com/com/management_policy.html",
+            "PRIMARY_ISSUER"
+          ]
+        ],
+        "content": "[PDF PAGE 8]\n（単位：百万円）\n 前第1四半期連結累計期間\n(自　2025年 4月 1日\n　至　2025年 6月30日)\n 当第1四半期連結累計期間\n(自　2026年 4月 1日\n　至　2026年 6月30日)\n売上収益 96,844 91,464\n売上原価 73,056 67,073\n売上総利益 23,788 24,390\n販売費及び一般管理費 15,947 17,702\n持分法による投資損益（△は損失） 780 163\nその他の収益 24 36\nその他の費用 77 71\n営業利益 8,569 6,817\n金融収益 264 257\n金融費用 310 424\n税引前四半期利益 8,523 6,651\n法人所得税 2,684 2,148\n四半期利益 5,838 4,502\n四半期利益の帰属\n親会社の所有者 5,827 4,484\n非支配持分 10 18\n四半期利益 5,838 4,502\n1株当たり四半期利益\n基本的1株当たり四半期利益（円） 59.42 46.42",
+        "content_sha256": "5658d58fb0fbcf479fa996523c1dce70da8388f2f84f8022943e802ff02a5adf"
+      }
+    ]
+  },
+  {
+    "case": "captured_SL.MI",
+    "ticker": "SL.MI",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: Year ended 31 December 2025\nLATEST_RESULTS_PERIOD_END: 2025-12-31\nLATEST_RESULTS_PRIOR_PERIOD: Year ended 31 December 2024\nLATEST_RESULTS_PRIOR_PERIOD_END: 2024-12-31\nLATEST_RESULTS_PERIOD_MONTHS: 12\nLATEST_RESULTS_CURRENCY: EUR\nLATEST_RESULTS_REPORTING_UNIT: thousands\nLATEST_RESULTS_REVENUE: 960361\nLATEST_RESULTS_PRIOR_REVENUE: 930354\nLATEST_RESULTS_EARNINGS: 107421\nLATEST_RESULTS_PRIOR_EARNINGS: 103121\nLATEST_RESULTS_EARNINGS_SCOPE: Group net profit\nLATEST_RESULTS_SOURCE_URL: https://www.sanlorenzoyacht.com/hubfs/Investors/Financial-results-and-financial-documents/EN/2025/5858-Sanlorenzo%20-%20Annual%20financial%20report%20as%20at%2031%20December%202025.pdf\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: CURRENCY_OR_UNIT_UNBOUND\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "capture": {
+      "date": "2026-10-06",
+      "kind": "verbatim_trimmed_retained_excerpt",
+      "original_content_sha256": [
+        "c3f1921e7fded56f70c7f64501e6c46f48cff4b84661782c0eaa4900034faffe"
+      ]
+    },
+    "evidence_records": [
+      {
+        "tool_name": "get_official_document",
+        "urls": [
+          "https://www.sanlorenzoyacht.com/hubfs/Investors/Financial-results-and-financial-documents/EN/2025/5858-Sanlorenzo%20-%20Annual%20financial%20report%20as%20at%2031%20December%202025.pdf"
+        ],
+        "evidence_status": "EVIDENCE_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://www.sanlorenzoyacht.com/hubfs/Investors/Financial-results-and-financial-documents/EN/2025/5858-Sanlorenzo%20-%20Annual%20financial%20report%20as%20at%2031%20December%202025.pdf",
+            "PRIMARY_ISSUER"
+          ]
+        ],
+        "content": "[PDF PAGE 80]\nOPERATING PERFORMANCE OF SANLORENZO GROUP\nII 078\nCONSOLIDATED ECONOMIC RESULTS\nReclassified income statement\n(€’000)\nYear ended 31 December Change\n2025\n% Net \nRevenues \nNew Yachts\n2024\n% Net \nRevenues \nNew Yachts\n2025 vs. 2024 2025 vs. 2024%\nNet Revenues New Yachts 960,361 100.0% 930,354 100.0% 30,007 +3.2%\nNet revenues for maintenance and other services 41,751 4.3% 33,063 3.6% 8,688 +26.3%\nOther income 24,919 2.6% 19,419 2.1% 5,500 +28.3%\nOperating costs (844,123) (87.9)% (804,997) (86.5)% (39,126) +4.9%\nAdjusted EBITDA 182,908 19.0% 177,839 19.1% 5,069 +2.9%\nNon-recurring costs (2,265) (0.2)% (1,479) (0.2)% (786) +53.1%\nEBITDA 180,643 18.8% 176,360 19.0% 4,283 +2.4%\nAmortisation/depreciation (40,766) (4.2)% (37,083) (4.0)% (3,683) +9.9%\nEBIT 139,877 14.6% 139,277 15.0% 600 +0.4%\nNet financial income/(expense) (2,707) (0.3)% 1,972 0.2% (4,679) -237.3%\nAdjustments to financial assets (193) - 219 - (412) -188.1%\nPre-tax profit 136,977 14.3% 141,468 15.2% (4,491) -3.2%\nIncome taxes (27,830) (2.9)% (38,346) (4.1)% 10,516 -27.4%\nNet profit 109,147 11.4% 103,122 11.1% 6,025 +5.8%\nNet (profit)/loss attributable to non-controlling interests20 (1,726) (0.2)% (1) - (1,725) N.a.\nGroup net profit 107,421 11.2% 103,121 11.1% 4,300 +4.2%\n20\t (Profit)/loss.",
+        "content_sha256": "06586c61751f8154aacc36766a6ffb44cbd3a02ee6190930395829d8aea9d063"
+      }
+    ]
+  },
+  {
+    "case": "captured_STAA.JK",
+    "ticker": "STAA.JK",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: Year ended December 31, 2025\nLATEST_RESULTS_PERIOD_END: 2025-12-31\nLATEST_RESULTS_PRIOR_PERIOD: Year ended December 31, 2024\nLATEST_RESULTS_PRIOR_PERIOD_END: 2024-12-31\nLATEST_RESULTS_PERIOD_MONTHS: 12\nLATEST_RESULTS_CURRENCY: IDR\nLATEST_RESULTS_REPORTING_UNIT: Million Rupiah\nLATEST_RESULTS_REVENUE: 9669155\nLATEST_RESULTS_PRIOR_REVENUE: 6439474\nLATEST_RESULTS_EARNINGS: 1606280\nLATEST_RESULTS_PRIOR_EARNINGS: 1282223\nLATEST_RESULTS_EARNINGS_SCOPE: Laba tahun berjalan yang dapat diatribusikan kepada pemilik entitas induk\nLATEST_RESULTS_SOURCE_URL: https://www.sta.co.id/news_pdf/1773062224_Financial_Statement_2025.pdf\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: CURRENCY_OR_UNIT_UNBOUND\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "capture": {
+      "date": "2026-10-06",
+      "kind": "verbatim_trimmed_retained_excerpt",
+      "original_content_sha256": [
+        "5852563c0806e59d4a0eb812ec201a7a95c099f1df95726925652c9532bc1704"
+      ]
+    },
+    "evidence_records": [
+      {
+        "tool_name": "get_official_document",
+        "urls": [
+          "https://www.sta.co.id/news_pdf/1773062224_Financial_Statement_2025.pdf"
+        ],
+        "evidence_status": "EVIDENCE_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://www.sta.co.id/news_pdf/1773062224_Financial_Statement_2025.pdf",
+            "PRIMARY_ISSUER"
+          ]
+        ],
+        "content": "[PDF PAGE 16]\nThe original consolidated financial statements included herein are in\nIndonesian language.\nCatatan atas laporan keuangan konsolidasian terlampir merupakan\nbagian yang tidak terpisahkan dari laporan keuangan\nkonsolidasian secara keseluruhan.\nThe accompanying notes to the consolidated financial\nstatements form an integral part of these consolidated financial\nstatements.\n4\nPT SUMBER TANI AGUNG RESOURCES TBK\nDAN ENTITAS ANAKNYA\nLAPORAN LABA RUGI DAN PENGHASILAN\nKOMPREHENSIF LAIN KONSOLIDASIAN\nUntuk Tahun yang Berakhir pada Tanggal\n31 Desember 2025\n(Disajikan dalam jutaan Rupiah,\nkecuali dinyatakan lain)\nPT SUMBER TANI AGUNG RESOURCES TBK\nAND ITS SUBSIDIARIES\nCONSOLIDATED STATEMENT OF PROFIT OR\nLOSS AND OTHER COMPREHENSIVE INCOME\nFor The Year Ended\nDecember 31, 2025\n(Expressed in millions of Rupiah,\nunless otherwise stated)\n Tahun yang berakhir pada tanggal 31 Desember/\nYears ended December 31,\nCatatan/\n2025    Notes 2024\nPENDAPATAN DARI KONTRAK REVENUE FROM CONTRACTS\nDENGAN PELANGGAN 9.669.155 2,29 6.439.474 WITH CUSTOMER\nBEBAN POKOK PENJUALAN (6.504.266) 2,30,37 (4.256.084) COST OF SALES\nLABA BRUTO 3.164.889 2.183.390 GROSS PROFIT\nLaba/(rugi) yang timbul dari Gain/(loss) arising from\n perubahan atas kuantitas dan changes in quantity and\nnilai wajar aset biologis (15.945)  2,8 103.606 fair value of biological assets\nBeban penjualan dan pemasaran (682.208)  2,31 (266.805) Selling and marketing expenses\nGeneral and administrative\nBeban umum dan administrasi (215.374)  2,32 (197.394) expenses\nPendapatan operasi lainnya 134.057   33,37 93.396 Other operating income\nBeban operasi lainnya (17.826) 34 (48.711) Other operating expenses\nLABA USAHA 2.367.593 1.867.482 PROFIT FROM OPERATIONS\nBiaya keuangan (98.480) 35 (89.214) Finance costs\nPendapatan keuangan 56.546 36 45.533 Finance income\nBagian laba entitas asosiasi 7.400   2,11 7.335 Share in profit of an associate\nLABA SEBELUM PROFIT BEFORE\nPAJAK PENGHASILAN 2.333.059 1.831.136 INCOME TAX\nBeban pajak penghasilan, neto (506.895)  21d,21f (377.003) Income tax expense, net\nLABA TAHUN BERJALAN 1.826.164 1.454.133 PROFIT FOR THE YEAR\nPenghasilan komprehensif lain: Other comprehensive income:\nPos-pos yang akan Items that will be reclassified\n direklasifikasi ke laba rugi: to profit or loss:\n Selisih kurs atas penjabaran Difference arising from translation\n  laporan keuangan 6.346 8.413 of financial statements\nPajak penghasilan terkait (1.396)  21d (1.851) Income tax effect\nPos-pos yang tidak akan Items that will not be reclassified\n direklasifikasi ke laba rugi: to profit or loss:\n Bagian penghasilan/(rugi) komprehensif Share in other comprehensive\n  lain entitas asosiasi, income/(loss) of an associate,\nsetelah pajak (218)  2,11 79 net of tax\n Laba/(rugi) pengukuran kembali atas Re-measurement gain/(loss) on\n  liabilitas imbalan kerja (16.365) 25 6.820 employee benefits liability\n Pajak penghasilan terkait 3.598   21d (1.500) Income tax effect\nPenghasilan/(rugi) komprehensif lain Other comprehensive income/(loss)\n tahun berjalan, setelah pajak (8.035) 11.961 for the year, net of tax\nTOTAL PENGHASILAN\nKOMPREHENSIF TOTAL COMPREHENSIVE\nTAHUN BERJALAN 1.818.129 1.466.094 INCOME FOR THE YEAR\n\n[PDF PAGE 18]\nThe original consolidated financial statements included herein are in Indonesian language.\nCatatan atas laporan keuangan konsolidasian terlampir merupakan bagian yang tidak terpisahkan dari laporan keuangan konsolidasian secara keseluruhan. The accompanying notes to the consolidated financial statements form an integral part of these consolidated financial stateme nts taken as a whole.\n6\nPT SUMBER TANI AGUNG RESOURCES TBK\nDAN ENTITAS ANAKNYA\nLAPORAN PERUBAHAN EKUITAS KONSOLIDASIAN\nUntuk Tahun yang Berakhir pada Tanggal 31 Desember 2025\n(Disajikan dalam jutaan Rupiah, kecuali dinyatakan lain)\nPT SUMBER TANI AGUNG RESOURCES TBK\nAND ITS SUBSIDIARIES\nCONSOLIDATED STATEMENT OF CHANGES IN EQUITY\nFor The Year Ended December 31, 2025\n(Expressed in millions of Rupiah, unless otherwise stated)\nEkuitas yang dapat diatribusikan kepada pemilik entitas induk/Equity attributable to owners of the parent company\nPenghasilan komprehensif lain/\nOther comprehensive income\n   Pengukuran\nkembali\n   Selisih kurs    keuntungan/\nkarena (kerugian)\n   Selisih transaksi    penjabaran    atas liabilitas\ndengan laporan    imbalan kerja\n  Modal saham    kepentingan    keuangan, neto/    karyawan, neto/ Saldo laba/Retained earnings\n  ditempatkan dan    nonpengendali/ Difference    Re-measurement\n  disetor penuh/ Tambahan Saham  Difference due to    arising from    of gain/(loss)     Ditentukan untuk Belum    Kepentingan\n Issued and    modal disetor/ treasuri/  transaction with    translation of    on liabilities      cadangan umum/ ditentukan    nonpengendali/\n Catatan/ fully paid Additional Treasury    non-controlling financial    for employee    Appropriated for     penggunaannya/ Non-controlling    Total ekuitas/\n Notes   share capital    paid-in capital shares interests    statements, net    benefits, net    general reserve    Unappropriated Total/Total interests    Total equity\nSaldo tanggal 31 Desember 2023 1.090.337 1.176.013 - 39.955 8.926 4.193 218.067 1.932.662 4.470.153 333.525 4.803.678 Balance as of December 31, 2023\nDividen 38 - - - - - - - (294.377) (294.377) (75.428) (369.805) Dividends\nKenaikan investasi kepentingan Increase in non-controlling interest\n nonpengendali - - - - - - - - - 1 1 investments\nLaba tahun berjalan - - - - - - - 1.282.223 1.282.223 171.910 1.454.133 Profit for the year\nPenghasilan komprehensif lain: Other comprehensive income:\n Selisih kurs atas penjabaran Difference arising from translation\n  laporan keuangan, neto - - - - 6.562 - - - 6.562 - 6.562 of financial statements, net\n Bagian penghasilan komprehensif Share in other comprehensive\n  lain entitas asosiasi, setelah pajak - - - - - 79 - - 79 - 79  income of an associate, net of tax\n Laba pengukuran kembali atas Re-measurement gain on\n  liabilitas imbalan kerja, neto - - - - - 4.066 - - 4.066 1.254 5.320 employee benefits liability, net\nTotal penghasilan komprehensif\n tahun berjalan - - - - 6.562 4.145 - 1.282.223 1.292.930 173.164 1.466.094  Total comprehensive income for the year\nSaldo tanggal 31 Desember 2024 1.090.337 1.176.013 - 39.955 15.488 8.338 218.067 2.920.508 5.468.706 431.262 5.899.968 Balance as of December 31, 2024\nDividen 38 - - - - - - (599.685) (599.685) (114.495) (714.180) Dividends\nSaham treasuri 26 - - (1.535) - - - - - (1.535) - (1.535) Treasury stock\nLaba tahun berjalan - - - - - - - 1.606.280 1.606.280 219.884 1.826.164 Profit for the year\nPenghasilan komprehensif lain: Other comprehensive income:\n Selisih kurs atas penjabaran Difference arising from translation\n  laporan keuangan, neto - - - - 4.950 - - - 4.950 - 4.950 of financial statements, net\n Bagian penghasilan komprehensif Share in other comprehensive\n  lain entitas asosiasi, setelah pajak - - - - - (218) - - (218) - (218)  income of an associate, net of tax\n Rugi pengukuran kembali atas Re-measurement loss on\n  liabilitas imbalan kerja, neto - - - - - (11.871) - - (11.871) (896) (12.767) employee benefits liability, net\nTotal penghasilan komprehensif\n tahun berjalan - - - - 4.950 (12.089) - 1.606.280 1.599.141 218.988 1.818.129  Total comprehensive income for the year\nSaldo tanggal 31 Desember 2025 1.090.337 1.176.013 (1.535) 39.955 20.438 (3.751) 218.067 3.927.103 6.466.627 535.755 7.002.382 Balance as of December 31, 2025\n\n[PDF PAGE 45]\nThe original consolidated financial statements included herein are in\nthe Indonesian language.\nPT SUMBER TANI AGUNG RESOURCES TBK\nDAN ENTITAS ANAKNYA\nCATATAN ATAS LAPORAN\nKEUANGAN KONSOLIDASIAN\nTanggal 31 Desember 2025 dan Untuk\nTahun yang Berakhir pada Tanggal Tersebut\n(Disajikan dalam jutaan Rupiah,\nkecuali dinyatakan lain)\nPT SUMBER TANI AGUNG RESOURCES TBK\nAND ITS SUBSIDIARIES\nNOTES TO THE CONSOLIDATED\nFINANCIAL STATEMENTS\nAs of December 31, 2025 and\nFor The Year then Ended\n(Expressed in millions of Rupiah,\nunless otherwise stated)\n32\n2. IKHTISAR INFORMASI KEBIJAKAN AKUNTANSI\nMATERIAL (lanjutan)\n2. SUMMARY OF MATERIAL ACCOUNTING\nPOLICIES INFORMATION (continued)\nq. Sewa (lanjutan) q. Leases (continued)\niii) Sewa jangka pendek dan sewa aset bernilai\nrendah\niii) Short-term leases and leases of low-value\nassets\nGrup menerapkan pengecualian pengakuan\nsewa jangka pendek untuk sewa mesin dan\nperalatan jangka pendeknya (yaitu, sewa yang\nmemiliki jangka waktu sewa 12 bulan atau\nkurang, dari tanggal permulaan dan tidak\nmengandung opsi beli). Hal ini juga berlaku\nuntuk pengecualian pengakuan sewa aset\nbernilai rendah untuk sewa peralatan kantor\nyang dianggap bernilai rendah. Pembayaran\nsewa untuk sewa jangka pendek dan sewa dari\naset bernilai rendah diakui sebagai beban\ndengan metode garis lurus selama masa sewa.\nThe Group applies the short-term lease\nrecognition exemption to its short-term leases\nof machinery and equipment (i.e., those leases\nthat have a lease term of 12 months or less\nfrom the commencement date and do not\ncontain a purchase option). It also applies the\nlease of low-value assets recognition\nexemption to leases of office equipment that\nare considered to be low value. Lease\npayments on short-term leases and leases of\nlow-value assets are recognized as expense\non a straight-line basis over the lease term.\nGrup sebagai lessor Group as a lessor\nSewa di mana Grup tidak mengalihkan secara\nsubstansial seluruh risiko dan manfaat yang\nterkait dengan kepemilikan suatu aset\ndiklasifikasikan sebagai sewa operasi.\nPendapatan sewa yang timbul dicatat dengan\nmetode garis lurus selama masa sewa dan\ndimasukkan dalam pendapatan lainnya dalam\nlaporan laba rugi dan penghasilan\nkomprehensif lain k",
+        "content_sha256": "a61c67d4ded5865f16bd227efe0518c5895e120969219213a7c0b222a19d2f03"
+      }
+    ]
+  },
+  {
+    "case": "captured_SIP.BR",
+    "ticker": "SIP.BR",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: For the year ended 31 December 2025\nLATEST_RESULTS_PERIOD_END: 2025-12-31\nLATEST_RESULTS_PRIOR_PERIOD: For the year ended 31 December 2024\nLATEST_RESULTS_PRIOR_PERIOD_END: 2024-12-31\nLATEST_RESULTS_PERIOD_MONTHS: 12\nLATEST_RESULTS_CURRENCY: USD\nLATEST_RESULTS_REPORTING_UNIT: KUSD\nLATEST_RESULTS_REVENUE: 570432\nLATEST_RESULTS_PRIOR_REVENUE: 441199\nLATEST_RESULTS_EARNINGS: 125449\nLATEST_RESULTS_PRIOR_EARNINGS: 65838\nLATEST_RESULTS_EARNINGS_SCOPE: Result for the period (Group share / Shareholder equity)\nLATEST_RESULTS_SOURCE_URL: https://www.sipef.com/media/3159/sipef-annualreport2025-en-20260706lowres.pdf\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: CURRENCY_OR_UNIT_UNBOUND\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "capture": {
+      "date": "2026-10-06",
+      "kind": "verbatim_trimmed_retained_excerpt",
+      "original_content_sha256": [
+        "c04257a8ddcc51ecb61e853a38fc50dd4d2c60cc03f267ceeb0c868d71e9da2c"
+      ]
+    },
+    "evidence_records": [
+      {
+        "tool_name": "get_official_document",
+        "urls": [
+          "https://www.sipef.com/media/3159/sipef-annualreport2025-en-20260706lowres.pdf"
+        ],
+        "evidence_status": "EVIDENCE_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://www.sipef.com/media/3159/sipef-annualreport2025-en-20260706lowres.pdf",
+            "PRIMARY_ISSUER"
+          ]
+        ],
+        "content": "[PDF PAGE 211]\nIN KUSD NOTE 2025 2024\nOPERATING ACTIVITIES   \nProfit before tax  190 448 97 464\nAdjusted for:    \nDepreciation 8,9,10 54 333 55 846\nMovement in provisions 17 2 155 1 990\nStock options   219  201\nUnrealised exchange result  1 318 2 032\nChanges in fair value of biological assets  - 464 -6 238\nOther non-cash results   673 - 69\nHedge reserves and financial derivatives 26 -1 852 1 338\nFinancial income and expenses  - 27 1 364\n(Gain)/loss on disposal of property, plant and equipment  4 380 2 578\nChange in fair value of asset held for sale  2 018 6 394\nCash flow from operating activities before change in net working capital 25 253 200 162 900\nChange in net working capital 25 15 230 1 768\nCash flow from operating activities after change in net working capital a  268 431 164 668\nIncome taxes paid b 23 -46 171 -31 625\nCash flow from operating activities c= a+b  222 260 133 043\nINVESTING ACTIVITIES    \nAcquisition intangible assets 8  0 - 40\nAcquisition biological assets 9 -34 037 -31 666\nAcquisition property, plant, and equipment 10 -55 367 -55 152\nFinancing smallholder advances 11 -1 363 -4 282\nProceeds from sale of property, plant, and equipment   262  571\nProceeds from sale of financial assets 30 -1 668 -4 179\nCash flow from investing activities d  -92 174 -94 747\nFree cash flow e= c+d  130 086 38 295\nFINANCING ACTIVITIES    \nRepayment of treasury shares 22 -1 787 - 118\nProceeds of treasury shares 22 3 461 1 173\nRepayment in long-term financial borrowings 19 - 778 -18 924\nProceeds in long-term financial borrowings 19  593  398\nRepayment short-term financial borrowings 19 -33 398 - 50\nProceeds short-term financial borrowings 19  626 13 575\nLast year's dividend paid during this book year  -22 881 -22 434\nDividends paid by subsidiaries to minorities 16 -2 451 -2 150\nInterest received – paid   20 -1 435\nCash flow from financing activities f  -56 595 -29 965\nNet increase in investments, cash and cash equivalents g= e+f 19 73 492 8 331\nInvestments and cash and cash equivalents (opening balance) 19 19 880 11 550\nInvestments and cash and cash equivalents (closing balance) 19 93 373 19 880\nOf which: 19   \nOther investments and deposits 19  1  1\nCash and cash equivalents 19 93 372 19 880\n5. CONSOLIDATED CASH FLOW STATEMENT\n209\nSIPEF Integrated Annual Report 2025\n Financial statements\n\n[PDF PAGE 212]\nIN KUSD\nISSUED \nCAPITAL \nSIPEF\nSHARE \nPREMIUM \nSIPEF\nTREASURY \nSHARES\nREMEASUREMENT \nGAIN/(LOSS) \nDEFINED BENEFIT \nPLANS IAS19\nRESERVES\nTRANSLATION \nDIFFERENCES\nSHAREHOLDER \nEQUITY\nNON-\nCONTROLLING \nINTERESTS\nTOTAL EQUITY\n1 JANUARY 2025 44 734 107 970 -10 633 -4 718 772 471 -11 396 898 427 37 355 935 782\nResult for the period     125 449  125 449 6 766 132 215\nOther comprehensive income   -1 162   869 - 293 - 59 - 352\nTotal comprehensive income 0  0  0 -1 162 125 449  869 125 157 6 706 131 863\nLast year's dividend paid    -23 867  -23 867 -2 451 -26 318\nOther  1 674   193  1 867 1 867\n31 DECEMBER 2025 44 734 107 970 -8 959 -5 880 874 246 -10 527 1 001 584 41 610 1 043 194\n1 JANUARY 2024 44 734 107 970 -11 681 -5 510 729 243 -10 978 853 777 35 042 888 819\nResult for the period    65 838  65 838 4 409 70 247\nOther comprehensive income    792 - 371 - 418 3 54 57\nTotal comprehensive income 0  0  0  792 65 467 - 418 65 841 4 464 70 305\nLast year's dividend paid    -22 434  -22 434 -2 150 -24 584\nOther  1 048   194  1 242 1 242\n31 DECEMBER 2024 44 734 107 970 -10 633 -4 718 772 471 -11 396 898 427 37 355 935 782\n6. STATEMENT OF CHANGES IN CONSOLIDATED EQUITY\n210\nThe connection to the world of sustainable tropical agriculture\n\n\n[PDF PAGE 225]\nRevenue by location of the debtors \n \nIn KUSD 2025 2024 * \nIndonesia * 260 185 226 128 \nSwitzerland 195 261 162 790 \nSingapore * 57 494  156 \nUnited Kingdom 24 112 19 022 \nFrance 12 089 14 834 \nBelgium 9 713 7 529 \nIreland 6 016 5 478 \nCôte d'Ivoire 4 783 4 797 \nMauritania  692  0 \nThe Netherlands *  88  0 \nMalaysia *  0  466 \nTotal 570 432 441 199 \n* Comparative figures have been adjusted to exclude revenue from tea.  \n \nThe revenue of the Group is realised against a relatively small number of first -class buyers: per product about 90% of the revenue \nfrom contracts with customers  is realized with a maximum of 10 clients. For additional  information, we refer to note 26 – financial \ninstruments. \n \nSegment information – geographical information \n  \n 2025 \nIn KUSD Indonesia PNG Côte d'Ivoire Europe Singapore Total \nIntangible assets  0  0  0  69  0  69 \nGoodwill 104 782  0  0  0  0 104 782 \nBiological assets 261 351 73 010  452  0  0 334 813 \nOther property, plant & equipment 331 420 129 017 13 698  818  582 475 535 \nInvestments in associates and joint ventures  -3 217  0  0 0  3 217  0 \nOther financial assets  46  0  67  15  0  129 \nReceivables > 1 year 27 987  0  0 13 398  0 41 385 \nDeferred tax assets 13 039  0 1 247 1 413  0 15 699 \nTotal non-current assets 735 409 202 026 15 464 15 714 3 799 972 412 \n% of total 75.63% 20.78% 1.59% 1.62% 0.39% 100.00% \n \n 2024 \nIn KUSD Indonesia PNG Côte d'Ivoire Europe Singapore Total \nIntangible assets  0  0  0  119  0  119 \nGoodwill 104 782  0  0  0  0 104 782 \nBiological assets 244 606 75 769  476  0  0 320 851 \nOther property, plant & equipment 318 810 125 609 12 274  557  471 457 720 \nInvestments in associates and joint venture -2 173  0  0  0 2 504  331 \nOther financial assets  46  0  51  15  0  112 \nReceivables > 1 year 33 893  0  0 11 688  0 45 581 \nDeferred tax assets 14 068  0  891 1 518  0 16 478 \nTotal non-current assets 714 034 201 377 13 692 13 897 2 975 945 975 \n% of total 75.48% 21.29% 1.45% 1.47% 0.31% 100.00% \n \nThe assets of Indonesia and PNG relate 100% to the palm segment in 2025. The assets of Côte d’Ivoire relate 100% to the bananas. \nThe assets of Singapore relate primarily to Sipef Singapore and Verdant Bioscience Pte Ltd conducting research into and developing \nhigh-yielding seeds. The assets of Europe do not relate specifically to one product segment. \n \n \n \n \n \n \n \n \n \n223\nSIPEF Integrated Annual Report 2025\n Financial statements\n\n",
+        "content_sha256": "e30a58f35863bed76b300100765ceb197ca9e23b3ca2a2b9465b83cb34ad3bea"
+      }
+    ]
+  },
+  {
+    "case": "captured_2130.T",
+    "ticker": "2130.T",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: 2027年3月期 第1四半期\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: 2026年3月期 第1四半期\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 3\nLATEST_RESULTS_CURRENCY: JPY\nLATEST_RESULTS_REPORTING_UNIT: 百万円\nLATEST_RESULTS_REVENUE: 5750\nLATEST_RESULTS_PRIOR_REVENUE: 5467\nLATEST_RESULTS_EARNINGS: -252\nLATEST_RESULTS_PRIOR_EARNINGS: -41\nLATEST_RESULTS_EARNINGS_SCOPE: 親会社の所有者に帰属する四半期利益\nLATEST_RESULTS_SOURCE_URL: https://finance.matsui.co.jp/stock/2130/settlement/index\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: PERIOD_END_NOT_RETAINED\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "capture": {
+      "date": "2026-10-06",
+      "kind": "verbatim_trimmed_retained_excerpt",
+      "original_content_sha256": [
+        "5dd7be918281ee31a79f1109920015cd6417d21163554f367edec07f9538707b",
+        "5570930195ff38632f19bc336d265b4bad0b0474eb1d750c0db39aa32b481073"
+      ]
+    },
+    "evidence_records": [
+      {
+        "tool_name": "search_foreign_sources",
+        "urls": [
+          "https://x.com/Members_IR",
+          "https://finance.matsui.co.jp/stock/2130/settlement/index",
+          "https://finance.logmi.jp/articles/382860",
+          "https://www.nikkei.com/nkd/company/kessan?scode=2130",
+          "https://www.members.co.jp/ir/library/statements",
+          "https://www.inchcalculator.com/military-time-converter/2130-military-time",
+          "https://www.tractorhouse.com/listings/for-sale/john-deere/2130/tractors/1100",
+          "https://kitocrosby.com/product/crosby-g-2130-s-2130-bolt-type-anchor-shackles",
+          "https://support.hp.com/us-en/printer-setup/hp/7521807",
+          "https://www.tractordata.com/farm-tractors/000/7/2/723-john-deere-2130.html"
+        ],
+        "evidence_status": "RESULTS_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://x.com/Members_IR",
+            "SECONDARY"
+          ],
+          [
+            "https://finance.matsui.co.jp/stock/2130/settlement/index",
+            "SECONDARY"
+          ],
+          [
+            "https://finance.logmi.jp/articles/382860",
+            "SECONDARY"
+          ],
+          [
+            "https://www.nikkei.com/nkd/company/kessan?scode=2130",
+            "SECONDARY"
+          ],
+          [
+            "https://www.members.co.jp/ir/library/statements",
+            "SECONDARY"
+          ],
+          [
+            "https://www.inchcalculator.com/military-time-converter/2130-military-time",
+            "SECONDARY"
+          ],
+          [
+            "https://www.tractorhouse.com/listings/for-sale/john-deere/2130/tractors/1100",
+            "SECONDARY"
+          ],
+          [
+            "https://kitocrosby.com/product/crosby-g-2130-s-2130-bolt-type-anchor-shackles",
+            "SECONDARY"
+          ],
+          [
+            "https://support.hp.com/us-en/printer-setup/hp/7521807",
+            "SECONDARY"
+          ],
+          [
+            "https://www.tractordata.com/farm-tractors/000/7/2/723-john-deere-2130.html",
+            "SECONDARY"
+          ]
+        ],
+        "content": "STATUS: RESULTS_FOUND\n### Foreign Source Search Results\nQuery: 2130 Members Co., Ltd. 2027年3月期 最新 決算短信 決算説明資料 業績予想 売上高 営業利益 経常利益 当期純利益\nPurpose: management_guidance\nTicker: 2130.T (Members)\nSources: Tavily, DuckDuckGo\n\nNote: Verify dates and currencies in the source data.\n\n<search_results source=\"tavily\" data_type=\"external_web_content\">\n<result relevance=\"0.91\" provider=\"tavily\" truncated=\"true\" original_chars=\"958\">\n<title>株式会社メンバーズ　IR（証券コード：2130） (@Members_IR) / X</title>\n<url>https://x.com/Members_IR</url>\n<summary>...2億円） 通期：売上収益250億円（前回予想比△6.9%）、営業利益2億円（同△92.0%）の見込み 主因は生成AI進展等による外部環境の変化、事業構造転換に伴う稼働率低下です AX転換を加速します ssl4.eir-parts.net/doc/2130/tdnet…\n @Members_IR\n\n  株式会社メンバーズ　IR（証券コード：2130）@Members\\_IR\n\n  Jul 31\n\n  🆕IR note記事💹 本日発表の2027年3月期 第1四半期決算で全体成長率が鈍化した要因は？AX領域拡大を通じたデジタル実装パートナーへの進化とは？などの決算の要点をnoteで分かりやすく解説しています✨ ぜひご確認ください！\n\n  \n\n  【2027年3月期1Q】AX領域を通じたデジタル実装パートナーへの進化｜メンバーズのIR note｜Members IR noteFrom note.com\n @Members_IR [...] 株式会社メンバーズ　IR（証券...</summary>\n</result>\n<result relevance=\"0.89\" provider=\"tavily\" truncated=\"true\" original_chars=\"879\">\n<title>メンバーズ(2130) 東証プライム 決算 | マーケット情報 | 松井証券</title>\n<url>https://finance.matsui.co.jp/stock/2130/settlement/index</url>\n<summary>お問い合わせ\n よくあるご質問 別ウィンドウまたはタブで開きます\n\n 会社案内・IR情報 別ウィンドウまたはタブで開きます\n English IR 別ウィンドウまたはタブで開きます\n\n 松井証券ホーム\n マーケット情報(株式市況・株価検索など)\n メンバーズ(2130)\n 決算\n\n# 2130 東証プライム 決算：メンバーズ\n\n## 四半期ごと業績・決算情報\n\n### 四半期ごとの業績推移と今期見通し\n\n会社予想：2027年3月期時点\n\n 前々期実績\n 前期実績\n 同期実績\n 当初会社予想\n 最新会社予想\n アナリスト予想\n\n#### 経常利益\n\n #### 売上高\n #### 営業利益\n #### 純利益\n\nチャートは2026年6月期時点\n\n雷 雨 曇り 曇り時々晴れ 晴れ\n\n売上高・経常利益・最終利益の総合的な評価をお天気で表現しています。  \n「晴れ」に近づくほど高評価となります。「晴れ」、「曇り時々晴れ」、「曇り」、「雨」、「雷」。\n\n### 過去の四半...</summary>\n</result>\n<result relevance=\"0.87\" provider=\"tavily\" truncated=\"true\" original_chars=\"1228\">\n<title>メンバーズ（2130）の財務情報ならログミーFinance【QAあり】メンバーズ、売上総利益前年比＋50.6％の大幅成長　売上収益・営業利益などの業績目標を上方修正、増配継続 - ログミーファイナンス</title>\n<url>https://finance.logmi.jp/articles/382860</url>\n<summary>髙野：スライド26ページ右側のグラフをご覧ください。2027年3月期は「3ヶ年で収益性を10パーセント以上に回復させる」という計画の3年目にあたります。そのため、営業利益率については10パーセントを目指していきたいと考えています。\n\n一方、付加価値売上高成長率については、DX領域を拡大することで15パーセント以上に引き上げることを目指しています。これに関しては、今期の成長率実績を見ながら最終的に確定していきたいと考えています。\n\n## 質疑応答：採用のペースアップと稼働率について\n\n司会者：「採用を再加速していく中での稼働率の目安はどのようにお考えでしょうか？」というご質問です。\n\n髙野：スライド9ページの左側にあるグラフにおいて、2023年3月期の水準は収益性が大きく毀損されていない稼働率です。しかし、2024年3月期以降は新卒採用のペースと成長のペースが大きく乖離する状況が生じ、新卒の稼働率が大幅に低下しています。そのため、目指すべきは2023年3月期の水準...</summary>\n</result>\n<result relevance=\"0.81\" provider=\"tavily\" truncated=\"true\" original_chars=\"1407\">\n<title>【メンバーズ】[2130]決算発表や業務・財務情報 | 日経電子版</title>\n<url>https://www.nikkei.com/nkd/company/kessan?scode=2130</url>\n<summary>通期四半期\n\n単位：百万円\n\n|  |  |  |  |  |  |\n ---  ---  --- |\n| 決算期 | 2022/3連I | 2023/3連I | 2024/3連I | 2025/3単 | 2026/3連I |\n| 売上高（解説） | 14,938 | 17,662 | 20,467 | 22,329 | 24,424 |\n| 営業利益（解説） | 1,876 | 1,441 | 41 | 493 | 1,600 |\n| 経常利益（解説） | 1,896 | 1,399 | 136 | 472 | 1,641 |\n| 当期利益（解説） | 1,404 | 1,009 | 126 | 349 | 1,213 |\n| 一株利益（円）（解説） | 107.73 | 76.18 | 9.71 | 27.40 | 94.92 |\n| 一株配当（円）（解説） | 25.00 | 30.00 | 31.00 | 32.00 | 33.00 |\n| 決算月数（カ...</summary>\n</result>\n<result relevance=\"0.61\" provider=\"tavily\" truncated=\"true\" original_chars=\"954\">\n<title>決算短信｜IR情報｜メンバーズ</title>\n<url>https://www.members.co.jp/ir/library/statements</url>\n<summary>membersトップ\n IR\n 決算短信\n\n# 決算短信\n\n決算短信 決算説明資料・説明会動画 有価証券報告書 株主総会資料 その他IR資料\n\nget_adobe_reader  PDF形式のファイルをご覧になるためにはAdobe Readerが必要です。  \nAdobe Readerをお持ちでない場合は、左のアイコンからダウンロードしてください。\n\n本ページ上には、将来の業績に関する記述が含まれています。こうした記述は、将来の業績を保証するものではなく、 リスクや不確実性を内包するものです。将来の業績は、経営環境の変化などにより、実際の結果と異なる可能性があることにご留意ください。  \n  \n本画面に掲載されているコンテンツは、(株)プロネクサスより情報の提供を受けております。  \n  \n\nPowered by E-IR\n\n当社へのお問い合わせ\n\nページ上部へ [...] members\n\nお問い合わせ 資料請求\n\nサイト内検索\n\nmembers\n\nmembe...</summary>\n</result>\n<result provider=\"duckduckgo\">\n<title>What is 2130 Military Time? - Inch Calculator</title>\n<url>https://www.inchcalculator.com/military-time-converter/2130-military-time/</url>\n<summary>You can easily convert 2130 hours to standard 12-hour time by following a few easy steps. Since military time is based on the 24-hour time standard, all times greater than 11 represent a time in the afternoon.</summary>\n</result>\n<result provider=\"duckduckgo\">\n<title>JOHN DEERE 2130 Tractors For Sale - TractorHouse.com</title>\n<url>https://www.tractorhouse.com/listings/for-sale/john-deere/2130/tractors/1100</url>\n<summary>Mar 9, 2026 · Find 3 new & used JOHN DEERE 2130 Tractors for sale near you with prices ranging from $5,900 to $11,900 at TractorHouse.com</summary>\n</result>\n<result provider=\"duckduckgo\">\n<title>Crosby G-2130 / S-2130 Bolt Type Anchor Shackles</title>\n<url>https://kitocrosby.com/product/crosby-g-2130-s-2130-bolt-type-anchor-shackles/</url>\n<summary>Discover the reliability of Crosby G-2130 / S-2130 Bolt Type Anchor Shackles, engineered for strength and safety in lifting applications.</summary>\n</result>\n<result provider=\"duckduckgo\">\n<title>HP DeskJet 2130 All-in-One Printer series Setup | HP® Support</title>\n<url>https://support.hp.com/us-en/printer-setup/hp/7521807</url>\n<summary>Learn how to setup your HP DeskJet 2130 All-in-One Printer series. These steps include unpacking, installing ink cartridges & software. Also find setup troubleshooting videos.</summary>\n</result>\n<result provider=\"duckduckgo\">\n<title>TractorData.com John Deere 2130 tractor information</title>\n<url>https://www.tractordata.com/farm-tractors/000/7/2/723-john-deere-2130.html</url>\n<summary>May 31, 2025 · John Deere 2130 photos... Full dimensions and tires ... Right side of tractor frame, above front axle. FAQ: How to read a serial number table. TractorData is a family-owned small business located in Minnesota that has been providing reference information on tractors since 1999.</summary>\n</result>\n[...truncated]\n[summary policy: result metadata and query-relevant excerpts preserved]\n</search_results>",
+        "content_sha256": "5dd7be918281ee31a79f1109920015cd6417d21163554f367edec07f9538707b"
+      },
+      {
+        "tool_name": "search_foreign_sources",
+        "urls": [
+          "https://www.youtube.com/watch?v=_aWA51EP7BI",
+          "https://finance.logmi.jp/articles/382860",
+          "https://finance.yahoo.co.jp/quote/2130.T/financials",
+          "https://finance.matsui.co.jp/stock/2130/settlement/index",
+          "https://www.nikkei.com/nkd/disclosure/tdnr/20260513530592"
+        ],
+        "evidence_status": "RESULTS_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://www.youtube.com/watch?v=_aWA51EP7BI",
+            "SECONDARY"
+          ],
+          [
+            "https://finance.logmi.jp/articles/382860",
+            "SECONDARY"
+          ],
+          [
+            "https://finance.yahoo.co.jp/quote/2130.T/financials",
+            "SECONDARY"
+          ],
+          [
+            "https://finance.matsui.co.jp/stock/2130/settlement/index",
+            "SECONDARY"
+          ],
+          [
+            "https://www.nikkei.com/nkd/disclosure/tdnr/20260513530592",
+            "SECONDARY"
+          ]
+        ],
+        "content": "STATUS: RESULTS_FOUND\n### Foreign Source Search Results\nQuery: 2130 メンバーズ 2026年3月期 決算短信 売上収益 営業利益 親会社の所有者に帰属する当期利益\nPurpose: latest_results\nTicker: 2130.T (Members)\nSources: Tavily\n\nNote: Verify dates and currencies in the source data.\n\n<search_results source=\"tavily\" data_type=\"external_web_content\">\n<result relevance=\"0.95\" provider=\"tavily\">\n<title>メンバーズ（2130） 2026年3月期決算説明</title>\n<url>https://www.youtube.com/watch?v=_aWA51EP7BI</url>\n<summary>[21:49] 261億円、営業利益が56%増の 25億円と、え、ま、ここについては、え 、目標としてる営業利率10%に近い水分\n[21:58] として、え、目指してまいりたいという風 に考えております。\n[22:03] え、最後に株主関係についてです。え、 前期2026年度にかかる配当については 、ま、計画通り前年費プラ1円の33円を\n[22:12] 想定しております。え、また今後2027 年3月期、え、このこれ今年度の2027\n[22:19] 年3月期にかかる配当については収益性の 回復も目度がついたというようなところを 踏まえ、え、従来の方針通りDOE5%\n[22:28] 以上配当成功25%程度と、え、で+2円 の35円と、え、いう形で増廃を継続して\n[22:34] いくという計画でございます。え、当社の ROEはこの23年間低下してしまって おりましたが、事業向上の転換、収益の\n[22:43] 改善といったところが、え、目戸がついて きましたので、え、今後は20%兆の水準 を維持してまいりたいという風に考えて おります。 [...] [19:13] ていたDX現場支援ポジションへの転換と いったことをさらに大胆に加速させまして 、え、基本的には根期でそれをも完成さ\n[19:20] せるという風に考えております。え、その ために従来領域の低単価低成長の反件から はあの、え、撤退もさす、え、高単価化に\n[19:29] 取り組み、高単価値上げに取り組み、え、 社員の成長、それを社員の成長報酬アップ といったようなところへの公住につげて\n[19:36] いきたいという風に考えております。え、 そして改めてフューチャービジョンの挑戦 に向けたCSVの推進を、え、強化をして\n[19:44] まいりたいという風に考えております。え 、これらにより付加価値売上の成長率を 15%に引き上げ、営業利益を25億円\n[19:52] 以上、営業利益率10%を目指してまいり ます。\n[19:57] え、業績目標株主還元についてもう少し 説明いたします。え、目標成長率で、え、 15%と言ってもなかなか当社の成長率が [...] [2:12] まして付加価値売上高は前年費プラ 10.5%の235億円と過去最高を更新\n[2:19] しております。え、また同様にこの2年間 で収益性の改善に取り組んでおりました。\n[2:25] え、結果として営業利益は前年費3倍の、 え、16億円となりました。え、ここは 想定通りに進捗をしているという風に考え\n[2:33] ております。え、その他のについては後の ページでご説明いたします。\n[2:40] え、公表計画退避では売上付加価値売上高 はほぼ計画通り、え、各段階利益につき ましては計画を上ぶれて着地をしており\n[2:49] ます。え、またDX現場支援ポジションへ の転換というところに、え、の結果として の単価稼働率の大幅改善といったことに\n[2:58] よりまして、え、売上総利益率は前年同期 費+5.5ポイント、営業利益率もプラ 4.4ポイントとそれぞれ改善しており\n[3:06] まして、え、過去2期にわった収益性改善 の成果が出ているという風に考えており ます。え、とはいえ利益率は6.6%と、</summary>\n</result>\n<result relevance=\"0.93\" provider=\"tavily\">\n<title>メンバーズ（2130）の財務情報ならログミーFinance【QAあり】メンバーズ、売上総利益前年比＋50.6％の大幅成長　売上収益・営業利益などの業績目標を上方修正、増配継続 - ログミーファイナンス</title>\n<url>https://finance.logmi.jp/articles/382860</url>\n<summary>今後はさらに、社会に対して大きな価値を提供できる存在を目指して取り組んでいきたいと考えています。本日はその取り組みの進捗状況をご報告します。\n\n## 2026年3月期 第2四半期 累計 業績ハイライト\n\nまず、2026年3月期第2四半期の決算概要をご説明します。第2四半期累計の決算は、基本的には想定どおりの数字となったと考えています。\n\n売上高から外注費などの外部支出分を差し引いた付加価値売上高は、前年同期比11.1パーセント増の110億7,000万円となりました。営業利益は前期の約5億円の赤字から7億4,200万円増となり、2億6,300万円の黒字となりました。その他のKPIについては、この後に随時ご説明します。\n\n## 2026年3月期 第2四半期 P/L\n\nP/Lの詳細を計画対比でご説明します。売上総利益は前年同期比で50.6パーセント増加し、売上総利益率は前年同期比6.1ポイント増の22.7パーセントと大幅に改善しました。これは主に稼働率の改善が要因です。 [...] 提供：株式会社メンバーズ 2026年3月期第2四半期決算説明\n\n# 【QAあり】メンバーズ、売上総利益前年比＋50.6％の大幅成長　売上収益・営業利益などの業績目標を上方修正、増配継続\n\n#決算説明会\n\n株式会社メンバーズ（2130）\n\n動画株式会社メンバーズ 2026年3月期第2四半期決算説明\n\n## 新たな挑戦の歴史を創る\n\n髙野明彦氏（以下、髙野）：代表取締役 兼 社長執行役員の髙野です。本日はお忙しい中、ご参加いただき誠にありがとうございます。これから、2026年3月期第2四半期の決算説明を始めます。\n\nメンバーズは本年で30周年の節目の年を迎えます。過去30年間の成果に甘んじることなく、今後も10年、20年と成長し続けられるよう、「新たな挑戦の歴史を創る」をスローガンに掲げています。\n\nその挑戦の方向性を決定づけているのは、定款第2条のミッション「“MEMBERSHIP”で、心豊かな社会を創る」と、「VISION2030」で掲げる「日本中のクリエイターの力で、気候変動・人口減少を中心とした社会課題解決へ貢献し、持続可能社会への変革をリードする」という理念です。 [...] 1新たな挑戦の歴史を創る\n 22026年3月期 第2四半期 累計 業績ハイライト\n 32026年3月期 第2四半期 P/L\n 4売上収益/付加価値売上高\n 5営業利益/販管費・率/売上総利益率\n 6DC数/新卒・中途採用数/離職率\n 7稼働率\n 8外部環境:急拡大するDX市場・DX推進を阻む人材不足\n 9DX現場支援ポジションと競争優位性の確立\n 102026年3月期 方針/戦略\n 11DX現場支援ポジションへの転換加速 -DX比率/専門カンパニー全体付加価値売上高・DC数\n 12DX現場支援ポジションへの転換加速 -各事業領域 付加価値売上高・DC数\n 13DX現場支援ポジションへの転換加速 -DX人材比率/SINCA90プロジェクトの推進\n 14DX現場支援ポジションへの転換加速 -PMO人材の育成/一人あたり売上単価の向上\n 15DX現場支援ポジションへの転換加速 -1社あたりの収益最大化\n 16脱炭素DX事業の確立/脱炭素人材の育成\n 17全員参加型経営の確立 -社員エンゲージメントと株主意識の向上</summary>\n</result>\n<result relevance=\"0.92\" provider=\"tavily\">\n<title>(株)メンバーズ【2130】：決算情報 - Yahoo!ファイナンス</title>\n<url>https://finance.yahoo.co.jp/quote/2130.T/financials</url>\n<summary>まとめ\n\nはじめにお読みください\n\n 生成AIの性質上、要約の内容はその正確性や品質を保証するものではありません。注意事項をご確認の上、引用元の決算短信全文と併せてご覧ください。\n 本機能は予告なく変更、中止する可能性があります。\n\n引用元：2027年３月期 第１四半期決算短信（PDF）\n\n2027年3月期第1四半期は売上収益が前年同期比5.2%増の57億円と増収となった一方、247名の新卒入社に伴うコスト先行や稼働率低下により営業損失は3億9,500万円と前年同期（7,000万円の損失）から大幅に拡大しました。通期では営業利益25億円（前期比56.2%増）を見込んでいます。\n\n### 主な事業セグメント\n\n株式会社メンバーズは、DX伴走支援サービス事業の単一セグメントで運営されています。デジタルクリエイターが顧客企業に常駐し、DX・AX（AI活用による業務・事業変革）・GX領域における内製化支援を提供するデジタル実装パートナーとして事業を展開しています。\n\n### 当決算における事業や経営成績の主な変化 [...] ### キャッシュフローの変化\n\n営業活動によるキャッシュ・フローは1億2,300万円の支出となり、前年同期の2億7,100万円の収入から悪化しました。投資活動は1,500万円の支出（前年同期は2,200万円の支出）と小幅にとどまっています。財務活動は配当金支払い4億900万円等により5億5,700万円の支出（前年同期は5億3,100万円の支出）となりました。\n\n### 今年度、来年度の業績見通しの変化\n\n2027年3月期通期の業績予想は、売上収益268億円（前期比10.0%増）、営業利益25億円（前期比56.2%増）、親会社帰属当期利益17億円（前期比43.1%増）と大幅な増益を見込んでいます。第2四半期累計では売上収益125億円（前年同期比10.0%増）、営業利益3億2,000万円（前年同期比21.6%増）を予想しています。なお、直近公表の業績予想からの変更はありません。\n\n### 株主還元 [...] 2027年3月期第1四半期の売上収益は前年同期比5.2%増の57億円となりましたが、収益性は大幅に悪化しました。営業損失は3億9,500万円（前年同期は7,000万円の損失）、親会社帰属の四半期損失は2億5,300万円（前年同期は4,100万円の損失）と損失が拡大しています。これは、前年比約5.6倍となる247名の新卒入社に伴う人件費・教育研修費の先行計上に加え、AIによる特定スキル人材需要の想定以上の減少や低単価案件からの撤退による稼働率低下（全体74.2%、前年同期比1.9ポイント減）が主因です。一方、AI・データ関連売上は83.6%増と急拡大しています。\n\n### 貸借対照表の変化\n\n資産合計は前年度末比9.4%減の115億円となりました。現金及び現金同等物が15.7%減、営業債権及びその他の債権が15.8%減と流動資産が大幅に減少しています。負債合計は8.6%減の56億円、資本合計は10.2%減の59億円となり、利益剰余金の減少が主因です。\n\n### キャッシュフローの変化</summary>\n</result>\n<result relevance=\"0.91\" provider=\"tavily\">\n<title>メンバーズ(2130) 東証プライム 決算 | マーケット情報 | 松井証券</title>\n<url>https://finance.matsui.co.jp/stock/2130/settlement/index</url>\n<summary>減益\n\n  16.51円\n\n| 決算期 | 決算種別 | 売上高 | 営業利益 | 経常利益 | 純利益 | 1株益 |\n ---  ---  --- \n| 2026年6月期  第１四半期 | 第１ | 5,750 | -395 | -345 | -252 | -19.73 |\n| 2026年3月期  通期 | 通期 | 24,424 | 1,600 | 1,641 | 1,213 | 94.92 |\n| 2025年12月期  第３四半期累計 | 第３ | 17,648 | 752 | 819 | 533 | 41.75 |\n| 2025年9月期  第２四半期累計 | 第２ | 11,448 | 263 | 316 | 195 | 15.31 |\n| 2025年6月期  第１四半期 | 第１ | 5,467 | -70 | -43 | -41 | -3.22 |\n\n単位：百万円（1株当りの項目　単位：円）\n\n#### 四半期毎\n\n### 前年同期との比較\n\n #### 売上高\n\n  増収\n\n  2.83億円\n #### 営業利益\n\n  減益 [...] ### 決算情報\n\n| 決算期 (決算発表日) | 売上高 | 営業利益 | 経常利益 | 純利益 | 1株益 |\n ---  ---  --- |\n| 2026年3月期  (2026/05/14) | 24,424 | 1,600 | 1,641 | 1,213 | 94.92 |\n| 2025年3月期  (2025/05/14) | 22,329 | 493 | 472 | 349 | 27.4 |\n| 2024年3月期  (2024/05/10) | 20,467 | 46 | 136 | 126 | 9.71 |\n| 2023年3月期  (2023/05/10) | 17,662 | 1,441 | 1,399 | 1,009 | 76.18 |\n| 2022年3月期  (2022/05/10) | 14,938 | 1,876 | 1,896 | 1,404 | 107.73 |\n\n単位：百万円（1株当りの項目　単位：円）\n\n### 財務情報 [...] 減益\n\n  3.25億円\n #### 経常利益\n\n  減益\n\n  3.02億円\n #### 純利益\n\n  減益\n\n  2.11億円\n #### 1株益\n\n  減益\n\n  16.51円\n\n| 決算期 | 決算種別 | 売上高 | 営業利益 | 経常利益 | 純利益 | 1株益 |\n ---  ---  --- \n| 2026年6月期  第１四半期 | 第１ | 5,750 | -395 | -345 | -252 | -19.73 |\n| 2026年3月期  第４四半期 | 第４ | 6,776 | 848 | 822 | 680 | 53.21 |\n| 2025年12月期  第３四半期 | 第３ | 6,200 | 489 | 503 | 338 | 26.48 |\n| 2025年9月期  第２四半期 | 第２ | 5,981 | 333 | 359 | 236 | 18.53 |\n| 2025年6月期  第１四半期 | 第１ | 5,467 | -70 | -43 | -41 | -3.22 |\n\n単位：百万円（1株当りの項目　単位：円）\n\n### 業績・決算情報（年度ごと）</summary>\n</result>\n<result relevance=\"0.84\" provider=\"tavily\">\n<title>メンバーズ[2130]：2026年３月期 決算説明資料 2026年5月14日(適時開示) ：日経会社情報DIGITAL：日本経済新聞</title>\n<url>https://www.nikkei.com/nkd/disclosure/tdnr/20260513530592</url>\n<summary># メンバーズ：2026年３月期 決算説明資料\n\n# メンバーズ\n\n メンバーズ： 2026/5/14 15:30 発表資料   日経会社情報DIGITALで詳細情報をみる     /\n\nウィンドウ幅に合わせる\n\nページサイズに合わせる\n\n拡大\n\n縮小\n\n 日経会社情報\n 日経電子版\n マーケット\n 株式\n 適時開示速報\n Myニュース\n 朝刊・夕刊\n ご意見・ご要望\n ヘルプ\n\n  ログアウト    ログイン\n ご購読の申し込み</summary>\n</result>\n</search_results>",
+        "content_sha256": "5570930195ff38632f19bc336d265b4bad0b0474eb1d750c0db39aa32b481073"
+      }
+    ]
+  },
+  {
+    "case": "captured_5989.T",
+    "ticker": "5989.T",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: 2027年3月期 第1四半期\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: 2026年3月期 第1四半期\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 3\nLATEST_RESULTS_CURRENCY: JPY\nLATEST_RESULTS_REPORTING_UNIT: 百万円\nLATEST_RESULTS_REVENUE: 50862\nLATEST_RESULTS_PRIOR_REVENUE: N/A\nLATEST_RESULTS_EARNINGS: N/A\nLATEST_RESULTS_PRIOR_EARNINGS: N/A\nLATEST_RESULTS_EARNINGS_SCOPE: 営業利益\nLATEST_RESULTS_SOURCE_URL: https://finance.biggo.jp/news/jpx_tdnet_140120260805509915\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: INVALID_COMPARATIVE_CLAIM\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "capture": {
+      "date": "2026-10-06",
+      "kind": "verbatim_trimmed_retained_excerpt",
+      "original_content_sha256": [
+        "9b409e0b6a6be2d7eddb2a5bbdeee9ffa79b82478a40efab45ff399267d12ca9"
+      ]
+    },
+    "evidence_records": [
+      {
+        "tool_name": "search_foreign_sources",
+        "urls": [
+          "https://finance.yahoo.co.jp/quote/5989.Q/financials",
+          "https://finance.biggo.jp/news/jpx_tdnet_140120260805509915",
+          "https://www.nikkei.com/nkd/company/kigyo?scode=5989",
+          "https://www.h1-co.jp/ir/financial/forecast.html",
+          "https://www.reuters.com/jp/markets/companies/5989.T/profile"
+        ],
+        "evidence_status": "RESULTS_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://finance.yahoo.co.jp/quote/5989.Q/financials",
+            "SECONDARY"
+          ],
+          [
+            "https://finance.biggo.jp/news/jpx_tdnet_140120260805509915",
+            "SECONDARY"
+          ],
+          [
+            "https://www.nikkei.com/nkd/company/kigyo?scode=5989",
+            "SECONDARY"
+          ],
+          [
+            "https://www.h1-co.jp/ir/financial/forecast.html",
+            "SECONDARY"
+          ],
+          [
+            "https://www.reuters.com/jp/markets/companies/5989.T/profile",
+            "SECONDARY"
+          ]
+        ],
+        "content": "STATUS: RESULTS_FOUND\n### Foreign Source Search Results\nQuery: エイチワン 5989 2027年3月期 第1四半期決算短信 売上収益 営業利益 四半期利益 2026年8月6日\nPurpose: latest_results\nTicker: 5989.T (H-One Co.,Ltd.)\nSources: Tavily\n\nNote: Verify dates and currencies in the source data.\n\n<search_results source=\"tavily\" data_type=\"external_web_content\">\n<result relevance=\"0.96\" provider=\"tavily\">\n<title>(株)エイチワン【5989】：決算情報</title>\n<url>https://finance.yahoo.co.jp/quote/5989.Q/financials</url>\n<summary>2027年3月期通期の業績予想は、売上収益が前期比9.7%増の2,300億円、営業利益が9.2%増の160億円、親会社帰属の当期利益が0.2%増の110億円と増収増益を</summary>\n</result>\n<result relevance=\"0.95\" provider=\"tavily\">\n<title>[エイチワン 5989.T] 2027年3月期 第1四半期決算短信〔IFRS ...</title>\n<url>https://finance.biggo.jp/news/jpx_tdnet_140120260805509915</url>\n<summary>エイチワンが発表した2027年3月期第1四半期の連結決算は、売上収益が前年同期比0.4％増の508億62百万円と微増したものの、営業利益は同43.6％減の14</summary>\n</result>\n<result relevance=\"0.89\" provider=\"tavily\">\n<title>【エイチワン】[5989]IR情報 中期経営計画や決算短信 | 日経電子版</title>\n<url>https://www.nikkei.com/nkd/company/kigyo?scode=5989</url>\n<summary>閉じる\n\n現在ご利用頂けません。\n\n現在値(15:30)：\n:   1,403 円\n\n前日比：\n:   ＋14(＋1.01％)\n\n トップ\n ニュース\n チャート\n 株価\n 業績・財務\n 市場予想\n 企業発情報\n 企業概要\n 株主情報\n 年収\n\n 適時開示速報\n プレスリリース\n 有価証券報告書\n\n## 適時開示速報　　※適時開示速報には企業が「PR情報等」として開示した内容も含まれます。\n\n一覧\n\n※適時開示速報には企業が「PR情報等」として開示した内容も含まれます。\n\n| 発表日  時刻 | 表題 |\n --- |\n| 26/8/6 16:00 | 2027年3月期 第1四半期決算短信〔IFRS〕(連結) |\n| 26/7/2 15:49 | コーポレート・ガバナンスに関する報告書 2026/07/02 |\n| 26/6/24 16:00 | 執行役員の異動および委嘱事項の変更に関するお知らせ |\n| 26/6/24 16:00 | 支配株主等に関する事項について |\n| 26/6/20 8:00 | 「第20期定時株主総会招集ご通知」の一部訂正について |\n\n適時開示速報一覧 [...] 朝刊・夕刊\n  日経会社情報\n  人事ウオッチ\n  Myニュース\n\n投資情報専門メディア「日経ヴェリタス」が２カ月無料　詳細はこちら >\n\n5989 : 自動車部品\n\nプライム\n\n【自動車部品】ホンダ系。車体骨格部品が主力。航空機部品も。\n\n# エイチワン\n\n## Myニュース\n\n有料会員の方のみご利用になれます。  \n 気になる企業をフォローすれば、  \n 「Myニュース」でまとめよみができます。\n\nもっと詳しくログイン\n\n 世界の市況\n 銘柄フォルダ)\n 検索・履歴)\n ランキング\n もっと見る)\n\n#### もっと見る\n\n閉じる\n\n 日経会社情報 DIGITAL 企業の最新ニュース、株価・財務データも掲載\n スマートチャート チャートとニュースを併せて閲覧。各種指標も\n 適時開示 決算など上場企業の適時開示を一覧・検索\n 有価証券報告書 上場企業を中心に有価証券報告書などを掲載\n プレスリリース 企業などのリリースを掲載。検索にも対応\n 統計・指標 経済動向の把握に役に立つ指標ダッシュボード\n\n閉じる\n\n現在ご利用頂けません。 [...] + 増やす\n  + 学ぶ\n  + 貯める\n  + 得する\n  + 借りる\n  + 備える\n  + コラム\n    - マネーの知識ここから\n    - 黄金堂パーラー\n    - マッスルマネー\n    - お金のトリセツ\n    - お金を殖やすツボとドツボ\n    - みんなのESG\n    - 20代からのマイホーム考\n    - 日経マネー特集\n    - プロの羅針盤\n    - 家計の法律クリニック\n    - 人生100年こわくない\n    - 統計の森を歩く\n    - 投資つれづれ草\n    - マネーの本棚\n    - マネーのとびら\n    - マネー手帳\n テック\n\n  + サイエンス\n  + モバイル・テレコム\n  + カーボンゼロ\n  + サイバーセキュリティー\n  + 半導体\n  + SNS\n  + AI\n  + コラム\n    - スタートアップGlobe\n    - CBインサイツ\n    - 36Kr\n    - DealStreetAsia\n    - モバイルの達人\n    - 教えて山本さん！\n    - 日経サイエンス\n スポーツ</summary>\n</result>\n<result relevance=\"0.82\" provider=\"tavily\">\n<title>連結業績見通し | 株式会社エイチワン</title>\n<url>https://www.h1-co.jp/ir/financial/forecast.html</url>\n<summary># 株式会社エイチワン 株式会社エイチワン\n\n お問い合わせ\n サイトマップ\n ENGLISH\n\n文字サイズ\n:   標準;)\n:   大;)\n\n HOME\n IR情報\n 業績・財務\n 連結業績見通し\n\nPRINT)\n\n# 連結業績見通し\n\n## 2027年3月期の連結業績予想 （2026年4月1日～2027年3月31日）\n\n(単位：百万円)\n\n|  | 2026年3月期 | 2027年3月期見通し (2026年5月14日公表) | 増減率 (前年同期比) |\n ---  --- |\n| 売上収益 | 209,659 | 230,000 | 9.7% |\n| 営業利益 | 14,648 | 16,000 | 9.2% |\n| 税引前利益 | 15,270 | 15,000 | △1.8% |\n| 親会社の所有者に帰属する当期利益 | 10,974 | 11,000 | 0.2% |\n| 基本的1株当たり当期利益 | 390.06円 | 390.80円 | 0.74円 |\n\n## IR情報\n\nPAGE  \nTOP</summary>\n</result>\n<result relevance=\"0.58\" provider=\"tavily\">\n<title>5989.T - | Stock Price & Latest News</title>\n<url>https://www.reuters.com/jp/markets/companies/5989.T/profile</url>\n<summary>エイチワングループは、自動車部品の製造及び販売を主たる業務とする。【事業内容】日本、北米、中国及びアジアの4つの地域別のセグメントを運営する。各</summary>\n</result>\n</search_results>",
+        "content_sha256": "9b409e0b6a6be2d7eddb2a5bbdeee9ffa79b82478a40efab45ff399267d12ca9"
+      }
+    ]
+  },
+  {
+    "case": "captured_8473.T",
+    "ticker": "8473.T",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: 2027年3月期 第1四半期\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: 2026年3月期 第1四半期\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 3\nLATEST_RESULTS_CURRENCY: JPY\nLATEST_RESULTS_REPORTING_UNIT: 億円\nLATEST_RESULTS_REVENUE: 5710\nLATEST_RESULTS_PRIOR_REVENUE: 4434\nLATEST_RESULTS_EARNINGS: 1481\nLATEST_RESULTS_PRIOR_EARNINGS: 846\nLATEST_RESULTS_EARNINGS_SCOPE: 親会社の所有者に帰属する四半期利益\nLATEST_RESULTS_SOURCE_URL: https://www.sbigroup.co.jp/investors/library/presentation/pdf/presen260731.pdf\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: PERIOD_END_NOT_RETAINED\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "capture": {
+      "date": "2026-10-06",
+      "kind": "verbatim_trimmed_retained_excerpt",
+      "original_content_sha256": [
+        "8dab76b936410b38393ee46963b166912f7255e3f6550f01fbc49a23389afe75"
+      ]
+    },
+    "evidence_records": [
+      {
+        "tool_name": "get_official_document",
+        "urls": [
+          "https://www.sbigroup.co.jp/investors/library/presentation/pdf/presen260731.pdf"
+        ],
+        "evidence_status": "EVIDENCE_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://www.sbigroup.co.jp/investors/library/presentation/pdf/presen260731.pdf",
+            "PRIMARY_ISSUER"
+          ]
+        ],
+        "content": "STATUS: EVIDENCE_FOUND\nDOCUMENT_METADATA: {\"authority\": \"PRIMARY_ISSUER\", \"backend\": \"pypdf\", \"bytes_downloaded\": 1459437, \"candidate_paths\": [], \"evidence_chars\": 6105, \"pages_selected\": [1, 7, 21, 22, 23, 26, 27, 28, 31, 32, 35, 39], \"pages_total\": 62, \"reason\": null, \"source_url\": \"https://www.sbigroup.co.jp/investors/library/presentation/pdf/presen260731.pdf\", \"status\": \"EXTRACTED\"}\n\n[PDF PAGE 1]\n2027年3月期 第1四半期\nSBIホールディングス株式会社\n決算説明会\n2026年7月31日\nStrategic\nBusiness\nInnovator\n\n\n[PDF PAGE 7]\n6\n【無断転載禁止】\n2026年3月期1Q\n（2025年4月-6月）\n2027年3月期1Q\n（2026年4月-6月）\n前年同期比\n増減率（%）\n金融サービス\n事業 3,848 4,048 +5.2\n資産運用\n事業 86 125 +45.5\nPE 投資事業 421 1,361 +223.0\n暗号資産\n事業 111 139 +25.9\n次世代事業 66 132 +98.7\n（単位：億円）\n2027年3月期 第1四半期 セグメント別業績（IFRS）\n2026年3月期1Q\n（2025年4月-6月）\n2027年3月期1Q\n（2026年4月-6月）\n前年同期比\n増減率（%）\n727 1,160 +59.5\n13 27 +103.6\n280 1,199 +328.0\n▲5 ▲14 ｰ\n10 36 +262.5\n収益（売上高） 税引前利益\n過去最高※1\n過去最高※1\n【前年同期比較】\n 活況な株式市場を背景に、金融サービス事業や資産運用事業が大きく伸長\n PE投資事業は、複数の銘柄で評価益を計上したことが大きく貢献\n過去最高※1\n過去最高※1\n過去最高※1\n過去最高※1\n過去最高※1\n過去最高※1\n※1 現在のセグメントで業績を開示している2022年3月期以降の1Q業績との比較。なおFS事業は、IFRSを適用した2013年3月期以降の1Q業績との比較においても過去最高\n※2 セグメント別の数字には連結消去は含まれておりません。\n\n[PDF PAGE 21]\n20\n【無断転載禁止】\n74 77 87 89 11121 14 78 29 37\n157 147\n154 148 170\n128 107\n170\n160\n217\n241 321\n294 349\n380\n0\n100\n200\n300\n400\n500\n600\n700\n800\n900\n1,000\n2026年3月期\n第１四半期\n2026年3月期\n第2四半期\n2026年3月期\n第3四半期\n2026年3月期\n第4四半期\n2027年3月期\n第1四半期\nSBI証券の四半期収益は堅調に拡大\n※日本会計基準に基づく\n（億円）\n委託手数料\nトレーディング損益\n引受・募集・売出手数料\n金融収益\n（2026年\n4月～6月）\n前四半期比\n+18.3%\n【SBI証券の四半期連結営業収益（売上高）比較】\n（投資信託報酬、アドバイザ\nリーフィー、銀行代理業手\n数料、信用管理料、等）\n783\n（2025年\n4月～6月）\n（2025年\n10月～12月）\n621\n667\n（対面での国内株式、\n外国株式、先物、個別\n株オプション、等）\n（2025年\n7月～9月）\n1-（2） 証券事業：\n（2026年\n1月～3月）\n774\n916\nその他の受入手数料\n※ 日本会計基準に基づく\n\n[PDF PAGE 22]\n21\n【無断転載禁止】\n1,867 \n4,467 \n2,461 \n0\n2,000\n4,000\n6,000\n8,000\n10,000\n12,000\n14,000\n16,000\n3月 3月 3月 3月 3月 3月 3月 3月 3月 3月 3月 3月 3月 3月 3月 3月 3月 3月\n【SBIグループ※1および大手対面証券との証券口座数の推移】\n（千口座）\n野村\nSBI\nCAGR※2：13.4%\n※1 SBIグループの口座数にはSBIネオトレード証券、FOLIOを含む\n※2 CAGR（年平均成長率）は2009年3月末-2026年6月末の期間で計算\nSMBC日興\nSBIグループの証券口座数は\n「ゼロ革命」とオープンアライアンスが貢献し\n業界初となる1,600万口座を突破\n（2009年3月末～2026年3月末）\n2023年9月30日：\n「ゼロ革命」を開始\n2022年5月：\n手数料無料化を2024年3月期\n上半期中に実現すると発表\n2019年6月：\nオンラインの国内株式委託\n手数料無料化構想を発表\n（末）\nCAGR※2：XX%\nCAGR※2：1.9%\n2026年2010年 2012年 2014年 2016年 2018年 2020年 2022年 2024年\n16,383千口座\n2026年6月末時点\n6,136千口座\n●万口座\n1-（2） 証券事業：\n8月3日\n発表予定\n\n[PDF PAGE 23]\n22\n【無断転載禁止】\n18.3 20.0 22.7 \n31.6 33.1 \n40.7 3.7 5.6 6.9 \n12.3 16.9 \n25.4 \n0.0\n10.0\n20.0\n30.0\n40.0\n50.0\n60.0\n70.0\n80.0\n4Q 1Q 2Q 3Q 4Q 1Q 2Q 3Q 4Q 1Q 2Q 3Q 4Q 1Q 2Q 3Q 4Q 1Q 2Q 3Q 4Q 1Q\nSBIグループの証券事業における預り資産残高は\n投信を中心とした積立投資の拡大により75兆円を突破\n2026年3月期2025年3月期2024年3月期2023年3月期2022年3月期2021年3月期\n（兆円）\n～2029年3月末までに、預り資産100兆円を目指す～\n預り資産残高※1の推移\n（2021年3月期4Q末～2027年3月期1Q末）\n※1 預り資産残高にはFOLIO、SBIネオトレード証券等を含む\n※2 投信残高はSBI証券の残高のみを記載\n（末）\nゼロ革命開始\n（2023年9月）\n2027年3月期\n投信残高\n31.2兆円\n株式・債券、他\n44.1兆円\n※2\n66.1\n50.1\n44.0\n29.6\n25.622.0\n1-（2） 証券事業：\n75.3兆円\n\n[PDF PAGE 26]\n25\n【無断転載禁止】\n130 \n155 163 \n182 216 \n0\n50\n100\n150\n200\n250\n300\n350\n400\n1Q 2Q 3Q 4Q 1Q\n0.00\n0.50\n1.00\n1.50\n2.00\n2.50\n3.00\n3.50\n4月 5月 6月 7月 8月 9月 10月11月12月 1月 2月 3月 4月 5月 6月\n1Q 2Q 3Q 4Q 1Q\n【金融収益の推移】\n（億円）\n（兆円）\nSBI証券の信用取引建玉残高は3.2兆円を突破し\n金融収益は過去最高\n2027年3月期1Q末\n3.26兆円\n2026年3月期1Q末\n1.92兆円\n【信用取引建玉残高（各月末）の推移】\n（末）\n2026年3月期\n2027年3月期2026年3月期\n前年同期比\n+57.7%\n294\n321\n241\n■ うち信用取引分\n349\n2027年3月期\n380\n過去最高 過去最高\n① 金融収益\n\n[PDF PAGE 27]\n26\n【無断転載禁止】\n4\n23 38 49\n27 36\n17\n17\n24\n37\n6865\n83\n83 \n64\n113\n0\n50\n100\n150\n200\n250\n1Q 1Q 1Q 1Q 1Q\n（億円）\nSBI証券のトレーディング収益は過去最高を達成\n2027年\n3月期\n2023年\n3月期\n2024年\n3月期\n※2023年3月期第3四半期以降、暗号資産取引収益は\nトレーディング収益に含まれない\n2025年\n3月期\n2026年\n3月期\n128\n156\n109\n138\n米国金利環境を背景として外債収益は\n横ばいとなったが、好調な日本株式市\n場を背景に株式等収益が大幅に増加\nスポット収益は前年同期並みも、高金\n利通貨への旺盛な投資需要を受け、\nスワップ収益は過去最高\nFX収益\n債券等収益・株式等収益他\n119 131 143 \n233 \n0\n50\n100\n150\n200\n250\n2Q 3Q 4Q 1Q\n2027年3月期2026年3月期\n（億円）\nSBIグループのFX事業※1に\nおける顧客損益※2の推移\n217\n※1 SBI証券、SBI FXトレード、マネースクエアの合算\n※2 未実現損益も含む\n過去最高\n② トレーディング収益\nFX収益\n株式等収益他\n債券等収益\n暗号資産取引収益※\n\n[PDF PAGE 28]\n27\n【無断転載禁止】\n5.6 \n8.2 \n14.6 \n19.0 \n31.2 \n0.32 \n0.27 \n1.06 \n0.72 \n1.33 \n0.0\n0.5\n1.0\n1.5\n2.0\n0.0\n5.0\n10.0\n15.0\n20.0\n25.0\n30.0\n35.0\n1Q 2Q 3Q 4Q 1Q 2Q 3Q 4Q 1Q 2Q 3Q 4Q 1Q 2Q 3Q 4Q 1Q\n四半期末残高\n純増（買付-解約）\n【投資信託 信託報酬額】\n40 \n47 \n53 \n57 \n64 \n0\n5\n10\n15\n20\n25\n30\n35\n40\n45\n50\n55\n60\n65\n70\n1Q 2Q 3Q 4Q 1Q\n【SBI証券の投資信託 四半期末残高推移】\n2023年\n3月期\n2024年\n3月期\nSBI証券の信託報酬額は\n投資信託残高の増加により過去最高\n（兆円）\n（億円）\n2025年\n3月期 2027年3月期\n前年同期比\n+60.0％\n（末）\n（兆円）\n2026年\n3月期 2026年3月期\n～月間の積立投資設定金額は3,300億円超～\n過去最高過去最高\n前年同期末比\n+64.2%\n2027年\n3月期\n③ その他の受入手数料：信託報酬\n\n[PDF PAGE 31]\n30\n【無断転載禁止】\n152 183 \n297 267 \n369 356 266 356 315 316 \n520 \n1,415 \n1,519 \n0\n200\n400\n600\n800\n1,000\n1,200\n1,400\n1,600\n1Q 2Q 3Q 4Q 1Q 2Q 3Q 4Q 1Q 2Q 3Q 4Q 1Q\n2024年3月期 2025年3月期 2026年3月期 0\n~販売額は四半期として過去最高を更新~\nSBI証券における個人向け国債の販売額と10年国債金利の推移\n（億円）\n（2024年3月期1Q～2027年3月期1Q）\n2026年度\n0.0\n0.5\n1.0\n1.5\n2.0\n2.5\n3.0\n（%）\n■ 個人向け国債の販売額（左軸）\nー 10年国債金利（右軸）\n今後も追加的な利上げが見込まれる中\n投資妙味が高まる個人向け国債の需要の継続が予想される\n3.5\nSBI証券では個人向け国債を戦略的商品として注力\n⑤ 引受・募集・売出手数料：個人向け国債\n2027年3月期\n\n[PDF PAGE 32]\n31\n【無断転載禁止】\nSBI証券はプライマリーやセカンダリーの\n株式・債券の引受業務を強化\nIPO引受社数ランキング（2026年4月-2026年6月）\n※集計対象は新規上場企業の国内引受分で、追加売出分と海外は含まず。\n※各社発表資料より当社にて集計\n2026年4月-2026年6月での全上場会社数は11社\n社名 件数 関与率(%)\nSBI 10 90.9\nマネックス 9 81.8\n岡三 8 72.7\n岩井コスモ 6 54.5\n松井 6 54.5\n楽天 6 54.5\nSMBC日興 5 45.5\n東海東京 5 45.5\n大和 4 36.4\nみずほ 4 36.4\n三菱UFJ eスマート 4 36.4\nSBI証券の事業債・公共債の引受額の推移\n244 \n790 \n1,148 1,355 \n1,051 \n2023年\n3月期\n1Q\n2024年\n3月期\n1Q\n2025年\n3月期\n1Q\n2026年\n3月期\n1Q\n2027年\n3月期\n1Q\n100 \n1,225 \n1,842 2,140 2,460 \n2023年\n3月期\n1Q\n2024年\n3月期\n1Q\n2025年\n3月期\n1Q\n2026年\n3月期\n1Q\n2027年\n3月期\n1Q\nSBI証券の円債収益※の推移\n（2023年3月期1Qを100として指数化）\n(単位：億円)\n※事業債・公共債の引受に係る収益\n⑤ 引受・募集・売出手数料：IPO・債券引受\n\n[PDF PAGE 35]\n34\n【無断転載禁止】\nSBIインシュアランスグループの\n保有契約合計数の推移\n100 \n161 173 187 208 233 246 260 282 299 318 325\n0\n50\n100\n150\n200\n250\n300\n350\n2016年\n3月末\n2017年\n3月末\n2018年\n3月末\n2019年\n3月末\n2020年\n3月末\n2021年\n3月末\n2022年\n3月末\n2023年\n3月末\n2024年\n3月末\n2025年\n3月末\n2026年\n3月末\n2026年\n6月末\nSBI IG年平均成長率(CAGR)\n（2016年3月末～2026年6月末） 13.6% \n日本生命（単体）(CAGR)\n（2015年12月末～2026年3月末）\n（参考）\n第一生命（単体）(CAGR)\n（2015年12月末～2026年3月末）\n6.8% \n2.9 % \n2020年9月\nSBI常口セーフティ少短\nがグループ入り 2019年6月\nSBIプリズム少短\nがグループ入り2016年9月\nSBI日本少短が\nグループ入り\n（万件）\n2023年9月\nSBIペット少短が\nグループ入り \n2025年4月末\n300万件突破！\n1-（3） 保険事業：\n\n[PDF PAGE 39]\n38\n【無断転載禁止】\nSBIグローバルアセットマネジメントグループの\n運用資産残高は約14兆円に\n0\n10,000\n20,000\n30,000\n40,000\n50,000\n60,000\n70,000\n80,000\n90,000\n100,000\n110,000\n120,000\n130,000\n140,000\n2015年\n3月末\n2016年\n3月末\n2017年\n3月末\n2018年\n3月末\n2019年\n3月末\n2020年\n3月末\n2021年\n3月末\n2022年\n3月末\n2023年\n3月末\n2024年\n3月末\n2025年\n3月末\n2026年\n3月末\n2026年\n6月末\n（億円）\n（注1） 各月末日における為替レートを適用\n（注2） 億円未満は四捨五入\n（注3） SBIグローバルアセットマネジメント・グループの各社（以下「アセットマネジメント各社」）については、投資信託と投資顧問のそれぞれに計上しており、\n一部重複がある\n（注4）  アセットマネジメント各社の数値は公募投信、公社債投信、私募投信を含む\nSBI岡三アセット\nマネジメント\n2兆 7,873億円\n←\n～2026年度中に20兆円、2029年度までに50兆円達成を目指す～\n2. 資産運用事業：\nSBIアセット\nマネジメント\n（CARRET含む）\n9兆 4,020億円\n←\nレオス・キャピタル\nワークス\n1兆 7,911億円\n←\n13兆 9,804億円",
+        "content_sha256": "8dab76b936410b38393ee46963b166912f7255e3f6550f01fbc49a23389afe75"
+      }
+    ]
+  },
+  {
+    "case": "1112_HK_captured_flattened_results",
+    "ticker": "1112.HK",
+    "source_artifact": "1112.HK_20261006_191047_analysis.json",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: Six months ended 30 June 2026\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: Six months ended 30 June 2025\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 6\nLATEST_RESULTS_CURRENCY: RMB\nLATEST_RESULTS_REPORTING_UNIT: million\nLATEST_RESULTS_REVENUE: 8695.9\nLATEST_RESULTS_PRIOR_REVENUE: 7019.2\nLATEST_RESULTS_EARNINGS: 610.6\nLATEST_RESULTS_PRIOR_EARNINGS: 71.0\nLATEST_RESULTS_EARNINGS_SCOPE: Net profit (Profit for the period)\nLATEST_RESULTS_SOURCE_URL: https://www.hh.global/news/h-and-h-group-interim-results-2026-revenue-up-23-7\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_NORMALIZATION_REASON: COMPARATIVE_ROWS_UNBOUND\nLATEST_RESULTS_WITHHELD_FIELDS: LATEST_RESULTS_REVENUE_GROWTH_YOY, LATEST_RESULTS_EARNINGS_GROWTH_YOY\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---",
+    "evidence_records": [
+      {
+        "tool_name": "get_official_document",
+        "urls": [
+          "https://www.hh.global/news/h-and-h-group-interim-results-2026-revenue-up-23-7"
+        ],
+        "requested_urls": [
+          "https://www.hh.global/news/h-and-h-group-interim-results-2026-revenue-up-23-7"
+        ],
+        "evidence_status": "EVIDENCE_FOUND",
+        "execution_status": "SUCCEEDED",
+        "blocked": false,
+        "authority_by_url": [
+          [
+            "https://www.hh.global/news/h-and-h-group-interim-results-2026-revenue-up-23-7",
+            "PRIMARY_ISSUER"
+          ]
+        ],
+        "content": "STATUS: EVIDENCE_FOUND\nDOCUMENT_METADATA: {\"source_url\": \"https://www.hh.global/news/h-and-h-group-interim-results-2026-revenue-up-23-7\"}\nFINANCIAL RESULTS\nSix months ended 30 June\nSix months ended 30 June\n2026\n2025\nChange\nRMB million\nRMB million\n(Unaudited)\n(Unaudited)\nRevenue\n8,695.9\n7,019.2\n+23.9%\nEBITDA*\n1,583.3\n1,033.1\n+53.3%\nAdjusted EBITDA*\n1,891.9\n1,100.7\n+71.9%\nAdjusted EBITDA margin\n21.8%\n15.7%\n+6.1pts\nNet profit\n610.6\n71.0\n+760.0%\nAdjusted Net profit**\n919.2\n363.0\n+153.2%\nAdjusted net profit margin\n10.6%\n5.2%\n+5.4pts\n*EBITDA refers to earnings before interest, income tax expense, depreciation and amortization. Adjusted EBITDA = EBITDA + Non-cash losses of RMB308.6 million for the six months ended 30 June 2026 (six months ended 30 June 2025: losses of RMB57.6 million) + Non-recurring losses of nil for the six months ended 30 June 2026 (six months ended 30 June 2025: losses of RMB10.0 million).[^14]\n**Adjusted net profit = Net profit + EBITDA adjustment items of losses of RMB308.6 million for the six months ended 30 June 2026 (six months ended 30 June 2025: losses of RMB67.6 million) + Other non-cash losses of nil for the six months ended 30 June 2026 (six months ended 30 June 2025: losses of RMB224.4 million).[^15]\n",
+        "content_sha256": "4c739613d4ae2e13496021ee9d636e987b2e4c4b91d1998cf84945924323ae62"
+      }
+    ],
+    "expected_authority": "PRIMARY",
+    "expected_growth": [
+      "23.9%",
+      "760.0%"
+    ],
+    "justification": "Issuer-owned hh.global results release; two six-month June columns, ordered 2026/2025; RMB million in both columns; revenue8695.9/7019.2 and unadjusted total net profit610.6/71.0; the claim parenthetical denotes profit for the period rather than attributable or adjusted scope. Change column excluded."
+  }
+]

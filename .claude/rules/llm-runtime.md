@@ -38,7 +38,7 @@ diversity belongs at *verification* boundaries.
   facts; the policy module records what this repository has evidence for. Widening a
   qualification row requires running the live procedure, not reading a vendor doc.
 - **Per-seat construction facts are data**, never `if seat == ...`. Temperature,
-  client timeout, SDK retries and tier pins live in `SeatExecutionPolicy` so every
+  client timeout and tier pins live in `SeatExecutionPolicy` so every
   caller gets them — a pin placed at a graph call site reaches only the graph.
 - **One model instance per seat, never shared.** The tracking callback is bound per
   agent and carries that agent's output budget; returning one instance to several
@@ -69,6 +69,79 @@ retryable `server_error`/`timeout`, from the retry loop. **Never hand-wire a
 per-node backup model for transport errors.** Any walk of a composed runnable must
 descend only real LangChain composition types: attribute probing never terminates
 on a mock.
+
+## Request deadlines are sized at dispatch, never at construction
+
+**A tier switch, re-issue or failover re-sizes from the enclosing absolute
+deadline; never fix a request deadline at construction.** The tier is chosen per
+call, and Google enforces the client timeout server-side, so a timeout baked into
+a flex-built client rode along on the standard re-issue, degraded-standard calls
+and the failover copy (the October 2026 quick PM 504s). The deadline lives in a
+ContextVar set by `invoke_with_rate_limit_handling`, not on the model; the policy,
+`TimeoutClass` and admission live in `src/llm_runtime/timeouts.py`. A seat's
+budget class is data on its `SeatSpec`, never a display-name set. Policy numbers
+are settings read at the call, never module constants: the OpenAI ceiling is
+`OPENAI_REQUEST_CAP_SECONDS`, the APAC ceiling is its node total.
+
+**Keep retry policy in the runtime loop (`LLM_ATTEMPTS` total).** Clients configure
+one SDK attempt per request. That is a property of the three
+transport classes (`max_retries` defaults to one attempt and any other value is a
+construction error; a per-call `max_retries` is refused at dispatch), so never pass
+an attempt count to a constructor or factory. An SDK retry re-sends with the timeout
+sized for the first request, past the deadline it was sized from, and multiplies the
+loop's attempts: the operational seats sent `LLM_ATTEMPTS²` requests that way.
+The loop has one count for every retry, whatever its cause (429, 503, timeout):
+`BudgetPolicy.attempts`. A caller's explicit `max_attempts` can only lower it,
+never raise it. One SDK attempt is not one physical send: Google's aiohttp
+transport resends once on a server disconnect inside the same attempt, still
+under the hard deadline. A request-count test asserts sends at the SDK request
+layer, not `ainvoke` calls.
+
+**No plain OpenAI-family or Anthropic client.** Build every one with
+`new_openai_chat` / `new_anthropic_chat` in
+`src/llm_runtime/adapters/transports.py`, passing `dispatch_provider` (the vendor
+that receives the request) and the seat's `budget_timeout_class` explicitly. Never
+infer or default the provider: it selects the request ceiling and the flex-health
+key, and the factory's `_llm_runtime_provider` stamp lands only after construction.
+A compatible vendor refuses a `service_tier` before sending, whether it came
+from construction, bound kwargs or the invocation; it is never silently
+stripped. Tests patch those two seam
+functions, never `langchain_openai.ChatOpenAI`/`ChatAnthropic`.
+`tests/architecture/test_llm_constructor_boundary.py` rejects a plain client.
+Streaming stays refused until it is sized at dispatch and qualified.
+
+**A caller outside the graph invokes through `invoke_with_rate_limit_handling`,
+keyed by its seat's display name — never a bare `ainvoke` under a cap it computed
+itself.** The editor review, retrospective lesson and semantic judge were moved
+there; a bare `invocation_scope` would size the requests but drop the retries.
+The context must resolve to the seat (`seat_for_agent`): take it from
+`SEATS[...].callback_name`, never a hand-typed label. Read a cap from
+`resolve_invocation_budget` in `src/agents/runtime.py`, which resolves the seat.
+A seat's `client_timeout_seconds` is stamped on the transport at construction as
+`request_cap_override`, so it survives `model_copy`, fallback and failover. Every
+dispatch keeps the scope's deadline and resolves the request ceiling through
+`policy_for_provider`: the override, then the seat policy, then the receiving
+vendor's ceiling. Test a ceiling at the SDK request layer, not through
+construction fields.
+The writer chain and the portfolio macro classifier are on the loop too.
+Still direct, on purpose: the startup health check in `src/health_check.py`,
+bounded by `health_check_connectivity_timeout_seconds` and its seat's client
+timeout, with one SDK attempt, outside every analysis deadline.
+The article workflow binds `article_workflow_timeout_seconds` in
+`handle_article_generation`, hard-bounds each step at it, and never builds a
+writer fallback tier the remaining allowance cannot fit.
+
+Attempt telemetry must use the transport tier actually reached, including an in-call
+flex-to-standard retry or model failover. A quick-mode timeout after a flex latency
+fallback is still queue-affected even if the final request used standard; capacity
+and capability fallbacks do not establish that cause. Keep seat-specific tier policy
+in `SeatExecutionPolicy` so legacy and bound construction agree.
+
+A minimum useful attempt is a fraction of its plane's configured allowance for
+*one attempt* (`min_useful_seconds`, `MIN_USEFUL_ATTEMPT_FRACTION`); never a new absolute
+setting, and never derived from a clamped remainder or a multi-attempt total. For LLMs,
+use the smaller configured request ceiling and invocation cap. Embedding and MCP
+planes use their configured per-attempt allowance. Margins are `deadline_margin(cap)`.
 
 ## The pricing table goes stale silently
 

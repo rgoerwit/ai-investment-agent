@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -12,6 +11,7 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.types import RunnableConfig
 
+from src.analysis_snapshot import render_analysis_snapshot
 from src.async_utils import run_with_hard_timeout
 from src.config import config as settings_config
 from src.data_block_utils import unfenced_label
@@ -21,6 +21,7 @@ from src.error_safety import (
     summarize_failure_details,
 )
 from src.forensic_budget import AuditorBudgetLedger, AuditorBudgetPolicy
+from src.llm_runtime import timeouts as llm_timeouts
 from src.runtime_config import get_runtime_config
 from src.runtime_diagnostics import (
     ArtifactStatus,
@@ -34,12 +35,14 @@ from src.runtime_diagnostics import (
 )
 from src.runtime_services import get_current_tool_service
 from src.service_tiers import floor_llm_hard_timeout, floor_llm_total_timeout
-from src.tooling.runtime import ToolInvocation
+from src.tooling.runtime import ToolInvocation, tool_error_text
 from src.tooling.text_boundary import format_untrusted_block
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .analysis_integrity_prompt import ANALYSIS_INTEGRITY_BLOCK
 from .capital_structure import (
+    capital_structure_evidence_context,
     normalize_legal_output,
     preload_capital_structure_evidence,
 )
@@ -54,6 +57,7 @@ from .forensic_repair import (
 )
 from .governance_prompt import governance_block, governance_card
 from .output_validation import (
+    legal_recovery_preserves_assessments,
     log_output_diagnostics,
     log_truncation_diagnostic,
     should_fail_closed,
@@ -63,10 +67,29 @@ from .state import AgentState
 
 logger = structlog.get_logger(__name__)
 
-# Seeded from config so the full-mode budgets sit beside their quick-mode
-# sibling; kept as module constants because that is the seam tests patch.
-CONSULTANT_CALL_TIMEOUT_SECONDS = settings_config.consultant_call_timeout_seconds
-CONSULTANT_TOTAL_TIMEOUT_SECONDS = settings_config.consultant_total_timeout_seconds
+
+def consultant_call_timeout_seconds() -> float:
+    """Full-mode per-call Consultant cap, read from config at call time.
+
+    These were module constants seeded at import, so a config change after
+    import (a test override, a run-scoped settings object) never reached them.
+    """
+    return float(settings_config.consultant_call_timeout_seconds)
+
+
+def consultant_total_timeout_seconds(*, quick: bool | None = None) -> float:
+    """The Consultant node's total wall-clock budget, read at call time.
+
+    Quick mode comes from the run config (one source for the whole run), not
+    the graph-build argument; ``quick`` exists only for an explicit override.
+    """
+    if quick is None:
+        quick = get_runtime_config(settings_config).quick_mode_active
+    if quick:
+        return float(settings_config.consultant_quick_total_timeout_seconds)
+    return float(settings_config.consultant_total_timeout_seconds)
+
+
 # Headroom between the cooperative deadline (checked before each tool fan-out)
 # and the hard node bound below it. Wide enough that the graceful path — which
 # still produces a usable partial review — wins on any ordinary overshoot, and
@@ -166,8 +189,10 @@ async def _invoke_consultant_with_deadline(
     model_name: str | None,
     ticker: str,
     deadline: float,
-    total_timeout: float = CONSULTANT_TOTAL_TIMEOUT_SECONDS,
+    total_timeout: float | None = None,
 ) -> object:
+    if total_timeout is None:
+        total_timeout = consultant_total_timeout_seconds()
     remaining = remaining_consultant_budget(deadline)
     if remaining <= 0:
         raise TimeoutError(
@@ -177,21 +202,25 @@ async def _invoke_consultant_with_deadline(
     # Flex tier: a queued call may legitimately take minutes; floor the
     # per-call cap (the shrinking `remaining` budget still bounds the loop).
     per_call_cap = floor_llm_hard_timeout(
-        CONSULTANT_CALL_TIMEOUT_SECONDS,
+        consultant_call_timeout_seconds(),
         provider=provider,
         label="consultant_call_timeout",
     )
     timeout_s = min(per_call_cap, remaining)
     try:
-        return await agent_runtime.invoke_with_rate_limit_handling(
-            runnable,
-            messages,
-            context=context,
-            provider=provider,
-            model_name=model_name,
-            max_transient_attempts=1,
-            overall_timeout_seconds=timeout_s,
-        )
+        # Bound for the LLM request alone: the tool fan-out between requests
+        # runs outside it, so the injection judge in the tool hooks never sees
+        # the Consultant's LLM deadline (it fails open when admission refuses it).
+        with llm_timeouts.enclosing_deadline_at(deadline):
+            return await agent_runtime.invoke_with_rate_limit_handling(
+                runnable,
+                messages,
+                context=context,
+                provider=provider,
+                model_name=model_name,
+                max_attempts=1,
+                overall_timeout_seconds=timeout_s,
+            )
     except TimeoutError as exc:
         raise TimeoutError(
             f"Consultant call exceeded {timeout_s:.1f}s wall-clock timeout for {ticker}"
@@ -358,9 +387,7 @@ def create_consultant_node(
         cannot disagree about how long this seat is allowed to run.
         """
         return floor_llm_total_timeout(
-            settings_config.consultant_quick_total_timeout_seconds
-            if quick_mode
-            else CONSULTANT_TOTAL_TIMEOUT_SECONDS,
+            consultant_total_timeout_seconds(),
             provider=support.infer_provider_name(llm_with_tools or llm),
             label="consultant_total_timeout",
         )
@@ -388,10 +415,34 @@ def create_consultant_node(
             context.trade_date if context else datetime.now().strftime("%Y-%m-%d")
         )
 
+        consultant_profile = (
+            _select_quick_consultant_profile(state) if quick_mode else "full"
+        )
         debate_state = state.get("investment_debate_state")
         debate_history = "N/A"
         if debate_state and isinstance(debate_state, dict):
-            debate_history = debate_state.get("history", "N/A")
+            budget = _consultant_context_budget(
+                "debate",
+                profile=consultant_profile,
+            )
+            if debate_state.get("bull_history") or debate_state.get("bear_history"):
+                # Allocate to each side before truncation; the combined history
+                # starts with Bull and can otherwise exclude Bear completely.
+                header_chars = len("BULL RESEARCHER:\n\n\nBEAR RESEARCHER:\n")
+                per_side = max(1, (budget - header_chars) // 2)
+                debate_history = "\n\n".join(
+                    f"{side.upper()} RESEARCHER:\n"
+                    + support.summarize_for_pm(
+                        str(debate_state.get(f"{side}_history") or "NOT AVAILABLE"),
+                        "research",
+                        per_side,
+                    )
+                    for side in ("bull", "bear")
+                )
+            else:
+                debate_history = support.summarize_for_pm(
+                    str(debate_state.get("history", "N/A")), "debate", budget
+                )
         elif debate_state is None:
             logger.error(
                 "consultant_received_none_debate_state",
@@ -418,9 +469,6 @@ def create_consultant_node(
         value_trap = state.get("value_trap_report", "N/A")
         auditor = state.get("auditor_report") or "N/A"
         apac = state.get("apac_regional_report", "N/A")
-        consultant_profile = (
-            _select_quick_consultant_profile(state) if quick_mode else "full"
-        )
         evidence_index = (
             _build_decision_critical_evidence_index(state) if quick_mode else ""
         )
@@ -436,6 +484,7 @@ def create_consultant_node(
 
         all_context = f"""
 {evidence_index}\
+{render_analysis_snapshot(state.get("analysis_snapshot"))}
 === ANALYST REPORTS (SOURCE DATA) ===
 
 MARKET ANALYST REPORT:
@@ -452,7 +501,7 @@ FUNDAMENTALS ANALYST REPORT:
 {attribution_table}{conflict_table}
 === BULL/BEAR DEBATE HISTORY ===
 
-{support.summarize_for_pm(debate_history, "debate", _consultant_context_budget("debate", profile=consultant_profile)) if debate_history != "N/A" else "N/A"}
+{debate_history}
 
 === RESEARCH MANAGER SYNTHESIS ===
 
@@ -493,7 +542,7 @@ FUNDAMENTALS ANALYST REPORT:
                     "Cite the primary source you trust and identify the source you reject."
                 )
 
-        prompt = f"""{agent_prompt.system_message}
+        prompt = f"""{agent_prompt.system_message}{ANALYSIS_INTEGRITY_BLOCK}
 
 ANALYSIS DATE: {support._format_date_with_fy_hint(current_date)}
 TICKER: {ticker}
@@ -510,7 +559,7 @@ Provide your independent consultant review."""
             messages = [HumanMessage(content=prompt)]
             active_llm = llm_with_tools or llm
             total_timeout = _consultant_total_budget()
-            consultant_deadline = time.monotonic() + total_timeout
+            consultant_deadline = llm_timeouts.now() + total_timeout
 
             async def _invoke_loop_llm(runnable, loop_messages: list) -> object:
                 return await _invoke_consultant_with_deadline(
@@ -791,7 +840,7 @@ Provide your independent consultant review."""
     return consultant_node
 
 
-def create_legal_counsel_node(llm, tools: list) -> Callable:
+def create_legal_counsel_node(llm, tools: list, *, retry_llm: Any = None) -> Callable:
     """
     Create Legal Counsel node for PFIC or VIE detection.
     """
@@ -918,7 +967,7 @@ then return the complete required JSON assessment. Query terms alone are not fin
                                     tool_err, operation="legal_counsel_tool_failed"
                                 ),
                             )
-                            tool_output = f"TOOL_ERROR: {type(tool_err).__name__}"
+                            tool_output = tool_error_text(tool_err)
                     else:
                         tool_output = f"Unknown tool: {tool_call['name']}"
                     messages.append(
@@ -952,51 +1001,125 @@ then return the complete required JSON assessment. Query terms alone are not fin
                     getattr(final_response, "content", "")
                 )
 
+            from src.runtime_services import get_current_evidence_records
+
+            capital_structure_evidence = capital_structure_evidence_context(
+                capital_structure_evidence,
+                get_current_evidence_records(agent_key="legal_counsel"),
+            )
             normalized_response, capital_contract_present = normalize_legal_output(
                 response_str,
                 capital_structure_evidence,
             )
-            try:
-                if normalized_response is None:
-                    raise json.JSONDecodeError("No JSON object found", response_str, 0)
-                parsed = json.loads(normalized_response)
-                logger.debug(
-                    "legal_counsel_complete",
-                    ticker=ticker,
-                    pfic_status=parsed.get("pfic_status"),
-                    vie_structure=parsed.get("vie_structure"),
-                    capital_structure_classification=(
-                        parsed.get("capital_structure") or {}
-                    ).get("classification"),
-                    capital_structure_contract_present=capital_contract_present,
+            recovery_events: list[dict[str, Any]] = []
+            valid = (
+                normalized_response is not None
+                and validate_required_output("legal_counsel", normalized_response)["ok"]
+            )
+            if not valid and retry_llm is not None:
+                original_legal_output = normalized_response or ""
+                event = support.structural_recovery_event(
+                    "legal_counsel",
+                    "output_contract_violation",
+                    llm,
+                    retry_llm,
+                    response_str,
                 )
-                result = success_artifact(
-                    "legal_report",
-                    normalized_response,
-                    provider=support.infer_provider_name(llm),
-                )
-                result["sender"] = "legal_counsel"
-                return result
-            except json.JSONDecodeError:
+                recovery_events.append(event)
+                try:
+                    repair_response = await _invoke_agent_loop_llm(
+                        retry_llm,
+                        [
+                            *messages,
+                            HumanMessage(
+                                content=(
+                                    "The output contract failed. Using only the retained "
+                                    "evidence, return the complete required legal JSON. "
+                                    "Preserve uncertainty and source limitations; do not "
+                                    "invent findings or request tools.\n"
+                                    + format_untrusted_block(
+                                        response_str, "INVALID LEGAL OUTPUT"
+                                    )
+                                )
+                            ),
+                        ],
+                        context="Legal Counsel Structural Recovery",
+                        canonical_agent="Legal Counsel",
+                    )
+                    normalized_response, capital_contract_present = (
+                        normalize_legal_output(
+                            message_utils.extract_string_content(
+                                getattr(repair_response, "content", "")
+                            ),
+                            capital_structure_evidence,
+                        )
+                    )
+                    valid = (
+                        normalized_response is not None
+                        and validate_required_output(
+                            "legal_counsel", normalized_response
+                        )["ok"]
+                        and legal_recovery_preserves_assessments(
+                            original_legal_output, normalized_response
+                        )
+                    )
+                    event.update(
+                        outcome="accepted_text" if valid else "failed",
+                        final_output_valid=valid,
+                    )
+                except Exception as repair_exc:
+                    event.update(outcome="failed", final_output_valid=False)
+                    logger.warning(
+                        "legal_counsel_recovery_failed",
+                        ticker=ticker,
+                        **summarize_exception(
+                            repair_exc, operation="legal_counsel_recovery"
+                        ),
+                    )
+            if not valid or normalized_response is None:
                 logger.warning(
-                    "legal_counsel_invalid_json",
+                    "legal_counsel_invalid_output",
                     ticker=ticker,
-                    response_preview=redact_sensitive_text(response_str, max_chars=200),
+                    failure_kind="output_contract_violation",
                 )
                 fallback_report = _build_legal_fallback_report(
                     ticker=ticker,
                     country=country,
                     sector=sector,
-                    reason="Invalid JSON response from legal counsel",
+                    reason="Invalid legal output contract",
                 )
                 result = failure_artifact(
                     "legal_report",
-                    "Invalid JSON response from legal counsel",
+                    "Invalid legal output contract",
+                    error_kind="output_contract_violation",
                     provider=support.infer_provider_name(llm),
                     fallback_content=fallback_report,
                 )
                 result["sender"] = "legal_counsel"
+                if recovery_events:
+                    result["structural_recovery_events"] = recovery_events
                 return result
+
+            parsed = json.loads(normalized_response)
+            logger.debug(
+                "legal_counsel_complete",
+                ticker=ticker,
+                pfic_status=parsed.get("pfic_status"),
+                vie_structure=parsed.get("vie_structure"),
+                capital_structure_classification=(
+                    parsed.get("capital_structure") or {}
+                ).get("classification"),
+                capital_structure_contract_present=capital_contract_present,
+            )
+            result = success_artifact(
+                "legal_report",
+                normalized_response,
+                provider=support.infer_provider_name(llm),
+            )
+            result["sender"] = "legal_counsel"
+            if recovery_events:
+                result["structural_recovery_events"] = recovery_events
+            return result
         except Exception as exc:
             provider = support.infer_provider_name(llm)
             details = classify_failure(
@@ -1303,7 +1426,7 @@ Perform a forensic audit using your tools.{snapshot_block}"""
                                     tool_err, operation="auditor_tool_failed"
                                 ),
                             )
-                            tool_output = f"TOOL_ERROR: {type(tool_err).__name__}"
+                            tool_output = tool_error_text(tool_err)
                     else:
                         ledger.record_tool_failure(tool_call["name"])
                         tool_output = f"Unknown tool: {tool_call['name']}"

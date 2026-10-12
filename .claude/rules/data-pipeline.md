@@ -23,6 +23,16 @@ Divergences above the tolerance are recorded as source conflicts and surfaced to
 downstream reviewers. Recording a conflict is the mechanism; silently preferring one
 side is not.
 
+## Deadlines are settings, one per scope
+
+A market-data or filing-fetch timeout is a `Settings` field read at the call,
+never a literal or a module-level `ClientTimeout`. Pass it through
+`require_allowance` from `src/llm_runtime/timeouts.py` *before* creating the
+coroutine or thread, so a spent caller deadline takes the existing fallback
+without starting work; it sees the caller's deadline and any tool runner the
+fetch runs under. A `BlockingCallPolicy` needs no clamp: `run_blocking_call`
+applies it. Never bind a deadline around a fetch that runs content inspection. Group by meaning, not value. See `docs/CODEBASE_MEMORY.md`.
+
 ## Filing authority is not blind authority
 
 A filing-level value outranks an aggregator **only when it is an exact, confidently

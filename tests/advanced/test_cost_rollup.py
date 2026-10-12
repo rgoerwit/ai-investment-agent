@@ -131,6 +131,10 @@ class TestCanonicalAgentName:
             == "Fundamentals Analyst"
         )
         assert (
+            canonical_display_name("Fundamentals Analyst (RETRY-CAP)")
+            == "Fundamentals Analyst"
+        )
+        assert (
             canonical_display_name("Global Forensic Auditor Escalation")
             == "Global Forensic Auditor"
         )

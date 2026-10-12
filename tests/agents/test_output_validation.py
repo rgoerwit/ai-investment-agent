@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -908,6 +909,46 @@ def test_classify_output_contract_failure_detects_exact_api_cap_exhaustion():
     )
 
 
+@pytest.mark.parametrize("finish_reason", ["MAX_TOKENS", "length", "max_tokens"])
+def test_classify_output_contract_failure_trusts_the_provider_cap_stop(
+    finish_reason,
+):
+    """0995.HK: stopped at the cap with 19,111 of 19,115 tokens reported."""
+    runnable = SimpleNamespace(_configured_api_completion_tokens=19115)
+    response = SimpleNamespace(
+        usage_metadata={"output_tokens": 19111},
+        response_metadata={"finish_reason": finish_reason},
+    )
+
+    assert (
+        classify_output_contract_failure(
+            runnable=runnable,
+            response=response,
+            truncated=True,
+            validation={"ok": False, "missing": ["data_block"]},
+        )
+        == "output_cap_exhausted"
+    )
+
+
+def test_classify_output_contract_failure_clean_stop_below_cap_is_not_cap():
+    runnable = SimpleNamespace(_configured_api_completion_tokens=19115)
+    response = SimpleNamespace(
+        usage_metadata={"output_tokens": 19111},
+        response_metadata={"finish_reason": "STOP"},
+    )
+
+    assert (
+        classify_output_contract_failure(
+            runnable=runnable,
+            response=response,
+            truncated=True,
+            validation={"ok": False, "missing": ["data_block"]},
+        )
+        == "incomplete_structured_output"
+    )
+
+
 def test_classify_output_contract_failure_keeps_below_cap_omission_distinct():
     runnable = SimpleNamespace(
         _configured_max_completion_tokens=10923,
@@ -938,4 +979,78 @@ def test_classify_output_contract_failure_without_usage_reports_incomplete_struc
             validation={"ok": False, "missing": ["data_block"]},
         )
         == "incomplete_structured_output"
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("pfic_status", None),
+        ("pfic_status", "UNRECOGNIZED"),
+        ("vie_structure", []),
+        ("cmic_status", ""),
+        ("other_regulatory_risks", {}),
+        ("capital_structure", []),
+    ],
+)
+def test_legal_output_rejects_missing_or_malformed_decision_fields(field, value):
+    payload = {
+        "pfic_status": "UNCERTAIN",
+        "vie_structure": "N/A",
+        "cmic_status": "N/A",
+        "other_regulatory_risks": [],
+        "capital_structure": {},
+    }
+    assert validate_required_output("legal_counsel", json.dumps(payload))["ok"]
+    payload[field] = value
+    assert not validate_required_output("legal_counsel", json.dumps(payload))["ok"]
+    del payload[field]
+    assert not validate_required_output("legal_counsel", json.dumps(payload))["ok"]
+
+
+@pytest.mark.parametrize(
+    "risk",
+    [
+        None,
+        {},
+        {"severity": None},
+        {"risk_type": "TAX", "description": None, "severity": "HIGH"},
+        {"risk_type": "TAX", "description": "Unresolved tax", "severity": "EXTREME"},
+    ],
+)
+def test_legal_output_rejects_unusable_regulatory_entries(risk):
+    payload = {
+        "pfic_status": "UNCERTAIN",
+        "vie_structure": "N/A",
+        "cmic_status": "N/A",
+        "other_regulatory_risks": [risk],
+        "capital_structure": {},
+    }
+    assert not validate_required_output("legal_counsel", json.dumps(payload))["ok"]
+    payload["other_regulatory_risks"] = [
+        {"risk_type": "TAX", "description": "Unresolved tax", "severity": "HIGH"}
+    ]
+    assert validate_required_output("legal_counsel", json.dumps(payload))["ok"]
+
+
+def test_structural_legal_recovery_cannot_discard_supported_capital_exposure():
+    from src.agents.output_validation import legal_recovery_preserves_assessments
+
+    original = {
+        "capital_structure": {
+            "coverage_status": "FOUND",
+            "classification": "BLOCK_BUY",
+            "amount": "KRW 100M",
+        }
+    }
+    assert legal_recovery_preserves_assessments(
+        json.dumps(original), json.dumps(original)
+    )
+    for change in [{"amount": "KRW 1K"}, {"classification": "CLEAR"}]:
+        repaired = {"capital_structure": original["capital_structure"] | change}
+        assert not legal_recovery_preserves_assessments(
+            json.dumps(original), json.dumps(repaired)
+        )
+    assert legal_recovery_preserves_assessments(
+        '{"capital_structure":{"coverage_status":"UNRESOLVED"}}', json.dumps(original)
     )

@@ -115,6 +115,10 @@ def canonical_guidance_enum(field: str, value: object) -> str:
     if field not in _GUIDANCE_ENUM_FIELDS:
         return str(value or "").strip()
     token = canonical_enum(value)
+    if field == "COVERAGE_STATUS" and token not in GUIDANCE_COVERAGE_STATUSES:
+        readable = "_".join(token.split())
+        if readable in GUIDANCE_COVERAGE_STATUSES:
+            return readable
     if field in _GUIDANCE_NULL_TO_UNKNOWN_FIELDS and token in _GUIDANCE_NULL_TOKENS:
         return "UNKNOWN"
     return token

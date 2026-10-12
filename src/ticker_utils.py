@@ -15,6 +15,7 @@ from src.blocking_io import (
     YFINANCE_INFO_POLICY,
     run_blocking_call,
 )
+from src.config import config
 from src.exchange_metadata import (
     EXCHANGES_BY_SUFFIX,
     IBKR_TO_YFINANCE,
@@ -23,6 +24,7 @@ from src.exchange_metadata import (
     format_ibkr_symbol,
     format_yahoo_symbol,
 )
+from src.llm_runtime.timeouts import require_allowance
 
 logger = structlog.get_logger(__name__)
 
@@ -510,13 +512,26 @@ def _is_valid_company_name(name: str | None, ticker: str) -> bool:
     return True
 
 
+def _company_name_lookup_timeout(label: str) -> float:
+    """One HTTP source's allowance in the name chain, clamped to the deadline.
+
+    Raises TimeoutError when the allowance is spent, which each resolver
+    already treats as that source failing. The yfinance and yahooquery
+    sources pass the setting straight to ``run_blocking_call``, which clamps
+    it itself.
+    """
+    return require_allowance(config.company_name_lookup_timeout_seconds, label=label)
+
+
 async def _try_yfinance(ticker: str) -> tuple[str, str | None] | None:
     """Attempt company name resolution via yfinance."""
     try:
         import yfinance as yf
 
         info = await run_blocking_call(
-            YFINANCE_INFO_POLICY.with_label(f"yfinance.info:{ticker}"),
+            YFINANCE_INFO_POLICY.with_label(f"yfinance.info:{ticker}").with_timeout(
+                config.company_name_lookup_timeout_seconds
+            ),
             lambda: yf.Ticker(ticker).info,
         )
         if info:
@@ -541,7 +556,9 @@ async def _try_yahooquery(ticker: str) -> tuple[str, str | None] | None:
         from yahooquery import Ticker as YQTicker
 
         result = await run_blocking_call(
-            YAHOOQUERY_QUOTE_TYPE_POLICY.with_label(f"yahooquery.quote_type:{ticker}"),
+            YAHOOQUERY_QUOTE_TYPE_POLICY.with_label(
+                f"yahooquery.quote_type:{ticker}"
+            ).with_timeout(config.company_name_lookup_timeout_seconds),
             lambda: YQTicker(ticker).get_modules("quoteType assetProfile"),
         )
         if isinstance(result, dict) and ticker in result:
@@ -573,7 +590,10 @@ async def _try_fmp(ticker: str) -> tuple[str, str | None] | None:
         fmp = get_fmp_fetcher()
         if not fmp.is_available():
             return None
-        return await asyncio.wait_for(fmp.get_company_name(ticker), timeout=5)
+        # Resolve the bound before creating the coroutine, so a spent caller
+        # deadline never leaves an un-awaited request behind.
+        timeout = _company_name_lookup_timeout("fmp.profile")
+        return await asyncio.wait_for(fmp.get_company_name(ticker), timeout=timeout)
     except (asyncio.TimeoutError, Exception) as e:
         logger.debug("company_name_fmp_failed", ticker=ticker, error=str(e))
     return None
@@ -587,7 +607,8 @@ async def _try_eodhd(ticker: str) -> tuple[str, str | None] | None:
         eodhd = get_eodhd_fetcher()
         if not eodhd.is_available():
             return None
-        return await asyncio.wait_for(eodhd.get_company_name(ticker), timeout=5)
+        timeout = _company_name_lookup_timeout("eodhd.general")
+        return await asyncio.wait_for(eodhd.get_company_name(ticker), timeout=timeout)
     except (asyncio.TimeoutError, Exception) as e:
         logger.debug("company_name_eodhd_failed", ticker=ticker, error=str(e))
     return None
@@ -630,8 +651,9 @@ async def resolve_company_name(
     connection path can perform synchronous retries that are too expensive for
     normal analysis startup.
 
-    Each source has a 5-second timeout. Names are validated to ensure
-    they aren't just the ticker string echoed back.
+    Each source has its own ``COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS`` bound.
+    Names are validated to ensure they aren't just the ticker string echoed
+    back.
 
     Returns:
         CompanyNameResult with resolved name, source, and is_resolved flag.

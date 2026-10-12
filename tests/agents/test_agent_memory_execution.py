@@ -28,7 +28,7 @@ class TestResearcherMemoryIsolation:
         FinancialSituationMemory._reset_shared_state_for_tests()
 
     @pytest.mark.asyncio
-    @patch("src.memory.GoogleGenerativeAIEmbeddings")
+    @patch("src.embeddings.GoogleGenerativeAIEmbeddings")
     @patch("chromadb.PersistentClient")
     async def test_bull_researcher_memory_created_with_correct_ticker(
         self, mock_chroma_client, mock_embeddings
@@ -66,7 +66,7 @@ class TestResearcherMemoryIsolation:
         assert bull_memory.available
 
     @pytest.mark.asyncio
-    @patch("src.memory.GoogleGenerativeAIEmbeddings")
+    @patch("src.embeddings.GoogleGenerativeAIEmbeddings")
     @patch("chromadb.PersistentClient")
     async def test_sequential_ticker_analyses_dont_contaminate(
         self, mock_chroma_client, mock_embeddings
@@ -189,7 +189,7 @@ class TestResearcherMetadataFiltering:
         FinancialSituationMemory._reset_shared_state_for_tests()
 
     @pytest.mark.asyncio
-    @patch("src.memory.GoogleGenerativeAIEmbeddings")
+    @patch("src.embeddings.GoogleGenerativeAIEmbeddings")
     @patch("chromadb.PersistentClient")
     async def test_researcher_metadata_filter_prevents_wrong_ticker_retrieval(
         self, mock_chroma_client, mock_embeddings
@@ -272,7 +272,7 @@ class TestCrossTickerContamination:
     """Real-world contamination scenarios that the memory isolation prevents."""
 
     @pytest.mark.asyncio
-    @patch("src.memory.GoogleGenerativeAIEmbeddings")
+    @patch("src.embeddings.GoogleGenerativeAIEmbeddings")
     @patch("chromadb.PersistentClient")
     async def test_semiconductor_shortage_doesnt_leak_to_bank_stock(
         self, mock_chroma_client, mock_embeddings
@@ -369,7 +369,7 @@ class TestCrossTickerContamination:
 class TestMemoryCollectionNaming:
     """Test that memory collection names follow correct convention."""
 
-    @patch("src.memory.GoogleGenerativeAIEmbeddings")
+    @patch("src.embeddings.GoogleGenerativeAIEmbeddings")
     @patch("chromadb.PersistentClient")
     def test_edge_case_tickers_create_valid_collection_names(
         self, mock_chroma_client, mock_embeddings

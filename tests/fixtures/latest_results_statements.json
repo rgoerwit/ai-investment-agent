@@ -1,0 +1,62 @@
+[
+  {
+    "ticker": "0322.HK",
+    "capture_date": "2026-10-04",
+    "expect_primary": true,
+    "case": "simple_annual_statement",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: For the year ended 31 December 2025\nLATEST_RESULTS_PERIOD_END: 2025-12-31\nLATEST_RESULTS_PRIOR_PERIOD: For the year ended 31 December 2024\nLATEST_RESULTS_PRIOR_PERIOD_END: 2024-12-31\nLATEST_RESULTS_PERIOD_MONTHS: 12\nLATEST_RESULTS_CURRENCY: RMB\nLATEST_RESULTS_REPORTING_UNIT: RMB'000\nLATEST_RESULTS_REVENUE: 79068022\nLATEST_RESULTS_PRIOR_REVENUE: 80650914\nLATEST_RESULTS_EARNINGS: 4500698\nLATEST_RESULTS_PRIOR_EARNINGS: 3734429\nLATEST_RESULTS_EARNINGS_SCOPE: Profit attributable to owners of the Company\nLATEST_RESULTS_SOURCE_URL: https://www.hkexnews.hk/listedco/listconews/sehk/2026/0323/2026032300460.pdf\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "evidence": {
+      "tool_name": "get_official_document",
+      "content": "At 31 December 2025, cash at bank and on hand (including long-term time deposits) was \nRMB19,486.056 million, with an increase of RMB3,483.388 million when compared to 31 \nDecember 2024. Gearing ratio was -29.8%.\n* Adjusted profit attributable to owners of the Company include all profit attributable to owners of the \nCompany with the exception of the one-off gain on disposal of specific subsidiaries, property, plant and \nequipment and right-of-use assets (“Asset Activation Programme”).\n\n[PDF PAGE 4]\n– 4 –\nRESULTS\nThe Board of Directors of Tingyi (Cayman Islands) Holding Corp. (the “Company”) is pleased to \nannounce the audited consolidated results of the Company and its subsidiaries (the “Group”) for the \nyear ended 31 December 2025 together with the comparative figures for the corresponding period in \n2024 as follows:\nCONSOLIDATED INCOME STATEMENT\nFor the year ended 31 December 2025\n2025 2024\nNote RMB’000 RMB’000\nRevenue 4 79,068,022 80,650,914\nCost of sales (51,536,318) (53,955,271)\n  \nGross profit 27,531,704 26,695,643\nOther revenue 5 310,513 356,972\nOther net income 6 657,839 440,079\nDistribution costs (18,131,687) (18,041,843)\nAdministrative expenses (2,988,826) (2,827,531)\nOther operating expenses (205,629) (270,294)\nFinance costs 7 (320,816) (423,313)\nShare of results of an associate and joint ventures 112,818 129,941\n  \nProfit before taxation 7 6,965,916 6,059,654\nTaxation 8 (1,790,064) (1,737,519)\n  \nProfit for the year 5,175,852 4,322,135\n  \nProfit attributable to:\nOwners of the Company 4,500,698 3,734,429\nNon-controlling interests 675,154 587,706",
+      "urls": [
+        "https://www.hkexnews.hk/listedco/listconews/sehk/2026/0323/2026032300460.pdf"
+      ],
+      "evidence_status": "EVIDENCE_FOUND"
+    }
+  },
+  {
+    "ticker": "1415.HK",
+    "capture_date": "2026-10-04",
+    "expect_primary": true,
+    "case": "simple_interim_statement",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: Six months ended 30 June 2026\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: Six months ended 30 June 2025\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 6\nLATEST_RESULTS_CURRENCY: USD\nLATEST_RESULTS_REPORTING_UNIT: $'000\nLATEST_RESULTS_REVENUE: 1604742\nLATEST_RESULTS_PRIOR_REVENUE: 1360302\nLATEST_RESULTS_EARNINGS: 89874\nLATEST_RESULTS_PRIOR_EARNINGS: 67398\nLATEST_RESULTS_EARNINGS_SCOPE: Attributable to Equity shareholders of the Company\nLATEST_RESULTS_SOURCE_URL: https://www.hkexnews.hk/listedco/listconews/sehk/2026/0817/2026081701169.pdf\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "evidence": {
+      "tool_name": "get_official_document",
+      "content": "“Company”) is pleased to announce the unaudited consolidated interim results of the \nCompany and its subsidiaries (collectively referred to as the “Group”) for the six months \nended 30 June 2026 (the “Reporting Period”) together with comparative figures for the \nsix months ended 30 June 2025. The interim financial report is unaudited, but has been \nreviewed by the Company’s auditor, KPMG, in accordance with Hong Kong Standard on \nReview Engagements 2410, “Review of interim financial information performed by the \nindependent auditor of the entity”, issued by the Hong Kong Institute of Certified Public \nAccountants, whose independent review report will be included in the interim report of the \nCompany for the Reporting Period to be despatched to the shareholders of the Company \n(the “ Shareholders ”). The interim financial results have also been reviewed with no \ndisagreement by the audit committee (the “Audit Committee”) of the Company.\n\n[PDF PAGE 2]\n– 2 –\nCONSOLIDATED STATEMENT OF PROFIT OR LOSS — UNAUDITED\n(Expressed in United States dollars)\nSix months ended 30 June\nNote 2026 2025\n$’000 $’000\nRevenue 3 & 4 1,604,742 1,360,302\nCost of sales (1,424,635) (1,204,625)  \nGross profit 180,107 155,677\nOther income 5,173 9,573\nSelling and distribution expenses (1,695) (2,114)\nAdministrative expenses (75,192) (68,433)  \nProfit from operations 108,393 94,703\nFinance costs 5(a) (3,228) (9,572)\nShare of loss of an associate (252) (115)  \nProfit before taxation 5 104,913 85,016\nIncome tax 6 (15,290) (17,613)  \nProfit for the period 89,623 67,403  \nAttributable to:\nEquity shareholders of the Company 89,874 67,398\nNon-controlling interests (251) 5  \nProfit for the period 89,623 67,403  \nEarnings per share 7\nBasic $0.104 $0.078  \nDiluted $0.101 $0.075  ",
+      "urls": [
+        "https://www.hkexnews.hk/listedco/listconews/sehk/2026/0817/2026081701169.pdf"
+      ],
+      "evidence_status": "EVIDENCE_FOUND"
+    }
+  },
+  {
+    "ticker": "0288.HK",
+    "capture_date": "2026-10-05",
+    "expect_primary": false,
+    "case": "multiple_adjustment_columns",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: Six months ended 30 June 2026\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: Six months ended 30 June 2025\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 6\nLATEST_RESULTS_CURRENCY: US$\nLATEST_RESULTS_REPORTING_UNIT: million\nLATEST_RESULTS_REVENUE: 13827\nLATEST_RESULTS_PRIOR_REVENUE: 13387\nLATEST_RESULTS_EARNINGS: 773\nLATEST_RESULTS_PRIOR_EARNINGS: 725\nLATEST_RESULTS_EARNINGS_SCOPE: Profit attributable to owners of the Company before biological fair value adjustments\nLATEST_RESULTS_SOURCE_URL: https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0828/2026082800497.pdf\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "evidence": {
+      "tool_name": "get_official_document",
+      "content": " FOR THE SIX MONTHS ENDED 30 JUNE 2026\nHIGHLIGHTS\nSix months ended 30 June\n2026 2025\nPackaged meats sold (thousand metric tons) 1,522 1,451\nPork sold (thousand metric tons) 2,079 1,960\nSix months ended 30 June\n2026 2025\nResults before \nbiological fair \nvalue \nadjustments\nResults after \nbiological fair \nvalue \nadjustments\nResults before \nbiological fair \nvalue \nadjustments\nResults after \nbiological fair \nvalue \nadjustments\nUS$ million US$ million\n(unless otherwise stated) (unless otherwise stated)\n(unaudited) (unaudited)\nRevenue 13,827 13,827 13,387 13,387\nEBITDA 1,681 1,678 1,585 1,666\nOperating profit 1,231 1,231 1,259 1,259\nProfit attributable to owners of the \nCompany 773 770 725 788\nBasic earnings per share (US cents) 6.02 6.00 5.65 6.14",
+      "urls": [
+        "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0828/2026082800497.pdf"
+      ],
+      "evidence_status": "EVIDENCE_FOUND"
+    }
+  },
+  {
+    "ticker": "2097.HK",
+    "capture_date": "2026-10-05",
+    "expect_primary": false,
+    "case": "unreadable_pdf_labels",
+    "report": "### --- START LATEST_RESULTS ---\nLATEST_RESULTS_COVERAGE_STATUS: FOUND\nLATEST_RESULTS_PERIOD: 截至2026年6月30日止六個月\nLATEST_RESULTS_PERIOD_END: 2026-06-30\nLATEST_RESULTS_PRIOR_PERIOD: 截至2025年6月30日止六個月\nLATEST_RESULTS_PRIOR_PERIOD_END: 2025-06-30\nLATEST_RESULTS_PERIOD_MONTHS: 6\nLATEST_RESULTS_CURRENCY: 人民幣\nLATEST_RESULTS_REPORTING_UNIT: 千元\nLATEST_RESULTS_REVENUE: 15215804\nLATEST_RESULTS_PRIOR_REVENUE: 14874809\nLATEST_RESULTS_EARNINGS: 2319272\nLATEST_RESULTS_PRIOR_EARNINGS: 2718214\nLATEST_RESULTS_EARNINGS_SCOPE: 期內利潤\nLATEST_RESULTS_SOURCE_URL: https://www.hkexnews.hk/listedco/listconews/sehk/2026/0827/2026082700178_c.pdf\nLATEST_RESULTS_SOURCE_AUTHORITY: UNSUPPORTED\nLATEST_RESULTS_REVENUE_GROWTH_YOY: N/A\nLATEST_RESULTS_EARNINGS_GROWTH_YOY: N/A\n### --- END LATEST_RESULTS ---\n",
+    "evidence": {
+      "tool_name": "get_official_document",
+      "content": "࿚Ї2026 ϋ6˜30˜\nʕಂุᐶʮѓ\nʮ̡  ͉ʮ̡᙮ʮ̡d୕၈ ͉ණྠ ໨ ԫ ໨\nԫ ึ ໨ԫึ  ᔫϤʮб͉ʮ̡࿚Ї2026 ϋ6˜30˜  జѓಂ͊\nၝΥʕಂุᐶdஹΝ࿚Ї 2025 ϋ6˜30ˢ༰ᅰοf\n͉ණྠf\nࠅ\n࿚Ї6˜30˜\n Νˢᜊਗ\n2026 ϋ 2025 ϋ\nɛ͏࿆ɷʩ ɛ͏࿆ɷʩ\nϗɝ 15,215,804 14,874,809 2.3%\nˣл 4,629,693 4,706,373 -1.6%\nಂʫлᆗ 2,319,272 2,718,214 -14.7%\nл ɛ͏࿆ʩ 6.05 7.23 -16.3%\n\n[PDF PAGE 2]\n2\nؓ\nৌਕΫᚥ",
+      "urls": [
+        "https://www.hkexnews.hk/listedco/listconews/sehk/2026/0827/2026082700178_c.pdf"
+      ],
+      "evidence_status": "EVIDENCE_FOUND"
+    }
+  }
+]

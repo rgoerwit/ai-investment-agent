@@ -20,6 +20,8 @@ from src.macro_context import (
     get_macro_context,
 )
 from src.token_tracker import TokenTrackingCallback
+from src.tooling.inspection_service import InspectionService
+from src.tooling.inspector import InspectionDecision, InspectionEnvelope
 
 
 class TestIsThin:
@@ -120,6 +122,61 @@ class TestCacheReadWrite:
                 ttl_hours=12,
             )
         assert cached is None
+
+    def test_concurrent_writers_of_one_region_never_share_a_temp_file(self, tmp_path):
+        """Two tickers in one region write one cache file from two threads.
+
+        Both writers are held at the replacement step until the other has
+        written, so a shared temp name makes the second replacement fail.
+        """
+        import os
+        import threading
+        from pathlib import Path
+
+        rendezvous = threading.Barrier(2, timeout=5)
+        real_os_replace = os.replace
+        real_path_replace = Path.replace
+
+        def held_os_replace(src, dst):
+            rendezvous.wait()
+            return real_os_replace(src, dst)
+
+        def held_path_replace(self, target):
+            rendezvous.wait()
+            return real_path_replace(self, target)
+
+        errors: list[BaseException] = []
+
+        def write(report: str) -> None:
+            try:
+                _write_cache(
+                    "JAPAN",
+                    trade_date="2026-04-18",
+                    fingerprint="fp123",
+                    report=report,
+                    status="generated",
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        with (
+            patch("src.macro_context._CACHE_DIR", tmp_path),
+            patch("os.replace", held_os_replace),
+            patch.object(Path, "replace", held_path_replace),
+        ):
+            threads = [
+                threading.Thread(target=write, args=(f"brief {name}",))
+                for name in ("one", "two")
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+
+        assert errors == []
+        payload = json.loads((tmp_path / "JAPAN.json").read_text(encoding="utf-8"))
+        assert payload["report"] in {"brief one", "brief two"}
+        assert [p.name for p in tmp_path.iterdir()] == ["JAPAN.json"]
 
     def test_corrupted_cache_returns_none(self, tmp_path):
         with patch("src.macro_context._CACHE_DIR", tmp_path):
@@ -337,9 +394,42 @@ class TestGetMacroContext:
         )
 
     @pytest.mark.asyncio
-    async def test_cache_hit_blocked_by_inspection_returns_failed(self, tmp_path):
-        inspection_service = SimpleNamespace(
-            check=AsyncMock(return_value="TOOL_BLOCKED: suspicious cached context")
+    @pytest.mark.parametrize(
+        ("broken", "event", "fields"),
+        [
+            pytest.param(
+                False,
+                "macro_context_cache_blocked",
+                {"blocked_reason": "suspicious cached context"},
+                id="blocked",
+            ),
+            pytest.param(
+                True,
+                "macro_context_cache_inspection_failed",
+                {"reason": "INSPECTION_FAILED"},
+                id="backend-failure",
+            ),
+        ],
+    )
+    async def test_cache_hit_not_approved_by_inspection_returns_failed(
+        self, tmp_path, broken, event, fields
+    ):
+        """A block and a fail-closed backend error both refuse the cached
+        brief; each is logged as what it is, never a backend error as a block."""
+
+        class _Inspector:
+            async def inspect(self, envelope: InspectionEnvelope):
+                del envelope
+                if broken:
+                    raise RuntimeError("sk-secret-backend-detail")
+                return InspectionDecision(
+                    action="block",
+                    threat_level="high",
+                    reason="suspicious cached context",
+                )
+
+        inspection_service = InspectionService(
+            _Inspector(), mode="block", fail_policy="fail_closed"
         )
 
         with (
@@ -370,12 +460,15 @@ class TestGetMacroContext:
         fetch.assert_not_awaited()
         summarize.assert_not_awaited()
         mock_logger.warning.assert_any_call(
-            "macro_context_cache_blocked",
+            event,
             ticker="7203.T",
             region="JAPAN",
             cache_path=str(tmp_path / "JAPAN.json"),
-            blocked_reason="suspicious cached context",
+            **fields,
         )
+        events = {call.args[0] for call in mock_logger.warning.call_args_list}
+        assert len(events & {"macro_context_cache_blocked", event}) == 1
+        assert "sk-secret" not in repr(mock_logger.warning.call_args_list)
 
     @pytest.mark.asyncio
     async def test_generated_logs_fallback_and_cache_path(self, tmp_path):

@@ -1,6 +1,6 @@
 # The agent roster and the workflow
 
-Last updated: 2026-10-01 (fundamentals barrier re-dispatch)
+Last updated: 2026-10-07 (deterministic Junior relay)
 
 What each agent contributes, how the graph is sequenced, and the design decisions
 behind the specialist nodes. This document explains the rationale and intended
@@ -141,8 +141,13 @@ partial response without a terminal reason may receive the invocation runtime's
 ordinary provider retry; an explicit output-cap stop does not repeat the same request.
 Once a provider returns successfully, the owning node separately validates required blocks,
 field vocabularies, and end markers. Eligible full-mode analysts may receive one
-text-only structural regeneration; quick mode reserves that recovery for Senior
-Fundamentals and Portfolio Manager. The recovery binding stays in the base provider,
+text-only structural regeneration; quick mode reserves that recovery for Foreign Language, Senior
+Fundamentals and Portfolio Manager. Junior Fundamentals instead requests both tools
+in one turn; `src/agents/junior_relay.py` assembles their inspected originals, retains
+useful partial results with a degradation notice, and marks unusable acquisition
+unavailable without a text-only retry. Its terminal visit re-emits the same artifact
+and status; baseline capture retains the selector input and observed model/tool events
+alongside that code-produced output. The recovery binding stays in the base provider,
 uses a reasoning intent, inherits the originating seat's output budget, and cannot
 restart tool gathering.
 

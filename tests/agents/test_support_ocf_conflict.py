@@ -7,6 +7,8 @@ defect the external consultant flagged on recurring ALV.V runs.
 
 from __future__ import annotations
 
+import pytest
+
 from src.agents.support import compute_data_conflicts
 
 # Junior (yfinance) OCF 40M vs filing OCF 10.6M → ratio ~3.8x (> 1.3 threshold).
@@ -68,3 +70,30 @@ def test_immaterial_ratio_emits_no_ocf_conflict():
 def test_missing_foreign_data_no_ocf_conflict():
     out = compute_data_conflicts(_RAW, "")
     assert _ocf_line(out) == ""
+
+
+def test_filing_thousands_do_not_create_a_currency_magnitude_conflict():
+    assert (
+        _ocf_line(
+            compute_data_conflicts(
+                '{"operatingCashflow": 100000}',
+                "Operating Cash Flow (Filing): 100K KRW\nPeriod: FY2026",
+            )
+        )
+        == ""
+    )
+
+
+@pytest.mark.parametrize(
+    "amount",
+    [
+        "€1,234 Mio.",
+        "EUR 2,500 Mrd",
+        "4,800 Mio. EUR",
+        "1,200 crore",
+        "3,000 employees",
+    ],
+)
+def test_grouped_unsupported_filing_amount_cannot_create_false_conflict(amount):
+    foreign = f"Operating Cash Flow (Filing): {amount}\nPeriod: FY2026"
+    assert _ocf_line(compute_data_conflicts(_RAW, foreign)) == ""

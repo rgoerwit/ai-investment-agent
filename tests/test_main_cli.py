@@ -8,12 +8,14 @@ import asyncio
 import json
 import logging
 import sys
-from concurrent.futures import TimeoutError as FuturesTimeoutError
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("offline_main_flow")
 
 
 async def _async_none():
@@ -238,23 +240,6 @@ class TestOutputCompanyNameLookup:
                     {"longName": "Truecaller AB"} if symbol == "TRUE-B.ST" else {}
                 )
 
-        class _Future:
-            def __init__(self, fn):
-                self._fn = fn
-
-            def result(self, timeout=None):
-                return self._fn()
-
-        class _Executor:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-            def submit(self, fn):
-                return _Future(fn)
-
         fake_yfinance = MagicMock()
 
         def _ticker_factory(symbol):
@@ -264,13 +249,7 @@ class TestOutputCompanyNameLookup:
         fake_yfinance.Ticker.side_effect = _ticker_factory
 
         with patch.dict(sys.modules, {"yfinance": fake_yfinance}):
-            assert (
-                _load_company_name_for_output(
-                    "TRUE.B.ST",
-                    thread_pool_executor_cls=lambda **_kwargs: _Executor(),
-                )
-                == "Truecaller AB"
-            )
+            assert _load_company_name_for_output("TRUE.B.ST") == "Truecaller AB"
 
         assert requested_symbols == ["TRUE.B.ST", "TRUE-B.ST"]
 
@@ -280,21 +259,15 @@ class TestOutputCompanyNameLookup:
         fake_yfinance = MagicMock()
         fake_yfinance.Ticker.return_value.info = {"longName": "Should Not Return"}
 
-        mock_future = MagicMock()
-        mock_future.result.side_effect = FuturesTimeoutError()
-
-        mock_executor = MagicMock()
-        mock_executor.submit.return_value = mock_future
-
-        with patch.dict(sys.modules, {"yfinance": fake_yfinance}):
-            assert (
-                _load_company_name_for_output(
-                    "SNTIA.OL",
-                    thread_pool_executor_cls=lambda **_kwargs: mock_executor,
-                )
-                is None
-            )
-        mock_executor.shutdown.assert_called()
+        with (
+            patch.dict(sys.modules, {"yfinance": fake_yfinance}),
+            patch(
+                "src.blocking_io.run_blocking_call_sync",
+                side_effect=TimeoutError("stalled"),
+            ) as mock_call,
+        ):
+            assert _load_company_name_for_output("SNTIA.OL") is None
+        mock_call.assert_called_once()
 
     def test_run_analysis_warns_with_lookup_candidates_after_company_name_exhaustion(
         self,
@@ -326,7 +299,6 @@ class TestOutputCompanyNameLookup:
                     )
                 ),
             ),
-            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
             # Name is unresolved but data exists — the vacuum gate must not fire.
             patch("src.main._is_total_data_vacuum", new=AsyncMock(return_value=False)),
             patch(
@@ -422,7 +394,6 @@ class TestOutputCompanyNameLookup:
                     )
                 ),
             ),
-            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
             patch(
                 "src.main._prefetch_macro_context",
                 new=AsyncMock(return_value=macro_result),
@@ -506,7 +477,6 @@ class TestOutputCompanyNameLookup:
                     )
                 ),
             ),
-            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
             patch(
                 "src.main._prefetch_macro_context",
                 new=AsyncMock(return_value=macro_result),
@@ -672,7 +642,6 @@ class TestTracingMetadataFlow:
                     )
                 ),
             ),
-            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
             patch("src.graph.create_trading_graph", return_value=fake_graph),
             patch("src.token_tracker.get_tracker", return_value=fake_tracker),
             patch("src.main.build_analysis_validity", return_value={"ok": True}),
@@ -717,7 +686,6 @@ class TestTracingMetadataFlow:
                     )
                 ),
             ),
-            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
             patch("src.graph.create_trading_graph", return_value=fake_graph),
             patch("src.token_tracker.get_tracker", return_value=fake_tracker),
             patch("src.main.build_analysis_validity", return_value={"ok": True}),
@@ -785,7 +753,6 @@ class TestTracingMetadataFlow:
                     )
                 ),
             ),
-            patch("src.main._fetch_market_context", new=AsyncMock(return_value="")),
             patch(
                 "src.main._prefetch_macro_context",
                 new=AsyncMock(return_value=macro_result),
@@ -890,8 +857,8 @@ class TestRuntimeServiceHookConfig:
         monkeypatch.setattr(
             "src.main.config.untrusted_content_inspection_enabled", False
         )
-        # Pin MCP off so the assertion only inspects the audit/inspection wiring;
-        # MCP_ENABLED in the operator's .env would otherwise add MCPBudgetHook.
+        # Pin MCP off so the assertion only inspects the audit/inspection wiring
+        # whatever MCP_ENABLED says in the operator's .env.
         monkeypatch.setattr("src.main.config.mcp_enabled", False)
 
         services = build_runtime_services_from_config(enable_tool_audit=False)
@@ -962,8 +929,8 @@ class TestRuntimeServiceHookConfig:
 
         assert services.mcp_runtime is not None
         hook_types = [type(h).__name__ for h in services.tool_service.hooks]
-        assert "ContentInspectionHook" not in hook_types
-        assert "MCPBudgetHook" in hook_types
+        # MCP adds no hook: the runtime admits and counts its own budget.
+        assert hook_types == ["EvidenceRecorder"]
 
     def test_build_runtime_services_from_config_degrades_when_mcp_registry_missing(
         self, monkeypatch, tmp_path: Path
@@ -983,8 +950,6 @@ class TestRuntimeServiceHookConfig:
         services = build_runtime_services_from_config(enable_tool_audit=False)
 
         assert services.mcp_runtime is None
-        hook_types = [type(h).__name__ for h in services.tool_service.hooks]
-        assert "MCPBudgetHook" not in hook_types
 
     def test_configure_content_inspection_from_config_installs_tool_hook(
         self, monkeypatch
@@ -1463,6 +1428,97 @@ class TestMainOrchestration:
             "article",
             "final",
         ]
+
+    def test_run_deadline_caps_analysis_but_not_publication(self, monkeypatch):
+        """The watchdog's deadline is bound around the analysis only.
+
+        The ticker retrospective and the graph run see the run deadline as their
+        enclosing deadline; rendering, persistence and the article run after the
+        scope closes, on the publication reserve.
+        """
+        from src.cli import OutputTargets
+        from src.llm_runtime import run_deadline as run_deadline_mod
+        from src.llm_runtime.timeouts import current_enclosing_deadline
+        from src.main import main
+
+        seen: dict[str, float | None] = {}
+        ladder: list[float | None] = []
+        args = SimpleNamespace(
+            retrospective_only=False,
+            ticker="6083.T",
+            quick=True,
+            strict=False,
+            article=False,
+            quiet=True,
+            brief=False,
+            svg=False,
+            transparent=False,
+            imagedir=None,
+        )
+
+        def note(label, value=None):
+            seen[label] = current_enclosing_deadline()
+            return value
+
+        async def anote(label, value=None):
+            return note(label, value)
+
+        monkeypatch.setattr(run_deadline_mod, "_LOGGED", set())
+        monkeypatch.setattr("src.config._cached_env_file_values", lambda: {})
+        monkeypatch.setenv("PIPELINE_TICKER_DEADLINE_EPOCH", str(time.time() + 600))
+        monkeypatch.setattr("src.main.log_deadline_ladder", ladder.append)
+        monkeypatch.setattr("src.main.cli.parse_arguments", lambda: args)
+        monkeypatch.setattr("src.main.cli._validate_cli_args", lambda a: None)
+        monkeypatch.setattr(
+            "src.main.cli._resolve_output_targets",
+            lambda a: OutputTargets(None, Path("results/images"), True),
+        )
+        monkeypatch.setattr("src.main._setup_runtime", lambda a, t: ({}, object()))
+        monkeypatch.setattr(
+            "src.main._maybe_run_ticker_retrospective",
+            lambda a: anote("retrospective"),
+        )
+        monkeypatch.setattr(
+            "src.main.output._emit_start_banner", lambda a, t, **kw: "banner"
+        )
+        monkeypatch.setattr(
+            "src.main._execute_analysis",
+            lambda a, t, **kw: anote(
+                "execute", {"analysis_validity": {"publishable": True}}
+            ),
+        )
+        monkeypatch.setattr("src.main._attach_run_summary", lambda r, a, p: None)
+        monkeypatch.setattr(
+            "src.main.output._load_company_name_for_output_async",
+            lambda ticker: anote("name_lookup"),
+        )
+        monkeypatch.setattr(
+            "src.main.output._render_primary_output",
+            lambda r, a, t, b, **kw: note("render", (None, None, None)),
+        )
+        monkeypatch.setattr(
+            "src.main.persistence._persist_analysis_outputs",
+            lambda r, a, **kw: note("persist"),
+        )
+        monkeypatch.setattr(
+            "src.main.persistence._maybe_save_rejection_record",
+            lambda r, a, **kw: anote("rejection"),
+        )
+        monkeypatch.setattr(
+            "src.main.output._maybe_generate_article",
+            lambda *a, **kw: anote("article", False),
+        )
+        monkeypatch.setattr("src.main._log_final_summary", lambda r, a, g: None)
+        monkeypatch.setattr(
+            "src.cleanup.cleanup_async_resources", lambda: _async_none()
+        )
+
+        assert asyncio.run(main()) == 0
+        (deadline,) = ladder
+        assert deadline is not None
+        assert seen["retrospective"] == seen["execute"] == deadline
+        for label in ("name_lookup", "render", "persist", "rejection", "article"):
+            assert seen[label] is None, label
 
     def test_main_returns_two_for_cli_usage_error(self, monkeypatch):
         from src.main import main
@@ -2152,7 +2208,12 @@ class TestSavedDiagnostics:
         warning = logger.warning.call_args
         assert warning.args == ("quick_timeout_config_drift",)
         assert warning.kwargs["config"]["QUICK_LLM_API_TIMEOUT_SECONDS"] == 300
-        assert warning.kwargs["config"]["LLM_CALL_HARD_TIMEOUT_SECONDS"] == 600.0
+        # Quick mode no longer clamps the full-mode per-call cap (each seat's
+        # TimeoutClass supplies the quick cap), so a large value is not drift.
+        assert "LLM_CALL_HARD_TIMEOUT_SECONDS" not in warning.kwargs["config"]
+        assert (
+            "LLM_CALL_HARD_TIMEOUT_SECONDS" not in warning.kwargs["suggested_defaults"]
+        )
         assert warning.kwargs["config"]["API_RETRY_ATTEMPTS"] == 3
         assert warning.kwargs["config"]["GEMINI_RPM_LIMIT"] == 1000
 
@@ -2744,6 +2805,13 @@ class TestSavedFileBannerRemoval:
     """
 
     BANNER_SENTINEL = "# Multi-Agent Investment Analysis System"
+
+    @pytest.fixture(autouse=True)
+    def no_company_name_lookup(self, monkeypatch):
+        """The report header's synchronous name lookup answers "unknown"."""
+        monkeypatch.setattr(
+            "src.output._load_company_name_for_output", lambda _ticker: None
+        )
 
     def _make_report_result(self):
         return {

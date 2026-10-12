@@ -7,11 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.data.fetcher import SmartMarketDataFetcher
+from tests.helpers.offline_fetcher import offline_market_fetcher
 
 
 @pytest.fixture
 def fetcher():
-    return SmartMarketDataFetcher()
+    return offline_market_fetcher(SmartMarketDataFetcher())
 
 
 class TestEODHDIntegration:

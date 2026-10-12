@@ -45,10 +45,10 @@ def resolve_retrospective_sources(cfg: Any) -> tuple[Path, ...]:
     typo in ``RETROSPECTIVE_ARCHIVE_DIRS`` would otherwise silently halve the
     corpus with no signal at all.
     """
-    primary = Path(getattr(cfg, "results_dir", "results")).expanduser()
+    primary = Path(cfg.results_dir).expanduser()
     sources: list[Path] = [primary]
 
-    for candidate in parse_archive_dirs(getattr(cfg, "retrospective_archive_dirs", "")):
+    for candidate in parse_archive_dirs(cfg.retrospective_archive_dirs):
         if candidate == primary or candidate in sources:
             continue
         if not candidate.is_dir():

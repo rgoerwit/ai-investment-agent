@@ -21,6 +21,20 @@ toolkit = SimpleNamespace(
 )
 
 
+@pytest.fixture(autouse=True)
+def offline_company_name():
+    """Name resolution is the unresolved-ticker answer, not a Yahoo lookup.
+
+    The news and sentiment tools resolve a search-friendly company name before
+    searching; an unreachable resolver returns the ticker itself.
+    """
+    with patch(
+        "src.tools.shared.extract_company_name_async",
+        new=AsyncMock(side_effect=str),
+    ):
+        yield
+
+
 @pytest.fixture
 def mock_fetcher():
     """Mock the active market-data fetcher seam."""

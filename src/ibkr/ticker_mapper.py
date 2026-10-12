@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +18,7 @@ from typing import Any, Literal
 
 import structlog
 
+from src.atomic_files import atomic_write_text
 from src.error_safety import summarize_exception
 from src.exchange_metadata import IBKR_TO_YFINANCE
 from src.ibkr.exceptions import IBKRTickerResolutionError
@@ -90,29 +89,13 @@ def _load_cache() -> dict:
 
 def _save_cache(cache: dict) -> None:
     """Save conid cache atomically so interruption cannot truncate the map."""
-    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp_name: str | None = None
     try:
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{CACHE_FILE.name}.", suffix=".tmp", dir=str(CACHE_FILE.parent)
-        )
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(cache, handle, indent=2, sort_keys=True)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, CACHE_FILE)
-        temp_name = None
+        atomic_write_text(CACHE_FILE, json.dumps(cache, indent=2, sort_keys=True))
     except OSError as e:
         logger.warning(
             "conid_cache_save_failed",
             **summarize_exception(e, operation="conid_cache_save_failed"),
         )
-    finally:
-        if temp_name is not None:
-            try:
-                Path(temp_name).unlink(missing_ok=True)
-            except OSError:
-                pass
 
 
 # Venues that should be excluded from yfinance.Search fallback results

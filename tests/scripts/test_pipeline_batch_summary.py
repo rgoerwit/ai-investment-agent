@@ -1,7 +1,7 @@
 """Tests for the end-of-batch warning summary.
 
-Contract (per operator request): emit a single line ONLY when failures or
-critical errors are present in the batch. Clean batches print nothing.
+Contract: emit a single line for failures, critical errors, or flex degradation.
+Clean batches print nothing; tier fallback does not imply a failed analysis.
 """
 
 from __future__ import annotations
@@ -21,6 +21,28 @@ def _stats(**kwargs) -> LogStats:
 
 
 class TestBuildSummary:
+    def test_flex_summary_distinguishes_runs_episodes_and_fallbacks(self):
+        summary = build_summary(
+            [
+                _stats(exit_status=0, flex_fallbacks=2, flex_degradation_episodes=1),
+                _stats(exit_status=0, flex_fallbacks=4, flex_degradation_episodes=2),
+                _stats(exit_status=0),
+            ]
+        )
+        assert summary == (
+            "pipeline_batch_summary runs=3 failed=0 flex_fallbacks=6 "
+            "flex_degraded_runs=2 flex_degradation_episodes=3"
+        )
+
+    def test_fallback_before_threshold_does_not_invent_degradation(self):
+        assert build_summary([_stats(exit_status=0, flex_fallbacks=1)]) is None
+
+    def test_degradation_without_retained_fallback_events_is_reported(self):
+        assert build_summary([_stats(flex_degradation_episodes=1)]) == (
+            "pipeline_batch_summary runs=1 failed=0 flex_degraded_runs=1 "
+            "flex_degradation_episodes=1"
+        )
+
     def test_empty_input_returns_none(self):
         assert build_summary([]) is None
 
@@ -94,6 +116,32 @@ class TestBuildSummary:
 
 
 class TestCLIContract:
+    def test_flex_summary_filters_invocation_and_never_emits_payload(
+        self, tmp_path, capsys
+    ):
+        from pipeline_batch_summary import main as cli_main
+
+        (tmp_path / "A-LOG-quick-123.txt").write_text(
+            "event='flex_fallback_to_standard' message_preview='untrusted payload'\n"
+            "event='flex_provider_degraded' provider='google'\n"
+            "[pipeline_child_exit] status=0 elapsed=120s\n"
+        )
+        (tmp_path / "B-LOG-quick-456.txt").write_text(
+            "[pipeline_child_exit] status=1 elapsed=120s\n"
+        )
+        assert (
+            cli_main(
+                ["pipeline_batch_summary.py", str(tmp_path), "--pattern", "*-123.txt"]
+            )
+            == 0
+        )
+        out = capsys.readouterr().out
+        assert out == (
+            "pipeline_batch_summary runs=1 failed=0 flex_fallbacks=1 "
+            "flex_degraded_runs=1 flex_degradation_episodes=1\n"
+        )
+        assert "untrusted payload" not in out
+
     """In-process CLI tests. Avoids `subprocess` because earlier tests in
     the full suite can poison fork/exec startup on macOS (ChromaDB /
     tokenizers fork-safety) and the subprocess child can SIGSEGV before

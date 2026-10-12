@@ -19,6 +19,8 @@ behavioural risk on its own.
 
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -26,6 +28,7 @@ from typing import Any
 import structlog
 
 from src.claim_policy import CURRENT_GROWTH_CLAIM_FIELDS
+from src.liquidity_assessment import LiquidityAssessment
 from src.provenance_schema import Scorecard
 
 logger = structlog.get_logger(__name__)
@@ -33,6 +36,14 @@ logger = structlog.get_logger(__name__)
 # Contract statuses meaning "the canonical layer ran and would not stand behind
 # this payload". DEGRADED is excluded by design — see from_metrics_and_snapshot.
 _REJECTED_CONTRACT_STATUSES = frozenset({"INVALID", "DECODE_FAILED"})
+
+
+def _canonical_ratio(value: Any) -> float | None:
+    """A finite, non-negative canonical ratio, else None (bools and text rejected)."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number >= 0 else None
 
 
 def _contract_status(snapshot: Mapping[str, Any] | None) -> str | None:
@@ -96,6 +107,39 @@ def _missing_current_growth_fields(
             ):
                 available.add(str(claim["field"]))
     return frozenset(CURRENT_GROWTH_CLAIM_FIELDS - available)
+
+
+def _verified_gate_number(
+    snapshot: Mapping[str, Any] | None, field: str, *, integer: bool = False
+) -> float | None:
+    """Read an exact, source-bound primary fact; legacy/aggregator counts are unknown."""
+    claims = (snapshot or {}).get("claims") or {}
+    if not isinstance(claims, Mapping):
+        return None
+    values = set()
+    for claim in claims.values():
+        if not isinstance(claim, Mapping) or claim.get("field") != field:
+            continue
+        if (
+            claim.get("decision_eligible") is not True
+            or claim.get("coverage") != "FOUND"
+            or claim.get("authority") != "PRIMARY"
+            or claim.get("exactness") != "EXACT"
+            or not claim.get("source_url")
+            or not str(claim.get("evidence_id") or "").startswith("evidence:")
+        ):
+            return None
+        value = str(claim.get("value", "")).strip()
+        if not re.fullmatch(r"\d+" if integer else r"\d+(?:\.\d+)?%?", value):
+            return None
+        try:
+            number = int(value) if integer else float(value.rstrip("%"))
+        except (ValueError, OverflowError):
+            return None
+        if not integer and number > 100:
+            return None
+        values.add(number)
+    return next(iter(values)) if len(values) == 1 else None
 
 
 def _log_score_override(
@@ -164,6 +208,17 @@ class DecisionInputs:
     snapshot_authoritative: bool
     # Decoded contract status: None (no snapshot) | VALID | INVALID | DECODE_FAILED.
     snapshot_status: str | None = None
+    # Aggregator opinion counts and analyst prose cannot establish these gates.
+    english_analyst_count: int | None = None
+    us_revenue_pct: float | None = None
+    liquidity: LiquidityAssessment | None = None
+    health_exception_pb_ratio: float | None = None
+    health_exception_current_ratio: float | None = None
+    health_exception_claim_ids: tuple[str, ...] = ()
+    # Canonical raw debtToEquity RATIO (src/data/debt_equity.py), when the run's
+    # raw metrics carry one. The leverage gates convert it to percent at their own
+    # boundary; the report's DE_RATIO (``debt_to_equity_pct``) cannot override it.
+    raw_debt_to_equity_ratio: float | None = None
 
     @classmethod
     def from_metrics(
@@ -185,6 +240,8 @@ class DecisionInputs:
         snapshot: Mapping[str, Any] | None,
         *,
         ticker: str | None = None,
+        liquidity: Any = None,
+        raw_debt_to_equity_ratio: Any = None,
     ) -> DecisionInputs:
         parsed_health = metrics.get("adjusted_health_score")
         parsed_growth = metrics.get("adjusted_growth_score")
@@ -246,7 +303,26 @@ class DecisionInputs:
                 ),
             )
 
+        verified_coverage = (
+            _verified_gate_number(snapshot, "ANALYST_COVERAGE_ENGLISH", integer=True)
+            if snapshot_authoritative
+            else None
+        )
         sector_value = getattr(sector, "value", sector)
+        pb = current_ratio = None
+        exception_ids: tuple[str, ...] = ()
+        if snapshot_authoritative:
+            from src.score_lineage import eligible_fact_number
+
+            claims = (snapshot or {}).get("claims")
+            if isinstance(claims, Mapping):
+                pb, pb_id = eligible_fact_number(claims, "PB_RATIO", strict=True)
+                current_ratio, ratio_id = eligible_fact_number(
+                    claims, "CURRENT_RATIO_RAW", strict=True
+                )
+                exception_ids = tuple(
+                    claim_id for claim_id in (pb_id, ratio_id) if claim_id is not None
+                )
         return cls(
             decision_metrics=decision_metrics,
             sector=str(sector_value) if sector_value is not None else None,
@@ -268,6 +344,17 @@ class DecisionInputs:
             growth_coverage_authoritative=snapshot_authoritative,
             snapshot_authoritative=snapshot_authoritative,
             snapshot_status=snapshot_status,
+            health_exception_pb_ratio=pb,
+            health_exception_current_ratio=current_ratio,
+            health_exception_claim_ids=exception_ids,
+            english_analyst_count=int(verified_coverage)
+            if verified_coverage is not None
+            else None,
+            us_revenue_pct=_verified_gate_number(snapshot, "US_REVENUE_PERCENT")
+            if snapshot_authoritative
+            else None,
+            liquidity=LiquidityAssessment.from_dict(liquidity),
+            raw_debt_to_equity_ratio=_canonical_ratio(raw_debt_to_equity_ratio),
         )
 
     @property

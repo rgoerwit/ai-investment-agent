@@ -90,7 +90,7 @@ def test_google_reasoning_handoff_requests_readable_thoughts(monkeypatch) -> Non
 def test_openai_reasoning_handoff_requests_summary_without_duplicate_effort(
     monkeypatch,
 ) -> None:
-    import langchain_openai
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -110,7 +110,7 @@ def test_openai_reasoning_handoff_requests_summary_without_duplicate_effort(
         captured.update(kwargs)
         return model
 
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", fake_openai)
+    monkeypatch.setattr(transports, "new_openai_chat", fake_openai)
     request = SeatModelRequest(
         plan.bindings[SeatId.BULL],
         SEATS[SeatId.BULL],
@@ -136,7 +136,7 @@ def test_compat_adapter_rejects_unqualified_tool_seat() -> None:
 
 
 def test_moonshot_review_adapter_honors_reasoning_override(monkeypatch) -> None:
-    import langchain_openai
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -157,7 +157,7 @@ def test_moonshot_review_adapter_honors_reasoning_override(monkeypatch) -> None:
         captured.update(kwargs)
         return model
 
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", fake_chat_openai)
+    monkeypatch.setattr(transports, "new_openai_chat", fake_chat_openai)
     request = SeatModelRequest(
         plan.bindings[SeatId.CONSULTANT],
         SEATS[SeatId.CONSULTANT],
@@ -170,7 +170,8 @@ def test_moonshot_review_adapter_honors_reasoning_override(monkeypatch) -> None:
     assert captured["reasoning_effort"] == "low"
     assert captured["base_url"] == "https://api.moonshot.ai/v1"
     assert captured["max_completion_tokens"] == 4096 + 8192
-    assert captured["max_retries"] == 0
+    # The transport class owns its single SDK attempt; no adapter passes one.
+    assert "max_retries" not in captured
     assert captured["timeout"] == settings.api_timeout
     assert "service_tier" not in captured
     assert "flex_fallback_to_standard" not in captured
@@ -179,11 +180,11 @@ def test_moonshot_review_adapter_honors_reasoning_override(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("seat_id", "expected_temperature", "expected_timeout", "expected_retries"),
+    ("seat_id", "expected_temperature", "expected_timeout"),
     [
-        (SeatId.CONTENT_INSPECTOR, 0.0, None, None),
-        (SeatId.MACRO_CONTEXT, 0.1, None, None),
-        (SeatId.HEALTH_CHECK, 0.0, 10.0, 1),
+        (SeatId.CONTENT_INSPECTOR, 0.0, None),
+        (SeatId.MACRO_CONTEXT, 0.1, None),
+        (SeatId.HEALTH_CHECK, 0.0, 10.0),
     ],
 )
 def test_google_adapter_honors_specialized_seat_execution_policy(
@@ -191,7 +192,6 @@ def test_google_adapter_honors_specialized_seat_execution_policy(
     seat_id,
     expected_temperature,
     expected_timeout,
-    expected_retries,
 ) -> None:
     from src import llms
 
@@ -203,12 +203,8 @@ def test_google_adapter_honors_specialized_seat_execution_policy(
         captured.update(kwargs)
         return model
 
-    def fake_gemini(_model, temperature, timeout, max_retries, **_kwargs):
-        captured.update(
-            temperature=temperature,
-            timeout=timeout,
-            max_retries=max_retries,
-        )
+    def fake_gemini(_model, temperature, timeout, **kwargs):
+        captured.update(kwargs, temperature=temperature, timeout=timeout)
         return model
 
     monkeypatch.setattr(llms, "create_quick_thinking_llm", fake_quick)
@@ -229,13 +225,14 @@ def test_google_adapter_honors_specialized_seat_execution_policy(
     assert SeatModelFactory().build(request) is model
     assert captured["temperature"] == expected_temperature
     assert captured["timeout"] == expected_timeout
-    assert captured["max_retries"] == expected_retries
+    # One SDK attempt is a property of the Gemini transport class.
+    assert "max_retries" not in captured
     if SEATS[seat_id].execution_policy.standard_tier_only:
         assert request.service_tier is None
 
 
 def test_openai_adapter_omits_temperature_but_keeps_health_bounds(monkeypatch) -> None:
-    import langchain_openai
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -254,7 +251,7 @@ def test_openai_adapter_omits_temperature_but_keeps_health_bounds(monkeypatch) -
         captured.update(kwargs)
         return model
 
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", fake_chat_openai)
+    monkeypatch.setattr(transports, "new_openai_chat", fake_chat_openai)
     request = SeatModelRequest(
         plan.bindings[SeatId.HEALTH_CHECK],
         SEATS[SeatId.HEALTH_CHECK],
@@ -264,12 +261,15 @@ def test_openai_adapter_omits_temperature_but_keeps_health_bounds(monkeypatch) -
 
     assert SeatModelFactory().build(request) is model
     assert captured["timeout"] == 10.0
-    assert captured["max_retries"] == 1
+    # Stamped for dispatch, which resolves it under every scope and deadline.
+    assert model.request_cap_override == 10.0
+    # One request for the probe: the transport class's zero retries.
+    assert "max_retries" not in captured
     assert "temperature" not in captured
 
 
 def test_standard_openai_adapter_builds_normalized_budget_contract(monkeypatch) -> None:
-    import langchain_openai
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -290,7 +290,7 @@ def test_standard_openai_adapter_builds_normalized_budget_contract(monkeypatch) 
         captured.update(kwargs)
         return model
 
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", fake_chat_openai)
+    monkeypatch.setattr(transports, "new_openai_chat", fake_chat_openai)
     request = SeatModelRequest(
         plan.bindings[SeatId.MARKET],
         SEATS[SeatId.MARKET],
@@ -307,7 +307,7 @@ def test_standard_openai_adapter_builds_normalized_budget_contract(monkeypatch) 
 
 
 def test_openai_adapter_honors_reviewed_official_base_url(monkeypatch) -> None:
-    import langchain_openai
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -326,7 +326,7 @@ def test_openai_adapter_honors_reviewed_official_base_url(monkeypatch) -> None:
         captured.update(kwargs)
         return model
 
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", fake_chat_openai)
+    monkeypatch.setattr(transports, "new_openai_chat", fake_chat_openai)
     request = SeatModelRequest(
         plan.bindings[SeatId.MARKET],
         SEATS[SeatId.MARKET],
@@ -341,7 +341,7 @@ def test_openai_adapter_honors_reviewed_official_base_url(monkeypatch) -> None:
 
 
 def test_standard_openai_adapter_does_not_import_google_facade(monkeypatch) -> None:
-    import langchain_openai
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -355,7 +355,7 @@ def test_standard_openai_adapter_does_not_import_google_facade(monkeypatch) -> N
         deepseek_api_key="d",
     )
     plan = resolve_binding_plan(settings)
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", lambda **kwargs: MagicMock())
+    monkeypatch.setattr(transports, "new_openai_chat", lambda **kwargs: MagicMock())
     monkeypatch.delitem(sys.modules, "src.llms", raising=False)
     monkeypatch.delitem(sys.modules, "langchain_google_genai", raising=False)
     request = SeatModelRequest(
@@ -372,7 +372,7 @@ def test_standard_openai_adapter_does_not_import_google_facade(monkeypatch) -> N
 
 
 def test_anthropic_adapter_preserves_adaptive_writer_construction(monkeypatch) -> None:
-    import langchain_anthropic
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -393,7 +393,7 @@ def test_anthropic_adapter_preserves_adaptive_writer_construction(monkeypatch) -
         captured.update(kwargs)
         return model
 
-    monkeypatch.setattr(langchain_anthropic, "ChatAnthropic", fake_chat_anthropic)
+    monkeypatch.setattr(transports, "new_anthropic_chat", fake_chat_anthropic)
     request = SeatModelRequest(
         plan.bindings[SeatId.ARTICLE_WRITER],
         SEATS[SeatId.ARTICLE_WRITER],
@@ -407,7 +407,7 @@ def test_anthropic_adapter_preserves_adaptive_writer_construction(monkeypatch) -
 
 
 def test_apac_compatible_adapter_honors_reasoning_override(monkeypatch) -> None:
-    import langchain_openai
+    from src.llm_runtime.adapters import transports
 
     settings = Settings(
         _env_file=None,
@@ -429,7 +429,7 @@ def test_apac_compatible_adapter_honors_reasoning_override(monkeypatch) -> None:
         captured.update(kwargs)
         return model
 
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", fake_chat_openai)
+    monkeypatch.setattr(transports, "new_openai_chat", fake_chat_openai)
     binding = plan.bindings[SeatId.APAC]
     request = SeatModelRequest(
         binding,
@@ -442,3 +442,92 @@ def test_apac_compatible_adapter_honors_reasoning_override(monkeypatch) -> None:
     assert SeatModelFactory().build(request) is model
     assert captured["reasoning_effort"] == "low"
     assert captured["extra_body"] == {"thinking": {"type": "enabled"}}
+
+
+# --- Run-scoped SDK retries and the quick PM tier pin, on the BUILT client ---
+#
+# These build real ChatGoogleGenerativeAI instances (no network at construction)
+# and read the initialised object, because the defect was a raw settings read
+# that a mock of create_gemini_model's arguments alone would not pin down.
+
+
+@pytest.fixture
+def _reset_flex_state():
+    from src.service_tiers import (
+        _reset_flex_capability_cache_for_tests,
+        _reset_floor_log_cache_for_tests,
+    )
+
+    _reset_flex_capability_cache_for_tests()
+    _reset_floor_log_cache_for_tests()
+    yield
+    _reset_flex_capability_cache_for_tests()
+    _reset_floor_log_cache_for_tests()
+
+
+def _google_settings(*, api_retry_attempts: int) -> Settings:
+    return Settings(
+        _env_file=None,
+        llm_base_provider="google",
+        llm_review_provider="openai",
+        google_api_key="g",
+        openai_api_key="o",
+        google_service_tier="flex",
+        api_retry_attempts=api_retry_attempts,
+    )
+
+
+def _build_google_seat(seat_id: SeatId, settings: Settings, *, quick_mode: bool):
+    from types import SimpleNamespace
+
+    from src.llm_runtime.construction import build_required_model_for_seat
+    from src.runtime_config import build_runtime_config, use_runtime_config
+
+    runtime = build_runtime_config(SimpleNamespace(quick=quick_mode), settings)
+    with use_runtime_config(runtime):
+        return build_required_model_for_seat(
+            seat_id,
+            settings=settings,
+            plan=resolve_binding_plan(settings),
+            quick_mode=quick_mode,
+        )
+
+
+@pytest.mark.parametrize("api_retry_attempts", [1, 3])
+@pytest.mark.parametrize("quick_mode", [True, False])
+@pytest.mark.parametrize(
+    "seat_id",
+    [SeatId.PORTFOLIO_MANAGER, SeatId.SENIOR_FUNDAMENTALS, SeatId.HEALTH_CHECK],
+)
+def test_google_adapter_builds_one_sdk_attempt_in_every_mode(
+    seat_id, quick_mode, api_retry_attempts, restore_runtime_config, _reset_flex_state
+) -> None:
+    """The run's attempt budget is the runtime loop's, never the client's.
+
+    Was the run-scoped ``llm_attempts`` (clamped under ``--quick``), used only
+    by direct callers -- of which none remain but the one-attempt health check.
+    """
+    llm = _build_google_seat(
+        seat_id,
+        _google_settings(api_retry_attempts=api_retry_attempts),
+        quick_mode=quick_mode,
+    )
+
+    assert llm.max_retries == 1
+
+
+@pytest.mark.parametrize(
+    ("quick_mode", "expected_tier"), [(True, None), (False, "flex")]
+)
+def test_quick_portfolio_manager_built_model_is_standard_tier(
+    quick_mode, expected_tier, restore_runtime_config, _reset_flex_state
+) -> None:
+    # A standard-tier Gemini instance carries service_tier=None; only a flex
+    # instance gets the quick flex-attempt SDK deadline.
+    llm = _build_google_seat(
+        SeatId.PORTFOLIO_MANAGER,
+        _google_settings(api_retry_attempts=2),
+        quick_mode=quick_mode,
+    )
+
+    assert llm.service_tier == expected_tier

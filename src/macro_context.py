@@ -25,11 +25,13 @@ import structlog
 from langchain_core.callbacks import BaseCallbackHandler
 
 import src.config as config_module
+from src.atomic_files import atomic_write_text
 from src.error_safety import summarize_exception
 from src.macro_regime import MacroRegime, parse_macro_regime
 from src.macro_regions import infer_macro_region
 from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
+from src.tooling.runtime import INSPECTION_FAILED, ToolCallBlocked
 
 logger = structlog.get_logger(__name__)
 
@@ -190,13 +192,9 @@ def _write_cache(
         "status": status,
         "report": report,
     }
-    path = _cache_path(region)
-    tmp_path = path.with_suffix(".tmp")
-    tmp_path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False),
-        encoding="utf-8",
+    atomic_write_text(
+        _cache_path(region), json.dumps(payload, indent=2, ensure_ascii=False)
     )
-    tmp_path.replace(path)
     return generated_at
 
 
@@ -239,7 +237,12 @@ async def _fetch_macro_raw(trade_date: str, region: str) -> str:
     payload = {"trade_date": trade_date}
     if region:
         payload["region"] = region
-    return str(await get_macroeconomic_news.ainvoke(payload))
+    try:
+        return str(await get_macroeconomic_news.ainvoke(payload))
+    except ToolCallBlocked:
+        # Outside the tool service: a blocked region is thin, so the GLOBAL
+        # fallback still runs, as it did when a block returned no result.
+        return ""
 
 
 def _is_thin(raw: str | None) -> bool:
@@ -329,7 +332,7 @@ async def get_macro_context(
         )
         report = str(cached.get("report", ""))
         # Inspect cached brief on re-entry as untrusted cached_context.
-        report = await get_current_inspection_service().check(
+        decision, report = await get_current_inspection_service().evaluate(
             InspectionEnvelope(
                 content_text=report,
                 raw_content=report,
@@ -338,14 +341,24 @@ async def get_macro_context(
                 metadata={"region": region, "ticker": ticker},
             )
         )
-        if isinstance(report, str) and report.startswith("TOOL_BLOCKED:"):
-            logger.warning(
-                "macro_context_cache_blocked",
-                ticker=ticker,
-                region=region,
-                cache_path=str(_cache_path(region)),
-                blocked_reason=report.removeprefix("TOOL_BLOCKED:").strip(),
-            )
+        if decision.enforced not in ("allowed", "sanitized"):
+            cache_fields = {
+                "ticker": ticker,
+                "region": region,
+                "cache_path": str(_cache_path(region)),
+            }
+            if decision.enforced == "blocked":
+                logger.warning(
+                    "macro_context_cache_blocked",
+                    **cache_fields,
+                    blocked_reason=decision.reason,
+                )
+            else:
+                logger.warning(
+                    "macro_context_cache_inspection_failed",
+                    **cache_fields,
+                    reason=INSPECTION_FAILED,
+                )
             return MacroContextResult(
                 report="",
                 region=region,

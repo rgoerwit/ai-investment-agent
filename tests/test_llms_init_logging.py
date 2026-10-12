@@ -6,18 +6,16 @@ import pytest
 
 @contextmanager
 def _patch_llms_config(mock_cfg):
-    """Substitute *both* config references src/llms.py actually reads.
+    """Substitute the one config reference src/llms.py reads.
 
-    ``_settings_or_default`` resolves the module-level ``src.llms.config`` binding,
-    while the rate-limiter and budget helpers go through
-    ``src.llms.config_module.config``. Patching only the latter left every factory
-    reading the real ``.env`` — so these assertions silently depended on the
-    developer's OPENAI_API_KEY being set, and began failing the moment a migrated
-    ``.env`` moved that key to MOONSHOT_API_KEY.
+    Every factory resolves its default settings through ``resolve_settings``,
+    which reads the live ``src.config.config``. Leaving it unpatched left every
+    factory reading the real ``.env`` — so these assertions silently depended on
+    the developer's OPENAI_API_KEY being set, and began failing the moment a
+    migrated ``.env`` moved that key to MOONSHOT_API_KEY.
     """
     with ExitStack() as stack:
-        stack.enter_context(patch("src.llms.config", mock_cfg))
-        stack.enter_context(patch("src.llms.config_module.config", mock_cfg))
+        stack.enter_context(patch("src.config.config", mock_cfg))
         yield mock_cfg
 
 
@@ -39,7 +37,7 @@ def test_quick_llm_init_logging_emits_once_per_config():
 def test_consultant_llm_init_failure_logs_stack_trace():
     from src.llms import get_consultant_llm
 
-    with patch("src.llms.config") as mock_config:
+    with patch("src.config.config") as mock_config:
         mock_config.enable_consultant = True
         mock_config.get_openai_api_key.return_value = "test-key"
         mock_config.consultant_model = "gpt-5.2"
@@ -67,7 +65,7 @@ def test_consultant_llm_init_failure_logs_stack_trace():
 def test_quick_consultant_llm_init_failure_uses_quick_model_in_log():
     from src.llms import get_consultant_llm
 
-    with patch("src.llms.config") as mock_config:
+    with patch("src.config.config") as mock_config:
         mock_config.enable_consultant = True
         mock_config.get_openai_api_key.return_value = "test-key"
         mock_config.consultant_model = "gpt-5.2"
@@ -127,7 +125,7 @@ class TestOpenAIRateLimiter:
         return mock_cfg
 
     # ChatOpenAI is imported inside the function body, so we patch the source module.
-    _CHATOPENAI_TARGET = "langchain_openai.ChatOpenAI"
+    _CHATOPENAI_TARGET = "src.llm_runtime.adapters.transports.new_openai_chat"
 
     @pytest.mark.parametrize("factory_name,kwargs", _OPENAI_FACTORIES)
     def test_rate_limiter_attached_when_rpm_set(
@@ -230,13 +228,13 @@ class TestOpenAIRateLimiter:
             return MagicMock()
 
         with patch("src.llms._TieredChatGoogleGenerativeAI", side_effect=fake_gemini):
-            with patch("src.llms.config_module.config") as mock_cfg:
+            with patch("src.config.config") as mock_cfg:
                 mock_cfg.gemini_rpm_limit = 15
                 mock_cfg.llm_base_output_tokens = 8192
                 mock_cfg.llm_default_reasoning_reserve_tokens = 0
                 mock_cfg.llm_deep_reasoning_reserve_tokens = 0
                 mock_cfg.get_google_api_key.return_value = "key"
-                llms_mod.create_gemini_model("gemini-3-flash-preview", 0.3, 60, 3)
+                llms_mod.create_gemini_model("gemini-3-flash-preview", 0.3, 60)
 
         assert "rate_limiter" in captured_kw
         assert captured_kw["rate_limiter"] is llms_mod.GLOBAL_RATE_LIMITER

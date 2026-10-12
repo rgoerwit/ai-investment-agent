@@ -9,6 +9,7 @@ from src.memory import (
     cleanup_all_memories,
     create_memory_instances,
 )
+from tests.helpers.memory_config import pin_embedding_identity
 
 
 @pytest.mark.asyncio
@@ -25,8 +26,9 @@ class TestEmbeddingEdgeCases:
     async def test_embedding_dimension_mismatch(self):
         """Test handling of mismatched embedding dimensions."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-api-key"
-            with patch("src.memory.GoogleGenerativeAIEmbeddings") as mock_emb:
+            with patch("src.embeddings.GoogleGenerativeAIEmbeddings") as mock_emb:
                 with patch("chromadb.PersistentClient") as mock_client:
                     # Setup mock instance
                     mock_emb_instance = MagicMock()
@@ -56,8 +58,9 @@ class TestEmbeddingEdgeCases:
     async def test_embedding_nan_values(self):
         """Test handling of NaN in embedding vectors."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-api-key"
-            with patch("src.memory.GoogleGenerativeAIEmbeddings") as mock_emb:
+            with patch("src.embeddings.GoogleGenerativeAIEmbeddings") as mock_emb:
                 with patch("chromadb.PersistentClient") as mock_client:
                     mock_emb_instance = MagicMock()
                     # Init check valid
@@ -87,8 +90,9 @@ class TestEmbeddingEdgeCases:
     async def test_embedding_infinity_values(self):
         """Test handling of infinity in embeddings."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-api-key"
-            with patch("src.memory.GoogleGenerativeAIEmbeddings") as mock_emb:
+            with patch("src.embeddings.GoogleGenerativeAIEmbeddings") as mock_emb:
                 with patch("chromadb.PersistentClient") as mock_client:
                     mock_emb_instance = MagicMock()
                     # Init check valid
@@ -120,8 +124,9 @@ class TestEmbeddingEdgeCases:
     async def test_embedding_all_zeros(self):
         """Test handling of zero-vector embeddings."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-api-key"
-            with patch("src.memory.GoogleGenerativeAIEmbeddings") as mock_emb:
+            with patch("src.embeddings.GoogleGenerativeAIEmbeddings") as mock_emb:
                 with patch("chromadb.PersistentClient") as mock_client:
                     mock_emb_instance = MagicMock()
                     # Init check valid (non-zero for init to pass)
@@ -144,8 +149,9 @@ class TestEmbeddingEdgeCases:
     async def test_embedding_api_rate_limit(self):
         """Test handling of embedding API rate limit."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-api-key"
-            with patch("src.memory.GoogleGenerativeAIEmbeddings") as mock_emb:
+            with patch("src.embeddings.GoogleGenerativeAIEmbeddings") as mock_emb:
                 with patch("chromadb.PersistentClient") as mock_client:
                     mock_emb_instance = MagicMock()
                     # Init check valid
@@ -177,8 +183,9 @@ class TestMemoryPersistenceEdgeCases:
     async def test_corrupted_metadata(self):
         """Test handling of corrupted metadata in stored memories."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-api-key"
-            with patch("src.memory.GoogleGenerativeAIEmbeddings") as mock_emb:
+            with patch("src.embeddings.GoogleGenerativeAIEmbeddings") as mock_emb:
                 with patch("chromadb.PersistentClient") as mock_client:
                     mock_emb_instance = MagicMock()
                     mock_emb_instance.embed_query.return_value = [0.1] * 768
@@ -203,8 +210,9 @@ class TestMemoryPersistenceEdgeCases:
     async def test_duplicate_ids(self):
         """Test handling of duplicate memory IDs."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-api-key"
-            with patch("src.memory.GoogleGenerativeAIEmbeddings") as mock_emb:
+            with patch("src.embeddings.GoogleGenerativeAIEmbeddings") as mock_emb:
                 with patch("chromadb.PersistentClient") as mock_client:
                     mock_emb_instance = MagicMock()
                     mock_emb_instance.embed_query.return_value = [0.1] * 768
@@ -226,8 +234,9 @@ class TestMemoryPersistenceEdgeCases:
     async def test_very_large_document(self):
         """Test handling of extremely large document text."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-api-key"
-            with patch("src.memory.GoogleGenerativeAIEmbeddings") as mock_emb:
+            with patch("src.embeddings.GoogleGenerativeAIEmbeddings") as mock_emb:
                 with patch("chromadb.PersistentClient") as mock_client:
                     mock_emb_instance = MagicMock()
                     mock_emb_instance.embed_query.return_value = [0.1] * 768
@@ -250,8 +259,9 @@ class TestMemoryPersistenceEdgeCases:
     async def test_empty_situations_list(self):
         """Test handling of empty situations list."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-api-key"
-            with patch("src.memory.GoogleGenerativeAIEmbeddings") as mock_emb:
+            with patch("src.embeddings.GoogleGenerativeAIEmbeddings") as mock_emb:
                 with patch("chromadb.PersistentClient") as mock_client:
                     mock_emb_instance = MagicMock()
                     mock_emb.return_value = mock_emb_instance
@@ -273,8 +283,9 @@ class TestMemoryIsolationEdgeCases:
     async def test_ticker_with_special_chars(self):
         """Test ticker sanitization with special characters."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-api-key"
-            with patch("src.memory.GoogleGenerativeAIEmbeddings") as mock_emb:
+            with patch("src.embeddings.GoogleGenerativeAIEmbeddings") as mock_emb:
                 with patch("chromadb.PersistentClient") as mock_client:
                     mock_emb_instance = MagicMock()
                     mock_emb_instance.embed_query.return_value = [0.1] * 768
@@ -297,8 +308,9 @@ class TestMemoryIsolationEdgeCases:
     async def test_very_long_ticker(self):
         """Test handling of excessively long ticker symbols."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-api-key"
-            with patch("src.memory.GoogleGenerativeAIEmbeddings") as mock_emb:
+            with patch("src.embeddings.GoogleGenerativeAIEmbeddings") as mock_emb:
                 with patch("chromadb.PersistentClient") as mock_client:
                     mock_emb_instance = MagicMock()
                     mock_emb_instance.embed_query.return_value = [0.1] * 768
@@ -321,8 +333,9 @@ class TestMemoryIsolationEdgeCases:
         """Test ticker with unicode characters."""
         # Mock config instead of os.environ (Pydantic Settings pattern)
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-api-key"
-            with patch("src.memory.GoogleGenerativeAIEmbeddings") as mock_emb:
+            with patch("src.embeddings.GoogleGenerativeAIEmbeddings") as mock_emb:
                 with patch("chromadb.PersistentClient") as mock_client:
                     mock_emb_instance = MagicMock()
                     mock_emb_instance.embed_query.return_value = [0.1] * 768
@@ -365,8 +378,9 @@ class TestMemoryIsolationEdgeCases:
     async def test_query_with_empty_string(self):
         """Test querying with empty string."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-api-key"
-            with patch("src.memory.GoogleGenerativeAIEmbeddings") as mock_emb:
+            with patch("src.embeddings.GoogleGenerativeAIEmbeddings") as mock_emb:
                 with patch("chromadb.PersistentClient") as mock_client:
                     mock_emb_instance = MagicMock()
                     # Init check valid
@@ -393,8 +407,9 @@ class TestMemoryIsolationEdgeCases:
     async def test_query_with_very_long_text(self):
         """Test querying with extremely long query text."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-api-key"
-            with patch("src.memory.GoogleGenerativeAIEmbeddings") as mock_emb:
+            with patch("src.embeddings.GoogleGenerativeAIEmbeddings") as mock_emb:
                 with patch("chromadb.PersistentClient") as mock_client:
                     mock_emb_instance = MagicMock()
                     mock_emb_instance.embed_query.return_value = [0.1] * 768
@@ -415,8 +430,9 @@ class TestMemoryIsolationEdgeCases:
     async def test_query_with_invalid_filter(self):
         """Test querying with malformed metadata filter."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-api-key"
-            with patch("src.memory.GoogleGenerativeAIEmbeddings") as mock_emb:
+            with patch("src.embeddings.GoogleGenerativeAIEmbeddings") as mock_emb:
                 with patch("chromadb.PersistentClient") as mock_client:
                     mock_emb_instance = MagicMock()
                     mock_emb_instance.embed_query.return_value = [0.1] * 768

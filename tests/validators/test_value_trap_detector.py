@@ -75,67 +75,148 @@ class TestValueTrapPrompt:
 class TestGetOwnershipStructureTool:
     """Test get_ownership_structure tool functionality."""
 
+    @staticmethod
+    def _yahoo(
+        monkeypatch, *, institutional=None, insider=None, major=None, raises=None
+    ):
+        """A yfinance ``Ticker`` whose ownership properties are canned (no request).
+
+        ``raises`` makes every property access fail as Yahoo does for an unknown
+        symbol. Returns the list of symbols the tool asked for.
+        """
+        asked: list[str] = []
+
+        class FakeTicker:
+            def __init__(self, symbol: str) -> None:
+                asked.append(symbol)
+
+            def _get(self, value):
+                if raises is not None:
+                    raise raises
+                return value
+
+            @property
+            def institutional_holders(self):
+                return self._get(institutional)
+
+            @property
+            def insider_transactions(self):
+                return self._get(insider)
+
+            @property
+            def major_holders(self):
+                return self._get(major)
+
+        monkeypatch.setattr("src.tools.ownership.yf.Ticker", FakeTicker)
+        return asked
+
     @pytest.mark.asyncio
-    async def test_tool_returns_valid_json(self):
+    async def test_tool_returns_valid_json(self, monkeypatch):
         """Test tool returns valid JSON structure."""
         from src.tools.ownership import get_ownership_structure
 
-        # Use a well-known ticker - tools must be invoked with .ainvoke()
+        self._yahoo(
+            monkeypatch,
+            institutional=pd.DataFrame([{"Holder": "Vanguard", "pctHeld": 0.08}]),
+            insider=pd.DataFrame([{"Text": "Sale at price 100", "Shares": 10}]),
+            major=pd.DataFrame([["12%", "Institutions"]]),
+        )
+
         result = await get_ownership_structure.ainvoke({"ticker": "AAPL"})
         data = json.loads(result)
 
-        assert "ticker" in data
-        assert "institutional_holders" in data
-        assert "insider_transactions" in data
-        assert "major_holders" in data
-        assert "data_quality" in data
+        assert data["ticker"] == "AAPL"
+        assert data["institutional_holders"] == [
+            {"Holder": "Vanguard", "pctHeld": 0.08}
+        ]
+        assert data["insider_transactions_status"] == "FOUND"
+        assert data["major_holders"] == {"Institutions": "12%"}
+        assert data["data_quality"] == "COMPLETE"
 
     @pytest.mark.asyncio
-    async def test_tool_handles_invalid_ticker(self):
-        """Test tool gracefully handles invalid ticker."""
+    async def test_tool_handles_invalid_ticker(self, monkeypatch):
+        """Yahoo failing every property for an unknown symbol degrades, not crashes."""
         from src.tools.ownership import get_ownership_structure
+
+        self._yahoo(monkeypatch, raises=RuntimeError("No data found"))
 
         result = await get_ownership_structure.ainvoke({"ticker": "INVALIDTICKER12345"})
         data = json.loads(result)
 
-        # Should return structure with empty lists, not crash
-        assert "ticker" in data
-        assert isinstance(data.get("institutional_holders", []), list)
-        assert data.get("data_quality") in ["PARTIAL", "ERROR", "COMPLETE"]
+        assert data["ticker"] == "INVALIDTICKER12345"
+        assert data["institutional_holders"] == []
+        assert data["institutional_holders_status"] == "DATA_UNAVAILABLE"
+        assert data["insider_transactions_status"] == "DATA_UNAVAILABLE"
+        assert data["major_holders_status"] == "DATA_UNAVAILABLE"
+        assert data["data_quality"] == "PARTIAL"
 
     @pytest.mark.asyncio
-    async def test_tool_handles_empty_ticker(self):
+    async def test_tool_handles_empty_ticker(self, monkeypatch):
         """Test tool handles empty ticker string."""
         from src.tools.ownership import get_ownership_structure
+
+        self._yahoo(monkeypatch, raises=RuntimeError("No data found"))
 
         result = await get_ownership_structure.ainvoke({"ticker": ""})
         data = json.loads(result)
 
         # Should not crash
         assert "ticker" in data
+        assert data["data_quality"] == "PARTIAL"
 
     @pytest.mark.asyncio
-    async def test_tool_normalizes_international_ticker(self):
+    async def test_tool_normalizes_international_ticker(self, monkeypatch):
         """Test tool normalizes international ticker formats."""
+        from src.ticker_utils import normalize_ticker
         from src.tools.ownership import get_ownership_structure
 
-        # Test Japanese ticker
+        asked = self._yahoo(monkeypatch, raises=RuntimeError("No data found"))
+
         result = await get_ownership_structure.ainvoke({"ticker": "7203.T"})
         data = json.loads(result)
 
-        assert "ticker" in data
-        # Should normalize and attempt lookup
+        assert data["ticker"] == normalize_ticker("7203.T")
+        assert asked == [normalize_ticker("7203.T")]
 
     @pytest.mark.asyncio
-    async def test_tool_calculates_insider_trend(self):
+    @pytest.mark.parametrize(
+        ("texts", "trend"),
+        [
+            (
+                ["Purchase at price 10", "Buy at price 11", "Sale at price 9"],
+                "NET_BUYER",
+            ),
+            (
+                ["Sale at price 9", "Sale at price 8", "Purchase at price 10"],
+                "NET_SELLER",
+            ),
+            (["Purchase at price 10", "Sale at price 9"], "NEUTRAL"),
+            (["Stock award", "Gift"], "NEUTRAL"),
+        ],
+    )
+    async def test_tool_calculates_insider_trend(self, monkeypatch, texts, trend):
         """Test insider trend calculation logic."""
         from src.tools.ownership import get_ownership_structure
 
-        result = await get_ownership_structure.ainvoke({"ticker": "MSFT"})
-        data = json.loads(result)
+        self._yahoo(
+            monkeypatch,
+            insider=pd.DataFrame({"Text": texts, "Shares": [1] * len(texts)}),
+        )
 
-        insider_trend = data.get("insider_trend")
-        assert insider_trend in ["NET_BUYER", "NET_SELLER", "NEUTRAL", "UNKNOWN"]
+        data = json.loads(await get_ownership_structure.ainvoke({"ticker": "MSFT"}))
+
+        assert data["insider_trend"] == trend
+
+    @pytest.mark.asyncio
+    async def test_tool_leaves_trend_unknown_without_insider_data(self, monkeypatch):
+        from src.tools.ownership import get_ownership_structure
+
+        self._yahoo(monkeypatch, insider=pd.DataFrame())
+
+        data = json.loads(await get_ownership_structure.ainvoke({"ticker": "MSFT"}))
+
+        assert data["insider_trend"] == "UNKNOWN"
+        assert data["insider_transactions_status"] == "EMPTY"
 
     @pytest.mark.asyncio
     @patch("src.tools.ownership.yf.Ticker")
@@ -779,21 +860,37 @@ KEY_RISKS:
         assert metrics["score"] == 42
 
     @pytest.mark.asyncio
-    async def test_ownership_tool_timeout_handling(self):
-        """Test tool handles slow API responses."""
-        # Real API call with short timeout expectation
-        # This tests the tool doesn't hang indefinitely
-        import asyncio
+    async def test_ownership_tool_timeout_handling(self, monkeypatch):
+        """A stalled Yahoo property is cut at the section bound, not waited on."""
+        import threading
 
         from src.tools.ownership import get_ownership_structure
 
+        release = threading.Event()
+
+        class StalledTicker:
+            def __init__(self, symbol: str) -> None:
+                pass
+
+            @property
+            def institutional_holders(self):
+                release.wait(timeout=30)
+
+            insider_transactions = pd.DataFrame()
+            major_holders = pd.DataFrame()
+
+        monkeypatch.setattr("src.tools.ownership.yf.Ticker", StalledTicker)
+        monkeypatch.setattr(
+            "src.tools.ownership.config.ownership_section_timeout_seconds", 0.05
+        )
         try:
-            result = await asyncio.wait_for(
-                get_ownership_structure.ainvoke({"ticker": "AAPL"}), timeout=30
-            )
-            assert result is not None
-        except asyncio.TimeoutError:
-            pytest.skip("API too slow, but timeout handling works")
+            data = json.loads(await get_ownership_structure.ainvoke({"ticker": "AAPL"}))
+        finally:
+            release.set()
+
+        assert data["institutional_holders_status"] == "DATA_UNAVAILABLE"
+        assert data["insider_transactions_status"] == "EMPTY"
+        assert data["data_quality"] == "PARTIAL"
 
 
 class TestClassifyInsiderSellingEvidence:

@@ -24,10 +24,30 @@ sites must always pass one.
 ## Embedding calls are hard-bounded
 
 The client library treats an unset per-request timeout as *no timeout*, so an
-unreachable endpoint blocks forever rather than failing. The constructor health check
-runs on a daemon thread with a join timeout, and every embedding call is wrapped in
-the hard-timeout helper. Do not "fix" this through the library's own request-options
+unreachable endpoint blocks forever rather than failing. The startup probe has one
+owner per binding (`_claim_probe`), claimed before the client is built, so there is
+one client and one probe. It runs on a blocking-call worker (`start_blocking_call`)
+that sync and async waiters share, each under its own deadline; no waiter can cancel
+it, and a generation counter keeps an old binding from publishing into a new one.
+Every embedding call is wrapped in the hard-timeout helper. Do not "fix" this through the library's own request-options
 field, which is declared and never consumed.
+
+Both bounds are `Settings` fields read from the live `src.config.config`, because
+memory tests replace `src.memory.config` with a mock. Clamp only the per-request
+bound to a caller's enclosing deadline. Never clamp the startup probe, whose result
+is cached for the process: admit it only when its full bound fits, and never cache a
+deferral. Async entry points run it off the loop with `prepare_shared_embeddings`
+before building any memory. See `docs/CODEBASE_MEMORY.md`.
+
+Build no memory object when memory is off or there is no ticker; never fall back to
+a shared collection.
+
+One deadline per attempt covers the rate-limiter wait and the request. Take the
+limiter from the embedding binding's provider through `limiter_for_binding`, never
+a Gemini singleton, and never send outside it after an error or timeout.
+Keep the embedding SDKs at one retry layer: OpenAI `max_retries=0`; Google's aiohttp
+path still re-sends once on a connection error, inside the attempt deadline (the
+httpx-transport switch would drop environment proxies).
 
 ## The retrospective may not adjudicate the thesis
 

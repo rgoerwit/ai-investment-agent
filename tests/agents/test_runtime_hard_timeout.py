@@ -48,6 +48,17 @@ def _reset_circuit_breaker():
     reset_circuit_breaker_for_tests()
 
 
+def _seat_names(timeout_class):
+    """Display names of the registered seats in a timeout class (the real registry)."""
+    from src.llm_runtime.seats import SEATS
+
+    return frozenset(
+        spec.callback_name
+        for spec in SEATS.values()
+        if spec.timeout_class is timeout_class
+    )
+
+
 class TestApiRetryAttemptsDefault:
     """The SDK retry budget must stay small to bound worst-case call duration.
 
@@ -64,9 +75,9 @@ class TestApiRetryAttemptsDefault:
         # 10 retries × 300s timeout (api_timeout) = 50 min per single LLM call.
         # We cap retries low so the SDK can't hang on its own retries; outer
         # invoke_with_rate_limit_handling already retries 3× with backoff.
-        default = self._field_default("api_retry_attempts")
+        default = self._field_default("llm_attempts")
         assert default <= 3, (
-            f"api_retry_attempts default must stay small (≤3); got {default}. "
+            f"llm_attempts default must stay small (≤3); got {default}. "
             "At higher values the Gemini SDK can park a single ainvoke() for "
             "tens of minutes via internal retries, defeating wall-clock "
             "timeouts. See May 2026 HK ticker slow-tail incident."
@@ -92,10 +103,8 @@ class TestApexQuickHardTimeout:
     DATA_BLOCK / PM_BLOCK the hard gates depend on (2026-07-06 fix)."""
 
     def test_apex_seat_gets_apex_budget(self, monkeypatch):
-        from src.agents.runtime import (
-            APEX_SEAT_CONTEXTS,
-            quick_mode_hard_timeout_seconds,
-        )
+        from src.agents.runtime import quick_mode_hard_timeout_seconds
+        from src.llm_runtime.timeouts import TimeoutClass
 
         monkeypatch.setattr(
             settings_config, "apex_quick_llm_call_hard_timeout_seconds", 180.0
@@ -103,7 +112,11 @@ class TestApexQuickHardTimeout:
         monkeypatch.setattr(
             settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
         )
-        for context in APEX_SEAT_CONTEXTS:
+        assert _seat_names(TimeoutClass.APEX) == {
+            "Fundamentals Analyst",
+            "Portfolio Manager",
+        }
+        for context in _seat_names(TimeoutClass.APEX):
             assert quick_mode_hard_timeout_seconds(context, settings_config) == 180.0
 
     def test_non_apex_agent_gets_flat_quick_budget(self, monkeypatch):
@@ -151,10 +164,8 @@ class TestApexQuickHardTimeout:
         outruns the flat cap: on 2026-08-03 kimi-k3 blew the 60s quick cap on 6/6
         smoke-suite tickers and every baseline capture was rejected.
         """
-        from src.agents.runtime import (
-            CROSS_CHECK_SEAT_CONTEXTS,
-            quick_mode_hard_timeout_seconds,
-        )
+        from src.agents.runtime import quick_mode_hard_timeout_seconds
+        from src.llm_runtime.timeouts import TimeoutClass
 
         monkeypatch.setattr(
             settings_config, "cross_check_quick_llm_call_hard_timeout_seconds", 180.0
@@ -162,7 +173,10 @@ class TestApexQuickHardTimeout:
         monkeypatch.setattr(
             settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
         )
-        for context in CROSS_CHECK_SEAT_CONTEXTS:
+        assert {"Consultant", "Global Forensic Auditor"} <= _seat_names(
+            TimeoutClass.CROSS_CHECK
+        )
+        for context in _seat_names(TimeoutClass.CROSS_CHECK):
             assert quick_mode_hard_timeout_seconds(context, settings_config) == 180.0
         # The real, decorated call-site spellings must resolve too.
         for context in (
@@ -208,11 +222,8 @@ class TestApexQuickHardTimeout:
         must pass an explicit ``canonical_agent``; this scans ``src/agents`` and
         fails if a gate-critical/cross-check seat is left to derivation.
         """
-        from src.agents.runtime import (
-            APEX_SEAT_CONTEXTS,
-            CROSS_CHECK_SEAT_CONTEXTS,
-            quick_mode_hard_timeout_seconds,
-        )
+        from src.agents.runtime import quick_mode_hard_timeout_seconds
+        from src.llm_runtime.timeouts import TimeoutClass
 
         monkeypatch.setattr(
             settings_config, "apex_quick_llm_call_hard_timeout_seconds", 180.0
@@ -224,7 +235,9 @@ class TestApexQuickHardTimeout:
             settings_config, "quick_llm_call_hard_timeout_seconds", 60.0
         )
 
-        big_seats = set(APEX_SEAT_CONTEXTS) | set(CROSS_CHECK_SEAT_CONTEXTS)
+        big_seats = _seat_names(TimeoutClass.APEX) | _seat_names(
+            TimeoutClass.CROSS_CHECK
+        )
         agents_dir = Path(__file__).resolve().parents[2] / "src" / "agents"
         offenders: list[str] = []
 
@@ -297,20 +310,21 @@ class TestApexQuickHardTimeout:
             == 60.0
         )
 
-    def test_apex_seat_contexts_match_prompt_agent_names(self):
-        # APEX_SEAT_CONTEXTS must equal the on-disk agent_name of the two APEX
-        # seats, or the larger budget silently stops applying after a rename.
+    def test_apex_seat_display_names_match_prompt_agent_names(self):
+        # The APEX class's display names must equal the on-disk agent_name of
+        # those seats' prompts, or the larger budget silently stops applying
+        # after a rename (the runtime resolves the class from the agent name).
         import json
 
-        from src.agents.runtime import APEX_SEAT_CONTEXTS
-        from src.llms import APEX_SEATS
+        from src.llm_runtime.seats import SEATS
+        from src.llm_runtime.timeouts import TimeoutClass
 
         names = set()
-        for seat in APEX_SEATS:
-            key = "fundamentals_analyst" if seat == "senior_fundamentals" else seat
-            with open(f"prompts/{key}.json") as fh:
-                names.add(json.load(fh)["agent_name"])
-        assert APEX_SEAT_CONTEXTS == names
+        for spec in SEATS.values():
+            if spec.timeout_class is TimeoutClass.APEX:
+                with open(f"prompts/{spec.prompt_key}.json") as fh:
+                    names.add(json.load(fh)["agent_name"])
+        assert _seat_names(TimeoutClass.APEX) == names
 
 
 class TestHardTimeoutWrap:
@@ -472,12 +486,109 @@ class TestHardTimeoutWrap:
                     await invoke_with_rate_limit_handling(
                         runnable,
                         {"input": "x"},
-                        max_attempts=3,
-                        max_transient_attempts=2,
+                        max_attempts=2,
                         context="TransientBudgetTest",
                     )
 
         assert runnable.ainvoke.call_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("explicit", "policy_attempts", "expected_calls"),
+        [(3, 2, 2), (2, 2, 2), (1, 2, 1), (0, 2, 1), (None, 2, 2)],
+    )
+    async def test_llm_attempts_caps_an_explicit_max_attempts(
+        self, explicit, policy_attempts, expected_calls
+    ):
+        """LLM_ATTEMPTS caps every caller; an explicit count can only lower it."""
+
+        async def always_times_out(*_args, **_kwargs):
+            await asyncio.get_event_loop().create_future()
+
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(side_effect=always_times_out)
+
+        with (
+            patch.object(settings_config, "llm_attempts", policy_attempts),
+            patch.object(settings_config, "llm_call_hard_timeout_seconds", 0.01),
+            patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock),
+            pytest.raises(TimeoutError),
+        ):
+            await invoke_with_rate_limit_handling(
+                runnable,
+                {"input": "x"},
+                max_attempts=explicit,
+                context="AttemptCapTest",
+            )
+
+        assert runnable.ainvoke.call_count == expected_calls
+
+
+class TestAttemptSizing:
+    """The hard timeout is the time remaining, never padded past it.
+
+    The clock is frozen, so the remaining time is exactly the deadline passed
+    in. Refusing a request below the minimum useful attempt is dispatch
+    admission (``request_timeout``), pinned in tests/llm_runtime/test_timeouts.py.
+    """
+
+    @pytest.fixture
+    def sized(self, monkeypatch):
+        from src.agents import runtime as runtime_module
+        from src.llm_runtime import timeouts as llm_timeouts
+
+        monkeypatch.setattr(llm_timeouts, "now", lambda: 1000.0)
+        monkeypatch.setattr(runtime_module.asyncio, "sleep", AsyncMock())
+        timeouts: list[float] = []
+
+        async def spy(coro, *, timeout, label):
+            timeouts.append(timeout)
+            return await coro
+
+        monkeypatch.setattr(runtime_module, "run_with_hard_timeout", spy)
+        return timeouts
+
+    async def _invoke(self, overall):
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(return_value=AIMessage(content="ok"))
+        with patch.object(settings_config, "llm_call_hard_timeout_seconds", 60.0):
+            await invoke_with_rate_limit_handling(
+                runnable,
+                {"input": "x"},
+                max_attempts=1,
+                context="SizingTest",
+                overall_timeout_seconds=overall,
+            )
+        return runnable
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("remaining", [0.05, 0.1, 1.0, 59.0])
+    async def test_remaining_time_sizes_the_hard_timeout_unpadded(
+        self, sized, remaining
+    ):
+        runnable = await self._invoke(remaining)
+        assert sized == [pytest.approx(remaining, abs=1e-9)]  # 0.05 was 0.1
+        assert runnable.ainvoke.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_the_invocation_cap_still_bounds_a_long_deadline(self, sized):
+        await self._invoke(10_000.0)
+        assert len(sized) == 1
+        assert sized[0] < 10_000.0
+
+    @pytest.mark.asyncio
+    async def test_a_spent_deadline_still_reports_the_overall_deadline(self, sized):
+        with pytest.raises(TimeoutError, match="overall LLM deadline"):
+            await self._invoke(0.0)
+        assert sized == []
+
+    @pytest.mark.asyncio
+    async def test_an_enclosing_deadline_sizes_the_hard_timeout_unpadded(self, sized):
+        from src.llm_runtime.timeouts import enclosing_deadline
+
+        with enclosing_deadline(0.05):
+            await self._invoke(None)
+        assert sized == [pytest.approx(0.05, abs=1e-9)]
 
 
 def test_no_external_asyncio_timeout_wrapping_shared_llm_helper():
@@ -538,6 +649,129 @@ class TestQuickModeFlexLatencyGuard:
     flex-fallback x timeout matrix rows 6-8."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "start_tier", ["standard", "degraded", "capacity_fallback"]
+    )
+    async def test_standard_attempt_timeout_is_counted_and_retried(
+        self, monkeypatch, start_tier
+    ):
+        from unittest.mock import MagicMock
+
+        from src.agents.circuit_breaker import (
+            get_circuit_breaker,
+            reset_circuit_breaker_for_tests,
+        )
+        from src.runtime_config import RuntimeConfig, use_runtime_config
+        from src.service_tiers import mark_tier_attempt
+
+        reset_circuit_breaker_for_tests()
+        monkeypatch.setattr(settings_config, "gemini_service_tier", "flex")
+        if start_tier == "degraded":
+            monkeypatch.setattr(
+                "src.service_tiers.flex_degraded", lambda provider: True
+            )
+        rc = RuntimeConfig.from_config(settings_config).with_overrides(
+            quick_mode_active=True
+        )
+
+        async def timeout(*_a, **_kw):
+            if start_tier == "capacity_fallback":
+                mark_tier_attempt("standard")
+            raise TimeoutError("request timed out")
+
+        runnable = AsyncMock()
+        runnable.service_tier = "standard" if start_tier == "standard" else "flex"
+        runnable.ainvoke = AsyncMock(side_effect=timeout)
+        breaker = get_circuit_breaker()
+        record_spy = MagicMock(wraps=breaker.record_outcome)
+        monkeypatch.setattr(breaker, "record_outcome", record_spy)
+
+        with (
+            patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock),
+            use_runtime_config(rc),
+            pytest.raises(TimeoutError),
+        ):
+            await invoke_with_rate_limit_handling(
+                runnable,
+                {"input": "x"},
+                max_attempts=2,
+                context="QuickStandardTimeout",
+                provider="google",
+                model_name="gemini-3.5-flash",
+            )
+
+        assert runnable.ainvoke.call_count == 2
+        assert any(call.kwargs.get("ok") is False for call in record_spy.call_args_list)
+        from src.token_tracker import get_tracker
+
+        recorded = [
+            row
+            for row in get_tracker().call_attempts
+            if row.agent_name == "QuickStandardTimeout"
+        ]
+        assert recorded and all(row.service_tier != "flex" for row in recorded)
+        reset_circuit_breaker_for_tests()
+
+    @pytest.mark.asyncio
+    async def test_latency_fallback_timeout_does_not_requeue_or_trip_breaker(
+        self, monkeypatch
+    ):
+        from unittest.mock import MagicMock
+
+        from src.agents.circuit_breaker import (
+            get_circuit_breaker,
+            reset_circuit_breaker_for_tests,
+        )
+        from src.runtime_config import RuntimeConfig, use_runtime_config
+        from src.service_tiers import mark_flex_latency_fallback, mark_tier_attempt
+        from src.token_tracker import get_tracker
+
+        reset_circuit_breaker_for_tests()
+        monkeypatch.setattr(settings_config, "gemini_service_tier", "flex")
+        rc = RuntimeConfig.from_config(settings_config).with_overrides(
+            quick_mode_active=True
+        )
+
+        async def timeout_after_fallback(*_a, **_kw):
+            mark_flex_latency_fallback()
+            mark_tier_attempt("standard")
+            raise TimeoutError("standard leg exceeded remaining outer budget")
+
+        runnable = AsyncMock()
+        runnable.service_tier = "flex"
+        runnable.ainvoke = AsyncMock(side_effect=timeout_after_fallback)
+        breaker = get_circuit_breaker()
+        record_spy = MagicMock(wraps=breaker.record_outcome)
+        monkeypatch.setattr(breaker, "record_outcome", record_spy)
+
+        with (
+            patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock),
+            use_runtime_config(rc),
+            pytest.raises(TimeoutError),
+        ):
+            await invoke_with_rate_limit_handling(
+                runnable,
+                {"input": "x"},
+                max_attempts=2,
+                context="QuickLatencyFallbackTimeout",
+                provider="google",
+                model_name="gemini-3.5-flash",
+            )
+
+        assert runnable.ainvoke.call_count == 1
+        assert not any(
+            call.kwargs.get("ok") is False for call in record_spy.call_args_list
+        )
+        attempts = [
+            row
+            for row in get_tracker().call_attempts
+            if row.agent_name == "QuickLatencyFallbackTimeout"
+        ]
+        assert len(attempts) == 1
+        assert attempts[0].service_tier == "standard"
+        reset_circuit_breaker_for_tests()
+
+    @pytest.mark.asyncio
     async def test_quick_flex_timeout_is_non_retryable_and_not_breaker_counted(
         self, monkeypatch
     ):
@@ -561,6 +795,7 @@ class TestQuickModeFlexLatencyGuard:
 
         runnable = AsyncMock()
         runnable.ainvoke = AsyncMock(side_effect=always_hangs)
+        runnable.service_tier = "flex"
 
         breaker = get_circuit_breaker()
         record_spy = MagicMock(wraps=breaker.record_outcome)
@@ -575,8 +810,7 @@ class TestQuickModeFlexLatencyGuard:
                 await invoke_with_rate_limit_handling(
                     runnable,
                     {"input": "x"},
-                    max_attempts=3,
-                    max_transient_attempts=2,
+                    max_attempts=2,
                     context="QuickFlexGuard",
                     provider="google",
                     model_name="gemini-3.5-flash",
@@ -617,8 +851,7 @@ class TestQuickModeFlexLatencyGuard:
                 await invoke_with_rate_limit_handling(
                     runnable,
                     {"input": "x"},
-                    max_attempts=3,
-                    max_transient_attempts=2,
+                    max_attempts=2,
                     context="FullFlexRetry",
                     provider="google",
                     model_name="gemini-3.5-flash",
@@ -817,7 +1050,6 @@ class TestProviderPartialResponseRetry:
                 runnable,
                 {"input": "x"},
                 max_attempts=2,
-                max_transient_attempts=2,
                 context="ClassifierRetryAuthority",
             )
 
@@ -895,8 +1127,7 @@ class TestProviderPartialResponseRetry:
         result = await invoke_with_rate_limit_handling(
             runnable,
             {"input": "x"},
-            max_attempts=3,
-            max_transient_attempts=2,
+            max_attempts=2,
             context="OutputCapNoRetry",
             provider="openai",
             model_name="gpt-test",

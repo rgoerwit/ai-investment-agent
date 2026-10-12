@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
+from src.env_file import default_settings_env_file
 from src.ibkr.portfolio_defaults import (
     DEFAULT_CASH_BUFFER_PCT,
     DEFAULT_DRIFT_PCT,
@@ -43,7 +44,7 @@ class DashboardSettings(BaseSettings):
 
     model_config = {
         "env_prefix": "IBKR_DASHBOARD_",
-        "env_file": ".env",
+        "env_file": default_settings_env_file(),
         "extra": "ignore",
     }
 

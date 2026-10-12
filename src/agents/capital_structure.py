@@ -6,12 +6,21 @@ import json
 import math
 import re
 import time
+from collections.abc import Sequence
 from typing import Any
 
 import structlog
 
 from src.data_block_utils import replace_or_append_block_line
+from src.fx_normalization import canonical_currency_code
+from src.monetary import (
+    MONETARY_AMOUNT_RE,
+    iter_monetary_tokens,
+    monetary_currency_codes,
+    parse_monetary_amount,
+)
 from src.text_patterns import RESULT_ENVELOPE_RE
+from src.tooling.evidence_recorder import EvidenceRecord, normalize_http_url
 
 from .evidence_preflight import (
     PreflightCall,
@@ -331,6 +340,23 @@ async def preload_capital_structure_evidence(
     )
 
 
+def capital_structure_evidence_context(
+    preflight: str, records: Sequence[EvidenceRecord]
+) -> str:
+    """Include inspected follow-up evidence, never failed or blocked tool content."""
+    sections = [preflight]
+    for record in records:
+        if (
+            record.agent_key == "legal_counsel"
+            and record.source == "legal_counsel"
+            and not record.blocked
+            and record.execution_status == "SUCCEEDED"
+            and record.evidence_status in {"EVIDENCE_FOUND", "RESULTS_FOUND"}
+        ):
+            sections.append(f"#### legal_followup_{record.sequence}\n{record.content}")
+    return "\n\n".join(sections)
+
+
 def _extract_json_object(content: str) -> dict[str, Any] | None:
     decoder = json.JSONDecoder()
     for match in re.finditer(r"\{", content):
@@ -359,64 +385,53 @@ def _as_finite_float(value: Any, *, allow_zero: bool = False) -> float | None:
 
 def _parse_exposure_amount(raw_amount: Any) -> tuple[float, str] | None:
     """Parse an ISO-currency amount while preserving magnitude conservatively."""
-    text = str(raw_amount or "").strip().upper().replace(",", "")
-    match = re.fullmatch(
-        r"(?P<currency>[A-Z]{3})\s+(?P<value>\d+(?:\.\d+)?)\s*"
-        r"(?P<magnitude>TRILLION|TN|T|BILLION|BN|B|MILLION|MN|M)?",
-        text,
-    )
-    if match is None:
+    text = str(raw_amount or "").strip()
+    match = MONETARY_AMOUNT_RE.fullmatch(text)
+    if match is None or not (match.group("currency") or match.group("currency_suffix")):
         return None
-    multipliers = {
-        None: 1.0,
-        "M": 1e6,
-        "MN": 1e6,
-        "MILLION": 1e6,
-        "B": 1e9,
-        "BN": 1e9,
-        "BILLION": 1e9,
-        "T": 1e12,
-        "TN": 1e12,
-        "TRILLION": 1e12,
-    }
-    value = float(match.group("value")) * multipliers[match.group("magnitude")]
-    if not math.isfinite(value) or value <= 0:
+    value = parse_monetary_amount(text)
+    if value is None or value <= 0:
         return None
-    return value, match.group("currency")
+    return value, monetary_currency_codes(match)[0]
 
 
 def _source_context(evidence: str, source_url: str) -> str:
     """Return the bounded preflight section that actually contains the URL."""
-    if not source_url or source_url.upper() in {"N/A", "UNKNOWN"}:
+    normalized_url = normalize_http_url(source_url)
+    if normalized_url is None:
         return ""
+
+    def contains_source(context: str) -> bool:
+        return any(
+            normalize_http_url(match.group(0)) == normalized_url
+            for match in _URL_IN_QUOTED_PAYLOAD_RE.finditer(context)
+        )
+
     result_blocks: list[str] = re.findall(RESULT_ENVELOPE_RE.pattern, evidence or "")
     for block in result_blocks:
-        if source_url in block:
+        if contains_source(block):
             return block
     sections = re.split(r"(?m)^####\s+", evidence or "")
     for section in sections:
-        if source_url in section:
+        if contains_source(section):
             return section
     return ""
 
 
 def _amount_supported(context: str, amount: str) -> bool:
-    parsed = re.search(
-        r"\b(?P<currency>[A-Z]{3})\s+" r"(?P<number>\d[\d,]*(?:\.\d+)?)",
-        amount.upper(),
-    )
-    if parsed is None:
+    expected = _parse_exposure_amount(amount)
+    if expected is None:
         return False
-    currency = parsed.group("currency")
-    number = parsed.group("number").replace(",", "")
-    integer, dot, fraction = number.partition(".")
-    number_pattern = re.escape(integer)
-    if dot:
-        number_pattern += rf"(?:\.{re.escape(fraction)}0*)?"
-    normalized_context = context.replace(",", "")
-    return currency in normalized_context.upper() and bool(
-        re.search(rf"(?<!\d){number_pattern}(?!\d)", normalized_context)
-    )
+    value, currency = expected
+    # Bind magnitude and currency to the same token, not independent substrings.
+    for match in iter_monetary_tokens(context):
+        currencies = monetary_currency_codes(match)
+        if not any(currencies) or any(code and code != currency for code in currencies):
+            continue
+        actual = parse_monetary_amount(match.group(0))
+        if actual is not None and math.isclose(actual, value, rel_tol=1e-9):
+            return True
+    return False
 
 
 def _capital_claim_supported(capital: dict[str, Any], evidence: str) -> bool:
@@ -470,9 +485,9 @@ def assess_capital_structure_scale(
         return {"status": "UNRESOLVED", "reason": "AMOUNT_OR_BASIS_UNUSABLE"}
 
     exposure, exposure_currency = parsed_exposure
-    financial_currency = str(
-        raw_metrics.get("financialCurrency") or raw_metrics.get("currency") or ""
-    ).upper()
+    financial_currency = canonical_currency_code(
+        str(raw_metrics.get("financialCurrency") or raw_metrics.get("currency") or "")
+    )
     if not financial_currency or financial_currency != exposure_currency:
         return {"status": "UNRESOLVED", "reason": "CURRENCY_MISMATCH"}
 
@@ -492,9 +507,8 @@ def assess_capital_structure_scale(
         ),
         None,
     )
+    # debtToEquity is the canonical ratio (src/data/debt_equity.py); no rescaling.
     raw_de_ratio = _as_finite_float(raw_metrics.get("debtToEquity"))
-    if raw_de_ratio is not None and raw_de_ratio > 10:
-        raw_de_ratio /= 100.0
     if equity is None and total_debt > 0 and raw_de_ratio is not None:
         equity = total_debt / raw_de_ratio
     if equity is None or not math.isfinite(equity) or equity <= 0:
@@ -544,7 +558,7 @@ def assess_capital_structure_scale(
 
 def classify_capital_structure(capital: dict[str, Any]) -> str:
     """Derive decision treatment from normalized accounting attributes."""
-    if capital["coverage_status"] == "SEARCH_FAILED":
+    if capital["coverage_status"] in {"SEARCH_FAILED", "UNRESOLVED"}:
         return "UNRESOLVED"
     if capital["exposure_type"] == "NONE" and capital["coverage_status"] in {
         "FOUND",
@@ -622,19 +636,18 @@ def normalize_legal_output(
 
     if capital["coverage_status"] == "UNRESOLVED" and raw_capital is None:
         capital["coverage_status"] = _fallback_coverage(evidence)
-    if (
-        capital["coverage_status"] == "NOT_FOUND"
-        and "EVIDENCE_STATUS: COVERAGE_COMPLETE_NO_MATCH" not in evidence
+    # No complete-absence coverage producer exists yet. Model NONE and empty
+    # searches cannot independently establish code-owned clearance.
+    if capital["coverage_status"] == "NOT_FOUND" or (
+        capital["coverage_status"] == "FOUND" and capital["exposure_type"] == "NONE"
     ):
-        capital["coverage_status"] = "UNRESOLVED"
+        _withhold_unsupported_capital_claim(capital)
         capital["evidence"] = (
-            "Search completed, but the available source classes did not establish "
-            "complete no-exposure coverage."
+            "Available source classes did not establish code-owned complete "
+            "no-exposure coverage."
         )
-    if (
-        capital["coverage_status"] == "FOUND"
-        and capital["exposure_type"] not in {"NONE", "UNKNOWN"}
-        and not _capital_claim_supported(capital, evidence)
+    if capital["coverage_status"] == "FOUND" and not _capital_claim_supported(
+        capital, evidence
     ):
         _withhold_unsupported_capital_claim(capital)
     capital["classification"] = classify_capital_structure(capital)

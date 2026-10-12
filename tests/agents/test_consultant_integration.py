@@ -23,14 +23,14 @@ class TestConsultantNodeCreation:
 
     def test_consultant_llm_disabled_env_var(self):
         """Test that consultant is disabled when ENABLE_CONSULTANT=false."""
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = False
             llm = get_consultant_llm()
             assert llm is None
 
     def test_consultant_llm_missing_api_key(self):
         """Test that consultant returns None when OPENAI_API_KEY missing."""
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = True
             mock_config.get_openai_api_key.return_value = ""
             llm = get_consultant_llm()
@@ -40,15 +40,17 @@ class TestConsultantNodeCreation:
         """Test successful consultant LLM creation with valid config."""
         # Skip if langchain-openai not installed (it's optional)
         try:
-            import langchain_openai
+            from src.llm_runtime.adapters import transports
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_llm = Mock()
             mock_chatgpt.return_value = mock_llm
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_model = "gpt-4o"
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -59,7 +61,7 @@ class TestConsultantNodeCreation:
                 call_kwargs = mock_chatgpt.call_args[1]
                 assert call_kwargs["model"] == "gpt-4o"
                 assert call_kwargs["api_key"] == "test-key"
-                assert call_kwargs["max_retries"] == 0
+                assert "max_retries" not in call_kwargs
                 assert call_kwargs["max_completion_tokens"] == 8192
                 assert call_kwargs["use_responses_api"] is True
                 assert call_kwargs["output_version"] == "responses/v1"
@@ -1198,7 +1200,7 @@ Conditions:
             "VERDICT: HOLD\n"
             "RISK_TALLY: 0.5\n"
             "ZONE: MODERATE\n"
-            "DECISION_FACTS: NONE\n"
+            "DECISION_FACTS: claim:pe\n"
             "DECISION_GATES: NONE\n"
             "### --- END PM_BLOCK ---\n"
         )
@@ -1243,6 +1245,20 @@ Conditions:
                     },
                     "company_of_interest": "TEST.T",
                     "red_flags": [],
+                    "analysis_snapshot": {
+                        "contract_status": "VALID",
+                        "claims": {
+                            "claim:pe": {
+                                "id": "claim:pe",
+                                "field": "PE_RATIO_TTM",
+                                "value": "10",
+                                "authority": "AGGREGATOR",
+                                "coverage": "FOUND",
+                                "decision_eligible": True,
+                                "decision_role": "SUPPORT",
+                            }
+                        },
+                    },
                     "pre_screening_result": "PASS",
                     "artifact_statuses": {
                         "consultant_review": {
@@ -1516,7 +1532,7 @@ class TestConsultantQuickMode:
         """Test that consultant uses CONSULTANT_QUICK_MODEL when quick_mode=True."""
         # Skip if langchain-openai not installed (it's optional)
         try:
-            import langchain_openai
+            from src.llm_runtime.adapters import transports
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
@@ -1524,10 +1540,12 @@ class TestConsultantQuickMode:
 
         from src.llms import create_consultant_llm
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_quick_model = "gpt-4o-mini"
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -1544,7 +1562,7 @@ class TestConsultantQuickMode:
         """Test that consultant uses CONSULTANT_MODEL when quick_mode=False."""
         # Skip if langchain-openai not installed (it's optional)
         try:
-            import langchain_openai
+            from src.llm_runtime.adapters import transports
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
@@ -1552,10 +1570,12 @@ class TestConsultantQuickMode:
 
         from src.llms import create_consultant_llm
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_model = "gpt-4o"
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -1571,7 +1591,7 @@ class TestConsultantQuickMode:
         """Test that consultant defaults to gpt-4o-mini when CONSULTANT_QUICK_MODEL not set."""
         # Skip if langchain-openai not installed (it's optional)
         try:
-            import langchain_openai
+            from src.llm_runtime.adapters import transports
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
@@ -1579,10 +1599,12 @@ class TestConsultantQuickMode:
 
         from src.llms import create_consultant_llm
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_quick_model = "gpt-4o-mini"  # Default value
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -1597,7 +1619,7 @@ class TestConsultantQuickMode:
     def test_consultant_gpt5_uses_medium_reasoning_effort(self):
         """GPT-5 consultant should stay on normal reasoning, not pro-style deep compute."""
         try:
-            import langchain_openai
+            from src.llm_runtime.adapters import transports
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
@@ -1605,10 +1627,12 @@ class TestConsultantQuickMode:
 
         from src.llms import create_consultant_llm
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_model = "gpt-5.4"
                 mock_config.get_openai_api_key.return_value = "test-key"
@@ -1628,16 +1652,18 @@ class TestConsultantQuickMode:
     def test_consultant_quick_gpt5_mini_uses_low_reasoning_effort(self):
         """Quick-mode gpt-5-mini variants should use 'low' (mini rejects 'minimal')."""
         try:
-            import langchain_openai
+            from src.llm_runtime.adapters import transports
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
         from unittest.mock import MagicMock, patch
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_quick_model = "gpt-5.4-mini"
                 mock_config.consultant_model = "gpt-5.4"
@@ -1666,10 +1692,12 @@ class TestConsultantQuickMode:
 
         from unittest.mock import MagicMock, patch
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_quick_model = model
                 mock_config.consultant_model = "gpt-5.4"
@@ -1684,16 +1712,18 @@ class TestConsultantQuickMode:
     def test_quick_mode_falls_back_to_full_consultant_model_when_blank(self):
         """Blank quick model should not disable consultant; it should fall back."""
         try:
-            import langchain_openai
+            from src.llm_runtime.adapters import transports
         except ImportError:
             pytest.skip("langchain-openai not installed (optional dependency)")
 
         from unittest.mock import MagicMock, patch
 
-        with patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
 
-            with patch("src.llms.config") as mock_config:
+            with patch("src.config.config") as mock_config:
                 mock_config.enable_consultant = True
                 mock_config.consultant_quick_model = ""
                 mock_config.consultant_model = "gpt-5.4"
@@ -1710,7 +1740,7 @@ class TestConsultantQuickMode:
         """Quick mode should still build the consultant with quick settings."""
         mock_llm = Mock(name="quick-consultant")
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = True
             mock_config.get_openai_api_key.return_value = "test-key"
             with patch(
@@ -1733,7 +1763,7 @@ class TestConsultantQuickMode:
         quick_llm = Mock(name="quick-consultant")
         full_llm = Mock(name="full-consultant")
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = True
             mock_config.get_openai_api_key.return_value = "test-key"
             with patch(
@@ -1756,7 +1786,7 @@ class TestConsultantQuickMode:
         quick_callbacks = [Mock(name="quick-callback")]
         full_callbacks = [Mock(name="full-callback")]
 
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.enable_consultant = True
             mock_config.get_openai_api_key.return_value = "test-key"
             with patch(

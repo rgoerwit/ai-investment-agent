@@ -5,6 +5,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def test_src_llms_import_does_not_construct_default_models(monkeypatch):
     import langchain_google_genai
@@ -31,6 +33,7 @@ def test_src_llms_import_does_not_construct_default_models(monkeypatch):
     assert len(init_calls) == 1
 
 
+@pytest.mark.real_rate_limiter
 def test_src_llms_import_does_not_construct_global_rate_limiter(monkeypatch):
     init_calls = []
 

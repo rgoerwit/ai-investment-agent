@@ -11,6 +11,8 @@ they also catch the SDK changing how it surfaces HTTP failures.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
+import email.utils
 import json
 from pathlib import Path
 
@@ -18,6 +20,7 @@ import httpx
 import httpx2
 import pytest
 from mcp.shared.exceptions import MCPError
+from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT
 
 from src.mcp.client import MCPRuntime
 from src.mcp.config import MCPServerSpec
@@ -25,6 +28,7 @@ from src.mcp.errors import (
     HTTPErrorRecord,
     MCPCallError,
     MCPErrorCategory,
+    _parse_retry_after,
     classify_mcp_error,
 )
 
@@ -110,6 +114,41 @@ class TestClassifyMcpError:
         assert err.category is MCPErrorCategory.TRANSPORT
         assert err.retry_after_seconds == 12
 
+    def test_request_timeout_is_retryable_transport(self):
+        """The SDK's read-timeout error is a timeout, not a protocol error."""
+        err = classify_mcp_error(
+            MCPError(REQUEST_TIMEOUT, "Request 'initialize' timed out"),
+            server_id="s",
+            tool_name="quote",
+        )
+        assert err.category is MCPErrorCategory.TRANSPORT
+        assert err.retryable is True
+        assert err.json_rpc_code == REQUEST_TIMEOUT
+        assert err.tool_name == "quote"
+
+    def test_wrapped_request_timeout_is_transport(self):
+        inner = MCPError(REQUEST_TIMEOUT, "Request 'tools/call' timed out")
+        group = ExceptionGroup("outer", [ExceptionGroup("inner", [inner])])  # noqa: F821
+        err = classify_mcp_error(group, server_id="s")
+        assert err.category is MCPErrorCategory.TRANSPORT
+        assert err.retryable is True
+
+    def test_recorded_5xx_still_wins_over_request_timeout(self):
+        err = classify_mcp_error(
+            MCPError(REQUEST_TIMEOUT, "timed out"),
+            server_id="s",
+            http_error=HTTPErrorRecord(status=503),
+        )
+        assert err.http_status == 503
+        assert err.json_rpc_code is None
+
+    def test_connection_closed_stays_protocol(self):
+        err = classify_mcp_error(
+            MCPError(CONNECTION_CLOSED, "Connection closed"), server_id="s"
+        )
+        assert err.category is MCPErrorCategory.PROTOCOL
+        assert err.retryable is True
+
     def test_recorded_plain_4xx_defers_to_json_rpc_code(self):
         """A 400 carrying a real JSON-RPC error body keeps the server's code."""
         record = HTTPErrorRecord(status=400)
@@ -146,6 +185,51 @@ class TestClassifyMcpError:
         )
         assert err.category is MCPErrorCategory.PROTOCOL
         assert err.json_rpc_code == -32601
+
+
+# ---------------------------------------------------------------------------
+# Retry-After: delta-seconds or an HTTP-date (RFC 9110 section 10.2.3)
+# ---------------------------------------------------------------------------
+
+_RETRY_AFTER_NOW = dt.datetime(2026, 10, 11, 12, 0, 0, tzinfo=dt.UTC)
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("7", 7),
+        ("0", 0),
+        (" 7 ", 7),
+        ("Sun, 11 Oct 2026 12:02:00 GMT", 120),
+        ("Sun, 11 Oct 2026 12:00:00 GMT", 0),
+        ("Sun, 11 Oct 2026 11:59:00 GMT", 0),  # already past: no wait left
+        ("-1", None),
+        ("+5", None),
+        ("1_000", None),
+        ("9" * 20, None),  # no calendar date that far ahead
+        ("1.5", None),
+        ("soon", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_retry_after_parses_both_forms_and_drops_junk(header, expected):
+    assert _parse_retry_after(header, now=_RETRY_AFTER_NOW) == expected
+
+
+def test_a_partial_second_until_the_date_rounds_up():
+    now = _RETRY_AFTER_NOW + dt.timedelta(milliseconds=250)
+    assert _parse_retry_after("Sun, 11 Oct 2026 12:02:00 GMT", now=now) == 120
+
+
+def test_an_http_date_reaches_the_classified_error():
+    when = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60)
+    header = email.utils.format_datetime(when, usegmt=True)
+
+    err = classify_mcp_error(_status_error(429, {"retry-after": header}), server_id="s")
+
+    assert err.retry_after_seconds is not None
+    assert 58 <= err.retry_after_seconds <= 60
 
 
 # ---------------------------------------------------------------------------

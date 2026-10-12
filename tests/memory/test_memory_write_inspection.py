@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -111,3 +111,46 @@ async def test_memory_write_returns_false_when_all_documents_blocked():
         result = await memory.add_situations(["poison only"], [{"ticker": "NOPE"}])
         assert result is False
         memory.situation_collection.add.assert_not_called()
+
+
+class _BrokenInspector:
+    async def inspect(self, envelope: InspectionEnvelope) -> InspectionDecision:
+        del envelope
+        raise RuntimeError("sk-secret-backend-detail")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("inspector", "event"),
+    [
+        pytest.param(_BrokenInspector(), "memory_write_inspection_failed", id="failed"),
+        pytest.param(None, "memory_write_blocked", id="blocked"),
+    ],
+)
+async def test_memory_write_logs_a_backend_failure_apart_from_a_block(inspector, event):
+    """Both keep the document out (fail closed); only a block is logged as one."""
+
+    class BlockInspector:
+        async def inspect(self, envelope: InspectionEnvelope) -> InspectionDecision:
+            del envelope
+            return InspectionDecision(
+                action="block", threat_level="high", reason="planted"
+            )
+
+    memory = _memory_stub()
+    service = InspectionService(
+        inspector or BlockInspector(), mode="block", fail_policy="fail_closed"
+    )
+    services = RuntimeServices(
+        tool_service=ToolExecutionService(), inspection_service=service
+    )
+    with use_runtime_services(services), patch("src.memory.logger") as logger:
+        result = await memory.add_situations(["a lesson"], [{"ticker": "X"}])
+
+    assert result is False
+    memory.situation_collection.add.assert_not_called()
+    events = [call.args[0] for call in logger.warning.call_args_list]
+    assert event in events
+    other = {"memory_write_blocked", "memory_write_inspection_failed"} - {event}
+    assert not other & set(events)
+    assert "sk-secret" not in repr(logger.warning.call_args_list)

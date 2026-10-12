@@ -60,7 +60,7 @@ def mock_create_gemini_model(request):
 @pytest.fixture
 def mock_config():
     """Mocks the config object in the llms module to control model names."""
-    with patch("src.llms.config") as mock_conf:
+    with patch("src.config.config") as mock_conf:
         mock_conf.api_timeout = 300
         mock_conf.quick_llm_api_timeout_seconds = 120
         mock_conf.api_retry_attempts = 10
@@ -234,7 +234,6 @@ def test_create_gemini_model_logs_thinking_level_at_debug(caplog):
             "gemini-3-pro-preview",
             temperature=0.1,
             timeout=30,
-            max_retries=1,
             thinking_level="high",
         )
 
@@ -259,7 +258,7 @@ def test_create_gemini_model_uses_thinking_budget_for_gemini_2_5():
     with patch(
         "src.llms._TieredChatGoogleGenerativeAI", return_value=MagicMock()
     ) as mock_llm:
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.llm_base_output_tokens = 4096
             mock_config.llm_default_reasoning_reserve_tokens = 2048
             mock_config.llm_deep_reasoning_reserve_tokens = 8192
@@ -269,7 +268,6 @@ def test_create_gemini_model_uses_thinking_budget_for_gemini_2_5():
                 GEMINI_2_5_FLASH,
                 temperature=0.1,
                 timeout=30,
-                max_retries=1,
                 thinking_level="medium",
             )
 
@@ -283,7 +281,7 @@ def test_create_gemini_model_adds_default_reserve_for_gemini_3():
     llm = MagicMock()
 
     with patch("src.llms._TieredChatGoogleGenerativeAI", return_value=llm) as mock_llm:
-        with patch("src.llms.config") as mock_config:
+        with patch("src.config.config") as mock_config:
             mock_config.llm_base_output_tokens = 4096
             mock_config.llm_default_reasoning_reserve_tokens = 2048
             mock_config.llm_deep_reasoning_reserve_tokens = 8192
@@ -293,7 +291,6 @@ def test_create_gemini_model_adds_default_reserve_for_gemini_3():
                 GEMINI_3_PRO,
                 temperature=0.1,
                 timeout=30,
-                max_retries=1,
                 thinking_level="low",
                 max_output_tokens=2048,
                 reserve_class="default",

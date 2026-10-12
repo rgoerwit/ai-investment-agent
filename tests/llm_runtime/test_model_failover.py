@@ -25,6 +25,7 @@ from src.agents import invoke_with_rate_limit_handling
 from src.agents.circuit_breaker import reset_circuit_breaker_for_tests
 from src.agents.network_breaker import reset_network_breaker_singleton
 from src.config import Settings
+from src.llm_runtime.adapters import transports
 from src.llm_runtime.bindings import BindingConfigurationError, resolve_binding_plan
 from src.llm_runtime.construction import build_model_for_seat
 from src.llm_runtime.failover import (
@@ -254,16 +255,20 @@ class TestConstruction:
         model = build_model_for_seat(
             SeatId.CONSULTANT, settings=settings, plan=resolve_binding_plan(settings)
         )
-        assert isinstance(model, llms_mod._get_flex_fallback_chat_openai_cls())
+        assert isinstance(model, transports.deadline_aware_openai_cls())
         assert model.failover_model == "gpt-5.4"
         assert model.service_tier != "flex"  # failover capability, not flex
 
-    def test_openai_seat_without_failover_stays_plain(self):
+    def test_openai_seat_without_failover_has_no_failover_target(self):
+        # Every OpenAI client is the deadline-aware transport (there is no
+        # plain-client branch); without a configured failover it has no target.
         settings = _settings(openai_service_tier="auto")
         model = build_model_for_seat(
             SeatId.CONSULTANT, settings=settings, plan=resolve_binding_plan(settings)
         )
-        assert not isinstance(model, ModelFailoverMixin)
+        assert isinstance(model, transports.deadline_aware_openai_cls())
+        assert model.failover_model is None
+        assert failover_target(model) is None
 
     def test_attach_refuses_a_transport_that_cannot_serve_it(self):
         with pytest.raises(TypeError, match="cannot serve a model failover"):
@@ -335,12 +340,13 @@ class TestTransport:
     async def test_openai_transport_fails_over_at_auto(self):
         from langchain_openai import ChatOpenAI
 
-        cls = llms_mod._get_flex_fallback_chat_openai_cls()
+        cls = transports.deadline_aware_openai_cls()
         llm = cls(
             model="gpt-6.1-sol",
             api_key="k",
             service_tier="flex",
             failover_model="gpt-5.4",
+            dispatch_provider="openai",
         )
         captured = []
 
@@ -461,9 +467,7 @@ class TestRetryLoop:
         )
         with transport.patch():
             try:
-                await _invoke(
-                    _gemini(), "PM failover retried", max_transient_attempts=3
-                )
+                await _invoke(_gemini(), "PM failover retried", max_attempts=3)
             except genai_errors.ServerError:
                 pass
         after_failover = transport.calls[
@@ -483,11 +487,10 @@ class TestRetryLoop:
     async def test_quick_flex_queue_timeout_fails_over_instead_of_giving_up(self):
         """A quick flex queue timeout is never re-queued at flex, but a standard-tier
         failover attempt is not a re-queue."""
-        # Both tiers time out, as the outer hard timeout would leave it.
-        transport = _Transport({PRIMARY: [TimeoutError("flex queue")] * 2})
+        # With transport fallback disabled, the failed tier remains flex.
+        transport = _Transport({PRIMARY: [TimeoutError("flex queue")]})
         with (
             transport.patch(),
-            patch("src.agents.runtime.provider_flex_active", return_value=True),
             patch(
                 "src.agents.runtime.get_runtime_config",
                 return_value=type(
@@ -496,6 +499,7 @@ class TestRetryLoop:
                     {
                         "quiet_mode": True,
                         "quick_mode_active": True,
+                        "llm_attempts": 2,
                         "llm_call_hard_timeout_seconds": 60.0,
                     },
                 )(),
@@ -504,5 +508,8 @@ class TestRetryLoop:
                 "src.agents.runtime.quick_mode_hard_timeout_seconds", return_value=60.0
             ),
         ):
-            _, attempts, _ = await _invoke(_gemini(), "PM quick flex timeout")
+            _, attempts, _ = await _invoke(
+                _gemini(flex_fallback_to_standard=False), "PM quick flex timeout"
+            )
         assert [model for model, _, _ in attempts] == [PRIMARY, FAILOVER]
+        assert transport.calls == [(PRIMARY, "flex"), (FAILOVER, "standard")]

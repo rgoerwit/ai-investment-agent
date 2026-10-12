@@ -6,9 +6,7 @@ from __future__ import annotations
 
 import fcntl
 import json
-import os
 import re
-import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -19,6 +17,7 @@ from typing import Any
 
 import structlog
 
+from src.atomic_files import atomic_write_text
 from src.currency_resolver import resolve_local_trading_currency
 from src.data_block_utils import extract_kill_criteria
 from src.error_safety import summarize_exception
@@ -201,24 +200,7 @@ def _validate_analysis_index_entry(
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     """Atomically replace a JSON file on the same filesystem."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=str(path.parent),
-    )
-    try:
-        with os.fdopen(fd, "w") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_name, path)
-    except Exception:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True))
 
 
 _FILENAME_DASH_DATE_RE = re.compile(

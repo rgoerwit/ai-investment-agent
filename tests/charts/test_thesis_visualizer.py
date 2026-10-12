@@ -521,3 +521,156 @@ class TestEdgeCases:
             # Count bar characters
             bar_chars = sum(1 for c in line if c in "▓░")
             assert bar_chars == 20, f"Inconsistent bar width in: {line}"
+
+
+@pytest.mark.parametrize("coverage", [None, 4, 100])
+@pytest.mark.parametrize("us_revenue", [None, 10, 99])
+@pytest.mark.parametrize(
+    "liquidity", [None, "PASS", "MARGINAL", "FAIL_INSUFFICIENT_LIQUIDITY"]
+)
+def test_canonical_projection_flows_into_real_visual_and_report(
+    coverage, us_revenue, liquidity
+):
+    from dataclasses import asdict, replace
+
+    from src.agents.verdict_policy import (
+        assess_growth_gate,
+        assess_health_gate,
+        assess_initiation_gates,
+        compliance_hard_fail_result,
+        format_initiation_gate,
+        project_compliance_gates,
+        render_initiation_gate_context,
+    )
+    from src.decision_inputs import DecisionInputs
+    from src.liquidity_assessment import LiquidityAssessment
+    from src.report_generator import QuietModeReporter
+
+    inputs = replace(
+        DecisionInputs.from_metrics(
+            {"adjusted_health_score": 80, "adjusted_growth_score": 80}
+        ),
+        english_analyst_count=coverage,
+        us_revenue_pct=us_revenue,
+        liquidity=None
+        if liquidity is None
+        else LiquidityAssessment(
+            liquidity,
+            average_daily_turnover_usd={
+                "PASS": 500_000,
+                "MARGINAL": 150_000,
+                "FAIL_INSUFFICIENT_LIQUIDITY": 50_000,
+            }[liquidity],
+        ),
+    )
+    gates = assess_initiation_gates(inputs)
+    growth = assess_growth_gate(inputs)
+    policy = {
+        "schema_version": 1,
+        "initiation_gates": [asdict(gate) for gate in gates],
+        "growth_gate": {"status": growth.status},
+        "health_gate": asdict(assess_health_gate(inputs)),
+    }
+    source = (
+        SAMPLE_PM_OUTPUT
+        + "\nIndependent economic risk: +1, retained by PM discretion.\n"
+    )
+    projected = project_compliance_gates(source, inputs)
+    assert project_compliance_gates(projected, inputs) == projected
+    assert projected.index("**Hard Fail Checks:**") < projected.index("**Liquidity**")
+    visual = ThesisVisualizer(projected, decision_policy=policy).generate()
+    report = QuietModeReporter("TEST").generate_report(
+        {"final_trade_decision": projected, "decision_policy": policy}
+    )
+    context = render_initiation_gate_context(inputs)
+    for gate in gates:
+        assert format_initiation_gate(gate) in visual
+        assert format_initiation_gate(gate) in context
+        assert format_initiation_gate(gate) in report
+    assert (
+        "Hard Fail Result: " + compliance_hard_fail_result(gates, growth.status)
+        in visual
+    )
+    assert "Independent economic risk: +1" in projected
+    assert "verified_english" not in visual and "measured_liquidity" not in visual
+    if liquidity == "MARGINAL":
+        assert "$150,000 daily average - PASS; MARGINAL" in visual
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {
+            "schema_version": 2,
+            "initiation_gates": [
+                {"rule": "liquidity", "status": "PASS", "value": 1_000_000}
+            ],
+        },
+        {"schema_version": 1, "initiation_gates": None},
+        {
+            "schema_version": 1,
+            "initiation_gates": [
+                {"rule": "liquidity", "status": [], "value": "invented"}
+            ],
+        },
+        {
+            "schema_version": 1,
+            "initiation_gates": [
+                {"rule": "analyst_coverage", "status": "PASS"},
+                {"rule": "analyst_coverage", "status": "PASS"},
+            ],
+        },
+    ],
+)
+def test_malformed_or_future_canonical_gate_policy_stays_visible_and_unknown(policy):
+    visual = ThesisVisualizer(SAMPLE_PM_OUTPUT, decision_policy=policy).generate()
+    for label in ("Liquidity", "Analyst Coverage", "US Revenue"):
+        assert label + ": Unknown - INDETERMINATE" in visual
+    assert "Hard Fail Result: INDETERMINATE" in visual
+
+
+def test_legacy_canonical_status_without_measurement_never_borrows_pm_number():
+    policy = {
+        "schema_version": 1,
+        "initiation_gates": [
+            {
+                "rule": "analyst_coverage",
+                "status": "PASS",
+                "reason": "verified_english_analyst_count=4",
+            }
+        ],
+    }
+    visual = ThesisVisualizer(SAMPLE_PM_OUTPUT, decision_policy=policy).generate()
+    assert "Analyst Coverage: Unknown - PASS" in visual
+    assert "Analyst Coverage (8" not in visual
+
+
+@pytest.mark.parametrize(
+    "value", [10**1000, float("inf"), float("nan"), "10", True, -1]
+)
+def test_canonical_display_rejects_corrupt_measurement_values(value):
+    policy = {
+        "schema_version": 1,
+        "initiation_gates": [
+            {"rule": "liquidity", "status": "INDETERMINATE", "value": value}
+        ],
+    }
+    visual = ThesisVisualizer(SAMPLE_PM_OUTPUT, decision_policy=policy).generate()
+    assert "Liquidity: Unknown - INDETERMINATE" in visual
+
+
+@pytest.mark.parametrize("version", [True, "1", 1.0, 2, None, {}, []])
+def test_unsupported_policy_schema_cannot_supply_new_hard_fail_aggregate(version):
+    policy = {
+        "schema_version": version,
+        "initiation_gates": [
+            {"rule": "liquidity", "status": "PASS", "value": 1_000_000}
+        ],
+        "growth_gate": {"status": "HARD_FAIL", "hard_fail": True},
+    }
+    visual = ThesisVisualizer(SAMPLE_PM_OUTPUT, decision_policy=policy).generate()
+    for label in ("Liquidity", "Analyst Coverage", "US Revenue"):
+        assert label + ": Unknown - INDETERMINATE" in visual
+    assert "Hard Fail Result: INDETERMINATE" in visual
+    # The older growth-chart behavior is preserved by this surgical display fix.
+    assert "policy hard fail" in visual

@@ -282,35 +282,56 @@ class TestGraphLogging:
 
         assert creation_logged, "Ticker memory creation should be logged"
 
-    @patch("src.graph.components.logger")
-    def test_legacy_memory_warning_logged(self, mock_logger):
-        """Test that using legacy memories triggers a warning."""
-        # Create graph without ticker (legacy mode)
-        graph = create_trading_graph(max_debate_rounds=1)
+    @pytest.mark.parametrize(
+        ("ticker", "enable_memory", "level", "event"),
+        [
+            (None, True, "warning", "memory_skipped_no_ticker"),
+            ("TEST", False, "debug", "memory_disabled"),
+            (None, False, "debug", "memory_disabled"),
+        ],
+        ids=["no_ticker", "memory_off", "memory_off_no_ticker"],
+    )
+    def test_no_memory_object_without_a_ticker_or_with_memory_off(
+        self, monkeypatch, ticker, enable_memory, level, event
+    ):
+        """Nothing is constructed: no Chroma client, no embeddings probe.
 
-        # Verify warning was logged
-        warning_logged = False
-        for call in mock_logger.warning.call_args_list:
-            if len(call[0]) > 0 and "using_legacy_memories_no_ticker" in str(
-                call[0][0]
-            ):
-                warning_logged = True
-                break
+        Memory off or no ticker once built five shared ``legacy_*`` memories,
+        each opening Chroma and (once per process) probing the embeddings
+        provider, and the no-ticker case read collections shared by every
+        ticker. Every node now gets ``None``.
+        """
+        import src.graph.components as components
+        from src.memory import FinancialSituationMemory
 
-        assert warning_logged, "Legacy memory usage should trigger warning"
+        constructed: list[str] = []
+        monkeypatch.setattr(
+            FinancialSituationMemory,
+            "__init__",
+            lambda self, name: constructed.append(name),
+        )
+        researcher_memories: list[object] = []
+        real_researcher = components.create_researcher_node
 
-    @patch("src.graph.components.logger")
-    def test_memory_disabled_uses_debug_not_warning(self, mock_logger):
-        """Intentional memory disablement should not log a warning."""
+        def spy_researcher(llm, memory, *args, **kwargs):
+            researcher_memories.append(memory)
+            return real_researcher(llm, memory, *args, **kwargs)
+
+        monkeypatch.setattr(components, "create_researcher_node", spy_researcher)
+        mock_logger = MagicMock()
+        monkeypatch.setattr(components, "logger", mock_logger)
+
         graph = create_trading_graph(
-            ticker="TEST", enable_memory=False, max_debate_rounds=1
+            ticker=ticker, enable_memory=enable_memory, max_debate_rounds=1
         )
 
         assert graph is not None
-        mock_logger.warning.assert_not_called()
-        mock_logger.debug.assert_any_call(
-            "memory_disabled_using_legacy_memories", ticker="TEST"
-        )
+        assert constructed == []
+        assert researcher_memories == [None] * 4
+        logged = getattr(mock_logger, level).call_args_list
+        assert any(call.args[:1] == (event,) for call in logged)
+        if level == "debug":
+            mock_logger.warning.assert_not_called()
 
 
 class TestGraphMemoryKeyConsistency:

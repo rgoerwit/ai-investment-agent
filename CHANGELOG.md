@@ -5,6 +5,91 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [4.1.0] - 2026-10-12
+
+### Added
+
+- **Deadline-sized LLM requests** — Every request is sized at dispatch from one
+  absolute invocation deadline, under one budget policy per seat, through tier
+  switches, fallback and model failover. A request with less than a useful
+  allowance left is refused before it is sent, and each attempt records what was
+  dispatched.
+- **Configurable operational deadlines** — Tool, research, market-data, MCP,
+  embedding, article-workflow and shutdown deadlines are settings (see
+  `.env.example`); minimum useful attempts are derived, never fixed floors. The
+  pipeline's per-ticker deadline is a hard ceiling inside the analysis, with a
+  publication reserve so the report is still written.
+- **`make env-align`** — Writes a candidate `.env` in `.env.example`'s layout with
+  values copied verbatim, checks that it loads to the same values, prints counts
+  only, and replaces its output atomically with owner-only permissions.
+- **Offline unit tests by rule** — An autouse boundary refuses network access in
+  every non-integration test and names the call site of any attempt; integration
+  tests run only with `--run-integration` and read `INTEGRATION_*` credentials.
+
+### Changed
+
+- **One retry owner** — Every OpenAI, OpenAI-compatible, Anthropic and Google client
+  makes one SDK attempt per request; `LLM_ATTEMPTS` (formerly `API_RETRY_ATTEMPTS`)
+  is the total attempt count for rate limits, server errors and timeouts.
+- **One outcome per tool call** — `ToolExecutionService` bounds each call, hooks
+  included, by one deadline and records exactly one ledger outcome; content
+  inspection delivers only the text it inspected and fails closed on output it
+  cannot serialize.
+- **MCP** — Each `tools/call` takes one atomic budget reservation, honours
+  `Retry-After`, rechecks the server's cooldown immediately before sending, and
+  refuses a tool the server does not list.
+- **Blocking work** — One worker-slot size governs the blocking pools; a stalled
+  worker keeps its slot and a late result is discarded before inspection.
+- **Articles** — The `--article` workflow has its own deadline, and
+  `publish_article` is the single publication step: nothing is published after the
+  deadline or from a cancelled task.
+- **Debt-to-equity is one canonical ratio** — Each data source's unit and basis is
+  declared in `src/data/debt_equity.py`, and yfinance/yahooquery percentages are
+  converted before sources are merged. FMP, Alpha Vantage, EODHD and web-extracted
+  D/E values, whose unit or basis is unverified, are no longer used. `DE_RATIO` in
+  the report's DATA_BLOCK is a ratio (fundamentals prompt 11.18) read under one
+  field contract; `EXTREME_LEVERAGE` gates on the canonical ratio, with a
+  non-blocking `DE_DISCREPANCY` flag when the report disagrees.
+- **Tender eligibility** — `ACTIVE_TENDER` (which exempts the health and growth
+  gates) requires `M_AND_A_SUBJECT_ROLE: TARGET` and a positive tender price; the
+  Foreign Language Analyst reports the subject's role (prompt 1.24).
+- **Evidence and quick-mode gates** — Guidance-coverage demotion counts only the
+  required searches; latest-results claims are bound to inspected statement rows
+  and dates; monetary, currency and FX parsing each live in one place; a BUY that
+  relies on a growth exception is capped at HOLD; Consultant MAJOR_CONCERNS blocks
+  BUY.
+- **Failover example** — The `LLM_MODEL_FAILOVERS` example names
+  `gemini-3.6-flash`; `gemini-3.7-flash` was deprecated on 2026-10-08.
+
+### Fixed
+
+- **False leverage rejects** — yfinance's percentage D/E was read as a ratio
+  (TOT.TO's 8.05% as 805%); all six August–October `EXTREME_LEVERAGE` rejects were
+  this misread and pass when replayed.
+- **Acquirers treated as tender targets** — An acquirer's own tender (6670.TW) no
+  longer exempts it from the health and growth gates.
+- **Output-cap recovery** — An analyst output stopped at its output cap is
+  recognised from the provider's stop reason and retried as `RETRY-CAP` at lower
+  reasoning effort, instead of at higher effort that failed the same way (0995.HK).
+- **Failure classification** — A pydantic `ValidationError` from a tool argument is
+  an `application_error` with no host, not an unknown provider error.
+- **Quick-mode timeouts** — The quick Portfolio Manager and Junior Fundamentals run
+  on the standard Gemini tier, ending deadline failures inherited from the flex
+  attempt.
+- **Unbounded waits** — Gap-fill and Tavily lookups, official-document downloads
+  and MCP steps no longer wait on uncancellable threads or past their deadline.
+- **Missing provider packages** — `langchain-openai` and `langchain-anthropic` are
+  ordinary dependencies again; Docker's `--only main`, `make install` and a plain
+  `poetry sync` had installed neither.
+
+### Security
+
+- Pin fixed releases of `pyjwt` (2.15.1), `multidict` (6.9.1), `langgraph-sdk`
+  (0.4.5), `werkzeug` (3.1.9) and `virtualenv` (21.13.0), each past the 14-day
+  release-age cooldown, and drop the pip-audit ignores they made obsolete.
+
 ## [4.0.0] - 2026-09-16
 
 ### Added

@@ -205,16 +205,12 @@ def get_network_breaker() -> NetworkBreaker:
                 from src.config import config as settings_config
 
                 _global_breaker = NetworkBreaker(
-                    threshold=int(
-                        getattr(settings_config, "network_breaker_threshold", 4)
-                    ),
+                    threshold=int(settings_config.network_breaker_threshold),
                     window_seconds=float(
-                        getattr(settings_config, "network_breaker_window_seconds", 30.0)
+                        settings_config.network_breaker_window_seconds
                     ),
                     cool_off_seconds=float(
-                        getattr(
-                            settings_config, "network_breaker_cool_off_seconds", 45.0
-                        )
+                        settings_config.network_breaker_cool_off_seconds
                     ),
                 )
             except Exception:

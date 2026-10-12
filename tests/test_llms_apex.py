@@ -26,14 +26,14 @@ def _set_cfg(monkeypatch, **attrs):
     """Patch config attributes on every live binding.
 
     Other suites reload ``src.config``/``src.llms``, which can leave
-    ``llms_mod.config`` pointing at a different Settings object than
+    ``llms_mod.resolve_settings()`` pointing at a different Settings object than
     ``src.config.config``. Patch both so these tests are order-independent.
     """
     import src.config as config_module
 
     targets = {
         id(config_module.config): config_module.config,
-        id(llms_mod.config): llms_mod.config,
+        id(llms_mod.resolve_settings()): llms_mod.resolve_settings(),
         id(config): config,
     }
     for target in targets.values():
@@ -83,12 +83,15 @@ class TestApexFactoryUnset:
             result = llms_mod.create_apex_llm("portfolio_manager", quick_mode=True)
         assert result is sentinel
         quick.assert_called_once()
+        # PM pinned to standard in quick mode (seats.py execution policy).
+        assert quick.call_args.kwargs["service_tier"] == "standard"
 
     def test_senior_quick_mode_delegates_to_quick_path(self, monkeypatch):
         _set_cfg(monkeypatch, apex_model="")
         with patch.object(llms_mod, "create_quick_thinking_llm") as quick:
             llms_mod.create_apex_llm("senior_fundamentals", quick_mode=True)
         quick.assert_called_once()
+        assert quick.call_args.kwargs["service_tier"] == "standard"
 
 
 class TestApexFactorySet:
@@ -152,9 +155,7 @@ class TestApexFactorySet:
         assert kwargs["thinking_level"] == "high"
         assert kwargs["temperature"] == 0.1
 
-    def test_quick_mode_pins_standard_tier(self, monkeypatch):
-        # Gate-critical seat must not queue on best-effort flex under the tight
-        # --quick budget: create_gemini_model gets service_tier="standard".
+    def test_quick_senior_pins_standard_tier(self, monkeypatch):
         _set_cfg(
             monkeypatch,
             apex_model="gemini-3.1-pro-preview",
@@ -162,7 +163,35 @@ class TestApexFactorySet:
             apex_thinking_level="high",
         )
         with patch.object(llms_mod, "create_gemini_model") as gemini:
+            llms_mod.create_apex_llm("senior_fundamentals", quick_mode=True)
+        assert gemini.call_args.kwargs["service_tier"] == "standard"
+
+    def test_quick_pm_explicit_apex_pins_standard_tier(self, monkeypatch):
+        _set_cfg(
+            monkeypatch,
+            apex_model="gemini-3.1-pro-preview",
+            apex_quick_model="gemini-3.5-flash",
+            gemini_service_tier="flex",
+        )
+        with patch.object(llms_mod, "create_gemini_model") as gemini:
             llms_mod.create_apex_llm("portfolio_manager", quick_mode=True)
+        assert gemini.call_args.kwargs["service_tier"] == "standard"
+
+    def test_full_mode_pm_explicit_apex_leaves_tier_to_config(self, monkeypatch):
+        _set_cfg(
+            monkeypatch,
+            apex_model="gemini-3.1-pro-preview",
+            gemini_service_tier="flex",
+        )
+        with patch.object(llms_mod, "create_gemini_model") as gemini:
+            llms_mod.create_apex_llm("portfolio_manager", quick_mode=False)
+        assert gemini.call_args.kwargs["service_tier"] is None
+
+    def test_deep_factory_passes_explicit_tier_to_gemini(self):
+        with patch.object(llms_mod, "create_gemini_model") as gemini:
+            llms_mod.create_deep_thinking_llm(
+                model="gemini-3.5-flash", service_tier="standard"
+            )
         assert gemini.call_args.kwargs["service_tier"] == "standard"
 
     def test_full_mode_leaves_tier_to_config(self, monkeypatch):

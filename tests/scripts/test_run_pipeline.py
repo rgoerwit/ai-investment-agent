@@ -1,8 +1,10 @@
 """Tests for scripts/run_pipeline.sh — end-to-end screening pipeline."""
 
 import json
+import os
 import re
 import subprocess
+import sys
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -552,22 +554,29 @@ class TestTimeoutBudgetContract:
     def _script_text() -> str:
         return _RUN_PIPELINE_PATH.read_text()
 
-    def test_stage1_watchdog_default_raised_to_600(self):
+    def test_stage_watchdog_defaults_come_from_settings(self):
+        # One source of truth: no literal default left in the script; the
+        # values are read through src.config_print once the runtime is known.
         script = self._script_text()
         assert (
-            'STAGE1_TICKER_TIMEOUT_SECONDS="${STAGE1_TICKER_TIMEOUT_SECONDS:-600}"'
+            'STAGE1_TICKER_TIMEOUT_SECONDS="${STAGE1_TICKER_TIMEOUT_SECONDS:-}"'
             in script
         )
-        # The old 360 default (which the collapsed 60s call budget dies well
-        # inside, and which was too tight for a standard-tier APEX seat) is gone.
+        assert (
+            'STAGE2_TICKER_TIMEOUT_SECONDS="${STAGE2_TICKER_TIMEOUT_SECONDS:-}"'
+            in script
+        )
+        assert ":-600}" not in script
+        assert ":-2400}" not in script
         assert ":-360}" not in script
-
-    def test_stage2_watchdog_default_preserved(self):
-        script = self._script_text()
-        assert (
-            'STAGE2_TICKER_TIMEOUT_SECONDS="${STAGE2_TICKER_TIMEOUT_SECONDS:-2400}"'
-            in script
+        assert '"${PYTHON_CMD[@]}" -m src.config_print "$1"' in script
+        # Resolved after the Python runtime, before any stage reads them.
+        resolve_python = script.index("\nresolve_python_cmd\n")
+        resolved = script.index("\nresolve_stage_timeouts\n")
+        first_use = script.index(
+            "Per-ticker watchdog: ${STAGE1_TICKER_TIMEOUT_SECONDS}s"
         )
+        assert resolve_python < resolved < first_use
 
     def test_watchdog_printed_in_previews(self):
         script = self._script_text()
@@ -743,3 +752,156 @@ class TestPipelineMarkerPayload:
         )
         rendered = json.dumps(payload)
         assert '"workflow": "run_pipeline"' in rendered
+
+
+_SIGNALS_PATH = _RUN_PIPELINE_PATH.parent / "pipeline_signals.sh"
+_REPO_ROOT = _RUN_PIPELINE_PATH.parent.parent
+
+
+def _shell_function(script: str, name: str) -> str:
+    """The text of one top-level shell function, through its closing brace."""
+    start = script.index(f"\n{name}() {{\n") + 1
+    end = script.index("\n}\n", start) + 3
+    return script[start:end]
+
+
+def _run_bash(body: str, tmp_path: Path, env_overrides: dict[str, str]):
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key
+        not in {
+            "STAGE1_TICKER_TIMEOUT_SECONDS",
+            "STAGE2_TICKER_TIMEOUT_SECONDS",
+            "PIPELINE_TICKER_DEADLINE_EPOCH",
+        }
+    }
+    env["PYTHONPATH"] = str(_REPO_ROOT)
+    env.update(env_overrides)
+    # cd inside bash, never cwd=: posix_spawn, and an empty directory keeps the
+    # operator's cwd-relative .env out of src.config_print.
+    return subprocess.run(
+        ["bash", "-c", 'cd "$1" || exit 99\n' + body, "harness", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+        close_fds=False,
+        timeout=60,
+        check=False,
+    )
+
+
+class TestWatchdogContract:
+    """One source of truth for the stage watchdogs, and an absolute child deadline."""
+
+    @staticmethod
+    def _resolver_harness(python: str) -> str:
+        script = _RUN_PIPELINE_PATH.read_text()
+        return (
+            'fail() { printf "%s\\n" "$1" >&2; }\n'
+            f"PYTHON_CMD=({python})\n"
+            + _shell_function(script, "config_value")
+            + _shell_function(script, "resolve_stage_timeouts")
+            + "resolve_stage_timeouts\n"
+            + 'printf "%s %s\\n" "$STAGE1_TICKER_TIMEOUT_SECONDS" '
+            + '"$STAGE2_TICKER_TIMEOUT_SECONDS"\n'
+        )
+
+    def test_shell_default_equals_settings(self, tmp_path):
+        from src.config import Settings
+
+        result = _run_bash(self._resolver_harness(sys.executable), tmp_path, {})
+        assert result.returncode == 0, result.stderr
+        fields = Settings.model_fields
+        assert result.stdout.split() == [
+            str(fields["stage1_ticker_timeout_seconds"].default),
+            str(fields["stage2_ticker_timeout_seconds"].default),
+        ]
+
+    def test_exported_value_wins_without_consulting_python(self, tmp_path):
+        # PYTHON_CMD=false: any config_print call would fail the resolver.
+        result = _run_bash(
+            self._resolver_harness("false"),
+            tmp_path,
+            {
+                "STAGE1_TICKER_TIMEOUT_SECONDS": "720",
+                "STAGE2_TICKER_TIMEOUT_SECONDS": "3000",
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["720", "3000"]
+
+    def test_one_exported_value_and_one_from_settings(self, tmp_path):
+        result = _run_bash(
+            self._resolver_harness(sys.executable),
+            tmp_path,
+            {"STAGE1_TICKER_TIMEOUT_SECONDS": "720"},
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["720", "2400"]
+
+    @pytest.mark.parametrize("bad", ["abc", "0", "600.5", "-1"])
+    def test_non_integer_watchdog_fails_loudly(self, tmp_path, bad):
+        result = _run_bash(
+            self._resolver_harness("false"),
+            tmp_path,
+            {
+                "STAGE1_TICKER_TIMEOUT_SECONDS": bad,
+                "STAGE2_TICKER_TIMEOUT_SECONDS": "2400",
+            },
+        )
+        assert result.returncode == 1
+        assert "positive whole number" in result.stderr
+
+    def test_settings_read_failure_stops_the_pipeline(self, tmp_path):
+        result = _run_bash(self._resolver_harness("false"), tmp_path, {})
+        assert result.returncode == 1
+        assert "Unable to read stage1_ticker_timeout_seconds" in result.stderr
+
+    def test_config_value_unknown_key_exits_non_zero(self, tmp_path):
+        script = _RUN_PIPELINE_PATH.read_text()
+        body = (
+            f"PYTHON_CMD=({sys.executable})\n"
+            + _shell_function(script, "config_value")
+            + "config_value no_such_setting\n"
+        )
+        result = _run_bash(body, tmp_path, {})
+        assert result.returncode != 0
+        assert result.stdout == ""
+
+    def test_deadline_epoch_is_start_plus_timeout(self, tmp_path):
+        body = f'source "{_SIGNALS_PATH}"\nticker_deadline_epoch 600 1000\n'
+        result = _run_bash(body, tmp_path, {})
+        assert result.stdout == "1600"
+
+    def test_tracked_child_receives_the_absolute_deadline(self, tmp_path):
+        logfile = tmp_path / "child.log"
+        child = (
+            "import os; print('EPOCH=' + os.environ['PIPELINE_TICKER_DEADLINE_EPOCH'])"
+        )
+        body = (
+            f'source "{_SIGNALS_PATH}"\n'
+            "date +%s\n"
+            f'run_tracked_child "{logfile}" "{sys.executable}" -c "{child}"\n'
+            "date +%s\n"
+        )
+        result = _run_bash(
+            body,
+            tmp_path,
+            {
+                "PIPELINE_TICKER_TIMEOUT_SECONDS": "600",
+                "PIPELINE_TICKER_WATCHDOG_POLL_SECONDS": "1",
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        before, after = (int(line) for line in result.stdout.split())
+        log = logfile.read_text()
+        epoch = int(re.search(r"^EPOCH=(\d+)$", log, re.MULTILINE).group(1))
+        assert before + 600 <= epoch <= after + 600
+        assert f"[pipeline_child_deadline] epoch={epoch} timeout=600s" in log
+
+    def test_epoch_is_set_where_the_watchdog_starts_the_child(self):
+        signals = _SIGNALS_PATH.read_text()
+        assert 'PIPELINE_TICKER_DEADLINE_EPOCH="$deadline_epoch" "${cmd[@]}"' in signals
+        # The watchdog's own duration input stays; the child never reads it.
+        assert 'local timeout="${PIPELINE_TICKER_TIMEOUT_SECONDS:-900}"' in signals

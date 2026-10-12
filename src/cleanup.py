@@ -20,11 +20,12 @@ from collections.abc import Awaitable, Callable
 
 import structlog
 
+from src.config import config
+
 logger = structlog.get_logger(__name__)
 
 # Registry of cleanup functions
 _cleanup_functions: list[Callable[[], Awaitable[None]]] = []
-GENAI_CLIENT_CLOSE_TIMEOUT_SECONDS = 2.0
 
 
 def register_cleanup(cleanup_fn: Callable[[], Awaitable[None]]) -> None:
@@ -104,6 +105,12 @@ async def _cleanup_genai_clients() -> None:
         from src.llms import get_all_llm_instances
 
         llm_instances = get_all_llm_instances()
+        # GENAI_CLIENT_CLOSE_TIMEOUT_SECONDS, read at the call.
+        # Shutdown runs after any caller deadline and inside
+        # SHUTDOWN_HARD_TIMEOUT_SECONDS, so it is not clamped. wait_for is safe
+        # here: aclose() is native async I/O that honours cancellation, not a
+        # thread parked in a socket read.
+        close_timeout = config.genai_client_close_timeout_seconds
 
         for name, llm in llm_instances.items():
             try:
@@ -113,7 +120,7 @@ async def _cleanup_genai_clients() -> None:
                         try:
                             await asyncio.wait_for(
                                 client.aclose(),
-                                timeout=GENAI_CLIENT_CLOSE_TIMEOUT_SECONDS,
+                                timeout=close_timeout,
                             )
                             logger.debug(
                                 "cleanup_closed",
@@ -123,7 +130,7 @@ async def _cleanup_genai_clients() -> None:
                             logger.warning(
                                 "cleanup_timeout",
                                 resource=f"genai_async_client_{name}",
-                                timeout_seconds=GENAI_CLIENT_CLOSE_TIMEOUT_SECONDS,
+                                timeout_seconds=close_timeout,
                             )
                         finally:
                             try:

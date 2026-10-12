@@ -29,6 +29,21 @@ Each of these owns its defaults; **do not re-declare a literal that lives elsewh
 | `src/runtime_config.py` `RuntimeConfig` | the run-scoped fields a CLI flag overrides |
 | `src/llm_runtime/seats.py` `SeatExecutionPolicy` | per-seat call semantics: temperature, timeouts, retries, tier pins |
 
+## Never write a fallback for a Settings field
+
+**Read the field: `settings.api_timeout`, never `getattr(settings, "api_timeout", 300)`.**
+A literal fallback copies a default that already lives in `Settings` and goes stale,
+and for a gate it fails open: `getattr(config, "buy_stability_enabled", False)` and
+`getattr(settings, "llm_require_review_independence", False)` were OFF for any config
+object that lacked the field while `Settings` ships them ON. A config object that lacks
+a field is a bug to surface (`AttributeError`), so tests build `Settings(_env_file=None,
+...)` or `config.model_copy(update=...)`, not a partial `SimpleNamespace`.
+`tests/config/test_settings_hygiene.py` scans `src/` for the shape.
+
+**"Explicit settings, else the live singleton" has one spelling:**
+`src.config.resolve_settings(cfg)`. It reads `src.config.config` at call time, so
+tests patch that one name; never bind `config` at import as a fallback.
+
 ## Run-scoped values
 
 Read them as `get_runtime_config(config).<field>` — **never mutate the global config

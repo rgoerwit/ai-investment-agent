@@ -46,6 +46,7 @@ import yfinance as yf
 
 from src.async_utils import run_with_hard_timeout
 from src.config import config
+from src.data.debt_equity import cross_check as cross_check_debt_equity
 from src.data.gap_fill import (
     calculate_coverage as calculate_coverage_impl,
 )
@@ -117,6 +118,10 @@ from src.fx_normalization import (
     is_near_minor_unit_ratio,
     normalize_minor_unit_amount,
 )
+from src.llm_runtime.timeouts import (
+    clamp_to_operational_deadline,
+    require_allowance,
+)
 from src.runtime_services import get_current_market_data_fetcher
 from src.tavily_utils import search_tavily_inspected
 from src.ticker_policy import (
@@ -168,12 +173,9 @@ except ImportError:
 
 # Constants (merge-policy field sets and source rankings live in
 # src/data/merge_policy.py — the canonical home; do not redefine here)
-# D/E > 10 (1000%) is extremely rare; values like 14.77 are percentages (14.77%)
-DEBT_EQUITY_PERCENTAGE_THRESHOLD = 10.0
 FX_CACHE_TTL_SECONDS = 3600
 FETCH_RESULT_CACHE_TTL_SECONDS = 30
 PRICE_HISTORY_CACHE_TTL_SECONDS = 30
-PER_SOURCE_TIMEOUT = 15
 
 RECENT_SPLIT_WINDOW_DAYS = 180
 SPLIT_RATIO_MATCH_TOLERANCE = 0.25
@@ -806,7 +808,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
         return await fetch_all_sources_parallel_impl(
             self,
             symbol,
-            PER_SOURCE_TIMEOUT,
+            config.market_data_per_source_timeout_seconds,
             logger_obj=logger,
             asyncio_module=asyncio,
         )
@@ -1039,33 +1041,6 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 info["priceToBook"] = price / info["bookValue"]
         return info
 
-    def _fix_debt_equity_scaling(self, info: dict, symbol: str) -> dict:
-        de = info.get("debtToEquity")
-        if de is None:
-            return info
-        # Some sources (yfinance, yahooquery) can return numeric fields as strings
-        # for certain tickers/exchanges; convert before any numeric comparison.
-        try:
-            de = float(de)
-        except (TypeError, ValueError):
-            return info
-        # Statement-calculated values are already ratios — no correction needed
-        if info.get("_debtToEquity_source") == "calculated_from_statements":
-            return info
-        # Large values are clearly percentage format (e.g., 793.0 → divide → 7.93)
-        if de > DEBT_EQUITY_PERCENTAGE_THRESHOLD:
-            info["debtToEquity"] = de / 100.0
-        # Values in 1.5–10 range from API sources may also be percentage format
-        # (e.g., yfinance returns 7.93 for a company with 7.93% D/E).
-        # Cross-validate: EV < Market Cap confirms net-cash position, making
-        # a genuine 1.5×–10× D/E ratio essentially impossible.
-        elif de > 1.5:
-            ev = info.get("enterpriseValue")
-            mc = info.get("marketCap")
-            if ev is not None and mc is not None and ev < mc:
-                info["debtToEquity"] = de / 100.0
-        return info
-
     def _quarantine_recent_split_forward_metrics(
         self, info: dict[str, Any], symbol: str
     ) -> dict[str, Any]:
@@ -1239,9 +1214,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
         return info
 
     def _normalize_data_integrity(self, info: dict, symbol: str) -> dict:
+        # Before the currency repair: bookValue and totalDebt are both still in the
+        # financial currency, so book equity = bookValue * shares is comparable.
+        info = cross_check_debt_equity(info, symbol)
         info = self._normalize_quote_unit_mismatch(info, symbol)
         info = self._fix_currency_mismatch(info, symbol)
-        info = self._fix_debt_equity_scaling(info, symbol)
 
         # P/E Normalization with sanity checks
         # Only replace trailing with forward if BOTH values are reasonable
@@ -1535,9 +1512,13 @@ class SmartMarketDataFetcher(FinancialFetcher):
         try:
             from yahooquery import search as yq_search
 
+            timeout = require_allowance(
+                config.market_data_ticker_resolution_timeout_seconds,
+                label="yahooquery_search",
+            )
             result = await run_with_hard_timeout(
                 asyncio.to_thread(yq_search, base),
-                timeout=10,
+                timeout=timeout,
                 label=f"yahooquery_search:{base}",
             )
             quotes = result.get("quotes", []) if isinstance(result, dict) else []
@@ -1599,9 +1580,13 @@ class SmartMarketDataFetcher(FinancialFetcher):
             query = f"{symbol} yahoo finance ticker numeric code"
 
             # Use Tavily to find the mapping
+            timeout = require_allowance(
+                config.market_data_ticker_resolution_timeout_seconds,
+                label="tavily_ticker_resolve",
+            )
             result = await run_with_hard_timeout(
                 asyncio.to_thread(self.tavily_client.search, query, max_results=1),
-                timeout=10,
+                timeout=timeout,
                 label=f"tavily_ticker_resolve:{symbol}",
             )
 
@@ -1645,10 +1630,22 @@ class SmartMarketDataFetcher(FinancialFetcher):
             return None
 
     async def _get_financial_metrics_uncached(
-        self, ticker: str, timeout: int = 30
+        self, ticker: str, timeout: float | None = None
     ) -> dict[str, Any]:
-        """Hard wall-clock limit on the entire metrics fetch cycle."""
+        """Hard wall-clock limit on the entire metrics fetch cycle.
+
+        *timeout* defaults to ``MARKET_DATA_AGGREGATE_FETCH_TIMEOUT_SECONDS``
+        and is shrunk to a caller's enclosing deadline. The scope reads that
+        deadline but does not bind one for the stages inside it: gap fill runs
+        content inspection, whose LLM judge fails open when refused.
+        """
+        if timeout is None:
+            timeout = config.market_data_aggregate_fetch_timeout_seconds
+        timeout = clamp_to_operational_deadline(timeout)
         try:
+            if timeout <= 0:
+                # The caller's allowance is already spent: never start the fetch.
+                raise asyncio.TimeoutError("enclosing deadline already passed")
             return await asyncio.wait_for(
                 self._fetch_metrics_inner(ticker),
                 timeout=timeout,
@@ -1931,7 +1928,7 @@ class SmartMarketDataFetcher(FinancialFetcher):
             )
 
     async def get_financial_metrics(
-        self, ticker: str, timeout: int = 30
+        self, ticker: str, timeout: float | None = None
     ) -> dict[str, Any]:
         """Return unified metrics with short-lived per-process caching and inflight dedupe."""
         cached = self._get_cached_metrics(ticker)
@@ -1982,9 +1979,13 @@ class SmartMarketDataFetcher(FinancialFetcher):
             if not history_kwargs:
                 history_kwargs["period"] = period
 
+            timeout = require_allowance(
+                config.market_data_price_history_timeout_seconds,
+                label="yfinance.history",
+            )
             hist = await run_with_hard_timeout(
                 asyncio.to_thread(stock.history, **history_kwargs),
-                timeout=15,
+                timeout=timeout,
                 label=f"yfinance.history:{ticker}",
             )
             if hist.empty:
@@ -1994,9 +1995,14 @@ class SmartMarketDataFetcher(FinancialFetcher):
                         "history_ticker_resolved", original=ticker, resolved=resolved
                     )
                     stock = yf.Ticker(resolved)
+                    # Its own allowance, re-read after resolution spent time.
+                    timeout = require_allowance(
+                        config.market_data_price_history_timeout_seconds,
+                        label="yfinance.history",
+                    )
                     hist = await run_with_hard_timeout(
                         asyncio.to_thread(stock.history, **history_kwargs),
-                        timeout=15,
+                        timeout=timeout,
                         label=f"yfinance.history:{resolved}",
                     )
             return hist

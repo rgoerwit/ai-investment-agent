@@ -13,6 +13,7 @@ import structlog
 
 from src.exchange_metadata import IBKR_TO_YFINANCE
 from src.fx_normalization import (
+    canonical_currency_code,
     comparable_prices,
     get_fx_rate_cache,
     get_fx_rate_fallback,
@@ -55,7 +56,7 @@ def _fx_rate_for_currency(currency: str) -> float | None:
         asyncio.get_running_loop()
     except RuntimeError:
         resolved = cache.resolve_rates_sync([currency])
-        rate_info = resolved.get(currency.strip().upper())
+        rate_info = resolved.get(canonical_currency_code(currency) or "")
         return rate_info[0] if rate_info else None
     logger.debug("fx_static_fallback_inside_event_loop", currency=currency)
     return get_fx_rate_fallback(currency)
@@ -63,7 +64,7 @@ def _fx_rate_for_currency(currency: str) -> float | None:
 
 def _resolve_fx(analysis: AnalysisRecord) -> float | None:
     """Return a local-to-USD rate, or None when conversion cannot be trusted."""
-    currency = (analysis.currency or "USD").strip().upper()
+    currency = canonical_currency_code(analysis.currency) or "USD"
     saved = analysis.fx_rate_to_usd
 
     if currency in ("USD", ""):

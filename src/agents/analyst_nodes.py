@@ -6,7 +6,12 @@ from datetime import datetime
 from typing import Any
 
 import structlog
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.types import RunnableConfig
 
@@ -17,19 +22,24 @@ from src.data_block_utils import (
     detect_legacy_data_block_shape,
     extract_block_text_value,
     extract_last_data_block,
+    extract_last_fenced_block,
     fenced_end,
     fenced_start,
     has_parseable_data_block,
     has_parseable_fenced_block,
     normalize_legacy_data_block_report,
     normalize_structured_block_boundaries,
+    replace_last_fenced_block,
     replace_or_append_block_line,
 )
 from src.error_safety import summarize_exception
 from src.forensic_budget import ResearchBudgetLedger, ResearchBudgetPolicy
 from src.runtime_config import get_runtime_config
-from src.runtime_diagnostics import failure_artifact, success_artifact
-from src.service_tiers import floor_llm_hard_timeout
+from src.runtime_diagnostics import (
+    failure_artifact,
+    is_artifact_complete,
+    success_artifact,
+)
 from src.thesis_constants import DRAWDOWN_52WK_RATIO, DRAWDOWN_SMA200_RATIO
 from src.tooling.text_boundary import format_untrusted_block
 
@@ -54,11 +64,15 @@ from .fundamentals_reconciler import (
 from .management_guidance import (
     _preload_management_guidance_evidence,
     backfill_guidance_contract,
+    guidance_coverage_is_canonicalizable,
+    guidance_input_reason,
     normalize_management_guidance_output,
     promote_management_guidance,
 )
 from .output_limits import cap_state_value
 from .output_validation import (
+    _has_valid_latest_results_block,
+    _has_valid_management_guidance_block,
     classify_output_contract_failure,
     log_output_diagnostics,
     log_truncation_diagnostic,
@@ -97,11 +111,10 @@ UNRESOLVED if that block is unavailable.
 _FOREIGN_LANGUAGE_EVIDENCE_RETRY_SUFFIX = """
 CRITICAL EVIDENCE CORRECTION:
 Your first response omitted or malformed a mandatory evidence block.
-Run targeted searches of the latest results release, presentation, transcript, and
-statutory filing for management's forward guidance and material tax, subsidy,
-regulatory, accounting, or other non-operating earnings drivers. Also locate the
-newest official income statement and inspect its document before extracting current
-and year-ago comparative revenue and earnings. Then emit one parseable block for
+Use only the evidence already gathered; no tools or new searches are available.
+Correct the structured guidance and latest-results blocks using that evidence.
+If evidence is insufficient, record the applicable unresolved or search-failed
+coverage status without inventing a source or figures. Emit one parseable block for
 each of these marker pairs:
 {guidance_start}
 ...
@@ -266,6 +279,29 @@ def _authoritative_metric_warning(
         "are authoritative for downstream scoring; the earlier values are superseded.\n"
         + "\n".join(f"> {line}" for line in conflicts)
         + "\n\n"
+    )
+
+
+def _refresh_authoritative_metric_warning(content: str) -> str:
+    """Refresh only the generated correction block against the final projection."""
+    content = re.sub(
+        rf"(?m)^> \*\*{AUTHORITATIVE_CORRECTION_MARKER}:\*\* The labeled narrative values "
+        r"below conflict with reconciled structured inputs\. The DATA_BLOCK values "
+        r"are authoritative for downstream scoring; the earlier values are superseded\.\n"
+        r"(?:> - [^\n]*\n)*\n?",
+        "",
+        content,
+    )
+    block = extract_last_data_block(content, include_markers=True)
+    body = extract_last_data_block(content, include_markers=False)
+    if block is None or body is None:
+        return content
+    index = content.rfind(block)
+    narrative = content[:index] + content[index + len(block) :]
+    return (
+        content[:index]
+        + _authoritative_metric_warning(narrative, body)
+        + content[index:]
     )
 
 
@@ -795,6 +831,7 @@ def _normalize_structured_output(
     management_guidance_evidence: str = "",
     evidence_messages: list[BaseMessage] | None = None,
     canonical_snapshot: Mapping[str, Any] | None = None,
+    defer_guidance_fallback: bool = False,
 ) -> str:
     """Apply narrow deterministic output repairs for known model-format drift."""
     if agent_key == "foreign_language_analyst":
@@ -813,6 +850,7 @@ def _normalize_structured_output(
             content,
             management_guidance_evidence,
             evidence_records,
+            insert_fallback=not defer_guidance_fallback,
         )
         return normalize_foreign_language_evidence(
             guidance_normalized,
@@ -867,24 +905,79 @@ def _normalize_structured_output(
     return normalized
 
 
+def _final_output_invalid(content: str, agent_key: str) -> bool:
+    """Use the same contract for structural recovery and publication."""
+    from src.utils import detect_truncation
+
+    return should_fail_closed(
+        agent_key,
+        validation=validate_required_output(agent_key, content),
+        truncated=detect_truncation(content, agent=agent_key)["truncated"],
+        content=content,
+    )
+
+
 def _should_retry_output(content: str, agent_key: str) -> bool:
     """Return True when the initial output should get one deep-model retry."""
     if support._is_output_insufficient(content, agent_key):
         return True
 
-    if agent_key == "fundamentals_analyst":
-        return not validate_required_output(agent_key, content)["ok"]
-    if agent_key == "foreign_language_analyst":
-        return not validate_required_output(agent_key, content)["ok"]
+    if agent_key in {
+        "fundamentals_analyst",
+        "foreign_language_analyst",
+    }:
+        return _final_output_invalid(content, agent_key)
     return False
 
 
+def _merge_foreign_recovery(
+    original: str,
+    retry: str,
+    *,
+    retry_raw_guidance_usable: bool,
+    replace_guidance: bool,
+) -> tuple[str, bool, bool]:
+    """Take only repaired valid blocks, retaining independently valid original work."""
+    merged = original
+    accepted = False
+    guidance_replaced = False
+    if (
+        retry_raw_guidance_usable
+        and (replace_guidance or not _has_valid_management_guidance_block(original))
+        and _has_valid_management_guidance_block(retry)
+    ):
+        guidance = extract_last_fenced_block(
+            retry, "MANAGEMENT_GUIDANCE", include_markers=True
+        )
+        if guidance is not None:
+            merged = replace_last_fenced_block(merged, "MANAGEMENT_GUIDANCE", guidance)
+            accepted = True
+            guidance_replaced = True
+    if not _has_valid_latest_results_block(
+        original
+    ) and _has_valid_latest_results_block(retry):
+        results = extract_last_fenced_block(
+            retry, "LATEST_RESULTS", include_markers=True
+        )
+        if results is not None:
+            merged = replace_last_fenced_block(merged, "LATEST_RESULTS", results)
+            accepted = True
+    return merged, accepted, guidance_replaced
+
+
 def _build_retry_invocation_messages(
-    invocation_messages: list[Any], agent_key: str, content: str
+    invocation_messages: list[Any],
+    agent_key: str,
+    content: str,
+    *,
+    force_foreign_repair: bool = False,
 ) -> list[Any]:
     """Add the owning agent's structured-output correction for a retry."""
     if agent_key == "foreign_language_analyst":
-        if validate_required_output(agent_key, content)["ok"]:
+        if (
+            not force_foreign_repair
+            and validate_required_output(agent_key, content)["ok"]
+        ):
             return invocation_messages
         return [
             *invocation_messages,
@@ -1024,13 +1117,67 @@ def create_analyst_node(
     retry_llm: Any | None = None,
     allow_retry: bool = False,
     research_budget_policy: ResearchBudgetPolicy | None = None,
+    cap_retry_llm: Any | None = None,
 ) -> Callable:
     """
     Factory function creating data analyst agent nodes.
+
+    ``retry_llm`` regenerates a failed output contract at the retry seat's
+    reasoning value (RETRY-HIGH). ``cap_retry_llm`` is the same binding at the
+    FAST intent's value, used when the first output exhausted its output cap:
+    raising effort there spends the visible budget on thinking again.
     """
 
     async def analyst_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         from src.prompts import get_prompt
+
+        statuses = state.get("artifact_statuses") or {}
+        status = statuses.get(output_field) if isinstance(statuses, dict) else None
+        budgets = state.get("research_budgets") or {}
+        budget = budgets.get(agent_key) if isinstance(budgets, dict) else None
+        if agent_key == "junior_fundamentals_analyst" and (
+            (isinstance(status, dict) and is_artifact_complete(state, output_field))
+            or (
+                isinstance(budget, dict)
+                and budget.get("stop_reason")
+                in {"CODE_RELAY_COMPLETE", "ACQUISITION_INCOMPLETE"}
+            )
+        ):
+            # The terminal visit exposes the exact code-owned artifact to capture
+            # and prompt checks without paying for another model call.
+            content = state.get(output_field, "")
+            matched = (
+                isinstance(status, dict)
+                and status.get("complete") is True
+                and isinstance(status.get("ok"), bool)
+                and isinstance(content, str)
+                and status.get("content") == (content or None)
+                and (
+                    content.startswith(
+                        f"=== RAW FINANCIAL DATA FOR {state.get('company_of_interest', '')} ==="
+                    )
+                    or (not content and status["ok"] is False)
+                )
+            )
+            result = (
+                {output_field: content, "artifact_statuses": {output_field: status}}
+                if matched
+                else failure_artifact(
+                    output_field,
+                    "Current Junior acquisition artifact unavailable",
+                    provider="code",
+                    error_kind="data_unavailable",
+                )
+            )
+            return {
+                **result,
+                "messages": [
+                    AIMessage(
+                        content="Raw acquisition completed by code.", name=agent_key
+                    )
+                ],
+                "sender": agent_key,
+            }
 
         agent_prompt = get_prompt(agent_key)
         if not agent_prompt:
@@ -1374,11 +1521,45 @@ def create_analyst_node(
             if has_tool_calls:
                 return new_state
 
+            if agent_key == "junior_fundamentals_analyst":
+                # No acquisition occurred. Text-only recovery cannot supply evidence.
+                new_state.update(
+                    failure_artifact(
+                        output_field,
+                        "Junior did not request the required data tools",
+                        provider=support.infer_provider_name(llm),
+                        error_kind="output_contract_violation",
+                    )
+                )
+                if research_ledger is not None:
+                    research_ledger.record_outcome("MISSING_REQUIRED_ACQUISITION")
+                    new_state["research_budgets"] = {
+                        agent_key: research_ledger.telemetry()
+                    }
+                return new_state
+
             if research_ledger is not None and not force_research_synthesis:
                 research_ledger.record_model_final()
                 new_state["research_budgets"] = {agent_key: research_ledger.telemetry()}
 
             content_str = message_utils.extract_string_content(response.content)
+            foreign_guidance_needs_repair = False
+            if agent_key == "foreign_language_analyst" and not has_tool_calls:
+                initial_reason = guidance_input_reason(content_str)
+                canonicalizable = guidance_coverage_is_canonicalizable(content_str)
+                foreign_guidance_needs_repair = (
+                    initial_reason != "UNCHANGED" and not canonicalizable
+                )
+                new_state["guidance_normalization"] = {
+                    "initial_reason": initial_reason,
+                    "final_action": (
+                        "CANONICALIZED"
+                        if canonicalizable
+                        else "FALLBACK"
+                        if foreign_guidance_needs_repair
+                        else "UNCHANGED"
+                    ),
+                }
             content_str = _normalize_structured_output(
                 agent_key,
                 content_str,
@@ -1391,14 +1572,17 @@ def create_analyst_node(
                 management_guidance_evidence=management_guidance_evidence,
                 evidence_messages=filtered_messages,
                 canonical_snapshot=state.get("analysis_snapshot"),
+                defer_guidance_fallback=foreign_guidance_needs_repair,
             )
 
             recovery_event: dict[str, Any] | None = None
-
             if (
                 allow_retry
                 and retry_llm is not None
-                and _should_retry_output(content_str, agent_key)
+                and (
+                    foreign_guidance_needs_repair
+                    or _should_retry_output(content_str, agent_key)
+                )
             ):
                 retry_budget_reason = (
                     research_ledger.consume_llm()
@@ -1424,24 +1608,22 @@ def create_analyst_node(
                         truncated=initial_truncation["truncated"],
                         validation=initial_validation,
                     )
-                    reasoning_setting = next(
-                        (
-                            str(value)
-                            for attr in ("reasoning_effort", "thinking_level")
-                            if isinstance((value := getattr(llm, attr, None)), str)
-                        ),
-                        None,
+                    recovery_llm = retry_llm
+                    retry_label = "RETRY-HIGH"
+                    if initial_failure_kind == "output_cap_exhausted":
+                        if cap_retry_llm is not None:
+                            recovery_llm = cap_retry_llm
+                            retry_label = "RETRY-CAP"
+                        else:
+                            logger.warning(
+                                "structural_recovery_cap_binding_unavailable",
+                                agent_key=agent_key,
+                                ticker=ticker,
+                                fallback="RETRY-HIGH",
+                            )
+                    recovery_event = support.structural_recovery_event(
+                        agent_key, initial_failure_kind, llm, recovery_llm, content_str
                     )
-                    recovery_event = {
-                        "schema_version": 1,
-                        "originating_agent": agent_key,
-                        "failure_kind": initial_failure_kind,
-                        "original_model": support.get_model_name(llm),
-                        "recovery_model": support.get_model_name(retry_llm),
-                        "reasoning_setting": reasoning_setting,
-                        "original_output_chars": len(content_str),
-                        "outcome": "attempted",
-                    }
                     new_state["structural_recovery_events"] = [recovery_event]
                     log_truncation_diagnostic(
                         agent_key=agent_key,
@@ -1464,7 +1646,10 @@ def create_analyst_node(
                         ),
                     )
                     retry_messages = _build_retry_invocation_messages(
-                        invocation_messages, agent_key, content_str
+                        invocation_messages,
+                        agent_key,
+                        content_str,
+                        force_foreign_repair=foreign_guidance_needs_repair,
                     )
                     # Structural recovery re-renders from evidence already gathered by
                     # the owning analyst. It deliberately exposes no tools: another tool
@@ -1473,41 +1658,46 @@ def create_analyst_node(
                     # labeled for this originating agent. That keeps agent totals
                     # intuitive while preserving the actual analyst_retry billing
                     # seat and origin in persisted binding telemetry.
-                    retry_runnable = prompt_template | retry_llm
+                    retry_runnable = prompt_template | recovery_llm
 
-                    # In --quick, base the retry's overall budget on the same
-                    # per-seat cap the main path uses (larger for gate-critical APEX
-                    # seats), so a retry can't clip an APEX seat below its 180s
-                    # allowance. Full mode keeps the standard hard cap.
-                    _retry_rc = get_runtime_config(settings_config)
-                    _retry_base_seconds = (
-                        agent_runtime.quick_mode_hard_timeout_seconds(
-                            agent_prompt.agent_name, settings_config
-                        )
-                        if _retry_rc.quick_mode_active
-                        else float(_retry_rc.llm_call_hard_timeout_seconds)
+                    # The retry's whole budget (every transient attempt together)
+                    # is one invocation cap of the originating seat, read from the
+                    # same resolver the runtime sizes the call with: the seat's
+                    # class in --quick (180 s for gate-critical APEX seats), the
+                    # flex-floored hard cap in full mode.
+                    _retry_context = f"{agent_prompt.agent_name} ({retry_label})"
+                    _retry_provider = support.infer_provider_name(recovery_llm)
+                    _retry_budget = agent_runtime.resolve_invocation_budget(
+                        _retry_context,
+                        agent_prompt.agent_name,
+                        provider=_retry_provider,
+                        runtime_config=get_runtime_config(settings_config),
                     )
                     try:
                         retry_response = (
                             await agent_runtime.invoke_with_rate_limit_handling(
                                 retry_runnable,
                                 {"messages": retry_messages},
-                                context=f"{agent_prompt.agent_name} (RETRY-HIGH)",
+                                context=_retry_context,
                                 canonical_agent=agent_prompt.agent_name,
-                                provider=support.infer_provider_name(retry_llm),
-                                model_name=support.get_model_name(retry_llm),
-                                # Floor for flex: an un-floored overall budget
-                                # would clamp the flex-aware hard cap back down.
-                                overall_timeout_seconds=floor_llm_hard_timeout(
-                                    _retry_base_seconds,
-                                    provider=support.infer_provider_name(retry_llm),
-                                    label="analyst_retry_overall_timeout",
-                                ),
+                                provider=_retry_provider,
+                                model_name=support.get_model_name(recovery_llm),
+                                overall_timeout_seconds=_retry_budget.invocation_cap,
                             )
                         )
                         retry_response.name = agent_key
                         retry_content_str = message_utils.extract_string_content(
                             retry_response.content
+                        )
+                        retry_raw_guidance_usable = (
+                            (
+                                guidance_input_reason(retry_content_str) == "UNCHANGED"
+                                or guidance_coverage_is_canonicalizable(
+                                    retry_content_str
+                                )
+                            )
+                            if agent_key == "foreign_language_analyst"
+                            else False
                         )
                         retry_content_str = _normalize_structured_output(
                             agent_key,
@@ -1525,6 +1715,8 @@ def create_analyst_node(
                             management_guidance_evidence=management_guidance_evidence,
                             evidence_messages=filtered_messages,
                             canonical_snapshot=state.get("analysis_snapshot"),
+                            defer_guidance_fallback=agent_key
+                            == "foreign_language_analyst",
                         )
                         retry_tool_calls = getattr(retry_response, "tool_calls", None)
                         retry_has_tool_calls = (
@@ -1553,10 +1745,28 @@ def create_analyst_node(
                                 retry_improved=len(retry_content_str)
                                 > len(content_str),
                             )
-                            content_str = retry_content_str
-                            response = retry_response
-                            response_runnable = retry_llm
-                            recovery_event["outcome"] = "accepted_text"
+                            if agent_key == "foreign_language_analyst":
+                                content_str, accepted, guidance_replaced = (
+                                    _merge_foreign_recovery(
+                                        content_str,
+                                        retry_content_str,
+                                        retry_raw_guidance_usable=retry_raw_guidance_usable,
+                                        replace_guidance=foreign_guidance_needs_repair,
+                                    )
+                                )
+                                if guidance_replaced:
+                                    new_state["guidance_normalization"][
+                                        "final_action"
+                                    ] = "REPAIRED"
+                                recovery_event["outcome"] = (
+                                    "accepted_text" if accepted else "rejected_invalid"
+                                )
+                            else:
+                                content_str = retry_content_str
+                                recovery_event["outcome"] = "accepted_text"
+                            if recovery_event["outcome"] == "accepted_text":
+                                response = retry_response
+                                response_runnable = recovery_llm
                     except Exception as retry_error:
                         recovery_event["outcome"] = "failed"
                         logger.error(
@@ -1572,6 +1782,56 @@ def create_analyst_node(
                         new_state["research_budgets"] = {
                             agent_key: research_ledger.telemetry()
                         }
+
+            if (
+                agent_key == "foreign_language_analyst"
+                and foreign_guidance_needs_repair
+            ):
+                # The repair sees the raw structural gap. Only after that bounded
+                # attempt do we insert code-owned unresolved guidance, before the
+                # final whole-report contract check.
+                content_str = _normalize_structured_output(
+                    agent_key,
+                    content_str,
+                    ticker,
+                    management_guidance_evidence=management_guidance_evidence,
+                    evidence_messages=filtered_messages,
+                )
+                if new_state["guidance_normalization"]["final_action"] != "REPAIRED":
+                    new_state["guidance_normalization"]["final_action"] = (
+                        "FALLBACK"
+                        if extract_last_fenced_block(content_str, "MANAGEMENT_GUIDANCE")
+                        else "UNRECOVERED"
+                    )
+
+            if (
+                agent_key == "foreign_language_analyst"
+                and get_runtime_config(settings_config).quick_mode_active
+                and research_ledger is not None
+            ):
+                from src.agents.management_guidance import (
+                    fetch_unresolved_latest_results,
+                )
+
+                fetched = await fetch_unresolved_latest_results(
+                    content_str,
+                    ticker=ticker,
+                    company_name=company_name,
+                    budget=research_ledger,
+                )
+                if fetched:
+                    management_guidance_evidence += fetched
+                    new_state["management_guidance_evidence"] = (
+                        management_guidance_evidence
+                    )
+                    content_str = _normalize_structured_output(
+                        agent_key,
+                        content_str,
+                        ticker,
+                        management_guidance_evidence=management_guidance_evidence,
+                        evidence_messages=filtered_messages,
+                    )
+                new_state["research_budgets"] = {agent_key: research_ledger.telemetry()}
 
             from src.utils import detect_truncation
 
@@ -1595,12 +1855,7 @@ def create_analyst_node(
                 truncated=trunc_info["truncated"],
                 validation=validation if validation["checks"] else None,
             )
-            final_output_invalid = should_fail_closed(
-                agent_key,
-                validation=validation,
-                truncated=trunc_info["truncated"],
-                content=content_str,
-            )
+            final_output_invalid = _final_output_invalid(content_str, agent_key)
             if recovery_event is not None:
                 recovery_event["final_output_valid"] = not final_output_invalid
             if final_output_invalid:
@@ -1646,6 +1901,7 @@ def create_analyst_node(
                     content_str,
                     derived_snapshot,
                 )
+                content_str = _refresh_authoritative_metric_warning(content_str)
                 new_state["analysis_snapshot"] = derived_snapshot
                 logger.debug(
                     "fundamentals_output",

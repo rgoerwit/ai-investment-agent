@@ -6,7 +6,7 @@ across the PM_BLOCK ``VERDICT:`` line (the source of truth all downstream consum
 read) and the human-readable ``PORTFOLIO MANAGER VERDICT:`` header.
 
 Why it exists (APR.WA, June 2026): the Growth hard-fail has a Data-Vacuum / Marginal-
-Turnaround exception (HOLD/small-BUY when Health is decent, valuation cheap, and the low
+Turnaround exception (HOLD when Health is decent, valuation cheap, and the low
 growth score reflects missing data rather than genuine shrinkage). That exception lived
 in Step-1A prompt prose and was silently overridden when the Step-1C Zone tally — inflated
 by soft/free-form points — crossed 2.0, force-selling a healthy name. This floor relinks
@@ -15,8 +15,9 @@ healthy, data-limited name into DO_NOT_INITIATE.
 
 Conservative by construction: only floors DO_NOT_INITIATE -> HOLD (never upgrades to BUY),
 gates on the *deterministic* code subtotal (not the LLM's hand-summed total), requires no
-auto-reject/critical flag, and requires positive multi-year revenue so a genuinely
-shrinking name (e.g. KTY.WA: P/E > 18 and 3Y CAGR < 0) is never floored.
+auto-reject/critical or individually material flag, and requires positive multi-year
+revenue so a genuinely shrinking name (e.g. KTY.WA: P/E > 18 and 3Y CAGR < 0)
+is never floored.
 
 Every public rewriter in this module is a projection onto a canonical form: applying
 it repeatedly must leave the text unchanged after the first application.
@@ -24,8 +25,11 @@ it repeatedly must leave the text unchanged after the first application.
 
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 import structlog
 
@@ -34,7 +38,15 @@ from src.charts.extractors.valuation import is_weak_buy_asymmetry
 from src.data_block_utils import fenced_block_pattern
 from src.decision_inputs import DecisionInputs
 from src.pm_decision_parser import canonicalize_pm_verdict, parse_final_decision_scores
-from src.thesis_constants import GROWTH_MIN_PCT, HEALTH_MIN_PCT
+from src.thesis_constants import (
+    ANALYST_COVERAGE_MAX,
+    GROWTH_MIN_PCT,
+    HEALTH_EXCEPTION_CURRENT_RATIO_MIN,
+    HEALTH_EXCEPTION_MIN_PCT,
+    HEALTH_EXCEPTION_PB_MAX,
+    HEALTH_MIN_PCT,
+    US_REVENUE_MAX_PCT,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -117,7 +129,7 @@ def normalize_pm_block_contract(pm_output: str) -> str:
     pm_output = _POSITION_SIZE_PROSE_RE.sub(
         lambda match: f"{match.group(1)}{canonical_prose_value}", pm_output
     )
-    if token_rewritten or prose_lines_rewritten:
+    if token_rewritten:
         logger.warning(
             "pm_block_position_size_rewritten",
             verdict=verdict,
@@ -194,6 +206,48 @@ def apply_required_verdict(
         note=note,
         ticker=ticker,
     )
+    return rewritten, changed
+
+
+def _exception_growth_ceiling_applies(
+    inputs: DecisionInputs, assessment: GrowthGateAssessment
+) -> bool:
+    """Share the exception ceiling between enforcement and PM context."""
+    return (
+        assessment.exception in {"marginal_turnaround", "data_vacuum"}
+        and inputs.decision_metrics.get("m_and_a_status") != "ACTIVE_TENDER"
+    )
+
+
+def maybe_cap_exception_growth_buy_to_hold(
+    content_str: str, *, decision_inputs: DecisionInputs, ticker: str = "UNKNOWN"
+) -> tuple[str, bool]:
+    """A growth exception permits at most HOLD."""
+    assessment = assess_growth_gate(decision_inputs)
+    if not _exception_growth_ceiling_applies(decision_inputs, assessment):
+        return content_str, False
+    exception = assessment.exception
+    assert exception is not None
+    note = (
+        "> **DETERMINISTIC VERDICT CEILING APPLIED — BUY → HOLD**\n"
+        f"> Growth passed only through the {exception.replace('_', ' ')} "
+        "exception, which permits at most HOLD."
+    )
+    rewritten, changed, n_header, n_block = _apply_verdict_rewrite(
+        content_str,
+        required_verdict="HOLD",
+        allowed_from=frozenset({"BUY"}),
+        note=note,
+        ticker=ticker,
+    )
+    if changed:
+        logger.info(
+            "buy_capped_on_growth_exception",
+            ticker=ticker,
+            exception=exception,
+            header_rewrites=n_header,
+            block_rewrites=n_block,
+        )
     return rewritten, changed
 
 
@@ -348,16 +402,21 @@ _REVIEW_DISQUALIFYING_FLAGS = frozenset({"VALUE_TRAP_HIGH_RISK", "VALUE_TRAP_VER
 _REVIEW_DISQUALIFYING_PENALTY = 1.0
 
 
-def _disqualifies_review_candidate(flag: dict) -> bool:
+def _has_material_individual_risk(flag: dict) -> bool:
+    """A single material penalty must not disappear into a net risk subtotal."""
     ftype = str(flag.get("type", ""))
-    if ftype in _REVIEW_DISQUALIFYING_FLAGS or ftype.startswith(
-        _REVIEW_DISQUALIFYING_PREFIXES
-    ):
+    if ftype in _REVIEW_DISQUALIFYING_FLAGS:
         return True
     penalty = flag.get("risk_penalty")
     if isinstance(penalty, bool):
         return False
     return isinstance(penalty, int | float) and penalty >= _REVIEW_DISQUALIFYING_PENALTY
+
+
+def _disqualifies_review_candidate(flag: dict) -> bool:
+    return str(flag.get("type", "")).startswith(
+        _REVIEW_DISQUALIFYING_PREFIXES
+    ) or _has_material_individual_risk(flag)
 
 
 def maybe_tag_dni_review_candidate(
@@ -452,6 +511,21 @@ class GrowthGateAssessment:
     exception: str | None = None
     reason: str | None = None
 
+    @property
+    def status(self) -> str:
+        if self.exception:
+            return f"EXCEPTION_{self.exception.upper()}"
+        if self.hard_fail:
+            return "HARD_FAIL"
+        if self.reason in {
+            "growth_score_unreliable",
+            "growth_score_unavailable",
+            "health_score_unreliable_for_growth_exception",
+            "health_score_unavailable_for_growth_exception",
+        }:
+            return "INDETERMINATE"
+        return "PASS"
+
 
 @dataclass(frozen=True, slots=True)
 class VerdictPolicyViolation:
@@ -462,22 +536,373 @@ class VerdictPolicyViolation:
     required_verdict: str
 
 
+@dataclass(frozen=True, slots=True)
+class InitiationGateAssessment:
+    """A shared code-owned gate assessment with evidence and applicability."""
+
+    rule: str
+    status: str
+    reason: str
+    value: float | int | None = None
+    exception: str | None = None
+    applicable: bool = True
+    supporting_ids: tuple[str, ...] = ()
+
+
+def assess_health_gate(inputs: DecisionInputs) -> InitiationGateAssessment:
+    """Bind health and its documented exception to the same resolved snapshot."""
+    health = inputs.health_decision_pct
+    applicable = inputs.decision_metrics.get("m_and_a_status") != "ACTIVE_TENDER"
+    if (
+        not inputs.health_score_reliable
+        or not isinstance(health, int | float)
+        or isinstance(health, bool)
+        or not 0 <= health <= 100
+        or not math.isfinite(health)
+    ):
+        return InitiationGateAssessment(
+            "health",
+            "INDETERMINATE",
+            "reliable_health_score_unavailable",
+            applicable=applicable,
+        )
+    status, reason, exception = "PASS", "reliable_health_at_or_above_floor", None
+    if health < HEALTH_MIN_PCT:
+        pb, ratio = (
+            inputs.health_exception_pb_ratio,
+            inputs.health_exception_current_ratio,
+        )
+        qualified = (
+            inputs.snapshot_authoritative
+            and health >= HEALTH_EXCEPTION_MIN_PCT
+            and pb is not None
+            and 0 <= pb < HEALTH_EXCEPTION_PB_MAX
+            and math.copysign(1.0, pb) > 0
+            and ratio is not None
+            and HEALTH_EXCEPTION_CURRENT_RATIO_MIN < ratio < math.inf
+            and len(inputs.health_exception_claim_ids) == 2
+        )
+        if qualified:
+            reason, exception = (
+                "canonical_deep_value_liquidity_exception",
+                "deep_value_liquidity",
+            )
+        else:
+            status, reason = (
+                "FAIL",
+                (
+                    "reliable_health_below_exception_floor"
+                    if health < HEALTH_EXCEPTION_MIN_PCT
+                    else "health_exception_not_established"
+                ),
+            )
+    return InitiationGateAssessment(
+        "health",
+        status,
+        reason,
+        health,
+        exception,
+        applicable,
+        inputs.health_exception_claim_ids if exception else (),
+    )
+
+
+def health_gate_from_policy(policy: Mapping[str, Any]) -> InitiationGateAssessment:
+    """Absent legacy or malformed canonical health remains explicitly unknown."""
+    row = policy.get("health_gate")
+    if (
+        type(policy.get("schema_version")) is not int
+        or policy["schema_version"] != 1
+        or not isinstance(row, Mapping)
+    ):
+        row = {}
+    value, status = row.get("value"), row.get("status")
+    if (
+        not isinstance(status, str)
+        or status not in {"PASS", "FAIL", "INDETERMINATE"}
+        or (value is None and status != "INDETERMINATE")
+        or (
+            value is not None
+            and (
+                not isinstance(value, int | float)
+                or isinstance(value, bool)
+                or not 0 <= value <= 100
+                or not math.isfinite(value)
+            )
+        )
+        or not isinstance(row.get("applicable", True), bool)
+    ):
+        return InitiationGateAssessment(
+            "health", "INDETERMINATE", "canonical_health_gate_unavailable"
+        )
+    ids = row.get("supporting_ids", ())
+    exception = row.get("exception")
+    if (
+        (exception is not None and exception != "deep_value_liquidity")
+        or not isinstance(ids, list | tuple)
+        or any(not isinstance(i, str) or not i for i in ids)
+    ):
+        return InitiationGateAssessment(
+            "health", "INDETERMINATE", "canonical_health_gate_unavailable"
+        )
+    if (
+        status == "PASS"
+        and value is not None
+        and value < HEALTH_MIN_PCT
+        and not (
+            value >= HEALTH_EXCEPTION_MIN_PCT
+            and exception == "deep_value_liquidity"
+            and len(set(ids)) == 2
+        )
+    ):
+        return InitiationGateAssessment(
+            "health", "INDETERMINATE", "canonical_health_gate_unavailable"
+        )
+    return InitiationGateAssessment(
+        "health",
+        status,
+        str(row.get("reason") or "canonical_health_gate_unavailable"),
+        value,
+        exception,
+        row.get("applicable", True),
+        tuple(ids),
+    )
+
+
+def assess_initiation_gates(
+    inputs: DecisionInputs,
+) -> tuple[InitiationGateAssessment, ...]:
+    count = inputs.english_analyst_count
+    us_revenue = inputs.us_revenue_pct
+    liquidity = inputs.liquidity
+    return (
+        InitiationGateAssessment(
+            "analyst_coverage",
+            "INDETERMINATE"
+            if count is None
+            else "FAIL"
+            if count >= ANALYST_COVERAGE_MAX
+            else "PASS",
+            "verified_english_coverage_unavailable"
+            if count is None
+            else f"verified_english_analyst_count={count}",
+            value=count,
+        ),
+        InitiationGateAssessment(
+            "us_revenue",
+            "INDETERMINATE"
+            if us_revenue is None
+            else "FAIL"
+            if us_revenue > US_REVENUE_MAX_PCT
+            else "PASS",
+            "verified_us_revenue_unavailable"
+            if us_revenue is None
+            else f"verified_us_revenue_pct={us_revenue:g}",
+            value=us_revenue,
+        ),
+        InitiationGateAssessment(
+            "liquidity",
+            "INDETERMINATE"
+            if liquidity is None or liquidity.status in {"INSUFFICIENT_DATA", "ERROR"}
+            else "FAIL"
+            if liquidity.hard_fail
+            else "PASS",
+            "measured_liquidity_unavailable"
+            if liquidity is None
+            else liquidity.reason or liquidity.status,
+            value=liquidity.average_daily_turnover_usd if liquidity else None,
+        ),
+    )
+
+
+_GATE_LABELS = {
+    "liquidity": "Liquidity",
+    "analyst_coverage": "Analyst Coverage",
+    "us_revenue": "US Revenue",
+}
+
+
+def format_initiation_gate(gate: InitiationGateAssessment) -> str:
+    """One readable projection of canonical status and independently bound value."""
+    value = "Unknown"
+    if gate.value is not None:
+        value = (
+            f"${gate.value:,.0f} daily average"
+            if gate.rule == "liquidity"
+            else f"{gate.value:g}%"
+            if gate.rule in {"us_revenue", "health"}
+            else f"{gate.value:g} English analysts"
+        )
+    unavailable = {
+        "verified_english_coverage_unavailable": "Verified English analyst coverage unavailable",
+        "verified_us_revenue_unavailable": "Verified US revenue unavailable",
+        "measured_liquidity_unavailable": "Measured liquidity unavailable",
+        "reliable_health_score_unavailable": "Reliable financial health unavailable",
+        "canonical_health_gate_unavailable": "Canonical financial health unavailable",
+        "canonical_deep_value_liquidity_exception": "Established canonical P/B and current-ratio exception",
+        "health_exception_not_established": "Below health floor; qualifying exception not established",
+    }
+    reason = unavailable.get(
+        gate.reason, gate.reason.replace("_", " ").replace("=", ": ")
+    )
+    label = "Financial Health" if gate.rule == "health" else _GATE_LABELS[gate.rule]
+    exemption = "; Exempt under ACTIVE_TENDER" if not gate.applicable else ""
+    return f"{label}: {value} - {gate.status}; {reason}{exemption}"
+
+
+def initiation_gates_from_policy(
+    policy: Mapping[str, Any],
+) -> tuple[InitiationGateAssessment, ...]:
+    """Decode display data conservatively; legacy policies may lack measurements."""
+    raw = policy.get("initiation_gates")
+    rows = (
+        raw
+        if type(policy.get("schema_version")) is int
+        and policy["schema_version"] == 1
+        and isinstance(raw, list)
+        else []
+    )
+    gates = []
+    for rule in _GATE_LABELS:
+        owned = [
+            row for row in rows if isinstance(row, Mapping) and row.get("rule") == rule
+        ]
+        row = owned[0] if len(owned) == 1 else {}
+        status = row.get("status")
+        status = (
+            status
+            if isinstance(status, str) and status in {"PASS", "FAIL", "INDETERMINATE"}
+            else "INDETERMINATE"
+        )
+        value = row.get("value")
+        if (
+            not isinstance(value, int | float)
+            or isinstance(value, bool)
+            or abs(value) > 1e308
+            or not math.isfinite(value)
+            or value < 0
+            or (rule == "analyst_coverage" and int(value) != value)
+            or (rule == "us_revenue" and value > 100)
+        ):
+            value = None
+        reason = row.get("reason")
+        gates.append(
+            InitiationGateAssessment(
+                rule,
+                status,
+                reason
+                if isinstance(reason, str)
+                else "Canonical gate data unavailable",
+                value,
+            )
+        )
+    return tuple(gates)
+
+
+def compliance_hard_fail_result(
+    gates: tuple[InitiationGateAssessment, ...],
+    growth_status: str,
+    health: InitiationGateAssessment | None = None,
+) -> str:
+    """Display applicable code-owned gates; tender exempts health and growth."""
+    statuses = [gate.status for gate in gates]
+    if health is None or health.applicable:
+        statuses.append(growth_status)
+        if health is not None:
+            statuses.append(health.status)
+    if any(status in {"FAIL", "HARD_FAIL"} for status in statuses):
+        return "FAIL"
+    return "INDETERMINATE" if "INDETERMINATE" in statuses else "PASS"
+
+
+def format_compliance_result(
+    gates: tuple[InitiationGateAssessment, ...],
+    growth_status: str,
+    health: InitiationGateAssessment,
+) -> str:
+    result = compliance_hard_fail_result(gates, growth_status, health)
+    if result != "INDETERMINATE":
+        return result
+    count = sum(gate.status == "INDETERMINATE" for gate in gates)
+    if health.applicable:
+        count += int(health.status == "INDETERMINATE") + int(
+            growth_status == "INDETERMINATE"
+        )
+    return f"{result} — No verified hard failure among these gates; {count} gates unverified"
+
+
+def render_initiation_gate_context(inputs: DecisionInputs) -> str:
+    return (
+        "CODE-OWNED INITIATION GATES (independent of growth exceptions):\n"
+        + "- "
+        + format_initiation_gate(assess_health_gate(inputs))
+        + "\n"
+        + "\n".join(
+            f"- {format_initiation_gate(gate)}"
+            for gate in assess_initiation_gates(inputs)
+        )
+    )
+
+
+def project_compliance_gates(content: str, inputs: DecisionInputs) -> str:
+    """Replace only owned compliance labels; preserve discretionary risk prose."""
+    section = re.search(
+        r"(?ms)^### THESIS COMPLIANCE SUMMARY\s*\n(?P<body>.*?)(?=^### |\Z)", content
+    )
+    if section is None:
+        return content
+    body = section.group("body")
+    body = re.sub(
+        r"(?m)^\s*(?:[-*]\s*)?(?:\*\*)?(?:Financial Health|Growth Transition|Liquidity|Analyst Coverage|US Revenue|Hard Fail Result)(?:\*\*)?:[^\n]*\n?",
+        "",
+        body,
+    )
+    explanation = "Unresolved evidence is INDETERMINATE. Independent economic risks and the PM rationale retain their policy authority."
+    body = body.replace(explanation + "\n", "")
+    # These assessments are exactly those persisted in decision_policy.
+    growth = assess_growth_gate(inputs)
+    health = assess_health_gate(inputs)
+    score = (
+        "N/A"
+        if inputs.growth_decision_pct is None
+        else f"{inputs.growth_decision_pct:g}%"
+    )
+    lines = [
+        "- **" + format_initiation_gate(health).replace(":", "**:", 1),
+        f"- **Growth Transition**: {score} (Adjusted) - {growth.status}; {growth.reason or 'NONE'}"
+        + ("; Exempt under ACTIVE_TENDER" if not health.applicable else ""),
+    ]
+    gates = assess_initiation_gates(inputs)
+    lines.extend(
+        "- **" + format_initiation_gate(gate).replace(":", "**:", 1) for gate in gates
+    )
+    lines.append(
+        f"**Hard Fail Result**: {format_compliance_result(gates, growth.status, health)}"
+    )
+    lines.append(explanation)
+    heading = re.search(r"(?m)^\*\*Hard Fail Checks:?\*\*:?[ \t]*\n", body)
+    rows = "\n".join(lines) + "\n\n"
+    if heading is None:
+        body = "**Hard Fail Checks:**\n" + rows + body.lstrip("\n")
+    else:
+        body = body[: heading.end()] + rows + body[heading.end() :].lstrip("\n")
+    return content[: section.start("body")] + body + content[section.end("body") :]
+
+
 def render_growth_gate_context(decision_inputs: DecisionInputs) -> str:
     """Render the code-owned growth decision for the PM without restating policy."""
     assessment = assess_growth_gate(decision_inputs)
-    status = (
-        f"EXCEPTION_{assessment.exception.upper()}"
-        if assessment.exception
-        else "HARD_FAIL"
-        if assessment.hard_fail
-        else "PASS"
-    )
     missing = ",".join(sorted(decision_inputs.missing_current_growth_fields)) or "NONE"
     return (
         "CODE-OWNED GROWTH GATE (binding; do not infer a different exception):\n"
-        f"- STATUS: {status}\n"
+        f"- STATUS: {assessment.status}\n"
         f"- REASON: {assessment.reason or 'NONE'}\n"
         f"- MISSING_CURRENT_GROWTH_FIELDS: {missing}"
+        + (
+            "\n- MAX_VERDICT: HOLD (growth passed by exception)"
+            if _exception_growth_ceiling_applies(decision_inputs, assessment)
+            else ""
+        )
     )
 
 
@@ -496,13 +921,24 @@ def assess_growth_gate(decision_inputs: DecisionInputs) -> GrowthGateAssessment:
 
     metrics = decision_inputs.decision_metrics
     growth = decision_inputs.growth_decision_pct
-    if growth is None or growth >= GROWTH_FAIL_MAX:
+    if growth is None:
+        return GrowthGateAssessment(hard_fail=False, reason="growth_score_unavailable")
+    if growth >= GROWTH_FAIL_MAX:
         return GrowthGateAssessment(hard_fail=False)
+
+    if not decision_inputs.health_score_reliable:
+        return GrowthGateAssessment(
+            hard_fail=False, reason="health_score_unreliable_for_growth_exception"
+        )
 
     health = decision_inputs.health_decision_pct
     pe = metrics.get("pe_ratio")
     cagr = metrics.get("revenue_cagr_3y")
-    if health is None or health < HEALTH_FLOOR_MIN:
+    if health is None:
+        return GrowthGateAssessment(
+            hard_fail=False, reason="health_score_unavailable_for_growth_exception"
+        )
+    if health < HEALTH_FLOOR_MIN:
         return GrowthGateAssessment(
             hard_fail=True,
             reason="adjusted_health_below_exception_floor",
@@ -562,8 +998,17 @@ def assess_verdict_policy(
             reason="auto_reject_flags=" + ",".join(auto_reject_flags),
             required_verdict="DO_NOT_INITIATE",
         )
+    for gate in assess_initiation_gates(decision_inputs):
+        if gate.status == "FAIL":
+            return VerdictPolicyViolation(gate.rule, gate.reason, "DO_NOT_INITIATE")
     if decision_inputs.decision_metrics.get("m_and_a_status") == "ACTIVE_TENDER":
         return None
+
+    health = assess_health_gate(decision_inputs)
+    if health.status == "FAIL":
+        return VerdictPolicyViolation(
+            "financial_health_hard_fail", health.reason, "DO_NOT_INITIATE"
+        )
 
     growth_gate = assess_growth_gate(decision_inputs)
     if not growth_gate.hard_fail:
@@ -603,6 +1048,10 @@ def maybe_floor_verdict_to_hold(
         return content_str, False
     if _has_hard_flag(red_flags):
         return content_str, False
+    # A positive bonus can pull the net subtotal below Zone 1 without resolving
+    # a material individual risk. Review tagging shares this individual check.
+    if any(_has_material_individual_risk(flag) for flag in red_flags):
+        return content_str, False
     if code_subtotal is None or code_subtotal >= ZONE_1_THRESHOLD:
         return content_str, False
     if not (
@@ -615,6 +1064,14 @@ def maybe_floor_verdict_to_hold(
         )
         return content_str, False
 
+    if assess_health_gate(decision_inputs).status != "PASS":
+        return content_str, False
+
+    if any(
+        gate.status == "FAIL" or (gate.rule != "us_revenue" and gate.status != "PASS")
+        for gate in assess_initiation_gates(decision_inputs)
+    ):
+        return content_str, False
     growth_gate = assess_growth_gate(decision_inputs)
     if growth_gate.hard_fail or growth_gate.exception is None:
         return content_str, False
@@ -633,7 +1090,7 @@ def maybe_floor_verdict_to_hold(
         f"exception (Adjusted Health {health:.0f}% ≥ 65, P/E {pe:.2f} ≤ 18, "
         f"3Y revenue CAGR {cagr:.1f}% ≥ 0), and the deterministic code-computed risk "
         f"subtotal ({code_subtotal:+.2f}) is below the Zone-1 threshold ({ZONE_1_THRESHOLD}) "
-        f"with no auto-reject flag. A soft-point tally may not convert a healthy, "
+        f"without a material disqualifying flag. A soft-point tally may not convert a healthy, "
         f"data-limited name into an avoid/exit."
     )
     floored, changed, n_header, n_block = _apply_verdict_rewrite(

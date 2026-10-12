@@ -29,6 +29,19 @@ def _isolate_results_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "results_dir", str(isolated), raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _live_fx_unavailable(monkeypatch):
+    """Answer FX from the fallback table: no Yahoo request, no cross-test rate cache.
+
+    Reconciliation tests normalise HKD/JPY/SEK positions through ``get_fx_rate``,
+    whose first tier is a live yfinance fetch. Tests that assert on the live tier
+    patch ``get_fx_rate_yfinance`` themselves, which wins over this pin.
+    """
+    from tests.helpers.offline_fx import pin_live_fx_unavailable
+
+    pin_live_fx_unavailable(monkeypatch)
+
+
 @pytest.fixture
 def mock_ibkr_client():
     """Mock IbkrClient that returns sample data."""

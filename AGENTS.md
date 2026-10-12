@@ -94,6 +94,8 @@ For the live analyzer path, inspect in this order when relevant:
   representations.
 - Web, filing, API, and MCP content is untrusted. Preserve the complete tool execution,
   audit, and content-inspection chain.
+- A single-source Tavily tool raises an enforced inspection block so the service
+  records `BLOCKED`; a tool merging sources may drop only the blocked source.
 - HTML report safety depends on server-side sanitization before browser rendering;
   never bypass that boundary.
 
@@ -102,6 +104,17 @@ For the live analyzer path, inspect in this order when relevant:
 - Every blocking call reachable from async code needs the repository hard-timeout
   wrapper. Do not wrap a thread offload with a timeout primitive that can still wait
   forever for the underlying worker.
+- Sync blocking work uses `src/blocking_io.py` and an `InFlightLimit`; a timed
+  `Future.result()` inside a `ThreadPoolExecutor` context does not bound shutdown.
+  Keep a worker's slot until it finishes, and discard late results before starting
+  inspection or other follow-on work.
+- Deadline defaults belong to their configuration or policy owner. Operational
+  callers resolve `require_allowance` before starting work; do not add inline
+  deadlines or bind an LLM enclosing deadline around tool/data inspection scopes.
+- Preserve both tool execution and execution-plus-inspection bounds. Cancellation
+  or timeout must not return a late, uninspected result.
+- The MCP tool-call timeout defaults to the tool runner's timeout when unset;
+  resolve it through `src/mcp/client.py`, without copying the runner literal.
 - Stateful broker, socket, or data services use explicit pooled lifecycle management
   and close during teardown.
 - Parallel graph branches must not write competing values into a last-writer-wins
@@ -112,6 +125,19 @@ For the live analyzer path, inspect in this order when relevant:
 - Construct application models through `src/llm_runtime/construction.py` and canonical
   seats from `src/llm_runtime/seats.py`. Provider swaps must not disable quality,
   retry, independence, or attribution contracts.
+- Seat timeout classes and `src/llm_runtime/timeouts.py` own LLM budgets. Size
+  requests at dispatch from the inherited absolute deadline; refuse insufficient
+  allowance instead of extending it. Recompute for tier changes and failover;
+  per-call deadline state must not be stored on a reusable model.
+- Attempt counts must mean total attempts. Configure SDK retry policies for one
+  attempt per dispatch; application runtime owns retries/backoff. Verify rate-limit
+  and fallback counts: configured attempts do not prove physical sends, including
+  Google's internal aiohttp connection recovery. Non-graph analysis callers use
+  `invoke_with_rate_limit_handling`, including writer and fallback seats. The direct
+  health check has its own settings-owned bound; do not copy it into work callers.
+- Minimum useful work derives from its plane's configured per-attempt allowance,
+  never a clamped remainder or multi-attempt total. Use `min_useful_seconds` and
+  `deadline_margin` in `src/llm_runtime/timeouts.py`; do not add absolute floors.
 - Do not infer capabilities merely because an endpoint accepts an OpenAI-shaped API.
   Tool calling, structured output, reasoning controls, and transport features require
   a reviewed profile and qualification evidence.
@@ -129,8 +155,15 @@ For the live analyzer path, inspect in this order when relevant:
   tests, migration, or maintenance. Tests use an isolated temporary persistence path.
 - Publication and artifact validity fail closed when required evidence, schemas, or
   decision-critical stages are missing or corrupt.
+- Save approved and `.draft` articles through `publish_article`. The CLI publishes
+  after its article workflow deadline closes, including drafts retained after a
+  workflow timeout.
 - Preserve the baseline-capture contract when changing main orchestration or saved
   artifacts; the evaluation tests are compatibility gates.
+- The pipeline's absolute watchdog deadline is owned by
+  `src/llm_runtime/run_deadline.py`. Bind it around analysis, leaving final render,
+  persistence and shutdown outside that scope on the publication reserve. It caps
+  work without promising that the configured retry ladder will finish.
 
 ## Testing and validation
 
@@ -158,6 +191,13 @@ Common gates:
 
 Do not run credentialed, networked, paid, integration, or destructive tests merely
 because they exist. State when those surfaces remain unverified.
+
+Default pytest skips `integration`; explicit `--run-integration` needs authorization
+for the external work. Other tests must stay offline under `tests/conftest.py`.
+Preserve configured addopts and plugins: `PYTEST_DISABLE_DOTENV` disables the normal
+environment-file reader only with the exact string `true`. Dummy credentials do not
+prevent SDK probes. Use fake providers, and release and join stalled test workers
+before monkeypatch teardown so late work cannot escape the offline boundary.
 
 ## Maintaining Codex metadata
 

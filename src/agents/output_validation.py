@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Mapping, Sequence
 from numbers import Real
 from typing import Any
 
@@ -26,8 +28,19 @@ from src.earnings_baseline import (
 from src.llm_usage import extract_token_usage_breakdown
 from src.runtime_diagnostics.failure_classification import ArtifactErrorKind
 from src.text_patterns import URL_RE
+from src.validators.supplemental_extractors import (
+    CMIC_STATUS_TOKENS,
+    PFIC_STATUS_TOKENS,
+    VIE_STRUCTURE_TOKENS,
+)
 
 logger = structlog.get_logger(__name__)
+
+_LEGAL_STATUS_FIELDS = (
+    ("pfic_status", PFIC_STATUS_TOKENS),
+    ("vie_structure", VIE_STRUCTURE_TOKENS),
+    ("cmic_status", CMIC_STATUS_TOKENS),
+)
 
 _FORENSIC_VERDICT_PATTERN = re.compile(
     r"(?im)^\s*(?:\*\*)?\s*verdict\s*(?:\*\*)?\s*:\s*\S+"
@@ -36,9 +49,13 @@ _FORENSIC_VERDICT_PATTERN = re.compile(
 
 def _has_valid_latest_results_block(content: str) -> bool:
     """Require the complete latest-results contract, including explicit N/A fields."""
-    from src.agents.foreign_language_evidence import LATEST_RESULTS_SOURCE_FIELDS
+    from src.agents.foreign_language_evidence import (
+        _LATEST_RESULTS_NUMERIC_FIELDS,
+        LATEST_RESULTS_SOURCE_FIELDS,
+        unique_latest_results_block,
+    )
 
-    block = extract_last_fenced_block(content, "LATEST_RESULTS")
+    block = unique_latest_results_block(content)
     if not block:
         return False
 
@@ -73,16 +90,30 @@ def _has_valid_latest_results_block(content: str) -> bool:
         block,
         "LATEST_RESULTS_SOURCE_URL",
     )
-    if not (
+    valid_period = (
         period
         and period.upper() not in {"N/A", "NA", "NONE", "UNKNOWN"}
         and period_end
         and re.fullmatch(r"\d{4}-\d{2}-\d{2}", period_end)
-        and source_url
-        and URL_RE.fullmatch(source_url)
-    ):
+    )
+    if not valid_period:
         return False
-    return True
+    if source_url and URL_RE.fullmatch(source_url):
+        return True
+    # A normalized unsourced candidate can coexist with independently valid
+    # guidance, provided no latest-results numeric claim survives.
+    authority = extract_block_field_from_text_raw(
+        block, "LATEST_RESULTS_SOURCE_AUTHORITY"
+    )
+    numeric_fields = (
+        *_LATEST_RESULTS_NUMERIC_FIELDS,
+        "LATEST_RESULTS_REVENUE_GROWTH_YOY",
+        "LATEST_RESULTS_EARNINGS_GROWTH_YOY",
+    )
+    return authority == "UNSUPPORTED" and all(
+        extract_block_field_from_text_raw(block, field) == "N/A"
+        for field in numeric_fields
+    )
 
 
 def _has_valid_management_guidance_block(content: str) -> bool:
@@ -295,8 +326,17 @@ def classify_output_contract_failure(
     truncated: bool,
     validation: dict[str, Any],
 ) -> ArtifactErrorKind:
-    """Classify a provider-success response that failed its output contract."""
+    """Classify a provider-success response that failed its output contract.
 
+    The provider's own stop reason decides first: a response stopped at the token
+    cap can report a few tokens fewer than the configured cap (0995.HK: 19,111 of
+    19,115), so the token comparison is only the fallback when no stop reason says
+    so.
+    """
+    from src.agents.runtime import response_hit_output_cap
+
+    if response_hit_output_cap(response):
+        return "output_cap_exhausted"
     configured_intent_cap = get_configured_output_cap(runnable)
     configured_api_cap = (
         get_configured_api_output_cap(runnable) or configured_intent_cap
@@ -329,11 +369,113 @@ def _has_forensic_verdict(content: str) -> bool:
     return bool(_FORENSIC_VERDICT_PATTERN.search(content))
 
 
-def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
+def _valid_regulatory_risk(risk: Any) -> bool:
+    return (
+        isinstance(risk, dict)
+        and all(
+            isinstance(risk.get(field), str) and risk[field].strip()
+            for field in ("risk_type", "description", "severity")
+        )
+        and risk["severity"].upper() in {"HIGH", "MEDIUM", "LOW"}
+    )
+
+
+def legal_recovery_preserves_assessments(original: str, recovered: str) -> bool:
+    """Structural repair may fill gaps, but may not re-adjudicate valid findings."""
+
+    try:
+        before, after = json.loads(original), json.loads(recovered)
+    except (ValueError, TypeError):
+        return True  # Malformed original JSON has no trustworthy field boundaries.
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    for field, allowed in _LEGAL_STATUS_FIELDS:
+        value = before.get(field)
+        if isinstance(value, str) and value in allowed and after.get(field) != value:
+            return False
+    capital = before.get("capital_structure")
+    if (
+        isinstance(capital, dict)
+        and capital.get("coverage_status") == "FOUND"
+        and capital.get("classification") in {"BLOCK_BUY", "QUALIFY_RATIOS"}
+        and after.get("capital_structure") != capital
+    ):
+        # Amount, recourse and materiality can alter downstream sizing even when
+        # classification is unchanged. Structural repair is not re-adjudication.
+        return False
+    risks = before.get("other_regulatory_risks")
+    recovered_risks = after.get("other_regulatory_risks")
+    if isinstance(risks, list):
+        for risk in risks:
+            if _valid_regulatory_risk(risk) and (
+                not isinstance(recovered_risks, list) or risk not in recovered_risks
+            ):
+                return False
+    return True
+
+
+def validate_required_output(
+    agent_key: str,
+    content: str,
+    *,
+    snapshot: Mapping[str, Any] | None = None,
+    red_flags: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     checks: list[tuple[str, bool]] = []
     issues: dict[str, str] = {}
 
-    if agent_key == "foreign_language_analyst":
+    if agent_key == "legal_counsel":
+        try:
+            payload = json.loads(content)
+        except (ValueError, TypeError):
+            payload = None
+        valid_object = isinstance(payload, dict)
+        checks.append(("json_object", valid_object))
+        if valid_object:
+            for field, allowed in _LEGAL_STATUS_FIELDS:
+                checks.append(
+                    (
+                        field,
+                        isinstance(payload.get(field), str)
+                        and payload[field] in allowed,
+                    )
+                )
+            checks.append(
+                (
+                    "regulatory_risks",
+                    isinstance(payload.get("other_regulatory_risks"), list)
+                    and all(
+                        _valid_regulatory_risk(risk)
+                        for risk in payload["other_regulatory_risks"]
+                    ),
+                )
+            )
+            checks.append(
+                (
+                    "capital_structure",
+                    isinstance(payload.get("capital_structure"), dict),
+                )
+            )
+    elif agent_key == "junior_fundamentals_analyst":
+        checks.extend(
+            [
+                (
+                    "raw_data_wrapper",
+                    bool(
+                        re.search(
+                            r"(?s)=== RAW FINANCIAL DATA FOR [^\n]+ ===.+=== END RAW DATA ===",
+                            content,
+                        )
+                    ),
+                ),
+                ("metrics_tool_output", "### TOOL 1: get_financial_metrics" in content),
+                (
+                    "fundamental_tool_output",
+                    "### TOOL 2: get_fundamental_analysis" in content,
+                ),
+            ]
+        )
+    elif agent_key == "foreign_language_analyst":
         from src.agents.foreign_language_evidence import (
             has_foreign_language_protocol_residue,
         )
@@ -365,6 +507,8 @@ def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
         if guidance_issue is not None:
             issues["promoted_management_guidance"] = guidance_issue
     elif agent_key == "portfolio_manager":
+        from src.pm_claim_audit import trace_has_citations, validate_decision_trace
+
         pm_block = extract_last_fenced_block(content, "PM_BLOCK")
         checks.extend(
             [
@@ -393,6 +537,14 @@ def validate_required_output(agent_key: str, content: str) -> dict[str, Any]:
                 ),
             ]
         )
+        if red_flags is not None:
+            trace_valid = (
+                validate_decision_trace(content, snapshot, red_flags)["status"]
+                == "VALID"
+            )
+        else:
+            trace_valid = trace_has_citations(content)
+        checks.append(("decision_trace", trace_valid))
     elif agent_key == "research_manager":
         checks.extend(
             [
@@ -457,6 +609,7 @@ def should_fail_closed(
         "portfolio_manager",
         "fundamentals_analyst",
         "foreign_language_analyst",
+        "junior_fundamentals_analyst",
     }:
         return True
 

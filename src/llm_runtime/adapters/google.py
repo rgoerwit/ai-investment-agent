@@ -1,5 +1,7 @@
 """Google-native chat adapter."""
 
+from typing import Any
+
 from langchain_core.language_models import BaseChatModel
 
 from src.llm_runtime.adapters.base import SeatModelRequest
@@ -21,22 +23,19 @@ class GoogleAdapter:
 
         settings = request.settings or config
         policy = request.seat.execution_policy
+        timeout_class = request.seat.timeout_class
 
         if not policy.reasoning_control_enabled:
             llm = llms.create_gemini_model(
                 request.binding.model,
                 temperature=policy.sampling_temperature or 0.0,
                 timeout=int(policy.client_timeout_seconds or settings.api_timeout),
-                max_retries=(
-                    policy.sdk_max_retries
-                    if policy.sdk_max_retries is not None
-                    else settings.api_retry_attempts
-                ),
                 callbacks=list(request.callbacks),
                 max_output_tokens=request.output_tokens,
                 service_tier=request.service_tier,
                 api_key=settings.get_google_api_key(),
                 settings=settings,
+                timeout_class=timeout_class,
             )
             llm.rate_limiter = limiter_for_binding(
                 settings,
@@ -46,12 +45,20 @@ class GoogleAdapter:
             return llm
 
         if request.seat.seat_id is SeatId.ARTICLE_WRITER_BASE_FALLBACK:
+            # The seat policy reaches the writer floor too: its temperature
+            # and client ceiling, when the policy sets them.
+            writer_kwargs: dict[str, Any] = {}
+            if policy.sampling_temperature is not None:
+                writer_kwargs["temperature"] = policy.sampling_temperature
+            if policy.client_timeout_seconds is not None:
+                writer_kwargs["timeout"] = policy.client_timeout_seconds
             return llms.create_writer_fallback_llm(
                 callbacks=list(request.callbacks),
                 model=request.binding.model,
                 service_tier=request.service_tier,
                 api_key=settings.get_google_api_key(),
                 settings=settings,
+                **writer_kwargs,
             )
         if request.binding.intent in {
             ModelIntent.FAST,
@@ -69,7 +76,6 @@ class GoogleAdapter:
                     if policy.client_timeout_seconds is not None
                     else None
                 ),
-                max_retries=policy.sdk_max_retries,
                 callbacks=list(request.callbacks),
                 max_output_tokens=request.output_tokens,
                 service_tier=request.service_tier,
@@ -81,6 +87,7 @@ class GoogleAdapter:
                 api_key=settings.get_google_api_key(),
                 settings=settings,
                 include_thoughts=request.include_reasoning_output,
+                timeout_class=timeout_class,
             )
 
         reasoning = request.reasoning_value
@@ -100,11 +107,6 @@ class GoogleAdapter:
                 else 0.3
             ),
             timeout=int(policy.client_timeout_seconds or settings.api_timeout),
-            max_retries=(
-                policy.sdk_max_retries
-                if policy.sdk_max_retries is not None
-                else settings.api_retry_attempts
-            ),
             callbacks=list(request.callbacks),
             thinking_level=reasoning,
             max_output_tokens=request.output_tokens,
@@ -113,6 +115,7 @@ class GoogleAdapter:
             api_key=settings.get_google_api_key(),
             settings=settings,
             include_thoughts=request.include_reasoning_output,
+            timeout_class=timeout_class,
         )
         llm.rate_limiter = limiter_for_binding(
             settings,

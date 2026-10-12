@@ -95,7 +95,9 @@ class TestFundamentalsPromptContent:
             "NORMALIZED_EARNINGS_AVAILABLE",
         ):
             assert field in msg
-        assert "do not award the EPS_GROWTH point" in msg
+        assert "Score EPS_GROWTH=0 when" in msg
+        assert "Score EPS_GROWTH=N/A when" in msg
+        assert "no code-reconciled normalized growth rate is available" in msg
 
 
 class TestForeignLanguageGuidancePromptContent:
@@ -127,7 +129,8 @@ class TestForeignLanguageGuidancePromptContent:
     def test_latest_results_snapshot_requires_inspected_same_statement_values(self):
         msg = get_prompt("foreign_language_analyst").system_message
         assert "Search L: Latest Official Results Snapshot (TOP PRIORITY)" in msg
-        assert "call `get_official_document`" in msg
+        assert "inspect it with `get_official_document`" in msg
+        assert "unless the code-owned preflight already inspected that exact URL" in msg
         assert "current and year-ago comparative revenue and earnings" in msg
         assert "same statement presentation" in msg
         assert "this agent runs in parallel" in msg

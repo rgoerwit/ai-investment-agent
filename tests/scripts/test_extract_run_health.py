@@ -31,6 +31,41 @@ def _write_log(tmp_path: Path, lines: list[str]) -> Path:
 
 
 class TestParseLog:
+    def test_flex_events_count_episodes_separately_from_fallbacks(self, tmp_path):
+        log = _write_log(
+            tmp_path,
+            [
+                "event='flex_fallback_to_standard' operation='gemini_flex_capacity'",
+                "event='flex_fallback_to_standard' operation='gemini_flex_latency'",
+                "event='flex_provider_degraded' failures_in_window=2",
+                "event='llm_call_success' service_tier='standard'",
+                "[pipeline_child_exit] status=0 elapsed=120s",
+            ],
+        )
+        stats = parse_log(log)
+        assert stats.flex_fallbacks == 2
+        assert stats.flex_degradation_episodes == 1
+        assert stats.exit_status == 0
+        assert not stats.is_clean
+        # Keep the per-ticker network badge quiet; batch reporting owns tiers.
+        assert format_badge(stats) == ""
+        assert stats.to_dict()["flex_fallbacks"] == 2
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "event='flex_provider_degrad",
+            "event='flex_provider_degraded_retry'",
+            "event='llm_call_success' service_tier='flex'",
+            "event='llm_call_success' service_tier='standard'",
+        ],
+    )
+    def test_other_or_truncated_events_do_not_imply_flex_degradation(
+        self, tmp_path, line
+    ):
+        stats = parse_log(_write_log(tmp_path, [line]))
+        assert stats.flex_fallbacks == stats.flex_degradation_episodes == 0
+
     def test_clean_log_returns_zeros(self, tmp_path):
         log = _write_log(
             tmp_path,
@@ -222,3 +257,14 @@ class TestRealLogFixtures:
         assert stats.dns_failures >= 5
         badge = format_badge(stats)
         assert "dns=" in badge
+
+
+def test_transient_fallback_is_recorded_without_per_run_trouble_badge(tmp_path):
+    path = tmp_path / "fallback.txt"
+    path.write_text(
+        "event='flex_fallback_to_standard'\n[pipeline_child_exit] status=0 elapsed=20s\n"
+    )
+    stats = parse_log(path)
+    assert stats.flex_fallbacks == 1
+    assert not stats.is_clean  # Raw-event predicate, independent of thresholds.
+    assert format_badge(stats) == ""

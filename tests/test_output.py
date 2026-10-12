@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -57,23 +56,6 @@ def test_load_company_name_for_output_retries_normalized_alias():
         def __init__(self, symbol):
             self.info = {"longName": "Truecaller AB"} if symbol == "TRUE-B.ST" else {}
 
-    class _Future:
-        def __init__(self, fn):
-            self._fn = fn
-
-        def result(self, timeout=None):
-            return self._fn()
-
-    class _Executor:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def submit(self, fn):
-            return _Future(fn)
-
     fake_yfinance = MagicMock()
 
     def _ticker_factory(symbol):
@@ -84,40 +66,53 @@ def test_load_company_name_for_output_retries_normalized_alias():
 
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setitem(__import__("sys").modules, "yfinance", fake_yfinance)
-        assert (
-            _load_company_name_for_output(
-                "TRUE.B.ST",
-                thread_pool_executor_cls=lambda max_workers=1: _Executor(),
-            )
-            == "Truecaller AB"
-        )
+        assert _load_company_name_for_output("TRUE.B.ST") == "Truecaller AB"
 
     assert requested_symbols == ["TRUE.B.ST", "TRUE-B.ST"]
 
 
-def test_load_company_name_for_output_timeout_does_not_wait_for_executor_shutdown():
+def test_load_company_name_for_output_stall_returns_none_without_joining_worker():
+    """A stalled .info returns None at the bound; the worker is a daemon.
+
+    The old executor path returned on time too, but its worker was joined at
+    interpreter exit, so one stalled Yahoo read could hold the process open.
+    """
+    import threading
+    import time
+
+    from src.blocking_io import OUTPUT_COMPANY_NAME_INFO_POLICY
+    from src.config import config
     from src.output import _load_company_name_for_output
+    from tests.helpers.stalled_workers import stalled_worker
 
-    fake_yfinance = MagicMock()
-    fake_yfinance.Ticker.return_value.info = {"longName": "Should Not Return"}
+    workers: list[threading.Thread] = []
 
-    mock_future = MagicMock()
-    mock_future.result.side_effect = FuturesTimeoutError()
+    with (
+        pytest.MonkeyPatch.context() as monkeypatch,
+        stalled_worker(OUTPUT_COMPANY_NAME_INFO_POLICY.label) as release,
+    ):
 
-    mock_executor = MagicMock()
-    mock_executor.submit.return_value = mock_future
+        class _StalledTicker:
+            def __init__(self, symbol):
+                del symbol
 
-    with pytest.MonkeyPatch.context() as monkeypatch:
+            @property
+            def info(self):
+                workers.append(threading.current_thread())
+                release.wait(timeout=5)
+                return {"longName": "Should Not Return"}
+
+        fake_yfinance = MagicMock()
+        fake_yfinance.Ticker.side_effect = _StalledTicker
         monkeypatch.setitem(__import__("sys").modules, "yfinance", fake_yfinance)
-        assert (
-            _load_company_name_for_output(
-                "SNTIA.OL",
-                thread_pool_executor_cls=lambda max_workers=1: mock_executor,
-            )
-            is None
-        )
+        monkeypatch.setattr(config, "company_name_lookup_timeout_seconds", 0.05)
+        start = time.monotonic()
+        assert _load_company_name_for_output("SNTIA.OL") is None
+        elapsed = time.monotonic() - start
 
-    mock_executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+    assert elapsed < 1.0
+    assert len(workers) == 1
+    assert workers[0].daemon is True
 
 
 def test_render_primary_output_writes_report_without_banner(tmp_path):

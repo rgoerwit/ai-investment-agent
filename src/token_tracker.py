@@ -225,11 +225,11 @@ _AGENT_DISPLAY_NAME_MAP = {
 }
 
 # Suffixes appended at call sites to decorate the base agent name (debate round,
-# consultant/auditor final synthesis, high-thinking retry, escalation). This is a
+# consultant/auditor final synthesis, high- or low-thinking retry, escalation). This is a
 # closed, code-controlled set — stripping it is deterministic, not free-text
 # guessing.
 _AGENT_SUFFIX_RE = re.compile(
-    r"(?:_final_synthesis|\s+R\d+|\s+\(RETRY-HIGH\)|\s+Escalation|\s+Direct Retry)+$"
+    r"(?:_final_synthesis|\s+R\d+|\s+\(RETRY-(?:HIGH|CAP)\)|\s+Escalation|\s+Direct Retry)+$"
 )
 
 
@@ -433,9 +433,16 @@ class LLMCallAttempt:
     intent_output_cap_tokens: int | None = None
     api_output_cap_tokens: int | None = None
     configured_reasoning_reserve_tokens: int | None = None
+    service_tier: str | None = None
     failure_kind: str | None = None
     failure_origin: str | None = None
     retryable: bool | None = None
+    # Transport requests made inside this attempt (flex, standard re-issue,
+    # failover), each with its effective tier, model, request timeout sent,
+    # remaining allowance at dispatch, outcome and elapsed time. Each is one
+    # SDK attempt; never payloads, headers or client reprs. See
+    # src/llm_runtime/timeouts.py.
+    dispatches: list[dict[str, Any]] = field(default_factory=list)
 
 
 class TokenTracker:
@@ -566,9 +573,11 @@ class TokenTracker:
         intent_output_cap_tokens: int | None = None,
         api_output_cap_tokens: int | None = None,
         configured_reasoning_reserve_tokens: int | None = None,
+        service_tier: str | None = None,
         failure_kind: str | None = None,
         failure_origin: str | None = None,
         retryable: bool | None = None,
+        dispatches: list[dict[str, Any]] | None = None,
     ) -> None:
         """Record one provider call attempt, including failed attempts.
 
@@ -598,9 +607,11 @@ class TokenTracker:
             intent_output_cap_tokens=intent_output_cap_tokens,
             api_output_cap_tokens=api_output_cap_tokens,
             configured_reasoning_reserve_tokens=configured_reasoning_reserve_tokens,
+            service_tier=service_tier,
             failure_kind=failure_kind,
             failure_origin=failure_origin,
             retryable=retryable,
+            dispatches=list(dispatches or []),
         )
         with self._lock:
             self.call_attempts.append(attempt_record)

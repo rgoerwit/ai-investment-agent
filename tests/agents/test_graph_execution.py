@@ -1,7 +1,5 @@
 """Fixed test_graph_execution.py - removed pytestmark from non-async tests."""
 
-import sys
-from types import ModuleType
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -16,9 +14,6 @@ def _stub_graph_component_dependencies(monkeypatch):
 
         return _stub_runtime_node
 
-    stub_memory = tuple(MagicMock() for _ in range(5))
-
-    monkeypatch.setattr(components, "_create_legacy_memories", lambda: stub_memory)
     monkeypatch.setattr(
         components, "create_quick_thinking_llm", lambda **kwargs: Mock()
     )
@@ -413,7 +408,7 @@ class TestAuditorLLMConfiguration:
     Tests are model-agnostic — the user configures models via .env.
     """
 
-    @patch("src.llms.config")
+    @patch("src.config.config")
     def test_auditor_llm_never_sets_temperature(self, mock_config):
         """Auditor LLM should never set temperature (any model can reject it)."""
         from src.llms import create_auditor_llm
@@ -430,7 +425,7 @@ class TestAuditorLLMConfiguration:
         # — NOT 0.0 which breaks many model families.
         assert llm.temperature != 0.0
 
-    @patch("src.llms.config")
+    @patch("src.config.config")
     def test_auditor_llm_disabled_without_consultant(self, mock_config):
         """Should return None when ENABLE_CONSULTANT is false."""
         from src.llms import create_auditor_llm
@@ -440,7 +435,7 @@ class TestAuditorLLMConfiguration:
         llm = create_auditor_llm()
         assert llm is None
 
-    @patch("src.llms.config")
+    @patch("src.config.config")
     def test_auditor_llm_disabled_without_api_key(self, mock_config):
         """Should return None when OPENAI_API_KEY is missing."""
         from src.llms import create_auditor_llm
@@ -451,7 +446,7 @@ class TestAuditorLLMConfiguration:
         llm = create_auditor_llm()
         assert llm is None
 
-    @patch("src.llms.config")
+    @patch("src.config.config")
     def test_auditor_llm_falls_back_to_consultant_model(self, mock_config):
         """Should use consultant_model when auditor_model is not set."""
         from src.llms import create_auditor_llm
@@ -464,7 +459,7 @@ class TestAuditorLLMConfiguration:
         llm = create_auditor_llm()
         assert llm is not None
 
-    @patch("src.llms.config")
+    @patch("src.config.config")
     def test_auditor_llm_prefers_auditor_model(self, mock_config):
         """Should use auditor_model over consultant_model when set."""
         from src.llms import create_auditor_llm
@@ -479,7 +474,7 @@ class TestAuditorLLMConfiguration:
         # The model set should be the auditor-specific one
         assert "auditor" in llm.model_name
 
-    @patch("src.llms.config")
+    @patch("src.config.config")
     def test_consultant_llm_never_sets_temperature(self, mock_config):
         """Consultant LLM should never set temperature (model-agnostic)."""
         from src.llms import get_consultant_llm
@@ -507,9 +502,11 @@ class TestAuditorLLMConfiguration:
 
         from src.llms import create_auditor_llm
 
-        with _patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with _patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
-            with _patch("src.llms.config") as cfg:
+            with _patch("src.config.config") as cfg:
                 cfg.enable_consultant = True
                 cfg.get_openai_api_key.return_value = "k"
                 cfg.auditor_model = None
@@ -535,9 +532,11 @@ class TestAuditorLLMConfiguration:
 
         from src.llms import create_auditor_llm
 
-        with _patch("langchain_openai.ChatOpenAI") as mock_chatgpt:
+        with _patch(
+            "src.llm_runtime.adapters.transports.new_openai_chat"
+        ) as mock_chatgpt:
             mock_chatgpt.return_value = MagicMock()
-            with _patch("src.llms.config") as cfg:
+            with _patch("src.config.config") as cfg:
                 cfg.enable_consultant = True
                 cfg.get_openai_api_key.return_value = "k"
                 cfg.auditor_model = None
@@ -554,8 +553,8 @@ class TestAuditorLLMReasoning:
 
     def test_auditor_gpt5_uses_medium_reasoning_effort(self, monkeypatch):
         import src.llms as llms
+        from src.llm_runtime.adapters import transports
 
-        stub_module = ModuleType("langchain_openai")
         captured = {}
 
         class StubChatOpenAI:
@@ -563,15 +562,13 @@ class TestAuditorLLMReasoning:
                 captured.update(kwargs)
                 self.model_name = kwargs["model"]
 
-        stub_module.ChatOpenAI = StubChatOpenAI
-
-        monkeypatch.setitem(sys.modules, "langchain_openai", stub_module)
-        monkeypatch.setattr(llms.config, "enable_consultant", True)
+        monkeypatch.setattr(transports, "new_openai_chat", StubChatOpenAI)
+        monkeypatch.setattr(llms.resolve_settings(), "enable_consultant", True)
         monkeypatch.setattr(
-            type(llms.config), "get_openai_api_key", lambda self: "fake-key"
+            type(llms.resolve_settings()), "get_openai_api_key", lambda self: "fake-key"
         )
-        monkeypatch.setattr(llms.config, "auditor_model", "gpt-5-mini")
-        monkeypatch.setattr(llms.config, "consultant_model", "gpt-5")
+        monkeypatch.setattr(llms.resolve_settings(), "auditor_model", "gpt-5-mini")
+        monkeypatch.setattr(llms.resolve_settings(), "consultant_model", "gpt-5")
 
         llm = llms.create_auditor_llm()
 
@@ -874,10 +871,14 @@ class TestQuickModeGraphContracts:
         assert by_seat[SeatId.ANALYST_RETRY].binding.provider == "openai"
         assert by_seat[SeatId.VALUE_TRAP].reasoning_value == "medium"
         assert analyst_kwargs
-        assert all(kwargs["allow_retry"] is True for kwargs in analyst_kwargs)
-        assert all(kwargs["retry_llm"] is not None for kwargs in analyst_kwargs)
+        assert all(kwargs.get("allow_retry", True) is True for kwargs in analyst_kwargs)
+        assert all(
+            kwargs.get("retry_llm", True) is not None for kwargs in analyst_kwargs
+        )
 
-    def test_quick_mode_arms_recovery_only_for_gate_critical_seats(self, monkeypatch):
+    def test_quick_mode_arms_recovery_for_evidence_and_gate_critical_seats(
+        self, monkeypatch
+    ):
         from src.config import Settings
         from src.graph.components import build_graph_components
         from src.llm_runtime.bindings import resolve_binding_plan
@@ -942,14 +943,26 @@ class TestQuickModeGraphContracts:
             for request in requests
             if request.seat.seat_id is SeatId.ANALYST_RETRY
         ]
-        assert {request.output_tokens for request in retry_requests} == {10923, 16384}
+        assert {request.output_tokens for request in retry_requests} == {
+            4096,
+            10923,
+            16384,
+        }
         by_agent = dict(analyst_calls)
+        assert "allow_retry" not in by_agent["junior_fundamentals_analyst"]
+        assert "retry_llm" not in by_agent["junior_fundamentals_analyst"]
         assert by_agent["fundamentals_analyst"]["allow_retry"] is True
         assert by_agent["fundamentals_analyst"]["retry_llm"] is not None
+        assert by_agent["foreign_language_analyst"]["allow_retry"] is True
+        assert by_agent["foreign_language_analyst"]["retry_llm"] is not None
         for agent_key, kwargs in analyst_calls:
-            if agent_key != "fundamentals_analyst":
-                assert kwargs["allow_retry"] is False
-                assert kwargs["retry_llm"] is None
+            if agent_key not in {
+                "fundamentals_analyst",
+                "foreign_language_analyst",
+                "junior_fundamentals_analyst",
+            }:
+                assert kwargs.get("allow_retry", False) is False
+                assert kwargs.get("retry_llm") is None
         assert len(pm_calls) == 1
         assert pm_calls[0]["recovery_llm"] is not None
 
@@ -1001,8 +1014,10 @@ class TestQuickModeGraphContracts:
         )
 
         assert analyst_kwargs
-        assert all(kwargs["allow_retry"] is False for kwargs in analyst_kwargs)
-        assert all(kwargs["retry_llm"] is None for kwargs in analyst_kwargs)
+        assert all(
+            kwargs.get("allow_retry", False) is False for kwargs in analyst_kwargs
+        )
+        assert all(kwargs.get("retry_llm") is None for kwargs in analyst_kwargs)
 
 
 class TestDebateReasoningHandoffWiring:
@@ -1510,7 +1525,6 @@ class TestPostResearchSync:
 
             return _node
 
-        monkeypatch.setattr(components, "_create_legacy_memories", lambda: (None,) * 5)
         monkeypatch.setattr(
             components,
             "_is_auditor_enabled",

@@ -621,3 +621,33 @@ class TestMainArgHandling:
         )
         capsys.readouterr()
         assert rc == 1
+
+
+def test_coverage_reports_provider_gaps_without_treating_them_as_failures(tmp_path):
+    path = _write(
+        tmp_path,
+        "FULL.T",
+        "20261004",
+        "120000",
+        verdict="HOLD",
+        consultant_verdict="SKIPPED",
+    )
+    payload = json.loads(path.read_text())
+    payload["run_summary"].update(
+        {
+            "latest_results_reason": "ADAPTER_UNAVAILABLE",
+            "tool_outcomes": {
+                "recorded_executions": {
+                    "by_reason": {"GUIDANCE_EXTRACTION_AUTH_ERROR": 3}
+                }
+            },
+        }
+    )
+    path.write_text(json.dumps(payload))
+    _write(tmp_path, "QUICK.T", "20261004", "130000", is_quick_mode=True)
+    result = sbh.scan(tmp_path, "20261004")
+    assert result.coverage["full_runs"] == 1
+    assert result.coverage["publishable_full_runs"] == 1
+    assert result.coverage["runs_with_GUIDANCE_EXTRACTION_AUTH_ERROR"] == 1
+    assert result.coverage["latest_results_ADAPTER_UNAVAILABLE"] == 1
+    assert not result.flagged

@@ -12,14 +12,18 @@ import structlog
 from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
+from src.config import config
 from src.error_safety import (
     format_error_message,
     redact_sensitive_text,
     summarize_exception,
 )
+from src.llm_runtime.timeouts import require_allowance
 from src.runtime_diagnostics import classify_failure
 from src.runtime_services import get_current_inspection_service
+from src.tooling.inspection_service import approved_tool_content
 from src.tooling.inspector import InspectionEnvelope, SourceKind
+from src.tooling.runtime import ToolCallBlocked, ToolCallFailed
 from src.tooling.tool_argument_policy import _is_reasonable_reference_url
 
 logger = structlog.get_logger(__name__)
@@ -27,12 +31,8 @@ logger = structlog.get_logger(__name__)
 # Maximum characters to fetch from each reference URL
 MAX_REFERENCE_CHARS = 5000
 
-# Request timeout in seconds
-REQUEST_TIMEOUT = 10.0
+# The request timeout is REFERENCE_FETCH_TIMEOUT_SECONDS, read per fetch.
 MAX_REFERENCE_REDIRECTS = 3
-
-# User agent for requests
-USER_AGENT = "Mozilla/5.0 (compatible; InvestorAgent/1.0; +https://github.com/rgoerwit/ai-investment-agent)"
 
 _REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
 
@@ -43,6 +43,15 @@ def _safe_url_preview(url: str) -> str:
 
 def _safe_query_preview(query: str) -> str:
     return redact_sensitive_text(query, max_chars=80)
+
+
+def _reference_fetch_timed_out(url: str, timeout: float) -> str:
+    logger.warning(
+        "reference_fetch_timeout",
+        url=_safe_url_preview(url),
+        failure_kind="timeout",
+    )
+    return f"FETCH_FAILED: Request timed out after {timeout:g} seconds"
 
 
 def _resolve_redirect_target(current_url: str, location: str) -> str:
@@ -96,9 +105,17 @@ async def fetch_reference_content(url: str) -> str:
     if not _is_reasonable_reference_url(url):
         return f"INVALID_URL: '{url}' is not a valid HTTP/HTTPS URL"
 
+    timeout = config.reference_fetch_timeout_seconds
     try:
-        headers = {"User-Agent": USER_AGENT}
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+        # httpx applies it per phase. Shrunk to a caller's enclosing deadline
+        # before the client opens; a spent allowance takes the timeout reply.
+        timeout = require_allowance(timeout, label="reference_fetch")
+    except TimeoutError:
+        return _reference_fetch_timed_out(url, timeout)
+
+    try:
+        headers = {"User-Agent": config.http_user_agent}
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await _fetch_reference_response(client, url, headers)
             resp.raise_for_status()
 
@@ -142,15 +159,17 @@ async def fetch_reference_content(url: str) -> str:
             source_uri=url,
             metadata={"url": url[:200]},
         )
-        return str(await get_current_inspection_service().check(envelope))
+        return str(
+            approved_tool_content(
+                await get_current_inspection_service().evaluate(envelope)
+            )
+        )
+
+    except (ToolCallBlocked, ToolCallFailed):
+        raise
 
     except httpx.TimeoutException:
-        logger.warning(
-            "reference_fetch_timeout",
-            url=_safe_url_preview(url),
-            failure_kind="timeout",
-        )
-        return "FETCH_FAILED: Request timed out after 10 seconds"
+        return _reference_fetch_timed_out(url, timeout)
 
     except ValueError as exc:
         summary = summarize_exception(
@@ -238,12 +257,12 @@ async def search_claim(query: str) -> str:
     try:
         from src.tavily_utils import tavily_search_with_timeout
 
-        result = await tavily_search_with_timeout({"query": query.strip()})
+        # Its one source: a block is this call's outcome, recorded BLOCKED.
+        result = await tavily_search_with_timeout(
+            {"query": query.strip()}, raise_on_block=True
+        )
         if not result:
             return "SEARCH_UNAVAILABLE: Tavily search returned no results (API may be unavailable)"
-
-        if isinstance(result, str) and result.startswith("TOOL_BLOCKED:"):
-            return result
 
         text = str(result)
         if len(text) > MAX_CLAIM_SEARCH_CHARS:
@@ -254,6 +273,9 @@ async def search_claim(query: str) -> str:
             result_chars=len(text),
         )
         return text
+
+    except ToolCallBlocked:
+        raise
 
     except Exception as e:
         summary = summarize_exception(

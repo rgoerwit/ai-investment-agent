@@ -25,6 +25,10 @@ from unittest.mock import patch
 
 import pytest
 
+# Every test here reads the real limiter's pace; the root fixture's instant one
+# has none.
+pytestmark = pytest.mark.real_rate_limiter
+
 
 @pytest.fixture
 def restore_config_singleton():

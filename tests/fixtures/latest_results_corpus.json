@@ -1,0 +1,1815 @@
+{
+  "version": 1,
+  "selection": "Five prior captured regression controls, fourteen new public captured cases stratified by original withholding reason, language and statement layout, and forty-one declared adversarial mutations. New captured holdouts assigned before subsequent reader edits. Adjudication includes exact claim scope and numbers; readable nearby different metrics do not authorize a claim. Three additional October 5 public source excerpts and nine adversarial mutations exercise declared percentage columns, prior-first ordering, human currency names, and retained issuer provenance. October 6 adds twelve verbatim trimmed retained excerpts, nine GFT mutations and six explicitly declared formatting reconstructions. Original capture digests are retained separately from the accurately recomputed excerpt digests. Expected authority and consumer behavior are source-adjudicated; reconstructed formatting cases are not counted as production recoveries.",
+  "cases": [
+    {
+      "case": "simple_annual_statement",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "captured_excerpt",
+      "split": "regression_control",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "-2.0%",
+        "20.5%"
+      ],
+      "justification": "The ordered 2025/2024 annual columns use RMB thousands and bind Revenue 79,068,022/80,650,914 and owners profit 4,500,698/3,734,429."
+    },
+    {
+      "case": "simple_interim_statement",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_interim_statement",
+      "kind": "captured_excerpt",
+      "split": "regression_control",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "18.0%",
+        "33.3%"
+      ],
+      "justification": "The ordered 2026/2025 six-month columns use USD thousands and bind Revenue 1,604,742/1,360,302 and equity-shareholder profit 89,874/67,398."
+    },
+    {
+      "case": "multiple_adjustment_columns",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "multiple_adjustment_columns",
+      "kind": "captured_excerpt",
+      "split": "regression_control",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Four adjustment columns repeat revenue; the flattened before/after scope does not unambiguously bind each earnings cell."
+    },
+    {
+      "case": "unreadable_pdf_labels",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "unreadable_pdf_labels",
+      "kind": "captured_excerpt",
+      "split": "regression_control",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "PDF extraction corrupts the period, currency, and metric labels; legible numbers cannot restore source meaning."
+    },
+    {
+      "case": "explicit_half_year_secondary_narrative",
+      "fixture": "latest_results_narrative.json",
+      "fixture_case": "explicit_half_year_secondary_narrative",
+      "kind": "captured_excerpt",
+      "split": "regression_control",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "SECONDARY",
+      "expected_growth": null,
+      "justification": "Each narrative names H1 current/prior periods, KRW billions, and both exact metric pairs; search evidence has secondary authority."
+    },
+    {
+      "case": "independent_header_Annual results 2025",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "For the year ended 31 December 2025",
+          "Annual results 2025"
+        ],
+        [
+          "For the year ended 31 December 2024",
+          "Annual results 2024"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "-2.0%",
+        "20.5%"
+      ],
+      "justification": "Opaque claim wording supplies no period proof; the retained year-ended header and ordered 2025/2024 columns independently bind exact dates, duration, units and both metric pairs."
+    },
+    {
+      "case": "independent_header_FY2025",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "For the year ended 31 December 2025",
+          "FY2025"
+        ],
+        [
+          "For the year ended 31 December 2024",
+          "FY2024"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "-2.0%",
+        "20.5%"
+      ],
+      "justification": "Opaque claim wording supplies no period proof; the retained year-ended header and ordered 2025/2024 columns independently bind exact dates, duration, units and both metric pairs."
+    },
+    {
+      "case": "independent_header_2025年度",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "For the year ended 31 December 2025",
+          "2025年度"
+        ],
+        [
+          "For the year ended 31 December 2024",
+          "2024年度"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "-2.0%",
+        "20.5%"
+      ],
+      "justification": "Opaque claim wording supplies no period proof; the retained year-ended header and ordered 2025/2024 columns independently bind exact dates, duration, units and both metric pairs."
+    },
+    {
+      "case": "independent_header_Bilan annuel 2025",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "For the year ended 31 December 2025",
+          "Bilan annuel 2025"
+        ],
+        [
+          "For the year ended 31 December 2024",
+          "Bilan annuel 2024"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "-2.0%",
+        "20.5%"
+      ],
+      "justification": "Opaque claim wording supplies no period proof; the retained year-ended header and ordered 2025/2024 columns independently bind exact dates, duration, units and both metric pairs."
+    },
+    {
+      "case": "unknown_interim_label",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_interim_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "Six months ended 30 June 2026",
+          "Interim results 2026"
+        ],
+        [
+          "Six months ended 30 June 2025",
+          "Interim results 2025"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "18.0%",
+        "33.3%"
+      ],
+      "justification": "Opaque interim wording leaves the retained six-month 30 June header, 2026/2025 columns and both exact rows as independent proof."
+    },
+    {
+      "case": "unknown_narrative_label",
+      "fixture": "latest_results_narrative.json",
+      "fixture_case": "explicit_half_year_secondary_narrative",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_PERIOD: H1 2026",
+          "LATEST_RESULTS_PERIOD: Interim release"
+        ],
+        [
+          "LATEST_RESULTS_PRIOR_PERIOD: H1 2025",
+          "LATEST_RESULTS_PRIOR_PERIOD: Comparative release"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "SECONDARY",
+      "expected_growth": null,
+      "justification": "Both retained narrative sentences bind H1 dates, duration and metric amounts independently of the opaque claim wording; authority remains secondary."
+    },
+    {
+      "case": "wrong_unit",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "REPORTING_UNIT: RMB'000",
+          "REPORTING_UNIT: million"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The claim contradicts or omits its retained statement wrong unit. Source presence and matching other numbers cannot supply the missing accounting proof."
+    },
+    {
+      "case": "wrong_currency",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "CURRENCY: RMB",
+          "CURRENCY: USD"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The claim contradicts or omits its retained statement wrong currency. Source presence and matching other numbers cannot supply the missing accounting proof."
+    },
+    {
+      "case": "wrong_scope",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "EARNINGS_SCOPE: Profit attributable to owners of the Company",
+          "EARNINGS_SCOPE: Operating profit"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The claim contradicts or omits its retained statement wrong scope. Source presence and matching other numbers cannot supply the missing accounting proof."
+    },
+    {
+      "case": "swapped_revenue",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "REVENUE: 79068022",
+          "REVENUE: 80650914"
+        ],
+        [
+          "PRIOR_REVENUE: 80650914",
+          "PRIOR_REVENUE: 79068022"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The claim contradicts or omits its retained statement swapped revenue. Source presence and matching other numbers cannot supply the missing accounting proof."
+    },
+    {
+      "case": "changed_amount",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "REVENUE: 79068022",
+          "REVENUE: 79068023"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The claim contradicts or omits its retained statement changed amount. Source presence and matching other numbers cannot supply the missing accounting proof."
+    },
+    {
+      "case": "unknown_amount",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "REVENUE: 79068022",
+          "REVENUE: N/A"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The claim contradicts or omits its retained statement unknown amount. Source presence and matching other numbers cannot supply the missing accounting proof."
+    },
+    {
+      "case": "malformed_comma",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "REVENUE: 79068022",
+          "REVENUE: 1,5"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The claim contradicts or omits its retained statement malformed comma. Source presence and matching other numbers cannot supply the missing accounting proof."
+    },
+    {
+      "case": "wrong_date",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "PERIOD_END: 2025-12-31",
+          "PERIOD_END: 2025-09-30"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The claim contradicts or omits its retained statement wrong date. Source presence and matching other numbers cannot supply the missing accounting proof."
+    },
+    {
+      "case": "wrong_duration",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "PERIOD_MONTHS: 12",
+          "PERIOD_MONTHS: 6"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The claim contradicts or omits its retained statement wrong duration. Source presence and matching other numbers cannot supply the missing accounting proof."
+    },
+    {
+      "case": "bad_iso_date",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "PERIOD_END: 2025-12-31",
+          "PERIOD_END: 2025-02-30"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The claim contradicts or omits its retained statement bad iso date. Source presence and matching other numbers cannot supply the missing accounting proof."
+    },
+    {
+      "case": "prior_same_year",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "PRIOR_PERIOD_END: 2024-12-31",
+          "PRIOR_PERIOD_END: 2025-12-31"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The claim contradicts or omits its retained statement prior same year. Source presence and matching other numbers cannot supply the missing accounting proof."
+    },
+    {
+      "case": "invalid_source",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "SOURCE_URL: https://www.hkexnews.hk/listedco/listconews/sehk/2026/0323/2026032300460.pdf",
+          "SOURCE_URL: javascript:alert(1)"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The claim contradicts or omits its retained statement invalid source. Source presence and matching other numbers cannot supply the missing accounting proof."
+    },
+    {
+      "case": "known_contradiction",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "PERIOD: For the year ended 31 December 2025",
+          "PERIOD: Q2 2025"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The claim contradicts or omits its retained statement known contradiction. Source presence and matching other numbers cannot supply the missing accounting proof."
+    },
+    {
+      "case": "embedded_contradiction",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "PERIOD: For the year ended 31 December 2025",
+          "PERIOD: Results (Q2 2025)"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The claim contradicts or omits its retained statement embedded contradiction. Source presence and matching other numbers cannot supply the missing accounting proof."
+    },
+    {
+      "case": "explicit_date_contradiction",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "PERIOD: For the year ended 31 December 2025",
+          "PERIOD: Annual results to 2025-09-30"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The claim contradicts or omits its retained statement explicit date contradiction. Source presence and matching other numbers cannot supply the missing accounting proof."
+    },
+    {
+      "case": "reverse_columns",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "2025 2024",
+          "2024 2025"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The retained presentation reverse columns prevents unique binding of the same two metric pairs under one period and currency/scale header."
+    },
+    {
+      "case": "missing_earnings",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "Owners of the Company 4,500,698 3,734,429",
+          ""
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The retained presentation missing earnings prevents unique binding of the same two metric pairs under one period and currency/scale header."
+    },
+    {
+      "case": "truncated_revenue",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "Revenue 4 79,068,022 80,650,914",
+          "Revenue 4 79,068,022"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The retained presentation truncated revenue prevents unique binding of the same two metric pairs under one period and currency/scale header."
+    },
+    {
+      "case": "source_wrong_scale",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "RMB’000 RMB’000",
+          "RMB million RMB million"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The retained presentation source wrong scale prevents unique binding of the same two metric pairs under one period and currency/scale header."
+    },
+    {
+      "case": "adjacent_statement",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "Profit attributable to:",
+          "SEGMENT RESULTS\nSix months ended 30 June 2025\n2025 2024\nRMB million RMB million\nProfit attributable to:"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The retained presentation adjacent statement prevents unique binding of the same two metric pairs under one period and currency/scale header."
+    },
+    {
+      "case": "duplicate_revenue",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "Revenue 4 79,068,022 80,650,914",
+          "Revenue 4 79,068,022 80,650,914\nRevenue 4 79,068,022 80,650,914"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The retained presentation duplicate revenue prevents unique binding of the same two metric pairs under one period and currency/scale header."
+    },
+    {
+      "case": "garbled_metric",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "Revenue 4",
+          "ᐶʮѓ 4"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The retained presentation garbled metric prevents unique binding of the same two metric pairs under one period and currency/scale header."
+    },
+    {
+      "case": "missing_period_header",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "For the year ended 31 December 2025\n2025 2024",
+          "RESULTS\n2025 2024"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The retained presentation missing period header prevents unique binding of the same two metric pairs under one period and currency/scale header."
+    },
+    {
+      "case": "evidence_status_AUTH_ERROR",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {
+        "evidence_status": "AUTH_ERROR"
+      },
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "An unsuccessful or unknown evidence outcome cannot establish inspected primary evidence."
+    },
+    {
+      "case": "evidence_status_UNAVAILABLE",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {
+        "evidence_status": "UNAVAILABLE"
+      },
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "An unsuccessful or unknown evidence outcome cannot establish inspected primary evidence."
+    },
+    {
+      "case": "evidence_status_NO_RESULTS",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {
+        "evidence_status": "NO_RESULTS"
+      },
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "An unsuccessful or unknown evidence outcome cannot establish inspected primary evidence."
+    },
+    {
+      "case": "evidence_status_None",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {
+        "evidence_status": null
+      },
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "An unsuccessful or unknown evidence outcome cannot establish inspected primary evidence."
+    },
+    {
+      "case": "wrong_retained_url",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {
+        "urls": [
+          "https://example.com/other"
+        ]
+      },
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The cited URL is absent from the inspected evidence record."
+    },
+    {
+      "case": "narrative_scope",
+      "fixture": "latest_results_narrative.json",
+      "fixture_case": "explicit_half_year_secondary_narrative",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "Net income",
+          "Operating income"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Each narrative metric must explicitly bind both periods, currency, scale and scope. This alteration breaks narrative scope."
+    },
+    {
+      "case": "narrative_scale",
+      "fixture": "latest_results_narrative.json",
+      "fixture_case": "explicit_half_year_secondary_narrative",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "billion",
+          "million"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Each narrative metric must explicitly bind both periods, currency, scale and scope. This alteration breaks narrative scale."
+    },
+    {
+      "case": "narrative_prior",
+      "fixture": "latest_results_narrative.json",
+      "fixture_case": "explicit_half_year_secondary_narrative",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "H1 2025",
+          "H1 2024"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Each narrative metric must explicitly bind both periods, currency, scale and scope. This alteration breaks narrative prior."
+    },
+    {
+      "case": "narrative_amount",
+      "fixture": "latest_results_narrative.json",
+      "fixture_case": "explicit_half_year_secondary_narrative",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "261.6",
+          "261.7"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Each narrative metric must explicitly bind both periods, currency, scale and scope. This alteration breaks narrative amount."
+    },
+    {
+      "case": "narrative_fiscal",
+      "fixture": "latest_results_narrative.json",
+      "fixture_case": "explicit_half_year_secondary_narrative",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "<summary>",
+          "<summary>Fiscal year ends March 31.\n"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Each narrative metric must explicitly bind both periods, currency, scale and scope. This alteration breaks narrative fiscal."
+    },
+    {
+      "case": "noncalendar_explicit_fiscal",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "31 December",
+          "31 March"
+        ],
+        [
+          "2025-12-31",
+          "2025-03-31"
+        ],
+        [
+          "2024-12-31",
+          "2024-03-31"
+        ]
+      ],
+      "content_replacements": [
+        [
+          "31 December",
+          "31 March"
+        ],
+        [
+          "December 2024",
+          "March 2024"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "-2.0%",
+        "20.5%"
+      ],
+      "justification": "Explicit March year ends in the retained annual header and 2025/2024 columns bind a non-calendar fiscal year; no FY-to-calendar inference is needed."
+    },
+    {
+      "case": "FY_only_no_bound_header",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_annual_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "For the year ended 31 December 2025",
+          "FY2025"
+        ],
+        [
+          "For the year ended 31 December 2024",
+          "FY2024"
+        ]
+      ],
+      "content_replacements": [
+        [
+          "For the year ended 31 December 2025\n2025 2024",
+          "FY2025\n2025 2024"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "FY2025 alone has neither an explicit fiscal end nor duration. Incidental cash dates and four metric values cannot replace the missing statement-period header."
+    },
+    {
+      "case": "captured_0168.HK",
+      "fixture": "latest_results_captured.json",
+      "fixture_case": "captured_0168.HK",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "adjudication": "insufficient_period_binding",
+      "justification": "Relative This Reporting Period/Corresponding period columns and a change percentage do not independently establish both asserted quarter end dates. Yuan values are exact but dates cannot be reconstructed from the claim."
+    },
+    {
+      "case": "captured_1061.HK",
+      "fixture": "latest_results_captured.json",
+      "fixture_case": "captured_1061.HK",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "adjudication": "scope_mismatch",
+      "justification": "The retained income statement shows Profit for the period 110,720/163,401, but the claim asserts profit attributable to owners. An EPS owners caption cannot establish that monetary profit scope."
+    },
+    {
+      "case": "captured_2421.TW",
+      "fixture": "latest_results_captured.json",
+      "fixture_case": "captured_2421.TW",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "adjudication": "incomplete_metrics",
+      "justification": "The retained presentation shows revenue charts and NTD million labels, but neither claimed earnings pair 647.45/515.84 appears in the retained excerpt."
+    },
+    {
+      "case": "captured_2580.HK",
+      "fixture": "latest_results_captured.json",
+      "fixture_case": "captured_2580.HK",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "adjudication": "missing_claimed_scope",
+      "justification": "The income statement contains PROFIT FOR THE PERIOD 1,107,948/1,872,747. The claimed ordinary-equity-holder profit scope appears only in a separate earnings-per-share note without revenue; assembling those distinct presentations cannot establish both metric pairs under one table header."
+    },
+    {
+      "case": "captured_0806.HK",
+      "fixture": "latest_results_captured.json",
+      "fixture_case": "captured_0806.HK",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "adjudication": "revenue_scope_ambiguity",
+      "justification": "The asserted revenue pair 922,130/466,808 is labelled Fee income; the same statement separately labels Net fee income and Total net income. With no revenue scope field the generic Revenue claim does not resolve which revenue measure it intends."
+    },
+    {
+      "case": "captured_9999.HK",
+      "fixture": "latest_results_captured.json",
+      "fixture_case": "captured_9999.HK",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "adjudication": "amount_mismatch",
+      "justification": "The retained GAAP shareholder-income row reads 6,980,656 for second-quarter 2026, not claimed 6,998,939. Repeated quarter/year/currency columns also require explicit mapping; unrelated exact-looking digits cannot repair the claim."
+    },
+    {
+      "case": "captured_6831.HK",
+      "fixture": "latest_results_captured.json",
+      "fixture_case": "captured_6831.HK",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "24.1%",
+        "38.9%"
+      ],
+      "adjudication": "reader_false_rejection",
+      "justification": "The retained consolidated income statement binds 2025/2024 annual columns, RMB thousands, Revenue 4,762,967/3,838,202 and Profit for the year followed by Attributable to: Equity shareholders of the Company 486,481/350,167. An intervening Expressed in Renminbi line separates the period header from year columns; the scope hierarchy unambiguously identifies shareholder profit."
+    },
+    {
+      "case": "captured_6811.HK",
+      "fixture": "latest_results_captured.json",
+      "fixture_case": "captured_6811.HK",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "7.5%",
+        "72.3%"
+      ],
+      "adjudication": "reader_false_rejection",
+      "justification": "Year ended 31 December 2025 above ordered 2025/2024 HK$ thousand columns binds REVENUE 3,538,495/3,291,954 and Profit for the year attributable to Owners of the Company 108,101/62,749. Notes explicitly declares a note column."
+    },
+    {
+      "case": "captured_TECK.A.TO",
+      "fixture": "latest_results_captured.json",
+      "fixture_case": "captured_TECK.A.TO",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "SECONDARY",
+      "expected_growth": null,
+      "adjudication": "reader_false_rejection_authority_capped",
+      "justification": "The financial overview binds Three months ended March 31 to 2026/2025 columns, CAD$ millions, Revenue 3,943/2,290 and Profit attributable to shareholders 819/370. Dollar symbols are cell display prefixes within this explicitly CAD table. The current source-authority policy does not qualify teck.com as PRIMARY_ISSUER, so canonical authority remains SECONDARY and numeric growth must stay withheld; issuer identity alone cannot override that gate.",
+      "independent_source_authority": "PRIMARY_ISSUER"
+    },
+    {
+      "case": "captured_002800.KQ",
+      "fixture": "latest_results_captured.json",
+      "fixture_case": "captured_002800.KQ",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "adjudication": "missing_comparative",
+      "justification": "The Korean secondary snippet names current 642억원 revenue and 16.9% growth but never gives exact prior revenue 54,919 in claimed million units. The comparative cannot be reconstructed from a percentage."
+    },
+    {
+      "case": "captured_1381.T",
+      "fixture": "latest_results_captured.json",
+      "fixture_case": "captured_1381.T",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "adjudication": "estimated_comparative",
+      "justification": "Revenue fields are absent and prior operating profit is expressly estimated from 88.8% growth. The Japanese snippet cannot supply four exact statement values."
+    },
+    {
+      "case": "captured_2364.TW",
+      "fixture": "latest_results_captured.json",
+      "fixture_case": "captured_2364.TW",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "adjudication": "source_missing",
+      "justification": "No successful retained record has the cited issuer financial-summary URL. ROC-year wording and four asserted amounts cannot substitute for inspected source evidence."
+    },
+    {
+      "case": "captured_7068.T",
+      "fixture": "latest_results_captured.json",
+      "fixture_case": "captured_7068.T",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "adjudication": "source_url_invalid",
+      "justification": "The Japanese fiscal-quarter claim has no citation and all four metric values are N/A. It cannot establish latest-results authority."
+    },
+    {
+      "case": "captured_0966.HK",
+      "fixture": "latest_results_captured.json",
+      "fixture_case": "captured_0966.HK",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "adjudication": "percentage_reconstructed_comparative",
+      "justification": "The retained secondary summary gives HK$58.93 billion revenue and HK$12.87 billion shareholder profit, plus YoY percentages. It does not give the asserted exact prior amounts 55.96/6.76."
+    },
+    {
+      "case": "captured_BOSN.SW",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_BOSN.SW",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "5.3%",
+        "41.3%"
+      ],
+      "justification": "Inspected issuer presentation declares in CHF million H1 2025 H1 2026 +/-. Prior-first net sales 546.7/575.7 and net income 38.7/54.7 bind both exact half-year periods. Final column is expressly a percentage. Recorder provenance preserves PRIMARY_ISSUER across offline replay."
+    },
+    {
+      "case": "captured_1590.TW",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_1590.TW",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "12.0%",
+        "10.2%"
+      ],
+      "justification": "Inspected issuer consolidated annual income statement names December 31, 2025 and 2024 in thousands of New Taiwan Dollars and declares Amount/% pairs. Sales 34,329,945/30,660,133 and NET PROFIT FOR THE YEAR 8,399,832/7,623,278 bind total net profit, distinct from later owner-attributable earnings."
+    },
+    {
+      "case": "captured_TCW.TO",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_TCW.TO",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Retained issuer headline table interleaves three quarter columns and two half-year columns; the exact comprehensive-profit statement is in thousands while the claim uses rounded millions. Do not infer column grouping or silently rescale a rounded claim."
+    },
+    {
+      "case": "bossard_swapped_periods",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_BOSN.SW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "H1 2025 H1 2026 +/-",
+          "H1 2026 H1 2025 +/-"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Changing the explicit period order without moving amounts reverses the claimed comparison; all four numbers still appear."
+    },
+    {
+      "case": "bossard_missing_percent_header",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_BOSN.SW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "H1 2025 H1 2026 +/-",
+          "H1 2025 H1 2026"
+        ],
+        [
+          "5.3 %",
+          "5.3"
+        ],
+        [
+          "41.3 %",
+          "41.3"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "An undeclared third numeric column cannot be discarded as a percentage."
+    },
+    {
+      "case": "bossard_wrong_period_duration",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_BOSN.SW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_PERIOD_MONTHS: 6",
+          "LATEST_RESULTS_PERIOD_MONTHS: 3"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Half-year columns cannot prove a quarterly comparison."
+    },
+    {
+      "case": "bossard_foreign_table_before_income",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_BOSN.SW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "Net income 38.7 54.7 41.3 %",
+          "H1 2024 H1 2025\nin EUR million\nNet income 38.7 54.7 41.3 %"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "A new half-year header and currency declaration separates net income from the sales statement."
+    },
+    {
+      "case": "airtac_missing_percent_declaration",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_1590.TW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "  Amount  %  Amount  %",
+          "  Amount  Amount"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Interleaved percentages require an explicit Amount/% column declaration."
+    },
+    {
+      "case": "airtac_wrong_earnings_scope",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_1590.TW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_EARNINGS_SCOPE: NET PROFIT FOR THE YEAR",
+          "LATEST_RESULTS_EARNINGS_SCOPE: NET PROFIT ATTRIBUTABLE TO OWNERS"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "Total net profit cannot prove owner-attributable earnings even if both annual dates and amounts are present."
+    },
+    {
+      "case": "airtac_claims_percentage_as_revenue",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_1590.TW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_REVENUE: 34329945",
+          "LATEST_RESULTS_REVENUE: 100"
+        ],
+        [
+          "LATEST_RESULTS_PRIOR_REVENUE: 30660133",
+          "LATEST_RESULTS_PRIOR_REVENUE: 100"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "The Amount/% header identifies 100 as percentages, never revenue."
+    },
+    {
+      "case": "airtac_wrong_currency",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_1590.TW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_CURRENCY: New Taiwan Dollars",
+          "LATEST_RESULTS_CURRENCY: USD"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "New Taiwan Dollars cannot support a USD claim despite dollar display symbols."
+    },
+    {
+      "case": "bossard_undeclared_additional_period",
+      "fixture": "latest_results_october5.json",
+      "fixture_case": "captured_BOSN.SW",
+      "kind": "adversarial_mutation",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "in CHF million H1 2025 H1 2026 +/-",
+          "in CHF million Q2 2026 H1 2025 H1 2026 +/-"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "justification": "An additional period before the claimed columns makes the table ambiguous even when currency and both claimed periods occur later in the header."
+    },
+    {
+      "case": "captured_GFT.DE",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "4.8%",
+        "26.7%"
+      ],
+      "expected_reason": "SUPPORTED_PRIMARY",
+      "justification": "Exact ordered H1 2026/H1 2025 EUR million table binds Revenue 462.6/441.5 and Net income 17.1/13.5; primary issuer recorder authority permits 4.8%/26.7% growth. Net income is not per-share EPS."
+    },
+    {
+      "case": "captured_BSLN.SW",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_BSLN.SW",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "The issuer table and narrative retain 119.0/104.0 revenue and 27.9/15.8 net profit. Claimed 104.4 and 28.0 are wrong, irrespective of nearby correct numbers."
+    },
+    {
+      "case": "captured_BIJ.DE",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_BIJ.DE",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "PERIOD_END_NOT_RETAINED",
+      "justification": "Cited search excerpt names sales and generic net income, but no prior-period calendar proof or owner-attributable earnings scope. Half-year wording itself must not be misread as an annual contradiction."
+    },
+    {
+      "case": "captured_EMMN.SW",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_EMMN.SW",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "PERIOD_END_NOT_RETAINED",
+      "justification": "Cited search retains earnings 100.9/97.2 without comparative revenue, currency/scale and period columns. A half-year source title does not supply a complete table."
+    },
+    {
+      "case": "captured_TXG.TO",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_TXG.TO",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "PERIOD_END_NOT_RETAINED",
+      "justification": "Retained issuer table has five quarterly and cumulative columns. Abbreviated Jun in the model label is valid but cannot supply missing prior-date/table binding."
+    },
+    {
+      "case": "captured_8056.T",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_8056.T",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "PERIOD_END_NOT_RETAINED",
+      "justification": "Verbatim Japanese PDF excerpt retains prior-first three-month date ranges and 百万円. Existing readers cannot bind split labels and owners scope; canonical unit recognition alone cannot reconstruct that table."
+    },
+    {
+      "case": "captured_SL.MI",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_SL.MI",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "PERIOD_END_NOT_RETAINED",
+      "justification": "Verbatim €’000 issuer table contains two percentage columns and two change columns; source header lacks full year-end dates, and flattened cells are not an ordered two-cell table."
+    },
+    {
+      "case": "captured_STAA.JK",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_STAA.JK",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "The issuer declares millions of Rupiah; bilingual dot-grouped columns and ownership profit in the equity statement do not bind all four claimed income statement cells."
+    },
+    {
+      "case": "captured_SIP.BR",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_SIP.BR",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "KUSD explicitly means USD thousands, but retained pages show revenue geographical breakdown, cash flow and equity, without the claimed income statement comparison."
+    },
+    {
+      "case": "captured_2130.T",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_2130.T",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "PERIOD_END_NOT_RETAINED",
+      "justification": "Retained fiscal Q1 labels are valid calendar context only where present. No complete source comparative current/prior table binds both claim metrics under existing readers."
+    },
+    {
+      "case": "captured_5989.T",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_5989.T",
+      "kind": "captured_excerpt",
+      "split": "development",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "INVALID_COMPARATIVE_CLAIM",
+      "justification": "Claimed comparative figures are incomplete; fiscal context cannot repair missing figures."
+    },
+    {
+      "case": "captured_8473.T",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_8473.T",
+      "kind": "captured_excerpt",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "Retained year/month Q1 fiscal label supplies calendar context and the source 億円 declaration binds JPY hundred-millions, but comparative table binding remains incomplete; authority and growth stay withheld."
+    },
+    {
+      "case": "gft_wrong_revenue",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_PRIOR_REVENUE: 441.5",
+          "LATEST_RESULTS_PRIOR_REVENUE: 441.6"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "Exact source cells never authorize a nearby number."
+    },
+    {
+      "case": "gft_wrong_scope",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_EARNINGS_SCOPE: Net income",
+          "LATEST_RESULTS_EARNINGS_SCOPE: Earnings per share"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "Net income cannot be used as per-share earnings."
+    },
+    {
+      "case": "gft_wrong_scale",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_REPORTING_UNIT: EUR million",
+          "LATEST_RESULTS_REPORTING_UNIT: thousands"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "CURRENCY_OR_UNIT_UNBOUND",
+      "justification": "Million table declarations cannot bind thousands."
+    },
+    {
+      "case": "gft_wrong_period",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_PERIOD_END: 2026-06-30",
+          "LATEST_RESULTS_PERIOD_END: 2026-09-30"
+        ]
+      ],
+      "content_replacements": [],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "INVALID_COMPARATIVE_CLAIM",
+      "justification": "H1 must endJune 30, notSeptember 30."
+    },
+    {
+      "case": "gft_failed",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {
+        "execution_status": "FAILED"
+      },
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "SOURCE_NOT_RETAINED",
+      "justification": "Failed execution never authorizes retained content."
+    },
+    {
+      "case": "gft_blocked",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {
+        "blocked": true
+      },
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "SOURCE_NOT_RETAINED",
+      "justification": "Blocked evidence never authorizes retained content."
+    },
+    {
+      "case": "gft_stale_digest",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "Revenue\n462.6",
+          "Revenue\n462.7"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "Edited source digest and wrong cell withhold primary authority."
+    },
+    {
+      "case": "gft_authority_removed",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [],
+      "record_overrides": {
+        "authority_by_url": []
+      },
+      "expected_authority": "SECONDARY",
+      "expected_growth": null,
+      "expected_reason": "SUPPORTED_SECONDARY",
+      "justification": "Source support survives but issuer authority requires retained recorder attribution."
+    },
+    {
+      "case": "gft_truncated_row",
+      "fixture": "latest_results_october6.json",
+      "fixture_case": "captured_GFT.DE",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [],
+      "content_replacements": [
+        [
+          "Net income\n17.1\n13.5",
+          "Net income\n17.1"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "UNSUPPORTED",
+      "expected_growth": null,
+      "expected_reason": "COMPARATIVE_ROWS_UNBOUND",
+      "justification": "A missing comparative cell cannot be restored from model text."
+    },
+    {
+      "case": "half_year_source_header",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_interim_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "Six months ended",
+          "Half Year ended"
+        ]
+      ],
+      "content_replacements": [
+        [
+          "Six months ended",
+          "Half Year ended"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "18.0%",
+        "33.3%"
+      ],
+      "expected_reason": "SUPPORTED_PRIMARY",
+      "justification": "Declared formatting reconstruction: A complete Half Year ended 30June header supplies six-month duration; embedded year-ended wording is not an annual contradiction."
+    },
+    {
+      "case": "half_year_hyphen_header",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_interim_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "Six months ended",
+          "Half-year ended"
+        ]
+      ],
+      "content_replacements": [
+        [
+          "Six months ended",
+          "Half-year ended"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "18.0%",
+        "33.3%"
+      ],
+      "expected_reason": "SUPPORTED_PRIMARY",
+      "justification": "Declared formatting reconstruction: Hyphenated half-year header with actual dates retains six-month comparative meaning."
+    },
+    {
+      "case": "eur_thousands_alias",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_interim_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_CURRENCY: USD",
+          "LATEST_RESULTS_CURRENCY: EUR"
+        ],
+        [
+          "LATEST_RESULTS_REPORTING_UNIT: $'000",
+          "LATEST_RESULTS_REPORTING_UNIT: thousands"
+        ]
+      ],
+      "content_replacements": [
+        [
+          "United States dollars",
+          "EUR"
+        ],
+        [
+          "$’000",
+          "€’000"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "18.0%",
+        "33.3%"
+      ],
+      "expected_reason": "SUPPORTED_PRIMARY",
+      "justification": "Declared formatting reconstruction: EUR and €’000 declare the same currency/thousand scale, with both source dates and exact metric cells retained."
+    },
+    {
+      "case": "usd_compact_reporting_unit",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_interim_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_REPORTING_UNIT: $'000",
+          "LATEST_RESULTS_REPORTING_UNIT: thousands"
+        ]
+      ],
+      "content_replacements": [
+        [
+          "$’000",
+          "KUSD"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "18.0%",
+        "33.3%"
+      ],
+      "expected_reason": "SUPPORTED_PRIMARY",
+      "justification": "Declared formatting reconstruction: KUSD is a reporting declaration of USD thousands, not a widening of amount grammar."
+    },
+    {
+      "case": "idr_reporting_unit_plural",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_interim_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_CURRENCY: USD",
+          "LATEST_RESULTS_CURRENCY: IDR"
+        ],
+        [
+          "LATEST_RESULTS_REPORTING_UNIT: $'000",
+          "LATEST_RESULTS_REPORTING_UNIT: Million Rupiah"
+        ]
+      ],
+      "content_replacements": [
+        [
+          "United States dollars",
+          "Rupiah"
+        ],
+        [
+          "$’000",
+          "millions of Rupiah"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "18.0%",
+        "33.3%"
+      ],
+      "expected_reason": "SUPPORTED_PRIMARY",
+      "justification": "Declared formatting reconstruction: Million Rupiah and millions of Rupiah bind the same IDR million table; source metric pairs and period columns are preserved."
+    },
+    {
+      "case": "jpy_reporting_unit",
+      "fixture": "latest_results_statements.json",
+      "fixture_case": "simple_interim_statement",
+      "kind": "adversarial_mutation",
+      "split": "holdout",
+      "report_replacements": [
+        [
+          "LATEST_RESULTS_CURRENCY: USD",
+          "LATEST_RESULTS_CURRENCY: JPY"
+        ],
+        [
+          "LATEST_RESULTS_REPORTING_UNIT: $'000",
+          "LATEST_RESULTS_REPORTING_UNIT: 百万円"
+        ]
+      ],
+      "content_replacements": [
+        [
+          "United States dollars",
+          "JPY"
+        ],
+        [
+          "$’000",
+          "百万円"
+        ]
+      ],
+      "record_overrides": {},
+      "expected_authority": "PRIMARY",
+      "expected_growth": [
+        "18.0%",
+        "33.3%"
+      ],
+      "expected_reason": "SUPPORTED_PRIMARY",
+      "justification": "Declared formatting reconstruction: 百万円 explicitly declares JPY millions in a reconstructed formatting scenario with retained comparative table semantics."
+    }
+  ]
+}

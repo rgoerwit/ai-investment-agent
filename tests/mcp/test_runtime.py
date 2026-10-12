@@ -6,23 +6,25 @@ from pathlib import Path
 import pytest
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
-from src.mcp.catalog import ToolDescriptor
 from src.mcp.client import MCPRuntime
 from src.mcp.config import MCPAuthSpec, MCPServerSpec
 from src.mcp.errors import MCPCallError, MCPErrorCategory
-from src.tooling.inspector import InspectionDecision
 
 
 class _FakeSession:
     def __init__(self, result: CallToolResult | None = None):
         self._result = result
+        self.calls = 0
 
-    async def call_tool(self, name, arguments):
+    async def call_tool(self, name, arguments, read_timeout_seconds=None):
         assert name
         assert isinstance(arguments, dict)
+        assert read_timeout_seconds is not None and read_timeout_seconds > 0
+        self.calls += 1
         return self._result
 
-    async def list_tools(self):
+    async def list_tools(self, *, params=None):
+        assert params is None
         return ListToolsResult(
             tools=[
                 Tool(
@@ -32,33 +34,6 @@ class _FakeSession:
                     outputSchema={"type": "object"},
                 )
             ]
-        )
-
-
-class _AllowInspector:
-    async def evaluate(self, envelope):
-        return InspectionDecision(
-            action="allow", threat_level="safe"
-        ), envelope.raw_content
-
-
-class _SanitizeInspector:
-    async def evaluate(self, envelope):
-        return (
-            InspectionDecision(
-                action="sanitize",
-                threat_level="medium",
-                sanitized_content="sanitized text",
-            ),
-            "sanitized text",
-        )
-
-
-class _BlockInspector:
-    async def evaluate(self, envelope):
-        return (
-            InspectionDecision(action="block", threat_level="high", reason="blocked"),
-            "TOOL_BLOCKED: blocked",
         )
 
 
@@ -77,166 +52,77 @@ def _runtime(tmp_path: Path) -> MCPRuntime:
     return MCPRuntime([spec], budget_db_path=str(tmp_path / "mcp_usage.db"))
 
 
-@pytest.mark.asyncio
-async def test_call_tool_success_returns_normalized_payload(
-    tmp_path: Path, monkeypatch
-):
-    runtime = _runtime(tmp_path)
-    runtime._inspection_service = _AllowInspector()
+def _serve(monkeypatch, runtime: MCPRuntime, result: CallToolResult) -> _FakeSession:
+    session = _FakeSession(result)
 
     @asynccontextmanager
     async def fake_open_session(_spec):
-        yield _FakeSession(
-            CallToolResult(
-                content=[TextContent(type="text", text='{"data": [{"price": 12.3}]}')],
-                structuredContent=None,
-                isError=False,
-            )
-        )
+        yield session
 
     monkeypatch.setattr(runtime, "_open_session", fake_open_session)
+    return session
 
-    result = await runtime.call_tool(
-        "fmp_remote",
-        "quote",
-        {"symbol": "ABC"},
-        scope="consultant",
+
+@pytest.mark.asyncio
+async def test_execute_raw_returns_the_normalized_payload(tmp_path: Path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    _serve(
+        monkeypatch,
+        runtime,
+        CallToolResult(
+            content=[TextContent(type="text", text='{"data": [{"price": 12.3}]}')],
+            structuredContent=None,
+            isError=False,
+        ),
+    )
+
+    result = await runtime.execute_raw(
+        "fmp_remote", "quote", {"symbol": "ABC"}, scope="consultant"
     )
 
     assert result["parsed_text_json"] == {"data": [{"price": 12.3}]}
+    assert runtime.budget._run_calls["fmp_remote"] == 1
 
 
 @pytest.mark.asyncio
-async def test_call_tool_sanitize_returns_text_payload(tmp_path: Path, monkeypatch):
-    runtime = _runtime(tmp_path)
-    runtime._inspection_service = _SanitizeInspector()
-
-    @asynccontextmanager
-    async def fake_open_session(_spec):
-        yield _FakeSession(
-            CallToolResult(
-                content=[TextContent(type="text", text='{"data": [{"price": 12.3}]}')],
-                structuredContent=None,
-                isError=False,
-            )
-        )
-
-    monkeypatch.setattr(runtime, "_open_session", fake_open_session)
-    result = await runtime.call_tool(
-        "fmp_remote",
-        "quote",
-        {"symbol": "ABC"},
-        scope="consultant",
-    )
-    assert result["text_content"] == "sanitized text"
-
-
-@pytest.mark.asyncio
-async def test_call_tool_blocks_inspected_payload_and_records_budget(
+async def test_an_upstream_error_payload_is_returned_and_still_counted(
     tmp_path: Path, monkeypatch
 ):
     runtime = _runtime(tmp_path)
-    runtime._inspection_service = _BlockInspector()
+    _serve(
+        monkeypatch,
+        runtime,
+        CallToolResult(
+            content=[TextContent(type="text", text='{"error": "provider said no"}')],
+            structuredContent=None,
+            isError=True,
+        ),
+    )
 
-    @asynccontextmanager
-    async def fake_open_session(_spec):
-        yield _FakeSession(
-            CallToolResult(
-                content=[TextContent(type="text", text='{"data": [{"price": 12.3}]}')],
-                structuredContent=None,
-                isError=False,
-            )
-        )
+    result = await runtime.execute_raw(
+        "fmp_remote", "quote", {"symbol": "ABC"}, scope="consultant"
+    )
 
-    monkeypatch.setattr(runtime, "_open_session", fake_open_session)
-
-    with pytest.raises(MCPCallError) as exc_info:
-        await runtime.call_tool(
-            "fmp_remote",
-            "quote",
-            {"symbol": "ABC"},
-            scope="consultant",
-        )
-
-    assert exc_info.value.category is MCPErrorCategory.INSPECTION
-    assert runtime._budget._run_calls["fmp_remote"] == 1
+    assert result["is_error"] is True
+    assert runtime.budget._run_calls["fmp_remote"] == 1
 
 
 @pytest.mark.asyncio
-async def test_call_tool_rejects_non_allowlisted_tool(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("tool", "scope"), [("secret_tool", "consultant"), ("quote", "auditor")]
+)
+async def test_a_non_allowlisted_tool_or_wrong_scope_is_refused_unsent(
+    tmp_path: Path, monkeypatch, tool: str, scope: str
+):
     runtime = _runtime(tmp_path)
+    session = _serve(monkeypatch, runtime, CallToolResult(content=[], isError=False))
+
     with pytest.raises(MCPCallError) as exc_info:
-        await runtime.call_tool(
-            "fmp_remote",
-            "secret_tool",
-            {"symbol": "ABC"},
-            scope="consultant",
-        )
+        await runtime.execute_raw("fmp_remote", tool, {"symbol": "ABC"}, scope=scope)
+
     assert exc_info.value.category is MCPErrorCategory.CONFIG
-
-
-@pytest.mark.asyncio
-async def test_call_tool_rejects_wrong_scope(tmp_path: Path):
-    runtime = _runtime(tmp_path)
-    with pytest.raises(MCPCallError) as exc_info:
-        await runtime.call_tool(
-            "fmp_remote",
-            "quote",
-            {"symbol": "ABC"},
-            scope="auditor",
-        )
-    assert exc_info.value.category is MCPErrorCategory.CONFIG
-
-
-@pytest.mark.asyncio
-async def test_call_tool_raises_for_upstream_tool_error(tmp_path: Path, monkeypatch):
-    runtime = _runtime(tmp_path)
-    runtime._inspection_service = _AllowInspector()
-
-    @asynccontextmanager
-    async def fake_open_session(_spec):
-        yield _FakeSession(
-            CallToolResult(
-                content=[
-                    TextContent(type="text", text='{"error": "provider said no"}')
-                ],
-                structuredContent=None,
-                isError=True,
-            )
-        )
-
-    monkeypatch.setattr(runtime, "_open_session", fake_open_session)
-
-    with pytest.raises(MCPCallError) as exc_info:
-        await runtime.call_tool(
-            "fmp_remote",
-            "quote",
-            {"symbol": "ABC"},
-            scope="consultant",
-        )
-    assert exc_info.value.category is MCPErrorCategory.TOOL_ERROR
-
-
-@pytest.mark.asyncio
-async def test_list_tools_for_scope_filters_allowlist(tmp_path: Path, monkeypatch):
-    runtime = _runtime(tmp_path)
-
-    @asynccontextmanager
-    async def fake_open_session(_spec):
-        yield _FakeSession()
-
-    monkeypatch.setattr(runtime, "_open_session", fake_open_session)
-    tools = await runtime.list_tools_for_scope("consultant")
-
-    assert tools == [
-        ToolDescriptor(
-            server_id="fmp_remote",
-            name="quote",
-            description="Quote tool",
-            input_schema={"type": "object"},
-            output_schema={"type": "object"},
-        )
-    ]
+    assert session.calls == 0
+    assert runtime.budget._run_calls == {}
 
 
 @pytest.mark.asyncio
@@ -249,9 +135,10 @@ async def test_open_session_streamable_http_uses_http_client_for_headers(
     captured: dict[str, object] = {}
 
     class _FakeAsyncClient:
-        def __init__(self, *, headers=None, event_hooks=None):
+        def __init__(self, *, headers=None, event_hooks=None, timeout=None):
             captured["headers"] = headers
             captured["event_hooks"] = event_hooks
+            captured["timeout"] = timeout
 
         async def __aenter__(self):
             captured["http_client"] = self
@@ -267,9 +154,10 @@ async def test_open_session_streamable_http_uses_http_client_for_headers(
         yield "read", "write"
 
     class _FakeClientSession:
-        def __init__(self, read, write):
+        def __init__(self, read, write, read_timeout_seconds=None):
             captured["read"] = read
             captured["write"] = write
+            captured["read_timeout_seconds"] = read_timeout_seconds
 
         async def __aenter__(self):
             return self
@@ -295,6 +183,9 @@ async def test_open_session_streamable_http_uses_http_client_for_headers(
     assert captured["passed_http_client"] is captured["http_client"]
     assert captured["url"] == "https://example.test/mcp"
     assert captured["initialized"] is True
+    # The client and session bounds are set explicitly (tests/mcp/test_mcp_timeouts.py).
+    assert captured["timeout"] is not None
+    assert captured["read_timeout_seconds"] is not None
 
 
 class TestPartialServerAvailability:

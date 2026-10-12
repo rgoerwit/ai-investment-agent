@@ -258,3 +258,25 @@ class TestSuppressionPathIsRetired:
         assert get_effective_red_flags({}) == []
         assert get_effective_red_flags(None) == []
         assert get_effective_red_flags({"red_flags": "corrupt"}) == []
+
+
+def test_ocf_amount_preserves_negative_thousands_and_rejects_bad_suffix():
+    assert parse_ocf_amount("-100K KRW") == -100000
+    assert parse_ocf_amount("100KXYZ") is None
+    assert parse_ocf_amount("FY2026") is None
+    assert (
+        parse_ocf_amount("100 KRW") is None
+    )  # Existing free-text selector excludes small bare numbers.
+
+
+def test_ocf_selector_skips_years_and_counts_only_integer_digits():
+    assert parse_ocf_amount("2025 operating cash flow: PLN 971m") == 971e6
+    assert parse_ocf_amount("1234.56") is None
+    assert parse_ocf_amount("1234567.89 KRW") == 1234567.89
+    assert parse_ocf_amount("USD-100K") is None
+
+
+def test_grouped_bare_ocf_preserves_previous_threshold():
+    assert parse_ocf_amount("920,000") == 920_000
+    assert parse_ocf_amount("1234.56") is None
+    assert parse_ocf_amount("1,5") is None

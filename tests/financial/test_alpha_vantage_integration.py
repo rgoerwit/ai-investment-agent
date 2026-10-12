@@ -164,9 +164,10 @@ class TestAlphaVantageIntegration:
         assert metadata["field_sources"]["trailingPE"] == "alpha_vantage"
         assert metadata["field_quality"]["trailingPE"] == 9
 
-        # Alpha Vantage should provide debtToEquity
-        assert merged["debtToEquity"] == 0.5
-        assert metadata["field_sources"]["debtToEquity"] == "alpha_vantage"
+        # Alpha Vantage documents no unit/basis for DebtToEquity, so it contributes
+        # nothing to the canonical ratio (src/data/debt_equity.py).
+        assert "debtToEquity" not in merged
+        assert "debtToEquity" not in metadata["field_sources"]
 
         # yfinance should provide priceToBook (processed after alpha_vantage, same quality)
         assert merged["priceToBook"] == 1.8

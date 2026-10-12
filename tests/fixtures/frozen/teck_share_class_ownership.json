@@ -1,0 +1,7 @@
+{
+  "ticker": "TECK.A.TO",
+  "holder": "Temagami Mining Company Limited (56.4%)",
+  "source_url": "https://www.teck.com/media/Management-Information-Circular.pdf",
+  "content": "<result relevance=\"0.58\" provider=\"tavily\" truncated=\"true\" original_chars=\"1500\">\n<title>Notice of Meeting and Management Proxy Circular</title>\n<url>https://www.teck.com/media/Management-Information-Circular.pdf</url>\n<summary>...er Public Company Directorships: BCE Inc./Bell Canada Granite REIT 2023 Voting Results: N/A [...] (%) Class B Number Class B Votes (%) Aggregate Votes (%) Temagami Mining Company Limited(1) 4,300,000 56.4% 3,406,000 0.7% 34.0% SMM Resources Incorporated 1,469,000 19.3% 1,381,704 0.3% 11.6% (1) Keevil Holding Corporation (“Keevil Holdco”) beneficially owns 51.16% of the outstanding shares of Temagami Mining Company Limited (“Temagami”) and SMM Resources Incorp...</summary>\n</result>",
+  "note": "Trimmed retained public source result; 56.4% is class-specific, aggregate votes are 34.0%."
+}

@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from src.monetary import MONETARY_AMOUNT_PATTERN, parse_monetary_amount
+
 ROE_PERCENTAGE_THRESHOLD = 1.0
 
 
@@ -55,7 +57,8 @@ class FinancialPatternExtractor:
             ],
             "marketCap": [
                 re.compile(
-                    r"(?:Market Cap|Valuation).*?(\d{1,3}(?:[,\.]\d{3})*(?:[,\.]\d+)?)\s*([TBM])",
+                    rf"(?:Market Cap|Valuation)[\t ]*(?:\([^\n)]*\)[\t ]*)?"
+                    rf"(?:[:=][\t ]*|(?:of|is|around)[\t ]+)?(?P<amount>{MONETARY_AMOUNT_PATTERN})",
                     re.IGNORECASE,
                 )
             ],
@@ -85,8 +88,6 @@ class FinancialPatternExtractor:
                 ),
             ],
         }
-
-        self.multipliers = {"T": 1e12, "B": 1e9, "M": 1e6}
 
     def _normalize_number(self, val_str: str) -> float:
         try:
@@ -124,15 +125,16 @@ class FinancialPatternExtractor:
                 match = pattern.search(content)
                 if match:
                     try:
-                        val_str = match.group(1)
-                        val = self._normalize_number(val_str)
+                        if field == "marketCap":
+                            parsed_amount = parse_monetary_amount(match.group("amount"))
+                            if parsed_amount is None or parsed_amount <= 0:
+                                continue
+                            val = parsed_amount
+                        else:
+                            val = self._normalize_number(match.group(1))
 
                         if field == "returnOnEquity" and val > ROE_PERCENTAGE_THRESHOLD:
                             val = val / 100.0
-                        elif field == "marketCap":
-                            suffix = match.group(2).upper()
-                            multiplier = self.multipliers.get(suffix, 1)
-                            val = val * multiplier
                         elif field == "numberOfAnalystOpinions":
                             val = int(val)
                             if val < 0 or val > 200:

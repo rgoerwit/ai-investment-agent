@@ -4,6 +4,7 @@ from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 
+from src.llm_runtime.adapters import transports
 from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.budgets import resolve_generation_budget, stamp_budget_metadata
 from src.llm_runtime.profiles import resolve_sampling_temperature
@@ -13,6 +14,7 @@ from src.llm_runtime.provider_policy import (
 )
 from src.llm_runtime.rate_limits import limiter_for_binding
 from src.llm_runtime.seats import SeatId
+from src.llm_runtime.timeouts import apac_client_timeout_seconds
 
 # Providers whose effort comes from the seat's resolved intent rather than an
 # explicit per-binding override.
@@ -37,8 +39,6 @@ class CompatibleAdapter:
             raise ValueError(
                 "compatible transport is restricted to reviewed APAC/Moonshot seats"
             )
-        from langchain_openai import ChatOpenAI
-
         from src.config import config
 
         settings = request.settings or config
@@ -83,24 +83,22 @@ class CompatibleAdapter:
             "base_url": base_url,
             "api_key": api_key.get_secret_value(),
             # One knob for "how long may a compatible vendor's client wait",
-            # shared with the legacy path's _apply_openai_api_base. APAC keeps
-            # its own longer allowance for the deepest-reasoning re-issue.
+            # shared with the legacy path's _apply_openai_api_base. APAC's
+            # ceiling is its node total, the deadline every APAC request is
+            # sized from, and the same value it gets inside a scope.
             "timeout": policy.client_timeout_seconds
             or (
-                240
+                apac_client_timeout_seconds(settings)
                 if seat_id in self._APAC_SEATS
                 else settings.openai_compatible_client_timeout_seconds
-            ),
-            "max_retries": (
-                policy.sdk_max_retries
-                if policy.sdk_max_retries is not None
-                else 1
-                if thinking
-                else 3
             ),
             "callbacks": list(request.callbacks),
             "max_completion_tokens": budget.api_cap_tokens,
             "streaming": False,
+            # The bound vendor, explicitly: it selects the compatible request
+            # ceiling at dispatch, and a compatible vendor never gets a tier.
+            "dispatch_provider": provider,
+            "budget_timeout_class": request.seat.timeout_class.value,
         }
         if seat_id in self._APAC_SEATS:
             kwargs["extra_body"] = {
@@ -117,7 +115,7 @@ class CompatibleAdapter:
         )
         if temperature is not None:
             kwargs["temperature"] = temperature
-        llm = ChatOpenAI(**kwargs)
+        llm = transports.new_openai_chat(**kwargs)
         llm.rate_limiter = limiter_for_binding(
             settings,
             request.binding.identity.vendor_id,

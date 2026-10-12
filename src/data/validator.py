@@ -320,8 +320,10 @@ class FineGrainedValidator:
             )
             result.validated_fields.append("debtToEquity")
         elif de > 10:
+            # Plain ratio sanity check (canonical ratio, no unit guessing): debt over
+            # 10x book equity is possible but rare enough to flag.
             result.warnings.append(
-                f"Extreme leverage: D/E = {de:.2f} (very high debt relative to equity)"
+                f"Extreme leverage: D/E = {de:.2f}x (debt above 10x book equity)"
             )
             result.validated_fields.append("debtToEquity")
         else:

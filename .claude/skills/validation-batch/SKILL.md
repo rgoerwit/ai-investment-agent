@@ -10,6 +10,10 @@ description: >
 
 # Running a validation batch
 
+This is a live, networked and paid workflow. Require user authorization for the
+batch and its spend before launch; loading this skill or passing deterministic
+checks alone is not approval. Do not read private environment-file contents.
+
 A batch costs roughly **$1.60–$3.50 and 90 minutes to two hours**. Spend the cheap
 deterministic checks first — they catch a different and larger class of defect, and
 they cost nothing.
@@ -21,8 +25,8 @@ poetry run python scripts/check_macos_cloud_files.py --hydrate   # see §6
 poetry run ruff check src/ tests/ scripts/
 ```
 
-Then the suite. See `/run-tests` for scope selection — do not reach for the full
-~9,100 tests when the owning directory will do.
+Then the suite. See `/run-tests` for scope selection — do not reach for the
+complete suite when the owning directory will do.
 
 **A live batch is not a substitute for pytest, and has repeatedly been used as one.**
 The August 2026 fast-fail regression (a stale `analysis_outcome` letting the debate
@@ -145,7 +149,7 @@ placeholders and reads block on `fileproviderd`.
 | `git status` / `git diff` hangs past 3 min | iCloud fault | Don't block on it; read `code_commit` / `code_dirty` from the artifacts |
 | `fatal: mmap failed: Operation canceled` | iCloud fault | Same; retry once, then use the `find`-based fingerprint in §2 |
 | `grep -r` over `src/` times out | walks cold files | `find src -name "*.py" -exec grep -n PATTERN {} +` |
-| pytest fails collecting a file outside the test tree | cold placeholder | `scripts/check_macos_cloud_files.py --hydrate` |
+| pytest collection stalls on a file with the `dataless` flag | cold placeholder | `scripts/check_macos_cloud_files.py --hydrate` |
 | `pgrep` → `sysmond service not found` | sandbox | Not a liveness signal. Use file activity. |
 | `ps` → `operation not permitted` | sandbox | Same. |
 | `kill -0 <pid>` → rc=1 | ambiguous | **`operation not permitted` means the process EXISTS**; `no such process` means it is gone. Both return rc=1 — read stderr, not the exit code. |
@@ -156,8 +160,17 @@ Triage order for a stalled read: `dd` first, then `ls -lO` for the `dataless` fl
 then process inspection (needs the sandbox off). Never `ditto` a Chroma store.
 
 If pytest aborts during rootdir collection with a `PermissionError` on a file outside
-the test tree, that is a tool-boundary restriction, not a suite failure. Report the
-suite as **unrun** — do not route around the boundary.
+the test tree, that is a tool-boundary restriction, not a suite failure. Retry the
+same selected tests with collection confined to the test tree:
+
+```bash
+poetry run pytest <paths> -q -p no:cacheprovider --rootdir=tests --confcutdir=tests
+```
+
+No conftest lives above `tests/`, so `tests/conftest.py` and its isolation still load.
+This does not authorize reading the denied file or bypassing sandbox restrictions.
+Report the retry's actual result and the collection limitation. If the selected tests
+still cannot collect, report them as **unrun** with the remaining blocker.
 
 ## 7. Reading the results
 

@@ -2,7 +2,6 @@
 
 import logging
 import os
-import socket
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -54,6 +53,13 @@ from src.config import _apply_macos_fork_safety_env  # noqa: E402
 _apply_macos_fork_safety_env(enabled=True, platform=sys.platform)
 
 
+# Re-register subdirectory conftest fixtures on a re-collected Directory; see
+# tests/helpers/conftest_recollection.py for the pytest 9.1 mechanism.
+from tests.helpers.conftest_recollection import (  # noqa: E402, F401
+    pytest_make_collect_report,
+)
+
+
 @pytest.fixture(autouse=True)
 def _reset_ibkr_session_manager():
     """Reset the process-wide pooled IBKR session between tests.
@@ -83,10 +89,6 @@ def _reset_flex_health():
     _reset_flex_health_for_tests()
     yield
     _reset_flex_health_for_tests()
-
-
-# Capture real API key if present (for integration tests)
-_REAL_GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 
 
 @pytest.fixture(scope="session")
@@ -132,10 +134,14 @@ def setup_test_env(test_chroma_persist_dir: Path):
         "GOOGLE_API_KEY": "test-key",  # Default to dummy key
         "TAVILY_API_KEY": "test-key",
         "FINNHUB_API_KEY": "test-key",
+        # EDGAR URLs are refused without a contact address; the suite's sec.gov
+        # fixtures need one, and an operator's real address must not leak in.
+        "SEC_CONTACT_EMAIL": "tests@example.invalid",
         # Service tiers must be pinned to defaults: an operator .env with
         # GEMINI/OPENAI_SERVICE_TIER=flex flips llms.py construction paths
-        # (flex subclasses bypass ChatOpenAI/ChatGoogleGenerativeAI mocks) and
-        # floors timeout assertions (35 s quick budgets become 1350 s). Flex
+        # (the flex path goes through _build_openai_chat, and Gemini's flex
+        # path bypasses ChatGoogleGenerativeAI mocks) and floors timeout
+        # assertions (35 s quick budgets become 1350 s). Flex
         # behavior is tested explicitly via config patching in
         # tests/test_llms_flex.py / tests/test_service_tiers.py.
         "GEMINI_SERVICE_TIER": "standard",
@@ -181,18 +187,146 @@ def setup_test_env(test_chroma_persist_dir: Path):
         yield
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-integration",
+        action="store_true",
+        default=False,
+        help="run tests marked 'integration' (live network, real providers)",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Skip ``integration`` tests unless ``--run-integration`` opts in.
+
+    They reach live providers, so a default run must neither need the network nor
+    spend quota; the unit boundary (``_offline_boundary``) refuses them anyway.
+    """
+    if config.getoption("--run-integration"):
+        return
+    skip = pytest.mark.skip(reason="integration test: pass --run-integration to run")
+    for item in items:
+        if item.get_closest_marker("integration") is not None:
+            item.add_marker(skip)
+
+
 @pytest.fixture(autouse=True)
-def _block_network_for_security_tests(request, monkeypatch):
-    """Fail fast if security-marked tests attempt real socket access."""
-    if request.node.get_closest_marker("security") is None:
+def _offline_boundary(request, monkeypatch):
+    """Every non-``integration`` test is offline, and attempting otherwise fails it.
+
+    Refuses TCP/UDP sockets, DNS and libcurl (``install_offline_network``) and, for
+    every test but ``security`` ones, the embedding SDKs (``refuse_embedding_sdks``;
+    Step-3 security tests drive the real SDK into wire fakes). Refusal alone is not
+    enough: code under test usually catches the error and degrades, so a leaking
+    test passes while paying the timeout. At teardown a test that recorded any
+    attempt fails, naming targets and threads. A test that proves refusal calls
+    ``install_offline_network`` itself and asserts on its own list.
+    Guarded by ``tests/test_offline_boundary.py``.
+    """
+    if request.node.get_closest_marker("integration") is not None:
+        yield
         return
 
-    request.getfixturevalue("socket_disabled")
+    from tests.helpers.offline_network import (
+        install_offline_network,
+        refuse_embedding_sdks,
+    )
 
-    def blocked_name_resolution(*args, **kwargs):
-        raise RuntimeError("network access blocked for security-marked tests")
+    attempts = install_offline_network(monkeypatch)
+    if request.node.get_closest_marker("security") is None:
+        refuse_embedding_sdks(monkeypatch)
+    yield
+    if attempts:
+        pytest.fail(
+            f"{len(attempts)} network attempt(s) in a unit test: "
+            f"{attempts.describe()}. Inject a fake at the data source or mark "
+            "the test integration.",
+            pytrace=False,
+        )
 
-    monkeypatch.setattr(socket, "getaddrinfo", blocked_name_resolution)
+
+@pytest.fixture(autouse=True)
+def _instant_process_limiters(request, monkeypatch):
+    """Replace every process-fallback provider limiter with one that never waits.
+
+    A unit test that sends provider requests through ``limiter_for_binding`` (no
+    bound ``ProviderRuntime``) used to wait on the real Google limiter, paced at
+    ``RPM * 0.8 / 60`` requests a second -- about 5 s per acquire after the first
+    token. Three memory modules spent over 100 s of a full run doing so, and a
+    test's wall time depended on which test ran before it. Limiters are built by
+    ``create_process_rate_limiter``; replacing that (and the module-level copies
+    that bind it) covers the fallback table, ``GLOBAL_RATE_LIMITER`` and the lazily
+    built OpenAI limiter. Tests of the real limiter opt out with the
+    ``real_rate_limiter`` marker; ``integration`` tests keep the real one.
+    Guarded by ``tests/test_isolation_fixtures.py``.
+    """
+    if (
+        request.node.get_closest_marker("integration") is not None
+        or request.node.get_closest_marker("real_rate_limiter") is not None
+    ):
+        yield
+        return
+
+    from src import llms, runtime_services
+    from src.llm_runtime import rate_limits
+    from tests.helpers.instant_limiter import InstantLimiter
+
+    def instant(*_args, **_kwargs) -> InstantLimiter:
+        return InstantLimiter()
+
+    rate_limits.reset_fallback_limiters_for_tests()
+    monkeypatch.setattr(rate_limits, "create_process_rate_limiter", instant)
+    monkeypatch.setattr(runtime_services, "create_process_rate_limiter", instant)
+    monkeypatch.setattr(llms.GLOBAL_RATE_LIMITER, "_instance", None)
+    monkeypatch.setattr(llms, "_openai_rate_limiter", None)
+    monkeypatch.setattr(llms, "_openai_rate_limiter_initialized", False)
+    yield
+    rate_limits.reset_fallback_limiters_for_tests()
+
+
+@pytest.fixture
+def offline_main_flow(monkeypatch):
+    """The advisory lookups ``src.main`` makes around a run, answered "unavailable".
+
+    ``run_analysis`` fetches a benchmark market note, a 52-week price snapshot and
+    the macro context (a Tavily search), and publication looks up the company name
+    for the report header; each degrades to an empty or failed result when its
+    provider is unreachable.
+    Request it (``pytest.mark.usefixtures``) in any module that drives ``main`` or
+    ``run_analysis`` with the graph mocked. A test asserting on one of them patches
+    it again in its own body, which wins.
+    """
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("src.main._fetch_market_context", AsyncMock(return_value=""))
+    monkeypatch.setattr("src.main._fetch_price_snapshot", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        "src.output._load_company_name_for_output_async",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "src.macro_context.get_macro_context",
+        AsyncMock(side_effect=RuntimeError("macro context unavailable offline")),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_memory_state():
+    """Drop the process-wide embeddings and Chroma clients between tests.
+
+    ``FinancialSituationMemory`` caches its probed embeddings client and its Chroma
+    client on the class. A test that left them populated made the next test's
+    memories ``available`` without ever building a client (two
+    ``TestMemoryIsolation`` tests skipped when run alone and passed only after an
+    earlier test happened to leave state behind).
+    """
+    from src.memory import FinancialSituationMemory
+
+    FinancialSituationMemory._reset_shared_state_for_tests()
+    yield
+    FinancialSituationMemory._reset_shared_state_for_tests()
 
 
 @pytest.fixture(autouse=True)

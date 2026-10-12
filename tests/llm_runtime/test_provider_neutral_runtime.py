@@ -21,6 +21,7 @@ from unittest.mock import Mock
 import pytest
 
 from src.llm_runtime.adapters.base import SeatModelRequest
+from src.llm_runtime.seats import SEATS, SeatId
 
 SRC = Path(__file__).resolve().parents[2] / "src"
 
@@ -168,7 +169,8 @@ class TestAnthropicHonoursTheOutputBudgetContract:
         settings.api_timeout = 120
         return SeatModelRequest(
             binding=binding,
-            seat=Mock(),
+            # A real seat: the adapter reads its timeout class and attempt policy.
+            seat=SEATS[SeatId.ARTICLE_WRITER],
             quick_mode=False,
             callbacks=(),
             output_tokens=output_tokens,
@@ -185,9 +187,8 @@ class TestAnthropicHonoursTheOutputBudgetContract:
     def test_the_requested_cap_reaches_the_client(
         self, monkeypatch, requested, expected
     ):
-        import sys
-
         from src.llm_runtime.adapters import anthropic as adapter_mod
+        from src.llm_runtime.adapters import transports
 
         captured: dict = {}
 
@@ -196,9 +197,7 @@ class TestAnthropicHonoursTheOutputBudgetContract:
                 captured.update(kwargs)
                 self.rate_limiter = None
 
-        fake_module = Mock()
-        fake_module.ChatAnthropic = _FakeChatAnthropic
-        monkeypatch.setitem(sys.modules, "langchain_anthropic", fake_module)
+        monkeypatch.setattr(transports, "new_anthropic_chat", _FakeChatAnthropic)
         monkeypatch.setattr(adapter_mod, "limiter_for_binding", lambda *a, **k: None)
 
         adapter_mod.AnthropicAdapter().build(self._request(requested))

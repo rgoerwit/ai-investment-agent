@@ -8,12 +8,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.error_safety import summarize_exception
+from src.forensic_budget import ResearchBudgetLedger
 from src.tooling.evidence_recorder import (
     EvidenceStatus,
     ExecutionStatus,
     classify_evidence_value,
 )
-from src.tooling.runtime import ToolInvocation, ToolSource
+from src.tooling.runtime import ToolCallFailed, ToolInvocation, ToolSource
 
 PreflightCall = tuple[str, Any, dict[str, Any]]
 
@@ -71,6 +72,7 @@ async def run_preflight_calls(
     ticker: str,
     failure_event: str,
     logger: Any,
+    budget: ResearchBudgetLedger | None = None,
 ) -> tuple[list[PreflightOutcome], dict[str, int]]:
     """Execute independent tool calls concurrently through the runtime hook chain."""
     from src.runtime_services import get_current_tool_service
@@ -85,6 +87,15 @@ async def run_preflight_calls(
             return await tool.ainvoke(call_args)
 
         try:
+            if budget is not None and (
+                blocked := budget.authorize_tool(tool.name, args)
+            ):
+                return PreflightOutcome(
+                    label=label,
+                    execution_status="BLOCKED",
+                    evidence_status="UNAVAILABLE",
+                    reason=blocked,
+                )
             result = await get_current_tool_service().execute(
                 ToolInvocation(
                     name=tool.name,
@@ -95,6 +106,11 @@ async def run_preflight_calls(
                 runner=_runner,
             )
             value = str(result.value)
+            if budget is not None:
+                budget.record_tool_result(
+                    tool.name, value, blocked=result.blocked, args=args
+                )
+                value = budget.cap_evidence(value)
             execution_status, evidence_status, reason, content = (
                 classify_evidence_value(
                     tool.name,
@@ -110,6 +126,8 @@ async def run_preflight_calls(
                 reason=reason,
             )
         except Exception as exc:
+            if budget is not None:
+                budget.record_tool_failure(tool.name)
             logger.warning(
                 failure_event,
                 ticker=ticker,
@@ -120,7 +138,11 @@ async def run_preflight_calls(
                 label=label,
                 execution_status="FAILED",
                 evidence_status="UNAVAILABLE",
-                reason=type(exc).__name__.upper(),
+                reason=(
+                    exc.reason
+                    if isinstance(exc, ToolCallFailed)
+                    else type(exc).__name__.upper()
+                ),
             )
         finally:
             durations_ms[label] = round((time.monotonic() - started_at) * 1000)

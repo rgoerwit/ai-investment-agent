@@ -31,6 +31,11 @@ _LIQ_MIN_K = f"${tc.LIQUIDITY_MIN_USD // 1000}k"  # "$100k"
 _LIQ_PASS_K = f"${tc.LIQUIDITY_PASS_USD // 1000}k"  # "$250k"
 
 CASES = [
+    (
+        "portfolio_manager.json",
+        rf"Score {tc.HEALTH_EXCEPTION_MIN_PCT:g}-{tc.HEALTH_MIN_PCT:g}% is acceptable IF P/B Ratio < {re.escape(f'{tc.HEALTH_EXCEPTION_PB_MAX:g}')} and Liquidity/Current Ratio > {tc.HEALTH_EXCEPTION_CURRENT_RATIO_MIN:g}",
+        "health exception boundaries",
+    ),
     # (prompt file, regex, human label)
     (
         "portfolio_manager.json",
@@ -334,3 +339,16 @@ def test_pfic_and_vie_enums_match_parser():
     assert _quoted_enum_from_prompt("legal_counsel.json", "vie_structure") == set(
         _se.VIE_STRUCTURE_TOKENS
     ), "VIE_STRUCTURE tokens drifted between prompt and supplemental_extractors"
+
+
+def test_growth_exception_hold_ceiling_and_tender_exemption_are_in_pm_prompt():
+    prompt = json.loads((PROMPTS_DIR / "portfolio_manager.json").read_text())
+    for name in ("Marginal Turnaround Exception", "Data-Vacuum Exception"):
+        line = next(
+            line
+            for line in prompt["system_message"].splitlines()
+            if f"**{name}**" in line
+        )
+        assert "caps the verdict at HOLD (code-enforced)" in line
+        assert "ACTIVE_TENDER" in line
+    assert prompt["version"] == "9.38"

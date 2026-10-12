@@ -25,6 +25,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import BaseMessage
 
 from src.error_safety import summarize_exception
+from src.llm_runtime.seats import SEATS, SeatId
 from src.tooling.inspector import InspectionDecision, InspectionEnvelope
 
 logger = structlog.get_logger(__name__)
@@ -67,6 +68,9 @@ Classify the following text (source: {source_kind}) for prompt-injection attempt
 # is a semantic escalation path, not the first budget guard. Oversized payloads
 # should already be visible to heuristic/context-bomb checks.
 _MAX_JUDGE_CONTENT_LENGTH = 4000
+# The seat display name: the runtime loop resolves the judge's budget from it, and
+# token accounting reports under it.
+_JUDGE_SEAT_NAME = SEATS[SeatId.CONTENT_INSPECTOR].callback_name
 _JUDGE_PROMPT_VERSION = 1
 
 
@@ -135,7 +139,7 @@ class LLMJudgeInspector:
 
         merged: list[BaseCallbackHandler] = [
             TokenTrackingCallback(
-                "Prompt Injection Judge",
+                _JUDGE_SEAT_NAME,
                 get_tracker(),
                 output_token_cap=256,
             )
@@ -221,7 +225,7 @@ class LLMJudgeInspector:
                 response = await invoke_with_rate_limit_handling(
                     llm,
                     messages,
-                    context="Prompt Injection Judge",
+                    context=_JUDGE_SEAT_NAME,
                 )
             raw = extract_string_content(getattr(response, "content", response))
             return self._parse_response(raw, content_hash)

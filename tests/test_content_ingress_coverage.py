@@ -29,6 +29,7 @@ def _has_inspection_call(src: str) -> bool:
     return (
         "INSPECTION_SERVICE.check" in src
         or "get_current_inspection_service().check" in src
+        or "get_current_inspection_service().evaluate" in src
         or "INSPECTION_SERVICE.evaluate" in src
         or "self._inspection_service.evaluate" in src
     )
@@ -465,13 +466,17 @@ def test_new_inspectors_importable_from_owning_modules():
     from src.tooling.tool_argument_policy import ToolArgumentPolicyHook  # noqa: F401
 
 
-def test_mcp_runtime_uses_mcp_tool_output_inspection():
-    src = _read(_src("mcp/client.py"))
+def test_mcp_tool_output_is_inspected_by_the_tool_plane_hook():
+    # MCP output is inspected in one place: ContentInspectionHook, on every
+    # mcp__<server>__<tool> call routed through ToolExecutionService (the
+    # runtime's own inspecting entry point, call_tool, was removed).
+    src = _read(_src("tooling/inspection_hook.py"))
     assert "SourceKind.mcp_tool_output" in src, (
-        "mcp/client.py: MCP ingress must use SourceKind.mcp_tool_output."
+        "inspection_hook.py: MCP ingress must use SourceKind.mcp_tool_output."
     )
-    assert _has_inspection_call(src), (
-        "mcp/client.py: MCP tool output must be inspected before prompt reuse."
+    assert "parse_mcp_tool_name(call.name)" in src
+    assert "service.evaluate(envelope)" in src, (
+        "inspection_hook.py: MCP tool output must be inspected before prompt reuse."
     )
 
 

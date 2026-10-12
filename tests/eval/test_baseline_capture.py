@@ -1105,3 +1105,295 @@ def test_capture_flag_is_parsed_from_cli():
 
 async def _async_return(value):
     return value
+
+
+class _AllowanceSpender:
+    """An after() hook that spends the call's whole allowance."""
+
+    def __init__(self, ticks: list[float]) -> None:
+        self.ticks = ticks
+
+    async def before(self, call):
+        return call
+
+    async def after(self, call, result):
+        self.ticks[0] += 10_000.0
+        return result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refused", [False, True])
+async def test_capture_after_event_is_the_result_the_caller_received(
+    tmp_path, monkeypatch, refused
+):
+    """The "after" event is written on completion, never for a result the
+    service then refused because the allowance ran out."""
+    from src.llm_runtime import timeouts as llm_timeouts
+
+    ticks = [1_000.0]
+    monkeypatch.setattr(llm_timeouts, "now", lambda: ticks[0])
+    manager = _make_manager(tmp_path, monkeypatch)
+    hooks = [manager.make_tool_hook()]
+    if refused:
+        hooks.insert(0, _AllowanceSpender(ticks))
+    service = ToolExecutionService(hooks)
+    call = ToolInvocation(name="get_news", args={"ticker": "0005.HK"}, source="test")
+
+    if refused:
+        with pytest.raises(TimeoutError, match="no allowance left"):
+            await service.execute(call, runner=lambda args: _async_return("news"))
+    else:
+        await service.execute(call, runner=lambda args: _async_return("news"))
+
+    stages = [(event["stage"], event.get("value")) for event in manager._tool_calls]
+    assert stages == (
+        [("before", None)] if refused else [("before", None), ("after", "news")]
+    )
+
+
+async def _create_junior_cycle_capture(
+    tmp_path, monkeypatch, *, omit_selector=False, failed=False, empty_failure=False
+):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from langchain_core.runnables import RunnableLambda
+
+    from src.agents.analyst_nodes import create_analyst_node
+    from src.eval.prompt_checks import (
+        PromptCheckCollector,
+        run_prompt_checks_on_outputs,
+    )
+    from src.eval.serialization import normalize_for_json
+    from src.forensic_budget import graph_research_budget_policies
+    from src.graph.tool_nodes import create_agent_tool_node
+    from src.runtime_services import RuntimeServices, use_runtime_services
+    from src.tooling.inspection_service import InspectionService
+
+    manager = _make_manager(tmp_path, monkeypatch)
+    # No local settings are needed to exercise the real capture seam.
+    monkeypatch.setattr(
+        manager,
+        "_config_snapshot",
+        lambda config: normalize_for_json({"configurable": config["configurable"]}),
+    )
+    calls = [
+        {"name": name, "args": {"ticker": "0005.HK"}, "id": f"call-{index}"}
+        for index, name in enumerate(
+            ("get_financial_metrics", "get_fundamental_analysis")
+        )
+    ]
+    response = AIMessage(content="", tool_calls=calls)
+
+    class Selector(RunnableLambda):
+        def bind_tools(self, tools):
+            return self
+
+    selector = Selector(lambda _: response)
+    tools = []
+    for name, value in (
+        ("get_financial_metrics", '{"sector":"Industrials","operatingCashflow":123}'),
+        ("get_fundamental_analysis", "" if failed else "inspected qualitative fact"),
+    ):
+        tool = MagicMock()
+        tool.name = name
+        tool.ainvoke = AsyncMock(return_value=value)
+        tools.append(tool)
+    junior = "junior_fundamentals_analyst"
+    policy = graph_research_budget_policies(quick_mode=True)[junior]
+    analyst = create_analyst_node(
+        selector, junior, tools, "raw_fundamentals_data", research_budget_policy=policy
+    )
+    collector = PromptCheckCollector()
+    analyst = collector.wrap_node("Junior Fundamentals Analyst", analyst)
+    state = {"company_of_interest": "0005.HK", "messages": []}
+    config = {
+        "configurable": {
+            "context": SimpleNamespace(ticker="0005.HK", trade_date="2026-03-21")
+        }
+    }
+    with use_runtime_services(
+        RuntimeServices(
+            tool_service=ToolExecutionService([manager.make_tool_hook()]),
+            inspection_service=InspectionService(),
+        )
+    ):
+        selected = await _run_wrapped(
+            manager, "Junior Fundamentals Analyst", analyst, state=state, config=config
+        )
+        acquired = await _run_wrapped(
+            manager,
+            "junior_fund_tools",
+            create_agent_tool_node(tools, junior, budget_policy=policy),
+            state={**state, **selected},
+            config=config,
+        )
+        if empty_failure:
+            from src.runtime_diagnostics import failure_artifact
+
+            acquired.update(
+                failure_artifact(
+                    "raw_fundamentals_data",
+                    "Code acquisition capped",
+                    provider="code",
+                    error_kind="output_cap_exhausted",
+                )
+            )
+        terminal = await _run_wrapped(
+            manager,
+            "Junior Fundamentals Analyst",
+            analyst,
+            state={**state, **acquired},
+            config=config,
+        )
+    assert terminal["raw_fundamentals_data"] == acquired["raw_fundamentals_data"]
+    assert terminal["artifact_statuses"] == acquired["artifact_statuses"]
+    outputs = collector.collected_outputs()
+    assert outputs[junior].artifact_text == terminal["raw_fundamentals_data"]
+    checks = run_prompt_checks_on_outputs(outputs)
+    junior_checks = [
+        check for check in checks.node_reports if check.prompt_key == junior
+    ]
+    # Structural wrapper completeness is distinct from acquisition health.
+    assert junior_checks and all(check.passed for check in junior_checks) is (
+        not empty_failure
+    )
+    assert outputs[junior].artifact_status["ok"] is (not (failed or empty_failure))
+    if omit_selector:
+        manager._llm_calls.clear()
+    run_dir = manager.finalize_run(
+        {
+            **terminal,
+            "analysis_validity": {"publishable": True},
+            "run_summary": {"quick_model": "test-quick", "deep_model": "test-deep"},
+        }
+    )
+    return manager, run_dir, state, terminal
+
+
+@pytest.mark.asyncio
+async def test_junior_selection_tools_code_completion_capture_and_collector(
+    tmp_path, monkeypatch
+):
+    manager, run_dir, state, terminal = await _create_junior_cycle_capture(
+        tmp_path, monkeypatch
+    )
+    assert manager.final_status == "accepted"
+    assert validate_capture_bundle(run_dir).passed
+    agent_dir = run_dir / "agents/junior_fundamentals_analyst"
+    metadata = _read_json(agent_dir / "metadata.json")
+    assert metadata["llm_call_count"] == 1
+    assert len(metadata["llm_call_sequence_ids"]) == 1
+    assert len(metadata["tool_call_sequence_ids"]) == 4
+    assert metadata["artifact_producer"] == "code"
+    assert _read_json(agent_dir / "input_state.json")["messages"] == []
+    assert (
+        _read_json(agent_dir / "output.json")["raw_fundamentals_data"]
+        == terminal["raw_fundamentals_data"]
+    )
+    before = metadata.copy()
+    manager._coalesce_junior_completion()
+    assert manager._agent_records[0]["metadata"] == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "selector",
+        "tool",
+        "node",
+        "foreign_selector",
+        "mixed_selector_ids",
+        "missing_cycle",
+    ],
+)
+async def test_persisted_junior_cycle_rejects_corrupt_observed_links(
+    tmp_path, monkeypatch, case
+):
+    _, run_dir, _, _ = await _create_junior_cycle_capture(tmp_path, monkeypatch)
+    agent_dir = run_dir / "agents/junior_fundamentals_analyst"
+    metadata = _read_json(agent_dir / "metadata.json")
+    if case in {"selector", "tool", "node", "foreign_selector"}:
+        path = (
+            run_dir
+            / {
+                "selector": "llm_calls.jsonl",
+                "tool": "tool_calls.jsonl",
+                "node": "node_events.jsonl",
+                "foreign_selector": "llm_calls.jsonl",
+            }[case]
+        )
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        if case == "foreign_selector":
+            rows[0]["node_name"] = "Research Manager"
+        else:
+            rows.pop(0)
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    else:
+        metadata["selector_node_sequence_ids"] = (
+            [1, "bad"] if case == "mixed_selector_ids" else []
+        )
+        _write_json(agent_dir / "metadata.json", metadata)
+    assert not validate_capture_bundle(run_dir).passed
+
+
+@pytest.mark.asyncio
+async def test_in_memory_junior_capture_cannot_replace_missing_selector(
+    tmp_path, monkeypatch
+):
+    manager, _, _, _ = await _create_junior_cycle_capture(
+        tmp_path, monkeypatch, omit_selector=True
+    )
+    assert manager.final_status == "rejected"
+    assert any(
+        "selector" in reason or "llm" in reason for reason in manager._rejection_reasons
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_junior_completion_preserves_failure_and_capture_ineligibility(
+    tmp_path, monkeypatch
+):
+    manager, _, _, terminal = await _create_junior_cycle_capture(
+        tmp_path, monkeypatch, failed=True
+    )
+    assert not terminal["artifact_statuses"]["raw_fundamentals_data"]["ok"]
+    assert manager.final_status == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_empty_terminal_failure_closes_truthfully_and_cannot_be_captured_as_success(
+    tmp_path, monkeypatch
+):
+    manager, run_dir, _, terminal = await _create_junior_cycle_capture(
+        tmp_path, monkeypatch, empty_failure=True
+    )
+    assert terminal["raw_fundamentals_data"] == ""
+    assert (
+        terminal["artifact_statuses"]["raw_fundamentals_data"]["error_kind"]
+        == "output_cap_exhausted"
+    )
+    assert not terminal["messages"][0].tool_calls
+    assert manager.final_status == "rejected"
+    validation = validate_capture_bundle(run_dir)
+    assert not validation.passed
+    rejected = _read_json(run_dir / "capture_rejected.json")
+    assert "artifact_failed:raw_fundamentals_data" in rejected["rejection_reasons"]
+    assert not (run_dir / "run_output.json").exists()
+    assert not (run_dir / "agents/junior_fundamentals_analyst/output.json").exists()
+    events = [
+        json.loads(line)
+        for line in (run_dir / "node_events.jsonl").read_text().splitlines()
+    ]
+    terminal_event = events[-1]
+    assert terminal_event["node_name"] == "Junior Fundamentals Analyst"
+    assert {"raw_fundamentals_data", "artifact_statuses", "messages", "sender"} <= set(
+        terminal_event["output_keys"]
+    )
+    output = next(
+        record["output"]
+        for record in manager._agent_records
+        if record["node_name"] == "Junior Fundamentals Analyst"
+    )
+    assert output["raw_fundamentals_data"] == ""
+    assert output["artifact_statuses"] == terminal["artifact_statuses"]

@@ -502,3 +502,20 @@ class TestBaseGroupCliModelOverrides:
 
         assert plan.bindings[SeatId.MARKET].model == settings.google_llm_fast_model
         assert plan.bindings[SeatId.BULL].model == settings.google_llm_reasoning_model
+
+
+def test_independence_is_required_by_default_for_both_rows() -> None:
+    settings = _new_settings()
+    rows = resolve_binding_plan(settings).independence_telemetry(settings)
+    assert rows["review"]["required"] is True
+    assert rows["regional"]["required"] is True
+
+
+def test_a_settings_object_without_the_independence_flags_raises_not_waives() -> None:
+    """getattr(settings, 'llm_require_*_independence', False) waived the check."""
+    from types import SimpleNamespace
+
+    settings = _new_settings()
+    plan = resolve_binding_plan(settings)
+    with pytest.raises(AttributeError):
+        plan.independence_telemetry(SimpleNamespace())

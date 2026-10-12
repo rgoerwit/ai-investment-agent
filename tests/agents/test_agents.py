@@ -1158,6 +1158,7 @@ Score details here.
                 "original_model": None,
                 "recovery_model": None,
                 "reasoning_setting": None,
+                "recovery_reasoning_setting": None,
                 "original_output_chars": len(initial_response.content),
                 "outcome": "accepted_text",
                 "final_output_valid": True,

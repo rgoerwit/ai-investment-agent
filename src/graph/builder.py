@@ -14,7 +14,7 @@ from src.error_safety import redact_sensitive_text
 from src.eval import BaselineCaptureManager
 from src.runtime_config import get_runtime_config
 
-from .components import build_graph_components
+from .components import TradingContext, build_graph_components
 from .routing import (
     CONSULTANT_SKIP_SENTINEL,
     FUNDAMENTALS_BARRIER,
@@ -31,12 +31,21 @@ logger = structlog.get_logger(__name__)
 
 
 def _reconcile_fundamentals_evidence(state: AgentState) -> dict[str, Any]:
-    """Revalidate the original FLA response against all barrier-complete evidence."""
-    from src.agents.foreign_language_evidence import normalize_foreign_language_evidence
+    """Revalidate the accepted FLA artifact against all barrier-complete evidence."""
+    from src.agents.foreign_language_evidence import (
+        _field,
+        normalize_foreign_language_evidence,
+        unique_latest_results_block,
+    )
     from src.agents.management_guidance import normalize_management_guidance_output
     from src.agents.message_utils import (
         evidence_record_to_tool_evidence,
         latest_agent_text,
+    )
+    from src.agents.output_validation import _has_valid_latest_results_block
+    from src.data_block_utils import (
+        extract_last_fenced_block,
+        replace_last_fenced_block,
     )
     from src.runtime_diagnostics import get_valid_artifact_content
     from src.runtime_services import get_current_evidence_records
@@ -46,14 +55,45 @@ def _reconcile_fundamentals_evidence(state: AgentState) -> dict[str, Any]:
         "foreign_language_report",
     )
     if not valid_report:
-        return {}
+        if FUNDAMENTALS_BARRIER.inputs_complete(state):
+            logger.info(
+                "fla_latest_results_finalized",
+                ticker=state.get("company_of_interest", "UNKNOWN"),
+                reason_code="FLA_ARTIFACT_INVALID",
+            )
+        return {"latest_results_reason": "FLA_ARTIFACT_INVALID"}
+    # Re-read the original for facts that can gain authority when Legal finishes.
+    # Overlay only accepted repaired blocks: otherwise a missing initial block
+    # would erase its repair, while using the whole normalized artifact would lose
+    # original ownership claims that can now be checked against Legal evidence.
     raw_report = (
-        latest_agent_text(
-            state.get("messages", []),
-            "foreign_language_analyst",
-        )
+        latest_agent_text(state.get("messages", []), "foreign_language_analyst")
         or valid_report
     )
+    guidance_action = (state.get("guidance_normalization") or {}).get("final_action")
+    recovery_accepted = any(
+        event.get("originating_agent") == "foreign_language_analyst"
+        and event.get("outcome") == "accepted_text"
+        for event in state.get("structural_recovery_events", [])
+    )
+    for block_name, needs_overlay in (
+        (
+            "MANAGEMENT_GUIDANCE",
+            guidance_action == "REPAIRED",
+        ),
+        (
+            "LATEST_RESULTS",
+            recovery_accepted and not _has_valid_latest_results_block(raw_report),
+        ),
+    ):
+        if needs_overlay:
+            accepted_block = extract_last_fenced_block(
+                valid_report, block_name, include_markers=True
+            )
+            if accepted_block is not None:
+                raw_report = replace_last_fenced_block(
+                    raw_report, block_name, accepted_block
+                )
     guidance_evidence = state.get("management_guidance_evidence", "") or ""
     source_records = [
         record
@@ -74,14 +114,51 @@ def _reconcile_fundamentals_evidence(state: AgentState) -> dict[str, Any]:
         supplemental_evidence=guidance_evidence,
         additional_records=records,
     )
+    final_latest = unique_latest_results_block(reconciled)
+    coverage = (
+        _field(final_latest, "LATEST_RESULTS_COVERAGE_STATUS").upper()
+        if final_latest
+        else ""
+    )
+    authority = (
+        _field(final_latest, "LATEST_RESULTS_SOURCE_AUTHORITY").upper()
+        if final_latest
+        else ""
+    )
+    source_url = (
+        _field(final_latest, "LATEST_RESULTS_SOURCE_URL") if final_latest else ""
+    )
+    if final_latest is None:
+        reason_code = "NO_COMPLETE_BLOCK"
+    elif coverage == "FOUND" and source_url.upper() in {"", "N/A"}:
+        reason_code = "INVALID_CITATION"
+    elif coverage == "FOUND" and authority == "PRIMARY":
+        reason_code = "PRIMARY_VALIDATED"
+    elif coverage == "FOUND" and authority == "SECONDARY":
+        reason_code = "SECONDARY_SOURCE"
+    elif coverage == "FOUND":
+        reason_code = "UNSUPPORTED_SOURCE"
+    elif coverage in {"NOT_FOUND", "SEARCH_FAILED"}:
+        reason_code = coverage
+    else:
+        reason_code = "INVALID_COVERAGE"
+    if FUNDAMENTALS_BARRIER.inputs_complete(state):
+        logger.info(
+            "fla_latest_results_finalized",
+            ticker=state.get("company_of_interest", "UNKNOWN"),
+            reason_code=reason_code,
+        )
     if reconciled == state.get("foreign_language_report", ""):
-        return {}
+        return {"latest_results_reason": reason_code}
     logger.info(
         "fundamentals_evidence_reconciled",
         ticker=state.get("company_of_interest", "UNKNOWN"),
         evidence_records=len(records),
     )
-    return {"foreign_language_report": reconciled}
+    return {
+        "foreign_language_report": reconciled,
+        "latest_results_reason": reason_code,
+    }
 
 
 async def fundamentals_barrier_node(
@@ -428,7 +505,9 @@ BEAR RESEARCHER:
     ) -> Literal["Debate Sync Final"] | list[str]:
         """Route after Round 1: to Round 2 or directly to final sync (quick mode)."""
         context = config.get("configurable", {}).get("context")
-        max_rounds = getattr(context, "max_debate_rounds", 2) if context else 2
+        max_rounds = (
+            context.max_debate_rounds if context else TradingContext.max_debate_rounds
+        )
 
         if max_rounds <= 1:
             logger.debug("debate_r1_router", decision="skip_r2_quick_mode")

@@ -1901,3 +1901,46 @@ PE_RATIO_TTM: 99
             "TEST",
             canonical_snapshot=snapshot,
         )
+
+
+def test_growth_score_remains_distinct_from_reconciled_earnings_growth():
+    from src.agents.fundamentals_reconciler import reconcile_high_risk_fields
+    from src.data_block_utils import extract_block_text_value
+    from src.validators.metric_extractor import extract_metrics
+
+    body = "RAW_GROWTH_SCORE: 6/6\nADJUSTED_GROWTH_SCORE: 100% (based on 6 available points)\nEARNINGS_GROWTH_FY: 100%"
+    reconciled = reconcile_high_risk_fields(body, {"earningsGrowth": 0.35})
+    assert extract_block_text_value(reconciled, "EARNINGS_GROWTH_FY") == "35.0%"
+    metrics = extract_metrics(
+        f"### --- START DATA_BLOCK ---\n{reconciled}\n### --- END DATA_BLOCK ---"
+    )
+    assert metrics["adjusted_growth_score"] == 100
+
+
+@pytest.mark.parametrize("final_score", ["20.0%", "N/A", "66.7%"])
+def test_owned_warning_refreshes_final_projection_only(final_score):
+    from src.agents.analyst_nodes import _refresh_authoritative_metric_warning
+
+    content = """### GROWTH TRANSITION DETAIL
+**Score**: 3/6 (Adjusted: 50.0%)
+### --- START DATA_BLOCK ---
+RAW_GROWTH_SCORE: 2/6
+ADJUSTED_GROWTH_SCORE: 33.3%
+### --- END DATA_BLOCK ---
+"""
+    once = _refresh_authoritative_metric_warning(content)
+    projected = once.replace(
+        "ADJUSTED_GROWTH_SCORE: 33.3%", "ADJUSTED_GROWTH_SCORE: " + final_score
+    )
+    refreshed = _refresh_authoritative_metric_warning(projected)
+    assert "authoritative DATA_BLOCK=2/6 (33.3%)" not in refreshed
+    assert _refresh_authoritative_metric_warning(refreshed) == refreshed
+    assert "**Score**: 3/6 (Adjusted: 50.0%)" in refreshed
+    if final_score != "N/A":
+        assert f"authoritative DATA_BLOCK=2/6 ({final_score})" in refreshed
+    assert (
+        _refresh_authoritative_metric_warning(
+            "External note AUTHORITATIVE_METRIC_CORRECTION, retained."
+        )
+        == "External note AUTHORITATIVE_METRIC_CORRECTION, retained."
+    )

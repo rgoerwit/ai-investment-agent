@@ -719,10 +719,11 @@ class TestLegalFlagIntegration:
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 75%
 PE_RATIO_TTM: 12.00
+DE_RATIO: 50%
 ### --- END DATA_BLOCK ---
 
 **Leverage (2/2 pts)**:
-- D/E: 50: 1 pts
+- D/E: 50%: 1 pts
 
 **Interest Coverage**: 5.0x
 **Free Cash Flow**: $500M
@@ -757,10 +758,11 @@ PE_RATIO_TTM: 12.00
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 30%
 PE_RATIO_TTM: 25.00
+DE_RATIO: 600%
 ### --- END DATA_BLOCK ---
 
 **Leverage (0/2 pts)**:
-- D/E: 600: 0 pts
+- D/E: 600%: 0 pts
 
 **Interest Coverage**: 5.0x
 **Free Cash Flow**: $500M
@@ -857,7 +859,8 @@ class TestLegalJsonFallbackVisibility:
             if event == "legal_report_json_parse_failed_using_regex_fallback"
         ]
         assert len(warnings) == 1
-        assert "report_prefix" in warnings[0]
+        assert warnings[0]["failure_kind"] == "invalid_json"
+        assert "report_prefix" not in warnings[0]
 
     def test_malformed_json_ignores_prefixed_and_suffixed_decoy_keys(self):
         malformed = """{
@@ -895,7 +898,7 @@ class TestLegalJsonFallbackVisibility:
         assert risks["vie_structure"] == "NO"
         assert risks["cmic_status"] == "CLEAR"
 
-    def test_report_prefix_in_warning_is_redacted(self, monkeypatch):
+    def test_report_content_is_absent_from_warning(self, monkeypatch):
         from src.validators import supplemental_extractors
 
         recorder = _RecordingLogger()
@@ -910,7 +913,8 @@ class TestLegalJsonFallbackVisibility:
             if event == "legal_report_json_parse_failed_using_regex_fallback"
         ]
         assert len(warnings) == 1
-        assert "TOPSECRET456" not in warnings[0]["report_prefix"]
+        assert "TOPSECRET456" not in repr(warnings[0])
+        assert "report_prefix" not in warnings[0]
 
     def test_valid_json_does_not_warn(self, monkeypatch):
         from src.validators import supplemental_extractors

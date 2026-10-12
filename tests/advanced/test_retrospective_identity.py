@@ -345,6 +345,27 @@ class TestEvaluationMemo:
         second = EvaluationMemo(path)
         assert second.should_evaluate("run-1", 180) is False
 
+    def test_flush_publishes_through_the_shared_atomic_writer(
+        self, tmp_path, monkeypatch
+    ):
+        published: list[tuple[object, str]] = []
+        monkeypatch.setattr(
+            "src.retrospective.atomic_write_text",
+            lambda path, content: published.append((path, content)),
+        )
+        path = tmp_path / "memo.json"
+        memo = EvaluationMemo(path)
+        memo.record(
+            "run-1",
+            ticker="2767.T",
+            analysis_date=days_ago(180),
+            days_elapsed=180,
+            outcome=MEMO_OUTCOME_TRIGGERED,
+        )
+        memo.flush()
+        assert [p for p, _ in published] == [path]
+        assert "run-1" in json.loads(published[0][1])
+
     def test_flush_is_a_noop_when_nothing_changed(self, tmp_path):
         path = tmp_path / "memo.json"
         EvaluationMemo(path).flush()

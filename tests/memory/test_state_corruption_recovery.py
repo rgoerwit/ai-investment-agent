@@ -194,10 +194,11 @@ class TestTypedDictStructuralIssues:
                 assert "consultant_review" in result
                 assert len(result["consultant_review"]) > 0
 
-                # Should preserve debate content despite type mismatch
+                # Preserve both independent debate sides despite type mismatch.
                 assert len(invoke_calls) > 0
                 message_content = invoke_calls[0][1][0].content
-                assert "Debate content" in message_content
+                assert "Bull arguments" in message_content
+                assert "Bear arguments" in message_content
 
 
 class TestFastFailRouting:

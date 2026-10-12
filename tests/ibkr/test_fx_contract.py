@@ -241,3 +241,36 @@ class TestFxResolutionInsideAnEventLoop:
 
         assert _fx_rate_for_currency("JPY") == 0.0065
         assert calls == [["JPY"]]
+
+
+@pytest.mark.parametrize(
+    "currency,rate",
+    [("GBp", 0.01347), ("GBP", 1.347), ("GBX", 0.01347), ("RMB", 0.148)],
+)
+def test_saved_fx_rate_preserves_canonical_denomination(currency, rate, monkeypatch):
+    from src.fx_normalization import canonical_currency_code
+
+    calls = []
+
+    def resolve(code):
+        calls.append(code)
+        return rate
+
+    monkeypatch.setattr("src.ibkr.reconciliation_rules._fx_rate_for_currency", resolve)
+    assert _resolve_fx(_analysis(currency, rate)) == rate
+    assert calls == [canonical_currency_code(currency)]
+
+
+def test_cold_sync_minor_currency_lookup_preserves_cache_key(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.ibkr.reconciliation_rules import _fx_rate_for_currency
+
+    cache = SimpleNamespace(
+        peek_cached_rate=lambda code: None,
+        resolve_rates_sync=lambda currencies: {"GBp": (0.01347, "fallback")},
+    )
+    monkeypatch.setattr(
+        "src.ibkr.reconciliation_rules.get_fx_rate_cache", lambda: cache
+    )
+    assert _fx_rate_for_currency("GBp") == 0.01347

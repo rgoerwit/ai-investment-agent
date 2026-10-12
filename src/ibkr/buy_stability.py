@@ -25,10 +25,10 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
 
 import structlog
 
+from src.config import Settings
 from src.pm_decision_parser import canonicalize_pm_verdict, parse_final_decision_scores
 
 # Canonical set lives in the dependency-free validators module so lightweight
@@ -71,17 +71,17 @@ class PriorVerdict:
 class BuyStabilityConfig:
     """Run-scoped knobs for the BUY stability gate."""
 
-    enabled: bool = False
-    lookback_days: int = 7
-    margin_tally: float = 0.5
+    enabled: bool
+    lookback_days: int
+    margin_tally: float
 
     @classmethod
-    def from_config(cls, config: Any) -> BuyStabilityConfig:
+    def from_config(cls, config: Settings) -> BuyStabilityConfig:
         """Build from the global Settings object (env/.env/default chain)."""
         return cls(
-            enabled=bool(getattr(config, "buy_stability_enabled", False)),
-            lookback_days=int(getattr(config, "buy_stability_lookback_days", 7)),
-            margin_tally=float(getattr(config, "buy_stability_margin_tally", 0.5)),
+            enabled=bool(config.buy_stability_enabled),
+            lookback_days=int(config.buy_stability_lookback_days),
+            margin_tally=float(config.buy_stability_margin_tally),
         )
 
 

@@ -300,6 +300,7 @@ class ArtifactStatus:
     content: str | None
     error_kind: ArtifactErrorKind | None = None
     provider: str | None = None
+    model: str | None = None
     message: str | None = None
     retryable: bool = False
 
@@ -308,7 +309,7 @@ class ArtifactStatus:
 
 
 def success_artifact(
-    field: str, content: str, *, provider: str | None = None
+    field: str, content: str, *, provider: str | None = None, model: str | None = None
 ) -> dict[str, Any]:
     return {
         field: content,
@@ -318,6 +319,7 @@ def success_artifact(
                 ok=True,
                 content=content,
                 provider=provider,
+                model=model,
             ).as_dict()
         },
     }
@@ -397,6 +399,7 @@ def get_artifact_status(state: Mapping[str, Any], field: str) -> ArtifactStatus:
             content=raw.get("content"),
             error_kind=raw.get("error_kind"),
             provider=raw.get("provider"),
+            model=raw.get("model"),
             message=raw.get("message"),
             retryable=bool(raw.get("retryable")),
         )

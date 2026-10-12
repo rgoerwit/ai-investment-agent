@@ -8,6 +8,12 @@ from typing import Any, cast
 import structlog
 import yfinance as yf
 
+from src.blocking_io import (
+    GAP_FILL_YFINANCE_INFO_POLICY,
+    BlockingCallPolicy,
+    run_blocking_call,
+)
+from src.config import config
 from src.data.merge_policy import CRITICAL_ANALYSIS_FIELDS, SOURCE_QUALITY
 from src.runtime_services import get_current_inspection_service
 from src.tavily_utils import search_tavily_inspected
@@ -53,6 +59,7 @@ async def _fetch_tavily_gaps_impl(
     asyncio_module: Any = asyncio,
     search_fn=search_tavily_inspected,
     query_builder=generate_strict_search_query,
+    info_policy: BlockingCallPolicy | None = None,
 ) -> dict[str, Any]:
     """Fetch a limited set of missing safe fields from Tavily-inspected search results."""
     dangerous_fields = [
@@ -72,10 +79,20 @@ async def _fetch_tavily_gaps_impl(
         return {}
 
     try:
+        if info_policy is None:
+            # The shared in-flight cap stays; the bound is the company-name
+            # lookup setting, read now (run_blocking_call shrinks it to the
+            # operational deadline).
+            info_policy = GAP_FILL_YFINANCE_INFO_POLICY.with_timeout(
+                config.company_name_lookup_timeout_seconds
+            )
         ticker_obj = yf_module.Ticker(symbol)
-        info = await asyncio_module.wait_for(
-            asyncio_module.to_thread(lambda: ticker_obj.info),
-            timeout=5,
+        # Not wait_for(to_thread(...)): wait_for cancels and then waits on a
+        # thread that a stalled socket read never releases. run_blocking_call
+        # returns at the deadline and caps the orphaned workers.
+        info = await run_blocking_call(
+            info_policy.with_label(f"{info_policy.label}:{symbol}"),
+            lambda: ticker_obj.info,
         )
         company_name = info.get("longName") or info.get("shortName") or symbol
     except Exception:
@@ -99,7 +116,13 @@ async def _fetch_tavily_gaps_impl(
         else:
             query = query_builder(symbol, company_name, field_terms.get(field, field))
         try:
-            result = await search_fn(query, profile="finance_deep", timeout=5)
+            # Its own narrow bound, read per search; search_tavily_inspected
+            # shrinks it to a caller's enclosing deadline.
+            result = await search_fn(
+                query,
+                profile="finance_deep",
+                timeout=config.gap_fill_search_timeout_seconds,
+            )
             if isinstance(result, dict) and "results" in result:
                 search_results[field] = "\n".join(
                     item.get("content", "") for item in result["results"]
@@ -134,6 +157,10 @@ def merge_gap_fill_data(
     added = 0
     for key, value in gap_fill_data.items():
         if value is None:
+            continue
+        if key == "debtToEquity":
+            # Web-extracted prose has no verified unit/basis (percent vs ratio);
+            # it contributes nothing to the canonical ratio (src/data/debt_equity.py).
             continue
         should_use = False
         if key not in merged or merged[key] is None:

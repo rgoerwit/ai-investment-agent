@@ -22,12 +22,20 @@ import structlog
 from src.config import config
 from src.data.interfaces import FinancialFetcher
 from src.error_safety import redact_sensitive_text, summarize_exception
+from src.llm_runtime.timeouts import require_allowance
 
 logger = structlog.get_logger(__name__)
 
-# Default timeout for HTTP requests (session-level safety net + per-request)
-_TIMEOUT = aiohttp.ClientTimeout(total=10)
-_ANCHOR_TIMEOUT = aiohttp.ClientTimeout(total=5)
+
+def _request_timeout(seconds: float, *, label: str) -> aiohttp.ClientTimeout:
+    """HTTP total for one request (session safety net + per-request), read now.
+
+    *seconds* is the setting for the request's scope (full fundamentals or a
+    lightweight filtered lookup), shrunk to a caller's enclosing deadline;
+    raises TimeoutError when that is spent, which each handler treats as a
+    failed request.
+    """
+    return aiohttp.ClientTimeout(total=require_allowance(seconds, label=label))
 
 
 class EODHDFetcher(FinancialFetcher):
@@ -83,10 +91,12 @@ class EODHDFetcher(FinancialFetcher):
         params = {"api_token": self.api_key, "fmt": "json", "filter": "General"}
 
         try:
-            async with aiohttp.ClientSession(timeout=_ANCHOR_TIMEOUT) as session:
-                async with session.get(
-                    url, params=params, timeout=_ANCHOR_TIMEOUT
-                ) as response:
+            timeout = _request_timeout(
+                config.market_data_anchor_lookup_timeout_seconds,
+                label="eodhd.company_name",
+            )
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, params=params, timeout=timeout) as response:
                     if response.status == 200:
                         try:
                             data = await response.json()
@@ -131,10 +141,12 @@ class EODHDFetcher(FinancialFetcher):
         params = {"api_token": self.api_key, "fmt": "json"}
 
         try:
-            async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
-                async with session.get(
-                    url, params=params, timeout=_TIMEOUT
-                ) as response:
+            timeout = _request_timeout(
+                config.market_data_vendor_http_timeout_seconds,
+                label="eodhd.fundamentals",
+            )
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, params=params, timeout=timeout) as response:
                     # --- Error Handling & Circuit Breaking ---
                     if response.status == 200:
                         try:
@@ -202,10 +214,12 @@ class EODHDFetcher(FinancialFetcher):
         params = {"api_token": self.api_key, "fmt": "json", "filter": "Highlights"}
 
         try:
-            async with aiohttp.ClientSession(timeout=_ANCHOR_TIMEOUT) as session:
-                async with session.get(
-                    url, params=params, timeout=_ANCHOR_TIMEOUT
-                ) as response:
+            timeout = _request_timeout(
+                config.market_data_anchor_lookup_timeout_seconds,
+                label="eodhd.anchor",
+            )
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, params=params, timeout=timeout) as response:
                     # CASE 1: Success
                     if response.status == 200:
                         try:
@@ -346,7 +360,8 @@ class EODHDFetcher(FinancialFetcher):
             )
 
             # --- Health ---
-            # EODHD Debt/Equity is usually absolute, ensure we don't get %.
+            # Raw observation; EODHD documents no unit/basis for DebtToEquity, so the
+            # merge drops it (see src/data/debt_equity.py).
             output["debtToEquity"] = self._safe_float(highlights.get("DebtToEquity"))
             output["currentRatio"] = self._safe_float(highlights.get("CurrentRatio"))
 

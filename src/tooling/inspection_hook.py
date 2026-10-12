@@ -4,11 +4,11 @@ ContentInspectionHook plugs into the ToolExecutionService hook chain and
 inspects every tool output via an InspectionService before the result reaches
 an LLM context.
 
-The hook operates exclusively in after() — it never raises ToolCallBlocked
-because after() is called outside the before()-try/catch block in
-ToolExecutionService.execute(). Instead, blocked content is returned as
-a modified ToolResult with the legacy ``TOOL_BLOCKED:`` sentinel and
-blocked=True.
+The hook operates exclusively in after() and branches on the enforced
+disposition of ``InspectionService.evaluate``, never on the approved text: a
+``blocked`` outcome is returned as a ToolResult with the ``TOOL_BLOCKED:``
+placeholder and blocked=True; an ``inspection_failed`` one raises
+``ToolCallFailed`` so the call fails and the ledger records it FAILED.
 """
 
 from __future__ import annotations
@@ -24,14 +24,21 @@ from src.runtime_services import (
     get_current_inspection_service,
     get_current_runtime_services,
 )
-from src.tooling.inspection_service import InspectionService
+from src.tooling.inspection_service import InspectionService, approved_tool_content
 from src.tooling.inspector import InspectionEnvelope, SourceKind
-from src.tooling.runtime import ToolInvocation, ToolResult
+from src.tooling.runtime import (
+    INSPECTION_FAILED,
+    ToolCallBlocked,
+    ToolCallFailed,
+    ToolInvocation,
+    ToolResult,
+)
 
 logger = structlog.get_logger(__name__)
 
 _MAX_INSPECTION_INPUT_CHARS = 50_000
 _UNSAFE_SHAPE_FINDING = "non-string tool output degraded for inspection safety"
+_TRUNCATED_FINDING = "tool output truncated to the inspected length"
 
 
 def _type_marker(value: Any) -> str:
@@ -153,7 +160,7 @@ class ContentInspectionHook:
                     exc, operation="inspection_input_serialization_failed"
                 ),
             )
-            return result
+            raise ToolCallFailed(INSPECTION_FAILED) from None
 
         mcp_parts = parse_mcp_tool_name(call.name)
         if mcp_parts is not None:
@@ -189,9 +196,40 @@ class ContentInspectionHook:
         )
 
         service = self._inspection_service or get_current_inspection_service()
-        approved = await service.check(envelope)
+        decision, approved = await service.evaluate(envelope)
+        try:
+            approved = approved_tool_content((decision, approved))
+        except ToolCallFailed as exc:
+            logger.warning(
+                "tool_output_inspection_failed",
+                tool=call.name,
+                source=call.source,
+                agent_key=call.agent_key,
+                reason=exc.reason,
+            )
+            raise
+        except ToolCallBlocked:
+            # Returned, not raised: the service catches a block only from a
+            # before() hook or the runner, and the after-hooks still record it.
+            logger.warning(
+                "tool_call_blocked",
+                tool=call.name,
+                source=call.source,
+                agent_key=call.agent_key,
+                disposition=decision.enforced,
+                threat_level=decision.threat_level,
+                threat_types=decision.threat_types,
+            )
+            return ToolResult(
+                value=approved,
+                blocked=True,
+                findings=(result.findings or []) + [approved],
+            )
 
         if approved is result.value:
+            # Deliver only what was inspected: the serialized text replaces the
+            # original when its shape is unsafe to retain or it was truncated.
+            degradations: list[str] = []
             if metadata.get("shape_retention_safe") is False:
                 logger.warning(
                     "tool_output_shape_degraded",
@@ -200,29 +238,18 @@ class ContentInspectionHook:
                     agent_key=call.agent_key,
                     output_type=type(result.value).__name__,
                 )
-                findings = (result.findings or []) + [_UNSAFE_SHAPE_FINDING]
-                return ToolResult(
-                    value=content_text,
-                    blocked=False,
-                    findings=findings,
-                )
-            return result
-
-        # Content was sanitized or blocked.
-        blocked = isinstance(approved, str) and approved.startswith("TOOL_BLOCKED:")
-        findings = result.findings or []
-        if blocked:
-            logger.warning(
-                "tool_call_blocked",
-                tool=call.name,
-                source=call.source,
-                agent_key=call.agent_key,
-                reason=approved,
+                degradations.append(_UNSAFE_SHAPE_FINDING)
+            if metadata.get("truncated_for_inspection") is True:
+                degradations.append(_TRUNCATED_FINDING)
+            if not degradations:
+                return result
+            return ToolResult(
+                value=content_text,
+                blocked=False,
+                findings=(result.findings or []) + degradations,
             )
-            findings = findings + [approved]
 
+        # Content was sanitized.
         return ToolResult(
-            value=approved,
-            blocked=blocked,
-            findings=findings if findings else None,
+            value=approved, blocked=False, findings=result.findings or None
         )

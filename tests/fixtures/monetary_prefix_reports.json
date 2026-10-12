@@ -1,0 +1,22 @@
+[
+  {
+    "ticker": "EHL.AX",
+    "capture_date": "2026-10-05",
+    "report_fragment": "OPERATING_CASH_FLOW: AUD 266.69M\nFREE_CASH_FLOW: AUD 33.31M\n- **Net Income**: AUD 76.66M (Statutory NPAT) / AUD 89.0M (Operating NPAT)"
+  },
+  {
+    "ticker": "JHSF3.SA",
+    "capture_date": "2026-10-05",
+    "report_fragment": "OPERATING_CASH_FLOW: R$3.62B\nFREE_CASH_FLOW: R$1.67B\n- **Net Income**: R$2,131.41M (R$2.13B)"
+  },
+  {
+    "ticker": "6417.TWO",
+    "capture_date": "2026-10-05",
+    "report_fragment": "OPERATING_CASH_FLOW: NT$403.14M\nFREE_CASH_FLOW: NT$268.93M\n**Net Income**: NT$276.08M (~$8.7M USD)"
+  },
+  {
+    "ticker": "TCL.A.TO",
+    "capture_date": "2026-10-05",
+    "report_fragment": "OPERATING_CASH_FLOW: CAD 2.14B\nFREE_CASH_FLOW: CAD 593.86M\n**Net Income**: CAD 178.90M (TTM: CAD 335.20M)"
+  }
+]

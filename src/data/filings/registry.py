@@ -3,8 +3,10 @@
 import structlog
 
 from src.async_utils import run_with_hard_timeout
+from src.config import config
 from src.data.filings.base import FilingFetcher, FilingResult
 from src.error_safety import summarize_exception
+from src.llm_runtime.timeouts import require_allowance
 
 logger = structlog.get_logger(__name__)
 
@@ -39,10 +41,17 @@ class FilingRegistry:
             # Hard wall-clock so a hung HTTP call inside the fetcher (EDINET,
             # SEC EDGAR, etc.) cannot block the analysis pipeline. Internal
             # asyncio.to_thread calls in fetcher implementations rely on this
-            # outer wrapper rather than each carrying its own timeout.
+            # outer wrapper rather than each carrying its own timeout. The bound
+            # is read now and shrunk to a caller's enclosing deadline before
+            # get_filing_data() creates its coroutine; a spent allowance raises
+            # TimeoutError here and takes the same None path as a timeout.
+            timeout = require_allowance(
+                config.filing_fetch_timeout_seconds,
+                label=f"filing_fetch:{fetcher.source_name}",
+            )
             return await run_with_hard_timeout(
                 fetcher.get_filing_data(ticker),
-                timeout=30,
+                timeout=timeout,
                 label=f"filing_fetch:{fetcher.source_name}:{ticker}",
             )
         except Exception as e:

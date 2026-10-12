@@ -7,6 +7,8 @@ from enum import StrEnum
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
+from pydantic import ValidationError
+
 from src.error_safety import redact_sensitive_text
 
 ProviderName = Literal[
@@ -396,7 +398,14 @@ def classify_failure(
     )
     host = _extract_host(message) or _extract_host(root_message)
 
-    if isinstance(root, socket.gaierror) or any(
+    if isinstance(exc, ValidationError) or isinstance(root, ValidationError):
+        # Invalid arguments (e.g. a model's tool call) are a local contract failure.
+        # The type decides before any marker scan, and the documentation URL that
+        # pydantic appends to its message is not a host that was contacted.
+        kind: FailureKind = "application_error"
+        retryable = False
+        host = None
+    elif isinstance(root, socket.gaierror) or any(
         marker in combined
         for marker in (
             "nodename nor servname provided",
@@ -406,12 +415,14 @@ def classify_failure(
             "could not resolve host",
         )
     ):
-        kind: FailureKind = "dns_resolution"
+        kind = "dns_resolution"
         retryable = True
-    elif any(
+    elif isinstance(exc, TimeoutError) or any(
         marker in combined
         for marker in ("timed out", "timeout", "readtimeout", "connecttimeout")
     ):
+        # The type check covers TimeoutError subclasses whose name and message
+        # carry no marker, e.g. the budget refusal (src/llm_runtime/timeouts.py).
         kind = "timeout"
         retryable = True
     elif type(root).__name__ in {"YFPricesMissingError", "YFTzMissingError"} or any(

@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from src import cleanup
+from src.config import config
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +32,7 @@ async def test_cleanup_genai_clients_times_out_and_clears_client(monkeypatch):
     fake_llms = SimpleNamespace(get_all_llm_instances=lambda: {"quick": llm})
 
     monkeypatch.setitem(sys.modules, "src.llms", fake_llms)
-    monkeypatch.setattr(cleanup, "GENAI_CLIENT_CLOSE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(config, "genai_client_close_timeout_seconds", 0.01)
 
     with patch("src.cleanup.logger") as mock_logger:
         await cleanup._cleanup_genai_clients()

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import asdict
 from typing import Any
 
 import structlog
@@ -24,30 +25,40 @@ from src.agents.pm_verdict_metadata import (
 from src.agents.verdict_policy import (
     apply_required_verdict,
     assess_growth_gate,
+    assess_health_gate,
+    assess_initiation_gates,
     assess_verdict_policy,
+    maybe_cap_exception_growth_buy_to_hold,
     maybe_demote_buy_on_blocking_flags,
     maybe_floor_verdict_to_hold,
     maybe_qualify_buy_in_quick_mode,
     maybe_qualify_weak_asymmetry_buy,
     maybe_tag_dni_review_candidate,
     normalize_pm_block_contract,
+    project_compliance_gates,
     render_growth_gate_context,
+    render_initiation_gate_context,
 )
 from src.data_block_utils import (
     build_fenced_block,
     extract_data_block_field,
     fenced_block_pattern,
     has_parseable_data_block,
+    m_and_a_status_from_report,
     unfenced_label,
 )
 from src.decision_inputs import DecisionInputs
 from src.error_safety import summarize_exception
+from src.llm_runtime.responses import normalize_response
 
 # Verdict canonicalization lives in the neutral, dependency-free parser (it used
 # to live on src.agents.pm_verdict_metadata, which created a charts circular
 # import: pm_block -> pm_verdict_metadata -> agents/__init__ -> decision_nodes).
 from src.pm_claim_audit import (
+    active_decision_gate_ids,
     audit_pm_claims,
+    eligible_decision_claims,
+    normalize_decision_trace_citations,
     reconcile_final_decision_trace,
     render_decision_trace_instruction,
     validate_decision_trace,
@@ -63,6 +74,7 @@ from src.runtime_diagnostics import (
 
 from . import message_utils, support
 from . import runtime as agent_runtime
+from .analysis_integrity_prompt import ANALYSIS_INTEGRITY_BLOCK
 from .evidence_constraints import downstream_evidence_constraints
 from .fundamentals_reconciler import stamp_trade_block_price_currency
 from .governance_prompt import governance_block, governance_card
@@ -77,6 +89,32 @@ from .output_validation import (
 from .state import AgentState
 
 logger = structlog.get_logger(__name__)
+
+
+def _decision_inputs_from_state(
+    state: AgentState,
+    ticker: str,
+    *,
+    metrics: Mapping[str, Any] | None = None,
+    snapshot: Mapping[str, Any] | None = None,
+) -> DecisionInputs:
+    """Use the same decision context, preserving freshly validated inputs."""
+    from src.claim_policy import RAW_FINANCIAL_METRICS_INPUT
+    from src.tooling.structured_ingress import get_structured_ingress_payload
+    from src.validators.red_flag_detector import RedFlagDetector
+
+    fundamentals = get_valid_artifact_content(state, "fundamentals_report") or ""
+    raw_metrics, _ = get_structured_ingress_payload(state, RAW_FINANCIAL_METRICS_INPUT)
+    return DecisionInputs.from_metrics_and_snapshot(
+        metrics
+        if metrics is not None
+        else RedFlagDetector.extract_metrics(fundamentals, ticker=ticker),
+        RedFlagDetector.detect_sector(fundamentals) if fundamentals else None,
+        snapshot if snapshot is not None else state.get("analysis_snapshot"),
+        ticker=ticker,
+        liquidity=state.get("liquidity_assessment"),
+        raw_debt_to_equity_ratio=(raw_metrics or {}).get("debtToEquity"),
+    )
 
 
 def create_screen_rejection_node() -> Callable:
@@ -160,6 +198,9 @@ def create_screen_rejection_node() -> Callable:
         result["decision_policy"] = {
             "schema_version": 1,
             "source": "deterministic_screen",
+            "health_gate": asdict(
+                assess_health_gate(_decision_inputs_from_state(state, ticker))
+            ),
             "original_verdict": "DO_NOT_INITIATE",
             "final_verdict": "DO_NOT_INITIATE",
             "verdict_changed": False,
@@ -209,7 +250,6 @@ async def _recover_pm_verdict_metadata(
             provider=support.infer_provider_name(llm),
             model_name=support.get_model_name(llm),
             max_attempts=1,
-            max_transient_attempts=1,
         )
     except Exception as exc:
         logger.warning(
@@ -946,7 +986,7 @@ NEUTRAL ANALYST (Balanced):
             value_trap_warnings = RedFlagDetector.detect_value_trap_flags(
                 value_trap,
                 ticker,
-                m_and_a_status=extract_data_block_field(fundamentals, "M_AND_A_STATUS"),
+                m_and_a_status=m_and_a_status_from_report(fundamentals),
                 capital_context=_value_trap_capital_context(fundamentals),
                 governance_card=state.get("entity_governance_card"),
             )
@@ -1298,14 +1338,15 @@ NEUTRAL ANALYST (Balanced):
         red_flag_section, code_risk_subtotal = support.format_red_flag_section(
             pre_screening_result, red_flags
         )
-        floor_inputs = DecisionInputs.from_metrics_and_snapshot(
-            RedFlagDetector.extract_metrics(fundamentals or "", ticker=ticker),
-            RedFlagDetector.detect_sector(fundamentals) if fundamentals else None,
-            state.get("analysis_snapshot"),
-            ticker=ticker,
-        )
+        floor_inputs = _decision_inputs_from_state(state, ticker)
         growth_gate = assess_growth_gate(floor_inputs)
-        growth_gate_section = "\n\n" + render_growth_gate_context(floor_inputs)
+        health_gate = assess_health_gate(floor_inputs)
+        growth_gate_section = (
+            "\n\n"
+            + render_growth_gate_context(floor_inputs)
+            + "\n\n"
+            + render_initiation_gate_context(floor_inputs)
+        )
 
         all_context = f"""MARKET ANALYST REPORT:
 {support.summarize_for_pm(market, "market", 2500) if market else "N/A"}
@@ -1330,7 +1371,7 @@ POSITION PLANNER PROPOSAL:
 
 RISK TEAM DEBATE:
 {risk if risk else "N/A"}"""
-        pm_system_msg = agent_prompt.system_message
+        pm_system_msg = agent_prompt.system_message + ANALYSIS_INTEGRITY_BLOCK
         if strict_mode:
             pm_system_msg += _STRICT_PM_ADDENDUM
 
@@ -1411,6 +1452,9 @@ RISK TEAM DEBATE:
                 auditor=state.get("auditor_report") or None,
                 red_flags=red_flags,
             )
+            content_str = normalize_decision_trace_citations(
+                content_str, state.get("analysis_snapshot"), red_flags
+            )
             response_runnable = llm
             correction_used = False
 
@@ -1426,44 +1470,33 @@ RISK TEAM DEBATE:
                 trunc_info=trunc_info,
             )
 
-            validation = validate_required_output("portfolio_manager", content_str)
-            trace_sections = {"decision_facts", "decision_gates"}
+            validation = validate_required_output(
+                "portfolio_manager",
+                content_str,
+                snapshot=state.get("analysis_snapshot"),
+                red_flags=red_flags,
+            )
+            trace_sections = {"decision_facts", "decision_gates", "decision_trace"}
+            needs_correction = should_fail_closed(
+                "portfolio_manager",
+                validation=validation,
+                truncated=trunc_info["truncated"],
+                content=content_str,
+            )
+            repair_possible = bool(
+                eligible_decision_claims(state.get("analysis_snapshot"))
+                or active_decision_gate_ids(red_flags)
+            )
             if (
-                validation["missing"]
-                and set(validation["missing"]).issubset(trace_sections)
-                and not trunc_info["truncated"]
-            ):
-                correction_prompt = (
-                    "Your prior response omitted required decision-trace "
-                    "fields. Return the complete corrected response, including exactly "
-                    "one complete PM_BLOCK with DECISION_FACTS and DECISION_GATES. "
-                    "Do not return a patch and do not call tools."
-                )
-                (
-                    response,
-                    content_str,
-                    response_runnable,
-                ) = await invoke_structure_correction(
-                    correction_prompt,
-                    context_suffix="structure correction",
-                )
-                correction_used = True
-                trunc_info = detect_truncation(
-                    content_str,
-                    agent="portfolio_manager",
-                )
-                validation = validate_required_output(
-                    "portfolio_manager",
-                    content_str,
-                )
-            if (
-                recovery_llm is not None
-                and not correction_used
-                and should_fail_closed(
-                    "portfolio_manager",
-                    validation=validation,
-                    truncated=trunc_info["truncated"],
-                    content=content_str,
+                needs_correction
+                and repair_possible
+                and (
+                    recovery_llm is not None
+                    or (
+                        validation["missing"]
+                        and set(validation["missing"]).issubset(trace_sections)
+                        and not trunc_info["truncated"]
+                    )
                 )
             ):
                 failure_kind = classify_output_contract_failure(
@@ -1472,24 +1505,13 @@ RISK TEAM DEBATE:
                     truncated=trunc_info["truncated"],
                     validation=validation,
                 )
-                reasoning_setting = next(
-                    (
-                        str(value)
-                        for attr in ("reasoning_effort", "thinking_level")
-                        if isinstance((value := getattr(llm, attr, None)), str)
-                    ),
-                    None,
+                recovery_event = support.structural_recovery_event(
+                    "portfolio_manager",
+                    failure_kind,
+                    llm,
+                    recovery_llm or llm,
+                    content_str,
                 )
-                recovery_event: dict[str, Any] = {
-                    "schema_version": 1,
-                    "originating_agent": "portfolio_manager",
-                    "failure_kind": failure_kind,
-                    "original_model": support.get_model_name(llm),
-                    "recovery_model": support.get_model_name(recovery_llm),
-                    "reasoning_setting": reasoning_setting,
-                    "original_output_chars": len(content_str),
-                    "outcome": "attempted",
-                }
                 structural_recovery_events.append(recovery_event)
                 logger.warning(
                     "portfolio_manager_structural_recovery",
@@ -1498,27 +1520,42 @@ RISK TEAM DEBATE:
                     missing_sections=validation["missing"],
                 )
                 (
-                    response,
-                    content_str,
-                    response_runnable,
+                    corrected_response,
+                    corrected_content,
+                    correction_runnable,
                 ) = await invoke_structure_correction(
-                    "STRUCTURAL RECOVERY: Return one concise, complete response. "
-                    "Emit PM_BLOCK before supporting prose, include every required "
-                    "field, and close the block with its exact END marker. Do not "
-                    "return a patch and do not call tools.",
-                    context_suffix="structural recovery",
+                    "OUTPUT CONTRACT CORRECTION: Return one concise, complete response. "
+                    "Emit PM_BLOCK first and close its exact END marker. Cite at least "
+                    "one eligible canonical fact or active gate from the supplied decision "
+                    "trace instruction; both fields cannot be NONE. Every cited ID must "
+                    "be valid, and include all active gates. Do not invent evidence, "
+                    "return a patch, or call tools.",
+                    context_suffix="output contract correction",
                 )
-                recovery_event["outcome"] = "accepted_text"
                 correction_used = True
-                trunc_info = detect_truncation(
-                    content_str,
-                    agent="portfolio_manager",
-                )
+                if getattr(corrected_response, "tool_calls", None):
+                    recovery_event["outcome"] = "rejected_tool_calls"
+                else:
+                    response, content_str, response_runnable = (
+                        corrected_response,
+                        corrected_content,
+                        correction_runnable,
+                    )
+                    content_str = normalize_decision_trace_citations(
+                        content_str, state.get("analysis_snapshot"), red_flags
+                    )
+                trunc_info = detect_truncation(content_str, agent="portfolio_manager")
                 validation = validate_required_output(
                     "portfolio_manager",
                     content_str,
+                    snapshot=state.get("analysis_snapshot"),
+                    red_flags=red_flags,
                 )
-            decision_trace: dict[str, Any] | None = None
+            decision_trace = validate_decision_trace(
+                content_str,
+                state.get("analysis_snapshot"),
+                red_flags,
+            )
             final_output_invalid = should_fail_closed(
                 "portfolio_manager",
                 validation=validation,
@@ -1526,9 +1563,12 @@ RISK TEAM DEBATE:
                 content=content_str,
             )
             if structural_recovery_events:
-                structural_recovery_events[-1][
-                    "final_output_valid"
-                ] = not final_output_invalid
+                event = structural_recovery_events[-1]
+                event["final_output_valid"] = not final_output_invalid
+                if event.get("outcome") != "rejected_tool_calls":
+                    event["outcome"] = (
+                        "failed" if final_output_invalid else "accepted_text"
+                    )
             if not final_output_invalid:
                 content_str, decision_trace = reconcile_final_decision_trace(
                     content_str,
@@ -1583,6 +1623,7 @@ RISK TEAM DEBATE:
                         validation=validation,
                     ),
                 )
+                result["decision_trace"] = decision_trace
                 if structural_recovery_events:
                     result["structural_recovery_events"] = structural_recovery_events
                 return result
@@ -1702,6 +1743,21 @@ RISK TEAM DEBATE:
                         "to": "HOLD",
                     }
                 )
+            content_str, growth_capped = maybe_cap_exception_growth_buy_to_hold(
+                content_str,
+                decision_inputs=floor_inputs,
+                ticker=ticker,
+            )
+            if growth_capped:
+                policy_adjustments.append(
+                    {
+                        "kind": "growth_exception_ceiling",
+                        "rule": "growth_transition_exception",
+                        "reason": growth_gate.exception or "documented_exception",
+                        "from": "BUY",
+                        "to": "HOLD",
+                    }
+                )
             content_str, buy_demoted = maybe_demote_buy_on_blocking_flags(
                 content_str,
                 red_flags=red_flags,
@@ -1749,6 +1805,7 @@ RISK TEAM DEBATE:
             ):
                 if applied:
                     policy_qualifications.append({"kind": kind})
+            content_str = project_compliance_gates(content_str, floor_inputs)
             content_str, pm_claim_caveats = audit_pm_claims(
                 content_str,
                 fundamentals=fundamentals,
@@ -1764,6 +1821,21 @@ RISK TEAM DEBATE:
                 state.get("analysis_snapshot"),
                 red_flags,
             )
+            if decision_trace["status"] != "VALID":
+                if structural_recovery_events:
+                    structural_recovery_events[-1]["outcome"] = "failed"
+                    structural_recovery_events[-1]["final_output_valid"] = False
+                result = failure_artifact(
+                    "final_trade_decision",
+                    "Portfolio Manager decision trace invalid",
+                    provider=support.infer_provider_name(llm),
+                    fallback_content=content_str,
+                    error_kind="output_contract_violation",
+                )
+                result["decision_trace"] = decision_trace
+                if structural_recovery_events:
+                    result["structural_recovery_events"] = structural_recovery_events
+                return result
             _log_risk_tally_reconciliation(content_str, code_risk_subtotal, ticker)
             _log_pm_discipline_checks(
                 content_str, red_flags, valuation_reliability, ticker
@@ -1802,6 +1874,7 @@ RISK TEAM DEBATE:
                 "final_trade_decision",
                 cap_state_value(content_str, "final_trade_decision"),
                 provider=support.infer_provider_name(llm),
+                model=normalize_response(response).model,
             )
             result["red_flags"] = pm_generated_red_flags
             result["decision_trace"] = decision_trace
@@ -1812,11 +1885,23 @@ RISK TEAM DEBATE:
                 "verdict_changed": original_verdict != pm_metadata.verdict,
                 "adjustments": policy_adjustments,
                 "qualifications": policy_qualifications,
+                "health_gate": asdict(health_gate),
                 "growth_gate": {
+                    "status": growth_gate.status,
                     "hard_fail": growth_gate.hard_fail,
                     "exception": growth_gate.exception,
                     "reason": growth_gate.reason,
+                    "applicable": health_gate.applicable,
                 },
+                "initiation_gates": [
+                    {
+                        "rule": gate.rule,
+                        "status": gate.status,
+                        "reason": gate.reason,
+                        "value": gate.value,
+                    }
+                    for gate in assess_initiation_gates(floor_inputs)
+                ],
                 "buy_blockers": buy_blockers,
             }
             if structural_recovery_events:
@@ -2064,8 +2149,8 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
             # analyst-judgment fields (segment flags, ROIC quality, cycle
             # position, …) legitimately ride the parsed DATA_BLOCK — they are the
             # Senior analyst's output, not a competing canonical store.
-            decision_inputs = DecisionInputs.from_metrics_and_snapshot(
-                metrics, sector, analysis_snapshot, ticker=ticker
+            decision_inputs = _decision_inputs_from_state(
+                state, ticker, metrics=metrics, snapshot=analysis_snapshot
             )
 
             red_flags, pre_screening_result = RedFlagDetector.detect_red_flags(
@@ -2126,9 +2211,7 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                     vt_warnings = RedFlagDetector.detect_value_trap_flags(
                         value_trap_report,
                         ticker,
-                        m_and_a_status=extract_data_block_field(
-                            fundamentals_report, "M_AND_A_STATUS"
-                        ),
+                        m_and_a_status=m_and_a_status_from_report(fundamentals_report),
                         capital_context=_value_trap_capital_context(
                             fundamentals_report
                         ),

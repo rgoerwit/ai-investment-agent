@@ -9,7 +9,9 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import RunnableConfig
 
+from src.config import config as settings_config
 from src.error_safety import summarize_failure_details
+from src.llm_runtime.timeouts import enclosing_deadline
 from src.runtime_diagnostics import (
     classify_failure,
     failure_artifact,
@@ -146,81 +148,87 @@ def create_apac_specialist_node(llm, *, fallback_llm=None) -> Callable:
         ]
 
         active_llm = llm
-        try:
+        # The node total is this node's enclosing deadline, not a per-call
+        # timeout: the first call and the direct retry share it.
+        with enclosing_deadline(float(settings_config.apac_node_total_timeout_seconds)):
             try:
-                response = await agent_runtime.invoke_with_rate_limit_handling(
-                    active_llm,
-                    messages,
-                    context=agent_prompt.agent_name,
-                    provider=support.infer_provider_name(active_llm),
-                    model_name=support.get_model_name(active_llm),
-                    overall_timeout_seconds=240,
-                )
-            except Exception as exc:
-                if fallback_llm is None or not _is_content_policy_block(exc):
-                    raise
-                payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-                logger.warning(
-                    "apac_policy_block_direct_retry",
-                    ticker=ticker,
-                    # Was a hardcoded provider_code=1301, which became a lie the
-                    # moment this branch stopped being GLM-only. Report what was
-                    # actually reached instead of asserting a vendor code.
-                    model=support.get_model_name(active_llm),
-                    # get_base_url() returns the FULL url — path, query, and any
-                    # embedded credential. Only the parsed host may be logged.
-                    endpoint_host=failure_classification.get_endpoint_host(active_llm),
-                    payload_sha256=hashlib.sha256(payload_json.encode()).hexdigest(),
-                    payload_chars=len(payload_json),
-                )
-                active_llm = fallback_llm
-                response = await agent_runtime.invoke_with_rate_limit_handling(
-                    active_llm,
-                    messages,
-                    context=f"{agent_prompt.agent_name} Direct Retry",
-                    canonical_agent=agent_prompt.agent_name,
-                    provider=support.infer_provider_name(active_llm),
-                    model_name=support.get_model_name(active_llm),
-                    overall_timeout_seconds=240,
-                    max_attempts=1,
-                    max_transient_attempts=1,
-                )
-            text = message_utils.extract_string_content(response.content).strip()
-            if text != APAC_NO_MATERIAL_SENTINEL:
-                text = cap_state_value(text, APAC_REPORT_FIELD)
+                try:
+                    response = await agent_runtime.invoke_with_rate_limit_handling(
+                        active_llm,
+                        messages,
+                        context=agent_prompt.agent_name,
+                        provider=support.infer_provider_name(active_llm),
+                        model_name=support.get_model_name(active_llm),
+                    )
+                except Exception as exc:
+                    if fallback_llm is None or not _is_content_policy_block(exc):
+                        raise
+                    payload_json = json.dumps(
+                        payload, ensure_ascii=False, sort_keys=True
+                    )
+                    logger.warning(
+                        "apac_policy_block_direct_retry",
+                        ticker=ticker,
+                        # Was a hardcoded provider_code=1301, which became a lie the
+                        # moment this branch stopped being GLM-only. Report what was
+                        # actually reached instead of asserting a vendor code.
+                        model=support.get_model_name(active_llm),
+                        # get_base_url() returns the FULL url — path, query, and any
+                        # embedded credential. Only the parsed host may be logged.
+                        endpoint_host=failure_classification.get_endpoint_host(
+                            active_llm
+                        ),
+                        payload_sha256=hashlib.sha256(
+                            payload_json.encode()
+                        ).hexdigest(),
+                        payload_chars=len(payload_json),
+                    )
+                    active_llm = fallback_llm
+                    response = await agent_runtime.invoke_with_rate_limit_handling(
+                        active_llm,
+                        messages,
+                        context=f"{agent_prompt.agent_name} Direct Retry",
+                        canonical_agent=agent_prompt.agent_name,
+                        provider=support.infer_provider_name(active_llm),
+                        model_name=support.get_model_name(active_llm),
+                        max_attempts=1,
+                    )
+                text = message_utils.extract_string_content(response.content).strip()
+                if text != APAC_NO_MATERIAL_SENTINEL:
+                    text = cap_state_value(text, APAC_REPORT_FIELD)
 
-            result = success_artifact(
-                APAC_REPORT_FIELD,
-                text,
-                provider=support.infer_provider_name(active_llm),
-            )
-            result["sender"] = "apac_regional_specialist"
-            result["messages"] = [response]
-            result["prompts_used"] = prompts_used
-            return result
-        except Exception as exc:
-            provider = support.infer_provider_name(active_llm)
-            details = classify_failure(
-                exc,
-                provider=provider,
-                model_name=support.get_model_name(active_llm),
-                class_name=type(active_llm).__name__,
-                base_url=get_base_url(active_llm),
-            )
-            logger.warning(
-                "artifact_unavailable",
-                ticker=ticker,
-                artifact=APAC_REPORT_FIELD,
-                artifact_status="UNAVAILABLE",
-                **summarize_failure_details(details, operation="apac_specialist"),
-            )
-            result = unavailable_artifact(
-                APAC_REPORT_FIELD,
-                details=details,
-                fallback_content=APAC_UNAVAILABLE_SENTINEL,
-            )
-            result["sender"] = "apac_regional_specialist"
-            result["prompts_used"] = prompts_used
-            return result
+                result = success_artifact(
+                    APAC_REPORT_FIELD,
+                    text,
+                    provider=support.infer_provider_name(active_llm),
+                )
+                result["sender"] = "apac_regional_specialist"
+                result["messages"] = [response]
+                result["prompts_used"] = prompts_used
+                return result
+            except Exception as exc:
+                provider = support.infer_provider_name(active_llm)
+                details = classify_failure(
+                    exc,
+                    provider=provider,
+                    model_name=support.get_model_name(active_llm),
+                    class_name=type(active_llm).__name__,
+                    base_url=get_base_url(active_llm),
+                )
+                logger.warning(
+                    "artifact_unavailable",
+                    ticker=ticker,
+                    artifact=APAC_REPORT_FIELD,
+                    artifact_status="UNAVAILABLE",
+                    **summarize_failure_details(details, operation="apac_specialist"),
+                )
+                result = unavailable_artifact(
+                    APAC_REPORT_FIELD,
+                    details=details,
+                    fallback_content=APAC_UNAVAILABLE_SENTINEL,
+                )
+                result["sender"] = "apac_regional_specialist"
+                result["prompts_used"] = prompts_used
+                return result
 
     return apac_specialist_node

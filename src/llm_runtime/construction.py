@@ -1,7 +1,7 @@
 """Application-owned seat construction shared by graph and auxiliary workflows."""
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -10,13 +10,16 @@ from langchain_core.language_models import BaseChatModel
 from src.config import Settings, config
 from src.llm_runtime.adapters.base import SeatModelRequest
 from src.llm_runtime.bindings import BindingPlan, resolve_binding_plan
+from src.llm_runtime.dispatch import attach_request_cap_override
 from src.llm_runtime.factory import SeatModelFactory
 from src.llm_runtime.profiles import reasoning_value_for_seat, resolve_profile
 from src.llm_runtime.seats import (
     SEATS,
     ModelIntent,
     ReasoningAdjustment,
+    SeatExecutionPolicy,
     SeatId,
+    SeatSpec,
 )
 from src.service_tiers import resolve_google_service_tier
 
@@ -31,6 +34,8 @@ class LegacySeatRequest:
     model_override: str | None
     resolved_model: str
     include_reasoning_output: bool = False
+    # A per-construction replacement for the seat's registered policy, or None.
+    execution_policy: SeatExecutionPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -57,17 +62,42 @@ def build_legacy_model(
     *,
     graph_factories: LegacyGraphFactories | None = None,
 ) -> BaseChatModel | None:
-    """Construct any legacy seat through one compatibility dispatcher."""
+    """Construct any legacy seat through one compatibility dispatcher.
 
+    The seat policy's client timeout is stamped on the result, so every
+    dispatch resolves it whichever legacy factory built the client.
+    """
+
+    model = _build_legacy_client(request, graph_factories=graph_factories)
+    if model is None:
+        return None
+    spec = _spec_with_policy(request.seat_id, request.execution_policy)
+    attach_request_cap_override(model, spec.execution_policy.client_timeout_seconds)
+    return model
+
+
+def _build_legacy_client(
+    request: LegacySeatRequest,
+    *,
+    graph_factories: LegacyGraphFactories | None,
+) -> BaseChatModel | None:
     from src import llms
 
     seat_id = request.seat_id
+    spec = _spec_with_policy(seat_id, request.execution_policy)
+    policy = spec.execution_policy
     settings = request.settings
     quick_mode = request.quick_mode
+    pinned_tier = (
+        "standard"
+        if policy.standard_tier_only
+        or (quick_mode and policy.standard_tier_in_quick_mode)
+        else None
+    )
     callbacks = list(request.callbacks)
     output_tokens = request.output_tokens
     model_override = request.model_override
-    reasoning_output_kwargs = (
+    reasoning_output_kwargs: dict[str, Any] = (
         {"include_thoughts": True} if request.include_reasoning_output else {}
     )
     quick_factory = (
@@ -88,24 +118,38 @@ def build_legacy_model(
     )
 
     if seat_id is SeatId.ARTICLE_WRITER:
+        # The seat policy is the whole construction contract.
+        writer_kwargs: dict[str, Any] = {}
+        if policy.sampling_temperature is not None:
+            writer_kwargs["temperature"] = policy.sampling_temperature
+        if policy.client_timeout_seconds is not None:
+            writer_kwargs["timeout"] = policy.client_timeout_seconds
         return llms.create_writer_llm(
             callbacks=callbacks,
             model=request.resolved_model,
             api_key_override=settings.get_claude_api_key(),
             settings=settings,
+            **writer_kwargs,
         )
     if seat_id is SeatId.ARTICLE_WRITER_REVIEW_FALLBACK:
         return llms.create_writer_openai_fallback_llm(
             callbacks=callbacks,
             model=request.resolved_model,
             settings=settings,
+            request_timeout_seconds=policy.client_timeout_seconds,
         )
     if seat_id is SeatId.ARTICLE_WRITER_BASE_FALLBACK:
+        fallback_kwargs: dict[str, Any] = {}
+        if policy.sampling_temperature is not None:
+            fallback_kwargs["temperature"] = policy.sampling_temperature
+        if policy.client_timeout_seconds is not None:
+            fallback_kwargs["timeout"] = policy.client_timeout_seconds
         return llms.create_writer_fallback_llm(
             callbacks=callbacks,
             model=request.resolved_model,
             api_key=settings.get_google_api_key(),
             settings=settings,
+            **fallback_kwargs,
         )
     if seat_id is SeatId.EDITOR:
         return llms.create_editor_llm(
@@ -163,8 +207,7 @@ def build_legacy_model(
         return llms.create_gemini_model(
             request.resolved_model or runtime.quick_think_llm,
             temperature=0.0,
-            timeout=10,
-            max_retries=1,
+            timeout=int(policy.client_timeout_seconds or 10),
             service_tier="standard",
             api_key=settings.get_google_api_key(),
             settings=settings,
@@ -187,6 +230,7 @@ def build_legacy_model(
             quick_mode=quick_mode,
             callbacks=callbacks,
             max_output_tokens=output_tokens,
+            service_tier=pinned_tier,
             settings=settings,
         )
     if seat_id is SeatId.ANALYST_RETRY:
@@ -194,9 +238,9 @@ def build_legacy_model(
             model=request.resolved_model,
             callbacks=callbacks,
             max_output_tokens=output_tokens,
+            service_tier=pinned_tier,
             settings=settings,
         )
-    policy = SEATS[seat_id].execution_policy
     spec = SEATS[seat_id]
     if quick_mode or spec.normal_intent in {ModelIntent.FAST, ModelIntent.CLASSIFIER}:
         return quick_factory(
@@ -211,10 +255,9 @@ def build_legacy_model(
                 if policy.client_timeout_seconds is not None
                 else None
             ),
-            max_retries=policy.sdk_max_retries,
             callbacks=callbacks,
             max_output_tokens=output_tokens,
-            service_tier=("standard" if policy.standard_tier_only else None),
+            service_tier=pinned_tier,
             thinking_level_bump=(seat_id is SeatId.VALUE_TRAP and not quick_mode),
             api_key=settings.get_google_api_key(),
             settings=settings,
@@ -227,13 +270,34 @@ def build_legacy_model(
             if policy.client_timeout_seconds is not None
             else None
         ),
-        max_retries=policy.sdk_max_retries,
         callbacks=callbacks,
         max_output_tokens=output_tokens,
+        service_tier=pinned_tier,
         api_key=settings.get_google_api_key(),
         settings=settings,
         **reasoning_output_kwargs,
     )
+
+
+def _spec_with_policy(
+    seat_id: SeatId, execution_policy: SeatExecutionPolicy | None
+) -> SeatSpec:
+    """The registered seat, with its policy replaced for one construction."""
+    spec = SEATS[seat_id]
+    if execution_policy is None:
+        return spec
+    return replace(spec, execution_policy=execution_policy)
+
+
+def seat_policy_with(seat_id: SeatId, **overrides: Any) -> SeatExecutionPolicy | None:
+    """The seat's registered policy with the non-None ``overrides`` applied.
+
+    Returns None when nothing is overridden, so the registered policy stands.
+    """
+    fields = {key: value for key, value in overrides.items() if value is not None}
+    if not fields:
+        return None
+    return replace(SEATS[seat_id].execution_policy, **fields)
 
 
 def _default_legacy_builder(request: LegacySeatRequest) -> BaseChatModel | None:
@@ -253,8 +317,20 @@ def build_model_for_seat(
     model_override: str | None = None,
     legacy_builder: LegacyBuilder | None = None,
     include_reasoning_output: bool = False,
+    execution_policy: SeatExecutionPolicy | None = None,
+    reasoning_intent: ModelIntent | None = None,
 ) -> BaseChatModel | None:
-    """Construct one fresh client from a canonical seat binding."""
+    """Construct one fresh client from a canonical seat binding.
+
+    ``execution_policy`` replaces the seat's registered policy for this one
+    construction (a caller's explicit temperature, client timeout or SDK
+    attempts); every adapter and the legacy builder read it from the request.
+
+    ``reasoning_intent`` resolves the reasoning value for that intent from the
+    binding's own ladder instead of the seat's. It returns ``None`` when the
+    binding cannot honour it: the legacy schema, a seat without reasoning
+    control, or a ladder whose value for the intent equals the seat's own.
+    """
 
     resolved_plan = plan or resolve_binding_plan(settings)
     callback_list = list(callbacks)
@@ -265,6 +341,8 @@ def build_model_for_seat(
     ):
         return None
     if resolved_plan.schema == "legacy":
+        if reasoning_intent is not None:
+            return None
         builder = legacy_builder or _default_legacy_builder
         binding = (
             resolved_plan.quick_bindings if quick_mode else resolved_plan.bindings
@@ -279,6 +357,7 @@ def build_model_for_seat(
                 model_override=model_override,
                 resolved_model=binding.model,
                 include_reasoning_output=include_reasoning_output,
+                execution_policy=execution_policy,
             )
         )
 
@@ -288,7 +367,7 @@ def build_model_for_seat(
             f"{seat_id.value} model override {model_override!r} differs from the "
             f"resolved binding {binding.model!r}; pin it in environment settings"
         )
-    spec = SEATS[seat_id]
+    spec = _spec_with_policy(seat_id, execution_policy)
     if spec.execution_policy.standard_tier_only or (
         quick_mode and spec.execution_policy.standard_tier_in_quick_mode
     ):
@@ -324,6 +403,15 @@ def build_model_for_seat(
                 and not quick_mode
             ),
         )
+    if reasoning_intent is not None:
+        if reasoning_value is None:
+            return None
+        intent_value = reasoning_value_for_seat(
+            binding.profile, reasoning_intent, adjust=False
+        )
+        if intent_value is None or intent_value == reasoning_value:
+            return None
+        reasoning_value = intent_value
     model = (factory or SeatModelFactory()).build(
         SeatModelRequest(
             binding=binding,
@@ -360,16 +448,39 @@ def writer_seat_fallback_chain(
     callbacks: Sequence[BaseCallbackHandler] = (),
     plan: BindingPlan | None = None,
     factory: SeatModelFactory | None = None,
+    policy_overrides: Mapping[str, Any] | None = None,
 ) -> list[WriterSeatTier]:
-    """Return lazy, provider-neutral editorial fallback tiers."""
+    """Return lazy, provider-neutral editorial fallback tiers.
+
+    ``policy_overrides`` (``SeatExecutionPolicy`` field values) apply to every
+    tier's construction, so a caller's explicit settings reach the tier that
+    actually writes. The legacy chain honours ``sampling_temperature`` only
+    and refuses any other override rather than drop it.
+    """
 
     resolved_plan = plan or resolve_binding_plan(settings)
+    overrides = {
+        key: value
+        for key, value in (policy_overrides or {}).items()
+        if value is not None
+    }
     if resolved_plan.schema == "legacy":
+        unkept = sorted(set(overrides) - {"sampling_temperature"})
+        if unkept:
+            raise ValueError(
+                f"the legacy writer fallback chain cannot keep {unkept}; "
+                "only sampling_temperature reaches its tiers"
+            )
         from src.llms import writer_fallback_chain
 
+        legacy_kwargs: dict[str, Any] = {}
+        if overrides.get("sampling_temperature") is not None:
+            legacy_kwargs["temperature"] = overrides["sampling_temperature"]
         return [
             WriterSeatTier(tier.label, tier.build)
-            for tier in writer_fallback_chain(callbacks=list(callbacks))
+            for tier in writer_fallback_chain(
+                callbacks=list(callbacks), **legacy_kwargs
+            )
         ]
 
     model_factory = factory or SeatModelFactory()
@@ -390,6 +501,7 @@ def writer_seat_fallback_chain(
                 factory=model_factory,
                 callbacks=callbacks,
                 output_tokens=16_384,
+                execution_policy=seat_policy_with(seat, **overrides),
             )
 
         tiers.append(WriterSeatTier(label, build))

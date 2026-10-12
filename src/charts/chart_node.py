@@ -30,6 +30,7 @@ from langgraph.types import RunnableConfig
 
 from src.charts.base import CurrencyFormat
 from src.config import config as app_config
+from src.exchange_metadata import CURRENCY_DISPLAY_FORMATS, SUFFIX_TO_CURRENCY_CODE
 from src.runtime_config import get_runtime_config
 from src.thesis_constants import ANALYST_COVERAGE_MAX
 
@@ -38,56 +39,66 @@ logger = structlog.get_logger(__name__)
 
 # Exchange suffix to currency format mapping
 # Handles both prefix currencies ($100) and suffix currencies (100 zł)
-CURRENCY_MAP: dict[str, CurrencyFormat] = {
-    # Asia-Pacific - Prefix currencies
-    ".HK": CurrencyFormat("HK$", "prefix"),  # Hong Kong Dollar
-    ".T": CurrencyFormat("¥", "prefix"),  # Japanese Yen
-    ".TW": CurrencyFormat("NT$", "prefix"),  # Taiwan Dollar
-    ".TWO": CurrencyFormat("NT$", "prefix"),  # Taiwan OTC
-    ".KS": CurrencyFormat("₩", "prefix"),  # Korean Won (KOSPI)
-    ".KQ": CurrencyFormat("₩", "prefix"),  # Korean Won (KOSDAQ)
-    ".SS": CurrencyFormat("CN¥", "prefix"),  # Chinese Yuan (Shanghai)
-    ".SZ": CurrencyFormat("CN¥", "prefix"),  # Chinese Yuan (Shenzhen)
-    ".AX": CurrencyFormat("A$", "prefix"),  # Australian Dollar
-    ".SI": CurrencyFormat("S$", "prefix"),  # Singapore Dollar
-    ".BK": CurrencyFormat("฿", "prefix"),  # Thai Baht
-    ".JK": CurrencyFormat("Rp", "prefix", space=True),  # Indonesian Rupiah
-    ".KL": CurrencyFormat("RM", "prefix", space=True),  # Malaysian Ringgit
-    ".NS": CurrencyFormat("₹", "prefix"),  # Indian Rupee (NSE)
-    ".BO": CurrencyFormat("₹", "prefix"),  # Indian Rupee (BSE)
-    # Europe - Prefix currencies
-    ".L": CurrencyFormat("£", "prefix"),  # British Pound
-    ".AS": CurrencyFormat("€", "prefix"),  # Euro (Amsterdam)
-    ".PA": CurrencyFormat("€", "prefix"),  # Euro (Paris)
-    ".DE": CurrencyFormat("€", "prefix"),  # Euro (Frankfurt/Xetra)
-    ".F": CurrencyFormat("€", "prefix"),  # Euro (Frankfurt)
-    ".MI": CurrencyFormat("€", "prefix"),  # Euro (Milan)
-    ".MC": CurrencyFormat("€", "prefix"),  # Euro (Madrid)
-    ".BR": CurrencyFormat("€", "prefix"),  # Euro (Brussels)
-    ".LS": CurrencyFormat("€", "prefix"),  # Euro (Lisbon)
-    ".VI": CurrencyFormat("€", "prefix"),  # Euro (Vienna)
-    ".HE": CurrencyFormat("€", "prefix"),  # Euro (Helsinki)
-    ".IR": CurrencyFormat("€", "prefix"),  # Euro (Dublin)
-    ".AT": CurrencyFormat("€", "prefix"),  # Euro (Athens)
-    ".SW": CurrencyFormat("CHF", "prefix", space=True),  # Swiss Franc
-    # Europe - Suffix currencies
-    ".ST": CurrencyFormat("kr", "suffix", space=True),  # Swedish Krona
-    ".CO": CurrencyFormat("kr", "suffix", space=True),  # Danish Krone
-    ".OL": CurrencyFormat("kr", "suffix", space=True),  # Norwegian Krone
-    ".IC": CurrencyFormat("kr", "suffix", space=True),  # Icelandic Króna
-    ".WA": CurrencyFormat("zł", "suffix", space=True),  # Polish Złoty
-    ".PR": CurrencyFormat("Kč", "suffix", space=True),  # Czech Koruna
-    ".BD": CurrencyFormat("Ft", "suffix", space=True),  # Hungarian Forint
-    ".RO": CurrencyFormat("lei", "suffix", space=True),  # Romanian Leu
-    # Americas
-    ".TO": CurrencyFormat("C$", "prefix"),  # Canadian Dollar (Toronto)
-    ".V": CurrencyFormat("C$", "prefix"),  # Canadian Dollar (TSX Venture)
-    ".SA": CurrencyFormat("R$", "prefix", space=True),  # Brazilian Real
-    ".MX": CurrencyFormat("MX$", "prefix"),  # Mexican Peso
-    # Middle East & Africa
-    ".TA": CurrencyFormat("₪", "prefix"),  # Israeli Shekel
-    ".JO": CurrencyFormat("R", "prefix", space=True),  # South African Rand
+# These legacy display-only suffixes do not imply supported exchange metadata.
+_DISPLAY_ONLY_CURRENCIES = {
+    ".IR": "EUR",
+    ".AT": "EUR",
+    ".IC": "ISK",
+    ".TA": "ILS",
+    ".JO": "ZAR",
 }
+_DISPLAY_SUFFIXES = (
+    ".HK",
+    ".T",
+    ".TW",
+    ".TWO",
+    ".KS",
+    ".KQ",
+    ".SS",
+    ".SZ",
+    ".AX",
+    ".SI",
+    ".BK",
+    ".JK",
+    ".KL",
+    ".NS",
+    ".BO",
+    ".L",
+    ".AS",
+    ".PA",
+    ".DE",
+    ".F",
+    ".MI",
+    ".MC",
+    ".BR",
+    ".LS",
+    ".VI",
+    ".HE",
+    ".IR",
+    ".AT",
+    ".SW",
+    ".ST",
+    ".CO",
+    ".OL",
+    ".IC",
+    ".WA",
+    ".PR",
+    ".BD",
+    ".RO",
+    ".TO",
+    ".V",
+    ".SA",
+    ".MX",
+    ".TA",
+    ".JO",
+)
+CURRENCY_MAP: dict[str, CurrencyFormat] = {}
+for _suffix in _DISPLAY_SUFFIXES:
+    _currency = (
+        _DISPLAY_ONLY_CURRENCIES.get(_suffix) or SUFFIX_TO_CURRENCY_CODE[_suffix]
+    )
+    _symbol, _placement, _space = CURRENCY_DISPLAY_FORMATS[_currency]
+    CURRENCY_MAP[_suffix] = CurrencyFormat(_symbol, _placement, space=_space)
 
 
 def _get_currency_format(ticker: str) -> CurrencyFormat:

@@ -12,9 +12,18 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from src.agents import invoke_with_rate_limit_handling
+from src.config import config as settings_config
 
 # Fixed jitter value for deterministic tests
 FIXED_JITTER = 5.0
+# The largest explicit max_attempts these tests pass. LLM_ATTEMPTS caps every
+# explicit count, so the ceiling is raised to it here to exercise the counts.
+_LARGEST_EXPLICIT_ATTEMPTS = 3
+
+
+@pytest.fixture(autouse=True)
+def _attempt_ceiling(monkeypatch):
+    monkeypatch.setattr(settings_config, "llm_attempts", _LARGEST_EXPLICIT_ATTEMPTS)
 
 
 class Test429Detection:
@@ -214,7 +223,6 @@ class TestNonRateLimitErrors:
                 runnable,
                 {"input": "test"},
                 max_attempts=3,
-                max_transient_attempts=3,
             )
 
         assert result == "success"
@@ -251,7 +259,6 @@ class TestNonRateLimitErrors:
                         runnable,
                         {"input": "test"},
                         max_attempts=2,
-                        max_transient_attempts=2,
                         context="Fundamentals Analyst",
                         provider="google",
                         model_name="gemini-3.5-flash",
@@ -289,6 +296,7 @@ class TestQuietMode:
         with patch("asyncio.sleep", new_callable=AsyncMock):
             with patch("src.agents.runtime.settings_config") as mock_config:
                 mock_config.quiet_mode = True
+                mock_config.llm_attempts = _LARGEST_EXPLICIT_ATTEMPTS
                 with patch("src.agents.runtime.logger") as mock_logger:
                     await invoke_with_rate_limit_handling(
                         runnable,
@@ -313,6 +321,7 @@ class TestQuietMode:
 
         with patch("src.agents.runtime.settings_config") as mock_config:
             mock_config.quiet_mode = True
+            mock_config.llm_attempts = _LARGEST_EXPLICIT_ATTEMPTS
             with patch("src.agents.runtime.logger") as mock_logger:
                 with pytest.raises(Exception, match="401 Unauthorized"):
                     await invoke_with_rate_limit_handling(
@@ -341,6 +350,7 @@ class TestQuietMode:
             with patch("src.agents.runtime.random.uniform", return_value=FIXED_JITTER):
                 with patch("src.agents.runtime.settings_config") as mock_config:
                     mock_config.quiet_mode = False
+                    mock_config.llm_attempts = _LARGEST_EXPLICIT_ATTEMPTS
                     with patch("src.agents.runtime.logger") as mock_logger:
                         result = await invoke_with_rate_limit_handling(
                             runnable,

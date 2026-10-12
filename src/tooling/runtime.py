@@ -6,29 +6,110 @@ policy and post-call untrusted-content inspection run consistently.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 import structlog
 
 from src.async_utils import run_with_hard_timeout
-from src.error_safety import redact_sensitive_text
+from src.config import config as settings_config
+from src.error_safety import redact_sensitive_text, summarize_exception
+from src.llm_runtime.timeouts import (
+    clamp_to_operational_deadline,
+    operational_time_left,
+    tool_call_deadline,
+)
 from src.observability import start_tool_observation
 from src.runtime_diagnostics import classify_failure
 
 logger = structlog.get_logger(__name__)
 
-TOOL_CALL_TIMEOUT_SECONDS = 45.0
+
+def tool_execution_timeout_seconds() -> float:
+    """The runner's allowance for this call: the setting, clamped to what is left."""
+    return clamp_to_operational_deadline(settings_config.tool_execution_timeout_seconds)
+
+
+def tool_execution_with_inspection_timeout_seconds() -> float:
+    """This call's allowance for the hooks *and* the runner, clamped to what is left.
+
+    Derived, runner plus hooks, so it can never be narrower than the runner.
+    ``ToolExecutionService.execute`` bounds every call with it. A result
+    ``<= 0`` means the allowance is already spent and the call must fail as a
+    timeout unstarted.
+    """
+    return clamp_to_operational_deadline(
+        settings_config.tool_execution_timeout_seconds
+        + settings_config.tool_hooks_timeout_seconds
+    )
+
+
+ToolTimeoutScope: TypeAlias = Literal[
+    "not_started",
+    "with_inspection",
+    "runner",
+    "before_hooks",
+    "after_hooks",
+    "hooks_allowance_spent",
+]
+
+
+class _ScopedToolTimeout(TimeoutError):
+    """A timeout inside the combined scope, already classified and logged.
+
+    ``execute`` re-raises it unchanged; only a plain ``TimeoutError`` reaching
+    ``execute`` is the combined scope's own bound firing, which it raises as
+    ``with_inspection`` (or ``not_started`` when refused unstarted), so every
+    timeout leaves the service carrying its scope.
+    """
+
+    def __init__(self, message: str, *, scope: ToolTimeoutScope) -> None:
+        super().__init__(message)
+        self.scope = scope
+
 
 ToolSource: TypeAlias = Literal[
     "toolnode", "preflight", "consultant", "editor", "legal_counsel", "auditor"
 ]
 
 
+# The secret-free reason codes of a tool call that produced no usable result:
+# what failure observers record, what the model is told after ``TOOL_ERROR:``
+# or ``TOOL_BLOCKED:``, and what callers compare against. Defined here only;
+# everywhere else imports them (tests/tooling/test_tool_reason_codes.py).
+TOOL_TIMEOUT = "TOOL_TIMEOUT"
+TOOL_EXECUTION_FAILED = "TOOL_EXECUTION_FAILED"
+# Inspection could not finish inside the caller's allowance.
+INSPECTION_TIMEOUT = "INSPECTION_TIMEOUT"
+# Inspection could not run (a fail-closed backend error).
+INSPECTION_FAILED = "INSPECTION_FAILED"
+# Inspection enforced a block on the content the tool would have returned.
+INSPECTION_BLOCKED = "INSPECTION_BLOCKED"
+
+_TOOL_ERROR_PREFIX = "TOOL_ERROR: "
+
+
 class ToolCallBlocked(RuntimeError):
-    """Raised by a hook to block tool execution before the runner is invoked."""
+    """Raised to block a tool call: by a ``before()`` hook, or by the tool
+    itself when its own content inspection enforced a block.
+
+    Either way the service returns a ``blocked`` ``ToolResult`` (the
+    after-hooks see a runner's block, not a before() hook's) and completion
+    observers are told of it, so the evidence ledger records ``BLOCKED``.
+    """
+
+
+class ToolCallFailed(RuntimeError):
+    """Raised by a tool or hook for a typed failure that produced no result.
+
+    ``reason`` is a secret-free code (``INSPECTION_FAILED``): it is what
+    failure observers record and what the model is told, never exception prose.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass
@@ -56,6 +137,35 @@ class ToolHook(Protocol):
     async def before(self, call: ToolInvocation) -> ToolInvocation: ...
 
     async def after(self, call: ToolInvocation, result: ToolResult) -> ToolResult: ...
+
+
+@runtime_checkable
+class ToolFailureObserver(Protocol):
+    """Optional hook capability: told, synchronously, of a call that failed.
+
+    A hook that must keep a trace of every attempt (the evidence ledger keeps
+    the requested URL) implements this with ``ToolCompletionObserver``.
+    ``scope`` is the classified timeout scope, or None for a failure that was
+    not a timeout.
+    """
+
+    def failed(
+        self, call: ToolInvocation, reason: str, scope: ToolTimeoutScope | None
+    ) -> None: ...
+
+
+@runtime_checkable
+class ToolCompletionObserver(Protocol):
+    """Optional hook capability: told, synchronously, of the result a call returned.
+
+    The success side of ``ToolFailureObserver``: for every call exactly one of
+    ``completed`` and ``failed`` fires (neither for a cancelled call). It sees
+    the final result after every ``after()`` hook and admission check, so a
+    durable record belongs here, never in ``after()``, which can run for a
+    result the caller is then told timed out.
+    """
+
+    def completed(self, call: ToolInvocation, result: ToolResult) -> None: ...
 
 
 class ToolExecutionService:
@@ -93,54 +203,170 @@ class ToolExecutionService:
         call: ToolInvocation,
         runner: Callable[[dict[str, Any]], Awaitable[Any]],
     ) -> ToolResult:
+        """Run ``before()`` hooks, the runner and ``after()`` hooks under one bound.
+
+        The combined bound (``tool_execution_with_inspection_timeout_seconds``)
+        is deadline-only: when it fires the caller gets ``TimeoutError`` at
+        once and the late result, inspected or not, is discarded with the
+        orphaned task. The runner keeps its own narrower bound inside it.
+
+        Every timeout is logged once with the scope that produced it: a
+        ``_ScopedToolTimeout`` from inside (runner, a hook's own timeout, the
+        hooks' allowance spent) passes through unchanged; only the combined
+        bound firing, or a call refused unstarted, is labelled here.
+
+        The call's one outcome is decided here too: observers are told it
+        failed, or that it completed with the result returned to the caller.
+        """
+        try:
+            result = await self._execute_bounded(call, runner)
+        except Exception as exc:
+            self._notify_failed(call, exc)
+            raise
+        self._notify_completed(call, result)
+        return result
+
+    def _notify_completed(self, call: ToolInvocation, result: ToolResult) -> None:
+        """Tell each observing hook the result the caller receives."""
+        self._notify(
+            call,
+            ToolCompletionObserver,
+            "tool_completion_observer_failed",
+            lambda hook: hook.completed(call, result),
+        )
+
+    def _notify_failed(self, call: ToolInvocation, exc: Exception) -> None:
+        """Tell each observing hook the call failed, with the timeout scope."""
+        reason, scope = tool_failure_reason(exc)
+        self._notify(
+            call,
+            ToolFailureObserver,
+            "tool_failure_observer_failed",
+            lambda hook: hook.failed(call, reason, scope),
+        )
+
+    def _notify(
+        self,
+        call: ToolInvocation,
+        observer: type,
+        fault_event: str,
+        notify: Callable[[Any], None],
+    ) -> None:
+        """Notify each hook implementing *observer* of the call's one outcome.
+
+        Here, at the one chokepoint, so every surface (graph node, consultant,
+        auditor, preflight) leaves the same trace. An observer's own fault is
+        logged, never allowed to replace the result or failure being reported.
+        """
+        for hook in self._hooks:
+            if not isinstance(hook, observer):
+                continue
+            try:
+                notify(hook)
+            except Exception as observer_exc:
+                logger.warning(
+                    fault_event,
+                    tool=call.name,
+                    **summarize_exception(observer_exc, operation=fault_event),
+                )
+
+    async def _execute_bounded(
+        self,
+        call: ToolInvocation,
+        runner: Callable[[dict[str, Any]], Awaitable[Any]],
+    ) -> ToolResult:
+        allowance = tool_execution_with_inspection_timeout_seconds()
+        if allowance <= 0:
+            # The caller's allowance is already spent: run no hook, no tool.
+            _log_timeout(call, "not_started", allowance)
+            raise _ScopedToolTimeout(
+                f"Tool call '{call.name}' not started: allowance already spent",
+                scope="not_started",
+            )
+        # Bound before the inner task exists, so it (and any tool call made
+        # from inside it) inherits this call's deadline, kept back by a margin
+        # so the runner's own bound always fires before this one.
+        with tool_call_deadline(allowance):
+            try:
+                return await run_with_hard_timeout(
+                    self._execute_hooked(call, runner),
+                    timeout=allowance,
+                    label=f"tool_with_hooks:{call.name}",
+                )
+            except _ScopedToolTimeout:
+                raise
+            except TimeoutError as exc:
+                _log_timeout(call, "with_inspection", allowance)
+                raise _ScopedToolTimeout(
+                    f"Tool call '{call.name}' with its hooks exceeded {allowance:.1f}s",
+                    scope="with_inspection",
+                ) from exc
+
+    async def _execute_hooked(
+        self,
+        call: ToolInvocation,
+        runner: Callable[[dict[str, Any]], Awaitable[Any]],
+    ) -> ToolResult:
         try:
             for hook in self._hooks:
+                _require_hook_admission(call)
                 call = await hook.before(call)
+            # A last hook that outlived the allowance must not start the runner.
+            _require_hook_admission(call)
+        except _ScopedToolTimeout:
+            raise
+        except TimeoutError as exc:
+            # The hook's own timeout (a stalled policy lookup), not this
+            # scope's: the combined bound cancels, it does not raise in here.
+            raise _scoped_timeout(
+                call, "before_hooks", "timed out in a before() hook"
+            ) from exc
         except ToolCallBlocked as exc:
-            logger.warning(
-                "tool_call_blocked",
-                tool=call.name,
-                source=call.source,
-                agent_key=call.agent_key,
-                reason=redact_sensitive_text(str(exc)),
-            )
-            return ToolResult(
-                value=f"TOOL_BLOCKED: {exc}",
-                blocked=True,
-                findings=[redact_sensitive_text(str(exc))],
-            )
+            return _blocked_result(call, exc)
 
+        # Read after the before() hooks, so time they spent counts against a
+        # caller deadline rather than extending it.
+        timeout_seconds = tool_execution_timeout_seconds()
         try:
-            with start_tool_observation(
-                tool_name=call.name,
-                input_payload={
-                    "arg_keys": sorted(call.args.keys()),
-                    "ticker": call.args.get("ticker"),
-                },
-                metadata={
-                    "tool_name": call.name,
-                    "tool_source": call.source,
-                    "agent_key": call.agent_key,
-                },
+            if timeout_seconds <= 0:
+                # The caller's allowance is already spent: never start the tool.
+                raise TimeoutError("deadline already passed")
+            with (
+                start_tool_observation(
+                    tool_name=call.name,
+                    input_payload={
+                        "arg_keys": sorted(call.args.keys()),
+                        "ticker": call.args.get("ticker"),
+                    },
+                    metadata={
+                        "tool_name": call.name,
+                        "tool_source": call.source,
+                        "agent_key": call.agent_key,
+                    },
+                ),
+                tool_call_deadline(timeout_seconds),
             ):
+                # The runner's deadline is bound too: a tool call the runner
+                # makes (an MCP spot check routed back through this service)
+                # gets what this runner has left, never a fresh allowance.
                 result = ToolResult(
                     value=await run_with_hard_timeout(
                         runner(call.args),
-                        timeout=TOOL_CALL_TIMEOUT_SECONDS,
+                        timeout=timeout_seconds,
                         label=f"tool:{call.name}",
                     )
                 )
-        except asyncio.TimeoutError as exc:
-            logger.warning(
-                "tool_call_timeout",
-                tool=call.name,
-                source=call.source,
-                agent_key=call.agent_key,
-                timeout_seconds=TOOL_CALL_TIMEOUT_SECONDS,
-            )
-            raise TimeoutError(
-                f"Tool call '{call.name}' exceeded {TOOL_CALL_TIMEOUT_SECONDS:.1f}s"
+        except TimeoutError as exc:
+            raise _scoped_timeout(
+                call,
+                "runner",
+                f"exceeded {max(timeout_seconds, 0.0):.1f}s",
+                timeout_seconds=timeout_seconds,
             ) from exc
+        except ToolCallBlocked as exc:
+            # The tool enforced a block on its own content: the same blocked
+            # result a before() hook produces, which after-hooks then see.
+            result = _blocked_result(call, exc)
         except Exception as exc:
             # after() hooks only run for successfully produced tool outputs.
             # Failed executions propagate immediately so callers keep the original
@@ -161,8 +387,100 @@ class ToolExecutionService:
             raise
 
         for hook in reversed(self._hooks):
-            result = await hook.after(call, result)
+            _require_hook_admission(call)
+            try:
+                result = await hook.after(call, result)
+            except TimeoutError as exc:
+                raise _scoped_timeout(
+                    call, "after_hooks", "timed out in an after() hook"
+                ) from exc
+        # The last hook may itself have spent the allowance: the caller has
+        # already been told it timed out, so the result is not returned.
+        _require_hook_admission(call)
         return result
+
+
+def tool_failure_reason(exc: BaseException) -> tuple[str, ToolTimeoutScope | None]:
+    """The one classification of a tool call that raised: its reason code and,
+    for a timeout this service scoped, where it fired.
+
+    A timeout is ``TOOL_TIMEOUT``, a ``ToolCallFailed`` its own code, anything
+    else ``TOOL_EXECUTION_FAILED``: never the exception's class or prose. Failure
+    observers record it, and every surface tells the model the same code.
+    """
+    if isinstance(exc, _ScopedToolTimeout):
+        return TOOL_TIMEOUT, exc.scope
+    if isinstance(exc, TimeoutError):
+        return TOOL_TIMEOUT, None
+    if isinstance(exc, ToolCallFailed):
+        return exc.reason, None
+    return TOOL_EXECUTION_FAILED, None
+
+
+def tool_error_message(reason: str) -> str:
+    """The model-facing text of a failed tool call with *reason*."""
+    return f"{_TOOL_ERROR_PREFIX}{reason}"
+
+
+def tool_error_text(exc: BaseException) -> str:
+    """What a model is told of a tool call that raised (``tool_failure_reason``)."""
+    reason, _ = tool_failure_reason(exc)
+    return tool_error_message(reason)
+
+
+def _blocked_result(call: ToolInvocation, exc: ToolCallBlocked) -> ToolResult:
+    """The one result shape of a blocked call, wherever the block was raised."""
+    reason = redact_sensitive_text(str(exc))
+    logger.warning(
+        "tool_call_blocked",
+        tool=call.name,
+        source=call.source,
+        agent_key=call.agent_key,
+        reason=reason,
+    )
+    return ToolResult(value=f"TOOL_BLOCKED: {reason}", blocked=True, findings=[reason])
+
+
+def _log_timeout(
+    call: ToolInvocation, scope: str, timeout_seconds: float | None
+) -> None:
+    logger.warning(
+        "tool_call_timeout",
+        tool=call.name,
+        source=call.source,
+        agent_key=call.agent_key,
+        timeout_seconds=timeout_seconds,
+        scope=scope,
+    )
+
+
+def _require_hook_admission(call: ToolInvocation) -> None:
+    """Refuse to start (or to continue past) a hook once the allowance is spent.
+
+    Checked before every ``before()`` and ``after()`` hook and after the last
+    of each, so a hook that overruns -- including one that swallowed the
+    combined bound's cancellation and finished in an orphaned task -- never
+    lets a later hook, the runner or a returned result follow it. Admission
+    cannot undo what a hook already did, so no hook writes a durable record in
+    ``after()``: the ledger records through ``ToolCompletionObserver``, told
+    only of a result that passed this check and reached the caller.
+    """
+    if operational_time_left() <= 0:
+        raise _scoped_timeout(
+            call, "hooks_allowance_spent", "no allowance left for its hooks"
+        )
+
+
+def _scoped_timeout(
+    call: ToolInvocation,
+    scope: ToolTimeoutScope,
+    detail: str,
+    *,
+    timeout_seconds: float | None = None,
+) -> _ScopedToolTimeout:
+    """Log one classified timeout and return it, for the caller to raise."""
+    _log_timeout(call, scope, timeout_seconds)
+    return _ScopedToolTimeout(f"Tool call '{call.name}' {detail}", scope=scope)
 
 
 TOOL_SERVICE = ToolExecutionService()

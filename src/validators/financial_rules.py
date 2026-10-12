@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -11,7 +12,13 @@ import structlog
 
 from src.data_block_utils import extract_data_block_field
 from src.earnings_baseline import is_material_baseline_distortion
+from src.fx_normalization import canonical_currency_code
 from src.guidance_vocabulary import all_transient_tax_terms
+from src.monetary import (
+    extract_monetary_currency,
+    iter_monetary_tokens,
+    parse_monetary_amount,
+)
 from src.text_patterns import SENTENCE_SPLIT_RE
 from src.thesis_constants import (
     PE_MAX,
@@ -167,20 +174,6 @@ def contains_transient_strength_marker(report: str | None) -> bool:
     )
 
 
-_OCF_MAGNITUDE: dict[str, float] = {
-    "T": 1e12,
-    "TRILLION": 1e12,
-    "B": 1e9,
-    "BN": 1e9,
-    "BILLION": 1e9,
-    "M": 1e6,
-    "MN": 1e6,
-    "MM": 1e6,
-    "MILLION": 1e6,
-    "K": 1e3,
-}
-
-
 def sector_leverage_thresholds(
     sector: Sector,
     *,
@@ -194,10 +187,6 @@ def sector_leverage_thresholds(
     return (300, 2.5, 150) if strict_mode else (500, 2.0, 100)
 
 
-_OCF_NUM_MAG_RE = re.compile(
-    r"(\d[\d,]*\.?\d*)\s*(trillion|billion|million|bn|mm|mn|[tbmk])\b",
-    re.IGNORECASE,
-)
 _OCF_LINE_RE = re.compile(
     r"(?im)^[^\n]*\b(?:operating cash flow|cash flow from operations|"
     r"net cash from operating activities|cfo)\b[^\n]*$"
@@ -205,10 +194,6 @@ _OCF_LINE_RE = re.compile(
 _OCF_META_FIELD_RE = re.compile(
     r"(?i)\b(REPORT_DATE|PERIOD_END|PERIOD_START|PERIOD|CURRENCY|SCOPE|"
     r"AUDITOR_SIGNATURE_DATE|AUDIT_STATUS)\s*[:=]\s*([^|\n]+)"
-)
-_OCF_CURRENCY_RE = re.compile(
-    r"(?i)(?:\b(?:currency\s*[:=]\s*)?(USD|SGD|PLN|JPY|KRW|CNY|HKD|"
-    r"EUR|GBP|AUD|CAD|TWD|INR)\b|S\$)"
 )
 
 
@@ -259,10 +244,7 @@ def _normalize_ocf_period(value: str | None) -> str | None:
 
 
 def _extract_ocf_currency(text: str | None) -> str | None:
-    match = _OCF_CURRENCY_RE.search(text or "")
-    if not match:
-        return None
-    return "SGD" if match.group(0).upper() == "S$" else match.group(1).upper()
+    return extract_monetary_currency(text)
 
 
 def extract_datablock_ocf_observation(
@@ -297,19 +279,16 @@ def parse_ocf_amount(text: str | None) -> float | None:
     """
     if not text:
         return None
-    match = _OCF_NUM_MAG_RE.search(text)
-    if match:
-        try:
-            value = float(match.group(1).replace(",", ""))
-        except ValueError:
-            return None
-        return value * _OCF_MAGNITUDE.get(match.group(2).upper(), 1.0)
-    bare = re.search(r"(\d[\d,]{6,})", text)  # bare large number, e.g. 920000000
-    if bare:
-        try:
-            return float(bare.group(1).replace(",", ""))
-        except ValueError:
-            return None
+    matches = list(iter_monetary_tokens(text))
+    # Preserve preference for an explicit magnitude over unlabeled numbers;
+    # a year or footnote preceding the amount must not hide it.
+    for match in matches:
+        if match.group("magnitude"):
+            return parse_monetary_amount(match.group(0))
+    for match in matches:
+        if len(match.group("number").split(".", 1)[0]) >= 7:
+            # Small bare numbers may be years or footnotes, not money.
+            return parse_monetary_amount(match.group(0))
     return None
 
 
@@ -391,7 +370,8 @@ def _ocf_comparison_blocker(
     if (
         headline.currency
         and forensic.currency
-        and headline.currency.upper() != forensic.currency.upper()
+        and canonical_currency_code(headline.currency)
+        != canonical_currency_code(forensic.currency)
     ):
         return f"CURRENCY_MISMATCH ({headline.currency} vs {forensic.currency})"
     if not headline.currency or not forensic.currency:
@@ -506,6 +486,12 @@ def detect_ocf_corroboration_flag(
     }
 
 
+# Relative gap between the report's DE_RATIO and the canonical raw ratio that
+# raises the non-blocking DE_DISCREPANCY review flag. Rounding and a holding
+# company's financial-debt-only figure stay inside it; a unit slip (x100) does not.
+DE_DISCREPANCY_TOLERANCE = 0.25
+
+
 def detect_red_flags(
     metrics: Any,
     ticker: str = "UNKNOWN",
@@ -520,6 +506,7 @@ def detect_red_flags(
     input is the canonical production contract; the dict path is retained for
     the deterministic golden tests and any snapshot-free caller.
     """
+    raw_inputs = metrics
     metrics = getattr(metrics, "decision_metrics", metrics)
     red_flags: list[dict[str, Any]] = []
 
@@ -588,7 +575,56 @@ def detect_red_flags(
         )
         logger.warning("score_consistency_flag", ticker=ticker, kind=kind)
 
-    debt_to_equity = metrics.get("debt_to_equity")
+    # Gate value in percent. The canonical raw ratio (src/data/debt_equity.py) owns
+    # it when present; the report's DE_RATIO only fills in when no raw value exists
+    # and otherwise can only raise a non-blocking discrepancy.
+    report_de_pct = metrics.get("debt_to_equity")
+    raw_de_ratio = getattr(raw_inputs, "raw_debt_to_equity_ratio", None)
+    canonical_de_used = isinstance(raw_de_ratio, int | float) and math.isfinite(
+        raw_de_ratio
+    )
+    debt_to_equity = (
+        raw_de_ratio * 100.0
+        if canonical_de_used and raw_de_ratio is not None
+        else report_de_pct
+    )
+    de_gate_floor = min(
+        (t for t in (leverage_threshold, coverage_de_threshold) if t is not None),
+        default=None,
+    )
+    if (
+        canonical_de_used
+        and isinstance(report_de_pct, int | float)
+        and debt_to_equity is not None
+        and de_gate_floor is not None
+        and max(report_de_pct, debt_to_equity) > de_gate_floor
+        and abs(report_de_pct - debt_to_equity)
+        > DE_DISCREPANCY_TOLERANCE * max(abs(debt_to_equity), 1e-9)
+    ):
+        red_flags.append(
+            {
+                "type": "DE_DISCREPANCY",
+                "severity": "WARNING",
+                "detail": (
+                    f"Report DE_RATIO implies {report_de_pct:.1f}% but the canonical "
+                    f"raw debt/equity is {debt_to_equity:.1f}%; leverage gates use "
+                    "the canonical value"
+                ),
+                "action": "REVIEW",
+                "risk_penalty": 0.0,
+                "rationale": (
+                    "The report and the data layer disagree on leverage (for example "
+                    "a holding-company financial-debt correction). The report cannot "
+                    "authorize or lift a code-owned reject on its own."
+                ),
+            }
+        )
+        logger.info(
+            "de_discrepancy",
+            ticker=ticker,
+            report_de_pct=report_de_pct,
+            canonical_de_pct=debt_to_equity,
+        )
     role = str(entity_role or metrics.get("listing_role") or "").upper()
     holdco_leverage_explained = role in {"PURE_HOLDCO", "INTERMEDIATE_HOLDCO"} and (
         (
@@ -753,7 +789,6 @@ def detect_red_flags(
 
     net_margin = metrics.get("net_margin")
     pb_ratio = metrics.get("pb_ratio")
-    debt_to_equity = metrics.get("debt_to_equity")
     if (
         net_margin is not None
         and net_margin < 5.0
@@ -1024,18 +1059,18 @@ def detect_red_flags(
     ):
         ocf_ni_ratio = ocf / ni_for_ocf
         if ocf_ni_ratio > 3.0:
-            penalty, label = (
-                (1.5, "likely data error or period mismatch")
+            label = (
+                "likely data error or period mismatch"
                 if ocf_ni_ratio > 5.0
-                else (1.0, "unusual, verify data source")
+                else "unusual, verify data source"
             )
             red_flags.append(
                 {
                     "type": "SUSPICIOUS_OCF_NI_RATIO",
                     "severity": "WARNING",
                     "detail": f"OCF {ocf_ni_ratio:.1f}x net income — {label}",
-                    "action": "RISK_PENALTY",
-                    "risk_penalty": penalty,
+                    "action": "REVIEW",
+                    "risk_penalty": 0.0,
                     "rationale": f"Operating cash flow exceeding net income by >{ocf_ni_ratio:.0f}x is unusual and may indicate a data source error, wrong currency, or period mismatch. Cross-validate with an independent source.",
                 }
             )

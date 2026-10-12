@@ -11,7 +11,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from src.text_patterns import RESULT_ENVELOPE_RE, URL_RE
-from src.tooling.runtime import ToolInvocation, ToolResult
+from src.tooling.runtime import ToolInvocation, ToolResult, tool_error_message
 
 _MAX_CONTENT_CHARS = 20_000
 _MAX_RECORDS = 200
@@ -36,6 +36,11 @@ _ERROR_ENVELOPE_RE = re.compile(
     r")"
 )
 _AUTH_ERROR_RE = re.compile(r"(?is)\b(?:401|403|unauthorized|forbidden)\b")
+
+# Tools that retain an attempted document acquisition, including failed/blocked calls.
+DOCUMENT_ACQUISITION_TOOLS = frozenset(
+    {"get_official_document", "extract_guidance_sources", "get_official_filings"}
+)
 
 ExecutionStatus = Literal["SUCCEEDED", "FAILED", "BLOCKED", "SKIPPED"]
 EvidenceStatus = Literal[
@@ -70,6 +75,11 @@ class EvidenceRecord:
     execution_status: ExecutionStatus
     evidence_status: EvidenceStatus
     reason: str | None = None
+    original_content_chars: int | None = None
+    retained_content_chars: int | None = None
+    content_truncated: bool = False
+    # Resolved by the recorder after inspection, never from document metadata.
+    authority_by_url: tuple[tuple[str, EvidenceAuthority], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -150,6 +160,7 @@ def resolve_evidence_authority(
     tool_name: str,
     evidence_status: EvidenceStatus,
     urls: tuple[str, ...],
+    authority_by_url: tuple[tuple[str, EvidenceAuthority], ...] = (),
 ) -> EvidenceAuthority:
     """Resolve evidence authority once from source kind and validated URLs."""
     if evidence_status != "EVIDENCE_FOUND":
@@ -163,7 +174,10 @@ def resolve_evidence_authority(
 
     from src.tools.official_documents import resolve_source_authority
 
-    authorities = tuple(resolve_source_authority(url) for url in urls)
+    recorded = dict(authority_by_url)
+    authorities = tuple(
+        recorded.get(url) or resolve_source_authority(url) for url in urls
+    )
     if "PRIMARY_REGISTRY" in authorities:
         return "PRIMARY_REGISTRY"
     if "PRIMARY_ISSUER" in authorities:
@@ -211,6 +225,7 @@ def bind_fetched_evidence(
         tool_name=str(getattr(record, "tool_name", "")),
         evidence_status="EVIDENCE_FOUND",
         urls=(canonical_url,),
+        authority_by_url=tuple(getattr(record, "authority_by_url", ()) or ()),
     )
     return EvidenceBinding(
         evidence_id=evidence_record_id(record),
@@ -222,7 +237,7 @@ def bind_fetched_evidence(
     )
 
 
-def _bounded_text(value: Any) -> str:
+def _value_text(value: Any) -> str:
     if isinstance(value, str):
         text = value
     elif isinstance(value, dict | list | tuple):
@@ -236,6 +251,11 @@ def _bounded_text(value: Any) -> str:
         text = str(value)
     else:
         text = f"<{type(value).__name__}>"
+    return text
+
+
+def _bounded_text(value: Any) -> str:
+    text = _value_text(value)
     if len(text) <= _MAX_CONTENT_CHARS:
         return text
     return text[:_MAX_CONTENT_CHARS] + "\n...[evidence ledger truncated]"
@@ -248,25 +268,36 @@ def classify_evidence_value(
     blocked: bool = False,
 ) -> tuple[ExecutionStatus, EvidenceStatus, str | None, str]:
     """Classify one inspected tool result without trusting its outer status alone."""
-    content = _bounded_text(value)
+    source = _value_text(value)
+    content = _bounded_text(source)
     if blocked:
         return "BLOCKED", "UNAVAILABLE", "TOOL_BLOCKED", content
 
-    status_match = _STATUS_RE.search(content)
-    reason_match = _REASON_RE.search(content)
+    # Classify the full inspected result; ledger retention limits must not hide a
+    # useful neighbor or a provider error. Unclosed result envelopes prove neither.
+    depth = tag_count = 0
+    for tag in re.finditer(r"(?i)</?result\b", source):
+        depth += -1 if tag.group().startswith("</") else 1
+        tag_count += 1
+        if depth not in {0, 1}:
+            return "SUCCEEDED", "INSUFFICIENT", "MALFORMED_RESULT_ENVELOPE", content
+    if depth:
+        return "SUCCEEDED", "INSUFFICIENT", "MALFORMED_RESULT_ENVELOPE", content
+    blocks = RESULT_ENVELOPE_RE.findall(source)
+    if tag_count != 2 * len(blocks):
+        return "SUCCEEDED", "INSUFFICIENT", "MALFORMED_RESULT_ENVELOPE", content
+
+    status_match = _STATUS_RE.search(source)
+    reason_match = _REASON_RE.search(source)
     status = status_match.group(1).upper() if status_match else ""
     reason = reason_match.group(1).upper() if reason_match else None
 
     # Some adapters return STATUS: EVIDENCE_FOUND around a nested provider error.
     # Error semantics override that optimistic wrapper.
-    error_blocks = [
-        block
-        for block in RESULT_ENVELOPE_RE.findall(content)
-        if _ERROR_ENVELOPE_RE.search(block)
-    ]
+    error_blocks = [block for block in blocks if _ERROR_ENVELOPE_RE.search(block)]
     valid_blocks = [
         block
-        for block in RESULT_ENVELOPE_RE.findall(content)
+        for block in blocks
         if not _ERROR_ENVELOPE_RE.search(block)
         and ("<url>" in block.casefold() or "<content>" in block.casefold())
     ]
@@ -275,9 +306,9 @@ def classify_evidence_value(
             "EVIDENCE_FOUND" if status == "EVIDENCE_FOUND" else "RESULTS_FOUND"
         )
         return "SUCCEEDED", partial_status, "PARTIAL_PROVIDER_ERROR", content
-    if _ERROR_ENVELOPE_RE.search(content):
+    if _ERROR_ENVELOPE_RE.search(source):
         error_status: EvidenceStatus = (
-            "AUTH_ERROR" if _AUTH_ERROR_RE.search(content) else "INSUFFICIENT"
+            "AUTH_ERROR" if _AUTH_ERROR_RE.search(source) else "INSUFFICIENT"
         )
         return "SUCCEEDED", error_status, reason or "EMBEDDED_PROVIDER_ERROR", content
 
@@ -301,19 +332,26 @@ def classify_evidence_value(
         else:
             evidence_status = "INSUFFICIENT"
         return "SUCCEEDED", evidence_status, reason, content
-    if "DOCUMENT_METADATA:" in content:
+    if "DOCUMENT_METADATA:" in source:
         return "SUCCEEDED", "EVIDENCE_FOUND", reason, content
-    if "<search_results" in content or "Foreign Source Search Results" in content:
+    if "<search_results" in source or "Foreign Source Search Results" in source:
         return "SUCCEEDED", "RESULTS_FOUND", reason, content
-    if tool_name == "get_official_filings" and content.strip():
+    if tool_name == "get_official_filings" and source.strip():
         return "SUCCEEDED", "EVIDENCE_FOUND", reason, content
-    if not content.strip():
+    if not source.strip():
         return "SUCCEEDED", "NO_RESULTS", reason, ""
     return "SUCCEEDED", "RESULTS_FOUND", reason, content
 
 
 class EvidenceRecorder:
-    """Record the final post-hook result without mutating tool execution."""
+    """Record each tool call's one outcome without mutating tool execution.
+
+    A ``ToolCompletionObserver`` and a ``ToolFailureObserver``: the service
+    tells it either the result the caller received (``completed``) or why the
+    call produced none (``failed``), never both. Its ``after()`` is a
+    pass-through, so the record does not depend on its place in the hook
+    chain and no result the caller was told timed out is ever recorded.
+    """
 
     def __init__(self) -> None:
         self._records: list[EvidenceRecord] = []
@@ -348,14 +386,35 @@ class EvidenceRecorder:
             )
         )
 
+    def _admit(
+        self, dedupe_key: tuple[str | None, str, str, tuple[str, ...]], chars: int
+    ) -> bool:
+        """Whether a record with this identity and size may be appended; if so,
+        its identity is remembered. A duplicate is dropped, a full ledger marks
+        its overflow once."""
+        if dedupe_key in self._dedupe_keys:
+            return False
+        if (
+            len(self._records) >= _MAX_RECORDS
+            or self._content_chars + chars > _MAX_TOTAL_CONTENT_CHARS
+        ):
+            self._record_overflow()
+            return False
+        self._dedupe_keys.add(dedupe_key)
+        return True
+
     async def before(self, call: ToolInvocation) -> ToolInvocation:
         return call
 
     async def after(self, call: ToolInvocation, result: ToolResult) -> ToolResult:
-        content = _bounded_text(result.value)
-        execution_status, evidence_status, reason, _ = classify_evidence_value(
+        return result
+
+    def completed(self, call: ToolInvocation, result: ToolResult) -> None:
+        """Record the result the caller received, blocked or not."""
+        original = _value_text(result.value)
+        execution_status, evidence_status, reason, content = classify_evidence_value(
             call.name,
-            content,
+            original,
             blocked=result.blocked,
         )
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -364,15 +423,8 @@ class EvidenceRecorder:
         # content fetched from two DIFFERENT source URLs is two corroborating
         # sources, not a duplicate, and must keep both identities.
         dedupe_key = (call.agent_key, call.name, digest, requested_urls)
-        if dedupe_key in self._dedupe_keys:
-            return result
-        if (
-            len(self._records) >= _MAX_RECORDS
-            or self._content_chars + len(content) > _MAX_TOTAL_CONTENT_CHARS
-        ):
-            self._record_overflow()
-            return result
-        self._dedupe_keys.add(dedupe_key)
+        if not self._admit(dedupe_key, len(content)):
+            return
         urls = tuple(
             dict.fromkeys(
                 normalized
@@ -395,10 +447,62 @@ class EvidenceRecorder:
                 execution_status=execution_status,
                 evidence_status=evidence_status,
                 reason=reason,
+                original_content_chars=len(original),
+                retained_content_chars=min(len(original), _MAX_CONTENT_CHARS),
+                content_truncated=len(original) > _MAX_CONTENT_CHARS,
+                authority_by_url=tuple(
+                    (
+                        url,
+                        resolve_evidence_authority(
+                            tool_name=call.name,
+                            evidence_status=evidence_status,
+                            urls=(url,),
+                        ),
+                    )
+                    for url in urls
+                )
+                if not result.blocked
+                else (),
             )
         )
         self._content_chars += len(content)
-        return result
+
+    def failed(self, call: ToolInvocation, reason: str, scope: str | None) -> None:
+        """Keep the attempt of a call that produced no result.
+
+        ``completed()`` never runs for it, so without this the requested URL
+        (and that the call timed out, and where) is lost and the model is left
+        to guess the cause from prose. Same record, ``FAILED`` and ``UNAVAILABLE``.
+        """
+        content = tool_error_message(reason) + (
+            f"\nTIMEOUT_SCOPE: {scope}" if scope else ""
+        )
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        requested_urls = _requested_urls(call.args)
+        if not self._admit(
+            (call.agent_key, call.name, digest, requested_urls), len(content)
+        ):
+            return
+        self._records.append(
+            EvidenceRecord(
+                sequence=len(self._records) + 1,
+                agent_key=call.agent_key,
+                tool_name=call.name,
+                source=call.source,
+                content=content,
+                content_sha256=digest,
+                requested_urls=requested_urls,
+                urls=(),
+                blocked=False,
+                findings=(f"TIMEOUT_SCOPE:{scope}",) if scope else (),
+                execution_status="FAILED",
+                evidence_status="UNAVAILABLE",
+                reason=reason,
+                original_content_chars=len(content),
+                retained_content_chars=len(content),
+            )
+        )
+        self._content_chars += len(content)
 
     def snapshot(self, *, agent_key: str | None = None) -> list[EvidenceRecord]:
         if agent_key is None:

@@ -72,12 +72,6 @@ def _register_metrics(state: dict, payload: dict) -> dict:
 _SNAPSHOT = FROZEN / "2330_TW_metrics_snapshot.json"
 
 
-@pytest.fixture(autouse=True)
-def _replay_no_network(request):
-    """Pure parsing only — disable sockets (reuses pytest-socket)."""
-    request.getfixturevalue("socket_disabled")
-
-
 def _read(name: str) -> str:
     return (FROZEN / name).read_text(encoding="utf-8")
 
@@ -92,6 +86,10 @@ def test_data_block_metrics_golden():
     assert metrics["pb_ratio"] == 8.71
     assert metrics["sector"] == "technology"
     assert metrics["adjusted_health_score"] == 75.0
+    assert metrics["adjusted_growth_score"] == 100.0
+    assert metrics["ocf"] == 2_274.98 * 1_000_000_000
+    assert metrics["fcf"] == 992.38 * 1_000_000_000
+    assert metrics["net_income"] == 1_717.05 * 1_000_000_000
 
 
 def test_data_block_red_flags_golden():
@@ -114,7 +112,7 @@ def test_decision_inputs_path_matches_dict_path():
 
     for block in (
         _read("2330_TW_data_block.txt"),
-        _read("2330_TW_data_block.txt").replace("D/E: 0.20", "D/E: 9.00"),
+        _read("2330_TW_data_block.txt").replace("DE_RATIO: 0.20", "DE_RATIO: 9.00"),
     ):
         metrics = extract_metrics(block)
         sector = detect_sector(block)
@@ -161,10 +159,11 @@ def test_trade_block_golden():
 def test_extreme_leverage_forces_reject():
     """Invariant: D/E above the standard-sector reject threshold ⇒ REJECT.
 
-    The body's ``- D/E: 0.20`` line is what the parser reads first; swapping it
-    for an extreme value must flip pre-screening deterministically.
+    The DATA_BLOCK's ``DE_RATIO: 0.20`` line is what the parser reads (the legacy
+    unitless body line is display-only); swapping it for an extreme value must
+    flip pre-screening deterministically.
     """
-    block = _read("2330_TW_data_block.txt").replace("D/E: 0.20", "D/E: 9.00")
+    block = _read("2330_TW_data_block.txt").replace("DE_RATIO: 0.20", "DE_RATIO: 9.00")
     flags, pre_screen = detect_red_flags(
         extract_metrics(block), sector=detect_sector(block)
     )

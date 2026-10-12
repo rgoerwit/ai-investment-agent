@@ -25,13 +25,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.llms import _LazyRateLimiterProxy
+from src.config import config
 from src.memory import (
     FinancialSituationMemory,
     cleanup_all_memories,
     get_all_memory_stats,
     get_ticker_memory_stats,
 )
+from src.tooling.inspector import InspectionDecision
+from tests.helpers.memory_config import pin_embedding_identity
 
 
 @pytest.fixture(autouse=True)
@@ -66,7 +68,7 @@ class TestFinancialSituationMemoryInitialization:
         with patch("src.memory.config") as mock_config:
             mock_config.get_google_api_key.return_value = "test-key"
             with patch(
-                "src.memory.GoogleGenerativeAIEmbeddings",
+                "src.embeddings.GoogleGenerativeAIEmbeddings",
                 side_effect=Exception("API error"),
             ):
                 memory = FinancialSituationMemory("test_memory")
@@ -79,7 +81,7 @@ class TestFinancialSituationMemoryInitialization:
         with patch("src.memory.config") as mock_config:
             mock_config.get_google_api_key.return_value = "test-key"
             with patch(
-                "src.memory.GoogleGenerativeAIEmbeddings"
+                "src.embeddings.GoogleGenerativeAIEmbeddings"
             ) as mock_embeddings_class:
                 mock_embeddings = MagicMock()
                 mock_embeddings.embed_query.return_value = [0.1] * 768
@@ -99,10 +101,11 @@ class TestFinancialSituationMemoryInitialization:
         FinancialSituationMemory._reset_shared_state_for_tests()
         # Mock config getter directly (os.environ patching no longer works due to SecretStr)
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-key"
 
             with patch(
-                "src.memory.GoogleGenerativeAIEmbeddings"
+                "src.embeddings.GoogleGenerativeAIEmbeddings"
             ) as mock_embeddings_class:
                 mock_embeddings = MagicMock()
                 mock_embeddings.embed_query.return_value = [0.1] * 768
@@ -127,11 +130,12 @@ class TestFinancialSituationMemoryInitialization:
         """Multiple memory instances should share heavy embedding/client resources."""
         FinancialSituationMemory._reset_shared_state_for_tests()
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-key"
             mock_config.chroma_persist_directory = "test-chroma"
 
             with patch(
-                "src.memory.GoogleGenerativeAIEmbeddings"
+                "src.embeddings.GoogleGenerativeAIEmbeddings"
             ) as mock_embeddings_class:
                 mock_embeddings = MagicMock()
                 mock_embeddings.embed_query.return_value = [0.1] * 768
@@ -162,10 +166,11 @@ class TestFinancialSituationMemoryInitialization:
     def test_init_with_embedding_healthcheck_failure_is_degraded(self):
         """Memory should not report available when embedding healthcheck fails."""
         with patch("src.memory.config") as mock_config:
+            pin_embedding_identity(mock_config)
             mock_config.get_google_api_key.return_value = "test-key"
 
             with patch(
-                "src.memory.GoogleGenerativeAIEmbeddings"
+                "src.embeddings.GoogleGenerativeAIEmbeddings"
             ) as mock_embeddings_class:
                 mock_embeddings = MagicMock()
                 mock_embeddings.embed_query.side_effect = socket.gaierror(
@@ -194,7 +199,7 @@ class TestFinancialSituationMemoryInitialization:
             mock_config.get_google_api_key.return_value = "test-key"
 
             with patch(
-                "src.memory.GoogleGenerativeAIEmbeddings"
+                "src.embeddings.GoogleGenerativeAIEmbeddings"
             ) as mock_embeddings_class:
                 mock_embeddings = MagicMock()
                 mock_embeddings.embed_query.side_effect = lambda *_a, **_k: time.sleep(
@@ -204,8 +209,8 @@ class TestFinancialSituationMemoryInitialization:
 
                 with (
                     patch.object(
-                        FinancialSituationMemory,
-                        "_HEALTHCHECK_TIMEOUT_SECONDS",
+                        config,
+                        "memory_embedding_healthcheck_timeout_seconds",
                         0.1,
                     ),
                     patch.object(
@@ -301,39 +306,6 @@ class TestSituationStorage:
         assert len(call_kwargs["embeddings"]) == 2
 
     @pytest.mark.asyncio
-    async def test_get_embedding_logs_rate_limiter_fallback(self):
-        """Rate-limiter failures should be visible before direct embedding fallback."""
-
-        class BrokenLimiter:
-            async def __aenter__(self):
-                raise RuntimeError("limiter unavailable")
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-        memory = FinancialSituationMemory("test_memory")
-        memory.available = True
-        memory.embeddings = MagicMock()
-        memory.embeddings.aembed_query = AsyncMock(return_value=[0.1] * 768)
-
-        with patch("src.llms.GLOBAL_RATE_LIMITER", BrokenLimiter()):
-            with patch("src.memory.logger") as mock_logger:
-                embedding = await memory._get_embedding("hello world")
-
-        assert embedding == [0.1] * 768
-        mock_logger.warning.assert_called_once()
-        kwargs = mock_logger.warning.call_args.kwargs
-        assert kwargs["fallback"] == "direct_embed_query"
-        assert kwargs["failure_kind"] in {
-            "application_error",
-            "connect_error",
-            "timeout",
-            "unknown_provider_error",
-        }
-        assert kwargs["error_type"] == "RuntimeError"
-        assert "exc_info" not in kwargs
-
-    @pytest.mark.asyncio
     async def test_get_embedding_hard_timeout_bounds_stalled_call(self):
         """A stalled aembed_query must raise TimeoutError, not hang the run
         (both the rate-limited attempt and the fallback are bounded).
@@ -345,26 +317,13 @@ class TestSituationStorage:
         async def _stall(*_a, **_k):
             await asyncio.sleep(5)
 
-        # Instant limiter: the real GLOBAL_RATE_LIMITER can block on aacquire when
-        # tokens are drained (full-suite CI ordering), and that wait would leak into
-        # the timed section and mask the hard-timeout bound this test verifies.
-        class _InstantLimiter:
-            async def aacquire(self, *, blocking=True):
-                return True
-
         memory = FinancialSituationMemory("test_memory")
         memory.available = True
         memory.embeddings = MagicMock()
         memory.embeddings.aembed_query = _stall
 
         with (
-            patch.object(
-                FinancialSituationMemory, "_EMBEDDING_CALL_TIMEOUT_SECONDS", 0.05
-            ),
-            patch(
-                "src.llms.GLOBAL_RATE_LIMITER",
-                _LazyRateLimiterProxy(lambda: _InstantLimiter()),
-            ),
+            patch.object(config, "memory_embedding_call_timeout_seconds", 0.05),
             patch("src.memory.logger"),
         ):
             start = time.monotonic()
@@ -373,34 +332,6 @@ class TestSituationStorage:
             elapsed = time.monotonic() - start
 
         assert elapsed < 2
-
-    @pytest.mark.asyncio
-    async def test_get_embedding_accepts_lazy_rate_limiter_proxy(self):
-        """The shared lazy proxy should behave as an async context manager."""
-
-        class TrackingLimiter:
-            def __init__(self):
-                self.acquired = 0
-
-            async def aacquire(self, *, blocking=True):
-                self.acquired += 1
-                return True
-
-        limiter = TrackingLimiter()
-        memory = FinancialSituationMemory("test_memory")
-        memory.available = True
-        memory.embeddings = MagicMock()
-        memory.embeddings.aembed_query = AsyncMock(return_value=[0.2] * 768)
-
-        with patch(
-            "src.llms.GLOBAL_RATE_LIMITER", _LazyRateLimiterProxy(lambda: limiter)
-        ):
-            with patch("src.memory.logger") as mock_logger:
-                embedding = await memory._get_embedding("hello world")
-
-        assert embedding == [0.2] * 768
-        assert limiter.acquired == 1
-        mock_logger.warning.assert_not_called()
 
 
 class TestSituationQuerying:
@@ -725,7 +656,14 @@ class TestAddSituationsCollectionNotFoundRetry:
             "src.memory.get_current_inspection_service"
         ) as mock_inspection_service:
             mock_inspection = MagicMock()
-            mock_inspection.check = AsyncMock(return_value="approved content")
+            mock_inspection.evaluate = AsyncMock(
+                return_value=(
+                    InspectionDecision(
+                        action="allow", threat_level="safe", enforced="allowed"
+                    ),
+                    "approved content",
+                )
+            )
             mock_inspection_service.return_value = mock_inspection
 
             ok = await memory.add_situations(["test situation"], [{"ticker": "T"}])
@@ -763,7 +701,14 @@ class TestAddSituationsCollectionNotFoundRetry:
             "src.memory.get_current_inspection_service"
         ) as mock_inspection_service:
             mock_inspection = MagicMock()
-            mock_inspection.check = AsyncMock(return_value="approved")
+            mock_inspection.evaluate = AsyncMock(
+                return_value=(
+                    InspectionDecision(
+                        action="allow", threat_level="safe", enforced="allowed"
+                    ),
+                    "approved",
+                )
+            )
             mock_inspection_service.return_value = mock_inspection
 
             ok = await memory.add_situations(["test"], [{}])

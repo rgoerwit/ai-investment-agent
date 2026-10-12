@@ -23,12 +23,15 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
 
-import src.config as config_module
+from src.config import resolve_settings
 
 logger = structlog.get_logger(__name__)
 
@@ -81,8 +84,71 @@ class _FlexHealth:
 _flex_health: dict[str, _FlexHealth] = {}
 
 
-def _cfg(cfg: Any = None) -> Any:
-    return cfg if cfg is not None else config_module.config
+@dataclass
+class TierAttempt:
+    """Last transport tier reached inside one outer LLM attempt."""
+
+    tier: str | None = None
+    latency_fallback: bool = False
+
+
+_tier_attempt: ContextVar[TierAttempt | None] = ContextVar(
+    "llm_tier_attempt", default=None
+)
+
+
+@contextmanager
+def track_tier_attempt(initial_tier: str | None) -> Iterator[TierAttempt]:
+    attempt = TierAttempt(initial_tier)
+    token = _tier_attempt.set(attempt)
+    try:
+        yield attempt
+    finally:
+        _tier_attempt.reset(token)
+
+
+def mark_tier_attempt(tier: str | None) -> None:
+    """Called immediately before a transport request, including fallback."""
+    attempt = _tier_attempt.get()
+    if attempt is not None:
+        attempt.tier = tier
+
+
+def mark_flex_latency_fallback() -> None:
+    """Remember that flex queue time preceded the standard request."""
+    attempt = _tier_attempt.get()
+    if attempt is not None:
+        attempt.latency_fallback = True
+
+
+def runnable_attempt_tier(runnable: Any, provider: str | None) -> str | None:
+    """Initial tier for a composed model, before transport fallback may change it."""
+    from langchain_core.runnables import RunnableBinding, RunnableSequence
+
+    stack = [runnable]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, RunnableBinding):
+            stack.append(node.bound)
+            continue
+        if isinstance(node, RunnableSequence):
+            stack.extend(node.steps)
+            continue
+        tier = getattr(node, "service_tier", None)
+        if not isinstance(tier, str):
+            continue
+        model = getattr(node, "model_name", None) or getattr(node, "model", None)
+        if tier == "flex" and (
+            flex_degraded(provider)
+            or (isinstance(model, str) and is_flex_unsupported(model))
+        ):
+            return "standard" if provider == "google" else None
+        return tier
+    return "standard" if provider == "google" else None
 
 
 def normalize_model_name(model_name: str) -> str:
@@ -152,7 +218,7 @@ def flex_degraded(
     there is no background state to leak.
     """
     key = _normalize_provider(provider)
-    if not key or not bool(getattr(_cfg(cfg), "flex_degrade_enabled", True)):
+    if not key or not bool(resolve_settings(cfg).flex_degrade_enabled):
         return False
     ts = time.monotonic() if now is None else now
     with _flex_health_lock:
@@ -185,12 +251,12 @@ def note_flex_fallback(
     ``mark_flex_unsupported`` and are not congestion.
     """
     key = _normalize_provider(provider)
-    settings = _cfg(cfg)
-    if not key or not bool(getattr(settings, "flex_degrade_enabled", True)):
+    settings = resolve_settings(cfg)
+    if not key or not bool(settings.flex_degrade_enabled):
         return
-    threshold = int(getattr(settings, "flex_degrade_threshold", 2))
-    window = float(getattr(settings, "flex_degrade_window_seconds", 900.0))
-    cool_off = float(getattr(settings, "flex_degrade_cool_off_seconds", 1800.0))
+    threshold = int(settings.flex_degrade_threshold)
+    window = float(settings.flex_degrade_window_seconds)
+    cool_off = float(settings.flex_degrade_cool_off_seconds)
     ts = time.monotonic() if now is None else now
 
     with _flex_health_lock:
@@ -271,10 +337,10 @@ def resolve_google_service_tier(cfg: Any = None) -> str:
     ``RuntimeConfig.from_config`` already resolves for RPM, and it is resolved
     the same way here: one function, consulted by every reader.
     """
-    settings = _cfg(cfg)
-    if getattr(settings, "llm_base_provider", None) is not None:
-        return getattr(settings, "google_service_tier", "standard")
-    return getattr(settings, "gemini_service_tier", "standard")
+    settings = resolve_settings(cfg)
+    if settings.llm_base_provider is not None:
+        return settings.google_service_tier
+    return settings.gemini_service_tier
 
 
 def gemini_flex_active(cfg: Any = None) -> bool:
@@ -282,7 +348,7 @@ def gemini_flex_active(cfg: Any = None) -> bool:
 
 
 def openai_flex_active(cfg: Any = None) -> bool:
-    return getattr(_cfg(cfg), "openai_service_tier", "auto") == "flex"
+    return resolve_settings(cfg).openai_service_tier == "flex"
 
 
 def provider_flex_active(provider: str | None, cfg: Any = None) -> bool:
@@ -295,7 +361,7 @@ def provider_flex_active(provider: str | None, cfg: Any = None) -> bool:
 
 
 def flex_floor_seconds(cfg: Any = None) -> float:
-    return float(getattr(_cfg(cfg), "flex_llm_timeout_seconds", 900))
+    return float(resolve_settings(cfg).flex_llm_timeout_seconds)
 
 
 def _quick_mode_active(cfg: Any = None) -> bool:
@@ -316,7 +382,7 @@ def _quick_mode_active(cfg: Any = None) -> bool:
     """
     from src.runtime_config import get_runtime_config
 
-    return bool(get_runtime_config(config_module.config).quick_mode_active)
+    return bool(get_runtime_config(resolve_settings()).quick_mode_active)
 
 
 def _log_floor_once(label: str, base: float, floored: float, kind: str) -> None:
@@ -401,38 +467,12 @@ def floor_llm_total_timeout(
     return floor
 
 
-# Fraction of the quick-mode outer hard cap allotted to a single flex attempt's
-# SDK client timeout, so a flex attempt PLUS its standard-tier re-issue both fit
-# inside one run_with_hard_timeout window (2 x fraction < 1, with margin).
-FLEX_QUICK_ATTEMPT_FRACTION = 0.4
-
-
-def flex_attempt_client_timeout(
-    base_seconds: float,
-    *,
-    provider: str | None,
-    cfg: Any = None,
-    label: str = "llm_call",
-) -> float:
-    """SDK client timeout for a flex-tier model instance.
-
-    - **Full mode**: floor up to ``FLEX_LLM_TIMEOUT_SECONDS`` so a legitimately
-      queued flex call (1-15 min) is not killed by a short socket timeout.
-    - **Quick mode**: cap *below* the quick outer hard cap
-      (``quick_llm_call_hard_timeout_seconds``) so a queued flex call raises a
-      timeout in time for a standard-tier re-issue within the same
-      ``run_with_hard_timeout`` window, instead of being guillotined by the
-      outer cap (which would bypass the transport fallback). See the
-      flex-fallback x timeout matrix in the mitigation plan.
-
-    No-op (returns ``base_seconds``) when flex is off for the provider.
-    """
-    if not provider_flex_active(provider, cfg):
-        return base_seconds
-    if _quick_mode_active(cfg):
-        outer = float(getattr(_cfg(cfg), "quick_llm_call_hard_timeout_seconds", 60.0))
-        return min(base_seconds, max(5.0, outer * FLEX_QUICK_ATTEMPT_FRACTION))
-    return floor_llm_timeout(base_seconds, provider=provider, cfg=cfg, label=label)
+# The flex *request* timeout is no longer a property of a model instance. It was
+# (``flex_attempt_client_timeout``, removed October 2026): set at construction,
+# it survived the standard re-issue, degraded-standard calls and model failover,
+# and Google enforced it server-side. Each request is now sized at dispatch from
+# the invocation deadline -- see ``request_timeout`` in
+# ``src/llm_runtime/timeouts.py`` and ``FLEX_QUICK_ATTEMPT_FRACTION`` in Settings.
 
 
 def _reset_floor_log_cache_for_tests() -> None:

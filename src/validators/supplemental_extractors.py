@@ -8,7 +8,7 @@ from typing import Any
 
 import structlog
 
-from src.data_block_utils import extract_last_data_block
+from src.data_block_utils import extract_block_field, extract_last_data_block
 from src.validators.metric_extractor import (
     read_block_enum,
     read_block_float,
@@ -344,14 +344,14 @@ def extract_legal_risks(legal_report: str) -> dict[str, Any]:
         )
         return risks
     except json.JSONDecodeError as exc:
-        from src.error_safety import redact_sensitive_text
-
         # Operator-visible: the Legal Counsel prompt promises JSON output, so a
         # parse failure means format drift — the regex fallback may miss fields.
         logger.warning(
             "legal_report_json_parse_failed_using_regex_fallback",
-            reason=str(exc.msg)[:120],
-            report_prefix=redact_sensitive_text(json_str, max_chars=80),
+            failure_kind="invalid_json",
+            error_type=type(exc).__name__,
+            line=exc.lineno,
+            column=exc.colno,
         )
 
     pfic_match = re.search(
@@ -460,6 +460,12 @@ def extract_value_trap_score(value_trap_report: str) -> dict[str, Any]:
         ("M&A_CONTEXT_EVIDENCE", "m_and_a_context_evidence"),
         ("M&A_CONTEXT_SOURCE_URL", "m_and_a_context_source_url"),
         ("M&A_CONTEXT", "m_and_a_context"),
+    ):
+        value = extract_block_field(value_trap_report, "VALUE_TRAP_BLOCK", field)
+        if value and value.upper() not in ("NONE", "N/A"):
+            metrics[key] = value.upper() if field == "M&A_CONTEXT_EVIDENCE" else value
+
+    for field, key in (
         ("BUYBACK_CONTEXT", "buyback_context"),
         ("PAYOUT_TREND", "payout_trend"),
         ("CASH_POSITION", "cash_position"),

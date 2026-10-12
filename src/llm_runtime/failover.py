@@ -42,6 +42,11 @@ FAILOVER_FAILURE_KINDS = frozenset({"server_error", "timeout"})
 _FAILOVER_ATTEMPT: ContextVar[bool] = ContextVar("llm_failover_attempt", default=False)
 
 
+def in_failover_attempt() -> bool:
+    """Whether the current call is being served as a failover attempt."""
+    return _FAILOVER_ATTEMPT.get()
+
+
 @contextmanager
 def failover_attempt() -> Iterator[None]:
     """Mark the calls made inside this block as a failover attempt."""
@@ -64,22 +69,33 @@ class ModelFailoverMixin:
     _failover_model_field: ClassVar[str] = "model"
     _failover_standard_tier: ClassVar[str] = "standard"
 
+    def _failover_tier(self) -> str | None:
+        """The tier the failover copy is sent at; ``None`` sends no tier.
+
+        A transport whose vendor sells no service tiers (an OpenAI-compatible
+        endpoint) overrides this, so its failover copy never carries one.
+        """
+        return self._failover_standard_tier
+
     def _failover_delegate(self) -> Any | None:
         target = getattr(self, "failover_model", None)
         if not target or not _FAILOVER_ATTEMPT.get():
             return None
         source = getattr(self, self._failover_model_field, None)
+        tier = self._failover_tier()
         logger.warning(
             "llm_model_failover",
             source_model=source,
             target_model=target,
-            service_tier=self._failover_standard_tier,
+            service_tier=tier,
         )
-        # The copy has no failover of its own, so it cannot recurse.
+        # The copy has no failover of its own, so it cannot recurse. It carries no
+        # deadline either: its dispatch reads the same invocation ContextVar
+        # (src/llm_runtime/timeouts.py), so failover never gets a fresh clock.
         return self.model_copy(  # type: ignore[attr-defined]
             update={
                 self._failover_model_field: target,
-                "service_tier": self._failover_standard_tier,
+                "service_tier": tier,
                 "failover_model": None,
             }
         )

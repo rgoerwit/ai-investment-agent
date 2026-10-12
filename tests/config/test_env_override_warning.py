@@ -12,6 +12,14 @@ from unittest.mock import MagicMock, mock_open, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _dotenv_reading_enabled(monkeypatch):
+    """These tests feed ``_parse_env_file`` mocked file content, so the harness's
+    ``PYTEST_DISABLE_DOTENV`` switch (which makes it read nothing) is lifted;
+    ``open`` and ``Path.exists`` are patched, so no real file is touched."""
+    monkeypatch.delenv("PYTEST_DISABLE_DOTENV", raising=False)
+
+
 class TestEnvOverrideWarning:
     """Test environment variable override detection and warnings."""
 

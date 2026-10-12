@@ -20,6 +20,7 @@ the existing coverage:
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from dataclasses import fields as dataclass_fields
@@ -121,7 +122,80 @@ def test_pytest_does_not_load_operator_environment_file():
 
 
 _SETTINGS_ENV_CASES = [
+    ("llm_attempts", "LLM_ATTEMPTS", "7", 7),
+    # Deprecated spelling, still honoured through the alias property.
     ("api_retry_attempts", "API_RETRY_ATTEMPTS", "7", 7),
+    ("llm_attempts", "API_RETRY_ATTEMPTS", "7", 7),
+    ("flex_quick_attempt_fraction", "FLEX_QUICK_ATTEMPT_FRACTION", "0.3", 0.3),
+    ("min_useful_attempt_fraction", "MIN_USEFUL_ATTEMPT_FRACTION", "0.1", 0.1),
+    ("llm_dispatch_margin_seconds", "LLM_DISPATCH_MARGIN_SECONDS", "3", 3.0),
+    (
+        "apac_node_total_timeout_seconds",
+        "APAC_NODE_TOTAL_TIMEOUT_SECONDS",
+        "200",
+        200.0,
+    ),
+    ("openai_request_cap_seconds", "OPENAI_REQUEST_CAP_SECONDS", "90", 90.0),
+    (
+        "tool_execution_timeout_seconds",
+        "TOOL_EXECUTION_TIMEOUT_SECONDS",
+        "30",
+        30.0,
+    ),
+    ("tool_hooks_timeout_seconds", "TOOL_HOOKS_TIMEOUT_SECONDS", "90", 90.0),
+    ("deadline_margin_fraction", "DEADLINE_MARGIN_FRACTION", "0.1", 0.1),
+    (
+        "official_document_download_fraction",
+        "OFFICIAL_DOCUMENT_DOWNLOAD_FRACTION",
+        "0.6",
+        0.6,
+    ),
+    (
+        "official_document_inspection_fraction",
+        "OFFICIAL_DOCUMENT_INSPECTION_FRACTION",
+        "0.3",
+        0.3,
+    ),
+    *[
+        (field, field.upper(), "7.5", 7.5)
+        for field in (
+            "market_data_aggregate_fetch_timeout_seconds",
+            "market_data_per_source_timeout_seconds",
+            "market_data_vendor_http_timeout_seconds",
+            "market_data_anchor_lookup_timeout_seconds",
+            "market_data_ticker_resolution_timeout_seconds",
+            "market_data_price_history_timeout_seconds",
+            "company_name_lookup_timeout_seconds",
+            "fx_rate_fetch_timeout_seconds",
+            "consultant_spot_check_timeout_seconds",
+            "tavily_search_timeout_seconds",
+            "tavily_extract_timeout_seconds",
+            "gap_fill_search_timeout_seconds",
+            "ddg_search_timeout_seconds",
+            "official_filings_lookup_timeout_seconds",
+            "filing_fetch_timeout_seconds",
+            "official_document_dns_timeout_seconds",
+            "official_document_extract_timeout_seconds",
+            "subprocess_cleanup_timeout_seconds",
+            "reference_fetch_timeout_seconds",
+            "mcp_http_timeout_seconds",
+            "mcp_initialize_timeout_seconds",
+            "mcp_tool_call_timeout_seconds",
+            "ownership_section_timeout_seconds",
+            "stocktwits_http_timeout_seconds",
+            "retrospective_price_fetch_timeout_seconds",
+            "market_context_fetch_timeout_seconds",
+            "price_snapshot_fetch_timeout_seconds",
+            "output_company_name_timeout_seconds",
+            "health_check_connectivity_timeout_seconds",
+            "memory_embedding_healthcheck_timeout_seconds",
+            "memory_embedding_call_timeout_seconds",
+            "genai_client_close_timeout_seconds",
+            "langfuse_flush_timeout_seconds",
+            "article_workflow_timeout_seconds",
+        )
+    ],
+    ("ddg_http_timeout_seconds", "DDG_HTTP_TIMEOUT_SECONDS", "7", 7),
     ("gemini_rpm_limit", "GEMINI_RPM_LIMIT", "123", 123),
     ("enable_consultant", "ENABLE_CONSULTANT", "false", False),
     ("max_debate_rounds", "MAX_DEBATE_ROUNDS", "1", 1),
@@ -304,6 +378,91 @@ def test_no_duplicate_literal_default_for_portfolio_knob(param):
         f"{param} has a re-literalized numeric default; reference the "
         f"src.ibkr.portfolio_defaults constant instead. Offenders: {offenders}"
     )
+
+
+# --- No literal fallback for a Settings field read ---------------------------
+#
+# ``getattr(cfg, "api_timeout", 300)`` re-literalizes a default the field already
+# owns, and the two drift: ``getattr(config, "buy_stability_enabled", False)``
+# shipped a gate that was default-ON in Settings but silently OFF for any other
+# config object. Read the field; a config that lacks it is a bug to surface.
+
+_SETTINGS_FIELD_NAMES = frozenset(Settings.model_fields)
+
+
+def _is_literal_fallback(node: ast.expr) -> bool:
+    """A non-None constant, a negated number, or a CONSTANT_NAME reference."""
+    if isinstance(node, ast.Constant):
+        return node.value is not None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.operand, ast.Constant):
+        return True
+    return isinstance(node, ast.Name) and node.id.isupper()
+
+
+def _literal_settings_getattrs(source: str) -> list[tuple[int, str]]:
+    """``(line, source)`` of every 3-argument getattr naming a Settings field
+    whose default is a literal."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) == 3
+            and not node.keywords
+        ):
+            continue
+        _, name, default = node.args
+        if (
+            isinstance(name, ast.Constant)
+            and name.value in _SETTINGS_FIELD_NAMES
+            and _is_literal_fallback(default)
+        ):
+            found.append((node.lineno, ast.unparse(node)))
+    return found
+
+
+def test_no_literal_getattr_fallback_for_a_settings_field():
+    offenders = [
+        f"{path.relative_to(_SRC.parent)}:{line}: {text}"
+        for path in sorted(_SRC.rglob("*.py"))
+        for line, text in _literal_settings_getattrs(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        "read the Settings field directly; a literal fallback duplicates its "
+        "default and goes stale (or fails open): " + "; ".join(offenders)
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'getattr(s, "api_timeout", 300)',
+        'getattr(s, "buy_stability_enabled", False)',
+        'getattr(s, "quick_llm_call_hard_timeout_seconds", 60.0)',
+        'getattr(s, "results_dir", "results")',
+        'getattr(s, "flex_degrade_threshold", -1)',
+        'getattr(s, "retrospective_max_evaluations_per_run", MAX_PER_RUN)',
+    ],
+)
+def test_the_literal_getattr_guard_flags_a_planted_defect(line):
+    assert len(_literal_settings_getattrs(f"x = {line}\n")) == 1
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'getattr(s, "api_timeout")',
+        'getattr(s, "api_timeout", None)',
+        'getattr(s, "not_a_settings_field", 300)',
+        "getattr(s, name, 300)",
+        'getattr(s, "api_timeout", default_value)',
+        'getattr(s, "api_timeout", default=3)',
+        "s.api_timeout",
+    ],
+)
+def test_the_literal_getattr_guard_passes_sanctioned_shapes(line):
+    assert _literal_settings_getattrs(f"x = {line}\n") == []
 
 
 # --- Override precedence: CLI flag > shell env > .env > hardcoded default -----

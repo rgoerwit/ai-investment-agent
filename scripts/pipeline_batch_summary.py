@@ -11,6 +11,8 @@ Trouble-worthy signals (any one is sufficient):
 - network_breaker_opened in any log
 - llm_circuit_opened in any log
 - pending_tasks_dump in any log
+- a producer-defined flex degradation episode (tier availability and cost, not
+  failed runs); src/service_tiers.py applies the threshold before emitting it
 - ≥3 runs in a row each with dns_failures ≥ 5 (the May 2026 outage shape)
 
 The summary names the dominant failure_kind and the longest consecutive-
@@ -65,6 +67,8 @@ def build_summary(stats_seq: list[LogStats]) -> str | None:
     breaker_trips = sum(s.network_breaker_opened for s in stats_seq)
     circuit_opens = sum(s.llm_circuit_opened for s in stats_seq)
     pending_dumps = sum(s.pending_task_dumps for s in stats_seq)
+    flex_fallbacks = sum(s.flex_fallbacks for s in stats_seq)
+    flex_episodes = sum(s.flex_degradation_episodes for s in stats_seq)
     consecutive_dns = _consecutive_elevated_dns(stats_seq)
 
     notable = (
@@ -73,6 +77,7 @@ def build_summary(stats_seq: list[LogStats]) -> str | None:
         or breaker_trips > 0
         or circuit_opens > 0
         or pending_dumps > 0
+        or flex_episodes > 0
         or consecutive_dns >= _CONSECUTIVE_DNS_RUNS
     )
     if not notable:
@@ -98,6 +103,13 @@ def build_summary(stats_seq: list[LogStats]) -> str | None:
         parts.append(f"circuit_opens={circuit_opens}")
     if pending_dumps:
         parts.append(f"pending_dumps={pending_dumps}")
+    if flex_fallbacks:
+        parts.append(f"flex_fallbacks={flex_fallbacks}")
+    if flex_episodes:
+        parts.append(
+            f"flex_degraded_runs={sum(s.flex_degradation_episodes > 0 for s in stats_seq)}"
+        )
+        parts.append(f"flex_degradation_episodes={flex_episodes}")
     if consecutive_dns >= _CONSECUTIVE_DNS_RUNS:
         parts.append(f"consecutive_dns_runs={consecutive_dns}")
     if dominant_kind is not None:

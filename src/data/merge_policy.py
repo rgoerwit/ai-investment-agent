@@ -7,6 +7,7 @@ from typing import Any
 
 import structlog
 
+from src.data.debt_equity import normalize_source_results as normalize_debt_equity
 from src.fx_normalization import is_near_minor_unit_ratio
 
 logger = structlog.get_logger(__name__)
@@ -94,6 +95,7 @@ SOURCE_QUALITY = {
 }
 PRESERVED_FIELD_PROVENANCE = frozenset(
     {
+        "debtToEquity",
         "revenueGrowth",
         "earningsGrowth",
         "revenueGrowth_MRQ",
@@ -197,6 +199,8 @@ def smart_merge_with_quality(
     logger_obj: Any = logger,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Merge source results with quality-aware precedence and conflict tracking."""
+    # Unit contract before any comparison: every source's debtToEquity is a ratio.
+    source_results = normalize_debt_equity(source_results)
     source_results = quarantine_forward_pe_outlier(source_results, symbol)
     merged: dict[str, Any] = {}
     field_sources: dict[str, str] = {}

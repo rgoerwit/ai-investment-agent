@@ -10,6 +10,39 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "FLA_ARTIFACT_INVALID",
+        "NO_COMPLETE_BLOCK",
+        "INVALID_CITATION",
+        "PRIMARY_VALIDATED",
+        "SECONDARY_SOURCE",
+        "UNSUPPORTED_SOURCE",
+        "NOT_FOUND",
+        "SEARCH_FAILED",
+        "INVALID_COVERAGE",
+    ],
+)
+def test_current_latest_results_barrier_reasons_survive_persistence_allowlist(
+    reason, monkeypatch
+):
+    """Current barrier outcomes are retained; new outcomes must join this table."""
+    from src.persistence import build_run_summary
+
+    tracker = MagicMock()
+    tracker.get_total_stats.return_value = {"failed_attempts": 0, "total_calls": 0}
+    monkeypatch.setattr("src.token_tracker.get_tracker", lambda: tracker)
+
+    summary = build_run_summary(
+        {"latest_results_reason": reason},
+        quick_mode=True,
+        article_requested=False,
+    )
+
+    assert summary["latest_results_reason"] == reason
+
+
 def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
     from src.persistence import build_run_summary
 
@@ -38,6 +71,11 @@ def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
             "apac_regional_report": {"complete": True, "ok": True},
         },
         "messages": [ToolMessage(content="done", tool_call_id="call_1", name="tool")],
+        "guidance_normalization": {
+            "initial_reason": "MISSING_BLOCK",
+            "final_action": "FALLBACK",
+        },
+        "latest_results_reason": "INVALID_CITATION",
     }
 
     summary = build_run_summary(
@@ -46,6 +84,18 @@ def test_build_run_summary_tracks_finished_successful_artifacts(monkeypatch):
         article_requested=False,
         provider_preflight={"google": {"dns": "ok"}},
     )
+
+    assert summary["guidance_normalization"] == result["guidance_normalization"]
+    assert summary["latest_results_reason"] == "INVALID_CITATION"
+
+    result["guidance_normalization"]["final_action"] = "UNRECOVERED"
+    unresolved_summary = build_run_summary(
+        result,
+        quick_mode=True,
+        article_requested=False,
+        provider_preflight={"google": {"dns": "ok"}},
+    )
+    assert unresolved_summary["guidance_normalization"]["final_action"] == "UNRECOVERED"
 
     assert summary["consultant_finished"] is True
     assert summary["consultant_review_status"] == "FAILED"
@@ -470,6 +520,7 @@ def test_save_results_to_file_preserves_macro_context_metadata(tmp_path, monkeyp
     monkeypatch.setattr("src.token_tracker.get_tracker", lambda: StubTracker())
 
     result = {
+        "foreign_language_report": "LATEST_RESULTS_NORMALIZATION_REASON: COMPARATIVE_ROWS_UNBOUND\nLATEST_RESULTS_WITHHELD_FIELDS: REVENUE_GROWTH_YOY,EARNINGS_GROWTH_YOY",
         "market_report": "ok",
         "sentiment_report": "ok",
         "news_report": "ok",
@@ -549,6 +600,14 @@ def test_save_results_to_file_preserves_macro_context_metadata(tmp_path, monkeyp
     assert payload["macro_regime_raw"].startswith("MACRO_REGIME_BLOCK:")
     assert payload["reports"]["apac_regional_report"].startswith(
         "### APAC REGIONAL AUDIT"
+    )
+    assert (
+        "LATEST_RESULTS_NORMALIZATION_REASON: COMPARATIVE_ROWS_UNBOUND"
+        in payload["source_artifacts"]["foreign_language_report"]
+    )
+    assert (
+        "LATEST_RESULTS_WITHHELD_FIELDS: REVENUE_GROWTH_YOY,EARNINGS_GROWTH_YOY"
+        in payload["source_artifacts"]["foreign_language_report"]
     )
     assert payload["evidence_records"] == result["evidence_records"]
 
@@ -1027,3 +1086,110 @@ class TestRecordedModelProvenance:
         assert metadata["quick_model"] == "gemini-3.1-flash-lite"
         assert metadata["deep_model"] == "gemini-3.7-flash"
         assert metadata["decision_model"] == "gemini-3.1-pro-preview"
+
+
+@pytest.mark.parametrize(
+    "models,producer,ok,expected",
+    [
+        ([], None, True, "unknown"),
+        (["fallback"], None, True, "unknown"),
+        (["primary", "fallback"], None, True, "ambiguous"),
+        (["primary", "fallback"], "fallback", True, "fallback"),
+        (["primary"], "rejected", False, "unknown"),
+    ],
+)
+def test_decision_attribution_separates_configuration_usage_and_accepted_producer(
+    models, producer, ok, expected, monkeypatch
+):
+    from src.persistence import _decision_model_provenance, build_run_summary
+    from src.runtime_diagnostics import get_artifact_status, success_artifact
+
+    stats = {
+        "binding_usage": [
+            {"seat_id": "portfolio_manager", "model": model} for model in models
+        ],
+        "failed_attempts": 0,
+        "total_calls": len(models),
+    }
+    result = success_artifact(
+        "final_trade_decision", "VERDICT: HOLD", provider="google", model=producer
+    )
+    result["artifact_statuses"]["final_trade_decision"]["ok"] = ok
+    provenance = _decision_model_provenance(result, "configured", stats)
+    assert provenance["configured_decision_model"] == "configured"
+    assert provenance["artifact_decision_model"] == expected
+    assert provenance["decision_models_used"] == sorted(
+        set(models) | ({producer} if ok and producer else set())
+    )
+    assert get_artifact_status(result, "final_trade_decision").model == producer
+    tracker = MagicMock()
+    tracker.get_total_stats.return_value = stats
+    monkeypatch.setattr("src.token_tracker.get_tracker", lambda: tracker)
+    summary = build_run_summary(result, quick_mode=True, article_requested=False)
+    assert summary["artifact_decision_model"] == provenance["artifact_decision_model"]
+    assert summary["decision_models_used"] == provenance["decision_models_used"]
+
+
+def test_code_produced_relay_is_not_an_answering_llm_provider(monkeypatch):
+    from src.persistence import build_run_summary
+    from src.runtime_diagnostics import success_artifact
+
+    tracker = MagicMock()
+    tracker.get_total_stats.return_value = {"failed_attempts": 0, "total_calls": 0}
+    monkeypatch.setattr("src.token_tracker.get_tracker", lambda: tracker)
+    summary = build_run_summary(
+        success_artifact("raw_fundamentals_data", "raw", provider="code"),
+        quick_mode=True,
+        article_requested=False,
+    )
+    assert "code" not in summary["llm_providers_used"]
+
+
+@pytest.mark.parametrize(
+    "models,producer,ok,expected",
+    [
+        (["primary", "fallback"], "fallback", True, "fallback"),
+        (["primary", "fallback"], "primary", True, "primary"),
+        (["primary", "fallback"], None, True, "ambiguous"),
+        (["fallback"], None, True, "unknown"),
+        (["fallback"], "rejected", False, "unknown"),
+    ],
+)
+def test_producer_provenance_survives_summary_and_saved_metadata(
+    models, producer, ok, expected, tmp_path, monkeypatch
+):
+    from src import persistence
+    from src.runtime_diagnostics import success_artifact
+    from src.token_tracker import TokenTracker
+
+    stats = {
+        **TokenTracker().get_total_stats(),
+        "binding_usage": [
+            {"seat_id": "portfolio_manager", "model": model} for model in models
+        ],
+        "failed_attempts": 1,
+        "total_calls": len(models),
+    }
+    tracker = MagicMock()
+    tracker.get_total_stats.return_value = stats
+    monkeypatch.setattr("src.token_tracker.get_tracker", lambda: tracker)
+    monkeypatch.setattr(
+        persistence, "config", TestRecordedModelProvenance._new_schema_settings()
+    )
+    result = success_artifact(
+        "final_trade_decision", "VERDICT: HOLD", provider="google", model=producer
+    )
+    result["artifact_statuses"]["final_trade_decision"]["ok"] = ok
+    result["run_summary"] = persistence.build_run_summary(
+        result, quick_mode=True, article_requested=False
+    )
+    path = persistence.save_results_to_file(result, "TEST.T", results_dir=tmp_path)
+    saved = json.loads(path.read_text())
+    for key in (
+        "configured_decision_model",
+        "decision_models_used",
+        "artifact_decision_model",
+    ):
+        assert saved["metadata"][key] == result["run_summary"][key]
+    assert saved["metadata"]["artifact_decision_model"] == expected
+    assert "rejected" not in saved["metadata"]["decision_models_used"]

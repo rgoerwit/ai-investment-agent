@@ -21,7 +21,9 @@ from typing import Any
 import structlog
 
 from src.blocking_io import FX_RATE_POLICY, run_blocking_call
+from src.config import config
 from src.error_safety import summarize_exception
+from src.exchange_metadata import CURRENCY_CODE_ALIASES, CURRENCY_SYMBOL_TO_CODE
 
 logger = structlog.get_logger(__name__)
 
@@ -57,16 +59,24 @@ async def get_fx_rate_yfinance(
         JPY → USD returns ~0.0067 (1 JPY = $0.0067)
         HKD → USD returns ~0.128 (1 HKD = $0.128)
     """
-    # Normalize to uppercase so "jpy" → "JPY" works for direct callers
-    from_currency = from_currency.strip().upper()
-    to_currency = to_currency.strip().upper()
+    # Normalize codes without collapsing pence into pounds.
+    from_currency = canonical_currency_code(from_currency) or ""
+    to_currency = canonical_currency_code(to_currency) or ""
 
     if from_currency == to_currency:
         return 1.0
 
-    # yfinance forex ticker format: "JPYUSD=X" (from + to + =X)
-    fx_ticker = f"{from_currency}{to_currency}=X"
+    source_major, source_scale = normalize_minor_unit_currency(from_currency)
+    target_major, target_scale = normalize_minor_unit_currency(to_currency)
+    if source_major == target_major:
+        return source_scale / target_scale
 
+    # yfinance forex ticker format: "JPYUSD=X" (from + to + =X)
+    fx_ticker = f"{source_major}{target_major}=X"
+
+    # Read at call time, so an override reaches the call; run_blocking_call
+    # shrinks it to the operational deadline (caller and any tool runner).
+    timeout_seconds = config.fx_rate_fetch_timeout_seconds
     try:
         import yfinance as yf
 
@@ -88,7 +98,9 @@ async def get_fx_rate_yfinance(
             return info.get("regularMarketPrice") or info.get("previousClose")
 
         rate = await run_blocking_call(
-            FX_RATE_POLICY.with_label(f"fx_rate:{fx_ticker}"),
+            FX_RATE_POLICY.with_label(f"fx_rate:{fx_ticker}").with_timeout(
+                timeout_seconds
+            ),
             _fetch_rate,
         )
 
@@ -96,7 +108,7 @@ async def get_fx_rate_yfinance(
             logger.debug(
                 "fx_rate_fetched", pair=fx_ticker, rate=rate, source="yfinance"
             )
-            return float(rate)
+            return float(rate) * source_scale / target_scale
         else:
             logger.debug("fx_rate_invalid", pair=fx_ticker, rate=rate)
             return None
@@ -105,14 +117,28 @@ async def get_fx_rate_yfinance(
         logger.debug(
             "fx_rate_timeout",
             pair=fx_ticker,
-            timeout_ms=int(FX_RATE_POLICY.hard_timeout_seconds * 1000),
+            timeout_ms=int(timeout_seconds * 1000),
         )
         return None
     except YFRateLimitError as e:
-        logger.debug("fx_rate_rate_limited", pair=fx_ticker, error=str(e))
+        logger.debug(
+            "fx_rate_rate_limited",
+            pair=fx_ticker,
+            **(
+                summarize_exception(e, operation="fx_rate_yfinance")
+                | {"message_preview": None}
+            ),
+        )
         return None
     except Exception as e:
-        logger.debug("fx_rate_fetch_error", pair=fx_ticker, error=str(e))
+        logger.debug(
+            "fx_rate_fetch_error",
+            pair=fx_ticker,
+            **(
+                summarize_exception(e, operation="fx_rate_yfinance")
+                | {"message_preview": None}
+            ),
+        )
         return None
 
 
@@ -165,22 +191,35 @@ def canonical_currency_code(currency: str | None) -> str | None:
     ``"GBp".upper()`` is ``"GBP"`` — a different currency scaled 100x. A plain
     ``.upper()`` at a resolution boundary is therefore how a pence quote
     silently becomes a pounds quote (the GAMA.L false-review bug, Aug 2026).
-    Registered minor-unit aliases keep their canonical spelling; everything else
-    is upper-cased as before, so ``"usd"`` still normalizes to ``"USD"``.
+    Registered minor-unit aliases keep their canonical spelling; unambiguous
+    symbols resolve to ISO codes. Other inputs are upper-cased as before, so
+    ``"usd"`` still normalizes to ``"USD"``.
 
-    Matching is deliberately **case-sensitive**: ``"GBp"`` and ``"GBP"`` differ
-    only in case, so a case-insensitive lookup would map pounds onto pence. An
-    exact alias hit is preserved; anything else upper-cases, which still lands
-    ``"gbx"`` on the ``"GBX"`` alias and leaves ``"gbp"`` as ordinary pounds.
+    Minor-unit alias matching is deliberately **case-sensitive**: ``"GBp"`` and
+    ``"GBP"`` differ only in case, so a case-insensitive alias lookup would map
+    pounds onto pence. Exact minor-unit alias hits are preserved; registered
+    symbols match case-insensitively. Remaining inputs upper-case before the
+    code-alias lookup, which still lands ``"gbx"`` on the ``"GBX"`` alias and
+    leaves ``"gbp"`` as ordinary pounds.
     """
     if not currency:
         return None
-    stripped = currency.strip()
+    stripped = " ".join(currency.split())
     if not stripped:
         return None
     if stripped in MINOR_UNIT_CURRENCY_ALIASES:
         return stripped
-    return stripped.upper()
+    symbol = next(
+        (
+            code
+            for token, code in CURRENCY_SYMBOL_TO_CODE.items()
+            if token.casefold() == stripped.casefold()
+        ),
+        None,
+    )
+    if symbol:
+        return symbol
+    return CURRENCY_CODE_ALIASES.get(stripped.upper(), stripped.upper())
 
 
 def normalize_minor_unit_currency(currency: str | None) -> tuple[str | None, float]:
@@ -385,35 +424,24 @@ def get_fx_rate_fallback(from_currency: str, to_currency: str = "USD") -> float 
     entry for e.g. "EUR->GBP". Returns None (never a mislabeled USD rate)
     when either leg is missing from the table.
     """
+    from_currency = canonical_currency_code(from_currency) or ""
+    to_currency = canonical_currency_code(to_currency) or ""
     if from_currency == to_currency:
         return 1.0
-
-    normalized_currency, scale = normalize_minor_unit_currency(from_currency)
-    if scale != 1.0:
-        major_rate = (
-            FALLBACK_RATES_TO_USD.get(normalized_currency)
-            if normalized_currency is not None
-            else None
+    source_major, source_scale = normalize_minor_unit_currency(from_currency)
+    target_major, target_scale = normalize_minor_unit_currency(to_currency)
+    if source_major == target_major:
+        return source_scale / target_scale
+    source_rate = FALLBACK_RATES_TO_USD.get(source_major or "")
+    target_rate = FALLBACK_RATES_TO_USD.get(target_major or "")
+    if not source_rate or not target_rate:
+        logger.debug(
+            "fx_rate_fallback_cross_rate_unavailable",
+            from_currency=from_currency,
+            to_currency=to_currency,
         )
-        from_rate_to_usd = major_rate * scale if major_rate else None
-    else:
-        from_rate_to_usd = FALLBACK_RATES_TO_USD.get(from_currency)
-
-    if not from_rate_to_usd:
         return None
-
-    if to_currency == "USD":
-        fallback_rate = from_rate_to_usd
-    else:
-        to_rate_to_usd = FALLBACK_RATES_TO_USD.get(to_currency)
-        if not to_rate_to_usd:
-            logger.debug(
-                "fx_rate_fallback_cross_rate_unavailable",
-                from_currency=from_currency,
-                to_currency=to_currency,
-            )
-            return None
-        fallback_rate = from_rate_to_usd / to_rate_to_usd
+    fallback_rate = source_rate / target_rate * source_scale / target_scale
 
     logger.debug(
         "fx_rate_using_fallback",
@@ -453,13 +481,18 @@ async def get_fx_rate(
         if rate:
             usd_value = jpy_value * rate
     """
-    # Normalize currency codes (uppercase, strip whitespace)
-    from_currency = from_currency.strip().upper()
-    to_currency = to_currency.strip().upper()
+    # Preserve minor denominations while normalizing codes.
+    from_currency = canonical_currency_code(from_currency) or ""
+    to_currency = canonical_currency_code(to_currency) or ""
 
     # Identity case
     if from_currency == to_currency:
         return 1.0, "identity"
+
+    source_major, source_scale = normalize_minor_unit_currency(from_currency)
+    target_major, target_scale = normalize_minor_unit_currency(to_currency)
+    if source_major == target_major:
+        return source_scale / target_scale, "identity"
 
     # Try yfinance first (preferred - always up-to-date)
     rate = await get_fx_rate_yfinance(from_currency, to_currency)
@@ -473,6 +506,7 @@ async def get_fx_rate(
             logger.warning(
                 "fx_rate_fallback_used",
                 currency=from_currency,
+                to_currency=to_currency,
                 rate=rate,
                 msg=(
                     "Live yfinance FX fetch failed — used FALLBACK_RATES_TO_USD "
@@ -555,8 +589,8 @@ class FxRateCache:
         self, from_currency: str, to_currency: str = "USD"
     ) -> tuple[float | None, str]:
         """Resolve one currency, live-first, using the process-wide cache."""
-        from_currency = from_currency.strip().upper()
-        to_currency = to_currency.strip().upper()
+        from_currency = canonical_currency_code(from_currency) or ""
+        to_currency = canonical_currency_code(to_currency) or ""
         if from_currency == to_currency:
             return 1.0, "identity"
 
@@ -579,8 +613,8 @@ class FxRateCache:
         concurrently) falls back via get_fx_rate(), so the wall-clock cost is
         one timeout per concurrency batch, not one per currency serially.
         """
-        to_currency = to_currency.strip().upper()
-        unique = {c.strip().upper() for c in currencies if c and c.strip()}
+        to_currency = canonical_currency_code(to_currency) or ""
+        unique = {code for c in currencies if (code := canonical_currency_code(c))}
         unique.discard(to_currency)
         if not unique:
             return {}
@@ -630,8 +664,8 @@ class FxRateCache:
         rather than once per batch — avoids paying asyncio.run() startup
         cost on every call once the currency is warm in the cache.
         """
-        currency = currency.strip().upper()
-        to_currency = to_currency.strip().upper()
+        currency = canonical_currency_code(currency) or ""
+        to_currency = canonical_currency_code(to_currency) or ""
         if currency == to_currency:
             return 1.0, "identity"
         return self._cached(currency, to_currency)

@@ -315,6 +315,7 @@ class TestAgentToolNodeFiltering:
             "junior_fundamentals_analyst",
         )
         state = {
+            "company_of_interest": "TEST",
             "messages": [
                 AIMessage(
                     name="junior_fundamentals_analyst",
@@ -328,7 +329,7 @@ class TestAgentToolNodeFiltering:
                         }
                     ],
                 )
-            ]
+            ],
         }
 
         result = await node(state, {"configurable": {}})
@@ -398,6 +399,7 @@ class TestAgentToolNodeFiltering:
             "junior_fundamentals_analyst",
         )
         state = {
+            "company_of_interest": "TEST",
             "messages": [
                 AIMessage(
                     name="junior_fundamentals_analyst",
@@ -411,7 +413,7 @@ class TestAgentToolNodeFiltering:
                         }
                     ],
                 )
-            ]
+            ],
         }
 
         result = await node(state, {"configurable": {}})
@@ -964,9 +966,13 @@ class TestToolCallTimeout:
     @pytest.mark.asyncio
     async def test_tool_timeout_returns_error_message(self, monkeypatch):
         """Tool exceeding timeout returns error ToolMessage instead of hanging."""
-        import src.graph.tool_nodes as tn_mod
+        import src.tooling.runtime as tool_runtime
 
-        monkeypatch.setattr(tn_mod, "_TOOL_CALL_TIMEOUT_SECONDS", 0.2)
+        monkeypatch.setattr(
+            tool_runtime.settings_config,
+            "tool_execution_timeout_seconds",
+            0.2,
+        )
 
         tool = MagicMock()
         tool.name = "slow_tool"
@@ -1013,9 +1019,13 @@ class TestToolCallTimeout:
     @pytest.mark.asyncio
     async def test_timeout_does_not_block_other_tools(self, monkeypatch):
         """One slow tool timing out doesn't block fast parallel tools."""
-        import src.graph.tool_nodes as tn_mod
+        import src.tooling.runtime as tool_runtime
 
-        monkeypatch.setattr(tn_mod, "_TOOL_CALL_TIMEOUT_SECONDS", 0.2)
+        monkeypatch.setattr(
+            tool_runtime.settings_config,
+            "tool_execution_timeout_seconds",
+            0.2,
+        )
 
         fast_tool = MagicMock()
         fast_tool.name = "fast_tool"
@@ -1076,9 +1086,13 @@ class TestToolCallTimeout:
     @pytest.mark.asyncio
     async def test_timeout_logging(self, monkeypatch, caplog):
         """Timeout produces tool_call_timeout log entry with tool name."""
-        import src.graph.tool_nodes as tn_mod
+        import src.tooling.runtime as tool_runtime
 
-        monkeypatch.setattr(tn_mod, "_TOOL_CALL_TIMEOUT_SECONDS", 0.1)
+        monkeypatch.setattr(
+            tool_runtime.settings_config,
+            "tool_execution_timeout_seconds",
+            0.1,
+        )
 
         tool = MagicMock()
         tool.name = "hanging_tool"

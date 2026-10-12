@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
-from types import ModuleType
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -330,14 +328,14 @@ def test_portfolio_manager_prompt_treats_apac_silence_as_neutral():
 def test_apac_llm_factory_gates_quick_disabled_and_missing_key(monkeypatch):
     from src import llms
 
-    monkeypatch.setattr(llms.config, "enable_apac_specialist", False)
+    monkeypatch.setattr(llms.resolve_settings(), "enable_apac_specialist", False)
     assert llms.create_apac_specialist_llm() is None
 
-    monkeypatch.setattr(llms.config, "enable_apac_specialist", True)
+    monkeypatch.setattr(llms.resolve_settings(), "enable_apac_specialist", True)
     assert llms.create_apac_specialist_llm(quick_mode=True) is None
 
     monkeypatch.setattr(
-        type(llms.config),
+        type(llms.resolve_settings()),
         "get_apac_specialist_api_key",
         lambda self: "",
     )
@@ -346,6 +344,7 @@ def test_apac_llm_factory_gates_quick_disabled_and_missing_key(monkeypatch):
 
 def test_apac_llm_factory_passes_deepseek_kwargs(monkeypatch):
     from src import llms
+    from src.llm_runtime.adapters import transports
 
     captured = {}
 
@@ -353,18 +352,18 @@ def test_apac_llm_factory_passes_deepseek_kwargs(monkeypatch):
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    fake_module = ModuleType("langchain_openai")
-    fake_module.ChatOpenAI = FakeChatOpenAI
-    monkeypatch.setitem(sys.modules, "langchain_openai", fake_module)
-    monkeypatch.setattr(llms.config, "enable_apac_specialist", True)
+    monkeypatch.setattr(transports, "new_openai_chat", FakeChatOpenAI)
+    monkeypatch.setattr(llms.resolve_settings(), "enable_apac_specialist", True)
     monkeypatch.setattr(
-        type(llms.config),
+        type(llms.resolve_settings()),
         "get_apac_specialist_api_key",
         lambda self: "sk-test",
     )
-    monkeypatch.setattr(llms.config, "apac_specialist_model", "deepseek-v4-pro")
     monkeypatch.setattr(
-        llms.config, "apac_specialist_base_url", "https://api.deepseek.com"
+        llms.resolve_settings(), "apac_specialist_model", "deepseek-v4-pro"
+    )
+    monkeypatch.setattr(
+        llms.resolve_settings(), "apac_specialist_base_url", "https://api.deepseek.com"
     )
 
     llm = llms.create_apac_specialist_llm(max_completion_tokens=2048)
@@ -375,10 +374,15 @@ def test_apac_llm_factory_passes_deepseek_kwargs(monkeypatch):
     assert captured["reasoning_effort"] == "max"
     assert captured["extra_body"] == {"thinking": {"type": "enabled"}}
     assert "temperature" not in captured
+    # The APAC base URL is a compatible vendor, named explicitly.
+    assert captured["dispatch_provider"] == transports.OPENAI_COMPATIBLE_PROVIDER
+    assert captured["budget_timeout_class"] == "regional"
+    assert "service_tier" not in captured
 
 
 def test_apac_direct_retry_factory_disables_thinking_and_sdk_retries(monkeypatch):
     from src import llms
+    from src.llm_runtime.adapters import transports
 
     captured = {}
 
@@ -386,16 +390,17 @@ def test_apac_direct_retry_factory_disables_thinking_and_sdk_retries(monkeypatch
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    fake_module = ModuleType("langchain_openai")
-    fake_module.ChatOpenAI = FakeChatOpenAI
-    monkeypatch.setitem(sys.modules, "langchain_openai", fake_module)
-    monkeypatch.setattr(llms.config, "enable_apac_specialist", True)
+    monkeypatch.setattr(transports, "new_openai_chat", FakeChatOpenAI)
+    monkeypatch.setattr(llms.resolve_settings(), "enable_apac_specialist", True)
     monkeypatch.setattr(
-        type(llms.config), "get_apac_specialist_api_key", lambda self: "sk-test"
+        type(llms.resolve_settings()),
+        "get_apac_specialist_api_key",
+        lambda self: "sk-test",
     )
 
     llms.create_apac_specialist_llm(thinking_enabled=False)
 
     assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
-    assert captured["max_retries"] == 0
+    # One SDK attempt is the transport class's own; no factory passes a count.
+    assert "max_retries" not in captured
     assert "reasoning_effort" not in captured

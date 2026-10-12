@@ -546,6 +546,8 @@ class TestFlushTraces:
             mock_config.langfuse_enabled = True
             mock_config.get_langfuse_public_key.return_value = "pk-test"
             mock_config.get_langfuse_secret_key.return_value = "sk-test"
+            # A mock config must model the flush bound the call now reads.
+            mock_config.langfuse_flush_timeout_seconds = 2.0
             with patch.dict(
                 sys.modules,
                 _fake_langfuse_modules(client=mock_client),

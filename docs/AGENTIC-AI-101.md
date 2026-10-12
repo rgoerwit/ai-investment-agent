@@ -83,7 +83,7 @@ This isn't science fiction. This is what this repository does—using free or ch
 This project uses LangGraph because financial decisions require **precision**:
 
 - **Explicit control** - You define exactly when validation happens, when debate stops, when to short-circuit (reject early)
-- **Conditional routing** - Red-flag validator can skip debate if a stock has catastrophic leverage
+- **Conditional routing** - `Sync Check` (`src/graph/routing.py`) ends an unassessable run with a diagnostic and sends an issuer-level rejection to a deterministic fast-fail, skipping the debate
 - **Debugging** - LangSmith traces show exact state transitions (critical for production)
 - **Scalability** - Stateful graphs can be deployed to cloud infrastructure
 
@@ -133,13 +133,15 @@ What I wanted was an **institutional-quality research team** that could:
 - Handle obscure tickers (Taiwan semiconductors, Hong Kong banks)
 - Apply disciplined investment criteria (no emotional decisions)
 - Synthesize multiple perspectives (bull case, bear case, risk assessment)
-- Cost $0 marginal per analysis (free-tier APIs)
+- Cost little per analysis (free or cheap-tier APIs; each run records what it spent)
 
 So I built one. Not because it's perfect—it's not. But because it's **accessible**.
 
 ### The Architecture: How Agents Collaborate
 
-Here's how a single stock analysis flows through the system:
+Here's how a single stock analysis flows through the system. The authoritative
+diagram is in [README.md](../README.md); the edges live in `src/graph/builder.py`
+and the routers in `src/graph/routing.py`.
 
 ```
 User: "Analyze 0005.HK"
@@ -148,37 +150,35 @@ User: "Analyze 0005.HK"
   └─ Macro Context Analyst summarizes cached regional regime background
      and feeds it only to News Analyst
     ↓
-[Parallel Data Gathering]
-  ├─ Market Analyst (technical analysis)
-  ├─ Fundamentals Analyst (financial metrics)
-  ├─ News Analyst (recent events)
-  └─ Sentiment Analyst (social media)
+[Dispatcher: parallel evidence gathering]
+  ├─ Market, Sentiment and News analysts
+  ├─ Junior Fundamentals, Foreign Language and Legal Counsel (in parallel)
+  │     -> barrier -> Senior Fundamentals -> Financial Validator (code)
+  ├─ Value Trap Detector
+  └─ Forensic Auditor (optional; full mode only)
     ↓
-[Financial Validator]
-    ├─ RED FLAGS? (D/E > 500%, earnings quality issues)
-    │   ├─ YES → Skip debate, recommend SELL
-    │   └─ NO → Continue to debate
+[Sync Check: deterministic routing on the analysis outcome]
+    ├─ Required evidence unassessable → diagnostic output (no verdict)
+    ├─ Issuer rejected → PM Fast-Fail (code), skip debate
+    └─ Otherwise → continue to debate
+    ↓
+[Adversarial Debate]
+    ├─ Bull and Bear Researchers run in parallel
+    └─ One round in quick mode; a second round in full mode
     ↓
 [Research Manager]
-    └─ Synthesize findings, identify themes
+    └─ Synthesize both sides into the investment plan
     ↓
-[Adversarial Debate - Round 1]
-    ├─ Bull Researcher: "Here's the upside..."
-    └─ Bear Researcher: "Wait, consider these risks..."
+[Post-research review, in parallel with Valuation Calculator]
+    └─ Optional APAC specialist and External Consultant; quick mode
+       may bypass the Consultant on a clear negative or clean consensus
     ↓
-[Adversarial Debate - Round 2]
-    ├─ Bull: "I concede X, but counter with Y..."
-    └─ Bear: "Agreed on Y, but Z is still concerning..."
+[Trader → Risk Assessment Team]
+    ├─ Trader proposes a plan (it places no orders)
+    └─ Risky, Safe and Neutral analysts weigh it in parallel
     ↓
-[Risk Assessment Team]
-    ├─ Conservative Analyst: "Recommend 0% allocation"
-    ├─ Neutral Analyst: "Recommend 2% allocation"
-    └─ Aggressive Analyst: "Recommend 3% allocation"
-    ↓
-[Portfolio Manager]
-    └─ Synthesize all perspectives
-    └─ Apply thesis criteria (GARP strategy)
-    └─ FINAL DECISION: BUY / HOLD / SELL + position size
+[Portfolio Manager + deterministic verdict policy]
+    └─ FINAL DECISION: BUY / HOLD / DO NOT INITIATE
 ```
 
 This pre-graph macro brief is intentionally separate from portfolio-detected
@@ -186,13 +186,18 @@ macro events. `MacroEventsStore` holds sparse discrete shocks discovered by the
 portfolio path, while `src.macro_context.py` holds a short cached regional
 regime brief used as News Analyst background.
 
+The analyzer is initiation-only and portfolio-blind: it never recommends selling
+a holding. Sell and trim decisions belong to the separate broker-reconciliation
+path in `src/ibkr/`, which has the holdings and account context a standalone
+report lacks.
+
 **Why this works better than a single prompt:**
 
 1. **Specialization** - Each agent focuses on one domain (no "jack of all trades")
 2. **Adversarial debate** - Bull/Bear researchers catch each other's blind spots
 3. **Multi-perspective risk** - Conservative/neutral/aggressive analysts represent different risk tolerances
-4. **Deterministic gates** - Financial Validator uses hard thresholds (D/E > 500% = auto-reject, no rationalization)
-5. **Thesis enforcement** - Portfolio Manager applies quantitative criteria (growth score ≥ 50%, liquidity ≥ $100k hard floor / $250k full pass)
+4. **Deterministic gates** - The Financial Validator is code, not a model: sector-aware leverage and coverage thresholds (`src/validators/financial_rules.py`) produce red flags the model cannot argue away
+5. **Thesis enforcement** - The Portfolio Manager applies the quantitative criteria in `src/thesis_constants.py`, and the verdict policy (`src/agents/verdict_policy.py`) constrains what it may conclude
 
 ### Real-World Example: Red-Flag Detection
 
@@ -209,15 +214,14 @@ Consider a stock with these financials:
 
 **What this multi-agent system does:**
 
-1. **Fundamentals Analyst** extracts metrics into structured DATA_BLOCK
-2. **Financial Validator** detects:
-   - ❌ EXTREME_LEVERAGE (D/E 650% > 500% threshold)
-   - ❌ REFINANCING_RISK (interest coverage 1.2x < 2.0x with high leverage)
-3. **Conditional routing** skips debate entirely
-4. **Portfolio Manager** receives validator recommendation: AUTO_REJECT
-5. **Final decision:** SELL - "Leverage risk makes this uninvestable per GARP criteria"
+1. **Senior Fundamentals** extracts metrics into a structured DATA_BLOCK
+2. **Financial Validator** (code) detects:
+   - ❌ EXTREME_LEVERAGE (D/E above the sector-aware threshold)
+   - ❌ REFINANCING_RISK (weak interest coverage together with high leverage)
+3. **Conditional routing** skips the debate and goes to the deterministic PM Fast-Fail
+4. **Final decision:** DO NOT INITIATE, with the validator's reasons recorded in the report
 
-This saves ~60% of token costs (no debate needed for doomed stocks) and prevents "hope bias" (where debate might rationalize fatal flaws).
+This saves the debate, research and review calls for stocks that cannot qualify, and prevents "hope bias" (where debate might rationalize fatal flaws).
 
 ### The GARP Thesis: Disciplined Investing
 
@@ -230,36 +234,33 @@ This system isn't a black box. It enforces a specific investment strategy: **GAR
 5.  **Undiscovered** - Institutional/Analyst coverage gaps.
 6.  **Jurisdiction** - Geopolitical and exchange stability.
 
-**Designing for Reliability**: A common failure mode in LLM applications is "fragile parsing"—relying on regex to hunt through long narrative text for a single number. This system mitigates this by using a versioned **Structured DATA_BLOCK (v7.4)**. The LLM is forced to output critical metrics in a strict schema, which the Python plotting layer then extracts deterministically. This turns the LLM into a reliable data-producer for the visualization engine.
+**Designing for Reliability**: A common failure mode in LLM applications is "fragile parsing"—relying on regex to hunt through long narrative text for a single number. This system mitigates this by using a versioned **Structured DATA_BLOCK**. The LLM is forced to output critical metrics in a strict schema, which the Python plotting layer then extracts deterministically. This turns the LLM into a reliable data-producer for the visualization engine.
 
-**Hard requirements** (automatic SELL if violated):
+**Hard requirements** (a failure means DO NOT INITIATE; exact thresholds live in `src/thesis_constants.py`, and `tests/prompts/test_threshold_parity.py` keeps the prompts in step):
 
-- Financial Health Score ≥ 50% (profitable, positive cash flow, manageable debt)
-- Growth Score ≥ 50% (revenue/EPS growth, margin expansion, turnaround trajectory)
-- Liquidity ≥ $100k USD daily turnover, $250k for a full pass (tradeable without slippage)
-- Analyst Coverage < 15 (undiscovered by mainstream US research)
+- Financial Health Score above the floor (profitable, positive cash flow, manageable debt)
+- Growth Score above the floor (revenue/EPS growth, margin expansion, turnaround trajectory)
+- Liquidity above a hard daily-turnover floor, with a higher level for a full pass (tradeable without slippage)
+- Analyst coverage below a ceiling (undiscovered by mainstream US research)
 
 **Soft factors** (influence risk scoring):
 
-- Valuation (P/E ≤ 18, PEG ≤ 1.2, P/B ≤ 1.4)
-- US Revenue exposure (prefer 25-35% for diversification)
+- Valuation (P/E, PEG and P/B against the thesis ceilings)
+- US revenue exposure (capped for diversification)
 - Qualitative risks (geopolitical, industry headwinds, management issues)
 
 **Philosophy:** Find mid-cap international stocks transitioning from value (undervalued) to growth (expansion phase) before US analysts discover them. This is one of the few ways retail investors can compete with institutional funds—by looking where others aren't.
 
 ### Performance: The Honest Truth
 
-**Speed:**
-- Quick mode: 2-4 minutes per ticker
-- Standard mode: 5-10 minutes per ticker
-- Batch (300 tickers): 12-24 hours on free-tier Gemini (slower with rate limits)
-
-**Cost:**
-- Free tier Gemini: $0 per analysis (15 RPM limit, lots of retries)
-- Paid tier Gemini: ~$0.05-$0.15 per analysis (depending on model choice)
+**Speed and cost:** both depend on the resolved model seats, provider queueing and
+retries, so no figure here would stay true. Quick mode runs one debate round,
+disables the Forensic Auditor and APAC specialist, and may bypass the External
+Consultant on a clear negative or clean consensus; see the Runtime and cost section of
+[README.md](../README.md). Every saved run records its token usage and cost by
+seat, vendor, model and service tier.
 
 **Accuracy:**
-- Quantitative metrics: ~80% match to Bloomberg/Yahoo Finance (when data available)
 - Qualitative synthesis: Good for generating hypotheses, **not for final decisions**
 - Weaknesses: Historical data only, free APIs have gaps, sentiment analysis limited
 
@@ -273,11 +274,11 @@ This system isn't a black box. It enforces a specific investment strategy: **GAR
 
 This codebase demonstrates production-grade patterns often missing from tutorials:
 
-1. **Error handling** - Multi-source data fallback (yfinance → YahooQuery → FMP → EODHD → Tavily)
+1. **Error handling** - Multi-source data fallback (yfinance and optional EODHD/FMP, with Tavily search), so a gap is reported rather than filled with a guess
 2. **Rate limiting** - Exponential backoff, configurable RPM limits, graceful degradation
 3. **Memory isolation** - Ticker-specific ChromaDB collections prevent contamination
 4. **Prompt versioning** - JSON files with metadata tracking (`prompts/fundamentals_analyst.json`)
-5. **Testing** - 37 test files covering unit, integration, edge cases (rate limits, missing data, malformed responses)
+5. **Testing** - an offline-by-default suite covering unit, contract and edge cases (rate limits, missing data, malformed responses); integration tests opt in with `--run-integration`
 6. **Observability** - LangSmith tracing, structured logging, token usage tracking
 
 ### For Investors: A New Tool
@@ -287,7 +288,7 @@ This system provides:
 - ✅ Systematic discipline (no emotional decisions)
 - ✅ Multi-perspective analysis (bull/bear/risk synthesis)
 - ✅ International coverage (HK, JP, TW, KR equities)
-- ✅ Reproducible research (same inputs → same outputs)
+- ✅ Auditable research (saved evidence, bindings and decision trace; model output can still vary between runs)
 - ✅ Full transparency (every decision explained with supporting data)
 
 But remember:
@@ -408,17 +409,17 @@ The solution isn't to avoid AI—it's to use it **responsibly**:
    ```bash
    poetry run python -m src.main --ticker 0005.HK
    # Analyzes HSBC Holdings (Hong Kong)
-   # Takes ~5-10 minutes
-   # Results saved to results/0005_HK_2025-XX-XX.md
+   # Takes minutes; elapsed time depends on provider conditions
+   # Pass --output results/0005.HK.md to save the report
    ```
 
 ### Next Steps
 
 - **Read the architecture** - Start with [README.md](../README.md), then `docs/CODEBASE_MEMORY.md`, then the live tree
-- **Run tests** - `poetry run pytest tests/ -v`
+- **Run tests** - `make test-ci` for the deterministic offline suite (see the Testing section of [README.md](../README.md))
 - **Try batch analysis** - `./scripts/run_pipeline.sh` (see [README.md](../README.md))
-- **Modify the thesis** - Edit `prompts/portfolio_manager.json` to change criteria
-- **Add a new agent** - Follow the package patterns under `src/agents/` and `src/graph/`
+- **Modify the thesis** - Thresholds belong to `src/thesis_constants.py`; the prompts under `prompts/` restate them as prose, and `tests/prompts/test_threshold_parity.py` fails when the two drift. Edit prompt JSON through a JSON parser, then run `make test-prompts`
+- **Add a new agent** - Declare its seat in `src/llm_runtime/seats.py` (provider binding, tier and timeout class), build its model through `src/llm_runtime/construction.py`, then wire the node and edges in `src/graph/builder.py` with routers in `src/graph/routing.py`
 
 ---
 
@@ -471,4 +472,4 @@ The code is imperfect. The analysis isn't always right. But it's a start.
 
 ---
 
-*Last updated: December 2025*
+*Last updated: October 2026*

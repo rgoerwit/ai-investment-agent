@@ -20,8 +20,10 @@ from pathlib import Path
 from typing import Literal
 
 import structlog
-from pydantic import AliasChoices, Field, SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from src.env_file import default_settings_env_file
 
 # Note: Pydantic Settings handles .env loading natively via env_file in SettingsConfigDict.
 # No manual load_dotenv() needed - it's cleaner and avoids double-loading issues.
@@ -86,7 +88,7 @@ def configure_langsmith_tracing(settings: "Settings") -> None:
     """
     has_api_key = bool(settings.get_langsmith_api_key())
     project_name = settings.langsmith_project
-    tracing_enabled = bool(getattr(settings, "langsmith_tracing_enabled", False))
+    tracing_enabled = settings.langsmith_tracing_enabled
 
     if has_api_key and tracing_enabled:
         # LangSmith SDK auto-detects from Pydantic Settings - just log for visibility
@@ -96,11 +98,16 @@ def configure_langsmith_tracing(settings: "Settings") -> None:
 def _parse_env_file() -> dict[str, str]:
     """Parse .env file to get explicitly set values (ignoring comments and blank lines).
 
-    Preserved for backwards compatibility with existing tests.
+    Preserved for backwards compatibility with existing tests. Honours the same
+    policy as the ``Settings`` classes: under pytest no file is read, so
+    ``get_env_value`` never serves the operator's ``.env`` to a unit test.
     """
-    env_file = Path(".env")
+    env_file_name = default_settings_env_file()
     env_values: dict[str, str] = {}
 
+    if env_file_name is None:
+        return env_values
+    env_file = Path(env_file_name)
     if not env_file.exists():
         return env_values
 
@@ -328,11 +335,6 @@ def validate_environment_variables() -> None:
 # --- Pydantic Settings Class ---
 
 
-def _default_settings_env_file() -> str | None:
-    """Keep pytest from ingesting operator configuration during collection."""
-    return None if os.environ.get("PYTEST_DISABLE_DOTENV") == "true" else ".env"
-
-
 class Settings(BaseSettings):
     """
     Configuration class for the Multi-Agent Trading System.
@@ -446,7 +448,7 @@ class Settings(BaseSettings):
         default_factory=dict, validation_alias="LLM_SEAT_QUICK_MODEL_OVERRIDES"
     )
     # Same-vendor model failover for the retry attempt after a server error or
-    # timeout, keyed by model: {"gemini-3.8-flash": "gemini-3.7-flash"}. Every
+    # timeout, keyed by model: {"gemini-3.8-flash": "gemini-3.6-flash"}. Every
     # seat bound to a source model inherits it; see src/llm_runtime/failover.py.
     llm_model_failovers: dict[str, str] = Field(
         default_factory=dict, validation_alias="LLM_MODEL_FAILOVERS"
@@ -835,6 +837,16 @@ class Settings(BaseSettings):
         validation_alias="APAC_SPECIALIST_API_KEY",
         description="API key for the optional APAC Regional Specialist",
     )
+    # A node total, not a request timeout: it is the APAC node's enclosing
+    # deadline, so its first call and the direct retry share one allowance. It
+    # is also the APAC client's request ceiling, in and out of an invocation
+    # scope (apac_client_timeout_seconds in src/llm_runtime/timeouts.py).
+    apac_node_total_timeout_seconds: float = Field(
+        default=240.0,
+        gt=0.0,
+        validation_alias="APAC_NODE_TOTAL_TIMEOUT_SECONDS",
+        description="Total wall-clock budget for the APAC specialist node",
+    )
     editor_model: str | None = Field(
         default=None,
         validation_alias="EDITOR_MODEL",
@@ -1028,6 +1040,16 @@ class Settings(BaseSettings):
             "endpoints on the review plane"
         ),
     )
+    # The standard per-request ceiling on the OpenAI plane (api.openai.com):
+    # every OpenAI client is built with it and every in-scope OpenAI request is
+    # capped at it; the invocation deadline still sizes each request below it.
+    # Read at the call (src/llm_runtime/timeouts.py), never at import.
+    openai_request_cap_seconds: float = Field(
+        default=120.0,
+        gt=0.0,
+        validation_alias="OPENAI_REQUEST_CAP_SECONDS",
+        description="Standard per-request ceiling in seconds for OpenAI requests",
+    )
     # Quick-mode screening should not inherit a 5-minute SDK socket/read
     # timeout. The outer runtime helper still enforces the hard wall-clock cap;
     # this SDK timeout catches provider stalls earlier and avoids 300s slow-tail
@@ -1038,17 +1060,78 @@ class Settings(BaseSettings):
         validation_alias="QUICK_LLM_API_TIMEOUT_SECONDS",
         description="Provider SDK timeout in seconds for quick-mode Gemini LLMs",
     )
-    # Lowered from 10 -> 2: at 10 retries × 300s timeout, a single hung Gemini
-    # call could legitimately consume 50min before raising. The outer
-    # `invoke_with_rate_limit_handling` already retries 3× with backoff, so
-    # SDK-level retries are deliberately tight. Bump if you see frequent
-    # transient 5xx errors that aren't being absorbed.
-    api_retry_attempts: int = Field(
+    # TOTAL attempts for one LLM call (one meaning on every vendor): the
+    # transient-retry budget of the application retry loop
+    # (`invoke_with_rate_limit_handling`), the only retry owner. Every client
+    # sends a single SDK attempt per request.
+    # Lowered from 10 -> 2 in May 2026: at 10 x 300s a single hung Gemini call
+    # could consume 50 min before raising.
+    # API_RETRY_ATTEMPTS is the deprecated spelling; LLM_ATTEMPTS wins when both
+    # are set. Its value carries over unchanged: Google, its main consumer,
+    # already counted total attempts.
+    llm_attempts: int = Field(
         default=2,
         ge=0,
-        validation_alias="API_RETRY_ATTEMPTS",
-        description="Number of retry attempts for failed API calls",
+        validation_alias=AliasChoices("LLM_ATTEMPTS", "API_RETRY_ATTEMPTS"),
+        description="Total attempts for one LLM call (0 is treated as 1)",
     )
+    # Per-dispatch admission (src/llm_runtime/timeouts.py). A request is refused,
+    # not sent, when less than the minimum useful attempt remains; the margin is
+    # held back so a request's own deadline fires before the hard cap does.
+    llm_dispatch_margin_seconds: float = Field(
+        default=2.0,
+        ge=0.0,
+        validation_alias="LLM_DISPATCH_MARGIN_SECONDS",
+        description="Seconds kept back from each request deadline",
+    )
+    # The tool plane's margin (deadline_margin in src/llm_runtime/timeouts.py):
+    # work inside a hard cap gets a deadline this share of the cap earlier, at
+    # most LLM_DISPATCH_MARGIN_SECONDS, so its own typed timeout fires before
+    # the cap cancels it.
+    deadline_margin_fraction: float = Field(
+        default=0.05,
+        gt=0.0,
+        lt=1.0,
+        validation_alias="DEADLINE_MARGIN_FRACTION",
+        description=(
+            "Share of a hard cap kept back from the deadline of the work inside "
+            "it (at most LLM_DISPATCH_MARGIN_SECONDS)"
+        ),
+    )
+    # The one minimum-useful-attempt rule (min_useful_seconds in
+    # src/llm_runtime/timeouts.py), shared by LLM requests, embedding attempts
+    # and MCP retries. Chosen, not measured: 0.04 of a 120 s request is 4.8 s, close
+    # to the 5 s the LLM plane used before it was derived.
+    min_useful_attempt_fraction: float = Field(
+        default=0.04,
+        gt=0.0,
+        le=0.5,
+        validation_alias="MIN_USEFUL_ATTEMPT_FRACTION",
+        description=(
+            "Share of an attempt's configured allowance below which the time "
+            "left is not worth sending it for (chosen, not measured); at most "
+            "half, so a minimum is always well inside its allowance"
+        ),
+    )
+    # A quick-mode flex request may queue for this share of its invocation cap,
+    # leaving the rest for a standard re-issue inside the same allowance.
+    flex_quick_attempt_fraction: float = Field(
+        default=0.4,
+        gt=0.0,
+        le=0.9,
+        validation_alias="FLEX_QUICK_ATTEMPT_FRACTION",
+        description="Share of a quick invocation cap a flex request may use",
+    )
+
+    @property
+    def api_retry_attempts(self) -> int:
+        """Deprecated alias of ``llm_attempts`` (total attempts)."""
+        return self.llm_attempts
+
+    @api_retry_attempts.setter
+    def api_retry_attempts(self, value: int) -> None:
+        self.llm_attempts = value
+
     # Wall-clock ceiling for a single `runnable.ainvoke()` call. Enforced via
     # `run_with_hard_timeout` in `invoke_with_rate_limit_handling` so a hung
     # provider SDK can't park a worker for hours. Keep tight for screening; use
@@ -1058,8 +1141,9 @@ class Settings(BaseSettings):
         gt=0.0,
         validation_alias="LLM_CALL_HARD_TIMEOUT_SECONDS",
         description=(
-            "Hard wall-clock cap (seconds) for a single LLM ainvoke; "
-            "raised as TimeoutError if exceeded."
+            "Hard wall-clock cap (seconds) for a single LLM ainvoke in full "
+            "mode; raised as TimeoutError if exceeded. --quick uses the per-class "
+            "quick caps instead."
         ),
     )
     # Tighter per-call cap for --quick mode. Quick Gemini Flash calls should
@@ -1091,7 +1175,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    # The OpenAI cross-check plane (Consultant + Forensic Auditor) is budgeted
+    # The review plane (Consultant, Forensic Auditor, Article Editor) is budgeted
     # separately from the APEX seats: its constraint is *vendor latency*, not
     # gate-criticality. Both seats can be pointed at an OpenAI-compatible endpoint
     # via OPENAI_API_BASE, and a reasoning vendor there can exceed the flat 60s
@@ -1099,7 +1183,8 @@ class Settings(BaseSettings):
     # 2026-08-03 the auditor timed out on 6/6 smoke-suite tickers and every
     # baseline capture was rejected. Kept distinct from the APEX knob so tuning
     # one cannot silently starve the other.
-    # Scope note: in practice this governs the **Auditor**. The Consultant passes
+    # Scope note: in practice this governs the **Auditor** and, since October
+    # 2026, the Article Editor's review calls. The Consultant passes
     # its own `overall_timeout_seconds` = min(CONSULTANT_CALL_TIMEOUT_SECONDS,
     # remaining-of-CONSULTANT_QUICK_TOTAL_TIMEOUT_SECONDS), which overrides this
     # cap — so raising this alone does not lengthen a Consultant call. Tune the
@@ -1109,9 +1194,9 @@ class Settings(BaseSettings):
         gt=0.0,
         validation_alias="CROSS_CHECK_QUICK_LLM_CALL_HARD_TIMEOUT_SECONDS",
         description=(
-            "Hard wall-clock cap (seconds) for a single OpenAI cross-check-seat "
-            "LLM ainvoke in --quick mode. Governs the Forensic Auditor; the "
-            "Consultant supplies its own tighter per-call deadline."
+            "Hard wall-clock cap (seconds) for a single review-plane LLM ainvoke "
+            "in --quick mode. Governs the Forensic Auditor and Article Editor; "
+            "the Consultant supplies its own tighter per-call deadline."
         ),
     )
     # An *optional* seat must never cost the ticker. The Auditor loops up to
@@ -1199,6 +1284,493 @@ class Settings(BaseSettings):
         description=(
             "Hard wall-clock cap (seconds) for cleanup_async_resources at "
             "process shutdown; on timeout the process forces os._exit()."
+        ),
+    )
+    # The pipeline watchdog contract (scripts/run_pipeline.sh, which reads the two
+    # stage values through `python -m src.config_print`; an exported shell value
+    # still wins). The shell hands each child an absolute deadline,
+    # PIPELINE_TICKER_DEADLINE_EPOCH, set when it starts the child; the child
+    # binds it, less the publication reserve, as the enclosing deadline of the
+    # whole analysis (src/llm_runtime/run_deadline.py). See docs/CODEBASE_MEMORY.md.
+    stage1_ticker_timeout_seconds: int = Field(
+        default=600,
+        gt=0,
+        validation_alias="STAGE1_TICKER_TIMEOUT_SECONDS",
+        description=(
+            "Per-ticker watchdog (seconds) for a Stage-1 quick analysis in "
+            "scripts/run_pipeline.sh; the child is signalled once it is exceeded."
+        ),
+    )
+    stage2_ticker_timeout_seconds: int = Field(
+        default=2400,
+        gt=0,
+        validation_alias="STAGE2_TICKER_TIMEOUT_SECONDS",
+        description=(
+            "Per-ticker watchdog (seconds) for a Stage-2 full analysis in "
+            "scripts/run_pipeline.sh; the child is signalled once it is exceeded."
+        ),
+    )
+    publication_reserve_seconds: float = Field(
+        default=30.0,
+        ge=0.0,
+        validation_alias="PUBLICATION_RESERVE_SECONDS",
+        description=(
+            "Seconds of a watchdog-run ticker's deadline kept back from analysis "
+            "for final publication (report render, persistence, shutdown)."
+        ),
+    )
+    # The article workflow (--article) runs after the analysis deadline's scope
+    # closes, so it binds its own. 900 s is about twice the longest measured
+    # article workflow (333-444 s across 15 June 2026 runs, analysis save to
+    # article write). See docs/LLM_PROVIDERS.md.
+    article_workflow_timeout_seconds: float = Field(
+        default=900.0,
+        gt=0.0,
+        validation_alias="ARTICLE_WORKFLOW_TIMEOUT_SECONDS",
+        description=(
+            "Wall-clock allowance (seconds) for the whole article workflow: "
+            "draft, editorial review and revisions, every writer fallback tier "
+            "included. A draft held when it runs out is saved unreviewed."
+        ),
+    )
+    # Two nested tool scopes. The execution scope bounds the tool runner inside
+    # ToolExecutionService; the combined scope, also applied by the service,
+    # bounds the before()/after() hooks too, which run outside the runner's
+    # timeout (an LLM judge can take longer than the tool). The combined scope
+    # is derived -- runner plus hooks -- so it can never be the narrower one;
+    # see tool_execution_with_inspection_timeout_seconds() in
+    # src/tooling/runtime.py and docs/CODEBASE_MEMORY.md.
+    tool_execution_timeout_seconds: float = Field(
+        default=45.0,
+        gt=0.0,
+        validation_alias="TOOL_EXECUTION_TIMEOUT_SECONDS",
+        description=(
+            "Hard wall-clock cap (seconds) on one tool runner call, excluding "
+            "the before()/after() hooks."
+        ),
+    )
+    tool_hooks_timeout_seconds: float = Field(
+        default=75.0,
+        gt=0.0,
+        validation_alias="TOOL_HOOKS_TIMEOUT_SECONDS",
+        description=(
+            "Seconds a tool call through the tool service may spend in its "
+            "before()/after() hooks (argument policy, content inspection) on "
+            "top of TOOL_EXECUTION_TIMEOUT_SECONDS; the sum is the call's hard "
+            "cap, and a timeout fails closed (TOOL_TIMEOUT in the graph)."
+        ),
+    )
+    # Market-data deadlines: one field per scope, not per value. Several share a
+    # number by coincidence (10 s HTTP vs 10 s ticker resolution, 8 s FX vs 8 s
+    # spot check) and stay separate. Each is clamped at the call to a caller's
+    # enclosing deadline when one is bound; none is required to be narrower
+    # than the scope around it. See docs/CODEBASE_MEMORY.md.
+    market_data_aggregate_fetch_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        validation_alias="MARKET_DATA_AGGREGATE_FETCH_TIMEOUT_SECONDS",
+        description=(
+            "Wall-clock cap (seconds) on one whole financial-metrics fetch "
+            "(resolution, parallel sources, gap fill); on timeout the fetch "
+            "returns an empty payload."
+        ),
+    )
+    market_data_per_source_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0.0,
+        validation_alias="MARKET_DATA_PER_SOURCE_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on each data source in the parallel fetch; a "
+            "source that exceeds it is recorded as a timeout and skipped."
+        ),
+    )
+    market_data_vendor_http_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias="MARKET_DATA_VENDOR_HTTP_TIMEOUT_SECONDS",
+        description=(
+            "aiohttp total timeout (seconds) on one FMP, EODHD or Alpha Vantage "
+            "fundamentals request."
+        ),
+    )
+    market_data_anchor_lookup_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+        validation_alias="MARKET_DATA_ANCHOR_LOOKUP_TIMEOUT_SECONDS",
+        description=(
+            "aiohttp total timeout (seconds) on a lightweight filtered EODHD "
+            "request (anchor metrics, company name)."
+        ),
+    )
+    market_data_ticker_resolution_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias="MARKET_DATA_TICKER_RESOLUTION_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on one mnemonic-to-numeric ticker resolution "
+            "lookup (yahooquery search or search fallback)."
+        ),
+    )
+    market_data_price_history_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0.0,
+        validation_alias="MARKET_DATA_PRICE_HISTORY_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on one yfinance price-history download; the "
+            "resolved-ticker retry gets its own."
+        ),
+    )
+    company_name_lookup_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+        validation_alias="COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on each source in the company-name fallback "
+            "chain and on the gap-fill name lookup."
+        ),
+    )
+    fx_rate_fetch_timeout_seconds: float = Field(
+        default=8.0,
+        gt=0.0,
+        validation_alias="FX_RATE_FETCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on one live FX rate fetch; on timeout the "
+            "static fallback table is used."
+        ),
+    )
+    consultant_spot_check_timeout_seconds: float = Field(
+        default=8.0,
+        gt=0.0,
+        validation_alias="CONSULTANT_SPOT_CHECK_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the Consultant's yfinance spot-check lookup."
+        ),
+    )
+    ownership_section_timeout_seconds: float = Field(
+        default=8.0,
+        gt=0.0,
+        validation_alias="OWNERSHIP_SECTION_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on each yfinance ownership section (institutional "
+            "holders, insider transactions, major holders); on timeout that "
+            "section is marked unavailable and the others still run."
+        ),
+    )
+    stocktwits_http_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias="STOCKTWITS_HTTP_TIMEOUT_SECONDS",
+        description=(
+            "aiohttp total timeout (seconds) on one StockTwits stream request; "
+            "on timeout the sentiment lookup returns an error payload."
+        ),
+    )
+    retrospective_price_fetch_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0.0,
+        validation_alias="RETROSPECTIVE_PRICE_FETCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the retrospective's whole yfinance fetch for "
+            "one past snapshot (stock history plus benchmark and its fallback); "
+            "on timeout that snapshot is skipped."
+        ),
+    )
+    market_context_fetch_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias="MARKET_CONTEXT_FETCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the advisory two-day benchmark history fetch "
+            "behind the market note; on timeout the note is omitted."
+        ),
+    )
+    price_snapshot_fetch_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias="PRICE_SNAPSHOT_FETCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the advisory one-year price history fetch for "
+            "the drawdown-investigation snapshot; on timeout there is no snapshot."
+        ),
+    )
+    output_company_name_timeout_seconds: float = Field(
+        default=6.0,
+        gt=0.0,
+        validation_alias="OUTPUT_COMPANY_NAME_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the whole report-header company-name lookup "
+            "(every candidate symbol); on timeout the header uses the ticker. "
+            "Each candidate also has COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS."
+        ),
+    )
+    # Research deadlines: web search, filing lookup and fetch, document download
+    # and extraction. Same rules as the market-data block above: one field per
+    # scope (30 s Tavily search vs 30 s Tavily extract vs 30 s filing fetch stay
+    # separate), read at the call, clamped to a caller's enclosing deadline.
+    tavily_search_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        validation_alias="TAVILY_SEARCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on one Tavily web search. On the async paths it "
+            "bounds the search; on the sync path it bounds search and "
+            "inspection together. On timeout the search returns no results."
+        ),
+    )
+    tavily_extract_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        validation_alias="TAVILY_EXTRACT_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on one Tavily extract request over discovered "
+            "guidance URLs."
+        ),
+    )
+    gap_fill_search_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+        validation_alias="GAP_FILL_SEARCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the Tavily search that fills missing "
+            "financial-metric fields inside a metrics fetch."
+        ),
+    )
+    ddg_search_timeout_seconds: float = Field(
+        default=8.0,
+        gt=0.0,
+        validation_alias="DDG_SEARCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the caller's wait for one DuckDuckGo fallback "
+            "search; on timeout the search contributes no results."
+        ),
+    )
+    ddg_http_timeout_seconds: int = Field(
+        default=5,
+        ge=1,
+        validation_alias="DDG_HTTP_TIMEOUT_SECONDS",
+        description=(
+            "HTTP client timeout (whole seconds) handed to the ddgs client for "
+            "each request it makes inside one DuckDuckGo search."
+        ),
+    )
+    official_filings_lookup_timeout_seconds: float = Field(
+        default=20.0,
+        gt=0.0,
+        validation_alias="OFFICIAL_FILINGS_LOOKUP_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the get_official_filings tool's whole lookup; "
+            "on timeout the tool reports LOOKUP_TIMEOUT."
+        ),
+    )
+    filing_fetch_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        validation_alias="FILING_FETCH_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on one filing API fetcher (EDINET and peers) "
+            "inside the filing registry; on timeout the registry returns None."
+        ),
+    )
+    official_document_dns_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+        validation_alias="OFFICIAL_DOCUMENT_DNS_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the public-address DNS check before each "
+            "official-document request."
+        ),
+    )
+    official_document_extract_timeout_seconds: float = Field(
+        default=20.0,
+        gt=0.0,
+        validation_alias="OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on each text-extraction backend for one official "
+            "document: the HTML parse, or pypdf then pdftotext for a PDF."
+        ),
+    )
+    # The official-document sequence (DNS check, download, pypdf, pdftotext,
+    # inspection) runs inside the tool's allowance (TOOL_EXECUTION_TIMEOUT_SECONDS,
+    # clamped to what is left) and is shared by fractions of it, so the split
+    # holds for any runner value; see "Allocation" in
+    # src/tools/official_documents.py. Both defaults are chosen, not measured:
+    # saved analyses record no per-phase durations.
+    official_document_download_fraction: float = Field(
+        default=0.55,
+        gt=0.0,
+        lt=1.0,
+        validation_alias="OFFICIAL_DOCUMENT_DOWNLOAD_FRACTION",
+        description=(
+            "Share of the official-document tool's allowance its download (DNS "
+            "checks and redirects included) may use; a trickling body stops there."
+        ),
+    )
+    official_document_inspection_fraction: float = Field(
+        default=0.25,
+        gt=0.0,
+        lt=1.0,
+        validation_alias="OFFICIAL_DOCUMENT_INSPECTION_FRACTION",
+        description=(
+            "Share of what the official-document download leaves that PDF "
+            "extraction must leave for content inspection of the evidence."
+        ),
+    )
+    subprocess_cleanup_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+        validation_alias="SUBPROCESS_CLEANUP_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on reaping a killed child process (pdftotext, "
+            "src/subprocesses.py) after a timeout, error or cancellation; past "
+            "it the reap continues detached and the caller is not held."
+        ),
+    )
+    reference_fetch_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias="REFERENCE_FETCH_TIMEOUT_SECONDS",
+        description=(
+            "httpx timeout (seconds, per phase) on the editor's fetch of one "
+            "article reference URL."
+        ),
+    )
+    http_user_agent: str = Field(
+        default=(
+            "Mozilla/5.0 (compatible; InvestorAgent/1.0; "
+            "+https://github.com/rgoerwit/ai-investment-agent)"
+        ),
+        validation_alias="HTTP_USER_AGENT",
+        description=(
+            "User-Agent every client that fetches third-party pages sends (the "
+            "official-document tool, the editor's reference fetch, StockTwits). "
+            "Its product token also names the application to SEC EDGAR."
+        ),
+    )
+    sec_contact_email: str | None = Field(
+        default=None,
+        validation_alias="SEC_CONTACT_EMAIL",
+        description=(
+            "Contact address the official-document tool puts in the User-Agent "
+            "of its sec.gov requests, as EDGAR asks of automated clients. Unset, "
+            "the official-document tool refuses sec.gov "
+            "URLs before connecting (DOCUMENT_SEC_CONTACT_REQUIRED). No default: "
+            "it is the operator's own address."
+        ),
+    )
+
+    @field_validator("http_user_agent", mode="before")
+    @classmethod
+    def _http_user_agent_is_a_header_value(cls, value: object) -> object:
+        if isinstance(value, str) and (
+            not value.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        ):
+            raise ValueError(
+                "HTTP_USER_AGENT must be non-empty, without control characters"
+            )
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("sec_contact_email", mode="before")
+    @classmethod
+    def _sec_contact_email_is_an_address(cls, value: object) -> object:
+        """An empty setting is unset; anything else must look like an address."""
+        if not isinstance(value, str) or not value.strip():
+            return None
+        address = value.strip()
+        if "@" not in address or any(
+            char.isspace() or ord(char) < 32 for char in address
+        ):
+            raise ValueError("SEC_CONTACT_EMAIL must be an email address")
+        return address
+
+    # MCP deadlines: the HTTP client's per-phase timeout, the initialize
+    # handshake and catalog request, and one tool call. Same rules as the blocks
+    # above. Each is handed to the SDK's own parameter (httpx2 client timeout,
+    # ClientSession read timeout, call_tool read timeout); the tool call also
+    # runs inside the tool runner's TOOL_EXECUTION_TIMEOUT_SECONDS.
+    mcp_http_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+        validation_alias="MCP_HTTP_TIMEOUT_SECONDS",
+        description=(
+            "httpx2 timeout (seconds, applied to each of connect, read, write and "
+            "pool) on every HTTP request of a streamable-HTTP MCP session. 5 s is "
+            "httpx2's own default, which the client had implicitly before it was "
+            "a setting."
+        ),
+    )
+    mcp_initialize_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        validation_alias="MCP_INITIALIZE_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the wait for the MCP initialize handshake "
+            "(connecting included) and for a tools/list catalog request; on "
+            "timeout the session fails as a retryable transport error."
+        ),
+    )
+    mcp_tool_call_timeout_seconds: float | None = Field(
+        default=None,
+        gt=0.0,
+        validation_alias="MCP_TOOL_CALL_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the wait for one MCP tool call's result once "
+            "the session is open. Unset follows TOOL_EXECUTION_TIMEOUT_SECONDS "
+            "(the runner bounds the whole call, session open included, so it "
+            "fires first); an explicit value is honoured."
+        ),
+    )
+    # Operational deadlines: health-check probe, embeddings, and the two
+    # shutdown paths. Same one-field-per-scope rule (15 s health probe vs 15 s
+    # embeddings probe; 2 s client close vs 2 s trace flush stay separate). Only
+    # the embedding call clamps to a caller's enclosing deadline: the health
+    # check is a top-level entrypoint, the embeddings probe initialises a
+    # process-wide client whose failure is cached, and the shutdown paths run
+    # after any caller deadline under SHUTDOWN_HARD_TIMEOUT_SECONDS.
+    health_check_connectivity_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0.0,
+        validation_alias="HEALTH_CHECK_CONNECTIVITY_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the health check's one-word LLM probe; on "
+            "timeout the connectivity check fails. The HEALTH_CHECK seat's own "
+            "client timeout sits inside it."
+        ),
+    )
+    memory_embedding_healthcheck_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0.0,
+        validation_alias="MEMORY_EMBEDDING_HEALTHCHECK_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on the embedding client's startup probe; on "
+            "timeout memory runs without embeddings for the process."
+        ),
+    )
+    memory_embedding_call_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        validation_alias="MEMORY_EMBEDDING_CALL_TIMEOUT_SECONDS",
+        description=(
+            "Hard cap (seconds) on one embedding request for a memory read or "
+            "write, per attempt; shrinks to a caller's enclosing deadline."
+        ),
+    )
+    genai_client_close_timeout_seconds: float = Field(
+        default=2.0,
+        gt=0.0,
+        validation_alias="GENAI_CLIENT_CLOSE_TIMEOUT_SECONDS",
+        description=(
+            "Cap (seconds) on closing each Google GenAI async client at shutdown; "
+            "on timeout the client is dropped and shutdown continues."
+        ),
+    )
+    langfuse_flush_timeout_seconds: float = Field(
+        default=2.0,
+        gt=0.0,
+        validation_alias="LANGFUSE_FLUSH_TIMEOUT_SECONDS",
+        description=(
+            "Cap (seconds) on the Langfuse flush/shutdown at the end of a run; "
+            "on timeout the flush is abandoned and the run exits."
         ),
     )
     llm_base_output_tokens: int = Field(
@@ -1298,7 +1870,7 @@ class Settings(BaseSettings):
         description="Environment (dev, prod, test)",
     )
     app_release: str = Field(
-        default="4.0.0",
+        default="4.1.0",
         validation_alias="APP_RELEASE",
         description="Application release/version tag for observability",
     )
@@ -1546,7 +2118,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         # Tests receive explicit dummy process values and must never ingest the
         # operator's ignored environment file during collection.
-        env_file=_default_settings_env_file(),
+        env_file=default_settings_env_file(),
         env_file_encoding="utf-8",
         # Ignore extra environment variables (don't fail on unknown vars)
         extra="ignore",
@@ -1728,3 +2300,15 @@ Config = Settings
 # --- Module-level Singleton Instance ---
 # Instantiated at import time, triggers validation
 config = Settings()
+
+
+def resolve_settings(cfg: Settings | None = None) -> Settings:
+    """``cfg``, or the live ``src.config.config`` singleton when ``cfg`` is None.
+
+    The one "explicit settings or the process settings" resolver. It reads the
+    module global at call time, so a test that patches ``src.config.config``
+    is seen by every caller; a module that bound ``config`` at import (``from
+    src.config import config``) keeps its own stale reference and must not be
+    the fallback.
+    """
+    return cfg if cfg is not None else config

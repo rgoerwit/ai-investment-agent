@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -12,8 +11,9 @@ from langchain_core.messages import HumanMessage, ToolMessage
 
 from src.config import Settings, config
 from src.error_safety import summarize_exception
+from src.llm_runtime import timeouts as llm_timeouts
 from src.runtime_services import get_current_tool_service
-from src.tooling.runtime import ToolInvocation
+from src.tooling.runtime import ToolInvocation, tool_error_text
 
 from . import message_utils
 from . import runtime as agent_runtime
@@ -88,7 +88,10 @@ InvokeWithDeadline = Callable[
 
 
 def remaining_consultant_budget(deadline: float) -> float:
-    return max(0.0, deadline - time.monotonic())
+    """Seconds left to the node's deadline or the run's, whichever is sooner."""
+    return max(
+        0.0, min(deadline - llm_timeouts.now(), llm_timeouts.operational_time_left())
+    )
 
 
 def _build_consultant_fmp_skip_payload(
@@ -158,6 +161,7 @@ async def _execute_tool_call(
                     runner=_run_tool,
                 )
                 result = tool_result.value
+                result_failed = tool_result.blocked
             except Exception as tool_err:
                 result_failed = True
                 logger.warning(
@@ -166,14 +170,16 @@ async def _execute_tool_call(
                     tool=tool_call["name"],
                     **summarize_exception(tool_err, operation="consultant_tool_failed"),
                 )
-                result = f"TOOL_ERROR: {type(tool_err).__name__}"
+                result = tool_error_text(tool_err)
     else:
         result_failed = True
         result = f"Unknown tool: {tool_call['name']}"
 
-    if isinstance(result, str):
+    if isinstance(result, str) and not result_failed:
+        # A raised failure or a block is already known; what is left to read
+        # is a tool's own legacy error text or JSON error payload.
         stripped = result.strip()
-        if stripped.startswith(("TOOL_ERROR:", "TOOL_BLOCKED:")):
+        if stripped.startswith("TOOL_ERROR:"):
             result_failed = True
         else:
             try:
@@ -354,7 +360,7 @@ async def run_bounded_consultant_loop(
     # answer instead of on reasoning it already did.
     #
     # Cost is bounded to exactly one extra call: this runs once, after the
-    # loop, and the consultant invokes with ``max_transient_attempts=1``, so
+    # loop, and the consultant invokes with ``max_attempts=1``, so
     # the runtime does not separately retry a partial before we get here. The
     # re-ask is strictly additive — any failure (deadline exhausted, provider
     # error) leaves whatever content we already had, so widening the trigger

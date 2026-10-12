@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 
+from src.error_safety import summarize_exception
 from src.tooling.inspection_service import (
     InspectionService,
     configure_content_inspection,
@@ -17,6 +19,7 @@ from src.tooling.inspector import (
     NullInspector,
     SourceKind,
 )
+from src.tooling.runtime import INSPECTION_FAILED
 
 
 def _envelope(text: str = "hello") -> InspectionEnvelope:
@@ -124,13 +127,6 @@ async def test_null_inspector_always_allows():
 
 
 @pytest.mark.asyncio
-async def test_warn_mode_passes_content_through():
-    svc = InspectionService(_BlockingInspector(), mode="warn")
-    result = await svc.check(_envelope("dangerous content"))
-    assert result == "dangerous content"
-
-
-@pytest.mark.asyncio
 async def test_warn_mode_preserves_raw_content_shape_when_allowed():
     raw_payload = {"results": [{"title": "hello"}]}
     svc = InspectionService(NullInspector(), mode="warn")
@@ -145,23 +141,9 @@ async def test_warn_mode_preserves_raw_content_shape_when_allowed():
     assert result is raw_payload
 
 
-@pytest.mark.asyncio
-async def test_warn_mode_null_inspector_passthrough():
-    svc = InspectionService(NullInspector(), mode="warn")
-    result = await svc.check(_envelope("safe content"))
-    assert result == "safe content"
-
-
 # ---------------------------------------------------------------------------
 # InspectionService — sanitize mode
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_sanitize_mode_replaces_content():
-    svc = InspectionService(_SanitizingInspector(), mode="sanitize")
-    result = await svc.check(_envelope("original"))
-    assert result == "[sanitized]"
 
 
 @pytest.mark.asyncio
@@ -248,48 +230,14 @@ async def test_duplicate_high_risk_block_logs_first_warning_then_suppresses():
     assert mock_debug.call_args.kwargs["suppressed_duplicates"] == 1
 
 
-@pytest.mark.asyncio
-async def test_sanitize_mode_block_action_without_sanitized_content():
-    """block action with no sanitized_content → pass through in sanitize mode."""
-
-    class BlockNoSanitize:
-        async def inspect(self, envelope):
-            return InspectionDecision(action="block", threat_level="high")
-
-    svc = InspectionService(BlockNoSanitize(), mode="sanitize")
-    result = await svc.check(_envelope("content"))
-    assert result == "content"
-
-
 # ---------------------------------------------------------------------------
 # InspectionService — block mode
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_block_mode_returns_blocked_placeholder():
-    svc = InspectionService(_BlockingInspector(), mode="block")
-    result = await svc.check(_envelope("dangerous"))
-    assert result.startswith("TOOL_BLOCKED:")
-
-
-@pytest.mark.asyncio
-async def test_block_mode_null_inspector_passthrough():
-    svc = InspectionService(NullInspector(), mode="block")
-    result = await svc.check(_envelope("safe"))
-    assert result == "safe"
-
-
 # ---------------------------------------------------------------------------
 # Fail policies
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_fail_open_allows_on_backend_error():
-    svc = InspectionService(_ErrorInspector(), mode="block", fail_policy="fail_open")
-    result = await svc.check(_envelope("content"))
-    assert result == "content"
 
 
 @pytest.mark.asyncio
@@ -307,27 +255,120 @@ async def test_fail_open_preserves_raw_content_shape_on_backend_error():
     assert result is raw_payload
 
 
-@pytest.mark.asyncio
-async def test_fail_closed_blocks_on_backend_error():
-    svc = InspectionService(_ErrorInspector(), mode="block", fail_policy="fail_closed")
-    result = await svc.check(_envelope("content"))
-    assert result.startswith("TOOL_BLOCKED:")
+# ---------------------------------------------------------------------------
+# Enforced disposition: decision x mode, derived once in evaluate()
+# ---------------------------------------------------------------------------
+
+_PLACEHOLDER = "TOOL_BLOCKED: planted"
+_SECRET = "sk-secret-token-in-exception"
+_ORIGINAL = "original"
+
+
+class _Decides:
+    def __init__(self, decision: InspectionDecision) -> None:
+        self.decision = decision
+
+    async def inspect(self, envelope: InspectionEnvelope) -> InspectionDecision:
+        del envelope
+        return self.decision
+
+
+def _raw(action: Any, sanitized: str | None, level: Any = "high") -> InspectionDecision:
+    return InspectionDecision(
+        action=action,
+        threat_level=level,
+        findings=["planted finding"],
+        reason="planted",
+        sanitized_content=sanitized,
+    )
+
+
+_DISPOSITIONS = [
+    # (action, replacement, mode, enforced, approved)
+    ("allow", None, "warn", "allowed", _ORIGINAL),
+    ("allow", None, "sanitize", "allowed", _ORIGINAL),
+    ("allow", None, "block", "allowed", _ORIGINAL),
+    ("sanitize", "[s]", "warn", "allowed", _ORIGINAL),
+    ("sanitize", "[s]", "sanitize", "sanitized", "[s]"),
+    ("sanitize", "[s]", "block", "sanitized", "[s]"),
+    ("sanitize", None, "sanitize", "allowed", _ORIGINAL),
+    ("sanitize", None, "block", "allowed", _ORIGINAL),
+    # An empty replacement is a replacement: never read as "nothing to scrub".
+    ("sanitize", "", "warn", "allowed", _ORIGINAL),
+    ("sanitize", "", "sanitize", "sanitized", ""),
+    ("sanitize", "", "block", "sanitized", ""),
+    # A raw block is enforced only in block mode.
+    ("block", None, "warn", "allowed", _ORIGINAL),
+    ("block", None, "sanitize", "allowed", _ORIGINAL),
+    ("block", None, "block", "blocked", _PLACEHOLDER),
+    ("block", "[s]", "warn", "allowed", _ORIGINAL),
+    ("block", "[s]", "sanitize", "sanitized", "[s]"),
+    ("block", "[s]", "block", "blocked", _PLACEHOLDER),
+    ("block", "", "sanitize", "sanitized", ""),
+    ("degrade", None, "warn", "allowed", _ORIGINAL),
+    ("degrade", None, "block", "blocked", _PLACEHOLDER),
+]
 
 
 @pytest.mark.asyncio
-async def test_evaluate_returns_decision_and_original_content():
-    svc = InspectionService(NullInspector(), mode="warn")
-    decision, approved = await svc.evaluate(_envelope("content"))
-    assert decision.action == "allow"
-    assert approved == "content"
+@pytest.mark.parametrize(
+    ("action", "replacement", "mode", "enforced", "approved"), _DISPOSITIONS
+)
+async def test_evaluate_enforces_one_disposition_per_decision_and_mode(
+    action, replacement, mode, enforced, approved
+):
+    raw = _raw(action, replacement, level="safe" if action == "allow" else "high")
+    svc = InspectionService(_Decides(raw), mode=mode, fail_policy="fail_closed")
+
+    decision, value = await svc.evaluate(_envelope(_ORIGINAL))
+
+    assert (decision.enforced, value) == (enforced, approved)
+    assert decision.action == action  # the raw verdict is kept beside it
+    assert raw.enforced is None  # the backend's own decision is not mutated
+    assert await svc.check(_envelope(_ORIGINAL)) == approved
 
 
 @pytest.mark.asyncio
-async def test_evaluate_returns_decision_and_blocked_placeholder():
-    svc = InspectionService(_BlockingInspector(), mode="block")
-    decision, approved = await svc.evaluate(_envelope("content"))
-    assert decision.action == "block"
-    assert approved.startswith("TOOL_BLOCKED:")
+@pytest.mark.parametrize("mode", ["warn", "sanitize", "block"])
+async def test_flagged_allow_is_allowed_in_every_mode(mode):
+    svc = InspectionService(_FlaggingInspector(), mode=mode)
+    decision, value = await svc.evaluate(_envelope(_ORIGINAL))
+    assert (decision.enforced, value) == ("allowed", _ORIGINAL)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["warn", "sanitize", "block"])
+async def test_fail_closed_backend_error_is_inspection_failed_with_a_code(mode):
+    class _Leaky:
+        async def inspect(self, envelope: InspectionEnvelope) -> InspectionDecision:
+            raise RuntimeError(f"backend down {_SECRET}")
+
+    svc = InspectionService(_Leaky(), mode=mode, fail_policy="fail_closed")
+
+    with patch("src.tooling.inspection_service.logger") as log:
+        decision, value = await svc.evaluate(_envelope("anything"))
+
+    assert decision.enforced == "inspection_failed"
+    assert value == f"TOOL_BLOCKED: {INSPECTION_FAILED}"
+    assert decision.reason == INSPECTION_FAILED
+    assert decision.findings == [INSPECTION_FAILED]
+    assert _SECRET not in repr(decision)
+    (call,) = log.error.call_args_list
+    assert call.args == ("content_inspection_backend_error",)
+    # The exception reaches the log only through summarize_exception: its
+    # fields plus the source and policy, no raw ``error``/``reason`` field.
+    summary = summarize_exception(
+        RuntimeError("x"), operation="content_inspection_backend_error"
+    )
+    assert set(call.kwargs) == {"source_kind", "source_name", "fail_policy", *summary}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["warn", "sanitize", "block"])
+async def test_fail_open_backend_error_is_allowed_with_the_original(mode):
+    svc = InspectionService(_ErrorInspector(), mode=mode, fail_policy="fail_open")
+    decision, value = await svc.evaluate(_envelope("anything"))
+    assert (decision.enforced, value) == ("allowed", "anything")
 
 
 # ---------------------------------------------------------------------------
@@ -580,26 +621,6 @@ async def test_fail_closed_with_benign_arabic_rtl_passes_through_in_sanitize_mod
     # took the sanitize path, not the fail-closed block path.
     assert result == "cleaned"
     assert "TOOL_BLOCKED" not in str(result)
-
-
-@pytest.mark.asyncio
-async def test_fail_closed_inspector_exception_still_blocks():
-    """Sanity: fail_closed semantics are preserved for actual inspector
-    failures (so the new low-threat carve-out doesn't accidentally relax
-    the block-on-error contract)."""
-    svc = InspectionService(_ErrorInspector(), mode="warn", fail_policy="fail_closed")
-    decision, value = await svc.evaluate(_envelope("anything"))
-    assert decision.action == "block"
-    assert isinstance(value, str) and "TOOL_BLOCKED" in value
-
-
-@pytest.mark.asyncio
-async def test_fail_open_inspector_exception_passes_original():
-    """Mirror coverage for fail_open on inspector failure: original flows."""
-    svc = InspectionService(_ErrorInspector(), mode="warn", fail_policy="fail_open")
-    text = "anything"
-    result = await svc.check(_envelope(text))
-    assert result == text
 
 
 # ---------------------------------------------------------------------------
