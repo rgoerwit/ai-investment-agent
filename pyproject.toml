@@ -121,10 +121,23 @@ anthropic = "1.6.0"
 # pin is the enforcement point.
 cryptography = "50.0.1"
 # Transitive only (mcp). Exact pin carries the floor for the Oct-2026 PyJWT
-# batch (1 critical, 5 high): 2.14.0 clears all but two. 2.15.0 fixes one
-# more moderate but was under the 14-day cooldown at pin time; one moderate
-# (options-dict mutation in decode) has no fix. Nothing in src/ imports jwt.
-pyjwt = "2.14.0"
+# batches: 2.15.x fixes the pre-verification RecursionError DoS
+# (GHSA-42vr-xj54-vc7v) and the OKP private-JWK import check (GHSA-x33g-cr3x-6449);
+# 2.15.1 was the newest release past the 14-day cooldown at pin time. One
+# moderate (options-dict mutation in decode) has no fix. src/ never imports jwt.
+pyjwt = "2.15.1"
+# Transitive only (aiohttp, yarl). Exact pin is the floor for GHSA-54p9-h82j-f925
+# (items-view reference leak, fixed 6.9.1) and stays below 7.x, which aiohttp
+# (<7.0) does not accept.
+multidict = "6.9.1"
+# Transitive only (langgraph). Exact pin is the floor for GHSA-fvww-7h3r-vfhp
+# (custom auth ignored actions= on resource decorators, fixed 0.4.4); this app
+# runs the graph in-process and never serves LangGraph auth. 0.4.5 was the newest
+# release past the cooldown at pin time.
+langgraph-sdk = "0.4.5"
+# Transitive only (flask, for the IBKR dashboard). Exact pin is the floor for
+# GHSA-g6x2-hccm-hh4m (safe_join accepted Windows device names, fixed 3.1.9).
+werkzeug = "3.1.9"
 # Transitive (openai 3, anthropic 1, mcp 2, langsmith 0.12 all moved to the
 # httpx2 fork). Exact pin only to hold the release-age cooldown: unpinned, the
 # resolver took 2.13.1, a week old. httpcore2 is pinned exactly by httpx2 itself.

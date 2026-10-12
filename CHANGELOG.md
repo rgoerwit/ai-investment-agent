@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Dependencies: pin the transitive pyjwt 2.15.1, multidict 6.9.1,
+  langgraph-sdk 0.4.5 and werkzeug 3.1.9, each past the 14-day release-age
+  cooldown, for GHSA-x33g-cr3x-6449 and GHSA-42vr-xj54-vc7v (pyjwt),
+  GHSA-54p9-h82j-f925 (multidict), GHSA-fvww-7h3r-vfhp (langgraph-sdk) and
+  GHSA-g6x2-hccm-hh4m (werkzeug). The pip-audit step drops the ignores those
+  bumps and the earlier virtualenv 21.13.0 pin made obsolete.
+
 - A valid `DE_RATIO` is also finite: a value that overflows to infinity, or a
   ratio whose conversion to percent does, is invalid, on the legacy prose path
   too. The source-to-screen test now carries a complete health scoring contract,
