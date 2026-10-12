@@ -10,8 +10,10 @@ before they build a request.
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
+import traceback
 from typing import Any
 
 import pytest
@@ -23,16 +25,38 @@ class OfflineAttempts(list[str]):
     def __init__(self) -> None:
         super().__init__()
         self.threads: list[str] = []
+        self.sites: list[str] = []
 
     def record(self, target: str) -> None:
         self.append(target)
         self.threads.append(threading.current_thread().name)
+        self.sites.append(_caller_site())
 
     def describe(self) -> str:
         return ", ".join(
-            f"{target} (thread {thread})"
-            for target, thread in zip(self, self.threads, strict=True)
+            f"{target} (thread {thread}, at {site})"
+            for target, thread, site in zip(self, self.threads, self.sites, strict=True)
         )
+
+
+def _caller_site() -> str:
+    """The innermost frame outside the socket module and this helper.
+
+    A refused socket is usually swallowed by the code that made it, so the call
+    site is the only way to find a platform-specific probe from a CI log.
+    """
+    skip = {os.path.abspath(socket.__file__), os.path.abspath(__file__)}
+    for frame in reversed(traceback.extract_stack()[:-1]):
+        if os.path.abspath(frame.filename) in skip:
+            continue
+        path = frame.filename
+        marker = "site-packages" + os.sep
+        if marker in path:
+            path = path.split(marker, 1)[1]
+        else:
+            path = os.path.relpath(path)
+        return f"{path}:{frame.lineno} {frame.name}"
+    return "unknown"
 
 
 class EmbeddingProviderUnreachable(ConnectionError):

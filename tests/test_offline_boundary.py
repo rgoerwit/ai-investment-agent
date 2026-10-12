@@ -120,7 +120,12 @@ def test_a_background_thread_attempt_is_recorded_with_its_thread_name(attempts):
 
     assert attempts == ["dns:worker.example"]
     assert attempts.threads == ["egress-worker"]
-    assert attempts.describe() == "dns:worker.example (thread egress-worker)"
+    # The call site names the code that tried, which is what finds a probe that
+    # only runs on another platform (the CI-only socket:2 attempts).
+    assert attempts.describe().startswith(
+        "dns:worker.example (thread egress-worker, at tests/test_offline_boundary.py:"
+    )
+    assert attempts.describe().endswith(" reach)")
 
 
 def test_a_tests_own_transport_patch_wins(monkeypatch, attempts):
@@ -184,8 +189,8 @@ def test_an_unmarked_test_that_touches_the_network_fails_at_teardown(
     result.stdout.fnmatch_lines(
         [
             "*1 network attempt(s) in a unit test: dns:leak.example "
-            "(thread MainThread). Inject a fake at the data source or mark the "
-            "test integration.*",
+            "(thread MainThread, at *test_leaks). Inject a fake at the data "
+            "source or mark the test integration.*",
         ]
     )
 
