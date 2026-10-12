@@ -202,6 +202,62 @@ def test_pdf_and_html_extraction_share_one_limit_sized_by_the_named_constant():
 
 
 @pytest.mark.asyncio
+async def test_stalled_pdf_workers_refuse_html_extraction_until_released(
+    monkeypatch, _stubbed
+):
+    """The production policies share one limit, so PDF stalls refuse HTML work."""
+    limit = documents._PDF_POLICY.in_flight
+    assert limit is not None
+    assert limit.in_flight == 0
+    monkeypatch.setattr(documents, "resolve_program", lambda name: None)
+
+    with stalled_worker(documents._PDF_POLICY.label) as release:
+
+        def stall(*args, **kwargs):
+            release.wait(_STALL_CEILING)
+            raise AssertionError("released stall must not be inspected")
+
+        monkeypatch.setattr(documents, "_extract_with_pypdf", stall)
+        pdf_calls = [
+            documents.extract_pdf_text(
+                b"%PDF", MagicMock(max_document_pages=10, max_selected_pages=2), ""
+            )
+            for _ in range(limit.max_in_flight)
+        ]
+        outcomes = await asyncio.gather(*pdf_calls, return_exceptions=True)
+        assert [getattr(o, "reason", o) for o in outcomes] == [
+            "EXTRACTION_TIMEOUT"
+        ] * limit.max_in_flight
+        # Every PDF call timed out, yet each worker still holds its slot.
+        assert limit.in_flight == limit.max_in_flight
+        assert not release.is_set()
+
+        ticks: list[float] = []
+        beat = asyncio.create_task(_heartbeat(ticks))
+        try:
+            began = time.monotonic()
+            reply = await _fetch()
+            elapsed = time.monotonic() - began
+        finally:
+            beat.cancel()
+
+        assert reply == _reply("EXTRACTION_TIMEOUT")
+        assert elapsed < _BOUND
+        # Refused at the pool: no HTML worker was admitted or started.
+        assert limit.in_flight == limit.max_in_flight
+        assert not [
+            t for t in threading.enumerate() if t.name.startswith(f"blocking:{_LABEL}")
+        ]
+        _stubbed.check_within.assert_not_awaited()
+        assert sum(1 for t in ticks if began <= t <= began + elapsed) >= 1
+
+    assert limit.in_flight == 0
+    reply = await _fetch()
+    assert reply.startswith("STATUS: EVIDENCE_FOUND\n")
+    assert limit.in_flight == 0
+
+
+@pytest.mark.asyncio
 async def test_a_stalled_pypdf_worker_keeps_its_slot_and_saturation_is_refused(
     monkeypatch,
 ):
