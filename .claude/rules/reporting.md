@@ -40,7 +40,10 @@ The writer runs asynchronously through `invoke_with_rate_limit_handling`, includ
 fallback seats. `handle_article_generation` in `src/output.py` binds the workflow's
 own deadline after the analysis scope closes. Draft, review and revision steps share
 that bound; reject a fallback before constructing it when useful allowance cannot
-fit, and discard late step results before publication.
+fit, and discard late step results before publication. Every article write,
+approved or `.draft`, goes through `publish_article`, never a bare file write; the
+CLI calls it after the workflow scope closes, so a draft kept after a workflow
+timeout is still saved.
 
 Citations of hard fields are audited deterministically against the underlying data,
 including un-backticked parentheticals, and a mismatch produces a caveat block rather
