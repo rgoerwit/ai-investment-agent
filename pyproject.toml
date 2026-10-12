@@ -25,10 +25,10 @@ langchain-google-genai = "4.4.0"
 # in 1.70.0 / 1.65.0, below the 1.75.0 we were already on. Exact, not a range:
 # a range resolves to the newest release, which was 3 days old at pin time.
 google-genai = "2.24.0"
-# OPTIONAL: OpenAI for consultant node (cross-validation)
-# The consultant node uses OpenAI to provide independent review of Gemini analysis
+# Required, not extras: the transports build every OpenAI-compatible and
+# Anthropic client from these. Listed in an extra, Poetry locks them
+# extra-gated and a plain install (Docker's --only main, a --sync) drops them.
 langchain-openai = "1.6.2"
-# Writer LLM: Anthropic Claude (falls back to Gemini if CLAUDE_KEY not set)
 langchain-anthropic = "1.7.2"
 langgraph = "1.2.11"
 langgraph-checkpoint = "4.2.0"
@@ -142,13 +142,18 @@ mypy = "2.3.1"
 ast-serialize = "0.11.2"
 librt = "0.15.0"
 pre-commit = "4.6.2"
+# Transitive only (pre-commit). Exact pin is the floor for GHSA-p58f-9548-mpm2
+# (activation scripts run commands embedded in paths; fixed in 21.7.13) and holds
+# the release-age cooldown: 21.13.0 was the newest aged release at pin time.
+virtualenv = "21.13.0"
+# Transitive only (virtualenv >=21.13 needs >=1.6). Exact pin holds the cooldown:
+# unpinned, the resolver took 1.6.2, two days old.
+python-discovery = "1.6.1"
 ipython = "9.17.1"
 pytest-env = "1.7.1"
 
 [tool.poetry.extras]
 observability = ["opentelemetry-api", "opentelemetry-sdk"]
-consultant = ["langchain-openai"]  # Enable external consultant for cross-validation
-writer = ["langchain-anthropic"]  # Claude-based article writer
 filings = ["edinet-tools"]  # Japan EDINET filing API
 
 [tool.poetry.scripts]
