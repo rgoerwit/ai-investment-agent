@@ -509,6 +509,7 @@ def extract_metrics(
         effective_status = effective_m_and_a_status(
             m_and_a_match.group(1).upper(),
             extract_block_text_value(data_block, "M_AND_A_TENDER_PRICE"),
+            extract_block_text_value(data_block, "M_AND_A_SUBJECT_ROLE"),
         )
         if effective_status is not None:
             metrics["m_and_a_status"] = effective_status

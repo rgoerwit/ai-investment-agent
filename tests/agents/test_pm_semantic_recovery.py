@@ -446,7 +446,7 @@ async def test_exception_ceiling_is_saved_before_quick_qualification_and_trace(
         "analysis_snapshot": snapshot,
         "fundamentals_report": _FUNDAMENTALS.replace(
             "PE_RATIO_TTM: 12.0",
-            f"PE_RATIO_TTM: {pe}\nREVENUE_CAGR_3Y: 5.1%\nM_AND_A_STATUS: {'ACTIVE_TENDER' if tender else 'NONE'}\nM_AND_A_TENDER_PRICE: {'USD 15.00' if tender else 'N/A'}",
+            f"PE_RATIO_TTM: {pe}\nREVENUE_CAGR_3Y: 5.1%\nM_AND_A_STATUS: {'ACTIVE_TENDER' if tender else 'NONE'}\nM_AND_A_TENDER_PRICE: {'USD 15.00' if tender else 'N/A'}\nM_AND_A_SUBJECT_ROLE: {'TARGET' if tender else 'N/A'}",
         ),
         "liquidity_assessment": LiquidityAssessment(
             "PASS", average_daily_turnover_usd=500_000
@@ -693,7 +693,7 @@ async def test_actual_pm_preserves_health_exception_tender_and_independent_block
                 "analysis_snapshot": snapshot,
                 "fundamentals_report": _FUNDAMENTALS.replace(
                     "### --- END DATA_BLOCK ---",
-                    f"M_AND_A_STATUS: {'ACTIVE_TENDER' if tender else 'NONE'}\nM_AND_A_TENDER_PRICE: {'USD 15.00' if tender else 'N/A'}\n### --- END DATA_BLOCK ---",
+                    f"M_AND_A_STATUS: {'ACTIVE_TENDER' if tender else 'NONE'}\nM_AND_A_TENDER_PRICE: {'USD 15.00' if tender else 'N/A'}\nM_AND_A_SUBJECT_ROLE: {'TARGET' if tender else 'N/A'}\n### --- END DATA_BLOCK ---",
                 ),
                 "liquidity_assessment": LiquidityAssessment(
                     "PASS", average_daily_turnover_usd=500_000

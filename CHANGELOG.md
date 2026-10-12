@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `ACTIVE_TENDER` is honored only for a tender for the analyzed company's own
+  shares: the DATA_BLOCK carries `M_AND_A_SUBJECT_ROLE` (fundamentals prompt
+  11.18), and `effective_m_and_a_status` requires `TARGET` plus a price that
+  parses whole as a positive monetary amount, so a priced bidder, an unknown role,
+  `51 %` or a date no longer qualify. Every reader goes through
+  `m_and_a_status_from_report`.
+
 - Debt-to-equity hardening. Statement-derived D/E keeps its provenance through
   the merge, and the total-debt/book-equity cross-check only logs a ×100
   disagreement instead of replacing the value: the unit is fixed per source,

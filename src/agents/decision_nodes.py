@@ -41,10 +41,10 @@ from src.agents.verdict_policy import (
 )
 from src.data_block_utils import (
     build_fenced_block,
-    effective_m_and_a_status,
     extract_data_block_field,
     fenced_block_pattern,
     has_parseable_data_block,
+    m_and_a_status_from_report,
     unfenced_label,
 )
 from src.decision_inputs import DecisionInputs
@@ -986,10 +986,7 @@ NEUTRAL ANALYST (Balanced):
             value_trap_warnings = RedFlagDetector.detect_value_trap_flags(
                 value_trap,
                 ticker,
-                m_and_a_status=effective_m_and_a_status(
-                    extract_data_block_field(fundamentals, "M_AND_A_STATUS"),
-                    extract_data_block_field(fundamentals, "M_AND_A_TENDER_PRICE"),
-                ),
+                m_and_a_status=m_and_a_status_from_report(fundamentals),
                 capital_context=_value_trap_capital_context(fundamentals),
                 governance_card=state.get("entity_governance_card"),
             )
@@ -2214,14 +2211,7 @@ def create_financial_health_validator_node(strict_mode: bool = False) -> Callabl
                     vt_warnings = RedFlagDetector.detect_value_trap_flags(
                         value_trap_report,
                         ticker,
-                        m_and_a_status=effective_m_and_a_status(
-                            extract_data_block_field(
-                                fundamentals_report, "M_AND_A_STATUS"
-                            ),
-                            extract_data_block_field(
-                                fundamentals_report, "M_AND_A_TENDER_PRICE"
-                            ),
-                        ),
+                        m_and_a_status=m_and_a_status_from_report(fundamentals_report),
                         capital_context=_value_trap_capital_context(
                             fundamentals_report
                         ),

@@ -36,11 +36,12 @@ class _RecordingLogger:
         self.events.append({"event": event, **fields})
 
 
-def _report(status: str, price: str) -> str:
+def _report(status: str, price: str, role: str = "TARGET") -> str:
     return (
         "### --- START DATA_BLOCK ---\n"
         f"M_AND_A_STATUS: {status}\n"
         f"M_AND_A_TENDER_PRICE: {price}\n"
+        f"M_AND_A_SUBJECT_ROLE: {role}\n"
         "### --- END DATA_BLOCK ---"
     )
 
@@ -50,8 +51,19 @@ class TestEffectiveStatus:
         "price",
         ["TWD 120.5", "JPY 1,200", "$18", "120", "TWD 120.5 per share (cash)"],
     )
-    def test_priced_tender_is_kept(self, price):
-        assert effective_m_and_a_status("ACTIVE_TENDER", price) == "ACTIVE_TENDER"
+    def test_priced_target_tender_is_kept(self, price):
+        assert (
+            effective_m_and_a_status("ACTIVE_TENDER", price, "TARGET")
+            == "ACTIVE_TENDER"
+        )
+
+    @pytest.mark.parametrize("role", ["ACQUIRER", "OTHER", "N/A", "", None])
+    def test_priced_tender_without_target_role_is_demoted(self, role, monkeypatch):
+        """A priced bidder (6670.TW's shape with a price) gets no exemption."""
+        recorder = _RecordingLogger()
+        monkeypatch.setattr(data_block_utils, "logger", recorder)
+        assert effective_m_and_a_status("ACTIVE_TENDER", "TWD 120", role) == "RUMORED"
+        assert recorder.events[0]["reason"] == "subject_not_target"
 
     @pytest.mark.parametrize(
         "price",
@@ -64,6 +76,10 @@ class TestEffectiveStatus:
             "TBD",
             "-",
             "51%",
+            "51 %",
+            "-5 USD",
+            "inf",
+            "2026-11-30",
             "N/A (51% stake)",
             "N/A (period ends 2026-11-30)",
         ],
@@ -71,17 +87,17 @@ class TestEffectiveStatus:
     def test_unpriced_tender_is_demoted_and_logged(self, price, monkeypatch):
         recorder = _RecordingLogger()
         monkeypatch.setattr(data_block_utils, "logger", recorder)
-        assert effective_m_and_a_status("ACTIVE_TENDER", price) == "RUMORED"
+        assert effective_m_and_a_status("ACTIVE_TENDER", price, "TARGET") == "RUMORED"
         assert len(recorder.events) == 1
-        assert recorder.events[0]["event"] == "m_and_a_tender_unpriced_demoted"
-        assert recorder.events[0]["status"] == "ACTIVE_TENDER"
+        assert recorder.events[0]["event"] == "m_and_a_tender_demoted"
+        assert recorder.events[0]["reason"] == "unpriced"
 
     @pytest.mark.parametrize("status", ["RUMORED", "NONE", None])
     def test_other_statuses_pass_through(self, status, monkeypatch):
         recorder = _RecordingLogger()
         monkeypatch.setattr(data_block_utils, "logger", recorder)
-        assert effective_m_and_a_status(status, "N/A") == status
-        assert effective_m_and_a_status(status, "JPY 100") == status
+        assert effective_m_and_a_status(status, "N/A", None) == status
+        assert effective_m_and_a_status(status, "JPY 100", "ACQUIRER") == status
         assert recorder.events == []
 
 
@@ -93,6 +109,10 @@ class TestMetricExtractor:
     def test_priced_target_stays_active_tender(self):
         metrics = extract_metrics(_report("ACTIVE_TENDER", "JPY 1,200"))
         assert metrics["m_and_a_status"] == "ACTIVE_TENDER"
+
+    def test_priced_acquirer_is_not_active_tender(self):
+        metrics = extract_metrics(_report("ACTIVE_TENDER", "TWD 120", "ACQUIRER"))
+        assert metrics["m_and_a_status"] == "RUMORED"
 
     def test_non_tender_status_is_unchanged(self):
         assert extract_metrics(_report("NONE", "N/A"))["m_and_a_status"] == "NONE"
@@ -151,6 +171,16 @@ class TestSnapshot:
     def test_unpriced_tender_is_snapshotted_as_rumored(self):
         assert self._snapshot("N/A")["m_and_a_status"] == "RUMORED"
 
+    def test_priced_acquirer_is_snapshotted_as_rumored(self):
+        snapshot = extract_snapshot(
+            {
+                "final_trade_decision": "PORTFOLIO MANAGER VERDICT: HOLD",
+                "fundamentals_report": _report("ACTIVE_TENDER", "TWD 120", "ACQUIRER"),
+            },
+            "6670.TW",
+        )
+        assert snapshot["m_and_a_status"] == "RUMORED"
+
     def test_priced_tender_is_snapshotted_as_active(self):
         assert self._snapshot("TWD 120")["m_and_a_status"] == "ACTIVE_TENDER"
 
@@ -167,7 +197,7 @@ def test_value_trap_call_sites_use_the_helper():
     assert len(sites) == 2
     for kw in sites:
         assert isinstance(kw.value, ast.Call)
-        assert getattr(kw.value.func, "id", None) == "effective_m_and_a_status"
+        assert getattr(kw.value.func, "id", None) == "m_and_a_status_from_report"
 
 
 def test_prompts_carry_the_subject_role_contract():
@@ -178,3 +208,4 @@ def test_prompts_carry_the_subject_role_contract():
     instruction = instruction.split("**CRITICAL**", 1)[0]
     assert "Subject Role" in instruction and "TARGET" in instruction
     assert "ACQUIRER" in instruction
+    assert "M_AND_A_SUBJECT_ROLE:" in senior["system_message"]

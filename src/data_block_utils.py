@@ -5,6 +5,8 @@ from enum import Enum
 
 import structlog
 
+from src.monetary import MONETARY_AMOUNT_RE, parse_monetary_amount
+
 logger = structlog.get_logger(__name__)
 
 
@@ -437,36 +439,61 @@ def extract_data_block_field(report: str | None, field_name: str) -> str | None:
     return extract_block_field(report, "DATA_BLOCK", field_name)
 
 
+_TENDER_PRICE_ANNOTATION = re.compile(r"\s+per\b|\(", re.IGNORECASE)
+
+
+def _tender_price_is_positive(tender_price: str | None) -> bool:
+    """True when the field's leading amount, as a whole, is a positive price.
+
+    Annotations ("per share", "(cash)") are dropped; what remains must be one
+    complete monetary amount, so a stake ("51 %"), a date or "N/A (...)" is not
+    a price.
+    """
+    core = _TENDER_PRICE_ANNOTATION.split((tender_price or "").strip(), 1)[0].strip()
+    if not core or MONETARY_AMOUNT_RE.fullmatch(core) is None:
+        return False
+    amount = parse_monetary_amount(core)
+    return amount is not None and amount > 0
+
+
 def effective_m_and_a_status(
-    status: str | None, tender_price: str | None
+    status: str | None,
+    tender_price: str | None,
+    subject_role: str | None,
 ) -> str | None:
     """Return the M&A status the deterministic consumers may act on.
 
     ``ACTIVE_TENDER`` exempts health/growth gates and routes held positions to an
-    M&A exit, so it is honored only when the DATA_BLOCK names a positive tender
-    price. An unpriced tender is the signature of an acquirer (or an unconfirmed
-    deal) and is demoted to ``RUMORED``. Every other status passes through.
-    A stake percentage or a date is not a price, and a value that opens with a
-    null token ("N/A (51% stake)") is unpriced whatever follows it.
+    M&A exit, so it is honored only for a tender for the analyzed company's own
+    shares: ``M_AND_A_SUBJECT_ROLE: TARGET`` and a positive tender price. An
+    acquirer, an unknown role or an unpriced tender is demoted to ``RUMORED``.
+    Every other status passes through.
     """
     if status is None or status.strip().upper() != "ACTIVE_TENDER":
         return status
-    text = (tender_price or "").strip()
-    if text.split("(", 1)[0].strip().upper() not in _NULL_TOKENS:
-        for match in _NUMBER_TOKEN_PATTERN.finditer(text):
-            if text[match.end() : match.end() + 1] in {"%", "-", "/"}:
-                continue
-            try:
-                if float(match.group(0).replace(",", "")) > 0:
-                    return status
-            except ValueError:
-                continue
+    role = (subject_role or "").strip().upper()
+    if role != "TARGET":
+        reason = "subject_not_target"
+    elif not _tender_price_is_positive(tender_price):
+        reason = "unpriced"
+    else:
+        return status
     logger.info(
-        "m_and_a_tender_unpriced_demoted",
-        status=status,
+        "m_and_a_tender_demoted",
+        reason=reason,
+        subject_role=subject_role,
         tender_price=tender_price,
     )
     return "RUMORED"
+
+
+def m_and_a_status_from_report(report: str | None) -> str | None:
+    """The effective M&A status of a report's last DATA_BLOCK."""
+    return effective_m_and_a_status(
+        extract_data_block_field(report, "M_AND_A_STATUS"),
+        extract_data_block_field(report, "M_AND_A_TENDER_PRICE"),
+        extract_data_block_field(report, "M_AND_A_SUBJECT_ROLE"),
+    )
 
 
 def extract_data_block_number(report: str | None, field_name: str) -> float | None:
