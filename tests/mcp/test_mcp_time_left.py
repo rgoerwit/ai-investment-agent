@@ -178,12 +178,16 @@ async def test_the_minimum_is_not_derived_from_the_time_left(
 async def test_a_tiny_allowance_with_a_small_fraction_still_retries(
     tmp_path, monkeypatch, fake_clock, sleeps
 ):
-    """0.04 x 0.2 s = 0.008 s: 0.01 s left fits one retry, after a 0.002 s sleep."""
-    monkeypatch.setattr(config, "mcp_tool_call_timeout_seconds", 0.2)
+    """0.04 x 10 s = 0.4 s: 0.5 s left fits one retry, after a 0.1 s sleep.
+
+    Not smaller: the budget-store admission runs on a real thread under a
+    real-time bound taken from the deadline, which a slow runner can exceed.
+    """
+    monkeypatch.setattr(config, "mcp_tool_call_timeout_seconds", 10.0)
     monkeypatch.setattr(config, "min_useful_attempt_fraction", 0.04)
-    server, _ = await _retry_after_502(tmp_path, monkeypatch, deadline=0.01)
+    server, _ = await _retry_after_502(tmp_path, monkeypatch, deadline=0.5)
     assert server.methods.count("tools/call") == 2
-    assert sleeps == [pytest.approx(0.002)]
+    assert sleeps == [pytest.approx(0.1)]
 
 
 @pytest.mark.asyncio
@@ -204,15 +208,18 @@ async def test_a_fraction_override_moves_the_mcp_minimum(
 async def test_the_listing_gets_only_what_the_handshake_left(
     tmp_path, monkeypatch, fake_clock, recorder
 ):
-    """The handshake uses 0.04 s of a 0.05 s deadline; the listing gets 0.01 s.
+    """The handshake uses 0.9 s of a 1 s deadline; the listing gets 0.1 s.
 
-    Before, the listing got the session's fixed 0.05 s on top, failed as a
+    Before, the listing got the session's fixed timeout on top, failed as a
     retryable timeout, and the retry slept 0.5 s. Now its bound is what the
     handshake left, and the retry is refused: nothing sleeps, no call is sent.
+    The deadline is not smaller because the budget-store admission before the
+    handshake runs on a real thread under a real-time bound taken from it; at
+    0.05 s a slow CI runner timed that SQLite check out first.
     """
 
     def handshake_uses_most_of_the_deadline() -> None:
-        fake_clock[0] += 0.04
+        fake_clock[0] += 0.9
 
     server = FakeMCPServer(
         stall=frozenset({"tools/list"}),
@@ -222,7 +229,7 @@ async def test_the_listing_gets_only_what_the_handshake_left(
     runtime = http_runtime(tmp_path)
     before = set(asyncio.all_tasks())
 
-    with enclosing_deadline(0.05):
+    with enclosing_deadline(1.0):
         with pytest.raises(MCPCallError) as exc_info:
             await asyncio.wait_for(
                 runtime.execute_raw("fmp_remote", "quote", {}, scope="consultant"),
@@ -230,7 +237,7 @@ async def test_the_listing_gets_only_what_the_handshake_left(
             )
 
     err = exc_info.value
-    assert recorder.bounds == [pytest.approx(0.01)]
+    assert recorder.bounds == [pytest.approx(0.1)]
     assert recorder.sleeps == []
     # Sent, then timed out; the retry refused, never sent.
     assert err.category is MCPErrorCategory.TRANSPORT
