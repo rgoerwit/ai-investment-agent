@@ -1392,7 +1392,7 @@ async def test_live_and_serialized_issuer_authority_reaches_governance_and_growt
         services.issuer_authority.register_url(
             source, provenance="structured_company_profile"
         )
-        await recorder.after(
+        recorder.completed(
             ToolInvocation("get_official_document", {"url": source}, "preflight"),
             ToolResult(content),
         )

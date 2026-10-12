@@ -1107,6 +1107,50 @@ async def _async_return(value):
     return value
 
 
+class _AllowanceSpender:
+    """An after() hook that spends the call's whole allowance."""
+
+    def __init__(self, ticks: list[float]) -> None:
+        self.ticks = ticks
+
+    async def before(self, call):
+        return call
+
+    async def after(self, call, result):
+        self.ticks[0] += 10_000.0
+        return result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refused", [False, True])
+async def test_capture_after_event_is_the_result_the_caller_received(
+    tmp_path, monkeypatch, refused
+):
+    """The "after" event is written on completion, never for a result the
+    service then refused because the allowance ran out."""
+    from src.llm_runtime import timeouts as llm_timeouts
+
+    ticks = [1_000.0]
+    monkeypatch.setattr(llm_timeouts, "now", lambda: ticks[0])
+    manager = _make_manager(tmp_path, monkeypatch)
+    hooks = [manager.make_tool_hook()]
+    if refused:
+        hooks.insert(0, _AllowanceSpender(ticks))
+    service = ToolExecutionService(hooks)
+    call = ToolInvocation(name="get_news", args={"ticker": "0005.HK"}, source="test")
+
+    if refused:
+        with pytest.raises(TimeoutError, match="no allowance left"):
+            await service.execute(call, runner=lambda args: _async_return("news"))
+    else:
+        await service.execute(call, runner=lambda args: _async_return("news"))
+
+    stages = [(event["stage"], event.get("value")) for event in manager._tool_calls]
+    assert stages == (
+        [("before", None)] if refused else [("before", None), ("after", "news")]
+    )
+
+
 async def _create_junior_cycle_capture(
     tmp_path, monkeypatch, *, omit_selector=False, failed=False, empty_failure=False
 ):

@@ -10,6 +10,10 @@ from src.tooling.evidence_recorder import (
 from src.tooling.runtime import ToolExecutionService, ToolInvocation, ToolResult
 
 
+async def _returning(value: str) -> str:
+    return value
+
+
 class _SanitizingHook:
     async def before(self, call: ToolInvocation) -> ToolInvocation:
         return call
@@ -236,11 +240,11 @@ async def test_recorder_records_actual_truncation_without_changing_returned_valu
 ):
     recorder = EvidenceRecorder()
     original = "x" * length
-    result = ToolResult(value=original)
-    assert (
-        await recorder.after(ToolInvocation("web_search", {}, "preflight"), result)
-        is result
+    result = await ToolExecutionService([recorder]).execute(
+        ToolInvocation("web_search", {}, "preflight"),
+        lambda _args: _returning(original),
     )
+    assert result.value == original
     record = recorder.snapshot()[0]
     assert record.original_content_chars == length
     assert record.retained_content_chars == min(length, 20_000)
@@ -270,7 +274,7 @@ async def test_live_and_saved_issuer_authority_survive_registry_teardown_and_ign
         services.issuer_authority.register_url(
             url, provenance="structured_company_profile"
         )
-        await recorder.after(
+        recorder.completed(
             ToolInvocation("get_official_document", {"url": url}, "preflight"),
             ToolResult(content),
         )

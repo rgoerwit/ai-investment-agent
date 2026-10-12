@@ -578,12 +578,13 @@ wrapper, which only delayed cancellation by a loop turn; the node keeps the
   operational work reads it, LLM admission never does, and a test asserts
   hooks see no bound LLM deadline.
 - **A late result is never recorded.** A hook that swallows cancellation keeps
-  the orphaned chain running, and `EvidenceRecorder` is the last `after()` hook.
+  the orphaned chain running.
   The chain therefore checks the deadline before every `before()` and `after()`
   hook and after the last of each (`_require_hook_admission`, round 4; until then
   only before each `after()` hook) and stops once it is spent, so no later hook,
   runner or returned result follows a hook that overran. Admission cannot undo a
-  side effect a hook already performed. That race is why MCP budget accounting moved out of the hook
+  side effect a hook already performed, so the evidence ledger and the baseline
+  capture record through `ToolCompletionObserver`, after the last check. That race is why MCP budget accounting moved out of the hook
   chain (round 3): `MCPRuntime` now counts each tools/call as it is sent, so a
   discarded result is still counted (`docs/MCP.md`, Budget interaction). Round
   4 made that count atomic: check (`can_call`) and record were separate SQLite
@@ -754,7 +755,12 @@ an https-to-http redirect to an approved host is reported as
 leave the ledger nothing (`after()` hooks run only for a result), so the URL was
 lost and the model called it `EXTRACTION_TIMEOUT`; `ToolExecutionService` now tells
 hooks that implement `failed()` (the `EvidenceRecorder`) of any failure, with the
-timeout scope, as a `FAILED`/`UNAVAILABLE` record. Not changed: the vendor JSON
+timeout scope, as a `FAILED`/`UNAVAILABLE` record. Its success side is
+`ToolCompletionObserver.completed()`, which `execute` calls only once the result
+has passed the last admission check and is returned, so a call reaches exactly
+one of `completed` and `failed`; the ledger used to record in `after()`, and an
+allowance that ran out during or just after it left one call both `SUCCEEDED`
+and `FAILED` (round 4). Not changed: the vendor JSON
 clients (aiohttp: FMP, EODHD, Alpha Vantage) and `scripts/find_gems.py`'s rotating
 agents send their own headers.
 

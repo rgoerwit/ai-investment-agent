@@ -281,8 +281,8 @@ def build_runtime_services_from_config(
 
     inspection_service = InspectionService()
     evidence_recorder = EvidenceRecorder()
-    # First in the chain means last in reverse after-hook order, so the ledger
-    # receives the final inspected/sanitized result.
+    # The ledger records through its completion and failure observers, which
+    # see the final inspected/sanitized result wherever it sits in the chain.
     hooks: list[ToolHook] = [evidence_recorder]
     providers = provider_runtime or build_provider_runtime()
 

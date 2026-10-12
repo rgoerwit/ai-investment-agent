@@ -94,8 +94,9 @@ class ToolCallBlocked(RuntimeError):
     """Raised to block a tool call: by a ``before()`` hook, or by the tool
     itself when its own content inspection enforced a block.
 
-    Either way the service returns a ``blocked`` ``ToolResult`` and the
-    after-hooks see it, so the evidence ledger records ``BLOCKED``.
+    Either way the service returns a ``blocked`` ``ToolResult`` (the
+    after-hooks see a runner's block, not a before() hook's) and completion
+    observers are told of it, so the evidence ledger records ``BLOCKED``.
     """
 
 
@@ -142,15 +143,29 @@ class ToolHook(Protocol):
 class ToolFailureObserver(Protocol):
     """Optional hook capability: told, synchronously, of a call that failed.
 
-    ``after()`` runs only for a result that was produced, so a hook that must
-    keep a trace of the attempt (the evidence ledger keeps the requested URL)
-    implements this as well. ``scope`` is the classified timeout scope, or
-    None for a failure that was not a timeout.
+    A hook that must keep a trace of every attempt (the evidence ledger keeps
+    the requested URL) implements this with ``ToolCompletionObserver``.
+    ``scope`` is the classified timeout scope, or None for a failure that was
+    not a timeout.
     """
 
     def failed(
         self, call: ToolInvocation, reason: str, scope: ToolTimeoutScope | None
     ) -> None: ...
+
+
+@runtime_checkable
+class ToolCompletionObserver(Protocol):
+    """Optional hook capability: told, synchronously, of the result a call returned.
+
+    The success side of ``ToolFailureObserver``: for every call exactly one of
+    ``completed`` and ``failed`` fires (neither for a cancelled call). It sees
+    the final result after every ``after()`` hook and admission check, so a
+    durable record belongs here, never in ``after()``, which can run for a
+    result the caller is then told timed out.
+    """
+
+    def completed(self, call: ToolInvocation, result: ToolResult) -> None: ...
 
 
 class ToolExecutionService:
@@ -199,33 +214,60 @@ class ToolExecutionService:
         ``_ScopedToolTimeout`` from inside (runner, a hook's own timeout, the
         hooks' allowance spent) passes through unchanged; only the combined
         bound firing, or a call refused unstarted, is labelled here.
+
+        The call's one outcome is decided here too: observers are told it
+        failed, or that it completed with the result returned to the caller.
         """
         try:
-            return await self._execute_bounded(call, runner)
+            result = await self._execute_bounded(call, runner)
         except Exception as exc:
             self._notify_failed(call, exc)
             raise
+        self._notify_completed(call, result)
+        return result
+
+    def _notify_completed(self, call: ToolInvocation, result: ToolResult) -> None:
+        """Tell each observing hook the result the caller receives."""
+        self._notify(
+            call,
+            ToolCompletionObserver,
+            "tool_completion_observer_failed",
+            lambda hook: hook.completed(call, result),
+        )
 
     def _notify_failed(self, call: ToolInvocation, exc: Exception) -> None:
-        """Tell each observing hook the call failed, with the timeout scope.
+        """Tell each observing hook the call failed, with the timeout scope."""
+        reason, scope = tool_failure_reason(exc)
+        self._notify(
+            call,
+            ToolFailureObserver,
+            "tool_failure_observer_failed",
+            lambda hook: hook.failed(call, reason, scope),
+        )
+
+    def _notify(
+        self,
+        call: ToolInvocation,
+        observer: type,
+        fault_event: str,
+        notify: Callable[[Any], None],
+    ) -> None:
+        """Notify each hook implementing *observer* of the call's one outcome.
 
         Here, at the one chokepoint, so every surface (graph node, consultant,
         auditor, preflight) leaves the same trace. An observer's own fault is
-        logged, never allowed to replace the failure being reported.
+        logged, never allowed to replace the result or failure being reported.
         """
-        reason, scope = tool_failure_reason(exc)
         for hook in self._hooks:
-            if not isinstance(hook, ToolFailureObserver):
+            if not isinstance(hook, observer):
                 continue
             try:
-                hook.failed(call, reason, scope)
+                notify(hook)
             except Exception as observer_exc:
                 logger.warning(
-                    "tool_failure_observer_failed",
+                    fault_event,
                     tool=call.name,
-                    **summarize_exception(
-                        observer_exc, operation="tool_failure_observer_failed"
-                    ),
+                    **summarize_exception(observer_exc, operation=fault_event),
                 )
 
     async def _execute_bounded(
@@ -323,7 +365,7 @@ class ToolExecutionService:
             ) from exc
         except ToolCallBlocked as exc:
             # The tool enforced a block on its own content: the same blocked
-            # result a before() hook produces, so after-hooks record it.
+            # result a before() hook produces, which after-hooks then see.
             result = _blocked_result(call, exc)
         except Exception as exc:
             # after() hooks only run for successfully produced tool outputs.
@@ -418,9 +460,10 @@ def _require_hook_admission(call: ToolInvocation) -> None:
     Checked before every ``before()`` and ``after()`` hook and after the last
     of each, so a hook that overruns -- including one that swallowed the
     combined bound's cancellation and finished in an orphaned task -- never
-    lets a later hook, the runner or a recorded result follow it. Admission
-    cannot undo what a hook already did: a hook that finished its side effect
-    (a ledger write, an audit record) before the check keeps it.
+    lets a later hook, the runner or a returned result follow it. Admission
+    cannot undo what a hook already did, so no hook writes a durable record in
+    ``after()``: the ledger records through ``ToolCompletionObserver``, told
+    only of a result that passed this check and reached the caller.
     """
     if operational_time_left() <= 0:
         raise _scoped_timeout(

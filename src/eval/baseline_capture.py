@@ -133,6 +133,11 @@ class BaselineCaptureToolHook:
         return call
 
     async def after(self, call, result):
+        return result
+
+    def completed(self, call, result) -> None:
+        """Capture the result the caller received (``ToolCompletionObserver``),
+        never one it was then told timed out."""
         self.manager.record_tool_call(
             {
                 "stage": "after",
@@ -145,7 +150,6 @@ class BaselineCaptureToolHook:
                 "value": normalize_for_json(result.value),
             }
         )
-        return result
 
 
 class BaselineCaptureManager:

@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `src/tooling/runtime.py`: `INSPECTION_BACKEND_ERROR` is now `INSPECTION_FAILED`
   and `OFFICIAL_DOCUMENT_BLOCKED` is `INSPECTION_BLOCKED`. Memory writes and the
   macro cache log a backend failure as `*_inspection_failed`, not as a block.
+  Each tool call now has one ledger outcome: the evidence recorder used to record in
+  its `after()` hook, so an allowance that ran out during or just after it left the
+  call both `SUCCEEDED` and `FAILED` while the caller was told it timed out. The
+  service now tells `ToolCompletionObserver`s the result it returns, or failure
+  observers why there is none, never both; the recorder and the baseline capture's
+  `after` event record there. A `before()` policy block is now recorded as
+  `BLOCKED`, like a block the tool raises.
 
 - The macro-context cache and the retrospective evaluation memo are written through
   `atomic_write_text`: the macro cache used a fixed `.tmp` name, so two tickers in

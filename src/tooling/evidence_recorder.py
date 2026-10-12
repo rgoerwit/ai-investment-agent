@@ -344,7 +344,14 @@ def classify_evidence_value(
 
 
 class EvidenceRecorder:
-    """Record the final post-hook result without mutating tool execution."""
+    """Record each tool call's one outcome without mutating tool execution.
+
+    A ``ToolCompletionObserver`` and a ``ToolFailureObserver``: the service
+    tells it either the result the caller received (``completed``) or why the
+    call produced none (``failed``), never both. Its ``after()`` is a
+    pass-through, so the record does not depend on its place in the hook
+    chain and no result the caller was told timed out is ever recorded.
+    """
 
     def __init__(self) -> None:
         self._records: list[EvidenceRecord] = []
@@ -400,6 +407,10 @@ class EvidenceRecorder:
         return call
 
     async def after(self, call: ToolInvocation, result: ToolResult) -> ToolResult:
+        return result
+
+    def completed(self, call: ToolInvocation, result: ToolResult) -> None:
+        """Record the result the caller received, blocked or not."""
         original = _value_text(result.value)
         execution_status, evidence_status, reason, content = classify_evidence_value(
             call.name,
@@ -413,7 +424,7 @@ class EvidenceRecorder:
         # sources, not a duplicate, and must keep both identities.
         dedupe_key = (call.agent_key, call.name, digest, requested_urls)
         if not self._admit(dedupe_key, len(content)):
-            return result
+            return
         urls = tuple(
             dict.fromkeys(
                 normalized
@@ -455,14 +466,13 @@ class EvidenceRecorder:
             )
         )
         self._content_chars += len(content)
-        return result
 
     def failed(self, call: ToolInvocation, reason: str, scope: str | None) -> None:
         """Keep the attempt of a call that produced no result.
 
-        ``after()`` never runs for it, so without this the requested URL (and
-        that the call timed out, and where) is lost and the model is left to
-        guess the cause from prose. Same record, ``FAILED`` and ``UNAVAILABLE``.
+        ``completed()`` never runs for it, so without this the requested URL
+        (and that the call timed out, and where) is lost and the model is left
+        to guess the cause from prose. Same record, ``FAILED`` and ``UNAVAILABLE``.
         """
         content = tool_error_message(reason) + (
             f"\nTIMEOUT_SCOPE: {scope}" if scope else ""
