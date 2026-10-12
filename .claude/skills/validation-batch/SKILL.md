@@ -10,6 +10,10 @@ description: >
 
 # Running a validation batch
 
+This is a live, networked and paid workflow. Require user authorization for the
+batch and its spend before launch; loading this skill or passing deterministic
+checks alone is not approval. Do not read private environment-file contents.
+
 A batch costs roughly **$1.60–$3.50 and 90 minutes to two hours**. Spend the cheap
 deterministic checks first — they catch a different and larger class of defect, and
 they cost nothing.
@@ -21,8 +25,8 @@ poetry run python scripts/check_macos_cloud_files.py --hydrate   # see §6
 poetry run ruff check src/ tests/ scripts/
 ```
 
-Then the suite. See `/run-tests` for scope selection — do not reach for the full
-~9,100 tests when the owning directory will do.
+Then the suite. See `/run-tests` for scope selection — do not reach for the
+complete suite when the owning directory will do.
 
 **A live batch is not a substitute for pytest, and has repeatedly been used as one.**
 The August 2026 fast-fail regression (a stale `analysis_outcome` letting the debate

@@ -16,8 +16,24 @@ same service, which is what puts them under inspection at one chokepoint.
 
 **Count a sent request where it is sent, never in an `after()` hook.** `after()`
 runs only for a runner that succeeded with time left, so quota a vendor consumed
-on a timeout, failure or discarded result went uncounted. `MCPRuntime` admits
-each attempt (`can_call`) and records each tools/call as it is sent.
+on a timeout, failure or discarded result went uncounted. `MCPRuntime` takes one
+`BudgetTracker.reserve` per tools/call before sending it: a single `BEGIN
+IMMEDIATE` transaction on a worker that checks and takes both limits. The count
+is admitted reservations, never refunded; `has_room` is advisory only. A
+server's `Retry-After` is honoured in full when the deadline fits it and refused
+otherwise; the backoff cap applies only to the exponential backoff.
+
+**A tool reads its own inspection through `approved_tool_content`.** It returns
+the approved text, or raises `ToolCallBlocked` (`INSPECTION_BLOCKED`) or
+`ToolCallFailed` (`INSPECTION_TIMEOUT`, `INSPECTION_FAILED`), from the enforced
+disposition the configured mode produced, never the raw decision. A blocked
+placeholder never comes back as evidence or a search result. Reason codes are
+defined once in `src/tooling/runtime.py`, and every surface tells the model the
+code `tool_failure_reason` gives. The service checks hook admission before
+every `before()` and `after()` hook and after the last of each. Admission cannot
+undo a hook's side effect, so durable records go in an observer (below).
+CPU-bound document parsing (PDF and HTML) runs on the shared extraction pool,
+never on the event loop.
 
 Services resolve through a ContextVar with module singletons as fallback. Tests bind
 scoped services rather than mutating the globals.
@@ -25,9 +41,10 @@ scoped services rather than mutating the globals.
 ## Two tool deadlines, both load-bearing
 
 The runner timeout in `src/tooling/runtime.py` does not cover the hooks; the
-combined scope in `ToolExecutionService.execute` (runner plus
-`TOOL_HOOKS_TIMEOUT_SECONDS`) is their only bound, for every caller, and the
-only one: the graph node adds no wrapper. Tool scopes may *read* the caller's
+combined scope in `ToolExecutionService.execute`
+(`tool_execution_with_inspection_timeout_seconds`: the runner allowance plus
+`TOOL_HOOKS_TIMEOUT_SECONDS`, clamped to the operational deadline) is their
+bound for every caller, and the only one: the graph node adds no wrapper. Tool scopes may *read* the caller's
 enclosing deadline but must never *bind* one: the LLM judge fails open when
 admission refuses it. Only the service binds the tool-call deadline
 (`tool_call_deadline`, kept back from its cap by `deadline_margin`).
@@ -66,8 +83,10 @@ maps an exception to its reason by class over the whole cause chain
 **Every client that fetches third-party pages sends `config.http_user_agent`**
 (`HTTP_USER_AGENT`); never write a UA literal. sec.gov additionally needs
 `SEC_CONTACT_EMAIL` (refuse before connecting without it; never send it elsewhere).
-A tool failure is recorded where the service sees it (`EvidenceRecorder.failed`),
-not in each caller. Story: `docs/CODEBASE_MEMORY.md`.
+A tool call's outcome is recorded where the service decides it, not in each
+caller: `execute` tells observers either `completed()` with the returned result or
+`failed()` with the reason code, never both. **Write a durable record there, never
+in `after()`**, which can run for a result the caller is then told timed out. Story: `docs/CODEBASE_MEMORY.md`.
 
 ## Treat every external string as hostile
 

@@ -26,14 +26,24 @@ it builds for that directory. A command that names a root-level test file betwee
 files of one subdirectory re-collects `tests/` and builds a second `Dir`. Without the
 hook, tests under it lose that conftest: named fixtures error, and autouse isolation
 is skipped silently. Whether either directory is a package plays no part.
-`tests/test_conftest_recollection.py` guards it. Story: `docs/CODEBASE_MEMORY.md`.
+The hook calls a private pytest API, so it acts only where it detects both the
+9.1 deferral mechanism and the `parsefactories(holder=, node=)` signature; on any
+other pytest it does nothing. `tests/test_conftest_recollection.py` guards both
+branches. Story: `docs/CODEBASE_MEMORY.md`.
 
 ## Markers and scope
 
 Mark anything over five seconds `slow` and anything needing the network
-`integration`; those are skipped unless you pass `--run-integration` (it also gates the
-live SGX PDF canary). Mock model responses in unit tests. Run the directory that owns your
-change while iterating; the full suite once at wrap-up.
+`integration`. Only `integration` is skipped by default; `--run-integration` opts in
+(including the live SGX PDF canary). `slow` is filtered by the selected command, such
+as `make test-ci`. Network or paid provider runs need user authorization and their
+prerequisites. Mock model responses in unit tests and select tests from the actual diff.
+
+**An integration test never reads a provider key by its plain name.** pytest-env
+overwrites those names with dummies before any conftest loads. Read the key through
+`real_credential` in `tests/helpers/integration_prerequisites.py`, which reads
+`INTEGRATION_<NAME>` and rejects the dummy. Without a real key, skip with a message
+that names the variable, never its value.
 
 ## A guard must be proven against a real regression
 
@@ -82,6 +92,27 @@ assert on its own list. Guarded by `tests/test_offline_boundary.py`.
 `PYTEST_DISABLE_DOTENV`), and so does `_parse_env_file`, the reader behind
 `get_env_value`. A new settings class that hard-codes `".env"` fails
 `tests/config/test_env_file_policy.py`.
+
+The switch disables dotenv only when its value is exactly the string `true`, as
+configured in `pyproject.toml`; do not substitute `1` or drop pytest's configured
+plugins or addopts. Metadata tooling may read only `.env.example` contents.
+
+**Provider construction is not hermetic by itself.** Dummy credentials can construct
+a real SDK and trigger a memory health probe. Supply fake embeddings for availability
+tests; `tests/memory/test_embedding_probe_offline.py` verifies that unpatched
+construction sends nothing. Keep every releasable stalled worker patched until it
+finishes: release and join it before monkeypatch teardown, through
+`stalled_worker(label, prefix=)` in `tests/helpers/stalled_workers.py` rather than a
+hand-written join. A late worker can otherwise reach a real provider after the
+boundary has been restored. `_reset_shared_memory_state` also forgets the embedding
+probe's owner and advances its generation, so a probe a previous test left running
+cannot publish into the next test.
+
+Standalone audit probes need isolation before application/provider imports: the
+exact `true` dotenv switch, disabled `LANGSMITH_TRACING`, `LANGCHAIN_TRACING` and
+`LANGCHAIN_TRACING_V2`, and network/DNS refusal through
+`tests/helpers/offline_network.py`. Prefer the
+existing pytest boundary. Assert no attempts and keep refusal until workers finish.
 
 **Process-global waits and state are reset by root fixtures.** `_instant_process_limiters`
 swaps every process-fallback limiter for `tests/helpers/instant_limiter.py` (a real one

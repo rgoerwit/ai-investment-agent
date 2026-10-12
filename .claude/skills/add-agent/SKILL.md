@@ -34,9 +34,15 @@ where vendor diversity is the point; an analysis input belongs in `base`. Declar
 `requires` honestly — capability validation is what catches a chat-only model bound to
 a tool-calling seat, before the run rather than during it.
 
-Per-seat call semantics — temperature, client timeout, SDK retries, tier pins — are
+Per-seat call semantics — temperature, client timeout, tier pins — are
 `SeatExecutionPolicy` data, never an `if seat == ...` at a call site. Putting a pin at
 the call site means only that caller gets it.
+
+Choose the seat's `TimeoutClass` from `src/llm_runtime/timeouts.py`. The runtime owns
+total application attempts; transports configure one SDK attempt per dispatch. Do not
+add a per-seat retry setting or a construction-time flex deadline.
+Google's aiohttp connection recovery may resend internally; verify effective sends
+and application retry/rate-limit branch counts rather than model fields alone.
 
 ## 3. Node factory
 

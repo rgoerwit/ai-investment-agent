@@ -24,9 +24,12 @@ sites must always pass one.
 ## Embedding calls are hard-bounded
 
 The client library treats an unset per-request timeout as *no timeout*, so an
-unreachable endpoint blocks forever rather than failing. The constructor health check
-runs on a daemon thread with a join timeout, and every embedding call is wrapped in
-the hard-timeout helper. Do not "fix" this through the library's own request-options
+unreachable endpoint blocks forever rather than failing. The startup probe has one
+owner per binding (`_claim_probe`), claimed before the client is built, so there is
+one client and one probe. It runs on a blocking-call worker (`start_blocking_call`)
+that sync and async waiters share, each under its own deadline; no waiter can cancel
+it, and a generation counter keeps an old binding from publishing into a new one.
+Every embedding call is wrapped in the hard-timeout helper. Do not "fix" this through the library's own request-options
 field, which is declared and never consumed.
 
 Both bounds are `Settings` fields read from the live `src.config.config`, because

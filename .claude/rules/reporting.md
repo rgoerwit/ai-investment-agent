@@ -36,6 +36,12 @@ from a nearby bullet and renders a false failure.
 
 ## The article pipeline
 
+The writer runs asynchronously through `invoke_with_rate_limit_handling`, including
+fallback seats. `handle_article_generation` in `src/output.py` binds the workflow's
+own deadline after the analysis scope closes. Draft, review and revision steps share
+that bound; reject a fallback before constructing it when useful allowance cannot
+fit, and discard late step results before publication.
+
 Citations of hard fields are audited deterministically against the underlying data,
 including un-backticked parentheticals, and a mismatch produces a caveat block rather
 than a silent publish. Insert that block below the first heading, and make insertion

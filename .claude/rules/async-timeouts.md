@@ -31,6 +31,7 @@ workers are joined at interpreter exit even after `shutdown(wait=False)`. Use
 thread per call, a slot held until the thread really ends, fail-fast
 `BlockingCallSaturatedError` when full. An `InFlightLimit` on an async policy does the
 same for `run_blocking_call` — use it where repeated stalls could pile up orphans.
+Size it from `DEFAULT_WORKER_SLOTS`; a pool sized differently names its reason.
 None of this stops the stalled work; it bounds the caller and the orphan count.
 
 LLM `ainvoke` is bounded the same way: `invoke_with_rate_limit_handling` in
@@ -64,7 +65,8 @@ replace the work's own typed timeout.
 forks (a bare name, `close_fds=True` or `cwd=` each force it), and `fork()` in this
 threaded process can crash in Network.framework's atfork handler. The helper
 also kills and reaps on every abnormal exit. `tests/architecture/test_subprocess_spawns.py`
-enforces it.
+enforces it. The one exception is an MCP stdio server, which the SDK's own launcher
+starts.
 
 **No literal deadline at an execution boundary.** A number passed to
 `timeout=`, `*_timeout_seconds=`, `ClientTimeout`, `BlockingCallPolicy` or
@@ -73,7 +75,10 @@ enforces it.
 keyed by scope and parameter, and it must say why a literal is correct there. The
 guard follows imported names and `module.NAME` constants (config owners included),
 3-argument `getattr` fallbacks, and any `src/` function with a deadline-shaped
-parameter (`enclosing_deadline`, `require_allowance`, `run_program`, ...).
+parameter (`enclosing_deadline`, `require_allowance`, `run_program`, ...),
+including that parameter's own default. A literal inside `max()` or `min()` is a
+fixed deadline too; the only literal floor allowed is 0, which keeps a value
+positive. Any other floor is computed.
 
 **A deadline is not a bound.** A checkpoint bounds nothing that follows it, and a call
 starting just under the deadline can still run a full per-call timeout past it. Wrap
