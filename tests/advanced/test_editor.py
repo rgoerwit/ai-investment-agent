@@ -2196,7 +2196,7 @@ class TestEditorToolCalling:
 
         assert len(results) == 1
         assert results[0].content == "TOOL_ERROR: TOOL_EXECUTION_FAILED"
-        assert "https://example.com" in editor._failed_urls
+        assert editor._failed_urls == {"https://example.com"}
 
     @pytest.mark.asyncio
     async def test_execute_tool_calls_routes_through_tool_service(self):
@@ -2261,7 +2261,7 @@ class TestEditorToolCalling:
                 ]
             )
 
-        assert ("https://example.com" in editor._failed_urls) is blocked
+        assert editor._failed_urls == ({"https://example.com"} if blocked else set())
 
 
 # =============================================================================

@@ -23,6 +23,7 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
+from urllib.parse import urlparse
 
 import aiohttp
 import pytest
@@ -846,7 +847,10 @@ async def test_google_sends_one_physical_request_per_attempt_on_http_error(
     # The SDK's own error for the HTTP response, not a wrapper's.
     assert isinstance(raised.value.__cause__, genai_errors.ServerError)
     assert len(google_wire.sent) == 3  # retry_options=None: one SDK attempt
-    assert all("generativelanguage.googleapis.com" in url for url in google_wire.sent)
+    assert all(
+        urlparse(url).hostname == "generativelanguage.googleapis.com"
+        for url in google_wire.sent
+    )
 
 
 @pytest.mark.security
