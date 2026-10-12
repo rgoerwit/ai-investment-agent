@@ -47,6 +47,8 @@ the cap alone. Refusals are excluded by construction, since re-asking cannot cle
 them. An `output_cap_exhausted` recovery must not raise reasoning: thinking already
 spent the visible budget, so it reruns on the `cap_retry_llm` (`RETRY-CAP`, the FAST
 intent's value) and falls back to `RETRY-HIGH` only when no lower value exists.
+The provider's cap stop reason classifies it first; the token count is the fallback,
+since a capped response can report a few tokens under the cap.
 
 ## Absence is not failure
 

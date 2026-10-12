@@ -909,6 +909,46 @@ def test_classify_output_contract_failure_detects_exact_api_cap_exhaustion():
     )
 
 
+@pytest.mark.parametrize("finish_reason", ["MAX_TOKENS", "length", "max_tokens"])
+def test_classify_output_contract_failure_trusts_the_provider_cap_stop(
+    finish_reason,
+):
+    """0995.HK: stopped at the cap with 19,111 of 19,115 tokens reported."""
+    runnable = SimpleNamespace(_configured_api_completion_tokens=19115)
+    response = SimpleNamespace(
+        usage_metadata={"output_tokens": 19111},
+        response_metadata={"finish_reason": finish_reason},
+    )
+
+    assert (
+        classify_output_contract_failure(
+            runnable=runnable,
+            response=response,
+            truncated=True,
+            validation={"ok": False, "missing": ["data_block"]},
+        )
+        == "output_cap_exhausted"
+    )
+
+
+def test_classify_output_contract_failure_clean_stop_below_cap_is_not_cap():
+    runnable = SimpleNamespace(_configured_api_completion_tokens=19115)
+    response = SimpleNamespace(
+        usage_metadata={"output_tokens": 19111},
+        response_metadata={"finish_reason": "STOP"},
+    )
+
+    assert (
+        classify_output_contract_failure(
+            runnable=runnable,
+            response=response,
+            truncated=True,
+            validation={"ok": False, "missing": ["data_block"]},
+        )
+        == "incomplete_structured_output"
+    )
+
+
 def test_classify_output_contract_failure_keeps_below_cap_omission_distinct():
     runnable = SimpleNamespace(
         _configured_max_completion_tokens=10923,

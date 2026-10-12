@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A response the provider stopped at its output cap is classified
+  `output_cap_exhausted` from its stop reason before the token count is
+  compared with the cap. 0995.HK's Senior stopped on `MAX_TOKENS` reporting
+  19,111 of 19,115 tokens, so it was classified `incomplete_structured_output`
+  and the new `RETRY-CAP` recovery never ran.
+
 - `debtToEquity` is one canonical ratio from the source boundary to every
   consumer. `src/data/debt_equity.py` owns each source's verified unit and
   basis: yfinance and yahooquery report total debt / equity in percent and are

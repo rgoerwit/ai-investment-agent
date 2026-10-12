@@ -646,14 +646,19 @@ class TestAnalystStructuralRetry:
         assert retry["overall_timeout_seconds"] == pytest.approx(cap)
 
     @staticmethod
-    async def _recover(failure_kind: str, *, cap_retry: bool) -> tuple[list, dict]:
+    async def _recover(
+        failure_kind: str | None, *, cap_retry: bool, first: Any = _UNPARSEABLE
+    ) -> tuple[list, dict]:
+        """Run one recovery; ``failure_kind=None`` keeps the real classifier."""
+        from contextlib import nullcontext
+
         from src.agents import create_analyst_node
 
         calls: list[dict] = []
 
         async def fake_invoke(_runnable, input_data, **kwargs):
             calls.append(kwargs)
-            return _UNPARSEABLE if len(calls) == 1 else _REPAIRED
+            return first if len(calls) == 1 else _REPAIRED
 
         high = MagicMock(model_name="retry-model", thinking_level="high")
         low = MagicMock(model_name="retry-model", thinking_level="low")
@@ -665,7 +670,9 @@ class TestAnalystStructuralRetry:
             patch(
                 "src.agents.analyst_nodes.classify_output_contract_failure",
                 return_value=failure_kind,
-            ),
+            )
+            if failure_kind is not None
+            else nullcontext(),
         ):
             node = create_analyst_node(
                 MagicMock(),
@@ -699,6 +706,22 @@ class TestAnalystStructuralRetry:
         assert calls[1]["canonical_agent"] == "Fundamentals Analyst"
         assert event["recovery_reasoning_setting"] == "low"
         assert event["outcome"] == "accepted_text"
+
+    @pytest.mark.asyncio
+    async def test_provider_cap_stop_below_the_counted_cap_selects_retry_cap(self):
+        """0995.HK's real shape, classified for real: MAX_TOKENS at 19,111/19,115."""
+        stopped_at_cap = SimpleNamespace(
+            content=_UNPARSEABLE.content,
+            tool_calls=None,
+            response_metadata={"finish_reason": "MAX_TOKENS"},
+            usage_metadata={"output_tokens": 19111},
+        )
+
+        calls, event = await self._recover(None, cap_retry=True, first=stopped_at_cap)
+
+        assert event["failure_kind"] == "output_cap_exhausted"
+        assert calls[1]["context"] == "Fundamentals Analyst (RETRY-CAP)"
+        assert event["recovery_reasoning_setting"] == "low"
 
     @pytest.mark.asyncio
     async def test_other_contract_failures_keep_the_high_reasoning_retry(self):

@@ -326,8 +326,17 @@ def classify_output_contract_failure(
     truncated: bool,
     validation: dict[str, Any],
 ) -> ArtifactErrorKind:
-    """Classify a provider-success response that failed its output contract."""
+    """Classify a provider-success response that failed its output contract.
 
+    The provider's own stop reason decides first: a response stopped at the token
+    cap can report a few tokens fewer than the configured cap (0995.HK: 19,111 of
+    19,115), so the token comparison is only the fallback when no stop reason says
+    so.
+    """
+    from src.agents.runtime import response_hit_output_cap
+
+    if response_hit_output_cap(response):
+        return "output_cap_exhausted"
     configured_intent_cap = get_configured_output_cap(runnable)
     configured_api_cap = (
         get_configured_api_output_cap(runnable) or configured_intent_cap
