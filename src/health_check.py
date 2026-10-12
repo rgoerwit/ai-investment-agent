@@ -189,7 +189,7 @@ async def check_llm_connectivity() -> bool:
         #
         # Wrapped directly rather than routed through
         # invoke_with_rate_limit_handling: the HEALTH_CHECK seat's execution
-        # policy already pins standard tier, one retry and a short client
+        # policy already pins standard tier, one SDK attempt and a short client
         # timeout, and the generic wrapper could floor this deliberately-brief
         # probe up to a provider's flex ceiling.
         timeout_seconds = config.health_check_connectivity_timeout_seconds
