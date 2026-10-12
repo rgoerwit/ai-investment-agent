@@ -5,6 +5,7 @@ Transforms detailed research reports into engaging, accessible articles
 while matching the author's distinctive voice from writing samples.
 """
 
+import asyncio
 import json
 import os
 import random
@@ -201,8 +202,16 @@ def publish_article(article: str, output_path: Path) -> None:
     publishes here after the workflow scope has closed, in the publication
     reserve, where no deadline is bound: a ``.draft`` kept after a workflow
     timeout is still saved. An existing file at ``output_path`` is replaced
-    atomically or left untouched.
+    atomically or left untouched. A task that is being cancelled publishes
+    nothing either, even when its draft completed anyway.
     """
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:  # no running event loop
+        task = None
+    if task is not None and task.cancelling():
+        logger.warning("article_publication_refused_cancelled", path=str(output_path))
+        raise asyncio.CancelledError
     deadline = current_enclosing_deadline()
     if deadline is not None and llm_timeouts.now() >= deadline:
         raise ArticleWorkflowExpired("article publication: workflow deadline passed")
@@ -1133,17 +1142,20 @@ class ArticleWriter:
         Returns:
             Generated article as Markdown string
         """
-        article = await self.draft(
-            ticker=ticker,
-            company_name=company_name,
-            report_text=report_text,
-            trade_date=trade_date,
-            valuation_context=valuation_context,
-            governance_card=governance_card,
-            chart_paths=chart_paths,
-            article_dir=article_dir
-            or (Path(output_path).parent if output_path else None),
-            evidence_constraints=evidence_constraints,
+        article: str = await run_article_workflow_step(
+            self.draft(
+                ticker=ticker,
+                company_name=company_name,
+                report_text=report_text,
+                trade_date=trade_date,
+                valuation_context=valuation_context,
+                governance_card=governance_card,
+                chart_paths=chart_paths,
+                article_dir=article_dir
+                or (Path(output_path).parent if output_path else None),
+                evidence_constraints=evidence_constraints,
+            ),
+            label=f"article_writer:write:{ticker}",
         )
         if output_path:
             publish_article(article, Path(output_path))

@@ -89,7 +89,9 @@ async def _finish_late(llm: _StubbornLLM) -> None:
 
 
 def _writer_entry(entry: str, writer: ArticleWriter, target: Path):
-    """The two public entry points, as awaitables publishing to *target*."""
+    """The public entry points, as awaitables publishing to *target*."""
+    if entry == "write_bare":
+        return writer.write(output_path=target, **KWARGS)
     if entry == "write":
 
         async def via_write() -> str:
@@ -111,18 +113,28 @@ def seam(request) -> str:
     return str(request.param)
 
 
-@pytest.fixture(params=["write", "generate_article"])
-def entry(request, monkeypatch) -> str:
+def _patch_entry(name: str, monkeypatch) -> str:
     monkeypatch.setattr(
         "src.article_writer.search_tavily_inspected", AsyncMock(return_value=None)
     )
-    if request.param == "generate_article":
+    if name == "generate_article":
         # generate_article builds its own writer: hand it ours.
         monkeypatch.setattr(
             "src.article_writer.ArticleWriter",
             lambda **_kw: ArticleWriter(samples_dir=None, use_github_urls=False),
         )
-    return str(request.param)
+    return name
+
+
+@pytest.fixture(params=["write", "generate_article"])
+def entry(request, monkeypatch) -> str:
+    return _patch_entry(str(request.param), monkeypatch)
+
+
+@pytest.fixture(params=["write_bare", "write", "generate_article"])
+def cancel_entry(request, monkeypatch) -> str:
+    """Every entry, including ``write`` with no workflow deadline bound."""
+    return _patch_entry(str(request.param), monkeypatch)
 
 
 def _run(entry: str, seam: str, llm: _StubbornLLM, target: Path):
@@ -209,7 +221,97 @@ class TestPublication:
         assert target.read_text(encoding="utf-8") == article
 
 
+class TestDirectWrite:
+    @pytest.mark.asyncio
+    async def test_write_with_output_path_publishes(self, cancel_entry, tmp_path):
+        target = tmp_path / "out" / "article.md"
+        patcher, awaitable = _run(
+            cancel_entry, "model", _StubbornLLM(stall=False), target
+        )
+        try:
+            article = await awaitable
+        finally:
+            patcher.stop()
+
+        assert target.read_text(encoding="utf-8") == article
+        assert [p.name for p in target.parent.iterdir()] == ["article.md"]
+
+
+class TestCancelledCaller:
+    @pytest.mark.asyncio
+    async def test_cancelled_caller_publishes_nothing_when_the_draft_finishes_anyway(
+        self, cancel_entry, tmp_path
+    ):
+        target = tmp_path / "article.md"
+        target.write_text("previous", encoding="utf-8")
+        llm = _StubbornLLM(stall=True)
+        patcher, awaitable = _run(cancel_entry, "draft_task", llm, target)
+        caller = asyncio.ensure_future(awaitable)
+        try:
+            await asyncio.wait_for(llm.entered.wait(), timeout=SAFETY_NET_SECONDS)
+            caller.cancel()
+            await _drain()  # let the draft swallow the cancellation
+            # Without a bound step the swallowing draft runs in the caller's
+            # own task, so the draft must be released for the caller to end.
+            llm.release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(caller, timeout=SAFETY_NET_SECONDS)
+            await _finish_late(llm)
+        finally:
+            llm.release.set()
+            patcher.stop()
+
+        assert llm.cancellations == 1
+        assert target.read_text(encoding="utf-8") == "previous"
+        assert [p.name for p in tmp_path.iterdir()] == ["article.md"]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_caller_creates_no_file(self, cancel_entry, tmp_path):
+        target = tmp_path / "article.md"
+        llm = _StubbornLLM(stall=True)
+        patcher, awaitable = _run(cancel_entry, "draft_task", llm, target)
+        caller = asyncio.ensure_future(awaitable)
+        try:
+            await asyncio.wait_for(llm.entered.wait(), timeout=SAFETY_NET_SECONDS)
+            caller.cancel()
+            await _drain()  # let the draft swallow the cancellation
+            # Without a bound step the swallowing draft runs in the caller's
+            # own task, so the draft must be released for the caller to end.
+            llm.release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(caller, timeout=SAFETY_NET_SECONDS)
+            await _finish_late(llm)
+        finally:
+            llm.release.set()
+            patcher.stop()
+
+        assert list(tmp_path.iterdir()) == []
+
+
 class TestPublishStep:
+    @pytest.mark.asyncio
+    async def test_refuses_in_a_task_with_a_pending_cancel(self, tmp_path):
+        target = tmp_path / "a.md"
+        target.write_text("previous", encoding="utf-8")
+
+        async def cancelled_then_publish() -> None:
+            current = asyncio.current_task()
+            assert current is not None
+            current.cancel()  # pending: delivered at the next await
+            publish_article("text", target)
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.ensure_future(cancelled_then_publish())
+
+        assert target.read_text(encoding="utf-8") == "previous"
+        assert [p.name for p in tmp_path.iterdir()] == ["a.md"]
+
+    @pytest.mark.asyncio
+    async def test_publishes_in_a_task_that_is_not_cancelled(self, tmp_path):
+        target = tmp_path / "a.md"
+        publish_article("text", target)
+        assert target.read_text(encoding="utf-8") == "text"
+
     def test_publishes_when_no_deadline_is_bound(self, tmp_path):
         target = tmp_path / "a.md"
         publish_article("text", target)

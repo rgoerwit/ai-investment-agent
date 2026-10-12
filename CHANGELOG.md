@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A cancelled caller never publishes an article. `publish_article` refuses from a
+  task that is being cancelled, as well as after an expired deadline, and
+  `ArticleWriter.write` drafts through `run_article_workflow_step`; a caller
+  cancelled before the deadline whose draft completed anyway used to overwrite
+  the destination.
+
 - The content-inspection hook delivers only what it inspected. A result over its
   50k-character input limit that the inspector allows is returned as the
   inspected, truncated text with a finding, not the original, whose tail used to
