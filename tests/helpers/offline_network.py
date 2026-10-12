@@ -101,6 +101,16 @@ def install_offline_network(monkeypatch: pytest.MonkeyPatch) -> OfflineAttempts:
     monkeypatch.setattr(socket, "socket", _OfflineSocket)
     monkeypatch.setattr(socket, "getaddrinfo", offline_getaddrinfo)
 
+    # langchain-openai probes its default TCP keepalive options with a throwaway,
+    # never-connected socket each time a ChatOpenAI is built, unless httpx would
+    # use a proxy (macOS reads the system proxy, so it rarely probes there; CI
+    # always does). With no probe socket it passes the options through unfiltered,
+    # its documented sandbox behavior; apply that directly, so the probe is not
+    # recorded and a real connection is still refused above.
+    from langchain_openai.chat_models import _client_utils as openai_client_utils
+
+    monkeypatch.setattr(openai_client_utils, "_filter_supported", list)
+
     import curl_cffi.requests as curl_requests
     from curl_cffi.requests.exceptions import ConnectionError as CurlConnectionError
 

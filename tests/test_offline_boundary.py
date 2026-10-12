@@ -107,6 +107,21 @@ async def test_event_loop_self_pipe_is_not_an_attempt(attempts):
     assert attempts == []
 
 
+def test_langchain_openai_socket_option_probe_is_not_an_attempt(attempts, monkeypatch):
+    """CI has no proxy, so building a ChatOpenAI probes its keepalive options."""
+    from langchain_openai.chat_models import _client_utils
+
+    monkeypatch.setattr(_client_utils, "_proxy_env_detected", lambda: False)
+
+    options = _client_utils._default_socket_options()
+
+    assert options
+    assert attempts == []
+    with pytest.raises(OSError):
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    assert attempts == [f"socket:{socket.AF_INET}"]
+
+
 def test_a_background_thread_attempt_is_recorded_with_its_thread_name(attempts):
     def reach() -> None:
         try:
