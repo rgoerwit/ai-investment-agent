@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A valid `DE_RATIO` is also finite: a value that overflows to infinity, or a
+  ratio whose conversion to percent does, is invalid, on the legacy prose path
+  too. The source-to-screen test now carries a complete health scoring contract,
+  so it checks the decision-eligible HEALTH scorecard, the D/E criterion's
+  `DE_RATIO_RAW` lineage (none for Financials, where the criterion is removed)
+  and that projection and decision inputs use that scorecard.
+
 - `DE_RATIO` follows one field contract in the last DATA_BLOCK: absent,
   unavailable (`N/A`), invalid or valid. A valid value matches in full (a plain
   decimal, an optional percent sign and at most one parenthetical annotation),

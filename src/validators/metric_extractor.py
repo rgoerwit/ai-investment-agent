@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Literal, NamedTuple
 
 import structlog
 
+from src.data.debt_equity import PERCENT_PER_RATIO
 from src.data_block_utils import (
     effective_m_and_a_status,
     extract_block_field_from_text,
@@ -710,13 +712,20 @@ def _de_ratio_field(report: str) -> _DeRatioField:
         return _DeRatioField("UNAVAILABLE")
     match = _DE_RATIO_VALUE.fullmatch(raw.strip())
     if match is None:
-        logger.info(
-            "debt_equity_report_value_rejected",
-            reason="unsupported_notation",
-            value_length=len(raw),
-        )
-        return _DeRatioField("INVALID")
-    return _DeRatioField("VALID", float(match.group(1)), bool(match.group(2)))
+        reason = "unsupported_notation"
+    else:
+        value = float(match.group(1))
+        if math.isfinite(value):
+            return _DeRatioField("VALID", value, bool(match.group(2)))
+        reason = "non_finite"
+    logger.info(
+        "debt_equity_report_value_rejected", reason=reason, value_length=len(raw)
+    )
+    return _DeRatioField("INVALID")
+
+
+def _finite_or_none(value: float) -> float | None:
+    return value if math.isfinite(value) else None
 
 
 def extract_debt_to_equity(report: str) -> float | None:
@@ -732,14 +741,16 @@ def extract_debt_to_equity(report: str) -> float | None:
     """
     field = _de_ratio_field(report)
     if field.state == "VALID" and field.value is not None:
-        return field.value if field.is_percent else field.value * 100
+        return _finite_or_none(
+            field.value if field.is_percent else field.value * PERCENT_PER_RATIO
+        )
     if field.state != "NO_BLOCK":
         return None
     for pattern in _LEGACY_DE_PATTERNS:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
         if match and match.group(2):
             try:
-                return float(match.group(1))
+                return _finite_or_none(float(match.group(1)))
             except ValueError:
                 continue
     return None
