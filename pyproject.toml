@@ -27,7 +27,7 @@ langchain-google-genai = "4.4.0"
 google-genai = "2.24.0"
 # Required, not extras: the transports build every OpenAI-compatible and
 # Anthropic client from these. Listed in an extra, Poetry locks them
-# extra-gated and a plain install (Docker's --only main, a --sync) drops them.
+# extra-gated and a plain install (Docker's --only main, a `poetry sync`) drops them.
 langchain-openai = "1.6.2"
 langchain-anthropic = "1.7.2"
 langgraph = "1.2.11"

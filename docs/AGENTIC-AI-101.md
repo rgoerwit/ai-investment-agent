@@ -133,7 +133,7 @@ What I wanted was an **institutional-quality research team** that could:
 - Handle obscure tickers (Taiwan semiconductors, Hong Kong banks)
 - Apply disciplined investment criteria (no emotional decisions)
 - Synthesize multiple perspectives (bull case, bear case, risk assessment)
-- Cost $0 marginal per analysis (free-tier APIs)
+- Cost little per analysis (free or cheap-tier APIs; each run records what it spent)
 
 So I built one. Not because it's perfect—it's not. But because it's **accessible**.
 
@@ -152,7 +152,7 @@ User: "Analyze 0005.HK"
     ↓
 [Dispatcher: parallel evidence gathering]
   ├─ Market, Sentiment and News analysts
-  ├─ Junior Fundamentals -> Foreign Language + Legal Counsel
+  ├─ Junior Fundamentals, Foreign Language and Legal Counsel (in parallel)
   │     -> barrier -> Senior Fundamentals -> Financial Validator (code)
   ├─ Value Trap Detector
   └─ Forensic Auditor (optional; full mode only)
@@ -254,13 +254,13 @@ This system isn't a black box. It enforces a specific investment strategy: **GAR
 ### Performance: The Honest Truth
 
 **Speed and cost:** both depend on the resolved model seats, provider queueing and
-retries, so no figure here would stay true. Quick mode runs one debate round and
-skips the optional review seats; see the Runtime and cost section of
+retries, so no figure here would stay true. Quick mode runs one debate round,
+disables the Forensic Auditor and APAC specialist, and may bypass the External
+Consultant on a clear negative or clean consensus; see the Runtime and cost section of
 [README.md](../README.md). Every saved run records its token usage and cost by
 seat, vendor, model and service tier.
 
 **Accuracy:**
-- Quantitative metrics: ~80% match to Bloomberg/Yahoo Finance (when data available)
 - Qualitative synthesis: Good for generating hypotheses, **not for final decisions**
 - Weaknesses: Historical data only, free APIs have gaps, sentiment analysis limited
 

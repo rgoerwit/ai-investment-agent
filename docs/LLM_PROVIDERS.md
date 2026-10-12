@@ -70,7 +70,7 @@ validator. Structural recovery happens only after a provider-success response fa
 validation and changes the request: it is text-only, uses the base provider's reasoning
 binding, inherits the originating seat's visible-output budget, and regenerates from
 already gathered evidence. Quick mode arms this bounded recovery only for Senior
-Fundamentals and Portfolio Manager. Cost rollups keep recovery usage under the
+Fundamentals, Foreign Language and Portfolio Manager. Cost rollups keep recovery usage under the
 originating analyst for human interpretation and also expose the canonical
 `analyst_retry` billing seat plus `originating_seat_id` for precise comparison.
 
