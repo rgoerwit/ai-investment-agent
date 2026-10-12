@@ -193,12 +193,15 @@ async def run_article_workflow_step(coro: Any, *, label: str) -> Any:
 
 
 def publish_article(article: str, output_path: Path) -> None:
-    """The one publication step: write the draft if the workflow deadline holds.
+    """The one publication step: write the article if the enclosing deadline holds.
 
-    Called by the caller after the bounded draft step returned, never from
-    inside it. An expired deadline means the caller was already told the
-    workflow timed out, so a late completion publishes nothing; an existing
-    file at ``output_path`` is replaced atomically or left untouched.
+    Called after the bounded draft step returned, never from inside it. An
+    expired deadline means the caller was already told the workflow timed out,
+    so a late completion publishes nothing. The CLI (``handle_article_generation``)
+    publishes here after the workflow scope has closed, in the publication
+    reserve, where no deadline is bound: a ``.draft`` kept after a workflow
+    timeout is still saved. An existing file at ``output_path`` is replaced
+    atomically or left untouched.
     """
     deadline = current_enclosing_deadline()
     if deadline is not None and llm_timeouts.now() >= deadline:

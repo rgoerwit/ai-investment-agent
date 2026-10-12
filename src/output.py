@@ -412,6 +412,7 @@ async def handle_article_generation(
             ArticleWorkflowExpired,
             ArticleWriter,
             article_workflow_deadline,
+            publish_article,
             run_article_workflow_step,
         )
         from src.error_safety import summarize_exception
@@ -581,7 +582,7 @@ async def handle_article_generation(
                 f"{article_path.stem}.draft{article_path.suffix or '.md'}"
             )
         )
-        atomic_write_text(saved_article_path, final_article)
+        publish_article(final_article, saved_article_path)
         article_hash = hashlib.sha256(final_article.encode("utf-8")).hexdigest()
 
         writer_model = getattr(writer, "current_model_name", "")

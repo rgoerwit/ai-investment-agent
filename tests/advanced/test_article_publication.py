@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -225,6 +226,135 @@ class TestPublishStep:
             with pytest.raises(ArticleWorkflowExpired):
                 publish_article("text", target)
         assert not target.exists()
+
+
+def _editor(edit: Any = None) -> Any:
+    editor = MagicMock()
+    editor.is_available.return_value = edit is not None
+    editor.edit = edit
+    return editor
+
+
+async def _cli_publish(
+    tmp_path: Path,
+    *,
+    approved: bool,
+    editor: Any = None,
+    logger_obj: Any = None,
+    result: dict[str, Any] | None = None,
+    publish: Callable[[str, Path], None] = publish_article,
+) -> list[tuple[str, Path]]:
+    """Drive handle_article_generation; return what publish_article was given."""
+    from src.output import handle_article_generation
+
+    async def write(**_kwargs: Any) -> str:
+        return ARTICLE
+
+    writer = MagicMock()
+    writer.write = write
+    writer.current_model_name = "writer-test"
+    writer.writer_fell_back = False
+    writer.load_voice_samples = MagicMock(return_value="")
+    calls: list[tuple[str, Path]] = []
+
+    def spy(article: str, path: Path) -> None:
+        calls.append((article, path))
+        publish(article, path)
+
+    with (
+        patch("src.article_writer.ArticleWriter", return_value=writer),
+        patch("src.article_writer.ArticleEditor", return_value=editor or _editor()),
+        patch("src.article_writer.publish_article", spy),
+        patch("src.output._article_is_publishable", return_value=approved),
+    ):
+        await handle_article_generation(
+            args=MagicMock(quiet=True, brief=True),
+            ticker="TEST",
+            company_name="Test Co",
+            report_text="Report",
+            trade_date="2026-01-01",
+            analysis_result=result,
+            logger_obj=logger_obj or MagicMock(),
+            resolve_article_path_fn=lambda *_a, **_k: tmp_path / "article.md",
+        )
+    return calls
+
+
+class TestCliPublication:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("approved", "name"), [(True, "article.md"), (False, "article.draft.md")]
+    )
+    async def test_publishes_through_publish_article(self, approved, name, tmp_path):
+        with patch("src.article_writer.logger") as writer_logger:
+            calls = await _cli_publish(tmp_path, approved=approved)
+
+        assert calls == [(ARTICLE, tmp_path / name)]
+        assert (tmp_path / name).read_text(encoding="utf-8") == ARTICLE
+        assert [p.name for p in tmp_path.iterdir()] == [name]
+        writer_logger.info.assert_called_once_with(
+            "article_saved", path=str(tmp_path / name)
+        )
+
+    @pytest.mark.asyncio
+    async def test_draft_is_saved_after_a_workflow_timeout_in_the_editor(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(config, "article_workflow_timeout_seconds", 0.3)
+
+        async def edit(**_kwargs: Any) -> tuple[str, dict[str, Any]]:
+            await asyncio.Event().wait()  # outlives the workflow allowance
+            return "# Approved", {"verdict": "APPROVED"}
+
+        result: dict[str, Any] = {}
+        calls = await _cli_publish(
+            tmp_path, approved=False, editor=_editor(edit), result=result
+        )
+
+        draft = tmp_path / "article.draft.md"
+        assert calls == [(ARTICLE, draft)]
+        assert draft.read_text(encoding="utf-8") == ARTICLE
+        generation = result["article_generation"]
+        assert generation["workflow_deadline_exceeded"] is True
+        assert generation["saved_path"] == str(draft)
+
+    @pytest.mark.asyncio
+    async def test_failed_write_preserves_the_existing_file_and_is_reported(
+        self, monkeypatch, tmp_path
+    ):
+        target = tmp_path / "article.md"
+        target.write_text("previous", encoding="utf-8")
+
+        def boom(*_a: Any, **_k: Any) -> None:
+            raise OSError("disk")
+
+        monkeypatch.setattr(os, "replace", boom)
+        logger_obj = MagicMock()
+        result: dict[str, Any] = {}
+        await _cli_publish(
+            tmp_path, approved=True, logger_obj=logger_obj, result=result
+        )
+
+        assert target.read_text(encoding="utf-8") == "previous"
+        assert [p.name for p in tmp_path.iterdir()] == ["article.md"]
+        assert logger_obj.error.call_args.args == ("article_generation_failed",)
+        assert "article_generation" not in result
+
+    @pytest.mark.asyncio
+    async def test_an_expired_enclosing_deadline_publishes_nothing_and_is_reported(
+        self, tmp_path
+    ):
+        def refuse(_article: str, _path: Path) -> None:
+            raise ArticleWorkflowExpired("article publication: deadline passed")
+
+        logger_obj = MagicMock()
+        calls = await _cli_publish(
+            tmp_path, approved=True, logger_obj=logger_obj, publish=refuse
+        )
+
+        assert calls == [(ARTICLE, tmp_path / "article.md")]
+        assert list(tmp_path.iterdir()) == []
+        assert logger_obj.error.call_args.args == ("article_generation_failed",)
 
 
 class TestAtomicWrite:

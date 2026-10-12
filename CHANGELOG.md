@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The CLI publishes an approved article or its `.draft` through `publish_article`,
+  the one publication step, instead of a bare atomic write, so it logs
+  `article_saved` like every other publication. It runs after the workflow scope
+  has closed, so a `.draft` kept after a workflow timeout is still saved; a failed
+  write leaves an existing file intact and is reported like any other article
+  failure.
+
 - `MCP_TOOL_CALL_TIMEOUT_SECONDS` is unset by default and then follows
   `TOOL_EXECUTION_TIMEOUT_SECONDS` (still 45 s), resolved in one place in
   `src/mcp/client.py` for both the call allowance and the retry's minimum useful
