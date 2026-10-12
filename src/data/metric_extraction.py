@@ -399,7 +399,7 @@ def extract_from_financial_statements(
                     debt = None if long_term is None else long_term + short_term
                 equity = statement_value(balance_sheet, "stockholders_equity")
 
-                if debt is not None and equity is not None and equity != 0:
+                if debt is not None and equity is not None and equity > 0:
                     extracted["debtToEquity"] = debt / equity
                     extracted["_debtToEquity_source"] = "calculated_from_statements"
             except Exception as exc:
@@ -1228,6 +1228,7 @@ def calculate_derived_metrics(data: dict[str, Any], symbol: str) -> dict[str, An
             roa = data.get("returnOnAssets")
             de = data.get("debtToEquity")
             if roa is not None and de is not None:
+                # debtToEquity is the canonical RATIO (src/data/debt_equity.py).
                 calculated["returnOnEquity"] = roa * (1 + de)
                 calculated["_returnOnEquity_source"] = "calculated_from_roa_de"
 

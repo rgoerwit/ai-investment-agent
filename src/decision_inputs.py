@@ -19,6 +19,7 @@ behavioural risk on its own.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -35,6 +36,14 @@ logger = structlog.get_logger(__name__)
 # Contract statuses meaning "the canonical layer ran and would not stand behind
 # this payload". DEGRADED is excluded by design — see from_metrics_and_snapshot.
 _REJECTED_CONTRACT_STATUSES = frozenset({"INVALID", "DECODE_FAILED"})
+
+
+def _canonical_ratio(value: Any) -> float | None:
+    """A finite, non-negative canonical ratio, else None (bools and text rejected)."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number >= 0 else None
 
 
 def _contract_status(snapshot: Mapping[str, Any] | None) -> str | None:
@@ -206,6 +215,10 @@ class DecisionInputs:
     health_exception_pb_ratio: float | None = None
     health_exception_current_ratio: float | None = None
     health_exception_claim_ids: tuple[str, ...] = ()
+    # Canonical raw debtToEquity RATIO (src/data/debt_equity.py), when the run's
+    # raw metrics carry one. The leverage gates convert it to percent at their own
+    # boundary; the report's DE_RATIO (``debt_to_equity_pct``) cannot override it.
+    raw_debt_to_equity_ratio: float | None = None
 
     @classmethod
     def from_metrics(
@@ -228,6 +241,7 @@ class DecisionInputs:
         *,
         ticker: str | None = None,
         liquidity: Any = None,
+        raw_debt_to_equity_ratio: Any = None,
     ) -> DecisionInputs:
         parsed_health = metrics.get("adjusted_health_score")
         parsed_growth = metrics.get("adjusted_growth_score")
@@ -340,6 +354,7 @@ class DecisionInputs:
             if snapshot_authoritative
             else None,
             liquidity=LiquidityAssessment.from_dict(liquidity),
+            raw_debt_to_equity_ratio=_canonical_ratio(raw_debt_to_equity_ratio),
         )
 
     @property

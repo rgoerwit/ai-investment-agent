@@ -305,6 +305,8 @@ class FMPFetcher(FinancialFetcher):
             result["priceToBook"] = r.get("priceToBookRatio")
             result["pegRatio"] = r.get("priceToEarningsGrowthRatio")
             result["currentRatio"] = r.get("currentRatio")
+            # Raw observation only: the merge drops it (basis unverified, see
+            # src/data/debt_equity.py), so it never reaches the canonical field.
             result["debtToEquity"] = r.get("debtToEquityRatio")
             result["profitMargins"] = r.get("netProfitMargin")
             result["freeCashflow"] = r.get(

@@ -127,14 +127,19 @@ class TestTrailingPeriodNumbers:
     raised, killing the Portfolio Manager node."""
 
     def test_debt_to_equity_trailing_period(self):
-        # 0.30 is a ratio (<10) → normalized to a percentage (×100).
-        assert extract_debt_to_equity("D/E: 0.30.") == 30.0
-        assert extract_debt_to_equity("Debt/Equity: 0.54.") == 54.0
+        # DE_RATIO is a ratio by contract → percentage (x100), trailing dot ignored.
+        assert extract_debt_to_equity("DE_RATIO: 0.30.") == pytest.approx(30.0)
+        assert extract_debt_to_equity("D/E: 30%.") == 30.0
 
     def test_debt_to_equity_semantics_preserved(self):
         assert extract_debt_to_equity("D/E: 6.92%") == 6.92  # explicit percent
-        assert extract_debt_to_equity("D/E: 6.92") == 692.0  # ratio → percent
-        assert extract_debt_to_equity("D/E: 120") == 120.0  # already a percent
+        assert extract_debt_to_equity("DE_RATIO: 6.92") == pytest.approx(692.0)
+        assert extract_debt_to_equity("DE_RATIO: 0.08") == pytest.approx(8.0)
+        assert extract_debt_to_equity("DE_RATIO: 12") == pytest.approx(1200.0)
+        assert extract_debt_to_equity("DE_RATIO: 45%") == 45.0
+        # A legacy unitless line has no knowable unit: it never feeds a gate.
+        assert extract_debt_to_equity("D/E: 6.92") is None
+        assert extract_debt_to_equity("D/E: 120") is None
         assert extract_debt_to_equity("D/E: N/A") is None
 
     def test_interest_coverage_trailing_period(self):
@@ -194,7 +199,7 @@ class TestSignedDecisionMetrics:
         assert [flag["type"] for flag in flags] == ["RETURN_QUALITY_FRAGILITY"]
 
     def test_negative_debt_to_equity_is_signed(self):
-        assert extract_debt_to_equity("D/E: -0.30") == -30.0
+        assert extract_debt_to_equity("DE_RATIO: -0.30") == pytest.approx(-30.0)
 
 
 @pytest.mark.parametrize(

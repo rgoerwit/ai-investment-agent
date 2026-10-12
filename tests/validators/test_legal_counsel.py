@@ -722,7 +722,7 @@ PE_RATIO_TTM: 12.00
 ### --- END DATA_BLOCK ---
 
 **Leverage (2/2 pts)**:
-- D/E: 50: 1 pts
+- D/E: 50%: 1 pts
 
 **Interest Coverage**: 5.0x
 **Free Cash Flow**: $500M
@@ -760,7 +760,7 @@ PE_RATIO_TTM: 25.00
 ### --- END DATA_BLOCK ---
 
 **Leverage (0/2 pts)**:
-- D/E: 600: 0 pts
+- D/E: 600%: 0 pts
 
 **Interest Coverage**: 5.0x
 **Free Cash Flow**: $500M

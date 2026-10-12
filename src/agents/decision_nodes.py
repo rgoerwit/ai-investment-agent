@@ -99,9 +99,12 @@ def _decision_inputs_from_state(
     snapshot: Mapping[str, Any] | None = None,
 ) -> DecisionInputs:
     """Use the same decision context, preserving freshly validated inputs."""
+    from src.claim_policy import RAW_FINANCIAL_METRICS_INPUT
+    from src.tooling.structured_ingress import get_structured_ingress_payload
     from src.validators.red_flag_detector import RedFlagDetector
 
     fundamentals = get_valid_artifact_content(state, "fundamentals_report") or ""
+    raw_metrics, _ = get_structured_ingress_payload(state, RAW_FINANCIAL_METRICS_INPUT)
     return DecisionInputs.from_metrics_and_snapshot(
         metrics
         if metrics is not None
@@ -110,6 +113,7 @@ def _decision_inputs_from_state(
         snapshot if snapshot is not None else state.get("analysis_snapshot"),
         ticker=ticker,
         liquidity=state.get("liquidity_assessment"),
+        raw_debt_to_equity_ratio=(raw_metrics or {}).get("debtToEquity"),
     )
 
 

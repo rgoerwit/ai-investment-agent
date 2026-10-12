@@ -360,7 +360,8 @@ class EODHDFetcher(FinancialFetcher):
             )
 
             # --- Health ---
-            # EODHD Debt/Equity is usually absolute, ensure we don't get %.
+            # Raw observation; EODHD documents no unit/basis for DebtToEquity, so the
+            # merge drops it (see src/data/debt_equity.py).
             output["debtToEquity"] = self._safe_float(highlights.get("DebtToEquity"))
             output["currentRatio"] = self._safe_float(highlights.get("CurrentRatio"))
 

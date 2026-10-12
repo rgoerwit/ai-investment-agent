@@ -49,7 +49,7 @@ ADR_EXISTS: NO
 - Operating Margin: 9.5%: 0 pts
 
 **Leverage (1/2 pts)**:
-- D/E: 120: 0 pts
+- D/E: 120%: 0 pts
 - NetDebt/EBITDA: 1.5: 1 pts
 
 **Liquidity (2/2 pts)**:
@@ -115,7 +115,7 @@ The analysis below references the DATA_BLOCK, but no fenced structured block was
 DATA_BLOCK:
 Health score looks acceptable, but formatting is incomplete.
 
-D/E: 120
+D/E: 120%
 Free Cash Flow: $450M
 """
 
@@ -136,7 +136,7 @@ PE_RATIO_TTM: 6.19
 PEG_RATIO: 0.07
 ### --- END DATA_BLOCK ---
 
-D/E: 16
+D/E: 16%
 Interest Coverage: 25.0x
 Free Cash Flow: ¥13.39B
 Net Income: ¥15.0B
@@ -155,17 +155,17 @@ Net Income: ¥15.0B
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 50%
 ### --- END DATA_BLOCK ---
-D/E: 250
+D/E: 250%
 """
         metrics1 = RedFlagDetector.extract_metrics(report1)
         assert metrics1["debt_to_equity"] == 250.0
 
-        # Case 2: Ratio format (<10) - convert to percentage
+        # Case 2: DE_RATIO is a ratio by contract - convert to percentage
         report2 = """
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 50%
+DE_RATIO: 2.5
 ### --- END DATA_BLOCK ---
-Debt/Equity: 2.5
 """
         metrics2 = RedFlagDetector.extract_metrics(report2)
         assert metrics2["debt_to_equity"] == 250.0  # 2.5 * 100
@@ -363,7 +363,7 @@ PE_RATIO_TTM: 15.0
 ### --- END DATA_BLOCK ---
 
 **Leverage (0/2 pts)**:
-- D/E: 600
+- D/E: 600%
 - Interest Coverage: 1.2x
 """
 
@@ -407,7 +407,7 @@ PE_RATIO_TTM: 8.0
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
-- D/E: 180
+- D/E: 180%
 - Interest Coverage: 1.5x
 """
 
@@ -427,7 +427,7 @@ PE_RATIO_TTM: 14.5
 ### --- END DATA_BLOCK ---
 
 **Leverage (2/2 pts)**:
-- D/E: 65
+- D/E: 65%
 - Interest Coverage: 8.5x
 
 **Cash Generation (2/2 pts)**:
@@ -456,7 +456,7 @@ PE_RATIO_TTM: 16.0
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
-- D/E: 450
+- D/E: 450%
 - Interest Coverage: 2.5x
 
 **Cash Generation**:
@@ -509,7 +509,7 @@ PE_RATIO_TTM: 20.0
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
-D/E: 650
+D/E: 650%
 Interest Coverage: 1.3x
 
 **Cash Generation**:
@@ -552,7 +552,7 @@ PE_RATIO_TTM: 13.5
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
-- D/E: 85
+- D/E: 85%
 - NetDebt/EBITDA: N/A
 
 **Cash Generation**:
@@ -572,7 +572,7 @@ PE_RATIO_TTM: 13.5
         base_state["fundamentals_report"] = """
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 60%
-D/E: 500
+D/E: 500%
 ### --- END DATA_BLOCK ---
 """
 
@@ -589,7 +589,7 @@ D/E: 500
         base_state["fundamentals_report"] = """
 ### --- START DATA_BLOCK ---
 ADJUSTED_HEALTH_SCORE: 60%
-D/E: 50
+D/E: 50%
 Interest Coverage: 1.5x
 ### --- END DATA_BLOCK ---
 """
@@ -613,7 +613,7 @@ class TestRedFlagIntegration:
         state = {
             "company_of_interest": "9999.HK",
             "company_name": "Failing Corp",
-            "fundamentals_report": "D/E: 700\nInterest Coverage: 0.8x",
+            "fundamentals_report": "D/E: 700%\nInterest Coverage: 0.8x",
             "messages": [],
         }
 
@@ -636,7 +636,7 @@ class TestRedFlagIntegration:
         state = {
             "company_of_interest": "TEST",
             "company_name": "Test",
-            "fundamentals_report": "D/E: 600",
+            "fundamentals_report": "D/E: 600%",
             "messages": [],
         }
 
@@ -700,6 +700,7 @@ class TestRealWorldEdgeCases:
 ### --- START DATA_BLOCK ---
 RAW_HEALTH_SCORE: 2/12
 ADJUSTED_HEALTH_SCORE: 17% (2/12 available)
+DE_RATIO: 8.2
 PE_RATIO_TTM: 45.2
 PE_RATIO_FORWARD: N/A
 PEG_RATIO: N/A
@@ -776,7 +777,7 @@ ANALYST_COVERAGE_ENGLISH: 3
 - Operating Margin: 8.1%: 0 pts
 
 **Leverage (2/2 pts)**:
-- D/E: 75: 1 pts
+- D/E: 75%: 1 pts
 - NetDebt/EBITDA: 1.8: 1 pts
 
 **Liquidity (1/2 pts)**:
@@ -840,6 +841,7 @@ negative direction.
 ### --- START DATA_BLOCK ---
 RAW_HEALTH_SCORE: 5/12
 ADJUSTED_HEALTH_SCORE: 42% (5/12 available)
+DE_RATIO: 2.8
 PE_RATIO_TTM: 6.2
 PE_RATIO_FORWARD: 5.8
 ### --- END DATA_BLOCK ---
@@ -852,7 +854,7 @@ PE_RATIO_FORWARD: 5.8
 - Operating Margin: 12.5%: 0 pts
 
 **Leverage (0/2 pts)** - CONCERN:
-- **D/E: 280** (high but not extreme)
+- **D/E: 280%** (high but not extreme)
 - **NetDebt/EBITDA**: 5.2x (elevated)
 - **Interest Coverage**: 1.8x (deteriorating - was 3.5x two years ago)
 
@@ -925,7 +927,7 @@ PE_RATIO_TTM: 12.5
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
-- D/E: 250 (normal for utilities)
+- D/E: 250% (normal for utilities)
 - Interest Coverage: 2.8x
 - NetDebt/EBITDA: 4.5x
 """,
@@ -959,7 +961,7 @@ PE_RATIO_TTM: 10.2
 ### --- END DATA_BLOCK ---
 
 **Leverage** - Capital-intensive sector norms:
-- D/E: 220 (typical for pulp/paper)
+- D/E: 220% (typical for pulp/paper)
 - Interest Coverage: 1.8x (generates strong EBITDA, coverage acceptable for sector)
 - NetDebt/EBITDA: 3.2x
 
@@ -995,7 +997,7 @@ ADJUSTED_HEALTH_SCORE: 52%
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
-- D/E: 180 (below 200% sector threshold)
+- D/E: 180% (below 200% sector threshold)
 - Interest Coverage: 1.6x (above 1.5x sector threshold)
 """,
             "messages": [],
@@ -1025,7 +1027,7 @@ ADJUSTED_HEALTH_SCORE: 30%
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
-- D/E: 850 (exceeds 800% sector threshold)
+- D/E: 850% (exceeds 800% sector threshold)
 - Interest Coverage: 1.2x (below 1.5x sector threshold)
 """,
             "messages": [],
@@ -1058,7 +1060,7 @@ PE_RATIO_TTM: 9.8
 ### --- END DATA_BLOCK ---
 
 **Leverage** - NOT APPLICABLE FOR BANKS:
-- D/E: 1200 (meaningless for banks - deposits are liabilities)
+- D/E: 1200% (meaningless for banks - deposits are liabilities)
 - Tier 1 Capital Ratio: 14.5% (regulatory capital - strong)
 - NPL Ratio: 1.8% (asset quality - good)
 - Interest Coverage: N/A (not applicable for banks)
@@ -1092,7 +1094,7 @@ ADJUSTED_HEALTH_SCORE: 55%
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
-- D/E: 520 (exceeds 500% standard threshold)
+- D/E: 520% (exceeds 500% standard threshold)
 - Interest Coverage: 1.9x
 """,
             "messages": [],
@@ -1211,7 +1213,7 @@ PE_RATIO_TTM: 11.2
 ### --- END DATA_BLOCK ---
 
 **Leverage** (Utility-Adjusted):
-- D/E: 210 (typical for regulated utility)
+- D/E: 210% (typical for regulated utility)
 - NetDebt/EBITDA: 5.8x
 - Interest Coverage: 3.2x (stable regulated cash flows)
 
@@ -1244,11 +1246,12 @@ PE_RATIO_TTM: 11.2
 SECTOR: Utilities
 SECTOR_ADJUSTMENTS: D/E threshold raised to 800% (vs 500% standard) for capital-intensive utilities
 ADJUSTED_HEALTH_SCORE: 32%
+DE_RATIO: 9.2
 PE_RATIO_TTM: 8.5
 ### --- END DATA_BLOCK ---
 
 **Leverage** - CRITICAL CONCERN:
-- D/E: 920 (extreme even for utility - post-acquisition debt bomb)
+- D/E: 920% (extreme even for utility - post-acquisition debt bomb)
 - NetDebt/EBITDA: 12.5x
 - Interest Coverage: 1.2x (stressed by rising rates)
 
@@ -1289,7 +1292,7 @@ PE_RATIO_TTM: 9.8
 ### --- END DATA_BLOCK ---
 
 **Leverage** - Capital-Intensive Sector Norms:
-- D/E: 220 (typical for pulp/paper - capex-heavy mills)
+- D/E: 220% (typical for pulp/paper - capex-heavy mills)
 - NetDebt/EBITDA: 3.1x
 - Interest Coverage: 1.8x (strong EBITDA covers debt comfortably)
 
@@ -1330,7 +1333,7 @@ PE_RATIO_TTM: N/A (losses)
 ### --- END DATA_BLOCK ---
 
 **Leverage** - CRITICAL DISTRESS:
-- D/E: 850 (extreme even for shipping - overleveraged at cycle peak)
+- D/E: 850% (extreme even for shipping - overleveraged at cycle peak)
 - NetDebt/EBITDA: 18.2x
 - Interest Coverage: 0.9x (cannot service debt)
 
@@ -1376,7 +1379,7 @@ PE_RATIO_TTM: 9.2
 ### --- END DATA_BLOCK ---
 
 **Leverage** - NOT APPLICABLE FOR BANKS:
-- D/E: 1200 (deposits are liabilities - meaningless metric)
+- D/E: 1200% (deposits are liabilities - meaningless metric)
 - Tier 1 Capital Ratio: 14.8% (regulatory capital - well above 10% minimum)
 - Common Equity Tier 1: 13.5% (strong)
 - Leverage Ratio: 5.2% (above 3% regulatory minimum)
@@ -1417,7 +1420,7 @@ PE_RATIO_TTM: 7.8
 ### --- END DATA_BLOCK ---
 
 **Leverage** - NOT APPLICABLE:
-- D/E: 2100 (21:1 leverage typical for Japanese megabank)
+- D/E: 2100% (21:1 leverage typical for Japanese megabank)
 - Tier 1 Capital Ratio: 11.2% (adequate)
 - Interest Coverage: N/A (not applicable for banks)
 
@@ -1460,7 +1463,7 @@ PE_RATIO_TTM: 12.5
 ### --- END DATA_BLOCK ---
 
 **Leverage** - Conservative:
-- D/E: 45 (minimal leverage for tech leader)
+- D/E: 45% (minimal leverage for tech leader)
 - NetDebt/EBITDA: 0.2x (net cash position)
 - Interest Coverage: 28.5x (trivial debt burden)
 
@@ -1502,7 +1505,7 @@ PE_RATIO_TTM: 15.2
 ### --- END DATA_BLOCK ---
 
 **Leverage** - EXTREME FOR TECH:
-- D/E: 580 (overleveraged post-LBO - PE firm loaded with debt)
+- D/E: 580% (overleveraged post-LBO - PE firm loaded with debt)
 - NetDebt/EBITDA: 6.8x
 - Interest Coverage: 1.6x (tight for tech company)
 
@@ -1548,7 +1551,7 @@ PE_RATIO_TTM: 9.8
 ### --- END DATA_BLOCK ---
 
 **Leverage** - Manageable:
-- D/E: 180 (includes Toyota Financial Services - captive auto finance)
+- D/E: 180% (includes Toyota Financial Services - captive auto finance)
 - NetDebt/EBITDA: 2.1x
 - Interest Coverage: 8.2x (comfortable debt service)
 
@@ -1590,7 +1593,7 @@ PE_RATIO_TTM: 3.2 (distressed valuation)
 ### --- END DATA_BLOCK ---
 
 **Leverage** - CRITICAL DISTRESS:
-- D/E: 620 (extreme - China property crisis)
+- D/E: 620% (extreme - China property crisis)
 - NetDebt/EBITDA: 15.8x
 - Interest Coverage: 0.8x (cannot service debt)
 
@@ -1640,7 +1643,7 @@ PE_RATIO_TTM: 8.5
 ### --- END DATA_BLOCK ---
 
 **Leverage** - Capital-intensive sector:
-- D/E: 300 (typical for integrated oil major)
+- D/E: 300% (typical for integrated oil major)
 - Interest Coverage: 4.2x (strong commodity cash flows)
 """,
             "messages": [],
@@ -1672,7 +1675,7 @@ PE_RATIO_TTM: 6.0
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
-- D/E: 350 (typical for property developer)
+- D/E: 350% (typical for property developer)
 - Interest Coverage: 2.5x
 """,
             "messages": [],
@@ -1692,7 +1695,7 @@ ADJUSTED_HEALTH_SCORE: 25%
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
-- D/E: 850 (exceeds 800% threshold even for real estate)
+- D/E: 850% (exceeds 800% threshold even for real estate)
 - Interest Coverage: 0.8x
 """,
             "messages": [],
@@ -1720,7 +1723,7 @@ PE_RATIO_TTM: 22.0
 ### --- END DATA_BLOCK ---
 
 **Leverage**:
-- D/E: 45 (minimal leverage for pharma)
+- D/E: 45% (minimal leverage for pharma)
 - Interest Coverage: 15.0x
 """,
             "messages": [],
@@ -1780,7 +1783,7 @@ PROFITABILITY_TREND: DECLINING
 - Free Cash Flow: $230M
 
 **Leverage**:
-- D/E: 85 (OK)
+- D/E: 85% (OK)
 - Interest Coverage: 4.2x (OK)
 - Debt Growth YoY: +18% (funding the dividend shortfall!)
 
@@ -3991,7 +3994,7 @@ PFIC_RISK: CLEAN
             self._CLEAN_DATA_BLOCK
             + "\n\n### FINANCIAL HEALTH DETAIL\n"
             + "**Leverage**:\n"
-            + "- D/E: 700\n"
+            + "- D/E: 700%\n"
         )
         node = create_financial_health_validator_node(strict_mode=True)
         state = self._make_state(high_leverage_report, self._CLEAN_LEGAL_JSON)
@@ -4068,17 +4071,15 @@ class TestDebtToEquityNormalization:
         result = RedFlagDetector._extract_debt_to_equity(report)
         assert result == pytest.approx(692.0)
 
-    def test_no_percent_small_value_still_converts(self):
-        """D/E: 6.92 (no %) is treated as ratio → returns 692 (existing heuristic preserved)."""
-        report = "- D/E: 6.92: 0 pts"
-        result = RedFlagDetector._extract_debt_to_equity(report)
+    def test_de_ratio_without_percent_is_a_ratio(self):
+        """DE_RATIO: 6.92 (no %) is a ratio by contract → returns 692."""
+        result = RedFlagDetector._extract_debt_to_equity("DE_RATIO: 6.92")
         assert result == pytest.approx(692.0)
 
-    def test_no_percent_large_value_stays(self):
-        """D/E: 120 (no %) is already-percentage form → returns 120."""
+    def test_legacy_unitless_line_never_feeds_a_gate(self):
+        """A legacy `D/E: 120` line has no knowable unit → no gate value."""
         report = "- D/E: 120: 0 pts"
-        result = RedFlagDetector._extract_debt_to_equity(report)
-        assert result == pytest.approx(120.0)
+        assert RedFlagDetector._extract_debt_to_equity(report) is None
 
     def test_debt_equity_label_with_percent(self):
         """Debt/Equity: 6.92% → 6.92."""
@@ -4114,14 +4115,14 @@ Net Income: ¥500M
         )
 
     def test_ratio_without_percent_triggers_leverage_flag(self):
-        """Sanity check: D/E: 6.92 (no %, treated as 6.92x = 692%) DOES trigger EXTREME_LEVERAGE."""
+        """Sanity check: DE_RATIO: 6.92 (6.92x = 692%) DOES trigger EXTREME_LEVERAGE."""
         report = """
 ### --- START DATA_BLOCK ---
 SECTOR: Industrials
 ADJUSTED_HEALTH_SCORE: 80%
+DE_RATIO: 6.92
 ### --- END DATA_BLOCK ---
 
-- D/E: 6.92: 0 pts
 Interest Coverage: 12.0x
 """
         metrics = RedFlagDetector.extract_metrics(report)

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `debtToEquity` is one canonical ratio from the source boundary to every
+  consumer. `src/data/debt_equity.py` owns each source's verified unit and
+  basis: yfinance and yahooquery report total debt / equity in percent and are
+  converted before the multi-source merge compares values; FMP, Alpha Vantage,
+  EODHD and web-extracted values, whose unit or basis is unverified, contribute
+  nothing. The magnitude and EV-versus-market-cap guess in the fetcher is gone
+  (net cash is not evidence of a unit); a cross-check against total debt / book
+  equity logs `debt_equity_unit_conflict` on a ×100 disagreement and adopts the
+  derived ratio. A unitless `DE_RATIO` is read as a ratio (fundamentals prompt
+  11.17 declares it), unitless legacy `D/E:` lines no longer gate, and
+  `EXTREME_LEVERAGE` and the refinancing-risk D/E clause gate on the canonical
+  raw ratio, with a non-blocking `DE_DISCREPANCY` when the report disagrees.
+  TOT.TO's 8.047 (8.05%) had been read as 805% and auto-rejected in Energy; all
+  six Aug–Oct `EXTREME_LEVERAGE` rejects were this misread, and replaying them
+  on the canonical ratio passes each one.
+
 - An `ACTIVE_TENDER` without a positive tender price is demoted to `RUMORED`
   before anything acts on it, through `effective_m_and_a_status` in
   `src/data_block_utils.py` (the metric extractor, the retrospective snapshot and

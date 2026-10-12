@@ -19,7 +19,7 @@ def test_fragile_valuation_detection():
     ADJUSTED_HEALTH_SCORE: 66% (8/12 available)
     PE_RATIO_TTM: 17.5
     PB_RATIO: 6.94
-    DE_RATIO: 138.0
+    DE_RATIO: 1.38
     NET_MARGIN: 3.69%
     ROA_PERCENT: 2.6
     ### --- END DATA_BLOCK ---

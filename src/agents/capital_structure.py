@@ -507,9 +507,8 @@ def assess_capital_structure_scale(
         ),
         None,
     )
+    # debtToEquity is the canonical ratio (src/data/debt_equity.py); no rescaling.
     raw_de_ratio = _as_finite_float(raw_metrics.get("debtToEquity"))
-    if raw_de_ratio is not None and raw_de_ratio > 10:
-        raw_de_ratio /= 100.0
     if equity is None and total_debt > 0 and raw_de_ratio is not None:
         equity = total_debt / raw_de_ratio
     if equity is None or not math.isfinite(equity) or equity <= 0:

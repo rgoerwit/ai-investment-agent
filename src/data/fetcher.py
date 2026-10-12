@@ -46,6 +46,7 @@ import yfinance as yf
 
 from src.async_utils import run_with_hard_timeout
 from src.config import config
+from src.data.debt_equity import cross_check as cross_check_debt_equity
 from src.data.gap_fill import (
     calculate_coverage as calculate_coverage_impl,
 )
@@ -172,8 +173,6 @@ except ImportError:
 
 # Constants (merge-policy field sets and source rankings live in
 # src/data/merge_policy.py — the canonical home; do not redefine here)
-# D/E > 10 (1000%) is extremely rare; values like 14.77 are percentages (14.77%)
-DEBT_EQUITY_PERCENTAGE_THRESHOLD = 10.0
 FX_CACHE_TTL_SECONDS = 3600
 FETCH_RESULT_CACHE_TTL_SECONDS = 30
 PRICE_HISTORY_CACHE_TTL_SECONDS = 30
@@ -1042,33 +1041,6 @@ class SmartMarketDataFetcher(FinancialFetcher):
                 info["priceToBook"] = price / info["bookValue"]
         return info
 
-    def _fix_debt_equity_scaling(self, info: dict, symbol: str) -> dict:
-        de = info.get("debtToEquity")
-        if de is None:
-            return info
-        # Some sources (yfinance, yahooquery) can return numeric fields as strings
-        # for certain tickers/exchanges; convert before any numeric comparison.
-        try:
-            de = float(de)
-        except (TypeError, ValueError):
-            return info
-        # Statement-calculated values are already ratios — no correction needed
-        if info.get("_debtToEquity_source") == "calculated_from_statements":
-            return info
-        # Large values are clearly percentage format (e.g., 793.0 → divide → 7.93)
-        if de > DEBT_EQUITY_PERCENTAGE_THRESHOLD:
-            info["debtToEquity"] = de / 100.0
-        # Values in 1.5–10 range from API sources may also be percentage format
-        # (e.g., yfinance returns 7.93 for a company with 7.93% D/E).
-        # Cross-validate: EV < Market Cap confirms net-cash position, making
-        # a genuine 1.5×–10× D/E ratio essentially impossible.
-        elif de > 1.5:
-            ev = info.get("enterpriseValue")
-            mc = info.get("marketCap")
-            if ev is not None and mc is not None and ev < mc:
-                info["debtToEquity"] = de / 100.0
-        return info
-
     def _quarantine_recent_split_forward_metrics(
         self, info: dict[str, Any], symbol: str
     ) -> dict[str, Any]:
@@ -1242,9 +1214,11 @@ class SmartMarketDataFetcher(FinancialFetcher):
         return info
 
     def _normalize_data_integrity(self, info: dict, symbol: str) -> dict:
+        # Before the currency repair: bookValue and totalDebt are both still in the
+        # financial currency, so book equity = bookValue * shares is comparable.
+        info = cross_check_debt_equity(info, symbol)
         info = self._normalize_quote_unit_mismatch(info, symbol)
         info = self._fix_currency_mismatch(info, symbol)
-        info = self._fix_debt_equity_scaling(info, symbol)
 
         # P/E Normalization with sanity checks
         # Only replace trailing with forward if BOTH values are reasonable

@@ -158,6 +158,10 @@ def merge_gap_fill_data(
     for key, value in gap_fill_data.items():
         if value is None:
             continue
+        if key == "debtToEquity":
+            # Web-extracted prose has no verified unit/basis (percent vs ratio);
+            # it contributes nothing to the canonical ratio (src/data/debt_equity.py).
+            continue
         should_use = False
         if key not in merged or merged[key] is None:
             should_use = True

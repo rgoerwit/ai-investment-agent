@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -499,6 +500,7 @@ def detect_red_flags(
     input is the canonical production contract; the dict path is retained for
     the deterministic golden tests and any snapshot-free caller.
     """
+    raw_inputs = metrics
     metrics = getattr(metrics, "decision_metrics", metrics)
     red_flags: list[dict[str, Any]] = []
 
@@ -567,7 +569,55 @@ def detect_red_flags(
         )
         logger.warning("score_consistency_flag", ticker=ticker, kind=kind)
 
-    debt_to_equity = metrics.get("debt_to_equity")
+    # Gate value in percent. The canonical raw ratio (src/data/debt_equity.py) owns
+    # it when present; the report's DE_RATIO only fills in when no raw value exists
+    # and otherwise can only raise a non-blocking discrepancy.
+    report_de_pct = metrics.get("debt_to_equity")
+    raw_de_ratio = getattr(raw_inputs, "raw_debt_to_equity_ratio", None)
+    canonical_de_used = isinstance(raw_de_ratio, int | float) and math.isfinite(
+        raw_de_ratio
+    )
+    debt_to_equity = (
+        raw_de_ratio * 100.0
+        if canonical_de_used and raw_de_ratio is not None
+        else report_de_pct
+    )
+    de_gate_floor = min(
+        (t for t in (leverage_threshold, coverage_de_threshold) if t is not None),
+        default=None,
+    )
+    if (
+        canonical_de_used
+        and isinstance(report_de_pct, int | float)
+        and debt_to_equity is not None
+        and de_gate_floor is not None
+        and max(report_de_pct, debt_to_equity) > de_gate_floor
+        and abs(report_de_pct - debt_to_equity) > 0.25 * max(abs(debt_to_equity), 1e-9)
+    ):
+        red_flags.append(
+            {
+                "type": "DE_DISCREPANCY",
+                "severity": "WARNING",
+                "detail": (
+                    f"Report DE_RATIO implies {report_de_pct:.1f}% but the canonical "
+                    f"raw debt/equity is {debt_to_equity:.1f}%; leverage gates use "
+                    "the canonical value"
+                ),
+                "action": "REVIEW",
+                "risk_penalty": 0.0,
+                "rationale": (
+                    "The report and the data layer disagree on leverage (for example "
+                    "a holding-company financial-debt correction). The report cannot "
+                    "authorize or lift a code-owned reject on its own."
+                ),
+            }
+        )
+        logger.info(
+            "de_discrepancy",
+            ticker=ticker,
+            report_de_pct=report_de_pct,
+            canonical_de_pct=debt_to_equity,
+        )
     role = str(entity_role or metrics.get("listing_role") or "").upper()
     holdco_leverage_explained = role in {"PURE_HOLDCO", "INTERMEDIATE_HOLDCO"} and (
         (
@@ -732,7 +782,6 @@ def detect_red_flags(
 
     net_margin = metrics.get("net_margin")
     pb_ratio = metrics.get("pb_ratio")
-    debt_to_equity = metrics.get("debt_to_equity")
     if (
         net_margin is not None
         and net_margin < 5.0

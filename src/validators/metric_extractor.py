@@ -639,6 +639,15 @@ def extract_metrics(
         metrics["industry"] = industry_match.group(1).strip().lower()
 
     metrics["debt_to_equity"] = extract_debt_to_equity(fundamentals_report)
+    legacy_de = extract_legacy_unitless_debt_to_equity(fundamentals_report)
+    if legacy_de is not None and metrics["debt_to_equity"] is None:
+        # Display/diagnostic only: a unitless figure cannot authorize a gate.
+        metrics["debt_to_equity_legacy_unitless"] = legacy_de
+        logger.info(
+            "debt_equity_legacy_unitless_ignored",
+            ticker=ticker,
+            value=legacy_de,
+        )
     metrics["interest_coverage"] = extract_interest_coverage(fundamentals_report)
     metrics["fcf"] = extract_free_cash_flow(fundamentals_report)
     metrics["net_income"] = extract_net_income(fundamentals_report)
@@ -648,27 +657,61 @@ def extract_metrics(
     return metrics
 
 
-def extract_debt_to_equity(report: str) -> float | None:
-    """Extract D/E ratio, converting a ratio to percentage where needed."""
-    patterns = [
-        r"(?:^|\n)\s*-?\s*D/E:\s*([-+]?\d+(?:\.\d+)?)(%?)",
-        r"(?:^|\n)\s*-?\s*Debt/Equity:\s*([-+]?\d+(?:\.\d+)?)(%?)",
-        r"(?:^|\n)\s*-?\s*Debt-to-Equity:\s*([-+]?\d+(?:\.\d+)?)(%?)",
-        r"D/E:\s*([-+]?\d+(?:\.\d+)?)(%?)",
-        r"Debt/Equity:\s*([-+]?\d+(?:\.\d+)?)(%?)",
-        r"DE_RATIO:\s*([-+]?\d+(?:\.\d+)?)(%?)",
-    ]
+_DE_NUMBER = r"([-+]?\d+(?:\.\d+)?)(%?)"
+_DE_RATIO_PATTERN = rf"(?<![A-Z0-9_])DE_RATIO:\s*{_DE_NUMBER}"
+_LEGACY_DE_PATTERNS = (
+    rf"(?:^|\n)\s*-?\s*D/E:\s*{_DE_NUMBER}",
+    rf"(?:^|\n)\s*-?\s*Debt/Equity:\s*{_DE_NUMBER}",
+    rf"(?:^|\n)\s*-?\s*Debt-to-Equity:\s*{_DE_NUMBER}",
+    rf"D/E:\s*{_DE_NUMBER}",
+    rf"Debt/Equity:\s*{_DE_NUMBER}",
+)
+
+
+def _first_de_match(
+    patterns: tuple[str, ...], report: str
+) -> tuple[float, bool] | None:
     for pattern in patterns:
         match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
         if match:
             try:
-                value = float(match.group(1))
+                return float(match.group(1)), bool(match.group(2))
             except ValueError:
                 continue
-            if match.group(2):
-                return value
-            return value if value >= 10 else value * 100
     return None
+
+
+def extract_debt_to_equity(report: str) -> float | None:
+    """Extract D/E as a percentage from the report's unit-explicit statements.
+
+    The DATA_BLOCK contract is ``DE_RATIO: <ratio>`` (0.45 means 45%), so a
+    ``DE_RATIO`` without ``%`` is a ratio and is converted to percent; with ``%`` it
+    is already a percentage. A legacy unitless ``D/E:`` / ``Debt/Equity:`` line has
+    no knowable unit, so it never feeds a code-owned gate: use
+    ``extract_legacy_unitless_debt_to_equity`` for display and diagnostics.
+    """
+    ratio_match = _first_de_match((_DE_RATIO_PATTERN,), report)
+    if ratio_match is not None:
+        value, is_percent = ratio_match
+        return value if is_percent else value * 100
+    for pattern in _LEGACY_DE_PATTERNS:
+        match = re.search(pattern, report, re.IGNORECASE | re.MULTILINE)
+        if match and match.group(2):
+            try:
+                return float(match.group(1))
+            except ValueError:
+                continue
+    return None
+
+
+def extract_legacy_unitless_debt_to_equity(report: str) -> float | None:
+    """Return a unitless legacy ``D/E:`` figure as written (unit unknown)."""
+    if _first_de_match((_DE_RATIO_PATTERN,), report) is not None:
+        return None
+    legacy = _first_de_match(_LEGACY_DE_PATTERNS, report)
+    if legacy is None or legacy[1]:
+        return None
+    return legacy[0]
 
 
 def extract_interest_coverage(report: str) -> float | None:

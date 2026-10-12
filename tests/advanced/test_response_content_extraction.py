@@ -28,7 +28,7 @@ PE_RATIO_TTM: 8.5
 ### --- END DATA_BLOCK ---
 
 ## Financial Metrics
-- D/E: 45
+- DE_RATIO: 0.45
 - Interest Coverage: 5.2x
 - Free Cash Flow: 150M HKD
 - Net Income: 200M HKD
@@ -386,7 +386,7 @@ class TestDownstreamCompatibility:
             "parts": [
                 {"text": "SECTOR: Technology\n\n"},
                 {
-                    "text": "### --- START DATA_BLOCK ---\nADJUSTED_HEALTH_SCORE: 82%\n### --- END DATA_BLOCK ---\n\n- D/E: 30"
+                    "text": "### --- START DATA_BLOCK ---\nADJUSTED_HEALTH_SCORE: 82%\n### --- END DATA_BLOCK ---\n\n- DE_RATIO: 0.30"
                 },
             ]
         }
@@ -401,7 +401,7 @@ class TestDownstreamCompatibility:
         input_list = [
             "SECTOR: Utilities\n",
             "### --- START DATA_BLOCK ---\nADJUSTED_HEALTH_SCORE: 55%\n### --- END DATA_BLOCK ---",
-            "- D/E: 200",
+            "- DE_RATIO: 2.0",
         ]
         extracted = extract_string_content(input_list)
         metrics = RedFlagDetector.extract_metrics(extracted)

@@ -45,7 +45,9 @@ ALLOWED_FIELDS = frozenset(
         "trailingPE",
         "forwardPE",
         "priceToBook",
-        "debtToEquity",
+        # debtToEquity is deliberately absent: FMP's ratio is not verified to share
+        # the canonical basis (total debt / equity; see src/data/debt_equity.py), so a
+        # cross-check against it would report a basis difference as a data error.
         "returnOnEquity",
         "returnOnAssets",
         "operatingMargins",
@@ -71,7 +73,6 @@ FMP_FIELD_MAP: dict[str, tuple[str, str]] = {
     "totalRevenue": ("income-statement", "revenue"),
     "returnOnEquity": ("ratios", "returnOnEquity"),
     "returnOnAssets": ("ratios", "returnOnAssets"),
-    "debtToEquity": ("ratios", "debtEquityRatio"),
     "trailingPE": ("ratios", "priceEarningsRatio"),
     "priceToBook": ("ratios", "priceToBookRatio"),
     "payoutRatio": ("ratios", "payoutRatio"),
@@ -89,7 +90,6 @@ FMP_MCP_REQUIRED_TOOLS = frozenset({"statements", "quote"})
 _FMP_METRIC_DISPATCH: dict[str, tuple[str, str]] = {
     "trailingPE": ("statements", "metrics-ratios-ttm"),
     "priceToBook": ("statements", "metrics-ratios-ttm"),
-    "debtToEquity": ("statements", "metrics-ratios-ttm"),
     "returnOnEquity": ("statements", "metrics-ratios-ttm"),
     "returnOnAssets": ("statements", "metrics-ratios-ttm"),
     "operatingMargins": ("statements", "metrics-ratios-ttm"),
@@ -120,7 +120,6 @@ _FMP_MCP_RESPONSE_FIELDS.update(
         # observed legacy MCP payloads and older fixtures.
         "trailingPE": ("priceToEarningsRatioTTM", "priceEarningsRatio"),
         "priceToBook": ("priceToBookRatioTTM", "priceToBookRatio"),
-        "debtToEquity": ("debtToEquityRatioTTM", "debtEquityRatio"),
         "dividendYield": ("dividendYieldTTM", "dividendYield"),
         "payoutRatio": ("dividendPayoutRatioTTM", "payoutRatio"),
         "currentRatio": ("currentRatioTTM", "currentRatio"),

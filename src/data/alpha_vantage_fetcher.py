@@ -196,6 +196,8 @@ class AlphaVantageFetcher(FinancialFetcher):
                 data.get("QuarterlyEarningsGrowthYOY")
             ),
             # Financial strength
+            # Raw observation; unit/basis undocumented, so the merge drops it
+            # (see src/data/debt_equity.py).
             "debtToEquity": self._safe_float(data.get("DebtToEquity")),
             "currentRatio": self._safe_float(data.get("CurrentRatio")),
             "beta": self._safe_float(data.get("Beta")),

@@ -112,7 +112,7 @@ def test_decision_inputs_path_matches_dict_path():
 
     for block in (
         _read("2330_TW_data_block.txt"),
-        _read("2330_TW_data_block.txt").replace("D/E: 0.20", "D/E: 9.00"),
+        _read("2330_TW_data_block.txt").replace("DE_RATIO: 0.20", "DE_RATIO: 9.00"),
     ):
         metrics = extract_metrics(block)
         sector = detect_sector(block)
@@ -159,10 +159,11 @@ def test_trade_block_golden():
 def test_extreme_leverage_forces_reject():
     """Invariant: D/E above the standard-sector reject threshold ⇒ REJECT.
 
-    The body's ``- D/E: 0.20`` line is what the parser reads first; swapping it
-    for an extreme value must flip pre-screening deterministically.
+    The DATA_BLOCK's ``DE_RATIO: 0.20`` line is what the parser reads (the legacy
+    unitless body line is display-only); swapping it for an extreme value must
+    flip pre-screening deterministically.
     """
-    block = _read("2330_TW_data_block.txt").replace("D/E: 0.20", "D/E: 9.00")
+    block = _read("2330_TW_data_block.txt").replace("DE_RATIO: 0.20", "DE_RATIO: 9.00")
     flags, pre_screen = detect_red_flags(
         extract_metrics(block), sector=detect_sector(block)
     )
