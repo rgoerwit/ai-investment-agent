@@ -7,817 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Dependencies: pin the transitive pyjwt 2.15.1, multidict 6.9.1,
-  langgraph-sdk 0.4.5 and werkzeug 3.1.9, each past the 14-day release-age
-  cooldown, for GHSA-x33g-cr3x-6449 and GHSA-42vr-xj54-vc7v (pyjwt),
-  GHSA-54p9-h82j-f925 (multidict), GHSA-fvww-7h3r-vfhp (langgraph-sdk) and
-  GHSA-g6x2-hccm-hh4m (werkzeug). The pip-audit step drops the ignores those
-  bumps and the earlier virtualenv 21.13.0 pin made obsolete.
+## [4.1.0] - 2026-10-12
 
-- A valid `DE_RATIO` is also finite: a value that overflows to infinity, or a
-  ratio whose conversion to percent does, is invalid, on the legacy prose path
-  too. The source-to-screen test now carries a complete health scoring contract,
-  so it checks the decision-eligible HEALTH scorecard, the D/E criterion's
-  `DE_RATIO_RAW` lineage (none for Financials, where the criterion is removed)
-  and that projection and decision inputs use that scorecard.
+### Added
 
-- `DE_RATIO` follows one field contract in the last DATA_BLOCK: absent,
-  unavailable (`N/A`), invalid or valid. A valid value matches in full (a plain
-  decimal, an optional percent sign and at most one parenthetical annotation),
-  so `0.45 / 9`, `0.45 percent` and `0.45 or 9` are invalid rather than read as
-  45%. An unavailable, invalid or omitted field is never replaced by prose; only
-  a legacy report with no DATA_BLOCK may use a labelled `D/E: N%` line. The
-  rejection log records a reason and the value's length, not report text. Across
-  1,942 August–October reports none had the field absent, and none of the 17
-  without a valid value carried a percent prose line, so production readings do
-  not change. A source-to-screen test now runs provider observation, merge,
-  canonical claim, report projection and pre-screen together, and pins that the
-  sector-dependent D/E health award stays the analyst's.
-
-- `ACTIVE_TENDER` is honored only for a tender for the analyzed company's own
-  shares: the DATA_BLOCK carries `M_AND_A_SUBJECT_ROLE` (fundamentals prompt
-  11.18), and `effective_m_and_a_status` requires `TARGET` plus a price that
-  parses whole as a positive monetary amount, so a priced bidder, an unknown role,
-  `51 %` or a date no longer qualify. Every reader goes through
-  `m_and_a_status_from_report`.
-
-- Debt-to-equity hardening. Statement-derived D/E keeps its provenance through
-  the merge, and the total-debt/book-equity cross-check only logs a ×100
-  disagreement instead of replacing the value: the unit is fixed per source,
-  and book value, share count and debt can come from different periods or share
-  classes. The cross-check also guards underflow, overflow and malformed inputs.
-  `DE_RATIO` is read from the last DATA_BLOCK as one complete token, so
-  `8.05 %` is a percentage and `8.05e-2`, grouped or suffixed values are
-  rejected rather than truncated. The `DE_DISCREPANCY` tolerance is a named
-  constant.
-
-- A response the provider stopped at its output cap is classified
-  `output_cap_exhausted` from its stop reason before the token count is
-  compared with the cap. 0995.HK's Senior stopped on `MAX_TOKENS` reporting
-  19,111 of 19,115 tokens, so it was classified `incomplete_structured_output`
-  and the new `RETRY-CAP` recovery never ran.
-
-- `debtToEquity` is one canonical ratio from the source boundary to every
-  consumer. `src/data/debt_equity.py` owns each source's verified unit and
-  basis: yfinance and yahooquery report total debt / equity in percent and are
-  converted before the multi-source merge compares values; FMP, Alpha Vantage,
-  EODHD and web-extracted values, whose unit or basis is unverified, contribute
-  nothing. The magnitude and EV-versus-market-cap guess in the fetcher is gone
-  (net cash is not evidence of a unit); a cross-check against total debt / book
-  equity logs `debt_equity_unit_conflict` on a ×100 disagreement and adopts the
-  derived ratio. A unitless `DE_RATIO` is read as a ratio (fundamentals prompt
-  11.17 declares it), unitless legacy `D/E:` lines no longer gate, and
-  `EXTREME_LEVERAGE` and the refinancing-risk D/E clause gate on the canonical
-  raw ratio, with a non-blocking `DE_DISCREPANCY` when the report disagrees.
-  TOT.TO's 8.047 (8.05%) had been read as 805% and auto-rejected in Energy; all
-  six Aug–Oct `EXTREME_LEVERAGE` rejects were this misread, and replaying them
-  on the canonical ratio passes each one.
-
-- An `ACTIVE_TENDER` without a positive tender price is demoted to `RUMORED`
-  before anything acts on it, through `effective_m_and_a_status` in
-  `src/data_block_utils.py` (the metric extractor, the retrospective snapshot and
-  both value-trap call sites); a stake percentage, a date, or a value that opens
-  with `N/A` is not a price. The Foreign Language Analyst now reports the
-  analyzed company's Subject Role (TARGET / ACQUIRER / OTHER), and the Senior
-  sets `ACTIVE_TENDER` only for a priced target (prompts: foreign language 1.24,
-  fundamentals 11.16). 6670.TW, the acquirer in a tender for 51% of 6904.TW with
-  no price, had been tagged `ACTIVE_TENDER`, which exempted its health and growth
-  gates. Snapshots already in the analysis index keep their stored status until
-  the ticker is re-analyzed.
-
-- An analyst output that exhausted its output cap is recovered at a lower
-  reasoning value, not a higher one. The structural retry re-ran every contract
-  failure at the retry seat's raised effort, so when thinking had consumed the
-  cap (0995.HK's Senior Fundamentals on `gemini-3.8-flash`, 19,111 of 19,115
-  tokens) the retry failed the same way and the run failed closed. Such
-  failures now rerun as `(RETRY-CAP)` on the same binding at the FAST intent's
-  reasoning value, through `build_model_for_seat(reasoning_intent=...)`; other
-  failures keep `(RETRY-HIGH)`, and the legacy schema, which cannot lower
-  reasoning, keeps it with a logged fallback.
-
-- A pydantic `ValidationError`, such as a model's invalid tool argument, is
-  classified as `application_error` with no host, before any message-marker
-  scan. It used to fall through to `unknown_provider_error` with host
-  `errors.pydantic.dev`, taken from the documentation URL pydantic appends to
-  its message. The `LLM_MODEL_FAILOVERS` example now names `gemini-3.6-flash`,
-  since `gemini-3.7-flash` was deprecated on 2026-10-08.
-
-- An MCP server's cooldown is rechecked immediately before a `tools/call` is
-  sent, after the listing and the budget reservation, so a caller paused there
-  while another caller hit a 429 or 401 no longer sends during the cooldown; its
-  reservation stays counted.
-
-- A cancelled caller never publishes an article. `publish_article` refuses from a
-  task that is being cancelled, as well as after an expired deadline, and
-  `ArticleWriter.write` drafts through `run_article_workflow_step`; a caller
-  cancelled before the deadline whose draft completed anyway used to overwrite
-  the destination.
-
-- The content-inspection hook delivers only what it inspected. A result over its
-  50k-character input limit that the inspector allows is returned as the
-  inspected, truncated text with a finding, not the original, whose tail used to
-  reach the model uninspected; a result it cannot serialize fails as
-  `INSPECTION_FAILED` instead of passing through uninspected.
-
-- `make env-align` (`scripts/align_env_file.py`) writes a candidate copy of an
-  existing `.env` laid out like `.env.example`: each of your settings sits where the
-  template names its key, template defaults you never set are commented out, and
-  anything the template does not mention is kept in trailing sections. Values are
-  copied verbatim and the result must load to exactly the same values, raw and
-  interpolated, or nothing is written; the report is counts only. The candidate
-  replaces the output atomically and owner-only (0600 before it is visible), and
-  an output that is the source or the template under any name, a hardlink or
-  symlink included, is refused.
-
-- The CLI publishes an approved article or its `.draft` through `publish_article`,
-  the one publication step, instead of a bare atomic write, so it logs
-  `article_saved` like every other publication. It runs after the workflow scope
-  has closed, so a `.draft` kept after a workflow timeout is still saved; a failed
-  write leaves an existing file intact and is reported like any other article
-  failure.
-
-- `MCP_TOOL_CALL_TIMEOUT_SECONDS` is unset by default and then follows
-  `TOOL_EXECUTION_TIMEOUT_SECONDS` (still 45 s), resolved in one place in
-  `src/mcp/client.py` for both the call allowance and the retry's minimum useful
-  attempt; an explicit value is honoured as before. It repeated the runner's literal,
-  so raising the runner's cap left the MCP call bound at 45 s.
-
-- A tool's own content inspection is read one way. `get_official_filings`,
-  `search_foreign_sources`, `extract_guidance_sources`, `search_claim` and
-  `fetch_reference_content` returned the `TOOL_BLOCKED:` placeholder as their text
-  (as `STATUS: EVIDENCE_FOUND` or as search results), so the ledger recorded a block
-  as a success; they now go through `approved_tool_content`, as the official-document
-  tool does: a block is a `BLOCKED` record, a timeout or backend failure a `FAILED`
-  call. A blocked Tavily result is no result for callers that merge several sources;
-  single-source tools raise it (`search_claim`, `extract_guidance_sources`,
-  `search_legal_tax_disclosures` and `get_macroeconomic_news`; the macro-context
-  fetch treats a blocked region as thin so the GLOBAL fallback still runs). Every
-  surface (graph node, Consultant, Auditor, editor) now tells the model the code the ledger records (`TOOL_TIMEOUT`, the typed
-  code, or `TOOL_EXECUTION_FAILED`), never an exception class or exception prose;
-  the editor loop used to send the exception text. Reason codes are defined once in
-  `src/tooling/runtime.py`: `INSPECTION_BACKEND_ERROR` is now `INSPECTION_FAILED`
-  and `OFFICIAL_DOCUMENT_BLOCKED` is `INSPECTION_BLOCKED`. Memory writes and the
-  macro cache log a backend failure as `*_inspection_failed`, not as a block.
-  Each tool call now has one ledger outcome: the evidence recorder used to record in
-  its `after()` hook, so an allowance that ran out during or just after it left the
-  call both `SUCCEEDED` and `FAILED` while the caller was told it timed out. The
-  service now tells `ToolCompletionObserver`s the result it returns, or failure
-  observers why there is none, never both; the recorder and the baseline capture's
-  `after` event record there. A `before()` policy block is now recorded as
-  `BLOCKED`, like a block the tool raises.
-
-- The macro-context cache and the retrospective evaluation memo are written through
-  `atomic_write_text`: the macro cache used a fixed `.tmp` name, so two tickers in
-  one region raced on the same temp file. `LLM_ATTEMPTS` now caps an explicit
-  `max_attempts` as well (an explicit 3 under the default 2 made three calls); a
-  caller's count can only lower it. `budget_timeout_class` and
-  `request_cap_override` are declared once on `DispatchBudgetFields` instead of in
-  each of the three transports. The MCP total attempt count is named
-  `_MAX_ATTEMPTS`, the memory probe slot has one owner, and the last four tests that
-  released a stalled worker without joining it now do both inside their patches.
-
-- Documentation matches the code. The README names the seats pinned to standard tier
-  under `--quick` (Portfolio Manager included) and states that integration tests need
-  `--run-integration` and an `INTEGRATION_`-prefixed key; the agentic-AI primer
-  describes the current routing (Sync Check, fast-fail, one or two debate rounds,
-  optional review seats), the BUY / HOLD / DO NOT INITIATE verdicts and the owners of
-  thresholds and seats instead of copying their numbers; the `.env.example` timeout
-  notes distinguish the request ceiling, invocation cap and flex floors; and the
-  codebase note derives the minimum useful attempt from `MIN_USEFUL_ATTEMPT_FRACTION`.
-
-- One `DEFAULT_WORKER_SLOTS` in `src/blocking_io.py` sizes the gap-fill, MCP
-  budget-store and document-extraction worker pools (each still its own pool, so a
-  stall in one never starves another), and a guard rejects the number written
-  inline. pypdf extraction now shares the HTML parse's pool: it had no in-flight
-  limit, so repeated stalls could pile up threads; `pdftotext` stays a bounded
-  subprocess. `atomic_write_text` flushes and fsyncs before the replacement, and the
-  three IBKR JSON writers (analysis index, refresh scheduler state, conid cache)
-  use it instead of each repeating the temp-file pattern. Stalled-worker tests
-  across the suite release and join through `tests/helpers/stalled_workers.py`.
-
-- No new work after the deadline. `ToolExecutionService` checks the operational
-  deadline before every `before()` and `after()` hook and after the last of each, so
-  a hook that overran, including one that swallowed cancellation, is never followed
-  by a later hook, the runner or a returned result (it used to check only before each
-  `after()` hook). Articles are written only after the bounded draft step returns
-  while the workflow deadline holds: `generate_article` and
-  `ArticleWriter.write(output_path=...)` no longer write from inside the bounded
-  work, so a late or cancellation-resistant writer writes nothing and an existing
-  file is kept. Articles and the analysis report are written through one atomic
-  writer, `src/atomic_files.py::atomic_write_text`; the report was a plain
-  `open(..., "w")` that a failure could leave half-written.
-
-- An official document's HTML parse, link ranking and text extraction now run as one
-  worker call under the extraction allowance and an in-flight limit instead of on
-  the event loop, where an 80 ms parse overran a 20 ms runner bound and stalled
-  every other task. A stall, a saturated limit or a spent allowance returns
-  `EXTRACTION_TIMEOUT`, a late result is discarded before inspection, and a stalled
-  worker keeps its slot until it ends. `OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS`
-  now bounds the HTML parse as well as pypdf and pdftotext.
-
-- Test infrastructure: the pytest re-collection workaround applies only where the
-  fixture manager has the deferred-conftest mechanism and the keyword
-  `parsefactories` signature it patches, so other supported pytest versions are
-  untouched. Stalled-worker tests release and join their workers in a `finally`
-  through `tests/helpers/stalled_workers.py`. Live integration tests take provider
-  keys from `INTEGRATION_<NAME>` (never a pytest-env dummy) and otherwise skip naming
-  the variable to set, because pytest-env overwrote the real key before the old
-  capture read it, so the live memory tests would have run against the dummy key.
-
-- The "one SDK attempt" guarantee is qualified: it means no SDK retry policy, not one
-  physical request. google-genai's aiohttp path resends once after a disconnect or
-  connector error inside the attempt, without re-sizing the timeout, so one Gemini
-  dispatch can make two sends bounded only by the hard deadline; a request-layer
-  test pins it. MCP stdio servers launch through the mcp SDK's own launcher
-  (`anyio.open_process`, `cwd` honoured), outside `src/subprocesses.py` and its
-  spawn guard; `docs/MCP.md` records the boundary.
-
-- The literal-deadline guard resolves deadline callees through the name they are
-  bound to (a local def, an import alias such as `enclosing_deadline as ed`, or
-  `module.function`), follows constant chains across one import, flags a fixed
-  value inside `max()` unless it is a floor of 0 or a computed bound, checks the
-  default of every deadline-shaped parameter, and respects lexical scope (nested
-  functions, loop and `with` targets no longer leak or shadow wrongly). Each missed
-  pattern is planted in a test that proves it is now rejected.
-
-- `invoke_with_rate_limit_handling` has one attempt count. `max_attempts` (default
-  `LLM_ATTEMPTS`) caps every retry, rate-limit and transient alike; a hidden
-  `max_attempts=3` beside `max_transient_attempts` let `LLM_ATTEMPTS=5` stop at
-  three calls on repeated 503s and `LLM_ATTEMPTS=1` make three calls on repeated
-  429s. Under the default `LLM_ATTEMPTS=2` a 429 now gets one retry instead of two.
-  The Consultant, PM verdict recovery and APAC direct retry pass `max_attempts=1`,
-  so Consultant 429s are no longer retried. The hard timeout is now
-  `min(cap, remaining)`: a fixed 0.1 s floor padded a spent deadline, and dispatch
-  admission already refuses an attempt below the minimum useful allowance.
-
-- MCP: each tools/call takes one atomic budget reservation (daily and per-run, one
-  SQLite `BEGIN IMMEDIATE` transaction on a bounded worker thread) immediately
-  before it is sent, so concurrent callers can no longer exceed a limit, and a
-  locked or broken budget store refuses the call unsent instead of stalling the
-  event loop or escaping as a raw sqlite error. The count is admitted reservations,
-  so it can exceed actual sends. A server's `Retry-After`, now also parsed as an
-  HTTP-date, is honoured in full or the retry refused (it was capped at 5 s); a 429
-  without one waits the 30 s default cooldown for its own retry as well as for
-  fresh calls, and the cooldown is registered before the retry, so a fresh caller
-  cannot send during it.
-
-- The embeddings startup probe has one owner per binding. Concurrent sync and async
-  callers each built a client and sent a probe; now they share one client and one
-  probe, each waiting under its own deadline. A cancelled owner no longer forces a
-  re-probe, a superseded binding's late probe can no longer publish, and a success
-  after the probe bound is discarded. `start_blocking_call` is added to
-  `src/blocking_io.py`, and probes share one in-flight slot.
-
-- An explicit seat client timeout now reaches every request. A writer built with a
-  111 s `client_timeout_seconds` sent about 298 s, because dispatch took the
-  registered seat's policy from the invocation scope and never saw the model's own
-  override. The override is stamped on the transport at construction
-  (`request_cap_override`) and resolved at every dispatch by `policy_for_provider`:
-  the model's override, then the canonical seat's, then the receiving vendor's
-  ceiling, always bounded by the deadline; a shorter ceiling lowers the minimum
-  useful attempt with it. OpenAI-compatible vendors now refuse a `service_tier`
-  passed at invocation or through bound kwargs before sending. The
-  `article_writer.create_writer_llm` seam no longer takes `timeout`, and the legacy
-  writer fallback chain refuses any override other than temperature.
-
-- An official document that content inspection blocked is no longer recorded as
-  primary evidence. The block placeholder used to come back as the document text,
-  wrapped in `STATUS: EVIDENCE_FOUND` with primary authority. Inspection now returns
-  one enforced disposition (allowed, sanitized, blocked, inspection_failed) from
-  the decision, the configured mode and the fail policy, so a warn-mode `block` is
-  still allowed. A blocked document is a `BLOCKED` ledger record. An inspection that
-  failed or timed out is a `FAILED` tool call: the model sees
-  `TOOL_ERROR: INSPECTION_FAILED` or `TOOL_ERROR: INSPECTION_TIMEOUT` (previously
-  `STATUS: INSUFFICIENT_DATA`, `REASON: INSPECTION_TIMEOUT`). Like any tool failure,
-  it counts against the forensic budget and the graph tool circuit. The same rule
-  applies to every tool output under fail-closed inspection, and a Tavily search
-  whose inspection failed returns no result. The fail-closed placeholder carries
-  the code `INSPECTION_BACKEND_ERROR` in place of the backend's exception text.
-
-- Unit tests are offline by rule, and integration tests are opt-in. One autouse
-  `_offline_boundary` fixture refuses sockets, DNS, libcurl and the embedding SDKs for
-  every non-`integration` test and fails any test that tried, naming targets and
-  threads, because refusal alone let leaking tests pass while waiting out timeouts.
-  `integration` tests now need `pytest --run-integration` (it also gates the live SGX
-  PDF canary, replacing `RUN_LIVE_EXCHANGE_PDF`). pytest-socket and its
-  `--allow-unix-socket` addopt are removed, and the unused
-  `src.tools.shared.fetch_with_timeout` is deleted.
-
-- yfinance no longer retries inside the library. `configure_yfinance_defaults` pinned
-  `yf.config.network.retries = 3`, so one refused or failing Yahoo request slept
-  1 + 2 + 4 s inside the library, invisible to every deadline and to the source
-  fallbacks that already answer a transient Yahoo failure; it now pins 0 (the library
-  default) and the application owns retries. Settings classes and the `.env` reader
-  take their file from one policy (`src.env_file.default_settings_env_file`): the
-  IBKR and dashboard settings hard-coded `.env` and `get_env_value` parsed it
-  directly, so under pytest an operator's IBKR credentials and `.env`-only values
-  reached unit tests. The unit suite's remaining Yahoo, Tavily and IBKR requests are
-  cut at their own seams, the process-fallback rate limiter and shared memory clients
-  are reset per test, and the full suite no longer waits on yfinance backoff or the
-  real Google limiter.
-
-- A failed official-document retrieval now says why. The catch-all that collapsed
-  every transport failure into `DOCUMENT_RETRIEVAL_FAILED` (11 of ~1,619 network
-  attempts in saved runs: six TLS certificate failures, a server disconnect, a read
-  timeout, ...) is replaced by one data-driven mapping, by exception class over the
-  whole cause chain: `DOCUMENT_TLS_FAILED` (an `ssl.SSLError` anywhere in the chain),
-  `DOCUMENT_DOWNLOAD_TIMEOUT` (`TimeoutError`, `httpx.TimeoutException`),
-  `DOCUMENT_CONNECT_FAILED`, `DOCUMENT_PROTOCOL_ERROR` (`RemoteProtocolError`,
-  `LocalProtocolError`, `ReadError`, `DecodingError`), `DOCUMENT_ALLOWANCE_SPENT`
-  (refused before any client opens); the residual keeps the old name and now means a
-  fault outside the network. `DOCUMENT_HTTP_ERROR` adds `HTTP_STATUS: <code>`. An
-  https-to-http redirect is `DOCUMENT_INSECURE_REDIRECT` (still refused), not
-  `UNAPPROVED_DOCUMENT_HOST`. `official_document_failed` is now logged for every
-  failed retrieval with `reason`, `phase` (dns, connect, redirect, body, extract,
-  inspect), `document_scheme`, `document_host` and `http_status`, never the path or
-  query. The auditor prompt (v2.16) lists the new codes.
-- One `HTTP_USER_AGENT` setting (default: the editor's former string) is sent by the
-  official-document client, the editor's reference fetch and StockTwits; the
-  document client sent none before, and `www.sec.gov` returned 0 successes in 262
-  saved calls. EDGAR requires a declared contact: new optional `SEC_CONTACT_EMAIL`
-  (no default; empty is unset) is required for sec.gov hosts in the official-document
-  client only: its requests there carry `<product token> <address>`, and unset, it
-  refuses sec.gov URLs before connecting with `DOCUMENT_SEC_CONTACT_REQUIRED` naming
-  the setting. The address goes to no other host, and no other code path adds it
-  (the editor's reference fetch and StockTwits send the shared string alone). Setting
-  it makes sec.gov retrievals possible; it does not by itself establish that EDGAR
-  accepts them. **Behaviour change:** StockTwits sends the shared string, not
-  `TradingBot/1.0`.
-- A tool call that times out or raises now leaves an evidence record
-  (`execution_status="FAILED"`, `reason` `TOOL_TIMEOUT` / `TOOL_EXECUTION_FAILED`,
-  requested URL, classified timeout scope) through a `failed()` observer the service
-  calls at its one chokepoint, so the graph tool node, consultant, auditor and
-  preflight all leave it; before, the URL was lost and the model relabelled the
-  timeout `EXTRACTION_TIMEOUT` in prose. The consultant, legal-counsel and
-  consultant-loop paths now return `TOOL_ERROR: TOOL_TIMEOUT` (as the graph node did)
-  instead of `TOOL_ERROR: TimeoutError`. Every timeout leaves `ToolExecutionService`
-  as a `_ScopedToolTimeout` (adds `not_started` and `with_inspection` scopes).
-
-- The literal-deadline guard (`tests/test_timeout_literals.py`) follows a numeric
-  constant through an import (`from m import T [as U]`, `m.T`, one re-export hop; a
-  config owner's constant counts once imported elsewhere), a 3-argument
-  `getattr(obj, "x", 30)` fallback, and every `src/` function whose positional or
-  keyword-only parameter is deadline-shaped (`enclosing_deadline`, `require_allowance`,
-  `run_program`, `check_within`, ...), derived from the signatures. It found six
-  non-deadline literals in `src/` (breaker cool-off report fields, a refused-retry
-  backoff record, an orphan-age filter, an auth cooldown, a consultant placeholder),
-  all allowlisted with reasons; no real deadline literal remained. Test-only change.
-  Residual hole: a function that returns a literal is not followed.
-
-- One minimum-useful-attempt rule and one margin, both derived. A minimum is
-  `MIN_USEFUL_ATTEMPT_FRACTION` (new, 0.04, at most 0.5, chosen not measured) of the
-  plane's configured allowance for one attempt: the LLM per-request ceiling (or the
-  invocation cap when shorter) before any flex floor, the embedding call timeout, the
-  MCP tool-call timeout (2.4-12 s, 1.2 s, 1.8 s at the shipped defaults; 4.8 s for a
-  full-mode OpenAI request, 12 s at most). `LLM_MIN_USEFUL_ATTEMPT_SECONDS`, `MEMORY_EMBEDDING_MIN_USEFUL_SECONDS`
-  and `MCP_RETRY_MIN_USEFUL_SECONDS` and their cross-field validators are removed (all
-  were branch-only). The LLM budget policy's margin is `deadline_margin(cap)`, the tool
-  plane's rule. **Behaviour change:** a quick-mode LLM request's minimum moves from 5 s
-  to 0.04 x its attempt allowance (2.4 s at the 60 s standard quick cap, 4.8 s full
-  mode), and the old `cap / 2`
-  ceiling is now the field's 0.5 bound; margins are unchanged.
-- Settings are read, never defaulted at the call site. Every `getattr(settings, "<field>", <literal>)`
-  is now a plain attribute read, one `resolve_settings` in `src/config.py` replaces four private
-  "explicit settings or the live singleton" helpers, and a hygiene test scans `src/` for the shape.
-  **Behaviour change:** the BUY stability gate (`buy_stability_enabled`) and the review/regional
-  independence requirements defaulted OFF for any config object lacking the field while `Settings`
-  ships them ON; such an object now raises `AttributeError` instead of silently disabling the gate.
-  `RETROSPECTIVE_MAX_EVALUATIONS_PER_RUN` has one default (the setting; the duplicate module constant
-  is gone). The Consultant's node deadline is measured on the shared deadline clock, shortened by the
-  run deadline, and bound as the LLM enclosing deadline for each request (never across tools).
-- LLM retries have one owner, the runtime loop. Every client sends exactly one SDK
-  attempt per request on every vendor; the transport classes enforce it, and no
-  constructor or factory takes an attempt count any more
-  (`SeatExecutionPolicy.transport_attempts` and its deprecated alias
-  `sdk_max_retries` are removed). **Behaviour change:** the macro-context,
-  injection-judge and signal-processor seats on OpenAI, compatible vendors or
-  Anthropic were built with `LLM_ATTEMPTS` SDK attempts while also retried by the
-  loop, so a failing call sent up to `LLM_ATTEMPTS²` requests (4 at the shipped
-  2), each SDK re-send past the deadline it was sized from; it now sends at most
-  `LLM_ATTEMPTS`. Google calls, the health check and every runtime-owned seat are
-  unchanged. The injection judge's seat is renamed "Prompt Injection Judge" (the
-  label its token accounting already used), and it and the signal processor now
-  resolve their seat's budget instead of the generic one. Dispatch records no
-  longer carry `configured_attempts`.
-- Memory: `--no-memory`, and a graph built without a ticker, construct no memory
-  object (the five shared `legacy_*` memories are gone, and with them a Chroma
-  client, a startup probe and a cross-ticker read). The embeddings startup probe
-  starts only when its full `MEMORY_EMBEDDING_HEALTHCHECK_TIMEOUT_SECONDS` fits
-  before the run deadline (otherwise it is deferred, uncached), and the CLI runs
-  it off the event loop before building memories. Embeddings take their rate
-  limiter from the embedding provider (`limiter_for_binding`), so OpenAI
-  embeddings are no longer paced at Google's RPM; the unthrottled setup fallback
-  and `embedding_rate_limiter_fallback` event are removed.
-- Rate limits: every process limiter starts with one token, so a process's first
-  request no longer waits about 5 s at 15 RPM; the pace afterwards is unchanged.
-  The Google ceiling is read in one place (`configured_google_rpm`), so the
-  unscoped fallback honours `GEMINI_RPM_LIMIT` under the legacy schema, and a
-  run-scoped xAI binding is now throttled at `XAI_RPM_LIMIT`.
-- MCP call budgets are now enforced by `MCPRuntime` itself: each attempt is
-  admitted against `daily_call_limit` / `per_run_limit` before a session opens,
-  and each tools/call is counted as it is sent. `MCPBudgetHook` is gone; it
-  counted in `after()`, so a call that timed out, failed, or whose result the
-  tool plane discarded was never counted, and a retry counted once for two
-  sends. **Behaviour change:** a retried call now uses two of `per_run_limit`,
-  and a retry the budget cannot cover is refused (`details.retry ==
-  "refused_budget"`). The dead `MCPRuntime.call_tool`, `list_tools_for_scope` and
-  `src/mcp/catalog.py` were removed.
-- An MCP tool the server does not list is now refused before the call is sent
-  (`failure_kind: "config"`, `details.refused == "tool_not_listed"`), and the
-  listing follows `nextCursor` within its one bound. Before, the call was sent
-  anyway and the SDK re-listed after it under the stale session bound, then
-  skipped output validation. The `x-mcp-header` filter is documented as inert in
-  production, where `initialize()` negotiates only legacy protocol versions.
-- Every child process under `src/` now starts through `src/subprocesses.py`, on
-  CPython's `posix_spawn` path (absolute executable, `close_fds=False`, no
-  `cwd`), with kill-and-reap on every abnormal exit. pdftotext and the run
-  fingerprint's git probe forked before, which in the threaded analysis process
-  risks a crash in Network.framework's atfork handler. The reap log events are
-  now `subprocess_reap_pending/failed/cancelled` (were
-  `official_document_subprocess_reap_*`), with a `pid` field.
-
-- The official-document tool now shares its allowance by fractions instead of
-  absolute reserves: the download may use `OFFICIAL_DOCUMENT_DOWNLOAD_FRACTION`
-  (0.55) of it, and `OFFICIAL_DOCUMENT_INSPECTION_FRACTION` (0.25) of the rest is
-  held back from PDF extraction for the content inspection of the evidence. These
-  replace `OFFICIAL_DOCUMENT_DOWNLOAD_TIMEOUT_SECONDS`,
-  `OFFICIAL_DOCUMENT_DOWNLOAD_TOTAL_TIMEOUT_SECONDS` and
-  `PDF_EXTRACTION_RESERVE_SECONDS`, added earlier in this release. A runner at or
-  below the old 20 s reserve fetched no document at all; any runner value now
-  works. **Behaviour change:** under the 45 s runner the download gets about 23.6 s
-  (was 25 s) and extraction about 14.5 s (was 20 s); inspection, which had no
-  share, gets the rest, and evidence it cannot finish inspecting is reported as
-  `INSPECTION_TIMEOUT` instead of the runner's bare `TOOL_TIMEOUT`. Both defaults
-  are chosen, not measured. Tavily and the document tool now inspect through one
-  bounded `InspectionService.check_within`.
-
-- Operational work inside a tool call now sizes itself against what the tool
-  runner has left, not only the caller's deadline: Tavily, market data, FX,
-  filings, the editor's reference fetch and every blocking call read one
-  operational deadline (MCP and the official-document tool already did). Before,
-  a second search inside a 45 s runner could be given its full 30 s and be cut off
-  as a bare `TOOL_TIMEOUT`. Every blocking call (`run_blocking_call` and its sync
-  twin) now applies that clamp itself and refuses, before any thread starts, once
-  the deadline has passed. Work inside a hard cap now gets a deadline kept back by
-  a margin, the new `DEADLINE_MARGIN_FRACTION` (5 % of the cap, at most
-  `LLM_DISPATCH_MARGIN_SECONDS`), so its own typed timeout fires before the cap's
-  cancellation instead of racing it. **Behaviour change:** an MCP call or document
-  extraction that runs to the runner's end now returns its own timeout result a
-  margin early rather than `TOOL_TIMEOUT`.
-- The combined tool scope is now derived: `TOOL_EXECUTION_TIMEOUT_SECONDS` plus the
-  new `TOOL_HOOKS_TIMEOUT_SECONDS` (75 s; 120 s in all, unchanged). It replaces
-  `TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS`, added earlier in this release,
-  and its startup check: raising the runner no longer requires raising a second
-  setting. Tool-call timeouts are now logged once with the scope that produced
-  them (`runner`, `before_hooks`, `after_hooks`, `hooks_allowance_spent`,
-  `with_inspection`, `not_started`); a hook's own timeout was reported as the
-  combined scope. The graph tool node no longer wraps the service in a second,
-  identical bound, so cancellation reaches a running tool one loop turn sooner.
-
-- Tests: subdirectory conftest fixtures now survive pytest 9.1 re-collecting a
-  directory. Naming a root-level test file between two files of one subdirectory
-  used to drop that subdirectory's conftest: named fixtures errored and autouse
-  isolation was skipped silently. Unit tests can no longer send embedding requests:
-  the memory startup probe reached Google 57 times in one full run. A new test runs
-  the real CLI flow under an already-spent run deadline and checks that it fails
-  closed. The README macro-context test now asserts the current diagram.
-  No production code changed.
-- An OpenAI, OpenAI-compatible or Anthropic client that its callers invoke directly
-  is now built with `LLM_ATTEMPTS` total attempts, like Google already was; it was a
-  fixed 3. **Behaviour change:** at the shipped `LLM_ATTEMPTS=2` such a client makes
-  two requests instead of three (both construction schemas). Seats that pin their
-  attempts keep them (health check, writer, macro classifier: one). The OpenAI
-  request ceiling is the new `OPENAI_REQUEST_CAP_SECONDS` setting (120 s, unchanged).
-  The APAC client ceiling is now `APAC_NODE_TOTAL_TIMEOUT_SECONDS` (240 s, unchanged)
-  and the same value applies inside an invocation, where it was 300 s; lowering or
-  raising the node total now moves both.
-- MCP steps now stay inside the time left, and read the tool runner's deadline as
-  well as the caller's (a nested MCP call no longer sizes its handshake and call
-  against the full settings while the runner has less). The tools/list catalogue
-  is bounded by what the handshake left (it got the session's full bound again).
-  Every tool call now lists first, inside that bound, so the SDK validates the
-  result against a cached schema instead of listing *after* the call under the
-  stale bound; a successful call sends the same requests in a different order, and
-  a failed one costs one extra listing. The retry backoff is admitted like an LLM
-  retry: shortened to fit, refused when less than the new
-  the minimum useful attempt would not be left, and re-checked after the
-  sleep. A refused retry raises the last attempt's error with `retryable: false`
-  and `details.retry == "refused_deadline"`; a 429 still registers its cooldown.
-- An official-document download now has a total deadline,
-  `OFFICIAL_DOCUMENT_DOWNLOAD_TOTAL_TIMEOUT_SECONDS` (35 s), around the whole
-  download, redirects and DNS checks included; httpx's timeout bounded only each
-  phase, so a trickling body could run on. The download also leaves PDF extraction
-  its reserve, `PDF_EXTRACTION_RESERVE_SECONDS` (unset means
-  `OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS`, 20 s): it may use what the caller and
-  the 45 s tool runner have left, less the reserve, so under the runner a download
-  gets at most 25 s (was up to 35 s per phase), and with less than the reserve left
-  no download starts. Extraction backends size to the tool runner's remaining time
-  too, and a skipped pdftotext logs `official_document_extraction_skipped`. A
-  pdftotext child cut short by cancellation is now killed and reaped (it was left
-  running); the reap is shielded and bounded by `SUBPROCESS_CLEANUP_TIMEOUT_SECONDS`
-  (5 s).
-- The `--article` workflow now has its own deadline, `ARTICLE_WORKFLOW_TIMEOUT_SECONDS`
-  (900 s, about twice the longest measured workflow), around draft, review and
-  revisions, and the writer runs asynchronously through the runtime loop instead of a
-  synchronous call that blocked the event loop. Writer clients send one SDK attempt
-  per request (was three Anthropic requests of `API_TIMEOUT` each, per tier); the loop
-  retries up to `LLM_ATTEMPTS`, each attempt capped at `API_TIMEOUT` in both run modes.
-  A writer fallback tier is no longer built once the allowance cannot fit it. When the
-  allowance runs out after a draft exists, the draft is saved for review with
-  `editor_review_error` and the new `workflow_deadline_exceeded` flag, never as an
-  approved article; a step that overruns is discarded, never written. The writer's
-  fact-check search now uses the async Tavily entrypoint. `create_writer_llm` honours
-  the temperature, timeout and attempts it is given, and the writer's configured
-  temperature now also reaches the fallback tiers (the provider-scoped Gemini floor
-  wrote at 0.1, not the writer's 0.7). `generate_article` is now a coroutine.
-- A memory embedding attempt now has one deadline covering the rate-limiter wait
-  and the request (the wait had no bound, and the request got a fresh
-  `MEMORY_EMBEDDING_CALL_TIMEOUT_SECONDS` after it). The unthrottled fallback is
-  taken only when no rate limiter exists; it no longer re-sends the request after
-  a provider error or timeout. Retry backoff is clamped to the caller's deadline,
-  retries stop when less than the minimum useful attempt
-  (`MIN_USEFUL_ATTEMPT_FRACTION` of the call timeout) is left, and the last attempt's own error is raised instead of a `RetryError`.
-  OpenAI embeddings send one SDK attempt per request (was three).
-- A model invoked outside the runtime loop is admitted and sized against an
-  enclosing deadline when one is bound; with none, nothing changes.
-- The portfolio manager's macro-event classifier invokes through the runtime loop
-  (bounded attempts, owned retries, one SDK attempt per request) instead of an
-  unbounded synchronous call.
-- `TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS` now bounds every tool call made
-  through the tool service, its `before()`/`after()` hooks included, not only graph
-  tool calls: the Consultant, Auditor, Legal Counsel, article editor and evidence
-  preflight had no bound on their hooks. A tool call made from inside another (the
-  Consultant's FMP MCP spot check) gets only what the outer runner has left. A
-  result whose allowance runs out before or during its `after()` hooks is
-  discarded, never returned or recorded in the evidence ledger, and a call whose
-  allowance is already spent now runs no hook at all (a call a `before()` hook
-  would have blocked times out instead). The async Tavily entrypoints now bound
-  search and inspection with one deadline, as the sync path did: a late search
-  result is discarded before inspection, and an inspection that overruns returns
-  nothing rather than the uninspected payload.
-
-- Enforce reliable financial-health failures through the existing verdict correction, preserving the canonical deep-value/current-ratio exception and active-tender exemption; project the same health assessment into saved policy, PM context and reports.
-- Close every completed Junior acquisition with its named terminal message, including empty or malformed failures, preserving current failure provenance and preventing a redundant blocked tool round.
+- **Deadline-sized LLM requests** — Every request is sized at dispatch from one
+  absolute invocation deadline, under one budget policy per seat, through tier
+  switches, fallback and model failover. A request with less than a useful
+  allowance left is refused before it is sent, and each attempt records what was
+  dispatched.
+- **Configurable operational deadlines** — Tool, research, market-data, MCP,
+  embedding, article-workflow and shutdown deadlines are settings (see
+  `.env.example`); minimum useful attempts are derived, never fixed floors. The
+  pipeline's per-ticker deadline is a hard ceiling inside the analysis, with a
+  publication reserve so the report is still written.
+- **`make env-align`** — Writes a candidate `.env` in `.env.example`'s layout with
+  values copied verbatim, checks that it loads to the same values, prints counts
+  only, and replaces its output atomically with owner-only permissions.
+- **Offline unit tests by rule** — An autouse boundary refuses network access in
+  every non-integration test and names the call site of any attempt; integration
+  tests run only with `--run-integration` and read `INTEGRATION_*` credentials.
 
 ### Changed
 
-- Every OpenAI, OpenAI-compatible and Anthropic client is now sized at dispatch
-  for the vendor it names. Before, only the flex-tier OpenAI client and Gemini
-  were. The canonical OpenAI adapter without a failover, the DeepSeek, z.ai,
-  Moonshot and xAI clients, the Consultant's alternate transport, the legacy
-  Consultant, Auditor, Editor and writer-fallback factories, the APAC factory
-  and both Anthropic writers sent their construction-time timeout. Every
-  constructor now passes its provider explicitly, and a missing one is an error.
-  **Behaviour change inside an invocation:** a compatible vendor is sized against
-  its `OPENAI_COMPATIBLE_CLIENT_TIMEOUT_SECONDS` ceiling instead of the 120 s
-  OpenAI cap, and its model-failover copy no longer sends `service_tier`. The
-  Consultant's alternate transport on a compatible base is built with that
-  ceiling too. Requests outside an invocation keep their built timeout. Streaming
-  on these clients and on Gemini is refused: `.stream()` runs as a sized
-  non-streaming call, and `streaming=True` or a `stream` argument raises.
-- The per-ticker pipeline watchdog is now a hard ceiling inside the analysis.
-  `STAGE1_TICKER_TIMEOUT_SECONDS` (600) and `STAGE2_TICKER_TIMEOUT_SECONDS` (2400)
-  are settings that `scripts/run_pipeline.sh` reads through
-  `python -m src.config_print`. An exported value still wins. A value that is not
-  a positive whole number now stops the pipeline. Each child receives an absolute
-  `PIPELINE_TICKER_DEADLINE_EPOCH` and binds it, less the new
-  `PUBLICATION_RESERVE_SECONDS` (30), around the analysis. **Behaviour change
-  under the pipeline:** an LLM request, retry or backoff that cannot finish
-  30 s before the watchdog fires is refused rather than sent. The injection
-  judge is included and falls back to its heuristic decision. Every
-  operational deadline that clamps to its caller now shrinks to the ticker's
-  remaining time, which until now was a no-op outside the APAC node. A ticker
-  that runs out of time now ends as an unpublishable `ANALYSIS FAILED` report
-  (`no_analysis`) rather than a SIGTERM (`child_exit_124`) more often.
-  Report rendering and persistence run outside the cap, on the reserve. A
-  startup `deadline_ladder_truncated` log reports when the configured retry
-  ladder cannot fit, which is always true in `--quick` at the shipped defaults.
-  Manual runs are unchanged. `tests/test_timeout_literals.py` now rejects a
-  numeric literal passed to a deadline parameter outside the configuration
-  owners.
-- Attempt counts now mean total attempts on every vendor. `API_RETRY_ATTEMPTS` is
-  renamed `LLM_ATTEMPTS` (the old name is still read; the new one wins) and
-  `SeatExecutionPolicy.sdk_max_retries` is renamed `transport_attempts` (the old
-  field still works, translated per vendor). Under the application retry loop each
-  request sends one SDK attempt and the loop owns retries, defaulting to
-  `LLM_ATTEMPTS`. **Behaviour change on OpenAI and Anthropic:** at the same
-  configured value, clients make one fewer request (the writer and its
-  fallbacks: 3 requests instead of 4; the editor now sends one per request under
-  the loop, below);
-  the Auditor, APAC specialist and the Consultant's alternate transport go from
-  2-4 SDK requests per call to one; the OpenAI-bound Health Check makes exactly
-  one request instead of two. The loop's transient-retry budget, previously a
-  fixed 2, now defaults to `LLM_ATTEMPTS`: at a configured 3, a full-mode call can
-  make three attempts of up to the 1,350 s flex-floored cap instead of two, until
-  an enclosing deadline bounds it.
-- The Article Editor's review, the retrospective lesson and the semantic judge now
-  run under the runtime retry loop, like the graph seats: each call is capped by
-  its seat's budget, every request is sized from the remaining allowance, and
-  retries are owned by the loop (one SDK attempt per request; these seats are now
-  built with one attempt on OpenAI and Anthropic). **Behaviour changes:** the
-  editor review was uncapped and is now capped per call at the review-plane budget
-  (`CROSS_CHECK_QUICK_LLM_CALL_HARD_TIMEOUT_SECONDS`, 180 s, in `--quick`;
-  `LLM_CALL_HARD_TIMEOUT_SECONDS` in full mode), and a timeout degrades the review
-  to REVISE as any other editor failure does; the editor seat moves from the
-  editorial to the cross-check budget class. The `--quick` retrospective lesson
-  and judge caps follow their class (`QUICK_LLM_CALL_HARD_TIMEOUT_SECONDS`, 60 s)
-  instead of the removed `min(LLM_CALL_HARD_TIMEOUT_SECONDS, 120)` clamp, which no
-  longer exists; `LLM_CALL_HARD_TIMEOUT_SECONDS` is read only in full mode and is
-  no longer reported as quick-mode drift. A refused judge response is still a
-  HARD_FAIL. The analyst structural retry reads its overall budget from the same
-  resolver (unchanged values). Consultant budgets are read from config at call
-  time, and their quick/full choice follows the run config rather than the
-  graph-build flag. Inside an invocation, a seat's explicit client timeout (the
-  Health Check's 10 s) is now the request ceiling, and a request takes its
-  ceiling from the vendor that receives it.
-- The two tool deadlines are now settings, defaults unchanged:
-  `TOOL_EXECUTION_TIMEOUT_SECONDS` (45 s, the tool runner) and
-  `TOOL_EXECUTION_WITH_INSPECTION_TIMEOUT_SECONDS` (120 s, a graph tool call
-  including the content-inspection hooks that run after the runner's bound is
-  released). Configuring the second below the first is rejected at startup. Both
-  shrink to a caller's remaining enclosing deadline when one is bound, and a call
-  whose caller deadline has already passed fails as a timeout without starting
-  the tool. **Behaviour change:** the graph tool node's outer scope is now
-  deadline-only (`run_with_hard_timeout`) rather than `asyncio.wait_for`, so a
-  stalled inspection hook that ignores cancellation returns `TOOL_TIMEOUT` on time
-  and its late, uninspected result is discarded instead of being returned.
-- The market-data deadlines are now settings, one per scope, defaults unchanged:
-  the whole metrics fetch (`MARKET_DATA_AGGREGATE_FETCH_TIMEOUT_SECONDS`, 30 s),
-  each parallel source (`MARKET_DATA_PER_SOURCE_TIMEOUT_SECONDS`, 15 s), a vendor
-  HTTP request (`MARKET_DATA_VENDOR_HTTP_TIMEOUT_SECONDS`, 10 s), the lightweight
-  EODHD lookup (`MARKET_DATA_ANCHOR_LOOKUP_TIMEOUT_SECONDS`, 5 s), ticker
-  resolution (`MARKET_DATA_TICKER_RESOLUTION_TIMEOUT_SECONDS`, 10 s), price
-  history (`MARKET_DATA_PRICE_HISTORY_TIMEOUT_SECONDS`, 15 s), each company-name
-  source (`COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS`, 5 s), a live FX rate
-  (`FX_RATE_FETCH_TIMEOUT_SECONDS`, 8 s) and the Consultant's spot check
-  (`CONSULTANT_SPOT_CHECK_TIMEOUT_SECONDS`, 8 s). Each is read at the call and
-  shrinks to a caller's remaining enclosing deadline when one is bound; a call
-  whose caller deadline has already passed takes its existing timeout fallback
-  without starting.
-- The research deadlines are now settings, one per scope, defaults unchanged: a
-  Tavily web search (`TAVILY_SEARCH_TIMEOUT_SECONDS`, 30 s), a Tavily extract
-  (`TAVILY_EXTRACT_TIMEOUT_SECONDS`, 30 s), the gap-fill search inside a metrics
-  fetch (`GAP_FILL_SEARCH_TIMEOUT_SECONDS`, 5 s), the wait for a DuckDuckGo search
-  (`DDG_SEARCH_TIMEOUT_SECONDS`, 8 s) and its client's HTTP timeout
-  (`DDG_HTTP_TIMEOUT_SECONDS`, 5 s), the official-filings lookup
-  (`OFFICIAL_FILINGS_LOOKUP_TIMEOUT_SECONDS`, 20 s), one filing fetcher
-  (`FILING_FETCH_TIMEOUT_SECONDS`, 30 s), an official-document download
-  (`OFFICIAL_DOCUMENT_DOWNLOAD_TIMEOUT_SECONDS`, 35 s), its DNS check
-  (`OFFICIAL_DOCUMENT_DNS_TIMEOUT_SECONDS`, 5 s) and PDF extraction
-  (`OFFICIAL_DOCUMENT_EXTRACT_TIMEOUT_SECONDS`, 20 s), and the editor's reference
-  fetch (`REFERENCE_FETCH_TIMEOUT_SECONDS`, 10 s). Each is read at the call and
-  shrinks to a caller's remaining enclosing deadline when one is bound, including
-  an explicit per-call Tavily timeout and the sync Tavily worker's shared
-  deadline; a call whose caller deadline has already passed takes its existing
-  timeout fallback without starting.
-- The MCP deadlines are now settings, one per scope, each handed to the SDK's own
-  parameter: the HTTP client's per-phase timeout (`MCP_HTTP_TIMEOUT_SECONDS`, 5 s,
-  unchanged: it is the httpx2 default the client already ran on because it set
-  none), the session read timeout on the initialize handshake and a tools/list
-  catalog request (`MCP_INITIALIZE_TIMEOUT_SECONDS`, 30 s), and the read timeout
-  on one tool call (`MCP_TOOL_CALL_TIMEOUT_SECONDS`, 45 s). Each is read when the
-  session opens or the call is sent and shrinks to a caller's remaining enclosing
-  deadline; a spent allowance opens no session and sends no call, and fails as a
-  non-retryable `transport` error. **Behaviour change:** the handshake, the
-  catalog request and the tool call had no protocol-level bound, so a stdio
-  server that never answered, or an HTTP server trickling bytes, could hold a
-  session for as long as its caller allowed (the Consultant's path is capped by
-  the 45 s tool runner, which still fires first, so its outcome is unchanged; a
-  direct `MCPRuntime.call_tool` or `list_tools_for_scope` caller had no bound). A
-  timed-out request (`REQUEST_TIMEOUT`, -32001) now classifies as a retryable
-  `transport` error rather than `protocol`.
-- The operational deadlines are now settings, one per scope, defaults unchanged:
-  the health check's LLM probe (`HEALTH_CHECK_CONNECTIVITY_TIMEOUT_SECONDS`,
-  15 s), the embeddings startup probe
-  (`MEMORY_EMBEDDING_HEALTHCHECK_TIMEOUT_SECONDS`, 15 s), one embedding request
-  (`MEMORY_EMBEDDING_CALL_TIMEOUT_SECONDS`, 30 s), closing a Google GenAI client
-  at shutdown (`GENAI_CLIENT_CLOSE_TIMEOUT_SECONDS`, 2 s) and the Langfuse flush
-  (`LANGFUSE_FLUSH_TIMEOUT_SECONDS`, 2 s). Only the embedding request shrinks to
-  a caller's remaining enclosing deadline; a spent allowance sends no request
-  and is not retried. The health check, the startup probe (whose failure is
-  cached for the process) and the shutdown paths are not clamped.
-- Six more market-data deadlines are settings, defaults unchanged, each clamped
-  to a caller's enclosing deadline: each yfinance ownership section
-  (`OWNERSHIP_SECTION_TIMEOUT_SECONDS`, 8 s), a StockTwits request
-  (`STOCKTWITS_HTTP_TIMEOUT_SECONDS`, 10 s), the retrospective's price fetch
-  (`RETROSPECTIVE_PRICE_FETCH_TIMEOUT_SECONDS`, 15 s), the advisory market note
-  and price snapshot (`MARKET_CONTEXT_FETCH_TIMEOUT_SECONDS`,
-  `PRICE_SNAPSHOT_FETCH_TIMEOUT_SECONDS`, 10 s each) and the report-header name
-  lookup (`OUTPUT_COMPANY_NAME_TIMEOUT_SECONDS`, 6 s; each candidate symbol uses
-  `COMPANY_NAME_LOOKUP_TIMEOUT_SECONDS`).
-- **Fixed:** the synchronous report-header company-name lookup ran each
-  candidate on a `ThreadPoolExecutor` worker. The caller returned on time, but
-  executor workers are joined at interpreter exit, so a stalled Yahoo read could
-  hold the process open after the report was written, and each stalled call
-  left another worker. It now runs on a slot-capped daemon worker
-  (`run_blocking_call_sync`, two slots); a full cap falls back to the ticker.
-- The APAC specialist's 240 s is now its node total
-  (`APAC_NODE_TOTAL_TIMEOUT_SECONDS`), shared by the first call and the direct
-  retry, rather than a fresh 240 s per call.
-- Seat timeout budgets are chosen by a `TimeoutClass` on each registered seat
-  rather than by matching display names; new knobs `FLEX_QUICK_ATTEMPT_FRACTION`
-  (0.4), `MIN_USEFUL_ATTEMPT_FRACTION` (0.04) and `LLM_DISPATCH_MARGIN_SECONDS` (2).
-- Treat generic consultant conditions, numerical discrepancies, and suspicious
-  OCF/NI ratios as zero-weight review findings rather than issuer-risk penalties.
-- Block BUY when the Consultant reports MAJOR_CONCERNS: unresolved material
-  analysis flaws withhold initiation authority without adding issuer-risk points.
-  Growth exceptions permit at most HOLD, with the active-tender override preserved.
+- **One retry owner** — Every OpenAI, OpenAI-compatible, Anthropic and Google client
+  makes one SDK attempt per request; `LLM_ATTEMPTS` (formerly `API_RETRY_ATTEMPTS`)
+  is the total attempt count for rate limits, server errors and timeouts.
+- **One outcome per tool call** — `ToolExecutionService` bounds each call, hooks
+  included, by one deadline and records exactly one ledger outcome; content
+  inspection delivers only the text it inspected and fails closed on output it
+  cannot serialize.
+- **MCP** — Each `tools/call` takes one atomic budget reservation, honours
+  `Retry-After`, rechecks the server's cooldown immediately before sending, and
+  refuses a tool the server does not list.
+- **Blocking work** — One worker-slot size governs the blocking pools; a stalled
+  worker keeps its slot and a late result is discarded before inspection.
+- **Articles** — The `--article` workflow has its own deadline, and
+  `publish_article` is the single publication step: nothing is published after the
+  deadline or from a cancelled task.
+- **Debt-to-equity is one canonical ratio** — Each data source's unit and basis is
+  declared in `src/data/debt_equity.py`, and yfinance/yahooquery percentages are
+  converted before sources are merged. FMP, Alpha Vantage, EODHD and web-extracted
+  D/E values, whose unit or basis is unverified, are no longer used. `DE_RATIO` in
+  the report's DATA_BLOCK is a ratio (fundamentals prompt 11.18) read under one
+  field contract; `EXTREME_LEVERAGE` gates on the canonical ratio, with a
+  non-blocking `DE_DISCREPANCY` flag when the report disagrees.
+- **Tender eligibility** — `ACTIVE_TENDER` (which exempts the health and growth
+  gates) requires `M_AND_A_SUBJECT_ROLE: TARGET` and a positive tender price; the
+  Foreign Language Analyst reports the subject's role (prompt 1.24).
+- **Evidence and quick-mode gates** — Guidance-coverage demotion counts only the
+  required searches; latest-results claims are bound to inspected statement rows
+  and dates; monetary, currency and FX parsing each live in one place; a BUY that
+  relies on a growth exception is capped at HOLD; Consultant MAJOR_CONCERNS blocks
+  BUY.
+- **Failover example** — The `LLM_MODEL_FAILOVERS` example names
+  `gemini-3.6-flash`; `gemini-3.7-flash` was deprecated on 2026-10-08.
 
 ### Fixed
 
-- Size every LLM request at dispatch from the invocation's absolute deadline
-  instead of a timeout fixed on the client at construction. The flex-attempt
-  timeout (24 s quick, 900 s full) no longer rides along on the standard re-issue,
-  on calls sent at standard after flex degrades, or on the model-failover copy;
-  a request with less than `MIN_USEFUL_ATTEMPT_FRACTION` of the cap left is refused before
-  any transport call, and each call attempt now records its `dispatches`
-  (tier, model, timeout sent, remaining allowance, configured attempts, outcome).
-  The full-mode latency fallback to standard is reachable again.
-- Pin the quick-mode Portfolio Manager to the standard Gemini tier again: its
-  2026-10 `504 DEADLINE_EXCEEDED` failures were the 24 s quick flex-attempt deadline,
-  enforced server-side and inherited by the standard re-issue and failover. The Google
-  adapter now honors the run-scoped `--quick` retry clamp, so quick PM, Senior
-  Fundamentals and Analyst Retry calls drop from 3 to 2 SDK attempts when
-  `API_RETRY_ATTEMPTS` is 3; explicit per-seat retry policies are unchanged.
-- Bound the caller's wait in the gap-fill company-name lookup (previously
-  `wait_for(to_thread)`, which waits on an uncancellable thread) and the sync Tavily
-  search (whose `with ThreadPoolExecutor` exit joined the stalled worker). Each now
-  runs on a daemon thread capped by an `InFlightLimit`, so stalls cannot pile up
-  threads or hold interpreter exit, and saturation returns the usual fallback at once.
-  The Tavily worker shares the caller's absolute deadline: a late search result is
-  discarded before inspection, and inspection gets only the remaining time. Neither
-  client exposes a transport timeout, so a stalled request still runs until it ends or
-  the process exits. The `to_thread` guard now resolves asyncio aliases.
-- Keep EPS rubric lineage on eligible per-share bases, honor verified majority
-  ownership ahead of unrelated independence text, preserve Junior originals from
-  inspected ingress, and bind one-cell-per-line comparative results tables.
-- Recognize complete half-year labels, abbreviated English dates, retained Japanese
-  fiscal Q1 context, and equivalent currency-bound reporting-unit declarations while
-  preserving comparative table and earnings-scope checks. Keep monetary amount
-  grammar separate from reporting units.
-- Freeze additional source-adjudicated latest-results regressions and distinguish
-  incomplete claims, retained unbound evidence, citation authority, and attempted
-  acquisition in offline replay. Report flex fallbacks and degradation episodes in
-  batch summaries without changing routing or pricing.
+- **False leverage rejects** — yfinance's percentage D/E was read as a ratio
+  (TOT.TO's 8.05% as 805%); all six August–October `EXTREME_LEVERAGE` rejects were
+  this misread and pass when replayed.
+- **Acquirers treated as tender targets** — An acquirer's own tender (6670.TW) no
+  longer exempts it from the health and growth gates.
+- **Output-cap recovery** — An analyst output stopped at its output cap is
+  recognised from the provider's stop reason and retried as `RETRY-CAP` at lower
+  reasoning effort, instead of at higher effort that failed the same way (0995.HK).
+- **Failure classification** — A pydantic `ValidationError` from a tool argument is
+  an `application_error` with no host, not an unknown provider error.
+- **Quick-mode timeouts** — The quick Portfolio Manager and Junior Fundamentals run
+  on the standard Gemini tier, ending deadline failures inherited from the flex
+  attempt.
+- **Unbounded waits** — Gap-fill and Tavily lookups, official-document downloads
+  and MCP steps no longer wait on uncancellable threads or past their deadline.
+- **Missing provider packages** — `langchain-openai` and `langchain-anthropic` are
+  ordinary dependencies again; Docker's `--only main`, `make install` and a plain
+  `poetry sync` had installed neither.
 
-- Reject failed evidence and failed result envelopes before ownership/capacity
-  normalization; bind envelope authority to its declared source and apply the same
-  checks to preflight fallback while preserving valid neighboring results.
-- Bind ownership percentages to a shareholder row or ownership clause instead of
-  unrelated amounts elsewhere in the cited record; preserve unknown control.
-- Bind prior-first comparative statements and declared percentage columns without
-  relaxing period, currency, scale, or earnings-scope checks. Preserve recorder-owned
-  source authority during offline replay and record explicit evidence truncation.
-- Give complete, unsupported quick-mode latest-results claims one budgeted fetch of
-  their approved citation, with no repeat of an already attempted source.
-- Preserve verified independent initiation failures across growth exceptions, and
-  withhold deterministic HOLD upgrades when English-language coverage or measured
-  liquidity is unresolved. Render and save the same gate assessments, distinguish
-  indeterminate growth inputs, and label risk-zone defaults before initiation gates.
-  Missing health withholds growth-exception authority without implying verified
-  low health.
-- Record effective standard Google service-tier attribution without changing the
-  deliberate standard transport policy or flex fallback pricing.
+### Security
 
-- Recognize supported currency-code and compound-symbol prefixes, signed and
-  accounting amounts through the shared monetary grammar. Preserve minor currency
-  denominations in FX resolution, caches, OCF comparisons, and reconciliation;
-  share stable currency spellings with chart formatting. Extract market-cap values
-  after parenthesized date qualifiers. Accept explicit ISO currency amounts in
-  either order for capital exposure, and stop free-text scanners at invalid
-  monetary candidates instead of substituting later comparative amounts.
-- Relay Junior Fundamentals data from its inspected tool results in code, retaining
-  useful partial results and exposing the same final artifact to prompt checks and
-  baseline capture. Bound currency and sign/bracket prefixes in the amount scanner.
-  Preserve legacy HTML extraction and render canonical initiation gates, measured
-  values, uncertainty, and the hard-fail aggregate in reports.
-  Share the Portfolio Manager's structural and semantic correction allowance;
-  require eligible decision facts or active gates and retain publication failure
-  when the final policy trace is invalid.
-- Bind observed comparative issuer statements to exact metric rows, period columns,
-  currency, reporting scale, and earnings scope. Preserve rejection across adjacent
-  tables and ambiguous layouts; persist finite normalization and withheld-field
-  reasons in the retained report.
-- Remove legal-response fragments from parser-fallback logging.
-- Parse currency suffixes separately from monetary magnitudes, preventing KRW,
-  BRL, and MYR amounts from creating false cash-conversion warnings. Share monetary
-  token recognition across metric extraction, OCF corroboration, filing conflicts,
-  capital-exposure scaling, and web-extracted market capitalization; preserve signed
-  K/M/B/T and spelled magnitudes. Reject unsupported units and ambiguous grouping,
-  including grouped-number backtracking to a smaller numeric prefix.
-- Bind capital claims to exact source URLs and scaled same-currency amounts; retain
-  unresolved absence coverage ahead of accounting qualifiers. Include inspected,
-  successful Legal Counsel follow-up evidence in normalization. Align the legal
-  prompt with unresolved no-findings coverage until absence is code-verifiable.
-- Preserve both debate sides and canonical versus advisory score explanations in
-  consultant context. Keep missing evidence distinct from issuer risk in review
-  and portfolio-manager prompts.
-- Recover invalid full-mode legal JSON once through the existing text-only recovery
-  seat, retain cost attribution, validate regulatory-risk entry shapes, and fail
-  closed when recovery is unsuccessful or changes retained legal assessments.
-- Leave more output room for Value Trap reasoning, retrieve unfetched approved
-  guidance documents when extraction is unavailable, and report evidence coverage
-  gaps separately from publication status in the batch health digest.
+- Pin fixed releases of `pyjwt` (2.15.1), `multidict` (6.9.1), `langgraph-sdk`
+  (0.4.5), `werkzeug` (3.1.9) and `virtualenv` (21.13.0), each past the 14-day
+  release-age cooldown, and drop the pip-audit ignores they made obsolete.
 
 ## [4.0.0] - 2026-09-16
 

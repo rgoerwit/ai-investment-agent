@@ -48,9 +48,11 @@ silently confer either status.
 
 Output budgets separate the application's visible-output intent from any API-side
 reasoning reserve. Saved diagnostics record both caps and classify an invalid response
-that consumes the API cap as `output_cap_exhausted`; an incomplete structured block
-below that cap remains `incomplete_structured_output`, while a complete response that
-omits a required contract field is `output_contract_violation`. Raising
+that the provider stopped at its output cap, or that consumed the API cap, as
+`output_cap_exhausted` (the stop reason decides first: a capped response can report a
+few tokens under the cap); an incomplete structured block otherwise remains
+`incomplete_structured_output`, while a complete response that omits a required
+contract field is `output_contract_violation`. Raising
 `LLM_BASE_OUTPUT_TOKENS` scales fractional seat budgets and is therefore an experiment,
 not a substitute for correct block-completion detection.
 
@@ -69,7 +71,9 @@ stop: that attempt is recorded as `output_cap_exhausted` and returned to the own
 validator. Structural recovery happens only after a provider-success response fails
 validation and changes the request: it is text-only, uses the base provider's reasoning
 binding, inherits the originating seat's visible-output budget, and regenerates from
-already gathered evidence. Quick mode arms this bounded recovery only for Senior
+already gathered evidence. After an `output_cap_exhausted` failure it runs the same
+binding at the FAST intent's lower reasoning value (`RETRY-CAP`), falling back to the
+reasoning value (`RETRY-HIGH`) only where none is lower. Quick mode arms this bounded recovery only for Senior
 Fundamentals, Foreign Language and Portfolio Manager. Cost rollups keep recovery usage under the
 originating analyst for human interpretation and also expose the canonical
 `analyst_retry` billing seat plus `originating_seat_id` for precise comparison.

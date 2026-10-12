@@ -129,8 +129,9 @@ control. EPS awards require eligible per-share lineage rather than total-profit 
 
 The canonical analysis snapshot and decision policy constrain model conclusions.
 Reliable financial-health failures require DO NOT INITIATE unless the documented
-canonical deep-value/current-ratio exception applies; active-tender policy preserves
-its health/growth exemption. Growth exceptions permit at most HOLD and do not erase
+canonical deep-value/current-ratio exception applies; an active tender for the
+company's own shares, with a stated price, keeps its health/growth exemption (an
+acquirer's offer does not). Growth exceptions permit at most HOLD and do not erase
 independent initiation blockers. Missing or suspect evidence remains indeterminate,
 and a BUY needs an eligible supporting fact as well as gate compliance. The same
 health/growth/initiation assessments are projected into PM context, saved policy,
@@ -224,7 +225,10 @@ runtime. A provider response that explicitly stopped at its output cap is not re
 with the same cap: it is recorded as `output_cap_exhausted` and returned to the owning
 node. Required output contracts are then validated independently; full mode permits one
 text-only reasoning recovery for eligible analysts, while quick mode limits that cost
-to Foreign Language, Senior Fundamentals, and Portfolio Manager. Junior Fundamentals
+to Foreign Language, Senior Fundamentals, and Portfolio Manager. A response stopped at
+its output cap is regenerated at a lower reasoning setting (`RETRY-CAP`), since more
+reasoning would spend the same budget again; other contract failures use the higher
+recovery setting (`RETRY-HIGH`). Junior Fundamentals
 uses the code-owned acquisition relay instead of structural regeneration. Portfolio
 Manager shares one correction allowance between structural and semantic repair.
 Recovery reuses evidence already gathered, exposes no tools, inherits the originating seat's output budget, and remains
