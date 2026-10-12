@@ -59,6 +59,7 @@ from src.llm_runtime.rate_limits import limiter_for_binding
 from src.runtime_diagnostics import classify_failure
 from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
+from src.tooling.runtime import INSPECTION_FAILED
 
 logger = structlog.get_logger(__name__)
 
@@ -778,7 +779,7 @@ class FinancialSituationMemory:
             approved_metadata: list[dict[str, Any]] = []
 
             for situation, meta in zip(situations, metadata, strict=True):
-                approved = await get_current_inspection_service().check(
+                decision, approved = await get_current_inspection_service().evaluate(
                     InspectionEnvelope(
                         content_text=situation,
                         raw_content=situation,
@@ -787,11 +788,21 @@ class FinancialSituationMemory:
                         metadata={"collection": self.name},
                     )
                 )
-                if isinstance(approved, str) and approved.startswith("TOOL_BLOCKED:"):
+                # Only approved text is persisted; a block and a backend that
+                # could not inspect (fail closed) both keep it out, each
+                # logged as what it is.
+                if decision.enforced == "blocked":
                     logger.warning(
                         "memory_write_blocked",
                         collection=self.name,
                         reason=approved,
+                    )
+                    continue
+                if decision.enforced not in ("allowed", "sanitized"):
+                    logger.warning(
+                        "memory_write_inspection_failed",
+                        collection=self.name,
+                        reason=INSPECTION_FAILED,
                     )
                     continue
 

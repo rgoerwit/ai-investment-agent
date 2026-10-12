@@ -370,7 +370,7 @@ class TestAuditorNodeWithPreload:
     @pytest.mark.parametrize(
         ("failure", "expected_content"),
         [
-            (RuntimeError("third pass failure"), "TOOL_ERROR: RuntimeError"),
+            (RuntimeError("third pass failure"), "TOOL_ERROR: TOOL_EXECUTION_FAILED"),
             # A tool timeout is the typed code the graph tool node uses, not
             # the class name the model relabelled as EXTRACTION_TIMEOUT.
             (TimeoutError("exceeded 45.0s"), "TOOL_ERROR: TOOL_TIMEOUT"),

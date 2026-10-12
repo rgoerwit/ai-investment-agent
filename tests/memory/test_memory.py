@@ -32,6 +32,7 @@ from src.memory import (
     get_all_memory_stats,
     get_ticker_memory_stats,
 )
+from src.tooling.inspector import InspectionDecision
 from tests.helpers.memory_config import pin_embedding_identity
 
 
@@ -655,7 +656,14 @@ class TestAddSituationsCollectionNotFoundRetry:
             "src.memory.get_current_inspection_service"
         ) as mock_inspection_service:
             mock_inspection = MagicMock()
-            mock_inspection.check = AsyncMock(return_value="approved content")
+            mock_inspection.evaluate = AsyncMock(
+                return_value=(
+                    InspectionDecision(
+                        action="allow", threat_level="safe", enforced="allowed"
+                    ),
+                    "approved content",
+                )
+            )
             mock_inspection_service.return_value = mock_inspection
 
             ok = await memory.add_situations(["test situation"], [{"ticker": "T"}])
@@ -693,7 +701,14 @@ class TestAddSituationsCollectionNotFoundRetry:
             "src.memory.get_current_inspection_service"
         ) as mock_inspection_service:
             mock_inspection = MagicMock()
-            mock_inspection.check = AsyncMock(return_value="approved")
+            mock_inspection.evaluate = AsyncMock(
+                return_value=(
+                    InspectionDecision(
+                        action="allow", threat_level="safe", enforced="allowed"
+                    ),
+                    "approved",
+                )
+            )
             mock_inspection_service.return_value = mock_inspection
 
             ok = await memory.add_situations(["test"], [{}])

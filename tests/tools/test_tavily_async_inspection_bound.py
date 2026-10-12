@@ -220,7 +220,7 @@ async def test_an_enforced_inspection_failure_returns_none_like_a_timeout(
     async def _failed(raw: Any, query_text: str) -> Any:
         del query_text
         inspected.append(raw)
-        return "TOOL_BLOCKED: INSPECTION_BACKEND_ERROR"
+        return "TOOL_BLOCKED: INSPECTION_FAILED"
 
     inspect_tavily_with(monkeypatch, _failed, enforced="inspection_failed")
     install(_Search())

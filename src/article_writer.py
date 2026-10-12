@@ -57,7 +57,7 @@ from src.runtime_diagnostics import (
 from src.runtime_services import get_current_tool_service
 from src.tavily_utils import search_tavily_inspected
 from src.token_tracker import TokenTrackingCallback, get_tracker
-from src.tooling.runtime import ToolInvocation
+from src.tooling.runtime import ToolInvocation, tool_error_text
 
 # Maximum characters for fact-check context (controls token usage)
 MAX_FACT_CHECK_CHARS = 1500
@@ -1821,7 +1821,9 @@ class ArticleEditor:
                 if tool_name == "fetch_reference_content":
                     url = tool_args.get("url", "")
                     url_cache[url] = content
-                    if content.startswith(_REFERENCE_FAILURE_PREFIXES):
+                    if tool_result.blocked or content.startswith(
+                        _REFERENCE_FAILURE_PREFIXES
+                    ):
                         self._failed_urls.add(url)
 
                 results.append(ToolMessage(content=content, tool_call_id=tool_id))
@@ -1831,7 +1833,7 @@ class ArticleEditor:
                     tool=tool_name,
                     **summarize_exception(e, operation="tool_execution_failed"),
                 )
-                error_content = f"TOOL_ERROR: {e}"
+                error_content = tool_error_text(e)
 
                 # Cache errors too — no point retrying a broken URL
                 if tool_name == "fetch_reference_content":

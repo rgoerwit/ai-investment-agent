@@ -781,12 +781,25 @@ tool raises `ToolCallBlocked` for `blocked`, which `ToolExecutionService` turns
 into the same blocked `ToolResult` a `before()` hook produces, so the ledger
 records `BLOCKED`; it raises `ToolCallFailed` (a typed reason code) for
 `inspection_failed` and a timeout, which reaches `EvidenceRecorder.failed` as
-`FAILED` with that code and the model as `TOOL_ERROR: <code>`. The content hook
-does the same for every tool, and Tavily returns `None` for an inspection that
-failed, as for a timeout. Approved text under the useful-text minimum is
-`DOCUMENT_TEXT_UNAVAILABLE`, and an empty replacement counts as a replacement.
-A fail-closed backend error carries the code `INSPECTION_BACKEND_ERROR`, never the
-exception text, which reaches only the log through `summarize_exception`.
+`FAILED` with that code and the model as `TOOL_ERROR: <code>`. Approved text
+under the useful-text minimum is `DOCUMENT_TEXT_UNAVAILABLE`, and an empty
+replacement counts as a replacement. A fail-closed backend error carries the
+code `INSPECTION_FAILED`, never the exception text, which reaches only the log
+through `summarize_exception`.
+
+A cross-commit review then found the contract applied to one tool only:
+`get_official_filings`, `search_foreign_sources`, `extract_guidance_sources`,
+`search_claim` and `fetch_reference_content` still returned the placeholder as
+`EVIDENCE_FOUND` or search results, and the graph tool node told the model
+`TOOL_EXECUTION_FAILED` while the ledger recorded the real code. Every tool that
+inspects its own content now reads the outcome through `approved_tool_content`
+(`src/tooling/inspection_service.py`); the content hook shares that mapping but
+returns its blocked result. Tavily returns `None` for a failed, timed-out or
+blocked inspection, except that a single-source tool passes `raise_on_block` and
+records `BLOCKED`. One `tool_failure_reason` in `src/tooling/runtime.py`, which
+also owns every reason code (`tests/tooling/test_tool_reason_codes.py`),
+classifies each raised failure, so the model sees `TOOL_ERROR: <code>` on every
+surface, the graph tool node included.
 Official documents get no stricter treatment than the configured mode.
 
 The pdftotext child used to be killed only on its own timeout. The runner's

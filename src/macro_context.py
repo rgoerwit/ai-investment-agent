@@ -31,6 +31,7 @@ from src.macro_regime import MacroRegime, parse_macro_regime
 from src.macro_regions import infer_macro_region
 from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
+from src.tooling.runtime import INSPECTION_FAILED
 
 logger = structlog.get_logger(__name__)
 
@@ -326,7 +327,7 @@ async def get_macro_context(
         )
         report = str(cached.get("report", ""))
         # Inspect cached brief on re-entry as untrusted cached_context.
-        report = await get_current_inspection_service().check(
+        decision, report = await get_current_inspection_service().evaluate(
             InspectionEnvelope(
                 content_text=report,
                 raw_content=report,
@@ -335,14 +336,24 @@ async def get_macro_context(
                 metadata={"region": region, "ticker": ticker},
             )
         )
-        if isinstance(report, str) and report.startswith("TOOL_BLOCKED:"):
-            logger.warning(
-                "macro_context_cache_blocked",
-                ticker=ticker,
-                region=region,
-                cache_path=str(_cache_path(region)),
-                blocked_reason=report.removeprefix("TOOL_BLOCKED:").strip(),
-            )
+        if decision.enforced not in ("allowed", "sanitized"):
+            cache_fields = {
+                "ticker": ticker,
+                "region": region,
+                "cache_path": str(_cache_path(region)),
+            }
+            if decision.enforced == "blocked":
+                logger.warning(
+                    "macro_context_cache_blocked",
+                    **cache_fields,
+                    blocked_reason=decision.reason,
+                )
+            else:
+                logger.warning(
+                    "macro_context_cache_inspection_failed",
+                    **cache_fields,
+                    reason=INSPECTION_FAILED,
+                )
             return MacroContextResult(
                 report="",
                 region=region,

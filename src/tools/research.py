@@ -12,7 +12,9 @@ from src.error_safety import summarize_exception
 from src.llm_runtime.timeouts import require_allowance
 from src.runtime_services import get_current_inspection_service
 from src.ticker_utils import normalize_ticker
+from src.tooling.inspection_service import approved_tool_content
 from src.tooling.inspector import InspectionEnvelope, SourceKind
+from src.tooling.runtime import ToolCallBlocked, ToolCallFailed
 from src.tools import shared
 
 logger = structlog.get_logger(__name__)
@@ -104,13 +106,15 @@ async def search_foreign_sources(
         )
 
         # Inspect merged foreign-search output after DDG+Tavily merge.
-        results_str = await get_current_inspection_service().check(
-            InspectionEnvelope(
-                content_text=results_str,
-                raw_content=results_str,
-                source_kind=SourceKind.web_search,
-                source_name="foreign_search_merged",
-                metadata={"ticker": ticker, "query": search_query[:100]},
+        results_str = approved_tool_content(
+            await get_current_inspection_service().evaluate(
+                InspectionEnvelope(
+                    content_text=results_str,
+                    raw_content=results_str,
+                    source_kind=SourceKind.web_search,
+                    source_name="foreign_search_merged",
+                    metadata={"ticker": ticker, "query": search_query[:100]},
+                )
             )
         )
 
@@ -140,6 +144,8 @@ Ticker: {ticker} ({company_name if company_resolved else "UNVERIFIED COMPANY"})
 Note: Verify dates and currencies in the source data.
 
 {results_str}"""
+    except (ToolCallBlocked, ToolCallFailed):
+        raise
     except Exception as exc:
         summary = summarize_exception(exc, operation="search_foreign_sources")
         logger.error("foreign_source_search_failed", ticker=ticker, **summary)
@@ -178,7 +184,7 @@ async def extract_guidance_sources(
     if not accepted:
         return "STATUS: INSUFFICIENT_DATA\nREASON: NO_VALID_GUIDANCE_URLS"
 
-    raw = await extract_tavily_inspected(accepted, query=query)
+    raw = await extract_tavily_inspected(accepted, query=query, raise_on_block=True)
     if not raw:
         return "STATUS: INSUFFICIENT_DATA\nREASON: GUIDANCE_EXTRACTION_FAILED"
     if isinstance(raw, dict) and raw.get("error"):
@@ -263,14 +269,17 @@ async def get_official_filings(
             "Use search_foreign_sources instead."
         )
     report = result.to_report_string()
-    # Inspect official filing text (lighter treatment via SourceKind).
-    inspected = await get_current_inspection_service().check(
-        InspectionEnvelope(
-            content_text=report,
-            raw_content=report,
-            source_kind=SourceKind.official_filing,
-            source_name="official_filings",
-            metadata={"ticker": normalized},
+    # Inspect official filing text (lighter treatment via SourceKind). Only
+    # approved text becomes evidence; a block or failure leaves as such.
+    inspected = approved_tool_content(
+        await get_current_inspection_service().evaluate(
+            InspectionEnvelope(
+                content_text=report,
+                raw_content=report,
+                source_kind=SourceKind.official_filing,
+                source_name="official_filings",
+                metadata={"ticker": normalized},
+            )
         )
     )
     return f"STATUS: EVIDENCE_FOUND\n{inspected}"

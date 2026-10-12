@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A tool's own content inspection is read one way. `get_official_filings`,
+  `search_foreign_sources`, `extract_guidance_sources`, `search_claim` and
+  `fetch_reference_content` returned the `TOOL_BLOCKED:` placeholder as their text
+  (as `STATUS: EVIDENCE_FOUND` or as search results), so the ledger recorded a block
+  as a success; they now go through `approved_tool_content`, as the official-document
+  tool does: a block is a `BLOCKED` record, a timeout or backend failure a `FAILED`
+  call. A blocked Tavily result is no result for callers that merge several sources;
+  single-source tools raise it. Every surface (graph node, Consultant, Auditor,
+  editor) now tells the model the code the ledger records (`TOOL_TIMEOUT`, the typed
+  code, or `TOOL_EXECUTION_FAILED`), never an exception class or exception prose;
+  the editor loop used to send the exception text. Reason codes are defined once in
+  `src/tooling/runtime.py`: `INSPECTION_BACKEND_ERROR` is now `INSPECTION_FAILED`
+  and `OFFICIAL_DOCUMENT_BLOCKED` is `INSPECTION_BLOCKED`. Memory writes and the
+  macro cache log a backend failure as `*_inspection_failed`, not as a block.
+
 - The macro-context cache and the retrospective evaluation memo are written through
   `atomic_write_text`: the macro cache used a fixed `.tmp` name, so two tickers in
   one region raced on the same temp file. `LLM_ATTEMPTS` now caps an explicit

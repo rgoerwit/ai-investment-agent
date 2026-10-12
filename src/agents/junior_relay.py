@@ -13,6 +13,7 @@ from src.runtime_diagnostics import (
     success_artifact,
 )
 from src.tooling.evidence_recorder import classify_evidence_value
+from src.tooling.runtime import TOOL_TIMEOUT, tool_error_message
 
 # Required acquisition sections are a contract, independent of tool permissions.
 JUNIOR_REQUIRED_TOOLS = ("get_financial_metrics", "get_fundamental_analysis")
@@ -52,8 +53,8 @@ def build_junior_relay(
                 payload = str(message.content)
                 if reason == "PARTIAL_PROVIDER_ERROR":
                     payload += "\n\n[CODE ACQUISITION NOTE: Partial provider failure; successful inspected results retained. Error envelopes are unavailable evidence.]"
-            elif message.content == "TOOL_ERROR: TOOL_TIMEOUT":
-                reason = "TOOL_TIMEOUT"
+            elif message.content == tool_error_message(TOOL_TIMEOUT):
+                reason = TOOL_TIMEOUT
                 error_kind = "timeout"
             elif (
                 not metrics_ok

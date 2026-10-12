@@ -29,6 +29,7 @@ def _has_inspection_call(src: str) -> bool:
     return (
         "INSPECTION_SERVICE.check" in src
         or "get_current_inspection_service().check" in src
+        or "get_current_inspection_service().evaluate" in src
         or "INSPECTION_SERVICE.evaluate" in src
         or "self._inspection_service.evaluate" in src
     )

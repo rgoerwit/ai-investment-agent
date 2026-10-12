@@ -456,9 +456,13 @@ class ResearchBudgetLedger:
         blocked: bool = False,
         args: Mapping[str, Any] | None = None,
     ) -> None:
-        """Classify typed tool outcomes without conflating missing data and faults."""
+        """Classify typed tool outcomes without conflating missing data and faults.
+
+        A block is the ``blocked`` flag the tool service set, never text that
+        happens to read like its placeholder.
+        """
         text = str(value).strip().upper()
-        if blocked or text.startswith("TOOL_BLOCKED:"):
+        if blocked:
             self.record_tool_blocked(tool_name)
         elif text.startswith("STATUS: INSUFFICIENT_DATA"):
             self.record_tool_insufficient(tool_name)

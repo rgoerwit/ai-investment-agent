@@ -21,7 +21,9 @@ from src.error_safety import (
 from src.llm_runtime.timeouts import require_allowance
 from src.runtime_diagnostics import classify_failure
 from src.runtime_services import get_current_inspection_service
+from src.tooling.inspection_service import approved_tool_content
 from src.tooling.inspector import InspectionEnvelope, SourceKind
+from src.tooling.runtime import ToolCallBlocked, ToolCallFailed
 from src.tooling.tool_argument_policy import _is_reasonable_reference_url
 
 logger = structlog.get_logger(__name__)
@@ -157,7 +159,14 @@ async def fetch_reference_content(url: str) -> str:
             source_uri=url,
             metadata={"url": url[:200]},
         )
-        return str(await get_current_inspection_service().check(envelope))
+        return str(
+            approved_tool_content(
+                await get_current_inspection_service().evaluate(envelope)
+            )
+        )
+
+    except (ToolCallBlocked, ToolCallFailed):
+        raise
 
     except httpx.TimeoutException:
         return _reference_fetch_timed_out(url, timeout)
@@ -248,12 +257,12 @@ async def search_claim(query: str) -> str:
     try:
         from src.tavily_utils import tavily_search_with_timeout
 
-        result = await tavily_search_with_timeout({"query": query.strip()})
+        # Its one source: a block is this call's outcome, recorded BLOCKED.
+        result = await tavily_search_with_timeout(
+            {"query": query.strip()}, raise_on_block=True
+        )
         if not result:
             return "SEARCH_UNAVAILABLE: Tavily search returned no results (API may be unavailable)"
-
-        if isinstance(result, str) and result.startswith("TOOL_BLOCKED:"):
-            return result
 
         text = str(result)
         if len(text) > MAX_CLAIM_SEARCH_CHARS:
@@ -264,6 +273,9 @@ async def search_claim(query: str) -> str:
             result_chars=len(text),
         )
         return text
+
+    except ToolCallBlocked:
+        raise
 
     except Exception as e:
         summary = summarize_exception(

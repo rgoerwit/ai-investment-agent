@@ -14,7 +14,11 @@ from src.error_safety import redact_sensitive_text, summarize_exception
 from src.forensic_budget import ResearchBudgetLedger, ResearchBudgetPolicy
 from src.runtime_services import get_current_tool_service
 from src.ticker_utils import normalize_ticker
-from src.tooling.runtime import ToolInvocation
+from src.tooling.runtime import (
+    ToolInvocation,
+    tool_error_message,
+    tool_failure_reason,
+)
 from src.tooling.structured_ingress import (
     build_structured_ingress_record,
     merge_structured_inputs,
@@ -24,6 +28,8 @@ from src.utils import format_tool_output_cap
 logger = structlog.get_logger(__name__)
 
 _TOOL_OUTPUT_MAX_CHARS = 20_000
+# This node's own code: the call never reached the tool service.
+_UNKNOWN_TOOL = "UNKNOWN_TOOL"
 
 
 def _cap_tool_output(content: str, tool_name: str) -> str:
@@ -151,16 +157,8 @@ def create_agent_tool_node(
 
         if not tool_fn:
             return (
-                _error_message(
-                    tool_name,
-                    tool_id,
-                    "TOOL_ERROR: UNKNOWN_TOOL",
-                ),
-                _structured_record(
-                    tool_name,
-                    "",
-                    failure_reason="UNKNOWN_TOOL",
-                ),
+                _error_message(tool_name, tool_id, tool_error_message(_UNKNOWN_TOOL)),
+                _structured_record(tool_name, "", failure_reason=_UNKNOWN_TOOL),
             )
 
         logger.debug(
@@ -209,46 +207,30 @@ def create_agent_tool_node(
                     blocked=tool_result.blocked,
                 ),
             )
-        except TimeoutError as exc:
-            logger.error(
-                "tool_call_timeout",
-                agent=agent_key,
-                tool=tool_name,
-                reason=redact_sensitive_text(str(exc)),
-            )
-            return (
-                _error_message(
-                    tool_name,
-                    tool_id,
-                    "TOOL_ERROR: TOOL_TIMEOUT",
-                ),
-                _structured_record(
-                    tool_name,
-                    "",
-                    failure_reason="TOOL_TIMEOUT",
-                ),
-            )
         except Exception as exc:
-            logger.error(
-                "tool_call_error",
-                agent=agent_key,
-                tool=tool_name,
-                **summarize_exception(exc, operation="tool_call_error"),
-            )
+            reason, _ = tool_failure_reason(exc)
+            if isinstance(exc, TimeoutError):
+                logger.error(
+                    "tool_call_timeout",
+                    agent=agent_key,
+                    tool=tool_name,
+                    reason=redact_sensitive_text(str(exc)),
+                )
+            else:
+                logger.error(
+                    "tool_call_error",
+                    agent=agent_key,
+                    tool=tool_name,
+                    failure_reason=reason,
+                    **summarize_exception(exc, operation="tool_call_error"),
+                )
             return (
                 # The operator log carries a safe exception summary. The model
-                # receives a stable classification rather than raw exception
-                # prose, and the shared research ledger can open its tool circuit.
-                _error_message(
-                    tool_name,
-                    tool_id,
-                    "TOOL_ERROR: TOOL_EXECUTION_FAILED",
-                ),
-                _structured_record(
-                    tool_name,
-                    "",
-                    failure_reason="TOOL_EXECUTION_FAILED",
-                ),
+                # receives the code the ledger records (the service's one
+                # classification), never exception prose, and any TOOL_ERROR
+                # lets the shared research ledger open its tool circuit.
+                _error_message(tool_name, tool_id, tool_error_message(reason)),
+                _structured_record(tool_name, "", failure_reason=reason),
             )
 
     async def agent_tool_node(state: AgentState, config) -> dict:

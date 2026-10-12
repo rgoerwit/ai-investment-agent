@@ -9,7 +9,6 @@ import pytest
 
 from src.error_safety import summarize_exception
 from src.tooling.inspection_service import (
-    INSPECTION_BACKEND_ERROR,
     InspectionService,
     configure_content_inspection,
 )
@@ -20,6 +19,7 @@ from src.tooling.inspector import (
     NullInspector,
     SourceKind,
 )
+from src.tooling.runtime import INSPECTION_FAILED
 
 
 def _envelope(text: str = "hello") -> InspectionEnvelope:
@@ -349,9 +349,9 @@ async def test_fail_closed_backend_error_is_inspection_failed_with_a_code(mode):
         decision, value = await svc.evaluate(_envelope("anything"))
 
     assert decision.enforced == "inspection_failed"
-    assert value == f"TOOL_BLOCKED: {INSPECTION_BACKEND_ERROR}"
-    assert decision.reason == INSPECTION_BACKEND_ERROR
-    assert decision.findings == [INSPECTION_BACKEND_ERROR]
+    assert value == f"TOOL_BLOCKED: {INSPECTION_FAILED}"
+    assert decision.reason == INSPECTION_FAILED
+    assert decision.findings == [INSPECTION_FAILED]
     assert _SECRET not in repr(decision)
     (call,) = log.error.call_args_list
     assert call.args == ("content_inspection_backend_error",)

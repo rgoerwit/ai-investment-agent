@@ -24,6 +24,7 @@ from src.agents.consultant_nodes import (
 from src.agents.forensic_repair import canonicalize_forensic_auditor_output
 from src.report_generator import QuietModeReporter
 from src.runtime_config import RuntimeConfig, use_runtime_config
+from src.tooling.runtime import ToolResult
 
 
 def _quick_run():
@@ -140,7 +141,7 @@ class TestDataFormatEdgeCases:
 
         class PassthroughService:
             async def execute(self, invocation, runner):
-                return SimpleNamespace(value=await runner(invocation.args))
+                return ToolResult(value=await runner(invocation.args))
 
         result = await run_bounded_consultant_loop(
             active_llm="active",
@@ -1722,7 +1723,7 @@ class TestTruncatedFinalResponse:
 
         class PassthroughService:
             async def execute(self, invocation, runner):
-                return SimpleNamespace(value=await runner(invocation.args))
+                return ToolResult(value=await runner(invocation.args))
 
         result = await run_bounded_consultant_loop(
             **self._loop_kwargs(

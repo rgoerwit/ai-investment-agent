@@ -161,6 +161,7 @@ async def _execute_tool_call(
                     runner=_run_tool,
                 )
                 result = tool_result.value
+                result_failed = tool_result.blocked
             except Exception as tool_err:
                 result_failed = True
                 logger.warning(
@@ -174,9 +175,11 @@ async def _execute_tool_call(
         result_failed = True
         result = f"Unknown tool: {tool_call['name']}"
 
-    if isinstance(result, str):
+    if isinstance(result, str) and not result_failed:
+        # A raised failure or a block is already known; what is left to read
+        # is a tool's own legacy error text or JSON error payload.
         stripped = result.strip()
-        if stripped.startswith(("TOOL_ERROR:", "TOOL_BLOCKED:")):
+        if stripped.startswith("TOOL_ERROR:"):
             result_failed = True
         else:
             try:

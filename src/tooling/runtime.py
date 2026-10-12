@@ -74,6 +74,22 @@ ToolSource: TypeAlias = Literal[
 ]
 
 
+# The secret-free reason codes of a tool call that produced no usable result:
+# what failure observers record, what the model is told after ``TOOL_ERROR:``
+# or ``TOOL_BLOCKED:``, and what callers compare against. Defined here only;
+# everywhere else imports them (tests/tooling/test_tool_reason_codes.py).
+TOOL_TIMEOUT = "TOOL_TIMEOUT"
+TOOL_EXECUTION_FAILED = "TOOL_EXECUTION_FAILED"
+# Inspection could not finish inside the caller's allowance.
+INSPECTION_TIMEOUT = "INSPECTION_TIMEOUT"
+# Inspection could not run (a fail-closed backend error).
+INSPECTION_FAILED = "INSPECTION_FAILED"
+# Inspection enforced a block on the content the tool would have returned.
+INSPECTION_BLOCKED = "INSPECTION_BLOCKED"
+
+_TOOL_ERROR_PREFIX = "TOOL_ERROR: "
+
+
 class ToolCallBlocked(RuntimeError):
     """Raised to block a tool call: by a ``before()`` hook, or by the tool
     itself when its own content inspection enforced a block.
@@ -197,14 +213,7 @@ class ToolExecutionService:
         auditor, preflight) leaves the same trace. An observer's own fault is
         logged, never allowed to replace the failure being reported.
         """
-        if isinstance(exc, _ScopedToolTimeout):
-            reason, scope = "TOOL_TIMEOUT", exc.scope
-        elif isinstance(exc, TimeoutError):
-            reason, scope = "TOOL_TIMEOUT", None
-        elif isinstance(exc, ToolCallFailed):
-            reason, scope = exc.reason, None
-        else:
-            reason, scope = "TOOL_EXECUTION_FAILED", None
+        reason, scope = tool_failure_reason(exc)
         for hook in self._hooks:
             if not isinstance(hook, ToolFailureObserver):
                 continue
@@ -349,15 +358,32 @@ class ToolExecutionService:
         return result
 
 
-def tool_error_text(exc: Exception) -> str:
-    """What a model is told of a tool call that raised: a timeout is the typed
-    ``TOOL_TIMEOUT`` (the code the graph tool node uses), a ``ToolCallFailed``
-    its reason code, any other failure its class name, never exception prose."""
+def tool_failure_reason(exc: BaseException) -> tuple[str, ToolTimeoutScope | None]:
+    """The one classification of a tool call that raised: its reason code and,
+    for a timeout this service scoped, where it fired.
+
+    A timeout is ``TOOL_TIMEOUT``, a ``ToolCallFailed`` its own code, anything
+    else ``TOOL_EXECUTION_FAILED``: never the exception's class or prose. Failure
+    observers record it, and every surface tells the model the same code.
+    """
+    if isinstance(exc, _ScopedToolTimeout):
+        return TOOL_TIMEOUT, exc.scope
     if isinstance(exc, TimeoutError):
-        return "TOOL_ERROR: TOOL_TIMEOUT"
+        return TOOL_TIMEOUT, None
     if isinstance(exc, ToolCallFailed):
-        return f"TOOL_ERROR: {exc.reason}"
-    return f"TOOL_ERROR: {type(exc).__name__}"
+        return exc.reason, None
+    return TOOL_EXECUTION_FAILED, None
+
+
+def tool_error_message(reason: str) -> str:
+    """The model-facing text of a failed tool call with *reason*."""
+    return f"{_TOOL_ERROR_PREFIX}{reason}"
+
+
+def tool_error_text(exc: BaseException) -> str:
+    """What a model is told of a tool call that raised (``tool_failure_reason``)."""
+    reason, _ = tool_failure_reason(exc)
+    return tool_error_message(reason)
 
 
 def _blocked_result(call: ToolInvocation, exc: ToolCallBlocked) -> ToolResult:

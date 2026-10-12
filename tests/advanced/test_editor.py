@@ -2172,11 +2172,14 @@ class TestEditorToolCalling:
 
     @pytest.mark.asyncio
     async def test_execute_tool_calls_handles_tool_exception(self):
-        """_execute_tool_calls should catch exceptions from tool execution."""
+        """_execute_tool_calls catches a tool failure and tells the model its
+        typed code, never the exception prose (which can carry a URL or key)."""
         editor = _create_article_editor()
 
         mock_tool = AsyncMock()
-        mock_tool.ainvoke = AsyncMock(side_effect=RuntimeError("Connection reset"))
+        mock_tool.ainvoke = AsyncMock(
+            side_effect=RuntimeError("Connection reset https://x?token=1")
+        )
         mock_tool.name = "fetch_reference_content"
 
         editor._tools_by_name = {"fetch_reference_content": mock_tool}
@@ -2192,8 +2195,8 @@ class TestEditorToolCalling:
         )
 
         assert len(results) == 1
-        assert "TOOL_ERROR" in results[0].content
-        assert "Connection reset" in results[0].content
+        assert results[0].content == "TOOL_ERROR: TOOL_EXECUTION_FAILED"
+        assert "https://example.com" in editor._failed_urls
 
     @pytest.mark.asyncio
     async def test_execute_tool_calls_routes_through_tool_service(self):
@@ -2229,6 +2232,36 @@ class TestEditorToolCalling:
         mock_tool.ainvoke.assert_not_called()
         assert len(results) == 1
         assert results[0].content == "hooked-result"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("blocked", [True, False])
+    async def test_a_blocked_reference_fetch_marks_the_url_failed(self, blocked):
+        """The service's blocked flag decides, whatever the text reads like."""
+        from src.tooling.runtime import ToolResult
+
+        editor = _create_article_editor()
+        mock_tool = AsyncMock()
+        mock_tool.name = "fetch_reference_content"
+        editor._tools_by_name = {"fetch_reference_content": mock_tool}
+        tool_service = Mock()
+        tool_service.execute = AsyncMock(
+            return_value=ToolResult(value="TOOL_BLOCKED: x", blocked=blocked)
+        )
+        with patch(
+            "src.article_writer.get_current_tool_service",
+            return_value=tool_service,
+        ):
+            await editor._execute_tool_calls(
+                [
+                    {
+                        "name": "fetch_reference_content",
+                        "args": {"url": "https://example.com"},
+                        "id": "call_1",
+                    }
+                ]
+            )
+
+        assert ("https://example.com" in editor._failed_urls) is blocked
 
 
 # =============================================================================
@@ -2412,17 +2445,21 @@ class TestSearchClaimTool:
             assert "SEARCH_UNAVAILABLE" in result
 
     @pytest.mark.asyncio
-    async def test_search_claim_preserves_blocked_sentinel_from_tavily(self):
-        """Blocked Tavily content should pass through without a second inspection pass."""
+    async def test_search_claim_raises_a_tavily_block_never_returns_it(self):
+        """Its one source blocked is the call blocked: raised for the tool
+        service to record, never returned as a result or folded into
+        SEARCH_FAILED."""
         from src.editor_tools import search_claim
+        from src.tooling.runtime import INSPECTION_BLOCKED, ToolCallBlocked
 
         with patch(
             "src.tavily_utils.tavily_search_with_timeout",
             new_callable=AsyncMock,
-            return_value="TOOL_BLOCKED: suspicious content",
-        ):
-            result = await search_claim.ainvoke({"query": "test query here"})
-            assert result == "TOOL_BLOCKED: suspicious content"
+            side_effect=ToolCallBlocked(INSPECTION_BLOCKED),
+        ) as search:
+            with pytest.raises(ToolCallBlocked):
+                await search_claim.ainvoke({"query": "test query here"})
+        assert search.await_args.kwargs == {"raise_on_block": True}
 
     @pytest.mark.asyncio
     async def test_search_truncates_long_results(self):

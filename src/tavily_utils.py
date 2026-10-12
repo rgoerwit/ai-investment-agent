@@ -21,7 +21,14 @@ from src.error_safety import summarize_exception
 from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.timeouts import require_allowance
 from src.runtime_services import get_current_inspection_service
+from src.tooling.inspection_service import approved_tool_content
 from src.tooling.inspector import InspectionEnvelope, SourceKind
+from src.tooling.runtime import (
+    INSPECTION_BLOCKED,
+    INSPECTION_TIMEOUT,
+    ToolCallBlocked,
+    ToolCallFailed,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -102,7 +109,12 @@ def _build_tavily_tool(
 
 
 async def _inspect_before_deadline(
-    raw: Any, query_text: str, *, deadline: float, log_fields: dict[str, Any]
+    raw: Any,
+    query_text: str,
+    *,
+    deadline: float,
+    log_fields: dict[str, Any],
+    raise_on_block: bool = False,
 ) -> Any:
     """Inspect *raw* within what is left of *deadline*, or return ``None``.
 
@@ -114,6 +126,11 @@ async def _inspect_before_deadline(
     ignores cancellation cannot hold the caller). An enforced
     ``inspection_failed`` (a fail-closed backend error) returns ``None`` too:
     one meaning for "could not inspect".
+
+    An enforced block is never returned as placeholder text. By default it is
+    ``None`` too: a caller merging several sources keeps the others. A tool
+    whose whole answer is this one result passes *raise_on_block* and gets
+    ``ToolCallBlocked``, so the ledger records the call ``BLOCKED``.
     """
     if raw is None:
         return None
@@ -134,17 +151,25 @@ async def _inspect_before_deadline(
     )
     if outcome is None:
         logger.warning("tavily_inspection_timeout", **log_fields)
-        return None
-    decision, inspected = outcome
-    if decision.enforced == "inspection_failed":
+    try:
+        return approved_tool_content(outcome)
+    except ToolCallFailed as exc:
         # Could not inspect: the same fail-closed result as a timeout.
-        logger.warning("tavily_inspection_failed", **log_fields)
+        if exc.reason != INSPECTION_TIMEOUT:
+            logger.warning("tavily_inspection_failed", reason=exc.reason, **log_fields)
         return None
-    return inspected
+    except ToolCallBlocked:
+        logger.warning("tavily_result_blocked", reason=INSPECTION_BLOCKED, **log_fields)
+        if raise_on_block:
+            raise
+        return None
 
 
 async def tavily_search_with_timeout(
-    query: dict[str, str], timeout: float | None = None
+    query: dict[str, str],
+    timeout: float | None = None,
+    *,
+    raise_on_block: bool = False,
 ) -> Any:
     """
     Execute Tavily search with timeout protection.
@@ -156,9 +181,12 @@ async def tavily_search_with_timeout(
         timeout: Maximum seconds to wait for search and inspection together
             (default: TAVILY_SEARCH_TIMEOUT_SECONDS), shrunk to a caller's
             enclosing deadline
+        raise_on_block: raise ``ToolCallBlocked`` for an enforced block instead
+            of returning None (``_inspect_before_deadline``)
 
     Returns:
-        Tavily search results (inspected), or None if timeout/error occurs
+        Tavily search results (inspected), or None if timeout/error occurs or
+        inspection did not approve them
     """
     if not _tavily_tool:
         return None
@@ -201,6 +229,7 @@ async def tavily_search_with_timeout(
             "query": query.get("query", "")[:100],
             "timeout_seconds": timeout,
         },
+        raise_on_block=raise_on_block,
     )
 
 
@@ -265,11 +294,13 @@ async def extract_tavily_inspected(
     *,
     query: str,
     timeout: float | None = None,
+    raise_on_block: bool = False,
 ) -> Any:
     """Extract query-relevant chunks from a bounded list of discovered URLs.
 
     *timeout* defaults to ``TAVILY_EXTRACT_TIMEOUT_SECONDS`` and is shrunk to a
     caller's enclosing deadline. It covers extraction and inspection together.
+    *raise_on_block* is as for ``tavily_search_with_timeout``.
     """
     api_key = config.get_tavily_api_key()
     if not api_key or not urls:
@@ -330,6 +361,7 @@ async def extract_tavily_inspected(
             "url_count": len(urls[:3]),
             "timeout_seconds": timeout,
         },
+        raise_on_block=raise_on_block,
     )
 
 

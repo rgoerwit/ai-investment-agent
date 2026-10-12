@@ -36,7 +36,7 @@ from src.runtime_services import (
 )
 from src.subprocesses import resolve_program, run_program
 from src.text_patterns import is_safe_public_host
-from src.tooling.inspection_service import INSPECTION_FAILED
+from src.tooling.inspection_service import approved_tool_content
 from src.tooling.inspector import InspectionEnvelope, SourceKind
 from src.tooling.runtime import (
     ToolCallBlocked,
@@ -809,15 +809,9 @@ async def get_official_document(
             logger.warning(
                 "official_document_inspection_timeout", backend=extracted.backend
             )
-            raise ToolCallFailed("INSPECTION_TIMEOUT")
-        decision, inspected = outcome
-        # The enforced disposition alone decides: a block or a failed
-        # inspection leaves the tool as such, never as evidence wrapping a
-        # placeholder, so the ledger records BLOCKED or FAILED.
-        if decision.enforced == "blocked":
-            raise ToolCallBlocked("OFFICIAL_DOCUMENT_BLOCKED")
-        if decision.enforced not in ("allowed", "sanitized"):
-            raise ToolCallFailed(INSPECTION_FAILED)
+        # A block or a failed inspection leaves the tool as such, never as
+        # evidence wrapping a placeholder, so the ledger records BLOCKED or FAILED.
+        inspected = approved_tool_content(outcome)
         if len(str(inspected)) < _MIN_USEFUL_TEXT_CHARS:
             raise DocumentExtractionError("DOCUMENT_TEXT_UNAVAILABLE")
         metadata = {

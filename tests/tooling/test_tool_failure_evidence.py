@@ -22,6 +22,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 import src.tooling.evidence_recorder as recorder_module
 import src.tooling.runtime as tool_runtime
 from src.agents.consultant_tool_loop import _execute_tool_call
+from src.claim_policy import RAW_FINANCIAL_METRICS_INPUT
 from src.graph.tool_nodes import create_agent_tool_node
 from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.timeouts import enclosing_deadline
@@ -215,15 +216,15 @@ async def test_a_runner_block_is_a_blocked_result_the_after_hooks_record():
     """One shape for a block, wherever it was raised: the ledger records it."""
     recorder = EvidenceRecorder()
     observer = _SeesAfter()
-    runner = AsyncMock(side_effect=ToolCallBlocked("OFFICIAL_DOCUMENT_BLOCKED"))
+    runner = AsyncMock(side_effect=ToolCallBlocked("INSPECTION_BLOCKED"))
 
     result = await ToolExecutionService([recorder, observer]).execute(
         _call(), runner=runner
     )
 
-    assert result.value == "TOOL_BLOCKED: OFFICIAL_DOCUMENT_BLOCKED"
+    assert result.value == "TOOL_BLOCKED: INSPECTION_BLOCKED"
     assert result.blocked is True
-    assert result.findings == ["OFFICIAL_DOCUMENT_BLOCKED"]
+    assert result.findings == ["INSPECTION_BLOCKED"]
     assert observer.seen == [result]
     (record,) = recorder.snapshot()
     assert (record.execution_status, record.evidence_status) == (
@@ -355,13 +356,32 @@ def test_a_hook_without_failed_is_not_an_observer_and_is_skipped():
             "TOOL_ERROR: TOOL_TIMEOUT",
         ),
         (asyncio.TimeoutError(), "TOOL_ERROR: TOOL_TIMEOUT"),
-        (RuntimeError("secret https://x?token=1"), "TOOL_ERROR: RuntimeError"),
+        (RuntimeError("secret https://x?token=1"), "TOOL_ERROR: TOOL_EXECUTION_FAILED"),
         (ToolCallFailed("INSPECTION_FAILED"), "TOOL_ERROR: INSPECTION_FAILED"),
-        (ValueError(), "TOOL_ERROR: ValueError"),
+        (ValueError(), "TOOL_ERROR: TOOL_EXECUTION_FAILED"),
     ],
 )
 def test_tool_error_text_types_a_timeout_and_never_echoes_prose(error, expected):
     assert tool_error_text(error) == expected
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            tool_runtime._ScopedToolTimeout("x", scope="after_hooks"),
+            ("TOOL_TIMEOUT", "after_hooks"),
+        ),
+        (TimeoutError(), ("TOOL_TIMEOUT", None)),
+        (ToolCallFailed("INSPECTION_TIMEOUT"), ("INSPECTION_TIMEOUT", None)),
+        (ToolCallBlocked("INSPECTION_BLOCKED"), ("TOOL_EXECUTION_FAILED", None)),
+        (asyncio.CancelledError(), ("TOOL_EXECUTION_FAILED", None)),
+    ],
+)
+def test_tool_failure_reason_is_the_one_classification(error, expected):
+    """What observers record and the model reads; a block that escaped the
+    service (never expected) is a failure, not a timeout or a block."""
+    assert tool_runtime.tool_failure_reason(error) == expected
 
 
 @pytest.mark.asyncio
@@ -417,6 +437,37 @@ async def test_the_consultant_loop_gets_a_typed_failure_reason():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("side_effect", "failed"),
+    [
+        pytest.param(ToolCallBlocked("INSPECTION_BLOCKED"), True, id="raised-block"),
+        pytest.param(None, False, id="text-that-reads-like-a-block"),
+    ],
+)
+async def test_the_consultant_loop_reads_a_block_from_the_flag(side_effect, failed):
+    tool = SimpleNamespace(
+        name="get_official_document",
+        ainvoke=AsyncMock(
+            side_effect=side_effect, return_value="TOOL_BLOCKED: quoted in a filing"
+        ),
+    )
+
+    message, outcome = await _guarded(
+        _execute_tool_call(
+            {"name": "get_official_document", "args": {"url": _URL}, "id": "t1"},
+            tools_by_name={"get_official_document": tool},
+            fmp_alt_disabled_kind=None,
+            tool_service_getter=lambda: ToolExecutionService([]),
+            agent_key="consultant",
+            ticker="7203.T",
+        )
+    )
+
+    assert message.content.startswith("TOOL_BLOCKED:")
+    assert outcome.result_failed is failed
+
+
+@pytest.mark.asyncio
 async def test_the_graph_tool_node_leaves_the_same_record(small_runner):
     recorder = EvidenceRecorder()
     tool = MagicMock()
@@ -454,3 +505,59 @@ async def test_the_graph_tool_node_leaves_the_same_record(small_runner):
     assert record.requested_urls == (_URL,)
     assert record.findings == ("TIMEOUT_SCOPE:runner",)
     assert record.agent_key == "test_agent"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (ToolCallFailed("INSPECTION_FAILED"), "INSPECTION_FAILED"),
+        (ToolCallFailed("INSPECTION_TIMEOUT"), "INSPECTION_TIMEOUT"),
+        (RuntimeError("secret https://x?token=1"), "TOOL_EXECUTION_FAILED"),
+    ],
+)
+async def test_the_graph_tool_node_tells_the_model_the_ledgers_reason(error, reason):
+    """The model text, the ledger record and the structured ingress record
+    carry one classification of the failure, never exception prose."""
+    recorder = EvidenceRecorder()
+    tool = MagicMock()
+    tool.name = "get_financial_metrics"
+    tool.ainvoke = AsyncMock(side_effect=error)
+    agent_key = "junior_fundamentals_analyst"
+    node = create_agent_tool_node([tool], agent_key)
+    state = {
+        "company_of_interest": "7203.T",
+        "messages": [
+            HumanMessage(content="Analyze"),
+            AIMessage(
+                name=agent_key,
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_financial_metrics",
+                        "args": {"ticker": "7203.T"},
+                        "id": "t1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ],
+    }
+
+    with use_runtime_services(
+        RuntimeServices(
+            tool_service=ToolExecutionService([recorder]),
+            inspection_service=InspectionService(),
+        )
+    ):
+        result = await _guarded(node(state, {"configurable": {}}))
+
+    (message,) = result["messages"]
+    assert message.content == f"TOOL_ERROR: {reason}"
+    assert message.status == "error"
+    (record,) = recorder.snapshot()
+    assert record.execution_status == "FAILED"
+    assert record.reason == reason
+    ingress = result["structured_inputs"][RAW_FINANCIAL_METRICS_INPUT]
+    assert (ingress["status"], ingress["reason"]) == ("INVALID", reason)
+    assert "secret" not in message.content

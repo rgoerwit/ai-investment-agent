@@ -122,7 +122,7 @@ class TestArtifactFallbacks:
         final_input = invoke_mock.await_args_list[4].args[1]
         assert any(
             isinstance(message, ToolMessage)
-            and message.content == "TOOL_ERROR: RuntimeError"
+            and message.content == "TOOL_ERROR: TOOL_EXECUTION_FAILED"
             for message in final_input
         )
         assert result["artifact_statuses"]["legal_report"]["ok"] is True

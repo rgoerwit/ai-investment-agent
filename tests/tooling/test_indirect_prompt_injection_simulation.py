@@ -93,8 +93,8 @@ async def test_tavily_helper_blocks_malicious_result_at_ingress():
         with patch("src.tooling.inspection_service.logger.warning") as mock_warning:
             result = await tavily_search_with_timeout({"query": "hostile search"})
 
-    assert isinstance(result, str)
-    assert result.startswith("TOOL_BLOCKED:")
+    # A block is no result, never placeholder text a caller could merge.
+    assert result is None
 
     findings = _inspection_findings(mock_warning)
     assert findings, "Expected a content_inspection_finding log for Tavily ingress."

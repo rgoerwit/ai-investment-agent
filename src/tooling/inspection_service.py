@@ -13,7 +13,9 @@ Every external-content callsite should call::
 
 and use the returned approved value in place of the raw content; a callsite
 that records or labels the outcome calls ``evaluate`` (or ``check_within``)
-and branches on the decision's ``enforced`` disposition. This is the
+and branches on the decision's ``enforced`` disposition, and a tool reads that
+outcome through ``approved_tool_content``, which raises a block or a failure
+through the tool-result seam instead of returning a placeholder. This is the
 single trust boundary for untrusted prompt-bound content. When the inspector
 allows the content, the original ``raw_content`` value is preserved when
 available so structured payload shapes are not lost.
@@ -35,14 +37,17 @@ from src.tooling.inspector import (
     InspectionEnvelope,
     NullInspector,
 )
+from src.tooling.runtime import (
+    INSPECTION_BLOCKED,
+    INSPECTION_FAILED,
+    INSPECTION_TIMEOUT,
+    ToolCallBlocked,
+    ToolCallFailed,
+)
 
 logger = structlog.get_logger(__name__)
 
 _BLOCKED_PLACEHOLDER = "TOOL_BLOCKED: {reason}"
-# The reason code of a fail-closed backend error: never the exception text.
-INSPECTION_BACKEND_ERROR = "INSPECTION_BACKEND_ERROR"
-# The tool-failure code when an enforced ``inspection_failed`` ends a call.
-INSPECTION_FAILED = "INSPECTION_FAILED"
 _SUPPRESSED_DUPLICATE_MILESTONES = frozenset({1, 5, 10, 25, 50, 100})
 
 
@@ -249,11 +254,11 @@ class InspectionService:
             InspectionDecision(
                 action="block",
                 threat_level="high",
-                findings=[INSPECTION_BACKEND_ERROR],
-                reason=INSPECTION_BACKEND_ERROR,
+                findings=[INSPECTION_FAILED],
+                reason=INSPECTION_FAILED,
                 enforced="inspection_failed",
             ),
-            _BLOCKED_PLACEHOLDER.format(reason=INSPECTION_BACKEND_ERROR),
+            _BLOCKED_PLACEHOLDER.format(reason=INSPECTION_FAILED),
         )
 
     async def evaluate(
@@ -318,6 +323,26 @@ class InspectionService:
             )
         except TimeoutError:
             return None
+
+
+def approved_tool_content(outcome: tuple[InspectionDecision, Any] | None) -> Any:
+    """A tool's reading of an ``evaluate``/``check_within`` outcome.
+
+    Returns the approved content for an ``allowed`` or ``sanitized``
+    disposition. Anything else leaves the tool through the tool-result seam,
+    never as text it returns: ``blocked`` raises ``ToolCallBlocked``
+    (``INSPECTION_BLOCKED``), so the ledger records ``BLOCKED``; ``None`` (the
+    bound fired) and every other disposition raise ``ToolCallFailed`` with
+    ``INSPECTION_TIMEOUT`` or ``INSPECTION_FAILED``, recorded ``FAILED``.
+    """
+    if outcome is None:
+        raise ToolCallFailed(INSPECTION_TIMEOUT)
+    decision, approved = outcome
+    if decision.enforced == "blocked":
+        raise ToolCallBlocked(INSPECTION_BLOCKED)
+    if decision.enforced not in ("allowed", "sanitized"):
+        raise ToolCallFailed(INSPECTION_FAILED)
+    return approved
 
 
 # ---------------------------------------------------------------------------

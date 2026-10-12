@@ -184,7 +184,7 @@ async def test_block_in_block_mode_is_recorded_blocked(monkeypatch):
 
     reply, record, binding = await _run(monkeypatch, inner, outer=inner)
 
-    assert reply == "TOOL_BLOCKED: OFFICIAL_DOCUMENT_BLOCKED"
+    assert reply == "TOOL_BLOCKED: INSPECTION_BLOCKED"
     _assert_not_evidence(
         reply, record, binding, execution_status="BLOCKED", reason="TOOL_BLOCKED"
     )
@@ -202,7 +202,7 @@ async def test_block_followed_by_an_outer_allow_stays_blocked(monkeypatch):
         outer=_service(outer_inspector),
     )
 
-    assert reply == "TOOL_BLOCKED: OFFICIAL_DOCUMENT_BLOCKED"
+    assert reply == "TOOL_BLOCKED: INSPECTION_BLOCKED"
     _assert_not_evidence(
         reply, record, binding, execution_status="BLOCKED", reason="TOOL_BLOCKED"
     )

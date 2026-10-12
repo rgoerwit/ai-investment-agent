@@ -11,7 +11,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from src.text_patterns import RESULT_ENVELOPE_RE, URL_RE
-from src.tooling.runtime import ToolInvocation, ToolResult
+from src.tooling.runtime import ToolInvocation, ToolResult, tool_error_message
 
 _MAX_CONTENT_CHARS = 20_000
 _MAX_RECORDS = 200
@@ -464,7 +464,7 @@ class EvidenceRecorder:
         that the call timed out, and where) is lost and the model is left to
         guess the cause from prose. Same record, ``FAILED`` and ``UNAVAILABLE``.
         """
-        content = f"TOOL_ERROR: {reason}" + (
+        content = tool_error_message(reason) + (
             f"\nTIMEOUT_SCOPE: {scope}" if scope else ""
         )
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
