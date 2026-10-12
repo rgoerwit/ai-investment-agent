@@ -31,7 +31,7 @@ from src.macro_regime import MacroRegime, parse_macro_regime
 from src.macro_regions import infer_macro_region
 from src.runtime_services import get_current_inspection_service
 from src.tooling.inspector import InspectionEnvelope, SourceKind
-from src.tooling.runtime import INSPECTION_FAILED
+from src.tooling.runtime import INSPECTION_FAILED, ToolCallBlocked
 
 logger = structlog.get_logger(__name__)
 
@@ -237,7 +237,12 @@ async def _fetch_macro_raw(trade_date: str, region: str) -> str:
     payload = {"trade_date": trade_date}
     if region:
         payload["region"] = region
-    return str(await get_macroeconomic_news.ainvoke(payload))
+    try:
+        return str(await get_macroeconomic_news.ainvoke(payload))
+    except ToolCallBlocked:
+        # Outside the tool service: a blocked region is thin, so the GLOBAL
+        # fallback still runs, as it did when a block returned no result.
+        return ""
 
 
 def _is_thin(raw: str | None) -> bool:

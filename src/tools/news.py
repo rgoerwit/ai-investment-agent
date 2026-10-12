@@ -193,7 +193,9 @@ async def get_macroeconomic_news(trade_date: str, region: str = "") -> str:
             "bond yields liquidity credit spreads risk appetite equity market"
         )
 
-    result = await shared._tavily_search_with_timeout({"query": query})
+    result = await shared._tavily_search_with_timeout(
+        {"query": query}, raise_on_block=True
+    )
     if not result:
         return "Macroeconomic news search timed out or failed."
     return shared._format_and_truncate_tavily_result(result)

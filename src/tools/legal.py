@@ -141,7 +141,9 @@ async def search_legal_tax_disclosures(
         query_length=len(query),
     )
 
-    results = await shared._tavily_search_with_timeout({"query": query})
+    results = await shared._tavily_search_with_timeout(
+        {"query": query}, raise_on_block=True
+    )
 
     searches = []
     if is_pfic_risk:

@@ -14,8 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as a success; they now go through `approved_tool_content`, as the official-document
   tool does: a block is a `BLOCKED` record, a timeout or backend failure a `FAILED`
   call. A blocked Tavily result is no result for callers that merge several sources;
-  single-source tools raise it. Every surface (graph node, Consultant, Auditor,
-  editor) now tells the model the code the ledger records (`TOOL_TIMEOUT`, the typed
+  single-source tools raise it (`search_claim`, `extract_guidance_sources`,
+  `search_legal_tax_disclosures` and `get_macroeconomic_news`; the macro-context
+  fetch treats a blocked region as thin so the GLOBAL fallback still runs). Every
+  surface (graph node, Consultant, Auditor, editor) now tells the model the code the ledger records (`TOOL_TIMEOUT`, the typed
   code, or `TOOL_EXECUTION_FAILED`), never an exception class or exception prose;
   the editor loop used to send the exception text. Reason codes are defined once in
   `src/tooling/runtime.py`: `INSPECTION_BACKEND_ERROR` is now `INSPECTION_FAILED`
