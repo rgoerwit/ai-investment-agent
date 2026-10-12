@@ -29,8 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template names its key, template defaults you never set are commented out, and
   anything the template does not mention is kept in trailing sections. Values are
   copied verbatim and the result must load to exactly the same values, raw and
-  interpolated, or nothing is written; the report is counts only, and the file is
-  created mode 0600.
+  interpolated, or nothing is written; the report is counts only. The candidate
+  replaces the output atomically and owner-only (0600 before it is visible), and
+  an output that is the source or the template under any name, a hardlink or
+  symlink included, is refused.
 
 - The CLI publishes an approved article or its `.draft` through `publish_article`,
   the one publication step, instead of a bare atomic write, so it logs

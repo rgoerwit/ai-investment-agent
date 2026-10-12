@@ -1,3 +1,4 @@
+import os
 import stat
 from pathlib import Path
 
@@ -151,13 +152,72 @@ def test_cli_writes_output_with_private_mode(tmp_path, capsys) -> None:
     assert "effective values identical" in capsys.readouterr().out
 
 
-def test_cli_tightens_mode_of_existing_output(tmp_path) -> None:
+def test_cli_replaces_existing_output_privately_with_no_open_window(
+    tmp_path, monkeypatch
+) -> None:
     out = tmp_path / "out.env"
     out.write_text("old", encoding="utf-8")
     out.chmod(0o644)
-    _run(tmp_path, "ALPHA=1\n")
+    old_inode = out.stat().st_ino
+    real_replace = os.replace
+    seen: list[tuple[int, str]] = []
+
+    def inspecting_replace(src, dst):
+        seen.append(
+            (stat.S_IMODE(os.stat(src).st_mode), Path(src).read_text(encoding="utf-8"))
+        )
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", inspecting_replace)
+    code, _ = _run(tmp_path, "ALPHA=1\n")
+    assert code == 0
     assert stat.S_IMODE(out.stat().st_mode) == 0o600
-    assert out.read_text(encoding="utf-8") != "old"
+    assert out.stat().st_ino != old_inode
+    assert len(seen) == 1
+    mode_at_replace, content_at_replace = seen[0]
+    assert mode_at_replace == 0o600
+    assert content_at_replace == out.read_text(encoding="utf-8") != "old"
+
+
+@pytest.mark.parametrize("protected", ["src.env", "template.env"])
+@pytest.mark.parametrize("kind", ["hardlink", "symlink"])
+def test_cli_refuses_output_aliasing_source_or_template_by_identity(
+    tmp_path, protected, kind
+) -> None:
+    source = tmp_path / "src.env"
+    template = tmp_path / "template.env"
+    source.write_text("ALPHA=1\n", encoding="utf-8")
+    template.write_text(TEMPLATE, encoding="utf-8")
+    alias = tmp_path / "out.env"
+    if kind == "hardlink":
+        os.link(tmp_path / protected, alias)
+    else:
+        alias.symlink_to(tmp_path / protected)
+    with pytest.raises(SystemExit) as exc:
+        main([str(source), "--template", str(template), "--output", str(alias)])
+    assert exc.value.code == 2
+    assert source.read_text(encoding="utf-8") == "ALPHA=1\n"
+    assert template.read_text(encoding="utf-8") == TEMPLATE
+
+
+def test_cli_failed_replace_keeps_previous_candidate_and_leaves_no_temp_file(
+    tmp_path, monkeypatch
+) -> None:
+    out = tmp_path / "out.env"
+    out.write_text("previous", encoding="utf-8")
+
+    def failing_replace(src, dst):
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    with pytest.raises(OSError, match="injected replace failure"):
+        _run(tmp_path, "ALPHA=1\n")
+    assert out.read_text(encoding="utf-8") == "previous"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "out.env",
+        "src.env",
+        "template.env",
+    ]
 
 
 def test_cli_check_writes_nothing(tmp_path) -> None:

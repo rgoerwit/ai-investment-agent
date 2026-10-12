@@ -3,7 +3,9 @@
 
 Reads the source and the template with python-dotenv's own parser, writes a
 candidate file and prints counts only, never a key or a value. The candidate must
-load to exactly the values the source loads to, or nothing is written.
+load to exactly the values the source loads to, or nothing is written. The
+candidate replaces the output atomically, owner-only, and the output may not be
+the source or the template under any name (hardlink or symlink included).
 """
 
 import argparse
@@ -17,6 +19,8 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 from dotenv.parser import Binding, parse_stream
+
+from src.atomic_files import atomic_write_text
 
 _LEADING_BLANKS = re.compile(r"(?:[ \t]*\n)*")
 _SLOT = re.compile(r"^\s*#\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=")
@@ -142,13 +146,6 @@ def align(source_text: str, template_text: str) -> Alignment:
     )
 
 
-def _write_private(path: Path, text: str) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    path.chmod(0o600)
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
@@ -157,7 +154,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args(argv)
     for protected, label in ((args.source, "source"), (args.template, "template")):
-        if args.output.resolve() == protected.resolve():
+        if args.output.resolve() == protected.resolve() or (
+            args.output.exists() and os.path.samefile(args.output, protected)
+        ):
             parser.error(f"refusing to overwrite the {label}")
 
     source_text = args.source.read_text(encoding="utf-8")
@@ -181,7 +180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"carried comments {result.carried}; effective values identical"
     )
     if not args.check:
-        _write_private(args.output, result.text)
+        atomic_write_text(args.output, result.text)
     return 0
 
 
