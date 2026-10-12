@@ -101,9 +101,21 @@ def _server_wait_seconds(err: MCPCallError) -> int | None:
     return None
 
 
+def _configured_tool_call_timeout() -> float:
+    """The MCP tool call's own timeout, else the tool runner's.
+
+    The one resolution of the optional field, so the call allowance and the
+    retry's minimum useful attempt are derived from the same value.
+    """
+    configured = settings_config.mcp_tool_call_timeout_seconds
+    if configured is None:
+        return settings_config.tool_execution_timeout_seconds
+    return configured
+
+
 def _tool_call_allowance() -> float:
     """The tool call's configured allowance, clamped to the time left now."""
-    return clamp_to_operational_deadline(settings_config.mcp_tool_call_timeout_seconds)
+    return clamp_to_operational_deadline(_configured_tool_call_timeout())
 
 
 def _tool_not_listed_error(server_id: str, tool_name: str) -> MCPCallError:
@@ -634,7 +646,7 @@ class MCPRuntime:
             )
             self._refuse_retry(err, backoff_seconds=backoff, reason=reason)
         minimum = llm_timeouts.min_useful_seconds(
-            settings_config.mcp_tool_call_timeout_seconds, settings_config
+            _configured_tool_call_timeout(), settings_config
         )
         wait = llm_timeouts.wait_allowance(
             operational_deadline(),

@@ -214,15 +214,16 @@ Four settings. Each is read when the step starts and shrinks to the time left:
 the caller's enclosing deadline (`src/llm_runtime/timeouts.py`) and, under the
 tool service, the runner's `tool_call_deadline` (`src/llm_runtime/timeouts.py`),
 kept back from the runner's cap by `deadline_margin`, read through the
-operational clamp. MCP reads that deadline and never binds it, so with the
-45 s call setting under the 45 s runner the call's own timeout fires first.
+operational clamp. MCP reads that deadline and never binds it. Unset, the call
+setting follows `TOOL_EXECUTION_TIMEOUT_SECONDS`; at or under the runner's cap,
+the call's own timeout fires first.
 
 | Setting | Default | Applied as | Bounds |
 |---|---|---|---|
 | `MCP_HTTP_TIMEOUT_SECONDS` | 5 s | `httpx2.AsyncClient(timeout=...)` | each phase (connect, read, write, pool) of each HTTP request. It does not bound a whole request |
 | `MCP_INITIALIZE_TIMEOUT_SECONDS` | 30 s | `ClientSession(read_timeout_seconds=...)`, and `asyncio.timeout(...)` around `list_tools()` | the wait for the initialize response, connecting included; then, re-read after the handshake, the tools/list catalogue response |
-| `MCP_TOOL_CALL_TIMEOUT_SECONDS` | 45 s | `call_tool(read_timeout_seconds=...)` | the wait for one tool call's result |
-| `MIN_USEFUL_ATTEMPT_FRACTION` | 0.04 of `MCP_TOOL_CALL_TIMEOUT_SECONDS` (1.8 s) | `wait_allowance(minimum=...)` before the retry backoff | the least time that must be left after the backoff for the one retry to be sent; shared with the LLM and embedding planes, derived from the configured call timeout, never from the time left |
+| `MCP_TOOL_CALL_TIMEOUT_SECONDS` | unset: `TOOL_EXECUTION_TIMEOUT_SECONDS` | `call_tool(read_timeout_seconds=...)` | the wait for one tool call's result; an explicit value is honoured |
+| `MIN_USEFUL_ATTEMPT_FRACTION` | 0.04 of the call timeout above (1.8 s at the 45 s runner default) | `wait_allowance(minimum=...)` before the retry backoff | the least time that must be left after the backoff for the one retry to be sent; shared with the LLM and embedding planes, derived from the configured call timeout, never from the time left |
 
 **The catalogue (October 2026, round 2).** `list_tools()` takes no per-request
 timeout, and the session's read timeout is fixed when the session opens, so a

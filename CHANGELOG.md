@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `MCP_TOOL_CALL_TIMEOUT_SECONDS` is unset by default and then follows
+  `TOOL_EXECUTION_TIMEOUT_SECONDS` (still 45 s), resolved in one place in
+  `src/mcp/client.py` for both the call allowance and the retry's minimum useful
+  attempt; an explicit value is honoured as before. It repeated the runner's literal,
+  so raising the runner's cap left the MCP call bound at 45 s.
+
 - A tool's own content inspection is read one way. `get_official_filings`,
   `search_foreign_sources`, `extract_guidance_sources`, `search_claim` and
   `fetch_reference_content` returned the `TOOL_BLOCKED:` placeholder as their text

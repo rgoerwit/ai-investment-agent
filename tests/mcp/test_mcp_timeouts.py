@@ -24,6 +24,7 @@ import pytest
 from mcp.types import REQUEST_TIMEOUT
 from pydantic import ValidationError
 
+import src.mcp.client as mcp_client
 from src.config import Settings, config
 from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.timeouts import enclosing_deadline
@@ -44,7 +45,6 @@ _STALL_CEILING_SECONDS = 10.0
 SHIPPED_DEFAULTS = {
     "mcp_http_timeout_seconds": 5.0,
     "mcp_initialize_timeout_seconds": 30.0,
-    "mcp_tool_call_timeout_seconds": 45.0,
 }
 
 
@@ -91,12 +91,34 @@ def test_http_default_is_the_timeout_the_client_had_implicitly():
     assert implicit == httpx2.Timeout(shipped)
 
 
-def test_tool_call_default_matches_the_tool_runner_default():
-    # Under the runner the call's own bound must never fire first by default.
-    assert (
-        Settings.model_fields["mcp_tool_call_timeout_seconds"].default
-        == Settings.model_fields["tool_execution_timeout_seconds"].default
-    )
+def test_tool_call_timeout_ships_unset_so_it_follows_the_tool_runner():
+    # A second literal would drift from the runner's; unset derives from it.
+    assert Settings.model_fields["mcp_tool_call_timeout_seconds"].default is None
+
+
+def test_unset_tool_call_timeout_follows_the_tool_runner(monkeypatch):
+    monkeypatch.setattr(config, "mcp_tool_call_timeout_seconds", None)
+    monkeypatch.setattr(config, "tool_execution_timeout_seconds", 45.0)
+    assert mcp_client._configured_tool_call_timeout() == 45.0
+    monkeypatch.setattr(config, "tool_execution_timeout_seconds", 80.0)
+    assert mcp_client._configured_tool_call_timeout() == 80.0
+    assert mcp_client._tool_call_allowance() == 80.0
+
+
+def test_an_explicit_tool_call_timeout_wins_over_the_runner(monkeypatch):
+    monkeypatch.setattr(config, "tool_execution_timeout_seconds", 80.0)
+    monkeypatch.setattr(config, "mcp_tool_call_timeout_seconds", 9.0)
+    assert mcp_client._configured_tool_call_timeout() == 9.0
+
+
+@pytest.mark.parametrize("explicit", [None, 600.0])
+def test_the_tool_call_allowance_is_clamped_to_the_deadline(
+    monkeypatch, fake_clock, explicit
+):
+    monkeypatch.setattr(config, "mcp_tool_call_timeout_seconds", explicit)
+    monkeypatch.setattr(config, "tool_execution_timeout_seconds", 600.0)
+    with enclosing_deadline(2.0):
+        assert mcp_client._tool_call_allowance() == 2.0
 
 
 @pytest.mark.parametrize("field", sorted(SHIPPED_DEFAULTS))
@@ -163,6 +185,8 @@ async def test_a_looser_caller_deadline_leaves_the_defaults(
 ):
     server = FakeMCPServer()
     server.install(monkeypatch)
+    monkeypatch.setattr(config, "mcp_tool_call_timeout_seconds", None)
+    monkeypatch.setattr(config, "tool_execution_timeout_seconds", 45.0)
     runtime = http_runtime(tmp_path)
 
     with enclosing_deadline(600.0):
@@ -178,9 +202,25 @@ async def test_a_looser_caller_deadline_leaves_the_defaults(
     assert recording_session.session_timeouts == [
         SHIPPED_DEFAULTS["mcp_initialize_timeout_seconds"]
     ]
-    assert recording_session.call_timeouts == [
-        SHIPPED_DEFAULTS["mcp_tool_call_timeout_seconds"]
-    ]
+    assert recording_session.call_timeouts == [45.0]
+
+
+@pytest.mark.asyncio
+async def test_an_unset_call_timeout_reaches_the_sdk_as_the_runners(
+    tmp_path, monkeypatch, recording_session
+):
+    server = FakeMCPServer()
+    server.install(monkeypatch)
+    monkeypatch.setattr(config, "mcp_tool_call_timeout_seconds", None)
+    monkeypatch.setattr(config, "tool_execution_timeout_seconds", 80.0)
+    runtime = http_runtime(tmp_path)
+
+    await asyncio.wait_for(
+        runtime.execute_raw("fmp_remote", "quote", {}, scope="consultant"),
+        timeout=_STALL_CEILING_SECONDS,
+    )
+
+    assert recording_session.call_timeouts == [80.0]
 
 
 @pytest.mark.asyncio

@@ -1709,14 +1709,15 @@ class Settings(BaseSettings):
             "timeout the session fails as a retryable transport error."
         ),
     )
-    mcp_tool_call_timeout_seconds: float = Field(
-        default=45.0,
+    mcp_tool_call_timeout_seconds: float | None = Field(
+        default=None,
         gt=0.0,
         validation_alias="MCP_TOOL_CALL_TIMEOUT_SECONDS",
         description=(
             "Hard cap (seconds) on the wait for one MCP tool call's result once "
-            "the session is open. Matches the tool runner's default, which "
-            "bounds the whole call (session open included) and so fires first."
+            "the session is open. Unset follows TOOL_EXECUTION_TIMEOUT_SECONDS "
+            "(the runner bounds the whole call, session open included, so it "
+            "fires first); an explicit value is honoured."
         ),
     )
     # Operational deadlines: health-check probe, embeddings, and the two
