@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A pydantic `ValidationError`, such as a model's invalid tool argument, is
+  classified as `application_error` with no host, before any message-marker
+  scan. It used to fall through to `unknown_provider_error` with host
+  `errors.pydantic.dev`, taken from the documentation URL pydantic appends to
+  its message. The `LLM_MODEL_FAILOVERS` example now names `gemini-3.6-flash`,
+  since `gemini-3.7-flash` was deprecated on 2026-10-08.
+
 - An MCP server's cooldown is rechecked immediately before a `tools/call` is
   sent, after the listing and the budget reservation, so a caller paused there
   while another caller hit a 429 or 401 no longer sends during the cooldown; its

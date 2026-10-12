@@ -1,8 +1,10 @@
 import asyncio
 from contextlib import nullcontext
+from typing import Literal
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
 from src.tooling.runtime import (
     ToolCallBlocked,
@@ -188,6 +190,34 @@ async def test_execute_logs_structured_failure_details_when_runner_fails():
     assert kwargs["failure_kind"] == "rate_limit"
     assert kwargs["retryable"] is True
     assert kwargs["error_type"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_execute_logs_tool_argument_validation_error_as_application_error():
+    class _SearchArgs(BaseModel):
+        purpose: Literal["filings", "news"]
+
+    def _invalid_call(*_args: object, **_kwargs: object) -> None:
+        _SearchArgs(purpose="ownership")
+
+    service = ToolExecutionService()
+    runner = AsyncMock(side_effect=_invalid_call)
+
+    with patch("src.tooling.runtime.logger") as mock_logger:
+        with pytest.raises(ValidationError):
+            await service.execute(
+                ToolInvocation(
+                    name="search_foreign_sources",
+                    args={"purpose": "ownership"},
+                    source="foreign_language_analyst",
+                ),
+                runner=runner,
+            )
+
+    kwargs = mock_logger.error.call_args.kwargs
+    assert kwargs["failure_kind"] == "application_error"
+    assert kwargs["retryable"] is False
+    assert kwargs["host"] is None
 
 
 @pytest.mark.asyncio
