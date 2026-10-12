@@ -506,12 +506,21 @@ class _OwnershipTicker:
     def __init__(self, stall: threading.Event | None = None):
         self.reads: list[str] = []
         self._stall = stall
+        self._finished = threading.Semaphore(0)
 
     def _read(self, name: str) -> Any:
         self.reads.append(name)
-        if self._stall is not None:
-            self._stall.wait(5)
-        return None
+        try:
+            if self._stall is not None:
+                self._stall.wait(5)
+            return None
+        finally:
+            self._finished.release()
+
+    def join_reads(self, timeout: float = 2.0) -> None:
+        """Wait for every started read to return (``to_thread`` workers are unnamed)."""
+        for _ in list(self.reads):
+            assert self._finished.acquire(timeout=timeout), "a stalled read outlived"
 
     @property
     def institutional_holders(self):
@@ -576,7 +585,9 @@ async def test_stalled_ownership_section_is_unavailable_at_its_bound(monkeypatch
             await ownership.get_ownership_structure.ainvoke({"ticker": "7203.T"})
         )
     finally:
+        # Release and join inside the patches; to_thread workers have no label.
         release.set()
+        fake.join_reads()
     assert time.monotonic() - start < 2.0
     assert payload["institutional_holders_status"] == "DATA_UNAVAILABLE"
     assert payload["data_quality"] == "PARTIAL"

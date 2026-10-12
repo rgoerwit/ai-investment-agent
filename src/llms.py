@@ -34,6 +34,7 @@ from src.llm_budgets import (
     get_generation_budget,
 )
 from src.llm_runtime.dispatch import (  # noqa: F401 - re-exported for callers
+    DispatchBudgetFields,
     _construction_timeout,
     _Dispatch,
     _dispatch_budget,
@@ -562,7 +563,9 @@ def _stamp_budget_metadata(
             callback.reasoning_reserve_tokens = budget.reserve_tokens  # type: ignore[attr-defined]
 
 
-class _TieredChatGoogleGenerativeAI(ModelFailoverMixin, ChatGoogleGenerativeAI):
+class _TieredChatGoogleGenerativeAI(
+    ModelFailoverMixin, ChatGoogleGenerativeAI, DispatchBudgetFields
+):
     """ChatGoogleGenerativeAI with Gemini request compatibility and flex support.
 
     langchain-google-genai 4.2.6 does not expose ``service_tier`` (see
@@ -601,11 +604,6 @@ class _TieredChatGoogleGenerativeAI(ModelFailoverMixin, ChatGoogleGenerativeAI):
     service_tier: str | None = None
     flex_fallback_to_standard: bool = True
     failover_model: str | None = None
-    # The seat's TimeoutClass value, used to size a direct caller's flex request.
-    budget_timeout_class: str | None = None
-    # The seat policy's explicit client timeout, stamped at construction
-    # (``attach_request_cap_override``) and resolved at every dispatch.
-    request_cap_override: float | None = Field(default=None, gt=0)
     disable_streaming: bool | Literal["tool_calling"] = True
 
     @model_validator(mode="after")

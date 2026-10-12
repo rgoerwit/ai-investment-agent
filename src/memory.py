@@ -229,6 +229,11 @@ def _running_future() -> Future[_ProbeOutcome]:
     return future
 
 
+def _new_probe_slot() -> InFlightLimit:
+    """The single in-flight slot a binding's availability probe runs in."""
+    return InFlightLimit(1)
+
+
 @dataclass(frozen=True)
 class _PendingProbe:
     """One binding's startup probe, from its owner's claim until it settles.
@@ -293,7 +298,7 @@ class FinancialSituationMemory:
     _probe_lock = threading.Lock()
     _probe_generation: int = 0
     _probe_run: _PendingProbe | None = None
-    _probe_in_flight = InFlightLimit(1)
+    _probe_in_flight = _new_probe_slot()
 
     def __init__(self, name: str):
         """
@@ -385,7 +390,7 @@ class FinancialSituationMemory:
             cls._shared_embeddings_key = None
             # A stalled worker keeps the slot it took until it ends; a fresh
             # slot keeps it from deferring the next test's probe.
-            cls._probe_in_flight = InFlightLimit(1)
+            cls._probe_in_flight = _new_probe_slot()
         cls._shared_chroma_client = None
         cls._shared_chroma_key = None
 

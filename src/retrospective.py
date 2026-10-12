@@ -27,6 +27,7 @@ from typing import Any, TypedDict, cast
 import structlog
 
 from src.async_utils import run_with_hard_timeout
+from src.atomic_files import atomic_write_text
 from src.config import config
 from src.data_block_utils import (
     extract_data_block_field,
@@ -1483,11 +1484,9 @@ class EvaluationMemo:
         if not self._dirty:
             return
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
-            with open(tmp_path, "w") as handle:
-                json.dump(self._entries, handle, indent=2, sort_keys=True)
-            tmp_path.replace(self.path)
+            atomic_write_text(
+                self.path, json.dumps(self._entries, indent=2, sort_keys=True)
+            )
             self._dirty = False
         except Exception as exc:
             logger.warning(

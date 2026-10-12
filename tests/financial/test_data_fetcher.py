@@ -894,12 +894,11 @@ class TestPanicMode:
         so the stall is a blocking ``.info`` released at the end of the test,
         which also frees its slot in the shared in-flight cap.
         """
-        import threading
-
+        from src.blocking_io import GAP_FILL_YFINANCE_INFO_POLICY
         from src.config import config as settings
+        from tests.helpers.stalled_workers import stalled_worker
 
         fetcher.tavily_client = MagicMock()
-        release = threading.Event()
 
         class _StalledTicker:
             @property
@@ -907,7 +906,7 @@ class TestPanicMode:
                 release.wait(5)
                 return {"longName": "Late Name"}
 
-        try:
+        with stalled_worker(GAP_FILL_YFINANCE_INFO_POLICY.label) as release:
             with (
                 patch.object(settings, "company_name_lookup_timeout_seconds", 0.01),
                 patch("src.data.fetcher.yf.Ticker", return_value=_StalledTicker()),
@@ -921,8 +920,6 @@ class TestPanicMode:
             ):
                 mock_search.return_value = {"results": []}
                 await fetcher._fetch_tavily_gaps("TEST", ["returnOnEquity"])
-        finally:
-            release.set()
 
         query = mock_search.call_args.args[0]
         assert query.startswith("TEST|TEST|")

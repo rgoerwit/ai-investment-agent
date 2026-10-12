@@ -575,9 +575,13 @@ async def invoke_with_rate_limit_handling(
     node_deadline = current_enclosing_deadline()
     if node_deadline is not None:
         deadline = node_deadline if deadline is None else min(deadline, node_deadline)
-    if max_attempts is None:
-        max_attempts = budget_policy.attempts
-    max_attempts = max(1, max_attempts)
+    # LLM_ATTEMPTS caps every caller; an explicit count can only lower it.
+    max_attempts = max(
+        1,
+        budget_policy.attempts
+        if max_attempts is None
+        else min(max_attempts, budget_policy.attempts),
+    )
 
     breaker_enabled = bool(settings_config.llm_circuit_breaker_enabled)
     breaker = get_circuit_breaker() if breaker_enabled else None

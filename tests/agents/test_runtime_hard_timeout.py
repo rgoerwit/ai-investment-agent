@@ -492,6 +492,37 @@ class TestHardTimeoutWrap:
 
         assert runnable.ainvoke.call_count == 2
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("explicit", "policy_attempts", "expected_calls"),
+        [(3, 2, 2), (2, 2, 2), (1, 2, 1), (0, 2, 1), (None, 2, 2)],
+    )
+    async def test_llm_attempts_caps_an_explicit_max_attempts(
+        self, explicit, policy_attempts, expected_calls
+    ):
+        """LLM_ATTEMPTS caps every caller; an explicit count can only lower it."""
+
+        async def always_times_out(*_args, **_kwargs):
+            await asyncio.get_event_loop().create_future()
+
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(side_effect=always_times_out)
+
+        with (
+            patch.object(settings_config, "llm_attempts", policy_attempts),
+            patch.object(settings_config, "llm_call_hard_timeout_seconds", 0.01),
+            patch("src.agents.runtime.asyncio.sleep", new_callable=AsyncMock),
+            pytest.raises(TimeoutError),
+        ):
+            await invoke_with_rate_limit_handling(
+                runnable,
+                {"input": "x"},
+                max_attempts=explicit,
+                context="AttemptCapTest",
+            )
+
+        assert runnable.ainvoke.call_count == expected_calls
+
 
 class TestAttemptSizing:
     """The hard timeout is the time remaining, never padded past it.

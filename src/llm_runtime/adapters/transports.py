@@ -39,10 +39,11 @@ from typing import Any, ClassVar, Literal
 
 import structlog
 from langchain_core.language_models import BaseChatModel
-from pydantic import Field, model_validator
+from pydantic import model_validator
 
 from src.error_safety import summarize_exception
 from src.llm_runtime.dispatch import (
+    DispatchBudgetFields,
     _Dispatch,
     _is_flex_capacity_error,
     _is_flex_latency_timeout,
@@ -135,7 +136,11 @@ def deadline_aware_anthropic_cls() -> type[BaseChatModel]:
 def _define_openai_cls() -> type[BaseChatModel]:
     chat_openai = _real_base("langchain_openai.chat_models.base", "ChatOpenAI")
 
-    class _FlexFallbackChatOpenAI(ModelFailoverMixin, chat_openai):  # type: ignore[valid-type,misc]
+    class _FlexFallbackChatOpenAI(
+        ModelFailoverMixin,
+        chat_openai,  # type: ignore[valid-type,misc]
+        DispatchBudgetFields,
+    ):
         """ChatOpenAI sized at dispatch, with flex fallback on the native endpoint.
 
         ``service_tier`` is a first-class ChatOpenAI field; langchain-openai
@@ -156,11 +161,6 @@ def _define_openai_cls() -> type[BaseChatModel]:
         max_retries: int | None = 0
         flex_fallback_to_standard: bool = True
         failover_model: str | None = None
-        # The seat's TimeoutClass value, used to size a direct caller's flex request.
-        budget_timeout_class: str | None = None
-        # The seat policy's explicit client timeout, stamped at construction
-        # (``attach_request_cap_override``) and resolved at every dispatch.
-        request_cap_override: float | None = Field(default=None, gt=0)
         # Streaming would bypass the dispatch check; route every public
         # stream/invoke path through ``_generate``/``_agenerate`` instead.
         disable_streaming: bool | Literal["tool_calling"] = True
@@ -321,7 +321,10 @@ def _define_openai_cls() -> type[BaseChatModel]:
 def _define_anthropic_cls() -> type[BaseChatModel]:
     chat_anthropic = _real_base("langchain_anthropic.chat_models", "ChatAnthropic")
 
-    class _BudgetedChatAnthropic(chat_anthropic):  # type: ignore[valid-type,misc]
+    class _BudgetedChatAnthropic(
+        chat_anthropic,  # type: ignore[valid-type,misc]
+        DispatchBudgetFields,
+    ):
         """ChatAnthropic sized at dispatch.
 
         langchain-anthropic forwards a per-call ``timeout`` through
@@ -334,8 +337,6 @@ def _define_anthropic_cls() -> type[BaseChatModel]:
         dispatch_provider: str
         # Zero SDK retries; the parent's default is 2.
         max_retries: int = 0
-        budget_timeout_class: str | None = None
-        request_cap_override: float | None = Field(default=None, gt=0)
         disable_streaming: bool | Literal["tool_calling"] = True
 
         @model_validator(mode="after")

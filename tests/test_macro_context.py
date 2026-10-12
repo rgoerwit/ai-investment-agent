@@ -121,6 +121,61 @@ class TestCacheReadWrite:
             )
         assert cached is None
 
+    def test_concurrent_writers_of_one_region_never_share_a_temp_file(self, tmp_path):
+        """Two tickers in one region write one cache file from two threads.
+
+        Both writers are held at the replacement step until the other has
+        written, so a shared temp name makes the second replacement fail.
+        """
+        import os
+        import threading
+        from pathlib import Path
+
+        rendezvous = threading.Barrier(2, timeout=5)
+        real_os_replace = os.replace
+        real_path_replace = Path.replace
+
+        def held_os_replace(src, dst):
+            rendezvous.wait()
+            return real_os_replace(src, dst)
+
+        def held_path_replace(self, target):
+            rendezvous.wait()
+            return real_path_replace(self, target)
+
+        errors: list[BaseException] = []
+
+        def write(report: str) -> None:
+            try:
+                _write_cache(
+                    "JAPAN",
+                    trade_date="2026-04-18",
+                    fingerprint="fp123",
+                    report=report,
+                    status="generated",
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        with (
+            patch("src.macro_context._CACHE_DIR", tmp_path),
+            patch("os.replace", held_os_replace),
+            patch.object(Path, "replace", held_path_replace),
+        ):
+            threads = [
+                threading.Thread(target=write, args=(f"brief {name}",))
+                for name in ("one", "two")
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+
+        assert errors == []
+        payload = json.loads((tmp_path / "JAPAN.json").read_text(encoding="utf-8"))
+        assert payload["report"] in {"brief one", "brief two"}
+        assert [p.name for p in tmp_path.iterdir()] == ["JAPAN.json"]
+
     def test_corrupted_cache_returns_none(self, tmp_path):
         with patch("src.macro_context._CACHE_DIR", tmp_path):
             (tmp_path / "JAPAN.json").write_text("{bad json", encoding="utf-8")

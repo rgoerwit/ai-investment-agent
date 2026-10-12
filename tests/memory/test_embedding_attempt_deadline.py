@@ -266,12 +266,20 @@ async def test_provider_timeout_sends_one_request_and_surfaces_the_timeout(
     monkeypatch.setattr(memory_module, "logger", MagicMock())
 
     start = time.monotonic()
-    with enclosing_deadline(0.06), pytest.raises(TimeoutError, match="hard timeout"):
-        await memory._get_embedding("text")
-    assert time.monotonic() - start < 0.5
-    assert requests.count == 1
-    assert limiter.acquired == 1
-    release.set()
+    try:
+        with (
+            enclosing_deadline(0.06),
+            pytest.raises(TimeoutError, match="hard timeout"),
+        ):
+            await memory._get_embedding("text")
+        assert time.monotonic() - start < 0.5
+        assert requests.count == 1
+        assert limiter.acquired == 1
+    finally:
+        # The stalled request is an orphaned loop task, not a thread worker:
+        # release it, then let the loop finish it before the patches are undone.
+        release.set()
+        await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio

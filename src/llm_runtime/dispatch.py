@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Any, NoReturn
 
 import structlog
+from pydantic import BaseModel, Field
 
 from src.llm_runtime import timeouts as llm_timeouts
 from src.llm_runtime.failover import in_failover_attempt
@@ -202,6 +203,21 @@ def _construction_timeout(model: Any) -> float | None:
 
 
 REQUEST_CAP_OVERRIDE_FIELD = "request_cap_override"
+
+
+class DispatchBudgetFields(BaseModel):
+    """The two fields ``_dispatch_budget`` reads, declared once for every transport.
+
+    A pydantic model so the chat classes collect them as fields (pydantic does
+    not collect fields from a plain mixin); list it after the vendor base, so
+    the vendor's ``__init__`` runs (a test stub of the vendor class included).
+    """
+
+    # The seat's TimeoutClass value, used to size a direct caller's request.
+    budget_timeout_class: str | None = None
+    # The seat policy's explicit client timeout, stamped at construction
+    # (``attach_request_cap_override``) and resolved at every dispatch.
+    request_cap_override: float | None = Field(default=None, gt=0)
 
 
 def attach_request_cap_override(model: Any, seconds: float | None) -> Any:

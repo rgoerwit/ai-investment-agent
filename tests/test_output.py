@@ -80,34 +80,35 @@ def test_load_company_name_for_output_stall_returns_none_without_joining_worker(
     import threading
     import time
 
+    from src.blocking_io import OUTPUT_COMPANY_NAME_INFO_POLICY
     from src.config import config
     from src.output import _load_company_name_for_output
+    from tests.helpers.stalled_workers import stalled_worker
 
-    release = threading.Event()
     workers: list[threading.Thread] = []
 
-    class _StalledTicker:
-        def __init__(self, symbol):
-            del symbol
+    with (
+        pytest.MonkeyPatch.context() as monkeypatch,
+        stalled_worker(OUTPUT_COMPANY_NAME_INFO_POLICY.label) as release,
+    ):
 
-        @property
-        def info(self):
-            workers.append(threading.current_thread())
-            release.wait(timeout=5)
-            return {"longName": "Should Not Return"}
+        class _StalledTicker:
+            def __init__(self, symbol):
+                del symbol
 
-    fake_yfinance = MagicMock()
-    fake_yfinance.Ticker.side_effect = _StalledTicker
+            @property
+            def info(self):
+                workers.append(threading.current_thread())
+                release.wait(timeout=5)
+                return {"longName": "Should Not Return"}
 
-    try:
-        with pytest.MonkeyPatch.context() as monkeypatch:
-            monkeypatch.setitem(__import__("sys").modules, "yfinance", fake_yfinance)
-            monkeypatch.setattr(config, "company_name_lookup_timeout_seconds", 0.05)
-            start = time.monotonic()
-            assert _load_company_name_for_output("SNTIA.OL") is None
-            elapsed = time.monotonic() - start
-    finally:
-        release.set()
+        fake_yfinance = MagicMock()
+        fake_yfinance.Ticker.side_effect = _StalledTicker
+        monkeypatch.setitem(__import__("sys").modules, "yfinance", fake_yfinance)
+        monkeypatch.setattr(config, "company_name_lookup_timeout_seconds", 0.05)
+        start = time.monotonic()
+        assert _load_company_name_for_output("SNTIA.OL") is None
+        elapsed = time.monotonic() - start
 
     assert elapsed < 1.0
     assert len(workers) == 1

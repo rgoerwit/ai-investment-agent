@@ -25,6 +25,7 @@ import structlog
 from langchain_core.callbacks import BaseCallbackHandler
 
 import src.config as config_module
+from src.atomic_files import atomic_write_text
 from src.error_safety import summarize_exception
 from src.macro_regime import MacroRegime, parse_macro_regime
 from src.macro_regions import infer_macro_region
@@ -190,13 +191,9 @@ def _write_cache(
         "status": status,
         "report": report,
     }
-    path = _cache_path(region)
-    tmp_path = path.with_suffix(".tmp")
-    tmp_path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False),
-        encoding="utf-8",
+    atomic_write_text(
+        _cache_path(region), json.dumps(payload, indent=2, ensure_ascii=False)
     )
-    tmp_path.replace(path)
     return generated_at
 
 

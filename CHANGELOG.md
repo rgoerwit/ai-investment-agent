@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The macro-context cache and the retrospective evaluation memo are written through
+  `atomic_write_text`: the macro cache used a fixed `.tmp` name, so two tickers in
+  one region raced on the same temp file. `LLM_ATTEMPTS` now caps an explicit
+  `max_attempts` as well (an explicit 3 under the default 2 made three calls); a
+  caller's count can only lower it. `budget_timeout_class` and
+  `request_cap_override` are declared once on `DispatchBudgetFields` instead of in
+  each of the three transports. The MCP total attempt count is named
+  `_MAX_ATTEMPTS`, the memory probe slot has one owner, and the last four tests that
+  released a stalled worker without joining it now do both inside their patches.
+
 - Documentation matches the code. The README names the seats pinned to standard tier
   under `--quick` (Portfolio Manager included) and states that integration tests need
   `--run-integration` and an `INTEGRATION_`-prefixed key; the agentic-AI primer

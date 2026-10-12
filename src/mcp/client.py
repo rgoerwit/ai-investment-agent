@@ -37,7 +37,8 @@ logger = structlog.get_logger(__name__)
 
 _DEFAULT_AUTH_COOLDOWN_SECONDS = 300
 _DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 30
-_MAX_RETRY_ATTEMPTS = 2
+# Total sends per call: the first one plus a single retry.
+_MAX_ATTEMPTS = 2
 
 
 def _spent_allowance_error(
@@ -593,7 +594,7 @@ class MCPRuntime:
             raise refusal
         # The failed attempt being retried, and the backoff slept before it.
         retrying: tuple[MCPCallError, float] | None = None
-        for attempt in range(_MAX_RETRY_ATTEMPTS):
+        for attempt in range(_MAX_ATTEMPTS):
             outcome = await self._attempt(spec, tool_name, arguments)
             if not isinstance(outcome, MCPCallError):
                 return outcome
@@ -604,7 +605,7 @@ class MCPRuntime:
                 self._refuse_retry(sent_err, backoff_seconds=backoff, reason="budget")
             # Before the retry decision, so fresh calls see a rate limit at once.
             self._on_call_failure(outcome)
-            if not outcome.retryable or attempt + 1 >= _MAX_RETRY_ATTEMPTS:
+            if not outcome.retryable or attempt + 1 >= _MAX_ATTEMPTS:
                 raise outcome
             backoff = await self._retry_backoff(outcome, spec, tool_name, attempt)
             retrying = (outcome, backoff)
